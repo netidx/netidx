@@ -344,9 +344,9 @@ async fn hello_client_write(
                 debug!("hello_write sending {:?}", h);
                 send(&cfg, &mut con, h).await?;
                 con.set_ctx(ctx.clone()).await;
+                info!("hello_write all traffic now encrypted");
                 ownership_check(&cfg, &mut con, hello.write_addr, resolver_id, secret)
                     .await?;
-                info!("hello_write all traffic now encrypted");
                 let client = task::block_in_place(|| ctx.lock().client())?;
                 let uifo = secstore.ifo(Some(&client))?;
                 let spn = spn.unwrap_or(Chars::from(client));

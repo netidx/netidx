@@ -80,7 +80,7 @@ impl Shard {
         shard: usize,
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
-        secstore: SecCtx,
+        secctx: SecCtx,
         resolver: SocketAddr,
     ) -> Self {
         let (read, read_rx) = unbounded();
@@ -99,7 +99,7 @@ impl Shard {
                             let r = Shard::process_read_batch(
                                 shard,
                                 &mut store,
-                                secstore.as_ref(),
+                                &secctx,
                                 resolver,
                                 req
                             );
@@ -111,7 +111,7 @@ impl Shard {
                         Some((req, reply)) => {
                             let r = Shard::process_write_batch(
                                 &mut store,
-                                secstore.as_ref(),
+                                &secctx,
                                 req
                             );
                             let _ = reply.send(r);
@@ -133,7 +133,7 @@ impl Shard {
     fn process_read_batch(
         shard: usize,
         store: &mut resolver_store::Store,
-        secstore: Option<&SecStore>,
+        secctx: &SecCtx,
         resolver: SocketAddr,
         mut req: ReadRequest,
     ) -> Pooled<ReadR> {
@@ -141,15 +141,14 @@ impl Shard {
         let now =
             SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
         let mut resp = FROM_READ_POOL.take();
-        let sec = secstore.map(|s| s.store.read());
         let uifo = req.uifo;
         resp.extend(req.batch.drain(..).map(|(id, m)| match m {
             ToRead::Resolve(path) => {
                 if let Some(r) = store.check_referral(&path) {
                     (id, FromRead::Referral(r))
                 } else {
-                    match secstore {
-                        None => {
+                    match secctx {
+                        SecCtx::Anonymous => {
                             let (flags, addrs) = store.resolve(&path);
                             let a = Resolved {
                                 krb5_spns: Pooled::orphan(HashMap::with_hasher(
@@ -273,7 +272,7 @@ impl Shard {
 
     fn process_write_batch(
         store: &mut resolver_store::Store,
-        secstore: Option<&SecStore>,
+        secctx: &SecCtx,
         mut req: WriteRequest,
     ) -> Pooled<WriteR> {
         let uifo = &*req.uifo;
@@ -355,7 +354,7 @@ impl Store {
     pub(crate) fn new(
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
-        secstore: Option<SecStore>,
+        secctx: SecCtx,
         resolver: SocketAddr,
     ) -> Self {
         let shards = std::cmp::max(1, num_cpus::get().next_power_of_two());
@@ -367,7 +366,7 @@ impl Store {
                     i,
                     parent.clone(),
                     children.clone(),
-                    secstore.clone(),
+                    secctx.clone(),
                     resolver,
                 )
             })
