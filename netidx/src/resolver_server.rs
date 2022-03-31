@@ -18,12 +18,12 @@ use crate::{
     utils,
 };
 use anyhow::Result;
-use rand::{thread_rng, Rng};
 use bytes::{Buf, Bytes};
 use cross_krb5::{K5ServerCtx, ServerCtx};
 use futures::{channel::oneshot, prelude::*, select_biased};
 use log::{debug, info, warn};
 use parking_lot::Mutex;
+use rand::{thread_rng, Rng};
 use std::{
     collections::{HashMap, HashSet},
     mem,
@@ -125,8 +125,8 @@ async fn client_loop_write(
                         let state = ClientInfo::CleaningUp(Vec::new());
                         inner.insert(write_addr, state);
                         match &secctx {
-                            SecCtx::Krb5(st) => st.remove(&write_addr),
-                            SecCtx::Local(st) => st.remove_secret(&write_addr),
+                            SecCtx::Krb5(a) => a.1.write().remove(&write_addr),
+                            SecCtx::Local(a) => a.1.write().remove(&write_addr),
                             SecCtx::Anonymous => ()
                         }
                     }
@@ -288,8 +288,9 @@ async fn hello_client_write(
         }
         ClientAuthWrite::Local(tok) => match secctx {
             SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("authentication not supported"),
-            SecCtx::Local(ref secstore) => {
-                let uifo = secstore.validate(&*tok)?;
+            SecCtx::Local(ref a) => {
+                let cred = a.0.authenticate(&*tok)?;
+                let uifo = a.1.write().users.ifo(Some(&cred.user))?;
                 info!("hello_write local auth succeeded");
                 let h = ServerHelloWrite {
                     ttl: cfg.writer_ttl.as_secs(),
@@ -302,13 +303,13 @@ async fn hello_client_write(
                 let secret = thread_rng().gen::<u128>();
                 ownership_check(&cfg, &mut con, hello.write_addr, resolver_id, secret)
                     .await?;
-                secstore.insert_secret(hello.write_addr, secret);
+                a.1.write().insert_local(hello.write_addr, secret);
                 uifo
             }
         },
         ClientAuthWrite::Reuse => match secctx {
             SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
-            SecCtx::Krb5(ref secstore) => match secstore.get(&hello.write_addr) {
+            SecCtx::Krb5(a) => match a.1.read().get_k5_ctx(&hello.write_addr) {
                 None => bail!("session not found"),
                 Some(ctx) => {
                     let h = ServerHelloWrite {
@@ -320,9 +321,11 @@ async fn hello_client_write(
                     info!("hello_write reusing krb5 context");
                     debug!("hello_write sending {:?}", h);
                     send(&cfg, &mut con, h).await?;
-                    con.set_ctx(ctx.clone()).await;
+                    con.set_ctx(ctx).await;
                     info!("hello_write all traffic now encrypted");
-                    secstore.ifo(Some(&task::block_in_place(|| ctx.lock().client())?))?
+                    a.1.write()
+                        .users
+                        .ifo(Some(&task::block_in_place(|| ctx.lock().client())?))?
                 }
             },
         },
