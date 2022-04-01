@@ -8,7 +8,7 @@ use crate::{
         glob::{GlobSet, Scope},
         resolver::Referral,
     },
-    secstore::SecStoreInner,
+    secctx::SecCtxDataReadGuard,
     utils::{self, Addr},
 };
 use bytes::Bytes;
@@ -432,23 +432,29 @@ impl Store {
 
     pub(crate) fn resolve_and_sign(
         &self,
-        sec: &SecStoreInner,
+        sec: &SecCtxDataReadGuard,
         now: u64,
         perm: Permissions,
         path: &Path,
-    ) -> (
-        u16,
-        Pooled<FxHashMap<SocketAddr, Chars>>,
-        Pooled<Vec<(SocketAddr, Bytes)>>,
-    ) {
+    ) -> (u16, Pooled<FxHashMap<SocketAddr, Chars>>, Pooled<Vec<(SocketAddr, Bytes)>>)
+    {
         let mut krb5_spns = SPN_POOL.take();
-        let mut sign_addr = |addr: &SocketAddr| match sec.get(addr) {
-            None => (*addr, Bytes::new()),
-            Some((spn, secret, _)) => {
-                if !krb5_spns.contains_key(addr) {
-                    krb5_spns.insert(*addr, spn.clone());
+        let mut sign_addr = |addr: &SocketAddr| {
+            let secret = match sec {
+                SecCtxDataReadGuard::Anonymous => None,
+                SecCtxDataReadGuard::Local(sec) => sec.get_local(addr),
+                SecCtxDataReadGuard::Krb5(sec) => {
+                    sec.get_k5_full(addr).map(|(spn, secret, _)| {
+                        if !krb5_spns.contains_key(addr) {
+                            krb5_spns.insert(*addr, spn.clone());
+                        }
+                        *secret
+                    })
                 }
-                (
+            };
+            match secret {
+                None => (*addr, Bytes::new()),
+                Some(secret) => (
                     *addr,
                     utils::make_sha3_token(
                         None,
@@ -459,7 +465,7 @@ impl Store {
                             path.as_bytes(),
                         ],
                     ),
-                )
+                ),
             }
         };
         let (flags, mut addrs) = self.resolve_default(path);

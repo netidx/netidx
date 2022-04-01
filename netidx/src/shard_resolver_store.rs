@@ -14,10 +14,10 @@ use crate::{
     resolver_store::{
         self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL,
     },
-    secctx::SecCtx,
+    secctx::{SecCtx, SecCtxDataReadGuard},
 };
-use cross_krb5::ServerCtx;
 use anyhow::Result;
+use cross_krb5::ServerCtx;
 use futures::{
     channel::{
         mpsc::{unbounded, UnboundedSender},
@@ -142,13 +142,14 @@ impl Shard {
             SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
         let mut resp = FROM_READ_POOL.take();
         let uifo = req.uifo;
+        let secctx = secctx.read();
         resp.extend(req.batch.drain(..).map(|(id, m)| match m {
             ToRead::Resolve(path) => {
                 if let Some(r) = store.check_referral(&path) {
                     (id, FromRead::Referral(r))
                 } else {
-                    match secctx {
-                        SecCtx::Anonymous => {
+                    match secctx.pmap() {
+                        None => {
                             let (flags, addrs) = store.resolve(&path);
                             let a = Resolved {
                                 krb5_spns: Pooled::orphan(HashMap::with_hasher(
@@ -162,17 +163,13 @@ impl Shard {
                             };
                             (id, FromRead::Resolved(a))
                         }
-                        Some(ref secstore) => {
-                            let perm = secstore.pmap().permissions(&*path, &*uifo);
+                        Some(pmap) => {
+                            let perm = pmap.permissions(&*path, &*uifo);
                             if !perm.contains(Permissions::SUBSCRIBE) {
                                 (id, FromRead::Denied)
                             } else {
-                                let (flags, krb5_spns, addrs) = store.resolve_and_sign(
-                                    &**sec.as_ref().unwrap(),
-                                    now,
-                                    perm,
-                                    &path,
-                                );
+                                let (flags, krb5_spns, addrs) =
+                                    store.resolve_and_sign(&secctx, now, perm, &path);
                                 let a = Resolved {
                                     krb5_spns,
                                     resolver,
@@ -191,8 +188,9 @@ impl Shard {
                 if let Some(r) = store.check_referral(&path) {
                     (id, FromRead::Referral(r))
                 } else {
-                    let allowed = secstore
-                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*uifo))
+                    let allowed = secctx
+                        .pmap()
+                        .map(|pmap| pmap.allowed(&*path, Permissions::LIST, &*uifo))
                         .unwrap_or(true);
                     if allowed {
                         (id, FromRead::List(store.list(&path)))
@@ -202,9 +200,9 @@ impl Shard {
                 }
             }
             ToRead::ListMatching(set) => {
-                let allowed = secstore
-                    .map(|s| {
-                        let pmap = s.pmap();
+                let allowed = secctx
+                    .pmap()
+                    .map(|pmap| {
                         set.iter().all(|g| {
                             pmap.allowed_in_scope(
                                 g.base(),
@@ -235,8 +233,9 @@ impl Shard {
                 }
             }
             ToRead::GetChangeNr(path) => {
-                let allowed = secstore
-                    .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*uifo))
+                let allowed = secctx
+                    .pmap()
+                    .map(|pmap| pmap.allowed(&*path, Permissions::LIST, &*uifo))
                     .unwrap_or(true);
                 if !allowed {
                     (id, FromRead::Denied)
@@ -254,8 +253,9 @@ impl Shard {
                 if let Some(r) = store.check_referral(&path) {
                     (id, FromRead::Referral(r))
                 } else {
-                    let allowed = secstore
-                        .map(|s| s.pmap().allowed(&*path, Permissions::LIST, &*uifo))
+                    let allowed = secctx
+                        .pmap()
+                        .map(|pmap| pmap.allowed(&*path, Permissions::LIST, &*uifo))
                         .unwrap_or(true);
                     if !allowed {
                         (id, FromRead::Denied)
@@ -278,6 +278,7 @@ impl Shard {
         let uifo = &*req.uifo;
         let write_addr = req.write_addr;
         let publish = |s: &mut resolver_store::Store,
+                       secctx: &SecCtxDataReadGuard,
                        path: Path,
                        default: bool,
                        flags: Option<u16>|
@@ -292,8 +293,7 @@ impl Shard {
                 } else {
                     Permissions::PUBLISH
                 };
-                if secstore.map(|s| s.pmap().allowed(&*path, perm, uifo)).unwrap_or(true)
-                {
+                if secctx.pmap().map(|p| p.allowed(&*path, perm, uifo)).unwrap_or(true) {
                     s.publish(path, write_addr, default, flags);
                     FromWrite::Published
                 } else {
@@ -302,19 +302,22 @@ impl Shard {
             }
         };
         let mut resp = FROM_WRITE_POOL.take();
+        let secctx = secctx.read();
         resp.extend(req.batch.drain(..).map(|(id, m)| match m {
             ToWrite::Heartbeat => unreachable!(),
             ToWrite::Clear => {
                 store.clear(&write_addr);
                 (id, FromWrite::Unpublished)
             }
-            ToWrite::Publish(path) => (id, publish(store, path, false, None)),
-            ToWrite::PublishDefault(path) => (id, publish(store, path, true, None)),
+            ToWrite::Publish(path) => (id, publish(store, &secctx, path, false, None)),
+            ToWrite::PublishDefault(path) => {
+                (id, publish(store, &secctx, path, true, None))
+            }
             ToWrite::PublishWithFlags(path, flags) => {
-                (id, publish(store, path, false, Some(flags)))
+                (id, publish(store, &secctx, path, false, Some(flags)))
             }
             ToWrite::PublishDefaultWithFlags(path, flags) => {
-                (id, publish(store, path, true, Some(flags)))
+                (id, publish(store, &secctx, path, true, Some(flags)))
             }
             ToWrite::Unpublish(path) | ToWrite::UnpublishDefault(path) => {
                 if !Path::is_absolute(&*path) {
@@ -362,13 +365,7 @@ impl Store {
         let shards = (0..shards)
             .into_iter()
             .map(|i| {
-                Shard::new(
-                    i,
-                    parent.clone(),
-                    children.clone(),
-                    secctx.clone(),
-                    resolver,
-                )
+                Shard::new(i, parent.clone(), children.clone(), secctx.clone(), resolver)
             })
             .collect();
         Store { shards, shard_mask, build_hasher: FxBuildHasher::default() }

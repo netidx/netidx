@@ -309,7 +309,7 @@ async fn hello_client_write(
         },
         ClientAuthWrite::Reuse => match secctx {
             SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
-            SecCtx::Krb5(a) => match a.1.read().get_k5_ctx(&hello.write_addr) {
+            SecCtx::Krb5(ref a) => match a.1.read().get_k5_ctx(&hello.write_addr) {
                 None => bail!("session not found"),
                 Some(ctx) => {
                     let h = ServerHelloWrite {
@@ -321,7 +321,7 @@ async fn hello_client_write(
                     info!("hello_write reusing krb5 context");
                     debug!("hello_write sending {:?}", h);
                     send(&cfg, &mut con, h).await?;
-                    con.set_ctx(ctx).await;
+                    con.set_ctx(ctx.clone()).await;
                     info!("hello_write all traffic now encrypted");
                     a.1.write()
                         .users
@@ -331,12 +331,13 @@ async fn hello_client_write(
         },
         ClientAuthWrite::Initiate { spn, token } => match secctx {
             SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
-            SecCtx::Krb5(ref secstore) => {
+            SecCtx::Krb5(ref a) => {
                 info!(
                     "hello_write initiating new krb5 context for {:?}",
                     hello.write_addr
                 );
-                let (ctx, secret, tok) = secstore.create(&token)?;
+                let (ctx, tok) = a.0.authenticate(&token)?;
+                let secret = thread_rng().gen::<u128>();
                 let h = ServerHelloWrite {
                     ttl: cfg.writer_ttl.as_secs(),
                     ttl_expired,
@@ -351,10 +352,10 @@ async fn hello_client_write(
                 ownership_check(&cfg, &mut con, hello.write_addr, resolver_id, secret)
                     .await?;
                 let client = task::block_in_place(|| ctx.lock().client())?;
-                let uifo = secstore.ifo(Some(&client))?;
+                let uifo = a.1.write().users.ifo(Some(&client))?;
                 let spn = spn.unwrap_or(Chars::from(client));
                 info!("hello_write listener ownership check succeeded");
-                secstore.store(hello.write_addr, spn, secret, ctx.clone());
+                a.1.write().insert_k5(hello.write_addr, spn, secret, ctx.clone());
                 uifo
             }
         },
@@ -445,8 +446,9 @@ async fn hello_client_read(
         }
         ClientAuthRead::Local(tok) => match secctx {
             SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("auth mech not supported"),
-            SecCtx::Local(ref secstore) => {
-                let uifo = secstore.validate(&*tok)?;
+            SecCtx::Local(ref a) => {
+                let cred = a.0.authenticate(&*tok)?;
+                let uifo = a.1.write().users.ifo(Some(&cred.user))?;
                 send(&cfg, &mut con, ServerHelloRead::Local).await?;
                 uifo
             }
@@ -456,12 +458,12 @@ async fn hello_client_read(
             SecCtx::Anonymous | SecCtx::Local(_) => {
                 bail!("authentication requested but not supported")
             }
-            SecCtx::Krb5(ref secstore) => {
-                let (ctx, _, tok) = secstore.create(&tok)?;
+            SecCtx::Krb5(ref a) => {
+                let (ctx, tok) = a.0.authenticate(&tok)?;
                 send(&cfg, &mut con, ServerHelloRead::Accepted(tok, CtxId::new()))
                     .await?;
                 con.set_ctx(ctx.clone()).await;
-                secstore.ifo(Some(&task::block_in_place(|| ctx.lock().client())?))?
+                a.1.write().users.ifo(Some(&task::block_in_place(|| ctx.lock().client())?))?
             }
         },
     };
@@ -528,16 +530,7 @@ async fn server_loop(
     let ctracker = CTracker::new();
     let clinfos = Clinfos(Arc::new(Mutex::new(HashMap::new())));
     let id = cfg.addrs[id];
-    let secctx = match &cfg.auth {
-        config::Auth::Anonymous => SecCtx::Anonymous,
-        config::Auth::Local(path) => SecCtx::Local(Arc::new(
-            secctx::local::Store::new(&path, permissions, &cfg).await?,
-        )),
-        config::Auth::Krb5(spns) => {
-            let k5 = secctx::k5::Store::new(spns[&id].clone(), permissions, &cfg)?;
-            SecCtx::Krb5(Arc::new(k5))
-        }
-    };
+    let secctx = SecCtx::new(&cfg, permissions, &id).await?;
     let published = Store::new(
         cfg.parent.clone().map(|s| s.into()),
         cfg.children.iter().map(|(p, s)| (p.clone(), s.clone().into())).collect(),

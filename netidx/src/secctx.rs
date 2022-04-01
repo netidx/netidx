@@ -135,6 +135,16 @@ pub(crate) enum SecCtxDataReadGuard<'a> {
     Local(RwLockReadGuard<'a, SecCtxData<u128>>),
 }
 
+impl<'a> SecCtxDataReadGuard<'a> {
+    pub(crate) fn pmap(&'a self) -> Option<&'a PMap> {
+        match self {
+            SecCtxDataReadGuard::Anonymous => None,
+            SecCtxDataReadGuard::Krb5(r) => Some(&r.pmap),
+            SecCtxDataReadGuard::Local(r) => Some(&r.pmap),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum SecCtx {
     Anonymous,
@@ -145,6 +155,27 @@ pub(crate) enum SecCtx {
 }
 
 impl SecCtx {
+    pub(crate) async fn new(
+        cfg: &Arc<config::server::Config>,
+        pmap: config::server::PMap,
+        id: &SocketAddr,
+    ) -> Result<Self> {
+        let t = match &cfg.auth {
+            config::Auth::Anonymous => SecCtx::Anonymous,
+            config::Auth::Local(path) => {
+                let auth = local::Authenticator::new(&path).await?;
+                let store = RwLock::new(SecCtxData::new(pmap, cfg)?);
+                SecCtx::Local(Arc::new((auth, store)))
+            }
+            config::Auth::Krb5(spns) => {
+                let auth = k5::Authenticator::new(spns[id].clone());
+                let store = RwLock::new(SecCtxData::new(pmap, cfg)?);
+                SecCtx::Krb5(Arc::new((auth, store)))
+            }
+        };
+        Ok(t)
+    }
+
     pub(crate) fn read(&self) -> SecCtxDataReadGuard {
         match self {
             SecCtx::Anonymous => SecCtxDataReadGuard::Anonymous,
