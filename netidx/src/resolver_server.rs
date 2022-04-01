@@ -13,7 +13,7 @@ use crate::{
             ServerHelloWrite, ToRead, ToWrite,
         },
     },
-    secctx::{self, SecCtx},
+    secctx::SecCtx,
     shard_resolver_store::Store,
     utils,
 };
@@ -309,25 +309,26 @@ async fn hello_client_write(
         },
         ClientAuthWrite::Reuse => match secctx {
             SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
-            SecCtx::Krb5(ref a) => match a.1.read().get_k5_ctx(&hello.write_addr) {
-                None => bail!("session not found"),
-                Some(ctx) => {
-                    let h = ServerHelloWrite {
-                        ttl: cfg.writer_ttl.as_secs(),
-                        ttl_expired,
-                        resolver_id,
-                        auth: ServerAuthWrite::Reused,
-                    };
-                    info!("hello_write reusing krb5 context");
-                    debug!("hello_write sending {:?}", h);
-                    send(&cfg, &mut con, h).await?;
-                    con.set_ctx(ctx.clone()).await;
-                    info!("hello_write all traffic now encrypted");
-                    a.1.write()
-                        .users
-                        .ifo(Some(&task::block_in_place(|| ctx.lock().client())?))?
-                }
-            },
+            SecCtx::Krb5(ref a) => {
+                let ctx =
+                    a.1.read()
+                        .get_k5_ctx(&hello.write_addr)
+                        .ok_or_else(|| anyhow!("session not found"))?;
+                let h = ServerHelloWrite {
+                    ttl: cfg.writer_ttl.as_secs(),
+                    ttl_expired,
+                    resolver_id,
+                    auth: ServerAuthWrite::Reused,
+                };
+                info!("hello_write reusing krb5 context");
+                debug!("hello_write sending {:?}", h);
+                send(&cfg, &mut con, h).await?;
+                con.set_ctx(ctx.clone()).await;
+                info!("hello_write all traffic now encrypted");
+                a.1.write()
+                    .users
+                    .ifo(Some(&task::block_in_place(|| ctx.lock().client())?))?
+            }
         },
         ClientAuthWrite::Initiate { spn, token } => match secctx {
             SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
@@ -463,7 +464,9 @@ async fn hello_client_read(
                 send(&cfg, &mut con, ServerHelloRead::Accepted(tok, CtxId::new()))
                     .await?;
                 con.set_ctx(ctx.clone()).await;
-                a.1.write().users.ifo(Some(&task::block_in_place(|| ctx.lock().client())?))?
+                a.1.write()
+                    .users
+                    .ifo(Some(&task::block_in_place(|| ctx.lock().client())?))?
             }
         },
     };

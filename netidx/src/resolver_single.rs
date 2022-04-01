@@ -2,7 +2,7 @@ use crate::{
     channel::Channel,
     channel::K5CtxWrap,
     chars::Chars,
-    config::{Server, ServerAuth},
+    config::{Auth, Server},
     os::local_auth::AuthClient,
     path::Path,
     pool::{Pool, Pooled},
@@ -14,7 +14,7 @@ use crate::{
     utils,
 };
 use anyhow::{anyhow, Error, Result};
-use cross_krb5::{ClientCtx, InitiateFlags, K5Ctx, PendingClientCtx};
+use cross_krb5::{ClientCtx, InitiateFlags, K5Ctx, PendingClientCtx, Step};
 use futures::{
     channel::{mpsc, oneshot},
     future::select_ok,
@@ -92,25 +92,25 @@ async fn connect_read(
         let (auth, ctx) = match desired_auth {
             DesiredAuth::Anonymous => (ClientAuthRead::Anonymous, None),
             DesiredAuth::Local => match &resolver.auth {
-                ServerAuth::Anonymous | ServerAuth::Krb5 { .. } => {
+                Auth::Anonymous | Auth::Krb5 { .. } => {
                     bail!("local auth is not available")
                 }
-                ServerAuth::Local(path) => {
+                Auth::Local(path) => {
                     let tok =
                         try_cf!("local token", continue, AuthClient::token(path).await);
                     (ClientAuthRead::Local(tok), None)
                 }
             },
             DesiredAuth::Krb5 { upn, .. } => match &resolver.auth {
-                ServerAuth::Anonymous => {
+                Auth::Anonymous => {
                     bail!("requested auth mechanism is not available")
                 }
-                ServerAuth::Local(path) => {
+                Auth::Local(path) => {
                     let tok =
                         try_cf!("local token", continue, AuthClient::token(path).await);
                     (ClientAuthRead::Local(tok), None)
                 }
-                ServerAuth::Krb5(spns) => {
+                Auth::Krb5(spns) => {
                     let upn = upn.as_ref().map(|s| s.as_str());
                     let target_spn = spns.get(&addr).ok_or_else(|| {
                         anyhow!("no target spn for resolver {:?}", addr)
@@ -118,10 +118,11 @@ async fn connect_read(
                     let (ctx, tok) = try_cf!(
                         "create ctx",
                         continue,
-                        task::block_in_place(|| ClientCtx::initiate(
+                        task::block_in_place(|| ClientCtx::new(
                             InitiateFlags::empty(),
                             upn,
-                            target_spn
+                            target_spn,
+                            None
                         ))
                     );
                     (ClientAuthRead::Initiate(utils::bytes(&*tok)), Some(ctx))
@@ -148,12 +149,21 @@ async fn connect_read(
             }
             (DesiredAuth::Krb5 { .. }, ServerHelloRead::Accepted(tok, _)) => {
                 let ctx = ctx.ok_or_else(|| anyhow!("bug accepted but no ctx"))?;
-                let ctx = try_cf!(
+                let res = try_cf!(
                     "resolver tok",
                     continue,
-                    task::block_in_place(|| ctx.finish(&tok))
+                    task::block_in_place(|| ctx.step(&tok))
                 );
-                con.set_ctx(K5CtxWrap::new(ctx)).await
+                let ctx = try_cf!(
+                    "ctx state",
+                    continue,
+                    match res {
+                        Step::Finished((ctx, None)) => Ok(ctx),
+                        Step::Finished(_) | Step::Continue(_) =>
+                            Err(anyhow!("unexpected ctx state")),
+                    }
+                );
+                con.set_ctx(K5CtxWrap::new(ctx)).await;
             }
         };
         break Ok(con);
@@ -310,21 +320,21 @@ async fn connect_write(
     let (auth, ctx) = match desired_auth {
         DesiredAuth::Anonymous => (ClientAuthWrite::Anonymous, SecState::Anonymous),
         DesiredAuth::Local => match &resolver.auth {
-            ServerAuth::Anonymous | ServerAuth::Krb5(_) => {
+            Auth::Anonymous | Auth::Krb5(_) => {
                 bail!("local auth not available")
             }
-            ServerAuth::Local(path) => {
+            Auth::Local(path) => {
                 (ClientAuthWrite::Local(AuthClient::token(path).await?), SecState::Local)
             }
         },
         DesiredAuth::Krb5 { upn, spn } => match &resolver.auth {
-            ServerAuth::Anonymous => {
+            Auth::Anonymous => {
                 bail!("authentication unavailable")
             }
-            ServerAuth::Local(path) => {
+            Auth::Local(path) => {
                 (ClientAuthWrite::Local(AuthClient::token(path).await?), SecState::Local)
             }
-            ServerAuth::Krb5(spns) => match security_context {
+            Auth::Krb5(spns) => match security_context {
                 Some(ctx)
                     if task::block_in_place(|| ctx.lock().ttl()).unwrap_or(sec) > sec =>
                 {
@@ -336,7 +346,7 @@ async fn connect_write(
                         anyhow!("no target spn for resolver {:?}", resolver_addr)
                     })?;
                     let (ctx, token) = task::block_in_place(|| {
-                        ClientCtx::initiate(InitiateFlags::empty(), upnr, target_spn)
+                        ClientCtx::new(InitiateFlags::empty(), upnr, target_spn, None)
                     })?;
                     let token = utils::bytes(&*token);
                     let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
@@ -379,7 +389,10 @@ async fn connect_write(
             SecState::Pending(ctx),
         ) => {
             info!("write_con processing resolver mutual authentication");
-            let ctx = K5CtxWrap::new(task::block_in_place(|| ctx.finish(&tok))?);
+            let ctx = K5CtxWrap::new(match task::block_in_place(|| ctx.step(&tok))? {
+                Step::Finished((ctx, None)) => ctx,
+                Step::Finished(_) | Step::Continue(_) => bail!("unexpected auth state"),
+            });
             info!("write_con mutual authentication succeeded");
             con.set_ctx(ctx.clone()).await;
             info!("write_con all traffic now encrypted");
