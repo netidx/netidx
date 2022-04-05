@@ -15,7 +15,7 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Buf;
-use cross_krb5::{AcceptFlags, ServerCtx};
+use cross_krb5::{AcceptFlags, ServerCtx, Step};
 use futures::{
     channel::{
         mpsc::{
@@ -1434,7 +1434,12 @@ async fn hello_client(
             DesiredAuth::Krb5 { upn, spn } => {
                 let p = spn.as_ref().or(upn.as_ref()).map(|s| s.as_str());
                 let (ctx, tok) = task::block_in_place(|| {
-                    ServerCtx::accept(AcceptFlags::empty(), p, &*tok)
+                    let ctx = ServerCtx::new(AcceptFlags::empty(), p)?;
+                    match ctx.step(&*tok)? {
+                        Step::Finished((ctx, Some(tok))) => Ok((ctx, tok)),
+                        Step::Finished((_, None)) => bail!("expected token"),
+                        Step::Continue(_) => bail!("unexpected gss continue"),
+                    }
                 })?;
                 con.send_one(&Hello::Token(utils::bytes(&*tok))).await?;
                 con.set_ctx(K5CtxWrap::new(ctx)).await;
