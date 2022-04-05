@@ -69,7 +69,7 @@ impl Into<Referral> for Server {
 }
 
 impl From<Referral> for Server {
-    fn from(mut r: Referral) -> Server {
+    fn from(r: Referral) -> Server {
         Server {
             path: r.path,
             ttl: r.ttl,
@@ -259,7 +259,7 @@ pub mod server {
     impl Config {
         pub fn parse(s: &str) -> Result<Config> {
             let cfg: file::Config = from_str(s)?;
-            check_addrs(&cfg.addrs);
+            check_addrs(&cfg.addrs)?;
             let addrs = cfg.addrs;
             let parent = cfg.parent.map(|r| r.check(Some(&addrs))).transpose()?;
             let children = {

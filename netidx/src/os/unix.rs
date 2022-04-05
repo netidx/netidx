@@ -32,7 +32,7 @@ impl Mapper {
     pub(crate) fn user(&self, user: u32) -> Result<String> {
         task::block_in_place(|| {
             let out = Command::new(&*self.0).arg(user.to_string()).output()?;
-            let user =
+            let mut user =
                 Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "user=")?;
             if user.is_empty() {
                 bail!("user not found")
@@ -96,7 +96,7 @@ pub(crate) mod local_auth {
     pub(crate) struct AuthServer {
         secret: u128,
         issued: Arc<Mutex<FxHashMap<u64, Instant>>>,
-        stop: oneshot::Sender<()>,
+        _stop: oneshot::Sender<()>,
     }
 
     impl AuthServer {
@@ -181,7 +181,7 @@ pub(crate) mod local_auth {
             let secret: u128 = thread_rng().gen();
             let (tx, rx) = oneshot::channel();
             spawn(Self::run(mapper, listener, secret, issued.clone(), rx));
-            Ok(AuthServer { secret, stop: tx, issued })
+            Ok(AuthServer { secret, _stop: tx, issued })
         }
 
         pub(crate) fn validate(&self, cred: &Credential) -> bool {

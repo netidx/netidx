@@ -139,12 +139,18 @@ async fn connect_read(
                 error!("server requires authentication");
                 continue;
             }
-            (DesiredAuth::Krb5 { .. }, ServerHelloRead::Anonymous) => {
+            (DesiredAuth::Local, ServerHelloRead::Anonymous)
+            | (DesiredAuth::Krb5 { .. }, ServerHelloRead::Anonymous) => {
                 error!("could not authenticate resolver server");
                 continue;
             }
-            (DesiredAuth::Krb5 { .. }, ServerHelloRead::Reused) => {
+            (DesiredAuth::Local, ServerHelloRead::Reused)
+            | (DesiredAuth::Krb5 { .. }, ServerHelloRead::Reused) => {
                 error!("protocol error, we didn't ask to reuse a security context");
+                continue;
+            }
+            (DesiredAuth::Local, ServerHelloRead::Accepted(_, _)) => {
+                error!("protocol error, we didn't send a krb auth token");
                 continue;
             }
             (DesiredAuth::Krb5 { .. }, ServerHelloRead::Accepted(tok, _)) => {
@@ -373,14 +379,16 @@ async fn connect_write(
         | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Local, _) => {
             unreachable!()
         }
-        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Anonymous, _) => {
+        (DesiredAuth::Local, ServerAuthWrite::Anonymous, _)
+        | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Anonymous, _) => {
             bail!("could not authenticate resolver server");
         }
         (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Reused, SecState::Reused(ctx)) => {
             con.set_ctx(ctx).await;
             info!("write_con all traffic now encrypted");
         }
-        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Reused, _) => {
+        (DesiredAuth::Local, ServerAuthWrite::Reused, _)
+        | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Reused, _) => {
             bail!("missing security context to reuse")
         }
         (
@@ -405,7 +413,8 @@ async fn connect_write(
             }
             wt!(con.send_one(&ReadyForOwnershipCheck))??;
         }
-        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Accepted(_), _) => {
+        (DesiredAuth::Local, ServerAuthWrite::Accepted(_), _)
+        | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Accepted(_), _) => {
             bail!("missing pending security context")
         }
     }

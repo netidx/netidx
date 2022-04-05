@@ -239,7 +239,7 @@ async fn hello_client_write(
         let m = PHello::ResolverAuthenticate(resolver_id, Bytes::new());
         time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
         match time::timeout(cfg.hello_timeout, con.receive()).await?? {
-            PHello::Anonymous | PHello::Token(_) | PHello::Local(_) => {
+            PHello::Anonymous | PHello::Token(_) | PHello::Local => {
                 bail!("listener ownership check unexpected response")
             }
             PHello::ResolverAuthenticate(_, mut tok) => {
