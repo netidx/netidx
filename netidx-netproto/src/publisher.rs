@@ -48,9 +48,9 @@ pub enum Hello {
     /// context will be thrown away and the old one will continue
     /// to be associated with the write address.
     ResolverAuthenticate(SocketAddr, Bytes),
-    /// Local machine authentication token, only valid for publishers
-    /// on the same machine as the client, and listening on 127.0.0.1.
-    Local(Bytes),
+    /// Local machine authentication, only valid for publishers on the
+    /// same machine as the client.
+    Local,
 }
 
 impl Pack for Hello {
@@ -61,7 +61,7 @@ impl Pack for Hello {
             Hello::ResolverAuthenticate(addr, tok) => {
                 Pack::encoded_len(addr) + Pack::encoded_len(tok)
             }
-            Hello::Local(tok) => Pack::encoded_len(tok),
+            Hello::Local => 0,
         }
     }
 
@@ -77,10 +77,7 @@ impl Pack for Hello {
                 Pack::encode(id, buf)?;
                 Pack::encode(tok, buf)
             }
-            Hello::Local(tok) => {
-                buf.put_u8(3);
-                Pack::encode(tok, buf)
-            }
+            Hello::Local => Ok(buf.put_u8(3)),
         }
     }
 
@@ -93,7 +90,7 @@ impl Pack for Hello {
                 let tok = Pack::decode(buf)?;
                 Ok(Hello::ResolverAuthenticate(addr, tok))
             }
-            3 => Ok(Hello::Local(Pack::decode(buf)?)),
+            3 => Ok(Hello::Local),
             _ => Err(PackError::UnknownTag),
         }
     }
@@ -216,9 +213,7 @@ impl Pack for From {
             From::Denied(p) => Pack::encoded_len(p),
             From::Unsubscribed(id) => Pack::encoded_len(id),
             From::Subscribed(p, id, v) => {
-                Pack::encoded_len(p)
-                    + Pack::encoded_len(id)
-                    + Pack::encoded_len(v)
+                Pack::encoded_len(p) + Pack::encoded_len(id) + Pack::encoded_len(v)
             }
             From::Update(id, v) => Pack::encoded_len(id) + Pack::encoded_len(v),
             From::Heartbeat => 0,

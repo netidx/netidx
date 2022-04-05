@@ -6,11 +6,11 @@ use crate::{
     auth::Permissions,
     channel::{Channel, K5CtxWrap},
     chars::Chars,
-    config::Config,
+    config::{client::Config, Auth},
     path::Path,
     pool::{Pool, Pooled},
     protocol::{self, publisher},
-    resolver::{Auth, ResolverWrite},
+    resolver::{DesiredAuth, ResolverWrite},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
@@ -27,7 +27,7 @@ use futures::{
     select_biased,
     stream::SelectAll,
 };
-use fxhash::FxBuildHasher;
+use fxhash::{FxHashMap, FxHashSet};
 use get_if_addrs::get_if_addrs;
 use log::{debug, error, info};
 use parking_lot::{Mutex, RwLock};
@@ -71,6 +71,8 @@ use tokio::{
 /// exactly 1 of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BindCfg {
+    /// Bind to 127.0.0.1
+    Local,
     /// Bind to the interface who's address matches `addr` when masked
     /// with `netmask`, e.g.
     ///
@@ -109,32 +111,38 @@ pub enum BindCfg {
 impl FromStr for BindCfg {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.find("/") {
-            None => Ok(BindCfg::Exact(s.parse()?)),
-            Some(_) => {
-                let mut parts = s.splitn(2, '/');
-                let addr: IpAddr =
-                    parts.next().ok_or_else(|| anyhow!("expected ip"))?.parse()?;
-                let bits: u32 =
-                    parts.next().ok_or_else(|| anyhow!("expected netmask"))?.parse()?;
-                if parts.next().is_some() {
-                    bail!("parse error, trailing garbage after netmask")
+        if s.trim() == "local" {
+            Ok(BindCfg::Local)
+        } else {
+            match s.find("/") {
+                None => Ok(BindCfg::Exact(s.parse()?)),
+                Some(_) => {
+                    let mut parts = s.splitn(2, '/');
+                    let addr: IpAddr =
+                        parts.next().ok_or_else(|| anyhow!("expected ip"))?.parse()?;
+                    let bits: u32 = parts
+                        .next()
+                        .ok_or_else(|| anyhow!("expected netmask"))?
+                        .parse()?;
+                    if parts.next().is_some() {
+                        bail!("parse error, trailing garbage after netmask")
+                    }
+                    let netmask = match addr {
+                        IpAddr::V4(_) => {
+                            if bits > 32 {
+                                bail!("invalid netmask");
+                            }
+                            IpAddr::V4(Ipv4Addr::from(u32::MAX.wrapping_shl(32 - bits)))
+                        }
+                        IpAddr::V6(_) => {
+                            if bits > 128 {
+                                bail!("invalid netmask");
+                            }
+                            IpAddr::V6(Ipv6Addr::from(u128::MAX.wrapping_shl(128 - bits)))
+                        }
+                    };
+                    Ok(BindCfg::Match { addr, netmask })
                 }
-                let netmask = match addr {
-                    IpAddr::V4(_) => {
-                        if bits > 32 {
-                            bail!("invalid netmask");
-                        }
-                        IpAddr::V4(Ipv4Addr::from(u32::MAX.wrapping_shl(32 - bits)))
-                    }
-                    IpAddr::V6(_) => {
-                        if bits > 128 {
-                            bail!("invalid netmask");
-                        }
-                        IpAddr::V6(Ipv6Addr::from(u128::MAX.wrapping_shl(128 - bits)))
-                    }
-                };
-                Ok(BindCfg::Match { addr, netmask })
             }
         }
     }
@@ -143,6 +151,7 @@ impl FromStr for BindCfg {
 impl BindCfg {
     fn select(&self) -> Result<IpAddr> {
         match self {
+            BindCfg::Local => Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             BindCfg::Exact(addr) => {
                 if get_if_addrs()?.iter().any(|i| i.ip() == addr.ip()) {
                     Ok(addr.ip())
@@ -203,7 +212,7 @@ lazy_static! {
     static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(100, 10_000);
     static ref RAWBATCH: Pool<Vec<(Option<ClId>, ToClientMsg)>> =
         Pool::new(100, 10_000);
-    static ref BATCHMSGS: Pool<HashMap<ClId, Pooled<Vec<ToClientMsg>>, FxBuildHasher>> =
+    static ref BATCHMSGS: Pool<FxHashMap<ClId, Pooled<Vec<ToClientMsg>>>> =
         Pool::new(100, 100);
 
     // estokes 2021: This is reasonable because there will never be
@@ -307,7 +316,7 @@ type MsgQ = Sender<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>;
 // are many more published values than clients we can save a lot of
 // memory this way. Roughly the size of a hashmap, plus it's
 // keys/values, replaced by 1 word.
-type Subscribed = Arc<HashSet<ClId, FxBuildHasher>>;
+type Subscribed = Arc<FxHashSet<ClId>>;
 
 /// This represents a published value. When it is dropped the value
 /// will be unpublished.
@@ -563,7 +572,7 @@ impl ToClientMsg {
 
 struct Client {
     msg_queue: MsgQ,
-    subscribed: HashMap<Id, Permissions, FxBuildHasher>,
+    subscribed: FxHashMap<Id, Permissions>,
 }
 
 struct Published {
@@ -575,19 +584,14 @@ struct Published {
 struct PublisherInner {
     addr: SocketAddr,
     stop: Option<oneshot::Sender<()>>,
-    clients: HashMap<ClId, Client, FxBuildHasher>,
-    hc_subscribed: HashMap<BTreeSet<ClId>, Subscribed, FxBuildHasher>,
+    clients: FxHashMap<ClId, Client>,
+    hc_subscribed: FxHashMap<BTreeSet<ClId>, Subscribed>,
     by_path: HashMap<Path, Id>,
-    by_id: HashMap<Id, Published, FxBuildHasher>,
-    destroy_on_idle: HashSet<Id, FxBuildHasher>,
-    on_write_chans: HashMap<
-        ChanWrap<Pooled<Vec<WriteRequest>>>,
-        (ChanId, HashSet<Id>),
-        FxBuildHasher,
-    >,
+    by_id: FxHashMap<Id, Published>,
+    destroy_on_idle: FxHashSet<Id>,
+    on_write_chans: FxHashMap<ChanWrap<Pooled<Vec<WriteRequest>>>, (ChanId, HashSet<Id>)>,
     on_event_chans: Vec<UnboundedSender<Event>>,
-    on_write:
-        HashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>, FxBuildHasher>,
+    on_write: FxHashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>>,
     resolver: ResolverWrite,
     advertised: HashMap<Path, HashSet<Path>>,
     to_publish: Pooled<HashMap<Path, Option<u16>>>,
@@ -597,7 +601,7 @@ struct PublisherInner {
     to_unsubscribe: Pooled<HashMap<Id, Subscribed>>,
     publish_triggered: bool,
     trigger_publish: UnboundedSender<Option<oneshot::Sender<()>>>,
-    wait_clients: HashMap<Id, Vec<oneshot::Sender<()>>, FxBuildHasher>,
+    wait_clients: FxHashMap<Id, Vec<oneshot::Sender<()>>>,
     wait_any_client: Vec<oneshot::Sender<()>>,
     default: BTreeMap<Path, UnboundedSender<(Path, oneshot::Sender<()>)>>,
 }
@@ -702,9 +706,14 @@ impl Publisher {
     /// auth, and bind config.
     pub async fn new(
         resolver: Config,
-        desired_auth: Auth,
+        desired_auth: DesiredAuth,
         bind_cfg: BindCfg,
     ) -> Result<Publisher> {
+        if let (DesiredAuth::Local | DesiredAuth::Krb5 { .. }, Auth::Anonymous) =
+            (&desired_auth, &resolver.auth)
+        {
+            bail!("only anonynymous auth supported by this resolver")
+        }
         let ip = bind_cfg.select()?;
         utils::check_addr(ip, &resolver.addrs)?;
         let (addr, listener) = match bind_cfg {
@@ -712,7 +721,7 @@ impl Publisher {
                 let l = TcpListener::bind(&addr).await?;
                 (l.local_addr()?, l)
             }
-            BindCfg::Match { .. } => {
+            BindCfg::Match { .. } | BindCfg::Local => {
                 let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr> {
                     Ok((ip, port)
                         .to_socket_addrs()?
@@ -743,14 +752,14 @@ impl Publisher {
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
             addr,
             stop: Some(stop),
-            clients: HashMap::with_hasher(FxBuildHasher::default()),
-            hc_subscribed: HashMap::with_hasher(FxBuildHasher::default()),
+            clients: HashMap::default(),
+            hc_subscribed: HashMap::default(),
             by_path: HashMap::new(),
-            by_id: HashMap::with_hasher(FxBuildHasher::default()),
-            destroy_on_idle: HashSet::with_hasher(FxBuildHasher::default()),
-            on_write_chans: HashMap::with_hasher(FxBuildHasher::default()),
+            by_id: HashMap::default(),
+            destroy_on_idle: HashSet::default(),
+            on_write_chans: HashMap::default(),
             on_event_chans: Vec::new(),
-            on_write: HashMap::with_hasher(FxBuildHasher::default()),
+            on_write: HashMap::default(),
             resolver,
             advertised: HashMap::new(),
             to_publish: TOPUB.take(),
@@ -760,7 +769,7 @@ impl Publisher {
             to_unsubscribe: TOUSUB.take(),
             publish_triggered: false,
             trigger_publish: tx_trigger,
-            wait_clients: HashMap::with_hasher(FxBuildHasher::default()),
+            wait_clients: HashMap::default(),
             wait_any_client: Vec::new(),
             default: BTreeMap::new(),
         })));
@@ -835,7 +844,7 @@ impl Publisher {
         let subscribed = pb
             .hc_subscribed
             .entry(BTreeSet::new())
-            .or_insert_with(|| Arc::new(HashSet::with_hasher(FxBuildHasher::default())))
+            .or_insert_with(|| Arc::new(HashSet::default()))
             .clone();
         pb.by_id.insert(id, Published { current: init, subscribed, path: path.clone() });
         pb.to_unpublish.remove(&path);
@@ -1193,10 +1202,9 @@ fn write(
     client: ClId,
     gc_on_write: &mut Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
     wait_write_res: &mut Vec<(Id, oneshot::Receiver<Value>)>,
-    write_batches: &mut HashMap<
+    write_batches: &mut FxHashMap<
         ChanId,
         (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
-        FxBuildHasher,
     >,
     id: Id,
     v: Value,
@@ -1265,13 +1273,12 @@ async fn handle_batch(
     client: ClId,
     msgs: impl Iterator<Item = publisher::To>,
     con: &mut Channel<ServerCtx>,
-    write_batches: &mut HashMap<
+    write_batches: &mut FxHashMap<
         ChanId,
         (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
-        FxBuildHasher,
     >,
-    secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
-    auth: &Auth,
+    secrets: &Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+    auth: &DesiredAuth,
     now: u64,
     deferred_subs: &mut DeferredSubs,
 ) -> Result<()> {
@@ -1288,7 +1295,7 @@ async fn handle_batch(
                 Subscribe { path, resolver, timestamp, permissions, mut token } => {
                     gc = true;
                     match auth {
-                        Auth::Anonymous => subscribe(
+                        DesiredAuth::Anonymous => subscribe(
                             &mut *pb,
                             con,
                             client,
@@ -1296,52 +1303,54 @@ async fn handle_batch(
                             Permissions::all(),
                             deferred_subs,
                         )?,
-                        Auth::Krb5 { .. } => match secrets.get(&resolver) {
-                            None => {
-                                debug!("denied, no stored secret for {}", resolver);
-                                con.queue_send(&From::Denied(path))?
-                            }
-                            Some(secret) => {
-                                if token.len() < mem::size_of::<u64>() {
-                                    bail!("error, token too short");
-                                }
-                                let salt = token.get_u64();
-                                let expected = utils::make_sha3_token(
-                                    Some(salt),
-                                    &[
-                                        &secret.to_be_bytes(),
-                                        &timestamp.to_be_bytes(),
-                                        &permissions.to_be_bytes(),
-                                        path.as_bytes(),
-                                    ],
-                                );
-                                let permissions =
-                                    Permissions::from_bits(permissions as u16)
-                                        .ok_or_else(|| {
-                                            anyhow!("invalid permission bits")
-                                        })?;
-                                let age = std::cmp::max(
-                                    u64::saturating_sub(now, timestamp),
-                                    u64::saturating_sub(timestamp, now),
-                                );
-                                if age > 300
-                                    || !permissions.contains(Permissions::SUBSCRIBE)
-                                    || &*token != &expected[mem::size_of::<u64>()..]
-                                {
-                                    debug!("subscribe permission denied");
+                        DesiredAuth::Krb5 { .. } | DesiredAuth::Local => {
+                            match secrets.get(&resolver) {
+                                None => {
+                                    debug!("denied, no stored secret for {}", resolver);
                                     con.queue_send(&From::Denied(path))?
-                                } else {
-                                    subscribe(
-                                        &mut *pb,
-                                        con,
-                                        client,
-                                        path,
-                                        permissions,
-                                        deferred_subs,
-                                    )?
+                                }
+                                Some(secret) => {
+                                    if token.len() < mem::size_of::<u64>() {
+                                        bail!("error, token too short");
+                                    }
+                                    let salt = token.get_u64();
+                                    let expected = utils::make_sha3_token(
+                                        Some(salt),
+                                        &[
+                                            &secret.to_be_bytes(),
+                                            &timestamp.to_be_bytes(),
+                                            &permissions.to_be_bytes(),
+                                            path.as_bytes(),
+                                        ],
+                                    );
+                                    let permissions =
+                                        Permissions::from_bits(permissions as u16)
+                                            .ok_or_else(|| {
+                                                anyhow!("invalid permission bits")
+                                            })?;
+                                    let age = std::cmp::max(
+                                        u64::saturating_sub(now, timestamp),
+                                        u64::saturating_sub(timestamp, now),
+                                    );
+                                    if age > 300
+                                        || !permissions.contains(Permissions::SUBSCRIBE)
+                                        || &*token != &expected[mem::size_of::<u64>()..]
+                                    {
+                                        debug!("subscribe permission denied");
+                                        con.queue_send(&From::Denied(path))?
+                                    } else {
+                                        subscribe(
+                                            &mut *pb,
+                                            con,
+                                            client,
+                                            path,
+                                            permissions,
+                                            deferred_subs,
+                                        )?
+                                    }
                                 }
                             }
-                        },
+                        }
                     }
                 }
                 Write(id, v, r) => write(
@@ -1395,9 +1404,9 @@ fn client_arrived(publisher: &PublisherWeak) {
 // CR estokes: Implement periodic rekeying to improve security
 async fn hello_client(
     publisher: &PublisherWeak,
-    secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
+    secrets: &Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     con: &mut Channel<ServerCtx>,
-    auth: &Auth,
+    auth: &DesiredAuth,
 ) -> Result<()> {
     use protocol::publisher::Hello::{self, *};
     debug!("hello_client");
@@ -1413,8 +1422,8 @@ async fn hello_client(
             client_arrived(publisher);
         }
         Token(tok) => match auth {
-            Auth::Anonymous => bail!("authentication not supported"),
-            Auth::Krb5 { upn, spn } => {
+            DesiredAuth::Anonymous | DesiredAuth::Local => bail!("authentication not supported"),
+            DesiredAuth::Krb5 { upn, spn } => {
                 let p = spn.as_ref().or(upn.as_ref()).map(|s| s.as_str());
                 let (ctx, tok) = task::block_in_place(|| {
                     ServerCtx::accept(AcceptFlags::empty(), p, &*tok)
@@ -1438,19 +1447,18 @@ async fn hello_client(
 
 async fn client_loop(
     t: PublisherWeak,
-    secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
+    secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     client: ClId,
     updates: Receiver<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>,
     s: TcpStream,
-    desired_auth: Auth,
+    desired_auth: DesiredAuth,
 ) -> Result<()> {
     let mut con: Channel<ServerCtx> = Channel::new(s);
     let mut batch: Vec<publisher::To> = Vec::new();
-    let mut write_batches: HashMap<
+    let mut write_batches: FxHashMap<
         ChanId,
         (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
-        FxBuildHasher,
-    > = HashMap::with_hasher(FxBuildHasher::default());
+    > = HashMap::default();
     let mut updates = updates.fuse();
     let mut hb = time::interval(HB);
     let mut msg_sent = false;
@@ -1548,7 +1556,7 @@ async fn accept_loop(
     t: PublisherWeak,
     serv: TcpListener,
     stop: oneshot::Receiver<()>,
-    desired_auth: Auth,
+    desired_auth: DesiredAuth,
 ) {
     let mut stop = stop.fuse();
     loop {
@@ -1571,7 +1579,7 @@ async fn accept_loop(
                         try_cf!("nodelay", continue, s.set_nodelay(true));
                         pb.clients.insert(clid, Client {
                             msg_queue: tx,
-                            subscribed: HashMap::with_hasher(FxBuildHasher::default()),
+                            subscribed: HashMap::default(),
                         });
                         let desired_auth = desired_auth.clone();
                         task::spawn(async move {
