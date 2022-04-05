@@ -143,12 +143,13 @@ impl Shard {
         let mut resp = FROM_READ_POOL.take();
         let uifo = req.uifo;
         let secctx = secctx.read();
+        let pmap = secctx.pmap();
         resp.extend(req.batch.drain(..).map(|(id, m)| match m {
             ToRead::Resolve(path) => {
                 if let Some(r) = store.check_referral(&path) {
                     (id, FromRead::Referral(r))
                 } else {
-                    match secctx.pmap() {
+                    match pmap {
                         None => {
                             let (flags, addrs) = store.resolve(&path);
                             let a = Resolved {
@@ -188,8 +189,7 @@ impl Shard {
                 if let Some(r) = store.check_referral(&path) {
                     (id, FromRead::Referral(r))
                 } else {
-                    let allowed = secctx
-                        .pmap()
+                    let allowed = pmap
                         .map(|pmap| pmap.allowed(&*path, Permissions::LIST, &*uifo))
                         .unwrap_or(true);
                     if allowed {
@@ -200,8 +200,7 @@ impl Shard {
                 }
             }
             ToRead::ListMatching(set) => {
-                let allowed = secctx
-                    .pmap()
+                let allowed = pmap
                     .map(|pmap| {
                         set.iter().all(|g| {
                             pmap.allowed_in_scope(
@@ -233,8 +232,7 @@ impl Shard {
                 }
             }
             ToRead::GetChangeNr(path) => {
-                let allowed = secctx
-                    .pmap()
+                let allowed = pmap
                     .map(|pmap| pmap.allowed(&*path, Permissions::LIST, &*uifo))
                     .unwrap_or(true);
                 if !allowed {
@@ -253,8 +251,7 @@ impl Shard {
                 if let Some(r) = store.check_referral(&path) {
                     (id, FromRead::Referral(r))
                 } else {
-                    let allowed = secctx
-                        .pmap()
+                    let allowed = pmap
                         .map(|pmap| pmap.allowed(&*path, Permissions::LIST, &*uifo))
                         .unwrap_or(true);
                     if !allowed {
@@ -277,8 +274,9 @@ impl Shard {
     ) -> Pooled<WriteR> {
         let uifo = &*req.uifo;
         let write_addr = req.write_addr;
+        let secctx = secctx.read();
+        let pmap = secctx.pmap();
         let publish = |s: &mut resolver_store::Store,
-                       secctx: &SecCtxDataReadGuard,
                        path: Path,
                        default: bool,
                        flags: Option<u16>|
@@ -293,7 +291,7 @@ impl Shard {
                 } else {
                     Permissions::PUBLISH
                 };
-                if secctx.pmap().map(|p| p.allowed(&*path, perm, uifo)).unwrap_or(true) {
+                if pmap.map(|p| p.allowed(&*path, perm, uifo)).unwrap_or(true) {
                     s.publish(path, write_addr, default, flags);
                     FromWrite::Published
                 } else {
@@ -302,22 +300,19 @@ impl Shard {
             }
         };
         let mut resp = FROM_WRITE_POOL.take();
-        let secctx = secctx.read();
         resp.extend(req.batch.drain(..).map(|(id, m)| match m {
             ToWrite::Heartbeat => unreachable!(),
             ToWrite::Clear => {
                 store.clear(&write_addr);
                 (id, FromWrite::Unpublished)
             }
-            ToWrite::Publish(path) => (id, publish(store, &secctx, path, false, None)),
-            ToWrite::PublishDefault(path) => {
-                (id, publish(store, &secctx, path, true, None))
-            }
+            ToWrite::Publish(path) => (id, publish(store, path, false, None)),
+            ToWrite::PublishDefault(path) => (id, publish(store, path, true, None)),
             ToWrite::PublishWithFlags(path, flags) => {
-                (id, publish(store, &secctx, path, false, Some(flags)))
+                (id, publish(store, path, false, Some(flags)))
             }
             ToWrite::PublishDefaultWithFlags(path, flags) => {
-                (id, publish(store, &secctx, path, true, Some(flags)))
+                (id, publish(store, path, true, Some(flags)))
             }
             ToWrite::Unpublish(path) | ToWrite::UnpublishDefault(path) => {
                 if !Path::is_absolute(&*path) {
