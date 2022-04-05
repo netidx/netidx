@@ -1408,7 +1408,7 @@ async fn hello_client(
     con: &mut Channel<ServerCtx>,
     auth: &DesiredAuth,
 ) -> Result<()> {
-    use protocol::publisher::Hello::{self, *};
+    use protocol::publisher::Hello;
     debug!("hello_client");
     // negotiate protocol version
     con.send_one(&1u64).await?;
@@ -1417,28 +1417,36 @@ async fn hello_client(
     let hello: Hello = con.receive().await?;
     debug!("hello_client received {:?}", hello);
     match hello {
-        Anonymous => {
-            con.send_one(&Anonymous).await?;
+        Hello::Anonymous => {
+            con.send_one(&Hello::Anonymous).await?;
             client_arrived(publisher);
         }
-        Token(tok) => match auth {
-            DesiredAuth::Anonymous | DesiredAuth::Local => bail!("authentication not supported"),
+        Hello::Local => {
+            con.send_one(&Hello::Local).await?;
+            client_arrived(publisher);
+        }
+        Hello::Token(tok) => match auth {
+            DesiredAuth::Anonymous => bail!("authentication not supported"),
+            DesiredAuth::Local => {
+                con.send_one(&Hello::Local).await?;
+                client_arrived(publisher);
+            }
             DesiredAuth::Krb5 { upn, spn } => {
                 let p = spn.as_ref().or(upn.as_ref()).map(|s| s.as_str());
                 let (ctx, tok) = task::block_in_place(|| {
                     ServerCtx::accept(AcceptFlags::empty(), p, &*tok)
                 })?;
-                con.send_one(&Token(utils::bytes(&*tok))).await?;
+                con.send_one(&Hello::Token(utils::bytes(&*tok))).await?;
                 con.set_ctx(K5CtxWrap::new(ctx)).await;
                 client_arrived(publisher);
             }
         },
-        ResolverAuthenticate(id, _) => {
+        Hello::ResolverAuthenticate(id, _) => {
             info!("hello_client processing listener ownership check from resolver");
             let secret =
                 secrets.read().get(&id).copied().ok_or_else(|| anyhow!("no secret"))?;
             let reply = utils::make_sha3_token(None, &[&(!secret).to_be_bytes()]);
-            con.send_one(&ResolverAuthenticate(id, reply)).await?;
+            con.send_one(&Hello::ResolverAuthenticate(id, reply)).await?;
             bail!("resolver authentication complete");
         }
     }

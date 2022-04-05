@@ -3,7 +3,7 @@ use crate::{
     batch_channel::{self, BatchReceiver, BatchSender},
     channel::{Channel, K5CtxWrap, ReadChannel, WriteChannel},
     chars::Chars,
-    config::Config,
+    config::client::Config,
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
@@ -13,12 +13,12 @@ use crate::{
         resolver::Resolved,
     },
     publisher::PublishFlags,
-    resolver::{Auth, ResolverRead},
+    resolver::{DesiredAuth, ResolverRead},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::{Buf, BufMut, Bytes};
-use cross_krb5::{ClientCtx, InitiateFlags};
+use cross_krb5::{ClientCtx, InitiateFlags, Step};
 use futures::{
     channel::{
         mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
@@ -567,7 +567,7 @@ struct SubscriberInner {
     durable_pending: HashMap<Path, DvalWeak>,
     durable_alive: HashMap<Path, DvalWeak>,
     trigger_resub: UnboundedSender<()>,
-    desired_auth: Auth,
+    desired_auth: DesiredAuth,
 }
 
 impl SubscriberInner {
@@ -630,7 +630,7 @@ pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
     /// create a new subscriber with the specified config and desired auth
-    pub fn new(resolver: Config, desired_auth: Auth) -> Result<Subscriber> {
+    pub fn new(resolver: Config, desired_auth: DesiredAuth) -> Result<Subscriber> {
         let (tx, rx) = mpsc::unbounded();
         let resolver = ResolverRead::new(resolver, desired_auth.clone());
         let t = Subscriber(Arc::new(Mutex::new(SubscriberInner {
@@ -1271,7 +1271,7 @@ fn unsubscribe(
 
 async fn hello_publisher(
     con: &mut Channel<ClientCtx>,
-    auth: &Auth,
+    auth: &DesiredAuth,
     target_spn: &Chars,
 ) -> Result<()> {
     use protocol::publisher::Hello;
@@ -1279,25 +1279,37 @@ async fn hello_publisher(
     con.send_one(&1u64).await?;
     let _ver: u64 = con.receive().await?;
     match auth {
-        Auth::Anonymous => {
+        DesiredAuth::Anonymous => {
             con.send_one(&Hello::Anonymous).await?;
-            let reply: Hello = con.receive().await?;
-            match reply {
+            match con.receive().await? {
                 Hello::Anonymous => (),
                 _ => bail!("unexpected response from publisher"),
             }
         }
-        Auth::Krb5 { upn, .. } => {
+        DesiredAuth::Local => {
+            con.send_one(&Hello::Local).await?;
+            match con.receive().await? {
+                Hello::Local => (),
+                _ => bail!("unexpected response from publisher"),
+            }
+        }
+        DesiredAuth::Krb5 { upn, .. } => {
             let p = upn.as_ref().map(|p| p.as_str());
             let (ctx, tok) = task::block_in_place(|| {
-                ClientCtx::initiate(InitiateFlags::empty(), p, target_spn)
+                ClientCtx::new(InitiateFlags::empty(), p, target_spn, None)
             })?;
             con.send_one(&Hello::Token(utils::bytes(&*tok))).await?;
             match con.receive().await? {
                 Hello::Anonymous => bail!("publisher failed mutual authentication"),
                 Hello::ResolverAuthenticate(_, _) => bail!("protocol error"),
+                Hello::Local => (),
                 Hello::Token(tok) => {
-                    let ctx = task::block_in_place(|| ctx.finish(&*tok))?;
+                    let ctx = match task::block_in_place(|| ctx.step(&*tok))? {
+                        Step::Finished((ctx, None)) => ctx,
+                        Step::Finished((_, Some(_))) | Step::Continue(_) => {
+                            bail!("unexpected extra token in gss auth")
+                        }
+                    };
                     con.set_ctx(K5CtxWrap::new(ctx)).await
                 }
             }
@@ -1474,7 +1486,7 @@ async fn connection(
     addr: SocketAddr,
     target_spn: Chars,
     from_sub: BatchReceiver<ToCon>,
-    auth: Auth,
+    auth: DesiredAuth,
 ) -> Result<()> {
     let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
     let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
