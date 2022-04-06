@@ -14,7 +14,7 @@ use crate::{
     resolver_store::{
         self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL,
     },
-    secctx::{SecCtx, SecCtxDataReadGuard},
+    secctx::SecCtx,
 };
 use anyhow::Result;
 use cross_krb5::ServerCtx;
