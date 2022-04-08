@@ -26,7 +26,7 @@ use log::{debug, error, info, warn};
 use parking_lot::RwLock;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
-    cmp::max, collections::HashMap, fmt::Debug, net::SocketAddr, sync::Arc,
+    cmp::max, collections::HashMap, fmt::Debug, net::SocketAddr, str::FromStr, sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -53,6 +53,19 @@ pub enum DesiredAuth {
     Anonymous,
     Krb5 { upn: Option<String>, spn: Option<String> },
     Local,
+}
+
+impl FromStr for DesiredAuth {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<DesiredAuth, Self::Err> {
+        match s {
+            "anonymous" => Ok(DesiredAuth::Anonymous),
+            "local" => Ok(DesiredAuth::Local),
+            "krb5" => Ok(DesiredAuth::Krb5 {upn: None, spn: None}),
+            _ => bail!("expected, anonymous, local, or krb5")
+        }
+    }
 }
 
 // continue with timeout

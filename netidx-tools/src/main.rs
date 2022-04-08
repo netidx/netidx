@@ -8,7 +8,7 @@ extern crate anyhow;
 #[macro_use]
 extern crate serde_derive;
 use log::warn;
-use netidx::{config, path::Path, publisher::BindCfg, resolver::Auth};
+use netidx::{config, path::Path, publisher::BindCfg, resolver::DesiredAuth};
 use std::net::SocketAddr;
 use structopt::StructOpt;
 
@@ -19,11 +19,11 @@ mod stress_subscriber;
 mod subscriber;
 
 #[cfg(unix)]
-mod resolver_server;
+mod container;
 #[cfg(unix)]
 mod recorder;
 #[cfg(unix)]
-mod container;
+mod resolver_server;
 
 #[cfg(not(unix))]
 mod resolver_server {
@@ -42,7 +42,9 @@ mod resolver_server {
 
 #[cfg(not(unix))]
 mod recorder {
-    use netidx::{config::server::Config, publisher::BindCfg, resolver::DesiredAuth, path::Path};
+    use netidx::{
+        config::server::Config, path::Path, publisher::BindCfg, resolver::DesiredAuth,
+    };
     pub(crate) fn run(
         _config: Config,
         _foreground: bool,
@@ -65,26 +67,28 @@ mod recorder {
 
 #[cfg(not(unix))]
 mod container {
-    use netidx::{resolver::DesiredAuth, config::client::Config};
-    pub(crate) fn run(
-        _config: Config,
-        _auth: Auth,
-        _ccfg: super::ContainerConfig
-    ) {
+    use netidx::{config::client::Config, resolver::DesiredAuth};
+    pub(crate) fn run(_config: Config, _auth: Auth, _ccfg: super::ContainerConfig) {
         todo!("the container is not yet ported to this platform")
     }
 }
 
 #[derive(StructOpt, Debug)]
 struct ContainerConfig {
+    #[structopt(short = "c", long = "config", help = "path to the client config")]
+    config: Option<String>,
+    #[structopt(short = "a", long = "auth", help = "auth mechanism")]
+    auth: DesiredAuth,
+    #[structopt(long = "upn", help = "kerberos upn, only if auth = krb5")]
+    upn: Option<String>,
+    #[structopt(long = "spn", help = "kerberos spn, only if auth = krb5")]
+    spn: Option<String>,
     #[structopt(
         short = "b",
         long = "bind",
         help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
     )]
     bind: BindCfg,
-    #[structopt(long = "spn", help = "krb5 use <spn>")]
-    spn: Option<String>,
     #[structopt(
         long = "timeout",
         help = "require subscribers to consume values before timeout (seconds)"
@@ -124,28 +128,34 @@ enum Sub {
         id: usize,
         #[structopt(short = "c", long = "config", help = "path to the server config")]
         config: String,
-        #[structopt(
-            short = "p",
-            long = "permissions",
-            help = "path to the permissions file"
-        )]
-        permissions: Option<String>,
     },
     #[structopt(name = "resolver", about = "query the resolver")]
     Resolver {
+        #[structopt(short = "c", long = "config", help = "path to the client config")]
+        config: Option<String>,
+        #[structopt(short = "a", long = "auth", help = "auth mechanism")]
+        auth: DesiredAuth,
+        #[structopt(long = "upn", help = "kerberos upn, only if auth = krb5")]
+        upn: Option<String>,
         #[structopt(subcommand)]
         cmd: ResolverCmd,
     },
     #[structopt(name = "publisher", about = "publish data")]
     Publisher {
+        #[structopt(short = "c", long = "config", help = "path to the client config")]
+        config: Option<String>,
+        #[structopt(short = "a", long = "auth", help = "auth mechanism")]
+        auth: DesiredAuth,
+        #[structopt(long = "upn", help = "kerberos upn, only if auth = krb5")]
+        upn: Option<String>,
+        #[structopt(long = "spn", help = "kerberos spn, only if auth = krb5")]
+        spn: Option<String>,
         #[structopt(
             short = "b",
             long = "bind",
             help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
         )]
         bind: BindCfg,
-        #[structopt(long = "spn", help = "krb5 use <spn>")]
-        spn: Option<String>,
         #[structopt(
             long = "timeout",
             help = "require subscribers to consume values before timeout (seconds)"
@@ -154,6 +164,12 @@ enum Sub {
     },
     #[structopt(name = "subscriber", about = "subscribe to values")]
     Subscriber {
+        #[structopt(short = "c", long = "config", help = "path to the client config")]
+        config: Option<String>,
+        #[structopt(short = "a", long = "auth", help = "auth mechanism")]
+        auth: DesiredAuth,
+        #[structopt(long = "upn", help = "kerberos upn, only if auth = krb5")]
+        upn: Option<String>,
         #[structopt(
             short = "o",
             long = "oneshot",
@@ -179,6 +195,14 @@ enum Sub {
     Container(ContainerConfig),
     #[structopt(name = "record", about = "record and republish archives")]
     Record {
+        #[structopt(short = "c", long = "config", help = "path to the client config")]
+        config: Option<String>,
+        #[structopt(short = "a", long = "auth", help = "auth mechanism")]
+        auth: DesiredAuth,
+        #[structopt(long = "upn", help = "kerberos upn, only if auth = krb5")]
+        upn: Option<String>,
+        #[structopt(long = "spn", help = "kerberos spn, only if auth = krb5")]
+        spn: Option<String>,
         #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
         foreground: bool,
         #[structopt(
@@ -187,8 +211,6 @@ enum Sub {
             help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
         )]
         bind: Option<BindCfg>,
-        #[structopt(long = "spn", help = "krb5 use <spn>")]
-        spn: Option<String>,
         #[structopt(
             long = "publish-base",
             help = "base path for republishing the archive"
@@ -294,14 +316,20 @@ enum ResolverCmd {
 enum Stress {
     #[structopt(name = "publisher", about = "run a stress test publisher")]
     Publisher {
+        #[structopt(short = "c", long = "config", help = "path to the client config")]
+        config: Option<String>,
+        #[structopt(short = "a", long = "auth", help = "auth mechanism")]
+        auth: DesiredAuth,
+        #[structopt(long = "upn", help = "kerberos upn, only if auth = krb5")]
+        upn: Option<String>,
+        #[structopt(long = "spn", help = "kerberos spn, only if auth = krb5")]
+        spn: Option<String>,
         #[structopt(
             short = "b",
             long = "bind",
             help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
         )]
         bind: BindCfg,
-        #[structopt(long = "spn", help = "krb5 use <spn>")]
-        spn: Option<String>,
         #[structopt(
             long = "delay",
             help = "time in ms to wait between batches",
@@ -314,22 +342,25 @@ enum Stress {
         cols: usize,
     },
     #[structopt(name = "subscriber", about = "run a stress test subscriber")]
-    Subscriber,
+    Subscriber {
+        #[structopt(short = "c", long = "config", help = "path to the client config")]
+        config: Option<String>,
+        #[structopt(short = "a", long = "auth", help = "auth mechanism")]
+        auth: DesiredAuth,
+        #[structopt(long = "upn", help = "kerberos upn, only if auth = krb5")]
+        upn: Option<String>,
+    },
 }
 
-fn auth(
-    anon: bool,
-    cfg: &config::Config,
-    upn: Option<String>,
-    spn: Option<String>,
-) -> Auth {
-    if anon {
-        Auth::Anonymous
-    } else {
-        match cfg.auth {
-            config::Auth::Anonymous => Auth::Anonymous,
-            config::Auth::Krb5(_) => Auth::Krb5 { upn, spn },
-        }
+fn auth(desired: DesiredAuth, upn: Option<String>, spn: Option<String>) -> Result<Auth> {
+    match desired {
+        DesiredAuth::Anonymous | DesiredAuth::Local => match (upn, spn) {
+            (None, None) => Ok(desired),
+            (Some(_), _) | (_, Some(_)) => {
+                bail!("upn/spn may not be specified for local or anonymous auth")
+            }
+        },
+        DesiredAuth::Krb5 { .. } => Ok(DesiredAuth::Krb5 { upn, spn }),
     }
 }
 
