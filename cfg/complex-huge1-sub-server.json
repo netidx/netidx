@@ -3,7 +3,7 @@
         "path": "/app/huge1/sub",
         "ttl": 3600,
         "addrs": ["127.0.0.1:1220", "127.0.0.1:1221"],
-        "krb5_spns": {}
+        "auth": "Anonymous"
     },
     "children": [],
     "pid_file": "",
