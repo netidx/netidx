@@ -29,7 +29,7 @@
 //! # fn get_cpu_temp() -> f32 { 42. }
 //! use netidx::{
 //!     publisher::{Publisher, Value, BindCfg},
-//!     config::Config,
+//!     config::client::Config,
 //!     resolver::Auth,
 //!     path::Path,
 //! };
@@ -64,7 +64,7 @@
 //! ```no_run
 //! use netidx::{
 //!     subscriber::{Subscriber, UpdatesFlags},
-//!     config::Config,
+//!     config::client::Config,
 //!     resolver::Auth,
 //!     path::Path,
 //! };
