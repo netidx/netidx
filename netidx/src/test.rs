@@ -7,7 +7,7 @@ mod resolver {
         path::Path,
         protocol::glob::{Glob, GlobSet},
         publisher::PublishFlags,
-        resolver::{Auth, ChangeTracker, ResolverRead, ResolverWrite},
+        resolver::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
         resolver_server::Server,
     };
     use std::{iter, net::SocketAddr, time::Duration};
@@ -20,20 +20,22 @@ mod resolver {
     #[test]
     fn publish_resolve_simple() {
         Runtime::new().unwrap().block_on(async {
-            let mut cfg =
-                config::Config::load("../cfg/simple.json").expect("load simple config");
-            let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
-                .await
-                .expect("start server");
-            cfg.addrs[0] = *server.local_addr();
+            let server_cfg = config::server::Config::load("../cfg/simple-server.json")
+                .expect("load simple server config");
+            let mut client_cfg =
+                config::client::Config::load("../cfg/simple-client.json")
+                    .expect("load simple client config");
+            let server =
+                Server::new(server_cfg, config::server::PMap::default(), false, 0)
+                    .await
+                    .expect("start server");
+            client_cfg.addrs[0] = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let w = ResolverWrite::new(cfg.clone(), Auth::Anonymous, paddr);
-            let r = ResolverRead::new(cfg, Auth::Anonymous);
+            let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr);
+            let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
             let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
             let flags = Some(PublishFlags::USE_EXISTING.bits());
-            w.publish_with_flags(paths.iter().map(|p| (p.clone(), flags)))
-                .await
-                .unwrap();
+            w.publish_with_flags(paths.iter().map(|p| (p.clone(), flags))).await.unwrap();
             for r in r.resolve(paths.clone()).await.unwrap().drain(..) {
                 assert_eq!(r.addrs.len(), 1);
                 assert_eq!(r.addrs[0].0, paddr);
@@ -54,15 +56,19 @@ mod resolver {
     #[test]
     fn publish_default() {
         Runtime::new().unwrap().block_on(async {
-            let mut cfg =
-                config::Config::load("../cfg/simple.json").expect("load simple config");
-            let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
-                .await
-                .expect("start server");
-            cfg.addrs[0] = *server.local_addr();
+            let server_cfg = config::server::Config::load("../cfg/simple-server.json")
+                .expect("load simple server config");
+            let mut client_cfg =
+                config::client::Config::load("../cfg/simple-client.json")
+                    .expect("load simple client config");
+            let server =
+                Server::new(server_cfg, config::server::PMap::default(), false, 0)
+                    .await
+                    .expect("start server");
+            client_cfg.addrs[0] = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let w = ResolverWrite::new(cfg.clone(), Auth::Anonymous, paddr);
-            let r = ResolverRead::new(cfg, Auth::Anonymous);
+            let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr);
+            let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
             w.publish_default(iter::once(p("/default"))).await.unwrap();
             let paths = vec![p("/default/foo/bar"), p("/default/foo/baz")];
             for r in r.resolve(paths.clone()).await.unwrap().drain(..) {
@@ -86,47 +92,66 @@ mod resolver {
         _huge0: (Server, Server),
         _huge1: (Server, Server),
         _huge1_sub: (Server, Server),
-        cfg_root: config::Config,
-        cfg_huge0: config::Config,
-        cfg_huge1: config::Config,
-        cfg_huge1_sub: config::Config,
+        cfg_root: config::client::Config,
+        cfg_huge0: config::client::Config,
+        cfg_huge1: config::client::Config,
+        cfg_huge1_sub: config::client::Config,
     }
 
     impl Ctx {
         async fn new() -> Ctx {
-            let pmap = config::PMap::default();
+            let pmap = config::server::PMap::default();
+            let server_cfg_root =
+                config::server::Config::load("../cfg/complex-root-server.json")
+                    .expect("root server config");
             let cfg_root =
-                config::Config::load("../cfg/complex-root.json").expect("root config");
+                config::client::Config::load("../cfg/complex-root-client.json")
+                    .expect("root client config");
+            let server_cfg_huge0 =
+                config::server::Config::load("../cfg/complex-huge0-server.json")
+                    .expect("huge0 server config");
             let cfg_huge0 =
-                config::Config::load("../cfg/complex-huge0.json").expect("huge0 config");
+                config::client::Config::load("../cfg/complex-huge0-client.json")
+                    .expect("huge0 client config");
+            let server_cfg_huge1 =
+                config::server::Config::load("../cfg/complex-huge1-server.json")
+                    .expect("huge1 server config");
             let cfg_huge1 =
-                config::Config::load("../cfg/complex-huge1.json").expect("huge1 config");
-            let cfg_huge1_sub = config::Config::load("../cfg/complex-huge1-sub.json")
-                .expect("huge1 sub config");
-            let server0_root = Server::new(cfg_root.clone(), pmap.clone(), false, 0)
-                .await
-                .expect("root server 0");
-            let server1_root = Server::new(cfg_root.clone(), pmap.clone(), false, 1)
+                config::client::Config::load("../cfg/complex-huge1-client.json")
+                    .expect("huge1 client config");
+            let server_cfg_huge1_sub =
+                config::server::Config::load("../cfg/complex-huge1-sub-server.json")
+                    .expect("huge1 sub server config");
+            let cfg_huge1_sub =
+                config::client::Config::load("../cfg/complex-huge1-sub-client.json")
+                    .expect("huge1 sub client config");
+            let server0_root =
+                Server::new(server_cfg_root.clone(), pmap.clone(), false, 0)
+                    .await
+                    .expect("root server 0");
+            let server1_root = Server::new(server_cfg_root, pmap.clone(), false, 1)
                 .await
                 .expect("root server 1");
-            let server0_huge0 = Server::new(cfg_huge0.clone(), pmap.clone(), false, 0)
-                .await
-                .expect("huge0 server0");
-            let server1_huge0 = Server::new(cfg_huge0.clone(), pmap.clone(), false, 1)
+            let server0_huge0 =
+                Server::new(server_cfg_huge0.clone(), pmap.clone(), false, 0)
+                    .await
+                    .expect("huge0 server0");
+            let server1_huge0 = Server::new(server_cfg_huge0, pmap.clone(), false, 1)
                 .await
                 .expect("huge0 server1");
-            let server0_huge1 = Server::new(cfg_huge1.clone(), pmap.clone(), false, 0)
-                .await
-                .expect("huge1 server0");
-            let server1_huge1 = Server::new(cfg_huge1.clone(), pmap.clone(), false, 1)
+            let server0_huge1 =
+                Server::new(server_cfg_huge1.clone(), pmap.clone(), false, 0)
+                    .await
+                    .expect("huge1 server0");
+            let server1_huge1 = Server::new(server_cfg_huge1, pmap.clone(), false, 1)
                 .await
                 .expect("huge1 server0");
             let server0_huge1_sub =
-                Server::new(cfg_huge1_sub.clone(), pmap.clone(), false, 0)
+                Server::new(server_cfg_huge1_sub.clone(), pmap.clone(), false, 0)
                     .await
                     .expect("huge1 sub server0");
             let server1_huge1_sub =
-                Server::new(cfg_huge1_sub.clone(), pmap.clone(), false, 1)
+                Server::new(server_cfg_huge1_sub, pmap.clone(), false, 1)
                     .await
                     .expect("huge1 sub server0");
             Ctx {
@@ -252,11 +277,13 @@ mod resolver {
         .collect::<Vec<_>>();
         let mut ct_root = ChangeTracker::new(Path::from("/"));
         let mut ct_app = ChangeTracker::new(Path::from("/app"));
-        let r_root = ResolverRead::new(ctx.cfg_root.clone(), Auth::Anonymous);
+        let r_root = ResolverRead::new(ctx.cfg_root.clone(), DesiredAuth::Anonymous);
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(r_root.check_changed(&mut ct_app).await.unwrap());
-        let w0 = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddrs[0]);
-        let w1 = ResolverWrite::new(ctx.cfg_root.clone(), Auth::Anonymous, waddrs[1]);
+        let w0 =
+            ResolverWrite::new(ctx.cfg_root.clone(), DesiredAuth::Anonymous, waddrs[0]);
+        let w1 =
+            ResolverWrite::new(ctx.cfg_root.clone(), DesiredAuth::Anonymous, waddrs[1]);
         w0.publish(paths.iter().cloned()).await.unwrap();
         time::sleep(Duration::from_millis(1000)).await;
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
@@ -277,13 +304,14 @@ mod resolver {
         // spuriously.
         check_list(&r_root).await;
         check_resolve(&ctx, &r_root, &paths, &waddrs).await;
-        let r_huge0 = ResolverRead::new(ctx.cfg_huge0.clone(), Auth::Anonymous);
+        let r_huge0 = ResolverRead::new(ctx.cfg_huge0.clone(), DesiredAuth::Anonymous);
         check_list(&r_huge0).await;
         check_resolve(&ctx, &r_huge0, &paths, &waddrs).await;
-        let r_huge1 = ResolverRead::new(ctx.cfg_huge1.clone(), Auth::Anonymous);
+        let r_huge1 = ResolverRead::new(ctx.cfg_huge1.clone(), DesiredAuth::Anonymous);
         check_list(&r_huge1).await;
         check_resolve(&ctx, &r_huge1, &paths, &waddrs).await;
-        let r_huge1_sub = ResolverRead::new(ctx.cfg_huge1.clone(), Auth::Anonymous);
+        let r_huge1_sub =
+            ResolverRead::new(ctx.cfg_huge1.clone(), DesiredAuth::Anonymous);
         check_list(&r_huge1_sub).await;
         check_resolve(&ctx, &r_huge1_sub, &paths, &waddrs).await;
         assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
@@ -313,7 +341,7 @@ mod publisher {
     use super::*;
     use crate::{
         publisher::{BindCfg, Event as PEvent, PublishFlags, Publisher, Val},
-        resolver::Auth,
+        resolver::DesiredAuth,
         resolver_server::Server,
         subscriber::{Event, Subscriber, UpdatesFlags, Value},
     };
@@ -347,12 +375,12 @@ mod publisher {
     }
 
     async fn run_publisher(
-        cfg: config::Config,
+        cfg: config::client::Config,
         default_destroyed: Arc<Mutex<bool>>,
         tx: oneshot::Sender<()>,
     ) {
         let publisher =
-            Publisher::new(cfg, Auth::Anonymous, "127.0.0.1/32".parse().unwrap())
+            Publisher::new(cfg, DesiredAuth::Anonymous, "127.0.0.1/32".parse().unwrap())
                 .await
                 .unwrap();
         let vp = publisher.publish("/app/v0".into(), Value::U64(0)).unwrap();
@@ -402,16 +430,16 @@ mod publisher {
         }
     }
 
-    async fn run_subscriber(cfg: config::Config, default_destroyed: Arc<Mutex<bool>>) {
-        let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
+    async fn run_subscriber(
+        cfg: config::client::Config,
+        default_destroyed: Arc<Mutex<bool>>,
+    ) {
+        let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
         let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
         let q = subscriber.subscribe_one("/app/q/foo".into(), None).await.unwrap();
         assert_eq!(q.last(), Event::Update(Value::True));
-        let res = subscriber
-            .resolver()
-            .resolve(iter::once("/app/q/adv".into()))
-            .await
-            .unwrap();
+        let res =
+            subscriber.resolver().resolve(iter::once("/app/q/adv".into())).await.unwrap();
         assert_eq!(res.len(), 1);
         let a = subscriber.subscribe_one("/app/q/adv".into(), None).await.unwrap();
         assert_eq!(a.last(), Event::Update(Value::False));
@@ -449,17 +477,21 @@ mod publisher {
     fn publish_subscribe() {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let mut cfg =
-                config::Config::load("../cfg/simple.json").expect("load simple config");
-            let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
-                .await
-                .expect("start server");
-            cfg.addrs[0] = *server.local_addr();
+            let server_cfg = config::server::Config::load("../cfg/simple-server.json")
+                .expect("load simple server config");
+            let mut client_cfg =
+                config::client::Config::load("../cfg/simple-client.json")
+                    .expect("load simple client config");
+            let server =
+                Server::new(server_cfg, config::server::PMap::default(), false, 0)
+                    .await
+                    .expect("start server");
+            client_cfg.addrs[0] = *server.local_addr();
             let default_destroyed = Arc::new(Mutex::new(false));
             let (tx, ready) = oneshot::channel();
-            task::spawn(run_publisher(cfg.clone(), default_destroyed.clone(), tx));
+            task::spawn(run_publisher(client_cfg.clone(), default_destroyed.clone(), tx));
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
-            run_subscriber(cfg, default_destroyed).await;
+            run_subscriber(client_cfg, default_destroyed).await;
             drop(server);
         });
     }
