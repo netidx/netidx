@@ -149,6 +149,7 @@ pub mod server {
     /// The on disk format, encoded as JSON
     pub(crate) mod file {
         use super::super::check_addrs;
+        use super::PMap;
         use crate::{chars::Chars, path::Path, pool::Pooled};
         use anyhow::Result;
         use std::{collections::HashMap, net::SocketAddr};
@@ -240,6 +241,7 @@ pub mod server {
             pub(super) hello_timeout: u64,
             pub(super) addrs: Vec<SocketAddr>,
             pub(super) auth: Auth,
+            pub(super) perms: PMap,
         }
     }
 
@@ -254,6 +256,7 @@ pub mod server {
         pub hello_timeout: Duration,
         pub addrs: Vec<SocketAddr>,
         pub auth: Auth,
+        pub perms: PMap,
     }
 
     impl Config {
@@ -304,6 +307,7 @@ pub mod server {
                 writer_ttl: Duration::from_secs(cfg.writer_ttl),
                 hello_timeout: Duration::from_secs(cfg.hello_timeout),
                 auth: cfg.auth.into(),
+                perms: cfg.perms,
             })
         }
 

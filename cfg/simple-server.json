@@ -7,5 +7,6 @@
     "hello_timeout": 10,
     "reader_ttl": 60,
     "writer_ttl": 120,
-    "auth": "Anonymous"
+    "auth": "Anonymous",
+    "perms": {}
 }

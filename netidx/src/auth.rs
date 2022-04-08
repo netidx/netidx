@@ -131,7 +131,7 @@ pub(crate) struct PMap(BTreeMap<Path, HashMap<Entity, Permissions>>);
 
 impl PMap {
     pub(crate) fn from_file(
-        file: config::server::PMap,
+        file: &config::server::PMap,
         db: &mut UserDb,
         root: &str,
         children: &BTreeMap<Path, config::Server>,

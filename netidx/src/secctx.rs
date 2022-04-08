@@ -77,12 +77,9 @@ pub(crate) struct SecCtxData<S: 'static> {
 }
 
 impl<S: 'static> SecCtxData<S> {
-    pub(crate) fn new(
-        pmap: config::server::PMap,
-        cfg: &Arc<config::server::Config>,
-    ) -> Result<Self> {
+    pub(crate) fn new(cfg: &Arc<config::server::Config>) -> Result<Self> {
         let mut users = UserDb::new(Mapper::new()?);
-        let pmap = PMap::from_file(pmap, &mut users, cfg.root(), &cfg.children)?;
+        let pmap = PMap::from_file(&cfg.perms, &mut users, cfg.root(), &cfg.children)?;
         Ok(Self { users, pmap, secrets: HashMap::default() })
     }
 
@@ -157,19 +154,18 @@ pub(crate) enum SecCtx {
 impl SecCtx {
     pub(crate) async fn new(
         cfg: &Arc<config::server::Config>,
-        pmap: config::server::PMap,
         id: &SocketAddr,
     ) -> Result<Self> {
         let t = match &cfg.auth {
             config::Auth::Anonymous => SecCtx::Anonymous,
             config::Auth::Local(path) => {
                 let auth = local::Authenticator::new(&path).await?;
-                let store = RwLock::new(SecCtxData::new(pmap, cfg)?);
+                let store = RwLock::new(SecCtxData::new(cfg)?);
                 SecCtx::Local(Arc::new((auth, store)))
             }
             config::Auth::Krb5(spns) => {
                 let auth = k5::Authenticator::new(spns[id].clone());
-                let store = RwLock::new(SecCtxData::new(pmap, cfg)?);
+                let store = RwLock::new(SecCtxData::new(cfg)?);
                 SecCtx::Krb5(Arc::new((auth, store)))
             }
         };

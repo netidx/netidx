@@ -30,7 +30,7 @@ mod resolver_server {
     use netidx::config;
 
     pub(crate) fn run(
-        _config: config::Config,
+        _config: config::server::Config,
         _permissions: config::PMap,
         _daemonize: bool,
         _delay_reads: bool,
@@ -42,7 +42,7 @@ mod resolver_server {
 
 #[cfg(not(unix))]
 mod recorder {
-    use netidx::{config::Config, publisher::BindCfg, resolver::Auth, path::Path};
+    use netidx::{config::server::Config, publisher::BindCfg, resolver::DesiredAuth, path::Path};
     pub(crate) fn run(
         _config: Config,
         _foreground: bool,
@@ -65,7 +65,7 @@ mod recorder {
 
 #[cfg(not(unix))]
 mod container {
-    use netidx::{resolver::Auth, config::Config};
+    use netidx::{resolver::DesiredAuth, config::client::Config};
     pub(crate) fn run(
         _config: Config,
         _auth: Auth,
@@ -73,23 +73,6 @@ mod container {
     ) {
         todo!("the container is not yet ported to this platform")
     }
-}
-
-#[derive(StructOpt, Debug)]
-#[structopt(name = "netidx")]
-struct Opt {
-    #[structopt(
-        short = "c",
-        long = "config",
-        help = "override the default config file location (~/.config/netidx.json)"
-    )]
-    config: Option<String>,
-    #[structopt(short = "a", long = "anonymous", help = "disable Kerberos 5")]
-    anon: bool,
-    #[structopt(long = "upn", help = "krb5 use <upn> instead of the current user")]
-    upn: Option<String>,
-    #[structopt(subcommand)]
-    cmd: Sub,
 }
 
 #[derive(StructOpt, Debug)]
@@ -122,6 +105,7 @@ struct ContainerConfig {
 }
 
 #[derive(StructOpt, Debug)]
+#[structopt(name = "netidx")]
 enum Sub {
     #[structopt(name = "resolver-server", about = "run a resolver")]
     ResolverServer {
@@ -138,10 +122,12 @@ enum Sub {
             default_value = "0"
         )]
         id: usize,
+        #[structopt(short = "c", long = "config", help = "path to the server config")]
+        config: String,
         #[structopt(
             short = "p",
             long = "permissions",
-            help = "location of the permissions file"
+            help = "path to the permissions file"
         )]
         permissions: Option<String>,
     },
