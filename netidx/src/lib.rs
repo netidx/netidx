@@ -30,7 +30,7 @@
 //! use netidx::{
 //!     publisher::{Publisher, Value, BindCfg},
 //!     config::client::Config,
-//!     resolver::Auth,
+//!     resolver::DesiredAuth,
 //!     path::Path,
 //! };
 //! use tokio::time;
@@ -43,7 +43,7 @@
 //!
 //! // no authentication (kerberos v5 is the other option)
 //! // listen on any unique address matching 192.168.0.0/16
-//! let publisher = Publisher::new(cfg, Auth::Anonymous, "192.168.0.0/16".parse()?).await?;
+//! let publisher = Publisher::new(cfg, DesiredAuth::Anonymous, "192.168.0.0/16".parse()?).await?;
 //!
 //! let temp = publisher.publish(
 //!     Path::from("/hw/washu-chan/cpu-temp"),
@@ -65,7 +65,7 @@
 //! use netidx::{
 //!     subscriber::{Subscriber, UpdatesFlags},
 //!     config::client::Config,
-//!     resolver::Auth,
+//!     resolver::DesiredAuth,
 //!     path::Path,
 //! };
 //! use futures::{prelude::*, channel::mpsc};
@@ -73,7 +73,7 @@
 //!
 //! # async fn run() -> Result<()> {
 //! let cfg = Config::load_default()?;
-//! let subscriber = Subscriber::new(cfg, Auth::Anonymous)?;
+//! let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous)?;
 //! let path = Path::from("/hw/washu-chan/cpu-temp");
 //! let temp = subscriber.subscribe_one(path, None).await?;
 //! println!("washu-chan cpu temp is: {:?}", temp.last());
