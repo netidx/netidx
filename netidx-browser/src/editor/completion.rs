@@ -2,9 +2,9 @@ use super::Scope;
 use glib::{prelude::*, subclass::prelude::*};
 use netidx::path::Path;
 use radix_trie::TrieCommon;
-use sourceview4_sc::{
+use sourceview4::{
     prelude::*, subclass::prelude::*, CompletionActivation, CompletionContext,
-    CompletionInfo, CompletionItem, CompletionProposal, CompletionProvider,
+    CompletionItem, CompletionProvider,
 };
 use std::{default::Default, rc::Rc};
 
@@ -61,65 +61,28 @@ pub(crate) mod imp {
     impl ObjectImpl for BScriptCompletionProvider {}
 
     impl CompletionProviderImpl for BScriptCompletionProvider {
-        fn activate_proposal(
+        fn activation(
             &self,
-            _proposal: &impl IsA<CompletionProposal>,
-            _iter: &gtk::TextIter,
-        ) -> bool {
-            false
-        }
-
-        fn activation(&self) -> CompletionActivation {
+            _provider: &super::BScriptCompletionProvider,
+        ) -> CompletionActivation {
             CompletionActivation::USER_REQUESTED
         }
 
-        fn gicon(&self) -> Option<gio::Icon> {
-            None
-        }
-
-        fn icon(&self) -> Option<gdk_pixbuf::Pixbuf> {
-            None
-        }
-
-        fn icon_name(&self) -> Option<glib::GString> {
-            None
-        }
-
-        fn info_widget(
-            &self,
-            _proposal: &impl IsA<CompletionProposal>,
-        ) -> Option<gtk::Widget> {
-            None
-        }
-
-        fn interactive_delay(&self) -> i32 {
+        fn interactive_delay(&self, _provider: &super::BScriptCompletionProvider) -> i32 {
             100
         }
 
-        fn name(&self) -> Option<glib::GString> {
-            Some("bscript".into())
-        }
-
-        fn priority(&self) -> i32 {
-            1
-        }
-
-        fn start_iter(
+        fn name(
             &self,
-            _context: &impl IsA<CompletionContext>,
-            _proposal: &impl IsA<CompletionProposal>,
-        ) -> Option<gtk::TextIter> {
-            None
-        }
-
-        fn match_(&self, _context: &impl IsA<CompletionContext>) -> bool {
-            true
+            _provider: &super::BScriptCompletionProvider,
+        ) -> Option<glib::GString> {
+            Some("bscript".into())
         }
 
         fn populate(
             &self,
-            provider: &impl IsA<CompletionProvider>,
-            context: &impl IsA<CompletionContext>,
+            provider: &super::BScriptCompletionProvider,
+            context: &CompletionContext,
         ) {
             macro_rules! get {
                 ($e:expr) => {
@@ -196,13 +159,6 @@ pub(crate) mod imp {
                 });
             let candidates = fn_candidates.chain(var_candidates).collect::<Vec<_>>();
             context.add_proposals(provider, &*candidates, true);
-        }
-
-        fn update_info(
-            &self,
-            _proposal: &impl IsA<CompletionProposal>,
-            _info: &impl IsA<CompletionInfo>,
-        ) {
         }
     }
 }
