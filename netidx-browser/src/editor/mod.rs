@@ -58,7 +58,7 @@ impl WidgetProps {
                 "End" => view::Align::End,
                 "Center" => view::Align::Center,
                 "Baseline" => view::Align::Baseline,
-                x => unreachable!(x),
+                x => unreachable!("{}", x),
             }
         }
         let halign_lbl = gtk::Label::new(Some("Horizontal Alignment:"));
