@@ -11,11 +11,11 @@ use glib;
 use log::{info, warn};
 use netidx::{
     chars::Chars,
-    config::Config,
+    config::client::Config,
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver,
-    resolver::{Auth, ResolverRead},
+    resolver::{DesiredAuth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
 use netidx_bscript::vm::RpcCallId;
@@ -135,12 +135,7 @@ impl CtxInner {
             refreshing: false,
         };
         task::spawn(inner.run());
-        Ctx {
-            subscriber,
-            to_gui,
-            from_gui: tx_from_gui,
-            updates: tx_updates,
-        }
+        Ctx { subscriber, to_gui, from_gui: tx_from_gui, updates: tx_updates }
     }
 
     async fn navigate_path(&mut self, base_path: Path) -> Result<()> {
@@ -450,7 +445,10 @@ enum ToBackend {
 pub(crate) struct Backend(mpsc::UnboundedSender<ToBackend>);
 
 impl Backend {
-    pub(crate) fn new(cfg: Config, auth: Auth) -> (thread::JoinHandle<()>, Backend) {
+    pub(crate) fn new(
+        cfg: Config,
+        auth: DesiredAuth,
+    ) -> (thread::JoinHandle<()>, Backend) {
         let (tx_create_ctx, mut rx_create_ctx) = mpsc::unbounded();
         let join_handle = {
             thread::spawn(move || {

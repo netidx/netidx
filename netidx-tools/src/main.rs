@@ -27,7 +27,7 @@ mod resolver_server;
 struct ClientParams {
     #[structopt(short = "c", long = "config", help = "path to the client config")]
     config: Option<String>,
-    #[structopt(short = "a", long = "auth", help = "auth mechanism")]
+    #[structopt(short = "a", long = "auth", help = "auth mechanism (krb5)", default_value = "krb5")]
     auth: DesiredAuth,
     #[structopt(long = "upn", help = "kerberos upn, only if auth = krb5")]
     upn: Option<String>,

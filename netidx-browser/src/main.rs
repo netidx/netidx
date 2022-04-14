@@ -24,10 +24,10 @@ use glib::{clone, idle_add_local, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use netidx::{
     chars::Chars,
-    config::{self, Config},
+    config::client::Config,
     path::Path,
     pool::{Pool, Pooled},
-    resolver::{self, Auth},
+    resolver::{self, DesiredAuth},
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
 };
 use netidx_bscript::{
@@ -1018,7 +1018,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
 }
 
 #[derive(StructOpt, Debug)]
-#[structopt(name = "netidx")]
+#[structopt(name = "netidx-browser")]
 struct Opt {
     #[structopt(
         short = "c",
@@ -1026,9 +1026,14 @@ struct Opt {
         help = "override the default config file location (~/.config/netidx.json)"
     )]
     config: Option<String>,
-    #[structopt(short = "a", long = "anonymous", help = "disable Kerberos 5")]
-    anon: bool,
-    #[structopt(long = "upn", help = "krb5 use <upn> instead of the current user")]
+    #[structopt(
+        short = "a",
+        long = "auth",
+        help = "what auth type to use (krb5)",
+        default_value = "krb5"
+    )]
+    auth: DesiredAuth,
+    #[structopt(long = "upn", help = "krb5 upn, instead of the current user")]
     upn: Option<String>,
     #[structopt(long = "path", help = "navigate to <path> on startup")]
     path: Option<Path>,
@@ -1043,13 +1048,9 @@ fn main() {
         None => Config::load_default().unwrap(),
         Some(path) => Config::load(path).unwrap(),
     };
-    let auth = if opt.anon {
-        Auth::Anonymous
-    } else {
-        match cfg.auth {
-            config::Auth::Anonymous => Auth::Anonymous,
-            config::Auth::Krb5(_) => Auth::Krb5 { upn: opt.upn.clone(), spn: None },
-        }
+    let auth = match opt.auth {
+        DesiredAuth::Local | DesiredAuth::Anonymous => opt.auth,
+        DesiredAuth::Krb5 { .. } => DesiredAuth::Krb5 { upn: opt.upn, spn: None },
     };
     let application = Application::new(
         Some("org.netidx.browser"),
