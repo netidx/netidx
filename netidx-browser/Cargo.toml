@@ -52,7 +52,7 @@ gio = "0.15"
 glib = "0.15"
 gdk = "0.15"
 gdk-pixbuf = "0.15"
-sourceview4-sc = "0.3"
+sourceview4 = { version = "0.3", path = "../../sourceview4-rs/sourceview4" }
 plotters = { version = "0.3", default_features = false, features = ["datetime", "line_series", "ttf"] }
 plotters-backend = "0.3"
 lazy_static = "1"
