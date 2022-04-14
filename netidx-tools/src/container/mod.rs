@@ -2,7 +2,6 @@ mod db;
 mod rpcs;
 mod stats;
 
-use super::ContainerConfig;
 use anyhow::Result;
 use arcstr::ArcStr;
 use db::{Datum, DatumKind, Reply, Sendable, Txn};
@@ -21,10 +20,10 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     publisher::{
-        DefaultHandle, Event as PEvent, Id, PublishFlags, Publisher, UpdateBatch, Val,
-        WriteRequest,
+        BindCfg, DefaultHandle, Event as PEvent, Id, PublishFlags, Publisher,
+        UpdateBatch, Val, WriteRequest,
     },
-    resolver::Auth,
+    resolver::DesiredAuth,
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
     utils::BatchItem,
 };
@@ -50,11 +49,39 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use structopt::StructOpt;
 use tokio::{
     runtime::Runtime,
     signal, task,
     time::{self, Instant},
 };
+
+#[derive(StructOpt, Debug)]
+pub(crate) struct Params {
+    #[structopt(
+        short = "b",
+        long = "bind",
+        help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
+    )]
+    bind: BindCfg,
+    #[structopt(
+        long = "timeout",
+        help = "require subscribers to consume values before timeout (seconds)"
+    )]
+    timeout: Option<u64>,
+    #[structopt(long = "api-path", help = "the netidx path of the container api")]
+    api_path: Path,
+    #[structopt(long = "db", help = "the db file")]
+    db: String,
+    #[structopt(long = "compress", help = "use zstd compression")]
+    compress: bool,
+    #[structopt(long = "compress-level", help = "zstd compression level")]
+    compress_level: Option<u32>,
+    #[structopt(long = "cache-size", help = "db page cache size in bytes")]
+    cache_size: Option<u64>,
+    #[structopt(long = "sparse", help = "don't even advertise the contents of the db")]
+    sparse: bool,
+}
 
 lazy_static! {
     static ref VARS: Pool<Vec<(Path, Chars, Value)>> = Pool::new(8, 2048);
@@ -709,7 +736,7 @@ enum Compiled {
 }
 
 struct Container {
-    cfg: ContainerConfig,
+    params: Params,
     api_path: Path,
     stats: Stats,
     locked: BTreeMap<Path, bool>,
@@ -730,26 +757,30 @@ struct Container {
 }
 
 impl Container {
-    async fn new(cfg: config::Config, auth: Auth, ccfg: ContainerConfig) -> Result<Self> {
+    async fn new(
+        cfg: config::client::Config,
+        auth: DesiredAuth,
+        params: Params,
+    ) -> Result<Self> {
         let (publish_events_tx, publish_events) = mpsc::unbounded();
-        let publisher = Publisher::new(cfg.clone(), auth.clone(), ccfg.bind).await?;
+        let publisher = Publisher::new(cfg.clone(), auth.clone(), params.bind).await?;
         publisher.events(publish_events_tx);
         let (db, db_updates) =
-            db::Db::new(&ccfg, publisher.clone(), ccfg.api_path.clone())?;
+            db::Db::new(&params, publisher.clone(), params.api_path.clone())?;
         let subscriber = Subscriber::new(cfg, auth)?;
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
         let (bs_tx, bs_rx) = mpsc::unbounded();
-        let api_path = ccfg.api_path.append("rpcs");
+        let api_path = params.api_path.append("rpcs");
         let api = rpcs::RpcApi::new(&publisher, &api_path)?;
-        let stats = Stats::new(publisher.clone(), ccfg.api_path.clone());
+        let stats = Stats::new(publisher.clone(), params.api_path.clone());
         let mut ctx =
             ExecCtx::new(Lc::new(db, subscriber, publisher, sub_updates_tx, bs_tx));
         Ref::register(&mut ctx);
         Rel::register(&mut ctx);
         OnWriteEvent::register(&mut ctx);
         Ok(Container {
-            cfg: ccfg,
+            params,
             api_path,
             stats,
             locked: BTreeMap::new(),
@@ -918,7 +949,7 @@ impl Container {
                 DatumKind::Deleted | DatumKind::Invalid => (),
             }
         }
-        Ok(batch.commit(self.cfg.timeout.map(Duration::from_secs)).await)
+        Ok(batch.commit(self.params.timeout.map(Duration::from_secs)).await)
     }
 
     fn update_expr_ids(
@@ -1464,7 +1495,7 @@ impl Container {
     }
 
     fn advertise_path(&self, path: Path) {
-        if !self.cfg.sparse {
+        if !self.params.sparse {
             if let Some((_, def)) = self.get_root(&path) {
                 let _: Result<_> = def.advertise(path);
             }
@@ -1645,7 +1676,7 @@ impl Container {
                 self.ctx.user.db.commit(mem::replace(&mut txn, Txn::new()));
             }
             if batch.len() > 0 {
-                let timeout = self.cfg.timeout.map(Duration::from_secs);
+                let timeout = self.params.timeout.map(Duration::from_secs);
                 let new_batch = self.ctx.user.publisher.start_batch();
                 mem::replace(&mut batch, new_batch).commit(timeout).await;
             }
@@ -1656,9 +1687,10 @@ impl Container {
     }
 }
 
-pub(super) fn run(cfg: config::Config, auth: Auth, ccfg: ContainerConfig) {
+pub(super) fn run(cfg: config::client::Config, auth: DesiredAuth, params: Params) {
     Runtime::new().expect("failed to create runtime").block_on(async move {
-        let t = Container::new(cfg, auth, ccfg).await.expect("failed to create context");
+        let t =
+            Container::new(cfg, auth, params).await.expect("failed to create context");
         t.run().await.expect("container main loop failed")
     })
 }

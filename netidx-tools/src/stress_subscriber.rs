@@ -1,9 +1,9 @@
 use futures::channel::mpsc;
 use futures::{prelude::*, select_biased};
 use netidx::{
-    config::Config,
+    config::client::Config,
     path::Path,
-    resolver::{Auth, ResolverRead},
+    resolver::{DesiredAuth, ResolverRead},
     subscriber::{Subscriber, UpdatesFlags},
 };
 use std::time::Duration;
@@ -12,7 +12,7 @@ use tokio::{
     time::{self, Instant},
 };
 
-pub(crate) fn run(config: Config, auth: Auth) {
+pub(crate) fn run(config: Config, auth: DesiredAuth) {
     let rt = Runtime::new().expect("runtime");
     rt.block_on(async {
         let r = ResolverRead::new(config.clone(), auth.clone());

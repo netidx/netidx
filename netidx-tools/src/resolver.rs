@@ -1,16 +1,58 @@
-use super::ResolverCmd;
 use netidx::{
     chars::Chars,
-    config::Config,
+    config::client::Config,
     path::Path,
     protocol::glob::{Glob, GlobSet},
-    resolver::{Auth, ChangeTracker, ResolverRead, ResolverWrite},
+    resolver::{DesiredAuth, ChangeTracker, ResolverRead, ResolverWrite},
 };
-use std::{collections::HashSet, iter, time::Duration};
+use std::{collections::HashSet, iter, time::Duration, net::SocketAddr};
 use tokio::{runtime::Runtime, time};
 use arcstr::ArcStr;
+use structopt::StructOpt;
 
-pub(crate) fn run(config: Config, cmd: ResolverCmd, auth: Auth) {
+#[derive(StructOpt, Debug)]
+pub(crate) enum ResolverCmd {
+    #[structopt(name = "resolve", about = "resolve an in the resolver server")]
+    Resolve { path: Path },
+    #[structopt(name = "list", about = "list entries in the resolver server")]
+    List {
+        #[structopt(
+            long = "no-structure",
+            short = "n",
+            help = "don't list structural items, only published paths"
+        )]
+        no_structure: bool,
+        #[structopt(
+            long = "watch",
+            short = "w",
+            help = "poll the resolver for new paths matching the specified pattern"
+        )]
+        watch: bool,
+        #[structopt(name = "pattern")]
+        path: Option<String>,
+    },
+    #[structopt(name = "table", about = "table descriptor for path")]
+    Table {
+        #[structopt(name = "path")]
+        path: Option<Path>,
+    },
+    #[structopt(name = "add", about = "add a new entry")]
+    Add {
+        #[structopt(name = "path")]
+        path: Path,
+        #[structopt(name = "socketaddr")]
+        socketaddr: SocketAddr,
+    },
+    #[structopt(name = "remove", about = "remove an entry")]
+    Remove {
+        #[structopt(name = "path")]
+        path: Path,
+        #[structopt(name = "socketaddr")]
+        socketaddr: SocketAddr,
+    },
+}
+
+pub(crate) fn run(config: Config, auth: DesiredAuth, cmd: ResolverCmd) {
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         match cmd {

@@ -1,4 +1,5 @@
 use anyhow::{Error, Result};
+use arcstr::ArcStr;
 use chrono::prelude::*;
 use futures::{
     channel::{mpsc, oneshot},
@@ -10,7 +11,7 @@ use fxhash::FxBuildHasher;
 use log::{error, info, warn};
 use netidx::{
     chars::Chars,
-    config::Config,
+    config::client::Config,
     path::Path,
     pool::Pooled,
     protocol::{
@@ -20,7 +21,7 @@ use netidx::{
     publisher::{
         BindCfg, ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest,
     },
-    resolver::{Auth, ChangeTracker, ResolverRead},
+    resolver::{ChangeTracker, DesiredAuth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
     utils,
 };
@@ -41,9 +42,67 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use structopt::StructOpt;
 use tokio::{runtime::Runtime, sync::broadcast, task, time};
 use uuid::{adapter::SimpleRef, Uuid};
-use arcstr::ArcStr;
+
+#[derive(StructOpt, Debug)]
+pub(crate) struct Params {
+    #[structopt(
+        short = "b",
+        long = "bind",
+        help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
+    )]
+    bind: Option<BindCfg>,
+    #[structopt(long = "publish-base", help = "base path for republishing the archive")]
+    publish_base: Option<Path>,
+    #[structopt(
+        long = "image-frequency",
+        help = "How often to write a full image, 0 for never (67108864)",
+        default_value = "67108864"
+    )]
+    image_frequency: usize,
+    #[structopt(
+        long = "poll-interval",
+        help = "How often to poll the resolver, 0 for never (5)",
+        default_value = "5"
+    )]
+    poll_interval: u64,
+    #[structopt(
+        long = "flush-frequency",
+        help = "How often to flush changes in pages, 0 only on exit (65534 pages)",
+        default_value = "65534"
+    )]
+    flush_frequency: usize,
+    #[structopt(
+        long = "flush-interval",
+        help = "How often to flush changes (seconds), 0 disable (30)",
+        default_value = "30"
+    )]
+    flush_interval: u64,
+    #[structopt(
+        long = "shards",
+        help = "how many other recorder shards to expect",
+        default_value = "0"
+    )]
+    shards: usize,
+    #[structopt(
+        long = "max-sessions",
+        help = "how many total client sesions to allow",
+        default_value = "256"
+    )]
+    max_sessions: usize,
+    #[structopt(
+        long = "max-sessions-per-client",
+        help = "how many sesions to allow each client",
+        default_value = "64"
+    )]
+    max_sessions_per_client: usize,
+    #[structopt(long = "archive", help = "path to the archive file")]
+    archive: String,
+    #[structopt(long = "spec", help = "glob pattern to archive, can be repeated")]
+    spec: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 enum BCastMsg {
@@ -885,7 +944,7 @@ mod publish {
         bcast: broadcast::Sender<BCastMsg>,
         archive: ArchiveReader,
         resolver: Config,
-        desired_auth: Auth,
+        desired_auth: DesiredAuth,
         bind_cfg: BindCfg,
         publish_base: Path,
         shards: usize,
@@ -1133,7 +1192,7 @@ mod record {
         bcast: broadcast::Sender<BCastMsg>,
         mut archive: ArchiveWriter,
         resolver: Config,
-        desired_auth: Auth,
+        desired_auth: DesiredAuth,
         poll_interval: Option<time::Duration>,
         image_frequency: Option<usize>,
         flush_frequency: Option<usize>,
@@ -1298,7 +1357,7 @@ async fn should_exit() -> Result<()> {
 async fn run_async(
     config: Config,
     publish_args: Option<(BindCfg, Path)>,
-    auth: Auth,
+    auth: DesiredAuth,
     image_frequency: Option<usize>,
     poll_interval: Option<time::Duration>,
     flush_frequency: Option<usize>,
@@ -1376,39 +1435,26 @@ async fn run_async(
     }
 }
 
-pub(crate) fn run(
-    config: Config,
-    _foreground: bool,
-    bind: Option<BindCfg>,
-    publish_base: Option<Path>,
-    auth: Auth,
-    image_frequency: usize,
-    poll_interval: u64,
-    flush_frequency: usize,
-    flush_interval: u64,
-    shards: usize,
-    max_sessions: usize,
-    max_sessions_per_client: usize,
-    archive: String,
-    spec: Vec<String>,
-) {
-    let image_frequency = if image_frequency == 0 { None } else { Some(image_frequency) };
-    let poll_interval = if poll_interval == 0 {
+pub(crate) fn run(config: Config, auth: DesiredAuth, params: Params) {
+    let image_frequency =
+        if params.image_frequency == 0 { None } else { Some(params.image_frequency) };
+    let poll_interval = if params.poll_interval == 0 {
         None
     } else {
-        Some(time::Duration::from_secs(poll_interval))
+        Some(time::Duration::from_secs(params.poll_interval))
     };
-    let flush_frequency = if flush_frequency == 0 { None } else { Some(flush_frequency) };
-    let flush_interval = if flush_interval == 0 {
+    let flush_frequency =
+        if params.flush_frequency == 0 { None } else { Some(params.flush_frequency) };
+    let flush_interval = if params.flush_interval == 0 {
         None
     } else {
-        Some(time::Duration::from_secs(flush_interval))
+        Some(time::Duration::from_secs(params.flush_interval))
     };
-    let publish_args = match (bind, publish_base) {
+    let publish_args = match (params.bind, params.publish_base) {
         (None, None) => None,
         (Some(bind), Some(publish_base)) => {
             match bind {
-                BindCfg::Match { .. } => (),
+                BindCfg::Match { .. } | BindCfg::Local => (),
                 BindCfg::Exact(_) => {
                     panic!("exact bindcfgs are not supported for this publisher")
                 }
@@ -1419,10 +1465,10 @@ pub(crate) fn run(
             panic!("you must specify bind and publish_base to publish an archive")
         }
     };
-    if spec.is_empty() && publish_args.is_none() {
+    if params.spec.is_empty() && publish_args.is_none() {
         panic!("you must specify a publish config, some paths to log, or both")
     }
-    let spec = spec
+    let spec = params.spec
         .into_iter()
         .map(Chars::from)
         .map(Glob::new)
@@ -1437,10 +1483,10 @@ pub(crate) fn run(
         poll_interval,
         flush_frequency,
         flush_interval,
-        shards,
-        max_sessions,
-        max_sessions_per_client,
-        archive,
+        params.shards,
+        params.max_sessions,
+        params.max_sessions_per_client,
+        params.archive,
         spec,
     ))
 }

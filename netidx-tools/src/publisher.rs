@@ -6,20 +6,36 @@ use futures::{
 use fxhash::FxBuildHasher;
 use log::{error, warn};
 use netidx::{
-    config::Config,
+    config::client::Config,
     path::Path,
     pool::Pooled,
     publisher::{BindCfg, Id, Publisher, Typ, Val, Value, WriteRequest},
-    resolver::Auth,
+    resolver::DesiredAuth,
     utils,
 };
 use parking_lot::Mutex;
 use std::{collections::HashMap, convert::From, sync::Arc, time::Duration};
+use structopt::StructOpt;
 use tokio::{
     io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Runtime,
     signal, task,
 };
+
+#[derive(StructOpt, Debug)]
+pub(crate) struct Params {
+    #[structopt(
+        short = "b",
+        long = "bind",
+        help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
+    )]
+    bind: BindCfg,
+    #[structopt(
+        long = "timeout",
+        help = "require subscribers to consume values before timeout (seconds)"
+    )]
+    timeout: Option<u64>,
+}
 
 macro_rules! tryc {
     ($msg:expr, $e:expr) => {
@@ -61,15 +77,15 @@ async fn handle_writes_loop(
     Ok(())
 }
 
-pub(crate) fn run(config: Config, bcfg: BindCfg, timeout: Option<u64>, auth: Auth) {
+pub(crate) fn run(config: Config, auth: DesiredAuth, params: Params) {
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
-        let timeout = timeout.map(Duration::from_secs);
+        let timeout = params.timeout.map(Duration::from_secs);
         let mut by_path: HashMap<Path, Arc<Val>> = HashMap::new();
         let by_id: ById =
             Arc::new(Mutex::new(HashMap::with_hasher(FxBuildHasher::default())));
         let publisher =
-            Publisher::new(config, auth, bcfg).await.expect("creating publisher");
+            Publisher::new(config, auth, params.bind).await.expect("creating publisher");
         let (writes_tx, writes_rx) = mpsc::channel(100);
         let mut buf = String::new();
         let mut stdin = BufReader::new(stdin());

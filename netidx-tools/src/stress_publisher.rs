@@ -1,30 +1,47 @@
 use futures::{prelude::*, select};
 use netidx::{
-    config::Config,
+    config::client::Config,
     path::Path,
     publisher::{BindCfg, Publisher, Value},
-    resolver::Auth,
+    resolver::DesiredAuth,
 };
-use std::{time::{Duration, Instant}, mem};
+use std::{
+    mem,
+    time::{Duration, Instant},
+};
+use structopt::StructOpt;
 use tokio::{runtime::Runtime, signal, time};
 
-async fn run_publisher(
-    config: Config,
-    bcfg: BindCfg,
+#[derive(StructOpt, Debug)]
+pub(crate) struct Params {
+    #[structopt(
+        short = "b",
+        long = "bind",
+        help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
+    )]
+    bind: BindCfg,
+    #[structopt(
+        long = "delay",
+        help = "time in ms to wait between batches",
+        default_value = "100"
+    )]
     delay: u64,
+    #[structopt(name = "rows", default_value = "100")]
     rows: usize,
+    #[structopt(name = "cols", default_value = "10")]
     cols: usize,
-    auth: Auth,
-) {
-    let delay = if delay == 0 { None } else { Some(Duration::from_millis(delay)) };
+}
+
+async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) {
+    let delay = if p.delay == 0 { None } else { Some(Duration::from_millis(p.delay)) };
     let publisher =
-        Publisher::new(config, auth, bcfg).await.expect("failed to create publisher");
+        Publisher::new(config, auth, p.bind).await.expect("failed to create publisher");
     let mut sent: usize = 0;
     let mut v = 0u64;
     let published = {
-        let mut published = Vec::with_capacity(rows * cols);
-        for row in 0..rows {
-            for col in 0..cols {
+        let mut published = Vec::with_capacity(p.rows * p.cols);
+        for row in 0..p.rows {
+            for col in 0..p.cols {
                 let path = Path::from(format!("/bench/{}/{}", row, col));
                 published.push(publisher.publish(path, Value::V64(v)).expect("encode"))
             }
@@ -67,17 +84,10 @@ async fn run_publisher(
     }
 }
 
-pub(crate) fn run(
-    config: Config,
-    bcfg: BindCfg,
-    delay: u64,
-    rows: usize,
-    cols: usize,
-    auth: Auth,
-) {
+pub(crate) fn run(config: Config, auth: DesiredAuth, params: Params) {
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
-        run_publisher(config, bcfg, delay, rows, cols, auth).await;
+        run_publisher(config, auth, params).await;
         // Allow the publisher time to send the clear message
         time::sleep(Duration::from_secs(1)).await;
     });

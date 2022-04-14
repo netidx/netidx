@@ -1,4 +1,4 @@
-use super::ContainerConfig;
+use super::Params;
 use anyhow::Result;
 use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
@@ -1465,7 +1465,7 @@ pub(super) struct Db {
 
 impl Db {
     pub(super) fn new(
-        cfg: &ContainerConfig,
+        cfg: &Params,
         publisher: Publisher,
         base_path: Path,
     ) -> Result<(Self, UnboundedReceiver<Update>)> {

@@ -8,26 +8,47 @@ use futures::{
     stream::{self, FusedStream},
 };
 use netidx::{
-    config::Config,
+    config::client::Config,
     path::Path,
     pool::Pooled,
-    resolver::Auth,
+    resolver::DesiredAuth,
     subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
     utils::{split_escaped, splitn_escaped, BatchItem, Batched},
 };
 use netidx_protocols::rpc::client::Proc;
 use std::{
     collections::HashMap,
+    fmt,
     io::Write,
     str::FromStr,
     time::{Duration, Instant},
-    fmt,
 };
+use structopt::StructOpt;
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
     runtime::Runtime,
     time,
 };
+
+#[derive(StructOpt, Debug)]
+pub(crate) struct Params {
+    #[structopt(
+        short = "o",
+        long = "oneshot",
+        help = "unsubscribe after printing one value for each subscription"
+    )]
+    oneshot: bool,
+    #[structopt(short = "n", long = "no-stdin", help = "don't read commands from stdin")]
+    no_stdin: bool,
+    #[structopt(
+        short = "t",
+        long = "subscribe-timeout",
+        help = "cancel subscription unless it succeeds within timeout"
+    )]
+    subscribe_timeout: Option<u64>,
+    #[structopt(name = "paths")]
+    paths: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 enum In {
@@ -149,13 +170,7 @@ struct Ctx {
 }
 
 impl Ctx {
-    fn new(
-        subscriber: Subscriber,
-        no_stdin: bool,
-        oneshot: bool,
-        subscribe_timeout: Option<u64>,
-        paths: Vec<String>,
-    ) -> Self {
+    fn new(subscriber: Subscriber, p: Params) -> Self {
         let (sender_updates, updates) = mpsc::channel(100);
         Ctx {
             sender_updates,
@@ -164,13 +179,13 @@ impl Ctx {
             subscriptions: HashMap::new(),
             rpcs: HashMap::new(),
             subscribe_ts: HashMap::new(),
-            subscribe_timeout: subscribe_timeout.map(Duration::from_secs),
+            subscribe_timeout: p.subscribe_timeout.map(Duration::from_secs),
             requests: {
-                let init = stream::iter(paths).map(|mut p| {
+                let init = stream::iter(p.paths).map(|mut p| {
                     p.insert_str(0, "ADD|");
                     Ok(p)
                 });
-                if no_stdin {
+                if p.no_stdin {
                     Box::new(init.fuse())
                 } else {
                     let stdin = Box::pin({
@@ -193,7 +208,7 @@ impl Ctx {
             stderr: io::stderr(),
             to_stdout: BytesMut::new(),
             to_stderr: BytesMut::new(),
-            oneshot,
+            oneshot: p.oneshot,
             requests_finished: false,
         }
     }
@@ -352,16 +367,9 @@ impl Ctx {
     }
 }
 
-async fn subscribe(
-    cfg: Config,
-    no_stdin: bool,
-    oneshot: bool,
-    subscribe_timeout: Option<u64>,
-    paths: Vec<String>,
-    auth: Auth,
-) {
+async fn subscribe(cfg: Config, auth: DesiredAuth, p: Params) {
     let subscriber = Subscriber::new(cfg, auth).expect("create subscriber");
-    let mut ctx = Ctx::new(subscriber, no_stdin, oneshot, subscribe_timeout, paths);
+    let mut ctx = Ctx::new(subscriber, p);
     let mut tick = time::interval(Duration::from_secs(1));
     loop {
         select_biased! {
@@ -383,14 +391,7 @@ async fn subscribe(
     }
 }
 
-pub(crate) fn run(
-    cfg: Config,
-    no_stdin: bool,
-    oneshot: bool,
-    subscribe_timeout: Option<u64>,
-    paths: Vec<String>,
-    auth: Auth,
-) {
+pub(crate) fn run(cfg: Config, auth: DesiredAuth, params: Params) {
     let rt = Runtime::new().expect("failed to init runtime");
-    rt.block_on(subscribe(cfg, no_stdin, oneshot, subscribe_timeout, paths, auth));
+    rt.block_on(subscribe(cfg, auth, params));
 }
