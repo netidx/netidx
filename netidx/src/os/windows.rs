@@ -2,18 +2,13 @@ use anyhow::{bail, Result};
 
 pub(crate) struct Mapper;
 
-impl apper {
+impl Mapper {
     pub(crate) fn new() -> Result<Mapper> {
         Ok(Mapper)
     }
 
     pub(crate) fn groups(&mut self, _user: &str) -> Result<Vec<String>> {
         bail!("group listing is not implemented on windows")
-    }
-
-
-    pub(crate) fn user(&self, user: u32) -> Result<String> {
-        bail!("user listing is not implemented on windows")
     }
 }
 
@@ -38,7 +33,7 @@ pub(crate) mod local_auth {
     pub(crate) struct AuthClient;
 
     impl AuthClient {
-        pub(crate) async fn token(&self) -> Result<Bytes> {
+        pub(crate) async fn token(_path: &str) -> Result<Bytes> {
             bail!("local auth not implemented on windows")
         }
     }
