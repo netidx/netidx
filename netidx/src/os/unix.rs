@@ -72,14 +72,16 @@ pub(crate) mod local_auth {
     use crate::os::local_auth::Credential;
     use anyhow::Result;
     use bytes::{Bytes, BytesMut};
-    use futures::{prelude::*, select_biased, channel::oneshot};
+    use futures::{channel::oneshot, prelude::*, select_biased};
     use fxhash::{FxBuildHasher, FxHashMap};
-    use log::warn;
+    use log::{debug, warn};
     use netidx_core::utils::{make_sha3_token, pack};
     use parking_lot::Mutex;
     use rand::{thread_rng, Rng};
     use std::{
         collections::{hash_map::Entry, HashMap},
+        fs::Permissions,
+        os::unix::fs::PermissionsExt,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -87,6 +89,7 @@ pub(crate) mod local_auth {
         time::{Duration, Instant},
     };
     use tokio::{
+        fs,
         io::{AsyncReadExt, AsyncWriteExt},
         net::{UnixListener, UnixStream},
         task::spawn,
@@ -145,7 +148,8 @@ pub(crate) mod local_auth {
                             warn!("accept: {}", e);
                             sleep(Duration::from_millis(100)).await
                         }
-                        Ok((client, _addr)) => {
+                        Ok((client, addr)) => {
+                            debug!("accepted client {:?}", addr);
                             if open.load(Ordering::Relaxed) >= 32 {
                                 continue;
                             } else {
@@ -174,7 +178,9 @@ pub(crate) mod local_auth {
         }
 
         pub(crate) async fn start(socket_path: &str) -> Result<AuthServer> {
+            let _ = fs::remove_file(socket_path).await;
             let listener = UnixListener::bind(socket_path)?;
+            fs::set_permissions(socket_path, Permissions::from_mode(0o777)).await?;
             let mapper = Mapper::new()?;
             let issued =
                 Arc::new(Mutex::new(HashMap::with_hasher(FxBuildHasher::default())));
@@ -197,14 +203,21 @@ pub(crate) mod local_auth {
 
     impl AuthClient {
         async fn token_once(path: &str) -> Result<Bytes> {
+            debug!("asking for a local token from {}", path);
             let mut soc = UnixStream::connect(path).await?;
             let mut buf = BytesMut::new();
             loop {
-                if soc.read_buf(&mut buf).await? == 0 {
+                let n = soc.read_buf(&mut buf).await?;
+                debug!("read {} bytes from the token", n);
+                if n == 0 {
                     break;
                 }
             }
-            Ok(buf.freeze())
+            if buf.len() == 0 {
+                bail!("empty token")
+            } else {
+                Ok(buf.freeze())
+            }
         }
 
         pub(crate) async fn token(path: &str) -> Result<Bytes> {
