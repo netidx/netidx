@@ -33,11 +33,11 @@ impl Mapper {
         task::block_in_place(|| {
             let out = Command::new(&*self.0).arg(user.to_string()).output()?;
             let mut user =
-                Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "user=")?;
+                Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "uid=")?;
             if user.is_empty() {
                 bail!("user not found")
             } else {
-                Ok(user.pop().unwrap())
+                Ok(user.swap_remove(0))
             }
         })
     }
@@ -110,7 +110,9 @@ pub(crate) mod local_auth {
             issued: Arc<Mutex<FxHashMap<u64, Instant>>>,
         ) -> Result<()> {
             let cred = client.peer_cred()?;
+            debug!("got peer credentials {:?}", cred);
             let user = mapper.user(cred.uid())?;
+            debug!("got user {}", user);
             let salt: u64 = loop {
                 let ts = Instant::now();
                 let salt: u64 = thread_rng().gen();
@@ -148,8 +150,8 @@ pub(crate) mod local_auth {
                             warn!("accept: {}", e);
                             sleep(Duration::from_millis(100)).await
                         }
-                        Ok((client, addr)) => {
-                            debug!("accepted client {:?}", addr);
+                        Ok((client, _addr)) => {
+                            debug!("accepted client");
                             if open.load(Ordering::Relaxed) >= 32 {
                                 continue;
                             } else {

@@ -379,11 +379,15 @@ async fn connect_write(
     wt!(con.send_one(&h))??;
     let r: ServerHelloWrite = wt!(con.receive())??;
     debug!("write_con resolver hello {:?}", r);
-    match (desired_auth, r.auth, ctx) {
-        (DesiredAuth::Anonymous, ServerAuthWrite::Anonymous, SecState::Anonymous)
-        | (DesiredAuth::Local, ServerAuthWrite::Local, SecState::Local)
+    let ownership_check = match (desired_auth, r.auth, ctx) {
+        (DesiredAuth::Anonymous, ServerAuthWrite::Anonymous, SecState::Anonymous) => {
+            *security_context = None;
+            false
+        }
+        (DesiredAuth::Local, ServerAuthWrite::Local, SecState::Local)
         | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Local, SecState::Local) => {
             *security_context = None;
+            true
         }
         (DesiredAuth::Anonymous, _, _) => {
             bail!("server requires authentication");
@@ -399,6 +403,7 @@ async fn connect_write(
         (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Reused, SecState::Reused(ctx)) => {
             con.set_ctx(ctx).await;
             info!("write_con all traffic now encrypted");
+            false
         }
         (DesiredAuth::Local, ServerAuthWrite::Reused, _)
         | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Reused, _) => {
@@ -418,18 +423,21 @@ async fn connect_write(
             con.set_ctx(ctx.clone()).await;
             info!("write_con all traffic now encrypted");
             *security_context = Some(ctx);
-            let secret: Secret = wt!(con.receive())??;
-            {
-                let mut secrets = secrets.write();
-                secrets.insert(resolver_addr, secret.0);
-                secrets.insert(r.resolver_id, secret.0);
-            }
-            wt!(con.send_one(&ReadyForOwnershipCheck))??;
+            true
         }
         (DesiredAuth::Local, ServerAuthWrite::Accepted(_), _)
         | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Accepted(_), _) => {
             bail!("missing pending security context")
         }
+    };
+    if ownership_check {
+        let secret: Secret = wt!(con.receive())??;
+        {
+            let mut secrets = secrets.write();
+            secrets.insert(resolver_addr, secret.0);
+            secrets.insert(r.resolver_id, secret.0);
+        }
+        wt!(con.send_one(&ReadyForOwnershipCheck))??;
     }
     if !r.ttl_expired && !*degraded {
         info!("connected to resolver {:?} for write", resolver_addr);
