@@ -26,6 +26,12 @@ pub(crate) struct Params {
         default_value = "100"
     )]
     delay: u64,
+    #[structopt(
+        long = "base",
+        help = "base path",
+        default_value = "/bench"
+    )]
+    base: String,
     #[structopt(name = "rows", default_value = "100")]
     rows: usize,
     #[structopt(name = "cols", default_value = "10")]
@@ -42,7 +48,7 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) {
         let mut published = Vec::with_capacity(p.rows * p.cols);
         for row in 0..p.rows {
             for col in 0..p.cols {
-                let path = Path::from(format!("/bench/{}/{}", row, col));
+                let path = Path::from(format!("{}/{}/{}", p.base, row, col));
                 published.push(publisher.publish(path, Value::V64(v)).expect("encode"))
             }
         }

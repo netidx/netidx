@@ -200,6 +200,16 @@ impl Shard {
                 }
             }
             ToRead::ListMatching(set) => {
+                let mut referrals = REF_POOL.take();
+                if shard == 0 {
+                    for glob in set.iter() {
+                        store.referrals_in_scope(
+                            &mut *referrals,
+                            glob.base(),
+                            glob.scope(),
+                        )
+                    }
+                }
                 let allowed = pmap
                     .map(|pmap| {
                         set.iter().all(|g| {
@@ -213,18 +223,9 @@ impl Shard {
                     })
                     .unwrap_or(true);
                 if !allowed {
-                    (id, FromRead::Denied)
+                    let lm = ListMatching { referrals, matched: PATH_BPOOL.take() };
+                    (id, FromRead::ListMatching(lm))
                 } else {
-                    let mut referrals = REF_POOL.take();
-                    if shard == 0 {
-                        for glob in set.iter() {
-                            store.referrals_in_scope(
-                                &mut *referrals,
-                                glob.base(),
-                                glob.scope(),
-                            )
-                        }
-                    }
                     let mut matched = PATH_BPOOL.take();
                     matched.push(store.list_matching(&set));
                     let lm = ListMatching { referrals, matched };
@@ -232,16 +233,18 @@ impl Shard {
                 }
             }
             ToRead::GetChangeNr(path) => {
+                let mut referrals = REF_POOL.take();
+                if shard == 0 {
+                    store.referrals_in_scope(&mut referrals, &*path, &Scope::Subtree);
+                }
                 let allowed = pmap
                     .map(|pmap| pmap.allowed(&*path, Permissions::LIST, &*uifo))
                     .unwrap_or(true);
                 if !allowed {
-                    (id, FromRead::Denied)
+                    let change_number = Z64(0);
+                    let cn = GetChangeNr { change_number, referrals, resolver };
+                    (id, FromRead::GetChangeNr(cn))
                 } else {
-                    let mut referrals = REF_POOL.take();
-                    if shard == 0 {
-                        store.referrals_in_scope(&mut referrals, &*path, &Scope::Subtree);
-                    }
                     let change_number = store.get_change_nr(&path);
                     let cn = GetChangeNr { change_number, referrals, resolver };
                     (id, FromRead::GetChangeNr(cn))

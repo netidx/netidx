@@ -64,7 +64,7 @@ enum Stress {
     #[structopt(name = "publisher", about = "run a stress test publisher")]
     Publisher(stress_publisher::Params),
     #[structopt(name = "subscriber", about = "run a stress test subscriber")]
-    Subscriber,
+    Subscriber(stress_subscriber::Params),
 }
 
 #[derive(StructOpt, Debug)]
@@ -149,7 +149,7 @@ fn main() {
         Opt::Stress { common, cmd } => {
             let (cfg, auth) = common.load();
             match cmd {
-                Stress::Subscriber => stress_subscriber::run(cfg, auth),
+                Stress::Subscriber(params) => stress_subscriber::run(cfg, auth, params),
                 Stress::Publisher(params) => stress_publisher::run(cfg, auth, params),
             }
         }

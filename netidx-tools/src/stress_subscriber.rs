@@ -11,12 +11,23 @@ use tokio::{
     runtime::Runtime,
     time::{self, Instant},
 };
+use structopt::StructOpt;
 
-pub(crate) fn run(config: Config, auth: DesiredAuth) {
+#[derive(StructOpt, Debug)]
+pub(crate) struct Params {
+    #[structopt(
+        long = "base",
+        help = "base path",
+        default_value = "/bench"
+    )]
+    base: String,
+}
+
+pub(crate) fn run(config: Config, auth: DesiredAuth, p: Params) {
     let rt = Runtime::new().expect("runtime");
     rt.block_on(async {
         let r = ResolverRead::new(config.clone(), auth.clone());
-        let table = r.table(Path::from("/bench")).await.expect("table");
+        let table = r.table(Path::from(p.base)).await.expect("table");
         let subscriber = Subscriber::new(config, auth).unwrap();
         let subs = {
             let mut subs = Vec::with_capacity(table.rows.len() * table.cols.len());
