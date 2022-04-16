@@ -155,7 +155,7 @@ pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
         }
         IpAddr::V4(ip) if ip.is_private() => {
             let ok = resolvers.iter().all(|a| match a.ip() {
-                IpAddr::V4(ip) if ip.is_private() => true,
+                IpAddr::V4(ip) if ip.is_private() || ip.is_loopback() => true,
                 IpAddr::V6(_) => true,
                 _ => false,
             });
