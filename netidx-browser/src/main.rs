@@ -1090,7 +1090,8 @@ fn main() {
                 }
             },
         };
-        let default_loc = match opts.lookup_value("path", Some(&glib::VariantTy::STRING)) {
+        let default_loc = match opts.lookup_value("path", Some(&glib::VariantTy::STRING))
+        {
             Some(path) => ViewLoc::Netidx(Path::from(path.get::<String>().unwrap())),
             None => match opts.lookup_value("file", Some(&glib::VariantTy::STRING)) {
                 Some(file) => ViewLoc::File(PathBuf::from(file.get::<String>().unwrap())),
@@ -1123,10 +1124,14 @@ fn main() {
                 run_gui(ctx, app, rx_to_gui);
             }
         });
-        application.run();
-        backend.stop();
-        drop(application);
-        let _: result::Result<_, _> = jh.join();
-        0
+        let jh = RefCell::new(Some(jh));
+        application.connect_shutdown(move |_| {
+            backend.stop();
+            if let Some(jh) = jh.borrow_mut().take() {
+                let _: result::Result<_, _> = jh.join();
+            }
+        });
+        -1
     });
+    application.run();
 }
