@@ -36,7 +36,6 @@ netidx-protocols = { path = "../netidx-protocols", version = "0.10", default_fea
 regex = "1"
 serde_derive = "1.0"
 serde_json = "1.0"
-structopt = "0.3"
 bytes = "1"
 fxhash = "0.2"
 anyhow = "1"

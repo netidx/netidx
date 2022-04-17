@@ -48,7 +48,6 @@ use std::{
         Arc,
     },
 };
-use structopt::StructOpt;
 use util::{ask_modal, err_modal};
 
 struct WVal<'a>(&'a Value);
@@ -1017,80 +1016,117 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     });
 }
 
-#[derive(StructOpt, Debug)]
-#[structopt(name = "netidx-browser")]
-struct Opt {
-    #[structopt(
-        short = "c",
-        long = "config",
-        help = "override the default config file location (~/.config/netidx.json)"
-    )]
-    config: Option<String>,
-    #[structopt(
-        short = "a",
-        long = "auth",
-        help = "what auth type to use (krb5)",
-        default_value = "krb5"
-    )]
-    auth: DesiredAuth,
-    #[structopt(long = "upn", help = "krb5 upn, instead of the current user")]
-    upn: Option<String>,
-    #[structopt(long = "path", help = "navigate to <path> on startup")]
-    path: Option<Path>,
-    #[structopt(long = "file", help = "navigate to view file on startup")]
-    file: Option<PathBuf>,
+fn add_local_options(application: &gtk::Application) {
+    application.add_main_option(
+        "config",
+        glib::Char::from(b'c'),
+        glib::OptionFlags::empty(),
+        glib::OptionArg::String,
+        "use the specified config file instead of the default",
+        Some("the config file to use"),
+    );
+    application.add_main_option(
+        "auth",
+        glib::Char::from(b'a'),
+        glib::OptionFlags::empty(),
+        glib::OptionArg::String,
+        "override the default auth mechanism (krb5)",
+        Some("[krb5, local, or anonymous]"),
+    );
+    application.add_main_option(
+        "upn",
+        glib::Char::from(b'u'),
+        glib::OptionFlags::empty(),
+        glib::OptionArg::String,
+        "set the krb5 user principal name (the current user)",
+        Some("the name"),
+    );
+    application.add_main_option(
+        "path",
+        glib::Char::from(b'p'),
+        glib::OptionFlags::empty(),
+        glib::OptionArg::String,
+        "navigate to the specified path on load (/)",
+        Some("path"),
+    );
+    application.add_main_option(
+        "file",
+        glib::Char::from(b'f'),
+        glib::OptionFlags::empty(),
+        glib::OptionArg::String,
+        "load the specified view file on load",
+        Some("file"),
+    );
 }
 
 fn main() {
     env_logger::init();
-    let opt = Opt::from_args();
-    let cfg = match &opt.config {
-        None => Config::load_default().unwrap(),
-        Some(path) => Config::load(path).unwrap(),
-    };
-    let auth = match opt.auth {
-        DesiredAuth::Local | DesiredAuth::Anonymous => opt.auth,
-        DesiredAuth::Krb5 { .. } => DesiredAuth::Krb5 { upn: opt.upn, spn: None },
-    };
     let application = Application::new(
         Some("org.netidx.browser"),
         gio::ApplicationFlags::NON_UNIQUE | Default::default(),
     );
-    let (jh, backend) = backend::Backend::new(cfg, auth);
-    let default_loc = match &opt.path {
-        Some(path) => ViewLoc::Netidx(path.clone()),
-        None => match &opt.file {
-            Some(file) => ViewLoc::File(file.clone()),
-            None => ViewLoc::Netidx(Path::from("/")),
-        },
-    };
-    let new_window_loc = Rc::new(RefCell::new(default_loc.clone()));
-    application.connect_activate({
-        let backend = backend.clone();
-        move |app| {
-            let app = app.clone();
-            let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
-            let raw_view = Arc::new(AtomicBool::new(false));
-            let backend = backend.create_ctx(tx_to_gui, raw_view.clone()).unwrap();
-            let _ = backend.from_gui.unbounded_send(FromGui::Navigate(mem::replace(
-                &mut *new_window_loc.borrow_mut(),
-                default_loc.clone(),
-            )));
-            let window = ApplicationWindow::new(&app);
-            let ctx = Rc::new(RefCell::new(bscript::create_ctx(WidgetCtx {
-                backend,
-                raw_view,
-                window: window.clone(),
-                new_window_loc: new_window_loc.clone(),
-                view_saved: Cell::new(true),
-                fns: Trie::new(),
-                vars: Trie::new(),
-            })));
-            run_gui(ctx, app, rx_to_gui);
-        }
+    add_local_options(&application);
+    application.connect_handle_local_options(|application, opts| {
+        let cfg = match opts.lookup_value("config", Some(&glib::VariantTy::STRING)) {
+            None => Config::load_default().unwrap(),
+            Some(path) => Config::load(path.get::<String>().unwrap()).unwrap(),
+        };
+        let auth = match opts.lookup_value("auth", Some(&glib::VariantTy::STRING)) {
+            None => DesiredAuth::Krb5 { upn: None, spn: None },
+            Some(auth) => match auth
+                .get::<String>()
+                .unwrap()
+                .parse::<DesiredAuth>()
+                .expect("invalid auth mechanism")
+            {
+                auth @ (DesiredAuth::Local | DesiredAuth::Anonymous) => auth,
+                DesiredAuth::Krb5 { .. } => {
+                    match opts.lookup_value("upn", Some(&glib::VariantTy::STRING)) {
+                        None => DesiredAuth::Krb5 { upn: None, spn: None },
+                        Some(upn) => {
+                            DesiredAuth::Krb5 { upn: upn.get::<String>(), spn: None }
+                        }
+                    }
+                }
+            },
+        };
+        let default_loc = match opts.lookup_value("path", Some(&glib::VariantTy::STRING)) {
+            Some(path) => ViewLoc::Netidx(Path::from(path.get::<String>().unwrap())),
+            None => match opts.lookup_value("file", Some(&glib::VariantTy::STRING)) {
+                Some(file) => ViewLoc::File(PathBuf::from(file.get::<String>().unwrap())),
+                None => ViewLoc::Netidx(Path::from("/")),
+            },
+        };
+        let (jh, backend) = backend::Backend::new(cfg, auth);
+        let new_window_loc = Rc::new(RefCell::new(default_loc.clone()));
+        application.connect_activate({
+            let backend = backend.clone();
+            move |app| {
+                let app = app.clone();
+                let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
+                let raw_view = Arc::new(AtomicBool::new(false));
+                let backend = backend.create_ctx(tx_to_gui, raw_view.clone()).unwrap();
+                let _ = backend.from_gui.unbounded_send(FromGui::Navigate(mem::replace(
+                    &mut *new_window_loc.borrow_mut(),
+                    default_loc.clone(),
+                )));
+                let window = ApplicationWindow::new(&app);
+                let ctx = Rc::new(RefCell::new(bscript::create_ctx(WidgetCtx {
+                    backend,
+                    raw_view,
+                    window: window.clone(),
+                    new_window_loc: new_window_loc.clone(),
+                    view_saved: Cell::new(true),
+                    fns: Trie::new(),
+                    vars: Trie::new(),
+                })));
+                run_gui(ctx, app, rx_to_gui);
+            }
+        });
+        application.run();
+        backend.stop();
+        drop(application);
+        let _: result::Result<_, _> = jh.join();
+        0
     });
-    application.run();
-    backend.stop();
-    drop(application);
-    let _: result::Result<_, _> = jh.join();
 }
