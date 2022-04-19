@@ -30,10 +30,10 @@ pub enum Hello {
     /// the connection at this point, if it chooses to allow this
     /// then it will return Anonymous.
     Anonymous,
-    /// An authentication token, if the token is valid then the
+    /// A Krb5 authentication token, if the token is valid then the
     /// publisher will send a token back to authenticate itself to
     /// the subscriber.
-    Token(Bytes),
+    Krb5 { token: Bytes, finished: bool },
     /// In order to prevent denial of service, spoofing, etc,
     /// authenticated publishers must prove that they are actually
     /// listening on the socket they claim to be listening on. To
@@ -57,7 +57,9 @@ impl Pack for Hello {
     fn encoded_len(&self) -> usize {
         1 + match self {
             Hello::Anonymous => 0,
-            Hello::Token(tok) => Pack::encoded_len(tok),
+            Hello::Krb5 { token, finished } => {
+                Pack::encoded_len(token) + Pack::encoded_len(finished)
+            }
             Hello::ResolverAuthenticate(addr, tok) => {
                 Pack::encoded_len(addr) + Pack::encoded_len(tok)
             }
@@ -68,9 +70,10 @@ impl Pack for Hello {
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             Hello::Anonymous => Ok(buf.put_u8(0)),
-            Hello::Token(tok) => {
+            Hello::Krb5 { token, finished } => {
                 buf.put_u8(1);
-                Pack::encode(tok, buf)
+                Pack::encode(token, buf)?;
+                Pack::encode(finished, buf)
             }
             Hello::ResolverAuthenticate(id, tok) => {
                 buf.put_u8(2);
@@ -84,7 +87,11 @@ impl Pack for Hello {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(Hello::Anonymous),
-            1 => Ok(Hello::Token(Pack::decode(buf)?)),
+            1 => {
+                let token = Pack::decode(buf)?;
+                let finished = Pack::decode(buf)?;
+                Ok(Hello::Krb5 { token, finished })
+            }
             2 => {
                 let addr = Pack::decode(buf)?;
                 let tok = Pack::decode(buf)?;
@@ -111,7 +118,7 @@ pub enum To {
         token: Bytes,
     },
     /// Unsubscribe from the specified value, this will always result
-    /// in an Unsubscibed message even if you weren't ever subscribed
+    /// in an Unsubscribed message even if you weren't ever subscribed
     /// to the value, or it doesn't exist.
     Unsubscribe(Id),
     /// Send a write to the specified value.
