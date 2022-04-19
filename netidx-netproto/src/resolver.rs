@@ -18,27 +18,10 @@ use std::{
 type Error = PackError;
 pub type Result<T> = result::Result<T, Error>;
 
-atomic_id!(CtxId);
-
-impl Pack for CtxId {
-    fn encoded_len(&self) -> usize {
-        Pack::encoded_len(&self.0)
-    }
-
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        Pack::encode(&self.0, buf)
-    }
-
-    fn decode(buf: &mut impl Buf) -> Result<Self> {
-        Ok(CtxId(Pack::decode(buf)?))
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientAuthRead {
     Anonymous,
-    Reuse(CtxId),
-    Initiate(Bytes),
+    Krb5 { token: Bytes, finished: bool },
     Local(Bytes),
 }
 
@@ -46,27 +29,24 @@ impl Pack for ClientAuthRead {
     fn encoded_len(&self) -> usize {
         1 + match self {
             ClientAuthRead::Anonymous => 0,
-            ClientAuthRead::Reuse(ref i) => Pack::encoded_len(i),
-            ClientAuthRead::Initiate(ref b) | ClientAuthRead::Local(ref b) => {
-                Pack::encoded_len(b)
+            ClientAuthRead::Krb5 { token, finished } => {
+                Pack::encoded_len(token) + Pack::encoded_len(finished)
             }
+            ClientAuthRead::Local(b) => Pack::encoded_len(b),
         }
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             ClientAuthRead::Anonymous => Ok(buf.put_u8(0)),
-            ClientAuthRead::Reuse(ref id) => {
+            ClientAuthRead::Krb5 { token, finished } => {
                 buf.put_u8(1);
-                Ok(Pack::encode(id, buf)?)
+                Pack::encode(token, buf)?;
+                Pack::encode(finished, buf)
             }
-            ClientAuthRead::Initiate(ref tok) => {
+            ClientAuthRead::Local(tok) => {
                 buf.put_u8(2);
-                Ok(Pack::encode(tok, buf)?)
-            }
-            ClientAuthRead::Local(ref tok) => {
-                buf.put_u8(3);
-                Ok(Pack::encode(tok, buf)?)
+                Pack::encode(tok, buf)
             }
         }
     }
@@ -74,9 +54,12 @@ impl Pack for ClientAuthRead {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(ClientAuthRead::Anonymous),
-            1 => Ok(ClientAuthRead::Reuse(Pack::decode(buf)?)),
-            2 => Ok(ClientAuthRead::Initiate(Pack::decode(buf)?)),
-            3 => Ok(ClientAuthRead::Local(Pack::decode(buf)?)),
+            1 => {
+                let token = Pack::decode(buf)?;
+                let finished = Pack::decode(buf)?;
+                Ok(ClientAuthRead::Krb5 { token, finished })
+            }
+            2 => Ok(ClientAuthRead::Local(Pack::decode(buf)?)),
             _ => return Err(Error::UnknownTag),
         }
     }
@@ -86,7 +69,7 @@ impl Pack for ClientAuthRead {
 pub enum ClientAuthWrite {
     Anonymous,
     Reuse,
-    Initiate { spn: Option<Chars>, token: Bytes },
+    Krb5 { spn: Option<Chars>, token: Bytes, finished: bool },
     Local(Bytes),
 }
 
@@ -95,8 +78,10 @@ impl Pack for ClientAuthWrite {
         1 + match self {
             ClientAuthWrite::Anonymous => 0,
             ClientAuthWrite::Reuse => 0,
-            ClientAuthWrite::Initiate { spn, token } => {
-                Pack::encoded_len(spn) + Pack::encoded_len(token)
+            ClientAuthWrite::Krb5 { spn, token, finished } => {
+                Pack::encoded_len(spn)
+                    + Pack::encoded_len(token)
+                    + Pack::encoded_len(finished)
             }
             ClientAuthWrite::Local(b) => Pack::encoded_len(b),
         }
@@ -106,10 +91,11 @@ impl Pack for ClientAuthWrite {
         match self {
             ClientAuthWrite::Anonymous => Ok(buf.put_u8(0)),
             ClientAuthWrite::Reuse => Ok(buf.put_u8(1)),
-            ClientAuthWrite::Initiate { spn, token } => {
+            ClientAuthWrite::Krb5 { spn, token, finished } => {
                 buf.put_u8(2);
                 Pack::encode(spn, buf)?;
-                Pack::encode(token, buf)
+                Pack::encode(token, buf)?;
+                Pack::encode(finished, buf)
             }
             ClientAuthWrite::Local(b) => {
                 buf.put_u8(3);
@@ -125,7 +111,8 @@ impl Pack for ClientAuthWrite {
             2 => {
                 let spn = Pack::decode(buf)?;
                 let token = Pack::decode(buf)?;
-                Ok(ClientAuthWrite::Initiate { spn, token })
+                let finished = Pack::decode(buf)?;
+                Ok(ClientAuthWrite::Krb5 { spn, token, finished })
             }
             3 => Ok(ClientAuthWrite::Local(Pack::decode(buf)?)),
             _ => Err(Error::UnknownTag),
@@ -209,8 +196,7 @@ impl Pack for ClientHello {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerHelloRead {
     Anonymous,
-    Reused,
-    Accepted(Bytes, CtxId),
+    Krb5 { token: Bytes, finished: bool },
     Local,
 }
 
@@ -218,9 +204,8 @@ impl Pack for ServerHelloRead {
     fn encoded_len(&self) -> usize {
         1 + match self {
             ServerHelloRead::Anonymous => 0,
-            ServerHelloRead::Reused => 0,
-            ServerHelloRead::Accepted(tok, id) => {
-                Pack::encoded_len(tok) + Pack::encoded_len(id)
+            ServerHelloRead::Krb5 { token, finished } => {
+                Pack::encoded_len(token) + Pack::encoded_len(finished)
             }
             ServerHelloRead::Local => 0,
         }
@@ -229,26 +214,24 @@ impl Pack for ServerHelloRead {
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             ServerHelloRead::Anonymous => Ok(buf.put_u8(0)),
-            ServerHelloRead::Reused => Ok(buf.put_u8(1)),
-            ServerHelloRead::Accepted(tok, id) => {
-                buf.put_u8(2);
-                Pack::encode(tok, buf)?;
-                Pack::encode(id, buf)
+            ServerHelloRead::Krb5 { token, finished } => {
+                buf.put_u8(1);
+                Pack::encode(token, buf)?;
+                Pack::encode(finished, buf)
             }
-            ServerHelloRead::Local => Ok(buf.put_u8(3)),
+            ServerHelloRead::Local => Ok(buf.put_u8(2)),
         }
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(ServerHelloRead::Anonymous),
-            1 => Ok(ServerHelloRead::Reused),
-            2 => {
-                let tok = Pack::decode(buf)?;
-                let id = Pack::decode(buf)?;
-                Ok(ServerHelloRead::Accepted(tok, id))
+            1 => {
+                let token = Pack::decode(buf)?;
+                let finished = Pack::decode(buf)?;
+                Ok(ServerHelloRead::Krb5 { token, finished })
             }
-            3 => Ok(ServerHelloRead::Local),
+            2 => Ok(ServerHelloRead::Local),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -258,7 +241,7 @@ impl Pack for ServerHelloRead {
 pub enum ServerAuthWrite {
     Anonymous,
     Reused,
-    Accepted(Bytes),
+    Krb5 { token: Bytes, finished: bool },
     Local,
 }
 
@@ -267,7 +250,9 @@ impl Pack for ServerAuthWrite {
         1 + match self {
             ServerAuthWrite::Anonymous => 0,
             ServerAuthWrite::Reused => 0,
-            ServerAuthWrite::Accepted(b) => Pack::encoded_len(b),
+            ServerAuthWrite::Krb5 { token, finished } => {
+                Pack::encoded_len(token) + Pack::encoded_len(finished)
+            }
             ServerAuthWrite::Local => 0,
         }
     }
@@ -276,11 +261,12 @@ impl Pack for ServerAuthWrite {
         match self {
             ServerAuthWrite::Anonymous => Ok(buf.put_u8(0)),
             ServerAuthWrite::Reused => Ok(buf.put_u8(1)),
-            ServerAuthWrite::Accepted(b) => {
+            ServerAuthWrite::Krb5 { token, finished } => {
                 buf.put_u8(2);
-                Pack::encode(b, buf)
+                Pack::encode(token, buf)?;
+                Pack::encode(finished, buf)
             }
-            ServerAuthWrite::Local => Ok(buf.put_u8(3))
+            ServerAuthWrite::Local => Ok(buf.put_u8(3)),
         }
     }
 
@@ -288,7 +274,11 @@ impl Pack for ServerAuthWrite {
         match buf.get_u8() {
             0 => Ok(ServerAuthWrite::Anonymous),
             1 => Ok(ServerAuthWrite::Reused),
-            2 => Ok(ServerAuthWrite::Accepted(Pack::decode(buf)?)),
+            2 => {
+                let token = Pack::decode(buf)?;
+                let finished = Pack::decode(buf)?;
+                Ok(ServerAuthWrite::Krb5 { token, finished })
+            }
             3 => Ok(ServerAuthWrite::Local),
             _ => Err(Error::UnknownTag),
         }
@@ -427,8 +417,44 @@ impl Pack for ToRead {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PublisherTargetAuth {
+    Anonymous,
+    Local,
+    Krb5(Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>),
+}
+
+impl Pack for PublisherTargetAuth {
+    fn encoded_len(&self) -> usize {
+        1 + match self {
+            Self::Anonymous | Self::Local => 0,
+            Self::Krb5(spns) => Pack::encoded_len(spns),
+        }
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        match self {
+            Self::Anonymous => Ok(buf.put_u8(0)),
+            Self::Local => Ok(buf.put_u8(1)),
+            Self::Krb5(spns) => {
+                buf.put_u8(2);
+                Pack::encode(spns, buf)
+            }
+        }
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        match buf.get_u8() {
+            0 => Ok(Self::Anonymous),
+            1 => Ok(Self::Local),
+            2 => Ok(Self::Krb5(Pack::decode(buf)?)),
+            _ => Err(Error::UnknownTag),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
-    pub krb5_spns: Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>,
+    pub target_auth: PublisherTargetAuth,
     pub resolver: SocketAddr,
     pub addrs: Pooled<Vec<(SocketAddr, Bytes)>>,
     pub timestamp: u64,
@@ -438,7 +464,7 @@ pub struct Resolved {
 
 impl Pack for Resolved {
     fn encoded_len(&self) -> usize {
-        Pack::encoded_len(&self.krb5_spns)
+        Pack::encoded_len(&self.target_auth)
             + Pack::encoded_len(&self.resolver)
             + Pack::encoded_len(&self.addrs)
             + Pack::encoded_len(&self.timestamp)
@@ -447,7 +473,7 @@ impl Pack for Resolved {
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        Pack::encode(&self.krb5_spns, buf)?;
+        Pack::encode(&self.target_auth, buf)?;
         Pack::encode(&self.resolver, buf)?;
         Pack::encode(&self.addrs, buf)?;
         Pack::encode(&self.timestamp, buf)?;
@@ -456,13 +482,53 @@ impl Pack for Resolved {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        let krb5_spns = Pack::decode(buf)?;
+        let target_auth = Pack::decode(buf)?;
         let resolver = Pack::decode(buf)?;
         let addrs = Pack::decode(buf)?;
         let timestamp = Pack::decode(buf)?;
         let flags = Pack::decode(buf)?;
         let permissions = Pack::decode(buf)?;
-        Ok(Resolved { krb5_spns, resolver, addrs, timestamp, permissions, flags })
+        Ok(Resolved { target_auth, resolver, addrs, timestamp, permissions, flags })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ResolverTargetAuth {
+    Anonymous,
+    Local(Chars),
+    Krb5(Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>),
+}
+
+impl Pack for ResolverTargetAuth {
+    fn encoded_len(&self) -> usize {
+        1 + match self {
+            Self::Anonymous => 0,
+            Self::Local(path) => Pack::encoded_len(path),
+            Self::Krb5(spns) => Pack::encoded_len(spns),
+        }
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        match self {
+            Self::Anonymous => Ok(buf.put_u8(0)),
+            Self::Local(path) => {
+                buf.put_u8(1);
+                Pack::encode(path, buf)
+            }
+            Self::Krb5(spns) => {
+                buf.put_u8(2);
+                Pack::encode(spns, buf)
+            }
+        }
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        match buf.get_u8() {
+            0 => Ok(Self::Anonymous),
+            1 => Ok(Self::Local(Pack::decode(buf)?)),
+            2 => Ok(Self::Krb5(Pack::decode(buf)?)),
+            _ => Err(Error::UnknownTag),
+        }
     }
 }
 
@@ -471,9 +537,9 @@ pub struct Referral {
     pub path: Path,
     pub ttl: u64,
     pub addrs: Pooled<Vec<SocketAddr>>,
-    pub krb5_spns: Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>,
+    pub target_auth: ResolverTargetAuth,
 }
-// CR estokes: These are probably not needed anymore
+
 impl Hash for Referral {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Hash::hash(&self.addrs, state)
@@ -493,22 +559,22 @@ impl Pack for Referral {
         Pack::encoded_len(&self.path)
             + Pack::encoded_len(&self.ttl)
             + Pack::encoded_len(&self.addrs)
-            + Pack::encoded_len(&self.krb5_spns)
+            + Pack::encoded_len(&self.target_auth)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         Pack::encode(&self.path, buf)?;
         Pack::encode(&self.ttl, buf)?;
         Pack::encode(&self.addrs, buf)?;
-        Pack::encode(&self.krb5_spns, buf)
+        Pack::encode(&self.target_auth, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         let path = Pack::decode(buf)?;
         let ttl = Pack::decode(buf)?;
         let addrs = Pack::decode(buf)?;
-        let krb5_spns = Pack::decode(buf)?;
-        Ok(Referral { path, ttl, addrs, krb5_spns })
+        let target_auth = Pack::decode(buf)?;
+        Ok(Referral { path, ttl, addrs, target_auth })
     }
 }
 
