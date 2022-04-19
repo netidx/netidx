@@ -21,45 +21,28 @@ pub type Result<T> = result::Result<T, Error>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthRead {
     Anonymous,
-    Krb5 { token: Bytes, finished: bool },
-    Local(Bytes),
+    Krb5,
+    Local,
 }
 
 impl Pack for AuthRead {
     fn encoded_len(&self) -> usize {
-        1 + match self {
-            Self::Anonymous => 0,
-            Self::Krb5 { token, finished } => {
-                Pack::encoded_len(token) + Pack::encoded_len(finished)
-            }
-            Self::Local(b) => Pack::encoded_len(b),
-        }
+        1
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             Self::Anonymous => Ok(buf.put_u8(0)),
-            Self::Krb5 { token, finished } => {
-                buf.put_u8(1);
-                Pack::encode(token, buf)?;
-                Pack::encode(finished, buf)
-            }
-            Self::Local(tok) => {
-                buf.put_u8(2);
-                Pack::encode(tok, buf)
-            }
+            Self::Krb5 => Ok(buf.put_u8(1)),
+            Self::Local => Ok(buf.put_u8(2)),
         }
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(Self::Anonymous),
-            1 => {
-                let token = Pack::decode(buf)?;
-                let finished = Pack::decode(buf)?;
-                Ok(Self::Krb5 { token, finished })
-            }
-            2 => Ok(Self::Local(Pack::decode(buf)?)),
+            1 => Ok(Self::Krb5),
+            2 => Ok(Self::Local),
             _ => return Err(Error::UnknownTag),
         }
     }
@@ -69,8 +52,8 @@ impl Pack for AuthRead {
 pub enum AuthWrite {
     Anonymous,
     Reuse,
-    Krb5 { spn: Option<Chars>, token: Bytes, finished: bool },
-    Local(Bytes),
+    Krb5 { spn: Option<Chars> },
+    Local,
 }
 
 impl Pack for AuthWrite {
@@ -78,10 +61,8 @@ impl Pack for AuthWrite {
         1 + match self {
             Self::Anonymous => 0,
             Self::Reuse => 0,
-            Self::Krb5 { spn, token, finished } => {
-                Pack::encoded_len(spn)
-                    + Pack::encoded_len(token)
-                    + Pack::encoded_len(finished)
+            Self::Krb5 { spn, token } => {
+                Pack::encoded_len(spn) + Pack::encoded_len(token)
             }
             Self::Local(b) => Pack::encoded_len(b),
         }
@@ -91,11 +72,10 @@ impl Pack for AuthWrite {
         match self {
             Self::Anonymous => Ok(buf.put_u8(0)),
             Self::Reuse => Ok(buf.put_u8(1)),
-            Self::Krb5 { spn, token, finished } => {
+            Self::Krb5 { spn, token } => {
                 buf.put_u8(2);
                 Pack::encode(spn, buf)?;
-                Pack::encode(token, buf)?;
-                Pack::encode(finished, buf)
+                Pack::encode(token, buf)
             }
             Self::Local(b) => {
                 buf.put_u8(3);
@@ -111,8 +91,7 @@ impl Pack for AuthWrite {
             2 => {
                 let spn = Pack::decode(buf)?;
                 let token = Pack::decode(buf)?;
-                let finished = Pack::decode(buf)?;
-                Ok(Self::Krb5 { spn, token, finished })
+                Ok(Self::Krb5 { spn, token })
             }
             3 => Ok(Self::Local(Pack::decode(buf)?)),
             _ => Err(Error::UnknownTag),

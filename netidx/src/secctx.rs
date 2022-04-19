@@ -41,35 +41,6 @@ pub(crate) mod local {
     }
 }
 
-pub(crate) mod k5 {
-    use super::*;
-
-    pub(crate) struct Authenticator(Chars);
-
-    impl Authenticator {
-        pub(crate) fn new(spn: Chars) -> Self {
-            Authenticator(spn)
-        }
-
-        pub(crate) fn authenticate(
-            &self,
-            tok: &[u8],
-        ) -> Result<(K5CtxWrap<ServerCtx>, Bytes)> {
-            let (ctx, tok) = task::block_in_place(|| {
-                let ctx = ServerCtx::new(AcceptFlags::empty(), Some(&*self.0))?;
-                match ctx.step(tok)? {
-                    Step::Finished((ctx, Some(tok))) => Ok((ctx, tok)),
-                    Step::Finished((_, None)) => bail!("expected finish with token"),
-                    Step::Continue((_, _)) => {
-                        bail!("context did not finish, needs more tokens")
-                    }
-                }
-            })?;
-            Ok((K5CtxWrap::new(ctx), utils::bytes(&*tok)))
-        }
-    }
-}
-
 pub(crate) struct SecCtxData<S: 'static> {
     pub(crate) users: UserDb,
     secrets: FxHashMap<SocketAddr, S>,
@@ -145,9 +116,7 @@ impl<'a> SecCtxDataReadGuard<'a> {
 #[derive(Clone)]
 pub(crate) enum SecCtx {
     Anonymous,
-    Krb5(
-        Arc<(k5::Authenticator, RwLock<SecCtxData<(Chars, u128, K5CtxWrap<ServerCtx>)>>)>,
-    ),
+    Krb5(Arc<(Chars, RwLock<SecCtxData<(Chars, u128, K5CtxWrap<ServerCtx>)>>)>),
     Local(Arc<(local::Authenticator, RwLock<SecCtxData<u128>>)>),
 }
 
@@ -164,7 +133,7 @@ impl SecCtx {
                 SecCtx::Local(Arc::new((auth, store)))
             }
             config::Auth::Krb5(spns) => {
-                let auth = k5::Authenticator::new(spns[id].clone());
+                let auth = spns[id].clone();
                 let store = RwLock::new(SecCtxData::new(cfg)?);
                 SecCtx::Krb5(Arc::new((auth, store)))
             }
