@@ -354,9 +354,7 @@ async fn connect_write(
             None | Some(_) => {
                 let upn = upn.as_ref().map(|s| s.as_str());
                 let spn = Chars::from(
-                    spn.as_ref()
-                        .map(|s| s.clone())
-                        .ok_or_else(|| anyhow!("spn is required for writers"))?,
+                    spn.clone().ok_or_else(|| anyhow!("spn is required for writers"))?,
                 );
                 let target_spn = spns.get(&resolver_addr).ok_or_else(|| {
                     anyhow!("no target spn for resolver {:?}", resolver_addr)
