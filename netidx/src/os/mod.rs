@@ -8,12 +8,15 @@ pub(crate) mod windows;
 
 pub(crate) mod local_auth {
     use super::*;
-    use netidx_core::pack::{Pack, PackError};
-    use bytes::{Bytes, Buf, BufMut};
+    use bytes::{Buf, BufMut, Bytes};
+    use netidx_core::{
+        chars::Chars,
+        pack::{Pack, PackError},
+    };
 
     pub(crate) struct Credential {
         pub(crate) salt: u64,
-        pub(crate) user: String,
+        pub(crate) user: Chars,
         pub(crate) token: Bytes,
     }
 
@@ -36,12 +39,11 @@ pub(crate) mod local_auth {
 
         fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
             let salt: u64 = Pack::decode(buf)?;
-            let user: String = Pack::decode(buf)?;
+            let user: Chars = Pack::decode(buf)?;
             let token: Bytes = Pack::decode(buf)?;
             Ok(Credential { salt, user, token })
         }
     }
-
 
     #[cfg(windows)]
     pub(crate) use windows::local_auth::*;

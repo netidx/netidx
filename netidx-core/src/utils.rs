@@ -282,16 +282,13 @@ thread_local! {
     static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
 }
 
-pub fn make_sha3_token(salt: Option<u64>, secret: &[&[u8]]) -> Bytes {
-    let salt = salt.unwrap_or_else(|| rand::thread_rng().gen::<u64>());
+pub fn make_sha3_token(data: &[&[u8]]) -> Bytes {
     let mut hash = Sha3_512::new();
-    hash.update(&salt.to_be_bytes());
-    for v in secret {
+    for v in data {
         hash.update(v);
     }
     BUF.with(|buf| {
         let mut b = buf.borrow_mut();
-        b.put_u64(salt);
         b.extend(hash.finalize().into_iter());
         b.split().freeze()
     })

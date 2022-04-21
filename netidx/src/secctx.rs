@@ -87,20 +87,25 @@ impl SecCtxData<(Chars, u128, K5CtxWrap<ServerCtx>)> {
     }
 }
 
-impl SecCtxData<u128> {
-    pub(crate) fn get_local(&self, id: &SocketAddr) -> Option<u128> {
-        self.secrets.get(id).map(|s| *s)
+impl SecCtxData<(Chars, u128)> {
+    pub(crate) fn get_local(&self, id: &SocketAddr) -> Option<(Chars, u128)> {
+        self.secrets.get(id).map(|(n, s)| (n.clone(), *s))
     }
 
-    pub(crate) fn insert_local(&mut self, write_addr: SocketAddr, secret: u128) {
-        self.secrets.insert(write_addr, secret);
+    pub(crate) fn insert_local(
+        &mut self,
+        write_addr: SocketAddr,
+        user: Chars,
+        secret: u128,
+    ) {
+        self.secrets.insert(write_addr, (user, secret));
     }
 }
 
 pub(crate) enum SecCtxDataReadGuard<'a> {
     Anonymous,
     Krb5(RwLockReadGuard<'a, SecCtxData<(Chars, u128, K5CtxWrap<ServerCtx>)>>),
-    Local(RwLockReadGuard<'a, SecCtxData<u128>>),
+    Local(RwLockReadGuard<'a, SecCtxData<(Chars, u128)>>),
 }
 
 impl<'a> SecCtxDataReadGuard<'a> {
@@ -117,7 +122,7 @@ impl<'a> SecCtxDataReadGuard<'a> {
 pub(crate) enum SecCtx {
     Anonymous,
     Krb5(Arc<(Chars, RwLock<SecCtxData<(Chars, u128, K5CtxWrap<ServerCtx>)>>)>),
-    Local(Arc<(local::Authenticator, RwLock<SecCtxData<u128>>)>),
+    Local(Arc<(local::Authenticator, RwLock<SecCtxData<(Chars, u128)>>)>),
 }
 
 impl SecCtx {

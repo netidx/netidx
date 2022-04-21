@@ -1,4 +1,5 @@
 use crate::pool::{Pool, Poolable, Pooled};
+use arcstr::ArcStr;
 use bytes::{Buf, BufMut, Bytes};
 use chrono::{naive::NaiveDateTime, prelude::*};
 use fxhash::FxBuildHasher;
@@ -12,11 +13,10 @@ use std::{
     hash::{BuildHasher, Hash},
     mem, net,
     ops::{Deref, DerefMut},
+    str,
     sync::Arc,
     time::Duration,
-    str,
 };
-use arcstr::ArcStr;
 
 #[derive(Debug, Clone, Copy)]
 pub enum PackError {
@@ -157,6 +157,47 @@ impl Pack for Bytes {
     }
 }
 
+#[derive(Debug)]
+pub struct BoundedBytes<const L: usize>(Bytes);
+
+impl<const L: usize> Deref for BoundedBytes<L> {
+    type Target = Bytes;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<const L: usize> DerefMut for BoundedBytes<L> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<const L: usize> Pack for BoundedBytes<L> {
+    fn encoded_len(&self) -> usize {
+        let len = Bytes::len(&self.0);
+        varint_len(len as u64) + len
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        if Bytes::len(self) > L {
+            Err(PackError::TooBig)
+        } else {
+            <Bytes as Pack>::encode(self, buf)
+        }
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let len = decode_varint(buf)? as usize;
+        if len > L || len > buf.remaining() {
+            Err(PackError::TooBig)
+        } else {
+            Ok(BoundedBytes(buf.copy_to_bytes(len)))
+        }
+    }
+}
+
 impl Pack for String {
     fn encoded_len(&self) -> usize {
         let len = String::len(self);
@@ -231,14 +272,14 @@ impl Pack for ArcStr {
         } else {
             let res = match str::from_utf8(&buf.chunk()[0..len]) {
                 Ok(s) => Ok(ArcStr::from(s)),
-                Err(_) => Err(PackError::InvalidFormat)
+                Err(_) => Err(PackError::InvalidFormat),
             };
             buf.advance(len);
             res
         }
     }
 }
-    
+
 pub fn varint_len(value: u64) -> usize {
     ((((value | 1).leading_zeros() ^ 63) * 9 + 73) / 64) as usize
 }

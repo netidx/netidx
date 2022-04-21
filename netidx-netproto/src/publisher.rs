@@ -30,10 +30,13 @@ pub enum Hello {
     /// the connection at this point, if it chooses to allow this
     /// then it will return Anonymous.
     Anonymous,
-    /// A Krb5 authentication token, if the token is valid then the
-    /// publisher will send a token back to authenticate itself to
-    /// the subscriber.
-    Krb5 { token: Bytes, finished: bool },
+    /// Authenticate using kerberos 5, following the hello, the
+    /// subscriber and publisher will exchange tokens to complete the
+    /// authentication.
+    Krb5,
+    /// Authenticate using a local unix socket, only valid for
+    /// publishers on the same machine as the subscriber.
+    Local,
     /// In order to prevent denial of service, spoofing, etc,
     /// authenticated publishers must prove that they are actually
     /// listening on the socket they claim to be listening on. To
@@ -47,57 +50,35 @@ pub enum Hello {
     /// context will replace any old one, if it fails the new
     /// context will be thrown away and the old one will continue
     /// to be associated with the write address.
-    ResolverAuthenticate(SocketAddr, Bytes),
-    /// Local machine authentication, only valid for publishers on the
-    /// same machine as the client.
-    Local,
+    ResolverAuthenticate(SocketAddr),
 }
 
 impl Pack for Hello {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            Hello::Anonymous => 0,
-            Hello::Krb5 { token, finished } => {
-                Pack::encoded_len(token) + Pack::encoded_len(finished)
-            }
-            Hello::ResolverAuthenticate(addr, tok) => {
-                Pack::encoded_len(addr) + Pack::encoded_len(tok)
-            }
-            Hello::Local => 0,
+            Hello::Anonymous | Hello::Krb5 | Hello::Local => 0,
+            Hello::ResolverAuthenticate(addr) => Pack::encoded_len(addr),
         }
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             Hello::Anonymous => Ok(buf.put_u8(0)),
-            Hello::Krb5 { token, finished } => {
-                buf.put_u8(1);
-                Pack::encode(token, buf)?;
-                Pack::encode(finished, buf)
+            Hello::Krb5 => Ok(buf.put_u8(1)),
+            Hello::Local => Ok(buf.put_u8(2)),
+            Hello::ResolverAuthenticate(id) => {
+                buf.put_u8(3);
+                Pack::encode(id, buf)
             }
-            Hello::ResolverAuthenticate(id, tok) => {
-                buf.put_u8(2);
-                Pack::encode(id, buf)?;
-                Pack::encode(tok, buf)
-            }
-            Hello::Local => Ok(buf.put_u8(3)),
         }
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(Hello::Anonymous),
-            1 => {
-                let token = Pack::decode(buf)?;
-                let finished = Pack::decode(buf)?;
-                Ok(Hello::Krb5 { token, finished })
-            }
-            2 => {
-                let addr = Pack::decode(buf)?;
-                let tok = Pack::decode(buf)?;
-                Ok(Hello::ResolverAuthenticate(addr, tok))
-            }
-            3 => Ok(Hello::Local),
+            1 => Ok(Hello::Krb5),
+            2 => Ok(Hello::Local),
+            3 => Ok(Hello::ResolverAuthenticate(Pack::decode(buf)?)),
             _ => Err(PackError::UnknownTag),
         }
     }

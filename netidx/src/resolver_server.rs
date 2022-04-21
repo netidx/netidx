@@ -22,6 +22,7 @@ use bytes::{Buf, Bytes};
 use cross_krb5::{AcceptFlags, K5ServerCtx, PendingServerCtx, ServerCtx, Step};
 use futures::{channel::oneshot, prelude::*, select_biased};
 use log::{debug, info, warn};
+use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
 use std::{
@@ -74,6 +75,35 @@ struct Clinfos(Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>);
 lazy_static! {
     static ref WRITE_BATCHES: Pool<Vec<ToWrite>> = Pool::new(5000, 100000);
     static ref READ_BATCHES: Pool<Vec<ToRead>> = Pool::new(5000, 100000);
+}
+
+pub(crate) async fn krb5_authentication(
+    timeout: Duration,
+    spn: &str,
+    con: &mut Channel<ServerCtx>,
+) -> Result<ServerCtx> {
+    // the GSS token shouldn't ever be bigger than 1 MB
+    const L: usize = 1 * 1024 * 1024;
+    use pack::BoundedBytes;
+    let mut ctx =
+        task::block_in_place(|| ServerCtx::new(AcceptFlags::empty(), Some(spn)))?;
+    loop {
+        let token: BoundedBytes<L> = time::timeout(timeout, con.receive()).await??;
+        match task::block_in_place(|| ctx.step(&*token))? {
+            Step::Continue((nctx, token)) => {
+                ctx = nctx;
+                let token = BytesBounded::<L>(Bytes::copy_from_slice(&*token));
+                time::timeout(timeout, con.send_one(&token)).await??;
+            }
+            Step::Finished((ctx, token)) => {
+                if let Some(token) = token {
+                    let token = BytesBounded::<L>(Bytes::copy_from_slice(&*token));
+                    time::timeout(timeout, con.send_one(&token)).await??;
+                }
+                break Ok(ctx);
+            }
+        }
+    }
 }
 
 async fn client_loop_write(
@@ -196,42 +226,6 @@ async fn client_loop_write(
     }
 }
 
-async fn recv<T: Pack + Debug>(
-    cfg: &Arc<config::server::Config>,
-    con: &mut Channel<ServerCtx>,
-) -> Result<T> {
-    Ok(time::timeout(cfg.hello_timeout, con.receive()).await??)
-}
-async fn send(
-    cfg: &Arc<config::server::Config>,
-    con: &mut Channel<ServerCtx>,
-    msg: impl Pack,
-) -> Result<()> {
-    Ok(time::timeout(cfg.hello_timeout, con.send_one(&msg)).await??)
-}
-
-async fn finish_krb5_authentication(
-    cfg: &Arc<config::server::Config>,
-    con: &mut Channel<ServerCtx>,
-    mut ctx: PendingServerCtx,
-) -> Result<ServerCtx> {
-    loop {
-        let token = recv::<Bytes>(&cfg, con).await?;
-        match ctx.step(&*token)? {
-            Step::Continue((nctx, token)) => {
-                ctx = nctx;
-                send(&cfg, con, Bytes::copy_from_slice(&*token)).await?;
-            }
-            Step::Finished((ctx, token)) => {
-                if let Some(token) = token {
-                    send(&cfg, con, Bytes::copy_from_slice(&*token)).await?
-                }
-                break Ok(ctx);
-            }
-        }
-    }
-}
-
 async fn hello_client_write(
     cfg: Arc<config::server::Config>,
     clinfos: Clinfos,
@@ -247,6 +241,19 @@ async fn hello_client_write(
 ) -> Result<()> {
     info!("hello_write starting negotiation");
     debug!("hello_write client_hello: {:?}", hello);
+    async fn recv<T: Pack + Debug>(
+        cfg: &Arc<config::server::Config>,
+        con: &mut Channel<ServerCtx>,
+    ) -> Result<T> {
+        Ok(time::timeout(cfg.hello_timeout, con.receive()).await??)
+    }
+    async fn send(
+        cfg: &Arc<config::server::Config>,
+        con: &mut Channel<ServerCtx>,
+        msg: impl Pack,
+    ) -> Result<()> {
+        Ok(time::timeout(cfg.hello_timeout, con.send_one(&msg)).await??)
+    }
     async fn ownership_check(
         cfg: &Arc<config::server::Config>,
         con: &mut Channel<ServerCtx>,
@@ -262,24 +269,13 @@ async fn hello_client_write(
             time::timeout(cfg.hello_timeout, TcpStream::connect(write_addr)).await??,
         );
         use publisher::Hello as PHello;
-        let m = PHello::ResolverAuthenticate(resolver_id, Bytes::new());
-        time::timeout(cfg.hello_timeout, con.send_one(&m)).await??;
-        match time::timeout(cfg.hello_timeout, con.receive()).await?? {
-            PHello::Anonymous | PHello::Krb5 { .. } | PHello::Local => {
-                bail!("listener ownership check unexpected response")
-            }
-            PHello::ResolverAuthenticate(_, mut tok) => {
-                if tok.len() < 8 {
-                    bail!("listener ownership check buffer short");
-                }
-                let expected = utils::make_sha3_token(
-                    Some(tok.get_u64()),
-                    &[&(!secret).to_be_bytes()],
-                );
-                if &*tok != &expected[mem::size_of::<u64>()..] {
-                    bail!("listener ownership check failed");
-                }
-            }
+        let n = thread_rng().gen::<u128>();
+        send(cfg, &mut con, PHello::ResolverAuthenticate(resolver_id)).await?;
+        send(cfg, &mut con, n).await?;
+        let token: BoundedBytes<4096> = recv(&cfg, &mut con).await?;
+        let answer = utils::make_sha3_token(&[&n.to_be_bytes(), &secret.to_be_bytes()]);
+        if &*token != &*answer {
+            bail!("listener ownership check failed");
         }
         Ok(())
     }
@@ -312,9 +308,10 @@ async fn hello_client_write(
             send(&cfg, &mut con, h).await?;
             ANONYMOUS.clone()
         }
-        AuthWrite::Local(tok) => match secctx {
+        AuthWrite::Local => match secctx {
             SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("authentication not supported"),
             SecCtx::Local(ref a) => {
+                let tok: BoundedBytes<4096> = recv(&cfg, &mut con).await?;
                 let cred = a.0.authenticate(&*tok)?;
                 let uifo = a.1.write().users.ifo(Some(&cred.user))?;
                 info!("hello_write local auth succeeded");
@@ -322,19 +319,40 @@ async fn hello_client_write(
                     ttl: cfg.writer_ttl.as_secs(),
                     ttl_expired,
                     resolver_id,
-                    auth: AuthWrite::Local(Bytes::default()),
+                    auth: AuthWrite::Local,
                 };
                 debug!("hello_write sending {:?}", h);
                 send(&cfg, &mut con, h).await?;
                 let secret = thread_rng().gen::<u128>();
                 ownership_check(&cfg, &mut con, hello.write_addr, resolver_id, secret)
                     .await?;
-                a.1.write().insert_local(hello.write_addr, secret);
+                a.1.write().insert_local(hello.write_addr, cred.user, secret);
                 uifo
             }
         },
         AuthWrite::Reuse => match secctx {
-            SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
+            SecCtx::Anonymous => bail!("authentication not supported"),
+            SecCtx::Local(ref a) => {
+                let (user, secret) =
+                    a.1.read()
+                        .get_local(&hello.write_addr)
+                        .ok_or_else(|| anyhow!("session not found"))?;
+                let n = thread_rng().gen::<u128>();
+                send(&cfg, &mut con, n).await?;
+                let token: BoundedBytes<4096> = recv(&cfg, &mut con).await?;
+                let answer = make_sha3_token(&[&n.to_be_bytes(), &secret.to_be_bytes()]);
+                if &*token != &*answer {
+                    bail!("reuse denied")
+                }
+                let h = ServerHelloWrite {
+                    ttl: cfg.writer_ttl.as_secs(),
+                    ttl_expired,
+                    resolver_id,
+                    auth: AuthWrite::Reuse,
+                };
+                send(&cfg, &mut con, h).await?;
+                a.1.write().users.ifo(Some(&*user))?
+            }
             SecCtx::Krb5(ref a) => {
                 let ctx =
                     a.1.read()
@@ -356,43 +374,20 @@ async fn hello_client_write(
                     .ifo(Some(&task::block_in_place(|| ctx.lock().client())?))?
             }
         },
-        AuthWrite::Krb5 { spn, token, finished } => match secctx {
+        AuthWrite::Krb5 { spn } => match secctx {
             SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
             SecCtx::Krb5(ref a) => {
-                if finished {
-                    bail!("client can't be finished without getting a token");
-                }
                 info!(
                     "hello_write initiating new krb5 context for {:?}",
                     hello.write_addr
                 );
                 let secret = thread_rng().gen::<u128>();
+                let ctx = krb5_authentication(cfg.hello_timeout, &*a.0, &mut con)?;
                 let h = ServerHelloWrite {
                     ttl: cfg.writer_ttl.as_secs(),
                     ttl_expired,
                     resolver_id,
-                    auth: AuthWrite::Anonymous,
-                };
-                let ctx = ServerCtx::new(AcceptFlags::empty(), Some(&*a.0))?;
-                let ctx = match ctx.step(&token)? {
-                    Step::Finished((_, None)) => bail!("expected at least 1 token"),
-                    Step::Finished((ctx, Some(token))) => {
-                        let token = Bytes::copy_from_slice(&*token);
-                        let h = ServerHelloWrite {
-                            auth: AuthWrite::Krb5 { spn: None, token, finished: true },
-                            ..h
-                        };
-                        send(&cfg, &mut con, h).await?;
-                        ctx
-                    }
-                    Step::Continue((mut ctx, token)) => {
-                        let token = Bytes::copy_from_slice(&*token);
-                        let h = ServerHelloWrite {
-                            auth: AuthWrite::Krb5 { spn: None, token, finished: true },
-                            ..h
-                        };
-                        send(&cfg, &mut con, h).await?;
-                    }
+                    auth: AuthWrite::Krb5 { spn: Chars::from("") },
                 };
                 info!("hello_write created context for {:?}", hello.write_addr);
                 debug!("hello_write sending {:?}", h);
