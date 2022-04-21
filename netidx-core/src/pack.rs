@@ -158,7 +158,7 @@ impl Pack for Bytes {
 }
 
 #[derive(Debug)]
-pub struct BoundedBytes<const L: usize>(Bytes);
+pub struct BoundedBytes<const L: usize>(pub Bytes);
 
 impl<const L: usize> Deref for BoundedBytes<L> {
     type Target = Bytes;

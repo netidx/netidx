@@ -1,6 +1,6 @@
 use crate::{
     auth::{UserInfo, ANONYMOUS},
-    channel::Channel,
+    channel::{Channel, K5CtxWrap},
     chars::Chars,
     config,
     pack::Pack,
@@ -8,9 +8,9 @@ use crate::{
     protocol::{
         publisher,
         resolver::{
-            AuthRead, AuthWrite, ClientHello, ClientHelloWrite, CtxId, FromWrite,
-            ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
-            ServerHelloWrite, ToRead, ToWrite,
+            AuthChallenge, AuthRead, AuthWrite, ClientHello, ClientHelloWrite, FromWrite,
+            HashMethod, ReadyForOwnershipCheck, Secret, ServerHelloWrite, ToRead,
+            ToWrite,
         },
     },
     secctx::SecCtx,
@@ -18,8 +18,8 @@ use crate::{
     utils,
 };
 use anyhow::Result;
-use bytes::{Buf, Bytes};
-use cross_krb5::{AcceptFlags, K5ServerCtx, PendingServerCtx, ServerCtx, Step};
+use bytes::Bytes;
+use cross_krb5::{AcceptFlags, K5ServerCtx, ServerCtx, Step};
 use futures::{channel::oneshot, prelude::*, select_biased};
 use log::{debug, info, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
@@ -75,35 +75,6 @@ struct Clinfos(Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>);
 lazy_static! {
     static ref WRITE_BATCHES: Pool<Vec<ToWrite>> = Pool::new(5000, 100000);
     static ref READ_BATCHES: Pool<Vec<ToRead>> = Pool::new(5000, 100000);
-}
-
-pub(crate) async fn krb5_authentication(
-    timeout: Duration,
-    spn: &str,
-    con: &mut Channel<ServerCtx>,
-) -> Result<ServerCtx> {
-    // the GSS token shouldn't ever be bigger than 1 MB
-    const L: usize = 1 * 1024 * 1024;
-    use pack::BoundedBytes;
-    let mut ctx =
-        task::block_in_place(|| ServerCtx::new(AcceptFlags::empty(), Some(spn)))?;
-    loop {
-        let token: BoundedBytes<L> = time::timeout(timeout, con.receive()).await??;
-        match task::block_in_place(|| ctx.step(&*token))? {
-            Step::Continue((nctx, token)) => {
-                ctx = nctx;
-                let token = BytesBounded::<L>(Bytes::copy_from_slice(&*token));
-                time::timeout(timeout, con.send_one(&token)).await??;
-            }
-            Step::Finished((ctx, token)) => {
-                if let Some(token) = token {
-                    let token = BytesBounded::<L>(Bytes::copy_from_slice(&*token));
-                    time::timeout(timeout, con.send_one(&token)).await??;
-                }
-                break Ok(ctx);
-            }
-        }
-    }
 }
 
 async fn client_loop_write(
@@ -226,6 +197,50 @@ async fn client_loop_write(
     }
 }
 
+const TOKEN_MAX: usize = 4096;
+
+async fn recv<T: Pack + Debug>(
+    timeout: Duration,
+    con: &mut Channel<ServerCtx>,
+) -> Result<T> {
+    Ok(time::timeout(timeout, con.receive()).await??)
+}
+async fn send(
+    timeout: Duration,
+    con: &mut Channel<ServerCtx>,
+    msg: &impl Pack,
+) -> Result<()> {
+    Ok(time::timeout(timeout, con.send_one(msg)).await??)
+}
+
+pub(crate) async fn krb5_authentication(
+    timeout: Duration,
+    spn: &str,
+    con: &mut Channel<ServerCtx>,
+) -> Result<ServerCtx> {
+    // the GSS token shouldn't ever be bigger than 1 MB
+    const L: usize = 1 * 1024 * 1024;
+    let mut ctx =
+        task::block_in_place(|| ServerCtx::new(AcceptFlags::empty(), Some(spn)))?;
+    loop {
+        let token: BoundedBytes<L> = recv(timeout, con).await?;
+        match task::block_in_place(|| ctx.step(&*token))? {
+            Step::Continue((nctx, token)) => {
+                ctx = nctx;
+                let token = BoundedBytes::<L>(Bytes::copy_from_slice(&*token));
+                send(timeout, con, &token).await?;
+            }
+            Step::Finished((ctx, token)) => {
+                if let Some(token) = token {
+                    let token = BoundedBytes::<L>(Bytes::copy_from_slice(&*token));
+                    send(timeout, con, &token).await?;
+                }
+                break Ok(ctx);
+            }
+        }
+    }
+}
+
 async fn hello_client_write(
     cfg: Arc<config::server::Config>,
     clinfos: Clinfos,
@@ -241,19 +256,6 @@ async fn hello_client_write(
 ) -> Result<()> {
     info!("hello_write starting negotiation");
     debug!("hello_write client_hello: {:?}", hello);
-    async fn recv<T: Pack + Debug>(
-        cfg: &Arc<config::server::Config>,
-        con: &mut Channel<ServerCtx>,
-    ) -> Result<T> {
-        Ok(time::timeout(cfg.hello_timeout, con.receive()).await??)
-    }
-    async fn send(
-        cfg: &Arc<config::server::Config>,
-        con: &mut Channel<ServerCtx>,
-        msg: impl Pack,
-    ) -> Result<()> {
-        Ok(time::timeout(cfg.hello_timeout, con.send_one(&msg)).await??)
-    }
     async fn ownership_check(
         cfg: &Arc<config::server::Config>,
         con: &mut Channel<ServerCtx>,
@@ -261,7 +263,7 @@ async fn hello_client_write(
         resolver_id: SocketAddr,
         secret: u128,
     ) -> Result<()> {
-        send(cfg, con, Secret(secret)).await?;
+        send(cfg.hello_timeout, con, &Secret(secret)).await?;
         let _: ReadyForOwnershipCheck =
             time::timeout(cfg.hello_timeout, con.receive()).await??;
         info!("hello_write connecting to {:?} for listener ownership check", write_addr);
@@ -270,10 +272,12 @@ async fn hello_client_write(
         );
         use publisher::Hello as PHello;
         let n = thread_rng().gen::<u128>();
-        send(cfg, &mut con, PHello::ResolverAuthenticate(resolver_id)).await?;
-        send(cfg, &mut con, n).await?;
-        let token: BoundedBytes<4096> = recv(&cfg, &mut con).await?;
         let answer = utils::make_sha3_token(&[&n.to_be_bytes(), &secret.to_be_bytes()]);
+        send(cfg.hello_timeout, &mut con, &PHello::ResolverAuthenticate(resolver_id))
+            .await?;
+        let m = AuthChallenge { hash_method: HashMethod::Sha3_512, challenge: n };
+        send(cfg.hello_timeout, &mut con, &m).await?;
+        let token: BoundedBytes<TOKEN_MAX> = recv(cfg.hello_timeout, &mut con).await?;
         if &*token != &*answer {
             bail!("listener ownership check failed");
         }
@@ -305,13 +309,14 @@ async fn hello_client_write(
             };
             info!("hello_write accepting Anonymous authentication");
             debug!("hello_write sending hello {:?}", h);
-            send(&cfg, &mut con, h).await?;
+            send(cfg.hello_timeout, &mut con, &h).await?;
             ANONYMOUS.clone()
         }
         AuthWrite::Local => match secctx {
             SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("authentication not supported"),
             SecCtx::Local(ref a) => {
-                let tok: BoundedBytes<4096> = recv(&cfg, &mut con).await?;
+                let tok: BoundedBytes<TOKEN_MAX> =
+                    recv(cfg.hello_timeout, &mut con).await?;
                 let cred = a.0.authenticate(&*tok)?;
                 let uifo = a.1.write().users.ifo(Some(&cred.user))?;
                 info!("hello_write local auth succeeded");
@@ -322,7 +327,7 @@ async fn hello_client_write(
                     auth: AuthWrite::Local,
                 };
                 debug!("hello_write sending {:?}", h);
-                send(&cfg, &mut con, h).await?;
+                send(cfg.hello_timeout, &mut con, &h).await?;
                 let secret = thread_rng().gen::<u128>();
                 ownership_check(&cfg, &mut con, hello.write_addr, resolver_id, secret)
                     .await?;
@@ -338,9 +343,11 @@ async fn hello_client_write(
                         .get_local(&hello.write_addr)
                         .ok_or_else(|| anyhow!("session not found"))?;
                 let n = thread_rng().gen::<u128>();
-                send(&cfg, &mut con, n).await?;
-                let token: BoundedBytes<4096> = recv(&cfg, &mut con).await?;
                 let answer = make_sha3_token(&[&n.to_be_bytes(), &secret.to_be_bytes()]);
+                let m = AuthChallenge { hash_method: HashMethod::Sha3_512, challenge: n };
+                send(cfg.hello_timeout, &mut con, &m).await?;
+                let token: BoundedBytes<TOKEN_MAX> =
+                    recv(cfg.hello_timeout, &mut con).await?;
                 if &*token != &*answer {
                     bail!("reuse denied")
                 }
@@ -350,7 +357,7 @@ async fn hello_client_write(
                     resolver_id,
                     auth: AuthWrite::Reuse,
                 };
-                send(&cfg, &mut con, h).await?;
+                send(cfg.hello_timeout, &mut con, &h).await?;
                 a.1.write().users.ifo(Some(&*user))?
             }
             SecCtx::Krb5(ref a) => {
@@ -366,7 +373,7 @@ async fn hello_client_write(
                 };
                 info!("hello_write reusing krb5 context");
                 debug!("hello_write sending {:?}", h);
-                send(&cfg, &mut con, h).await?;
+                send(cfg.hello_timeout, &mut con, &h).await?;
                 con.set_ctx(ctx.clone()).await;
                 info!("hello_write all traffic now encrypted");
                 a.1.write()
@@ -382,7 +389,8 @@ async fn hello_client_write(
                     hello.write_addr
                 );
                 let secret = thread_rng().gen::<u128>();
-                let ctx = krb5_authentication(cfg.hello_timeout, &*a.0, &mut con)?;
+                let ctx = krb5_authentication(cfg.hello_timeout, &*a.0, &mut con).await?;
+                let ctx = K5CtxWrap::new(ctx);
                 let h = ServerHelloWrite {
                     ttl: cfg.writer_ttl.as_secs(),
                     ttl_expired,
@@ -391,14 +399,13 @@ async fn hello_client_write(
                 };
                 info!("hello_write created context for {:?}", hello.write_addr);
                 debug!("hello_write sending {:?}", h);
-                send(&cfg, &mut con, h).await?;
+                send(cfg.hello_timeout, &mut con, &h).await?;
                 con.set_ctx(ctx.clone()).await;
                 info!("hello_write all traffic now encrypted");
                 ownership_check(&cfg, &mut con, hello.write_addr, resolver_id, secret)
                     .await?;
                 let client = task::block_in_place(|| ctx.lock().client())?;
                 let uifo = a.1.write().users.ifo(Some(&client))?;
-                let spn = spn.unwrap_or(Chars::from(client));
                 info!("hello_write listener ownership check succeeded");
                 a.1.write().insert_k5(hello.write_addr, spn, secret, ctx.clone());
                 uifo
@@ -475,38 +482,32 @@ async fn hello_client_read(
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secctx: SecCtx,
-    hello: ClientAuthRead,
+    hello: AuthRead,
 ) -> Result<()> {
-    async fn send(
-        cfg: &Arc<config::server::Config>,
-        con: &mut Channel<ServerCtx>,
-        hello: ServerHelloRead,
-    ) -> Result<()> {
-        Ok(time::timeout(cfg.hello_timeout, con.send_one(&hello)).await??)
-    }
     let uifo = match hello {
-        ClientAuthRead::Anonymous => {
-            send(&cfg, &mut con, ServerHelloRead::Anonymous).await?;
+        AuthRead::Anonymous => {
+            send(cfg.hello_timeout, &mut con, &AuthRead::Anonymous).await?;
             ANONYMOUS.clone()
         }
-        ClientAuthRead::Local(tok) => match secctx {
+        AuthRead::Local => match secctx {
             SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("auth mech not supported"),
             SecCtx::Local(ref a) => {
+                let tok: BoundedBytes<TOKEN_MAX> =
+                    recv(cfg.hello_timeout, &mut con).await?;
                 let cred = a.0.authenticate(&*tok)?;
                 let uifo = a.1.write().users.ifo(Some(&cred.user))?;
-                send(&cfg, &mut con, ServerHelloRead::Local).await?;
+                send(cfg.hello_timeout, &mut con, &AuthRead::Local).await?;
                 uifo
             }
         },
-        ClientAuthRead::Reuse(_) => bail!("read session reuse deprecated"),
-        ClientAuthRead::Initiate(tok) => match secctx {
+        AuthRead::Krb5 => match secctx {
             SecCtx::Anonymous | SecCtx::Local(_) => {
-                bail!("authentication requested but not supported")
+                bail!("authentication mechanism krb5 not supported")
             }
             SecCtx::Krb5(ref a) => {
-                let (ctx, tok) = a.0.authenticate(&tok)?;
-                send(&cfg, &mut con, ServerHelloRead::Accepted(tok, CtxId::new()))
-                    .await?;
+                let ctx = krb5_authentication(cfg.hello_timeout, &*a.0, &mut con).await?;
+                let ctx = K5CtxWrap::new(ctx);
+                send(cfg.hello_timeout, &mut con, &AuthRead::Krb5).await?;
                 con.set_ctx(ctx.clone()).await;
                 a.1.write()
                     .users

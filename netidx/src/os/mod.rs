@@ -13,35 +13,36 @@ pub(crate) mod local_auth {
         chars::Chars,
         pack::{Pack, PackError},
     };
+    use netidx_netproto::resolver::HashMethod;
 
     pub(crate) struct Credential {
-        pub(crate) salt: u64,
+        pub(crate) hash_method: HashMethod,
+        pub(crate) salt: u128,
         pub(crate) user: Chars,
         pub(crate) token: Bytes,
     }
 
     impl Pack for Credential {
-        fn const_encoded_len() -> Option<usize> {
-            None
-        }
-
         fn encoded_len(&self) -> usize {
-            Pack::encoded_len(&self.salt)
+            Pack::encoded_len(&self.hash_method)
+                + Pack::encoded_len(&self.salt)
                 + Pack::encoded_len(&self.user)
                 + Pack::encoded_len(&self.token)
         }
 
         fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+            Pack::encode(&self.hash_method, buf)?;
             Pack::encode(&self.salt, buf)?;
             Pack::encode(&self.user, buf)?;
             Pack::encode(&self.token, buf)
         }
 
         fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-            let salt: u64 = Pack::decode(buf)?;
-            let user: Chars = Pack::decode(buf)?;
-            let token: Bytes = Pack::decode(buf)?;
-            Ok(Credential { salt, user, token })
+            let hash_method = Pack::decode(buf)?;
+            let salt = Pack::decode(buf)?;
+            let user = Pack::decode(buf)?;
+            let token = Pack::decode(buf)?;
+            Ok(Credential { hash_method, salt, user, token })
         }
     }
 

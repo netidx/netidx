@@ -18,6 +18,53 @@ use std::{
 type Error = PackError;
 pub type Result<T> = result::Result<T, Error>;
 
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub enum HashMethod {
+    Sha3_512,
+}
+
+impl Pack for HashMethod {
+    fn encoded_len(&self) -> usize {
+        1
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        match self {
+            Self::Sha3_512 => Ok(buf.put_u8(0)),
+        }
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        match buf.get_u8() {
+            0 => Ok(Self::Sha3_512),
+            _ => Err(PackError::UnknownTag),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Copy)]
+pub struct AuthChallenge {
+    pub hash_method: HashMethod,
+    pub challenge: u128,
+}
+
+impl Pack for AuthChallenge {
+    fn encoded_len(&self) -> usize {
+        Pack::encoded_len(&self.hash_method) + Pack::encoded_len(&self.challenge)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        Pack::encode(&self.hash_method, buf)?;
+        Pack::encode(&self.challenge, buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        let hash_method = Pack::decode(buf)?;
+        let challenge = Pack::decode(buf)?;
+        Ok(AuthChallenge { hash_method, challenge })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthRead {
     Anonymous,
@@ -333,6 +380,7 @@ impl Pack for TargetAuth {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
+    pub hash_method: HashMethod,
     pub target_auth: TargetAuth,
     pub resolver: SocketAddr,
     pub addrs: Pooled<Vec<(SocketAddr, Bytes)>>,
@@ -343,7 +391,8 @@ pub struct Resolved {
 
 impl Pack for Resolved {
     fn encoded_len(&self) -> usize {
-        Pack::encoded_len(&self.target_auth)
+        Pack::encoded_len(&self.hash_method)
+            + Pack::encoded_len(&self.target_auth)
             + Pack::encoded_len(&self.resolver)
             + Pack::encoded_len(&self.addrs)
             + Pack::encoded_len(&self.timestamp)
@@ -352,6 +401,7 @@ impl Pack for Resolved {
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        Pack::encode(&self.hash_method, buf)?;
         Pack::encode(&self.target_auth, buf)?;
         Pack::encode(&self.resolver, buf)?;
         Pack::encode(&self.addrs, buf)?;
@@ -361,13 +411,22 @@ impl Pack for Resolved {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
+        let hash_method = Pack::decode(buf)?;
         let target_auth = Pack::decode(buf)?;
         let resolver = Pack::decode(buf)?;
         let addrs = Pack::decode(buf)?;
         let timestamp = Pack::decode(buf)?;
         let flags = Pack::decode(buf)?;
         let permissions = Pack::decode(buf)?;
-        Ok(Resolved { target_auth, resolver, addrs, timestamp, permissions, flags })
+        Ok(Resolved {
+            hash_method,
+            target_auth,
+            resolver,
+            addrs,
+            timestamp,
+            permissions,
+            flags,
+        })
     }
 }
 

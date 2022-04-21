@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use arcstr::ArcStr;
+use netidx_core::chars::Chars;
 use std::process::Command;
 use tokio::task;
 
@@ -29,7 +30,7 @@ impl Mapper {
         })
     }
 
-    pub(crate) fn user(&self, user: u32) -> Result<String> {
+    pub(crate) fn user(&self, user: u32) -> Result<Chars> {
         task::block_in_place(|| {
             let out = Command::new(&*self.0).arg(user.to_string()).output()?;
             let mut user =
@@ -37,7 +38,7 @@ impl Mapper {
             if user.is_empty() {
                 bail!("user not found")
             } else {
-                Ok(user.swap_remove(0))
+                Ok(Chars::from(user.swap_remove(0)))
             }
         })
     }
@@ -76,6 +77,7 @@ pub(crate) mod local_auth {
     use fxhash::{FxBuildHasher, FxHashMap};
     use log::{debug, warn};
     use netidx_core::utils::{make_sha3_token, pack};
+    use netidx_netproto::resolver::HashMethod;
     use parking_lot::Mutex;
     use rand::{thread_rng, Rng};
     use std::{
@@ -98,7 +100,7 @@ pub(crate) mod local_auth {
 
     pub(crate) struct AuthServer {
         secret: u128,
-        issued: Arc<Mutex<FxHashMap<u64, Instant>>>,
+        issued: Arc<Mutex<FxHashMap<u128, Instant>>>,
         _stop: oneshot::Sender<()>,
     }
 
@@ -107,24 +109,28 @@ pub(crate) mod local_auth {
             mapper: Mapper,
             mut client: UnixStream,
             secret: u128,
-            issued: Arc<Mutex<FxHashMap<u64, Instant>>>,
+            issued: Arc<Mutex<FxHashMap<u128, Instant>>>,
         ) -> Result<()> {
             let cred = client.peer_cred()?;
             debug!("got peer credentials {:?}", cred);
             let user = mapper.user(cred.uid())?;
             debug!("got user {}", user);
-            let salt: u64 = loop {
+            let salt = loop {
                 let ts = Instant::now();
-                let salt: u64 = thread_rng().gen();
+                let salt = thread_rng().gen::<u128>();
                 let mut issued = issued.lock();
                 if let Entry::Vacant(e) = issued.entry(salt) {
                     e.insert(ts);
                     break salt;
                 }
             };
-            let token =
-                make_sha3_token(Some(salt), &[user.as_bytes(), &secret.to_be_bytes()]);
-            let mut msg = pack(&Credential { salt, user, token })?;
+            let token = make_sha3_token(&[
+                &salt.to_be_bytes(),
+                user.as_bytes(),
+                &secret.to_be_bytes(),
+            ]);
+            let c = Credential { hash_method: HashMethod::Sha3_512, salt, user, token };
+            let mut msg = pack(&c)?;
             client.write_all_buf(&mut msg).await?;
             Ok(())
         }
@@ -133,7 +139,7 @@ pub(crate) mod local_auth {
             mapper: Mapper,
             listener: UnixListener,
             secret: u128,
-            issued: Arc<Mutex<FxHashMap<u64, Instant>>>,
+            issued: Arc<Mutex<FxHashMap<u128, Instant>>>,
             stop: oneshot::Receiver<()>,
         ) {
             let open = Arc::new(AtomicUsize::new(0));
@@ -186,18 +192,23 @@ pub(crate) mod local_auth {
             let mapper = Mapper::new()?;
             let issued =
                 Arc::new(Mutex::new(HashMap::with_hasher(FxBuildHasher::default())));
-            let secret: u128 = thread_rng().gen();
+            let secret = thread_rng().gen::<u128>();
             let (tx, rx) = oneshot::channel();
             spawn(Self::run(mapper, listener, secret, issued.clone(), rx));
             Ok(AuthServer { secret, _stop: tx, issued })
         }
 
         pub(crate) fn validate(&self, cred: &Credential) -> bool {
-            let token = make_sha3_token(
-                Some(cred.salt),
-                &[cred.user.as_bytes(), &self.secret.to_be_bytes()],
-            );
-            token == cred.token && self.issued.lock().remove(&cred.salt).is_some()
+            if cred.hash_method != HashMethod::Sha3_512 {
+                false
+            } else {
+                let token = make_sha3_token(&[
+                    &cred.salt.to_be_bytes(),
+                    cred.user.as_bytes(),
+                    &self.secret.to_be_bytes(),
+                ]);
+                token == cred.token && self.issued.lock().remove(&cred.salt).is_some()
+            }
         }
     }
 
@@ -205,12 +216,16 @@ pub(crate) mod local_auth {
 
     impl AuthClient {
         async fn token_once(path: &str) -> Result<Bytes> {
+            const TOKEN_MAX: usize = 4 * 1024;
             debug!("asking for a local token from {}", path);
             let mut soc = UnixStream::connect(path).await?;
             let mut buf = BytesMut::new();
             loop {
                 let n = soc.read_buf(&mut buf).await?;
                 debug!("read {} bytes from the token", n);
+                if buf.len() > TOKEN_MAX {
+                    bail!("token is too large")
+                }
                 if n == 0 {
                     break;
                 }
