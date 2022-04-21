@@ -227,12 +227,12 @@ pub(crate) async fn krb5_authentication(
         match task::block_in_place(|| ctx.step(&*token))? {
             Step::Continue((nctx, token)) => {
                 ctx = nctx;
-                let token = BoundedBytes::<L>(Bytes::copy_from_slice(&*token));
+                let token = BoundedBytes::<L>(utils::bytes(&*token));
                 send(timeout, con, &token).await?;
             }
             Step::Finished((ctx, token)) => {
                 if let Some(token) = token {
-                    let token = BoundedBytes::<L>(Bytes::copy_from_slice(&*token));
+                    let token = BoundedBytes::<L>(utils::bytes(&*token));
                     send(timeout, con, &token).await?;
                 }
                 break Ok(ctx);

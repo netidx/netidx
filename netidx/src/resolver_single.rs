@@ -7,14 +7,15 @@ use crate::{
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::{
-        ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, FromRead,
-        FromWrite, ReadyForOwnershipCheck, Secret, ServerAuthWrite, ServerHelloRead,
-        ServerHelloWrite, ToRead, ToWrite,
+        AuthChallenge, AuthRead, AuthWrite, ClientHello, ClientHelloWrite, FromRead,
+        FromWrite, HashMethod, ReadyForOwnershipCheck, Secret, ServerHelloWrite, ToRead,
+        ToWrite,
     },
     utils,
 };
 use anyhow::{anyhow, Error, Result};
 use cross_krb5::{ClientCtx, InitiateFlags, K5Ctx, PendingClientCtx, Step};
+use crossbeam::epoch::Pointable;
 use futures::{
     channel::{mpsc, oneshot},
     future::select_ok,
@@ -23,11 +24,12 @@ use futures::{
 };
 use fxhash::FxBuildHasher;
 use log::{debug, error, info, warn};
+use netidx_core::pack::BoundedBytes;
 use parking_lot::RwLock;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
-    cmp::max, collections::HashMap, fmt::Debug, net::SocketAddr, str::FromStr, sync::Arc,
-    time::Duration,
+    arch::x86_64::_MM_FLUSH_ZERO_MASK, cmp::max, collections::HashMap, fmt::Debug,
+    net::SocketAddr, str::FromStr, sync::Arc, time::Duration,
 };
 use tokio::{
     net::TcpStream,
@@ -62,8 +64,39 @@ impl FromStr for DesiredAuth {
         match s {
             "anonymous" => Ok(DesiredAuth::Anonymous),
             "local" => Ok(DesiredAuth::Local),
-            "krb5" => Ok(DesiredAuth::Krb5 {upn: None, spn: None}),
-            _ => bail!("expected, anonymous, local, or krb5")
+            "krb5" => Ok(DesiredAuth::Krb5 { upn: None, spn: None }),
+            _ => bail!("expected, anonymous, local, or krb5"),
+        }
+    }
+}
+
+pub(crate) async fn krb5_authentication(
+    principal: Option<&str>,
+    target_principal: &str,
+    con: &mut Channel<ClientCtx>,
+) -> Result<ClientCtx> {
+    async fn send(con: &mut Channel<ClientCtx>, token: &[u8]) -> Result<()> {
+        let token = BoundedBytes::<L>(utils::bytes(&*token));
+        Ok(time::timeout(HELLO_TO, con.send_one(&token)).await??)
+    }
+    const L: usize = 1 * 1024 * 1024;
+    let (mut ctx, token) = task::block_in_place(|| {
+        ClientCtx::new(InitiateFlags::empty(), principal, target_principal, None)
+    })?;
+    send(con, &*token).await?;
+    loop {
+        let token: BoundedBytes<L> = time::timeout(HELLO_TO, con.receive()).await??;
+        match task::block_in_place(|| ctx.step(&*token))? {
+            Step::Continue((nctx, token)) => {
+                ctx = nctx;
+                send(con, &*token).await?
+            }
+            Step::Finished((ctx, token)) => {
+                if let Some(token) = token {
+                    send(con, &*token).await?
+                }
+                break Ok(ctx);
+            }
         }
     }
 }
@@ -100,89 +133,34 @@ async fn connect_read(
         let con = cwt!("connect", TcpStream::connect(&addr));
         try_cf!("no delay", con.set_nodelay(true));
         let mut con = Channel::new(con);
-        cwt!("send version", con.send_one(&1u64));
-        let _ver: u64 = cwt!("recv version", con.receive());
-        let (auth, ctx) = match desired_auth {
-            DesiredAuth::Anonymous => (ClientAuthRead::Anonymous, None),
-            DesiredAuth::Local => match &resolver.auth {
-                Auth::Anonymous | Auth::Krb5 { .. } => {
-                    bail!("local auth is not available")
-                }
-                Auth::Local(path) => {
-                    let tok =
-                        try_cf!("local token", continue, AuthClient::token(path).await);
-                    (ClientAuthRead::Local(tok), None)
-                }
-            },
-            DesiredAuth::Krb5 { upn, .. } => match &resolver.auth {
-                Auth::Anonymous => {
-                    bail!("requested auth mechanism is not available")
-                }
-                Auth::Local(path) => {
-                    let tok =
-                        try_cf!("local token", continue, AuthClient::token(path).await);
-                    (ClientAuthRead::Local(tok), None)
-                }
-                Auth::Krb5(spns) => {
-                    let upn = upn.as_ref().map(|s| s.as_str());
-                    let target_spn = spns.get(&addr).ok_or_else(|| {
-                        anyhow!("no target spn for resolver {:?}", addr)
-                    })?;
-                    let (ctx, tok) = try_cf!(
-                        "create ctx",
-                        continue,
-                        task::block_in_place(|| ClientCtx::new(
-                            InitiateFlags::empty(),
-                            upn,
-                            target_spn,
-                            None
-                        ))
-                    );
-                    (ClientAuthRead::Initiate(utils::bytes(&*tok)), Some(ctx))
-                }
-            },
-        };
-        cwt!("hello", con.send_one(&ClientHello::ReadOnly(auth)));
-        let r: ServerHelloRead = cwt!("hello reply", con.receive());
-        match (desired_auth, r) {
-            (DesiredAuth::Anonymous, ServerHelloRead::Anonymous) => (),
-            (DesiredAuth::Local, ServerHelloRead::Local) => (),
-            (DesiredAuth::Krb5 { .. }, ServerHelloRead::Local) => (),
+        match (desired_auth, &resolver.auth) {
             (DesiredAuth::Anonymous, _) => {
-                error!("server requires authentication");
-                continue;
+                cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Anonymous)));
+                match cwt!("reply", con.receive::<AuthRead>()) {
+                    AuthRead::Anonymous => (),
+                    AuthRead::Local | AuthRead::Krb5 => bail!("protocol error"),
+                }
             }
-            (DesiredAuth::Local, ServerHelloRead::Anonymous)
-            | (DesiredAuth::Krb5 { .. }, ServerHelloRead::Anonymous) => {
-                error!("could not authenticate resolver server");
-                continue;
+            (DesiredAuth::Local | DesiredAuth::Krb5 { .. }, Auth::Local(path)) => {
+                let tok = cwt!("local token", AuthClient::token(path));
+                cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Local)));
+                cwt!("token", con.send_one(&tok));
+                match cwt!("reply", con.receive::<AuthRead>()) {
+                    AuthRead::Local => (),
+                    AuthRead::Krb5 | AuthRead::Anonymous => bail!("protocol error"),
+                }
             }
-            (DesiredAuth::Local, ServerHelloRead::Reused)
-            | (DesiredAuth::Krb5 { .. }, ServerHelloRead::Reused) => {
-                error!("protocol error, we didn't ask to reuse a security context");
-                continue;
-            }
-            (DesiredAuth::Local, ServerHelloRead::Accepted(_, _)) => {
-                error!("protocol error, we didn't send a krb auth token");
-                continue;
-            }
-            (DesiredAuth::Krb5 { .. }, ServerHelloRead::Accepted(tok, _)) => {
-                let ctx = ctx.ok_or_else(|| anyhow!("bug accepted but no ctx"))?;
-                let res = try_cf!(
-                    "resolver tok",
-                    continue,
-                    task::block_in_place(|| ctx.step(&tok))
-                );
-                let ctx = try_cf!(
-                    "ctx state",
-                    continue,
-                    match res {
-                        Step::Finished((ctx, None)) => Ok(ctx),
-                        Step::Finished(_) | Step::Continue(_) =>
-                            Err(anyhow!("unexpected ctx state")),
-                    }
-                );
-                con.set_ctx(K5CtxWrap::new(ctx)).await;
+            (DesiredAuth::Krb5 { upn, .. }, Auth::Krb5(spns)) => {
+                let upn = upn.as_ref().map(|s| s.as_str());
+                let target_spn = spns
+                    .get(&addr)
+                    .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?;
+                cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Krb5)));
+                let ctx = cwt!("k5auth", krb5_authentication(upn, target_spn, &mut con));
+                match cwt!("reply", con.receive::<AuthRead>()) {
+                    AuthRead::Krb5 => con.set_ctx(K5CtxWrap::new(ctx)).await,
+                    AuthRead::Local | AuthRead::Anonymous => bail!("protocol error"),
+                }
             }
         };
         break Ok(con);
@@ -323,12 +301,6 @@ async fn connect_write(
     desired_auth: &DesiredAuth,
     degraded: &mut bool,
 ) -> Result<(u64, Channel<ClientCtx>)> {
-    enum SecState {
-        Anonymous,
-        Local,
-        Reused(K5CtxWrap<ClientCtx>),
-        Pending(PendingClientCtx),
-    }
     info!("write_con connecting to resolver {:?}", resolver_addr);
     let con = wt!(TcpStream::connect(&resolver_addr))??;
     con.set_nodelay(true)?;
@@ -336,100 +308,70 @@ async fn connect_write(
     wt!(con.send_one(&1u64))??;
     let _version: u64 = wt!(con.receive())??;
     let sec = Duration::from_secs(1);
-    let (auth, ctx) = match desired_auth {
-        DesiredAuth::Anonymous => (ClientAuthWrite::Anonymous, SecState::Anonymous),
-        DesiredAuth::Local => match &resolver.auth {
-            Auth::Anonymous | Auth::Krb5(_) => {
-                bail!("local auth not available")
-            }
-            Auth::Local(path) => {
-                (ClientAuthWrite::Local(AuthClient::token(path).await?), SecState::Local)
-            }
-        },
-        DesiredAuth::Krb5 { upn, spn } => match &resolver.auth {
-            Auth::Anonymous => {
-                bail!("authentication unavailable")
-            }
-            Auth::Local(path) => {
-                (ClientAuthWrite::Local(AuthClient::token(path).await?), SecState::Local)
-            }
-            Auth::Krb5(spns) => match security_context {
-                Some(ctx)
-                    if task::block_in_place(|| ctx.lock().ttl()).unwrap_or(sec) > sec =>
-                {
-                    (ClientAuthWrite::Reuse, SecState::Reused(ctx.clone()))
+    let hello = |auth| {
+        let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
+        debug!("write_con connection established hello {:?}", h);
+        h
+    };
+    let (r, ownership_check) = match (desired_auth, &resolver.auth) {
+        (DesiredAuth::Anonymous, _) => {
+            wt!(con.send_one(&hello(AuthWrite::Anonymous)))??;
+            (wt!(con.receive::<ServerHelloWrite>())??, false)
+        }
+        (DesiredAuth::Krb5 { .. } | DesiredAuth::Local, Auth::Local(path)) => {
+            let secret = secrets.read().get(&resolver_addr).map(|u| *u);
+            match secret {
+                None => {
+                    let tok = wt!(AuthClient::token(path))??;
+                    wt!(con.send_one(&hello(AuthWrite::Local)))??;
+                    wt!(con.send_one(&tok))??;
+                    (wt!(con.receive::<ServerHelloWrite>())??, true)
                 }
-                _ => {
-                    let upnr = upn.as_ref().map(|s| s.as_str());
-                    let target_spn = spns.get(&resolver_addr).ok_or_else(|| {
-                        anyhow!("no target spn for resolver {:?}", resolver_addr)
-                    })?;
-                    let (ctx, token) = task::block_in_place(|| {
-                        ClientCtx::new(InitiateFlags::empty(), upnr, target_spn, None)
-                    })?;
-                    let token = utils::bytes(&*token);
-                    let spn = spn.as_ref().or(upn.as_ref()).cloned().map(Chars::from);
-                    (ClientAuthWrite::Initiate { spn, token }, SecState::Pending(ctx))
+                Some(secret) => {
+                    wt!(con.send_one(&hello(AuthWrite::Reuse)))??;
+                    let c: AuthChallenge = wt!(con.receive())??;
+                    if c.hash_method != HashMethod::Sha3_512 {
+                        bail!("hash method not supported")
+                    }
+                    let answer = utils::make_sha3_token(&[
+                        &c.challenge.to_be_bytes(),
+                        &secret.to_be_bytes(),
+                    ]);
+                    wt!(con.send_one(&answer))??;
+                    (wt!(con.receive::<ServerHelloWrite>())??, false)
                 }
-            },
+            }
+        }
+        (DesiredAuth::Krb5 { upn, spn }, Auth::Krb5(spns)) => match security_context {
+            Some(ctx)
+                if task::block_in_place(|| ctx.lock().ttl()).unwrap_or(sec) > sec =>
+            {
+                wt!(con.send_one(&hello(AuthWrite::Reuse)))??;
+                let r: ServerHelloWrite = wt!(con.receive())??;
+                con.set_ctx(ctx.clone()).await;
+                (r, false)
+            }
+            None | Some(_) => {
+                let upn = upn.as_ref().map(|s| s.as_str());
+                let spn = Chars::from(
+                    spn.as_ref()
+                        .map(|s| s.clone())
+                        .ok_or_else(|| anyhow!("spn is required for writers"))?,
+                );
+                let target_spn = spns.get(&resolver_addr).ok_or_else(|| {
+                    anyhow!("no target spn for resolver {:?}", resolver_addr)
+                })?;
+                wt!(con.send_one(&hello(AuthWrite::Krb5 { spn })))??;
+                let ctx = krb5_authentication(upn, target_spn, &mut con).await?;
+                let ctx = K5CtxWrap::new(ctx);
+                let r: ServerHelloWrite = wt!(con.receive())??;
+                con.set_ctx(ctx.clone());
+                *security_context = Some(ctx);
+                (r, true)
+            }
         },
     };
-    let h = ClientHello::WriteOnly(ClientHelloWrite { write_addr, auth });
-    debug!("write_con connection established hello {:?}", h);
-    wt!(con.send_one(&h))??;
-    let r: ServerHelloWrite = wt!(con.receive())??;
     debug!("write_con resolver hello {:?}", r);
-    let ownership_check = match (desired_auth, r.auth, ctx) {
-        (DesiredAuth::Anonymous, ServerAuthWrite::Anonymous, SecState::Anonymous) => {
-            *security_context = None;
-            false
-        }
-        (DesiredAuth::Local, ServerAuthWrite::Local, SecState::Local)
-        | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Local, SecState::Local) => {
-            *security_context = None;
-            true
-        }
-        (DesiredAuth::Anonymous, _, _) => {
-            bail!("server requires authentication");
-        }
-        (DesiredAuth::Local, ServerAuthWrite::Local, _)
-        | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Local, _) => {
-            unreachable!()
-        }
-        (DesiredAuth::Local, ServerAuthWrite::Anonymous, _)
-        | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Anonymous, _) => {
-            bail!("could not authenticate resolver server");
-        }
-        (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Reused, SecState::Reused(ctx)) => {
-            con.set_ctx(ctx).await;
-            info!("write_con all traffic now encrypted");
-            false
-        }
-        (DesiredAuth::Local, ServerAuthWrite::Reused, _)
-        | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Reused, _) => {
-            bail!("missing security context to reuse")
-        }
-        (
-            DesiredAuth::Krb5 { .. },
-            ServerAuthWrite::Accepted(tok),
-            SecState::Pending(ctx),
-        ) => {
-            info!("write_con processing resolver mutual authentication");
-            let ctx = K5CtxWrap::new(match task::block_in_place(|| ctx.step(&tok))? {
-                Step::Finished((ctx, None)) => ctx,
-                Step::Finished(_) | Step::Continue(_) => bail!("unexpected auth state"),
-            });
-            info!("write_con mutual authentication succeeded");
-            con.set_ctx(ctx.clone()).await;
-            info!("write_con all traffic now encrypted");
-            *security_context = Some(ctx);
-            true
-        }
-        (DesiredAuth::Local, ServerAuthWrite::Accepted(_), _)
-        | (DesiredAuth::Krb5 { .. }, ServerAuthWrite::Accepted(_), _) => {
-            bail!("missing pending security context")
-        }
-    };
     if ownership_check {
         let secret: Secret = wt!(con.receive())??;
         {
