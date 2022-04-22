@@ -306,7 +306,7 @@ impl Store {
         path: Path,
         publisher: &Arc<Publisher>,
         default: bool,
-        flags: Option<u16>,
+        flags: Option<u32>,
     ) {
         let publisher = self.publishers_by_id.entry(publisher.id).or_insert_with(|| {
             let p = publisher.clone();
@@ -520,7 +520,7 @@ impl Store {
     pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
         let n = Path::levels(parent);
         let mut paths = PATH_POOL.take();
-        if let Some(l) = self.by_level.get(&(n + 1)) {
+        if let Some(l) = self.published_by_level.get(&(n + 1)) {
             paths.extend(
                 l.range::<str, (Bound<&str>, Bound<&str>)>((
                     Excluded(parent.as_ref()),
@@ -542,7 +542,7 @@ impl Store {
                 let base = glob.base();
                 let mut n = Path::levels(base) + 1;
                 while glob.scope().contains(n) {
-                    match self.by_level.get(&n) {
+                    match self.published_by_level.get(&n) {
                         None => break,
                         Some(l) => {
                             let iter = l
@@ -557,7 +557,7 @@ impl Store {
                                 if pat.is_match(path)
                                     && !self.children.contains_key(dn)
                                     && (!pat.published_only()
-                                        || self.by_path.contains_key(path))
+                                        || self.published_by_path.contains_key(path))
                                 {
                                     paths.push(path.clone());
                                 }
@@ -573,7 +573,7 @@ impl Store {
     }
 
     pub(crate) fn get_change_nr(&self, path: &Path) -> Z64 {
-        self.by_level
+        self.published_by_level
             .get(&Path::levels(path))
             .and_then(|l| l.get(path).map(|cn| *cn))
             .unwrap_or(Z64(0))
@@ -590,15 +590,18 @@ impl Store {
     #[allow(dead_code)]
     pub(crate) fn invariant(&self) {
         debug!("resolver_store: checking invariants");
-        for (addr, paths) in self.by_addr.iter() {
+        for (id, paths) in self.published_by_id.iter() {
             for path in paths.iter() {
-                match self.by_path.get(path) {
-                    None => panic!("path {} in by_addr but not in by_path", path),
-                    Some(addrs) => {
-                        if !addrs.into_iter().any(|a| &a.0 == addr) {
+                match self.published_by_path.get(path) {
+                    None => panic!(
+                        "path {} in published_by_id but not in published_by_path",
+                        path
+                    ),
+                    Some(pubs) => {
+                        if !pubs.into_iter().any(|a| a == id) {
                             panic!(
-                                "path {} in {} by_addr, but {} not present in addrs",
-                                path, addr, addr
+                                "path {} in {:?} published_by_id, but {:?} not present in pubs",
+                                path, pubs, id
                             )
                         }
                     }
