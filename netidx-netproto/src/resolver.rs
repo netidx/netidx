@@ -702,9 +702,9 @@ pub enum ToWrite {
     /// Tell the resolver that we are still alive
     Heartbeat,
     /// Publish the path and set associated flags
-    PublishWithFlags(Path, u16),
+    PublishWithFlags(Path, u32),
     /// Add a default publisher to path and set associated flags
-    PublishDefaultWithFlags(Path, u16),
+    PublishDefaultWithFlags(Path, u32),
     /// Unpublish a default publisher
     UnpublishDefault(Path),
 }
