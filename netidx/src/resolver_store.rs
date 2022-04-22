@@ -330,12 +330,13 @@ impl Store {
             self.add_column(&path);
             self.add_parents(path.as_ref());
             let n = Path::levels(path.as_ref());
-            // CR estokes: wrong? Shouldn't it increment if the path
-            // is already present?
-            self.published_by_level
+            let cn = self
+                .published_by_level
                 .entry(n)
                 .or_insert_with(BTreeMap::new)
-                .insert(path.clone(), Z64(1));
+                .entry(path.clone())
+                .or_insert(Z64(0));
+            **cn += 1;
         }
     }
 
@@ -364,6 +365,13 @@ impl Store {
                         if pubs.len() < len {
                             self.remove_column(&path);
                             self.remove_parents(path.as_ref());
+                            let cn = self
+                                .published_by_level
+                                .entry(n)
+                                .or_insert_with(BTreeMap::new)
+                                .entry(path.clone())
+                                .or_insert(Z64(0));
+                            **cn += 1;
                         }
                     }
                     None => {
