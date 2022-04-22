@@ -8,7 +8,7 @@ use std::{
 };
 
 bitflags! {
-    pub struct Permissions: u16 {
+    pub struct Permissions: u32 {
         const DENY             = 0x01;
         const SUBSCRIBE        = 0x02;
         const WRITE            = 0x04;
@@ -134,7 +134,7 @@ impl PMap {
         file: &config::server::PMap,
         db: &mut UserDb,
         root: &str,
-        children: &BTreeMap<Path, config::Server>,
+        children: &BTreeMap<Path, config::Referral>,
     ) -> Result<Self> {
         let mut pmap = BTreeMap::new();
         for (path, tbl) in file.0.iter() {

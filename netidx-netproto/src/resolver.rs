@@ -396,6 +396,7 @@ impl Pack for PublisherId {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Publisher {
+    pub resolver: SocketAddr,
     pub id: PublisherId,
     pub addr: SocketAddr,
     pub hash_method: HashMethod,
@@ -404,13 +405,15 @@ pub struct Publisher {
 
 impl Pack for Publisher {
     fn encoded_len(&self) -> usize {
-        Pack::encoded_len(&self.id)
+        Pack::encoded_len(&self.resolver)
+            + Pack::encoded_len(&self.id)
             + Pack::encoded_len(&self.addr)
             + Pack::encoded_len(&self.hash_method)
             + Pack::encoded_len(&self.target_auth)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        Pack::encode(&self.resolver, buf)?;
         Pack::encode(&self.id, buf)?;
         Pack::encode(&self.addr, buf)?;
         Pack::encode(&self.hash_method, buf)?;
@@ -418,18 +421,19 @@ impl Pack for Publisher {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
+        let resolver = Pack::decode(buf)?;
         let id = Pack::decode(buf)?;
         let addr = Pack::decode(buf)?;
         let hash_method = Pack::decode(buf)?;
         let target_auth = Pack::decode(buf)?;
-        Ok(Publisher { id, addr, hash_method, target_auth })
+        Ok(Publisher { resolver, id, addr, hash_method, target_auth })
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublisherRef {
-    id: PublisherId,
-    token: Bytes,
+    pub id: PublisherId,
+    pub token: Bytes,
 }
 
 impl Pack for PublisherRef {

@@ -1,10 +1,9 @@
 pub use crate::protocol::resolver::{Auth, Referral};
-use crate::{chars::Chars, path::Path, pool::Pooled, utils};
+use crate::{path::Path, pool::Pooled, utils};
 use anyhow::Result;
 use log::debug;
 use serde_json::from_str;
 use std::{
-    cmp::{Eq, PartialEq},
     collections::{
         BTreeMap, Bound,
         Bound::{Excluded, Unbounded},
@@ -15,7 +14,6 @@ use std::{
     default::Default,
     env,
     fs::read_to_string,
-    hash::{Hash, Hasher},
     net::SocketAddr,
     path::Path as FsPath,
     time::Duration,

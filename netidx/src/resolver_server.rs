@@ -567,7 +567,6 @@ async fn hello_client(
 async fn server_loop(
     cfg: config::server::Config,
     delay_reads: bool,
-    id: usize,
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
 ) -> Result<SocketAddr> {
@@ -576,7 +575,7 @@ async fn server_loop(
     let cfg = Arc::new(cfg);
     let ctracker = CTracker::new();
     let clinfos = Clinfos(Arc::new(Mutex::new(HashMap::new())));
-    let id = cfg.addrs[id];
+    let id = cfg.addr;
     let secctx = SecCtx::new(&cfg, &id).await?;
     let published = Store::new(
         cfg.parent.clone().map(|s| s.into()),
@@ -656,11 +655,10 @@ impl Server {
     pub async fn new(
         cfg: config::server::Config,
         delay_reads: bool,
-        id: usize,
     ) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        let tsk = server_loop(cfg, delay_reads, id, recv_stop, send_ready);
+        let tsk = server_loop(cfg, delay_reads, recv_stop, send_ready);
         let local_addr = select_biased! {
             a = task::spawn(tsk).fuse() => a??,
             a = recv_ready.fuse() => a?,

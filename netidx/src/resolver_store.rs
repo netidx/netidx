@@ -6,13 +6,13 @@ use crate::{
     pool::{Pool, Pooled},
     protocol::{
         glob::{GlobSet, Scope},
-        resolver::Referral,
+        resolver::{Publisher, PublisherId, PublisherRef, Referral},
     },
     secctx::SecCtxDataReadGuard,
-    utils::{self, Addr},
+    utils,
 };
 use bytes::Bytes;
-use fxhash::{FxBuildHasher, FxHashMap};
+use fxhash::FxHashMap;
 use immutable_chunkmap::set::Set as ISet;
 use log::debug;
 use std::{
@@ -24,14 +24,16 @@ use std::{
         HashMap, HashSet,
     },
     convert::AsRef,
+    hash::Hash,
     iter::{self, FromIterator},
     net::SocketAddr,
+    sync::Arc,
 };
 
 lazy_static! {
-    static ref SPN_POOL: Pool<FxHashMap<SocketAddr, Chars>> = Pool::new(256, 100);
-    static ref BY_ADDR_POOL: Pool<FxHashMap<SocketAddr, Bytes>> = Pool::new(256, 100);
-    static ref SIGNED_ADDRS_POOL: Pool<Vec<(SocketAddr, Bytes)>> = Pool::new(256, 100);
+    static ref SIGNED_PUBS_POOL: Pool<Vec<PublisherRef>> = Pool::new(256, 100);
+    static ref BY_ID_POOL: Pool<FxHashMap<PublisherId, PublisherRef>> =
+        Pool::new(256, 100);
     pub(crate) static ref PATH_POOL: Pool<Vec<Path>> = Pool::new(256, 10000);
     pub(crate) static ref COLS_POOL: Pool<Vec<(Path, Z64)>> = Pool::new(256, 10000);
     pub(crate) static ref REF_POOL: Pool<Vec<Referral>> = Pool::new(256, 100);
@@ -42,22 +44,21 @@ pub(crate) const MAX_WRITE_BATCH: usize = 100_000;
 pub(crate) const MAX_READ_BATCH: usize = 1_000_000;
 pub(crate) const GC_THRESHOLD: usize = 100_000;
 
-// We hashcons the address sets. On average, a publisher should publish many paths.
-// for each published value we only store the path once, since it's an Arc<str>,
-// and a pointer to the set of addresses it is published by.
+// We hashcons the address sets because on average a publisher should
+// publish many paths.
 #[derive(Debug)]
-struct HCAddrs {
+struct HCSet<T: 'static + Ord + Clone + Hash> {
     ops: usize,
-    addrs: FxHashMap<Set<Addr>, ()>,
+    sets: FxHashMap<Set<T>, ()>,
 }
 
-impl HCAddrs {
-    fn new() -> HCAddrs {
-        HCAddrs { ops: 0, addrs: HashMap::with_hasher(FxBuildHasher::default()) }
+impl<T: 'static + Ord + Clone + Hash> HCSet<T> {
+    fn new() -> Self {
+        Self { ops: 0, sets: HashMap::default() }
     }
 
-    fn hashcons(&mut self, set: Set<Addr>) -> Set<Addr> {
-        let new = match self.addrs.entry(set) {
+    fn hashcons(&mut self, set: Set<T>) -> Set<T> {
+        let new = match self.sets.entry(set) {
             Entry::Occupied(e) => e.key().clone(),
             Entry::Vacant(e) => {
                 let r = e.key().clone();
@@ -72,8 +73,8 @@ impl HCAddrs {
         new
     }
 
-    fn add_address(&mut self, current: &Set<Addr>, addr: Addr) -> Set<Addr> {
-        let (new, existed) = current.insert(addr);
+    fn add(&mut self, current: &Set<T>, v: T) -> Set<T> {
+        let (new, existed) = current.insert(v);
         if existed {
             new
         } else {
@@ -81,8 +82,8 @@ impl HCAddrs {
         }
     }
 
-    fn remove_address(&mut self, current: &Set<Addr>, addr: &Addr) -> Option<Set<Addr>> {
-        let (new, _) = current.remove(addr);
+    fn remove(&mut self, current: &Set<T>, v: &T) -> Option<Set<T>> {
+        let (new, _) = current.remove(v);
         if new.len() == 0 {
             None
         } else {
@@ -92,7 +93,7 @@ impl HCAddrs {
 
     fn gc(&mut self) {
         self.ops = 0;
-        self.addrs.retain(|s, ()| s.strong_count() > 1)
+        self.sets.retain(|s, ()| s.strong_count() > 1)
     }
 }
 
@@ -104,15 +105,17 @@ fn column_path_parts<S: AsRef<str>>(path: &S) -> Option<(&str, &str)> {
 
 #[derive(Debug)]
 pub(crate) struct Store {
-    by_path: HashMap<Path, Set<Addr>>,
-    by_path_flags: HashMap<Path, u16>,
-    by_addr: FxHashMap<SocketAddr, HashSet<Path>>,
-    by_level: FxHashMap<usize, BTreeMap<Path, Z64>>,
+    publishers_by_id: FxHashMap<PublisherId, Arc<Publisher>>,
+    publishers_by_addr: FxHashMap<SocketAddr, PublisherId>,
+    published_by_path: HashMap<Path, Set<PublisherId>>,
+    flags_by_path: HashMap<Path, u32>,
+    published_by_id: FxHashMap<PublisherId, HashSet<Path>>,
+    published_by_level: FxHashMap<usize, BTreeMap<Path, Z64>>,
     columns: HashMap<Path, HashMap<Path, Z64>>,
     defaults: BTreeSet<Path>,
     parent: Option<Referral>,
     children: BTreeMap<Path, Referral>,
-    addrs: HCAddrs,
+    sets: HCSet<PublisherId>,
 }
 
 impl Store {
@@ -121,15 +124,17 @@ impl Store {
         children: BTreeMap<Path, Referral>,
     ) -> Self {
         let mut t = Store {
-            by_path: HashMap::new(),
-            by_path_flags: HashMap::new(),
-            by_addr: HashMap::with_hasher(FxBuildHasher::default()),
-            by_level: HashMap::with_hasher(FxBuildHasher::default()),
+            publishers_by_id: HashMap::default(),
+            publishers_by_addr: HashMap::default(),
+            published_by_path: HashMap::default(),
+            flags_by_path: HashMap::default(),
+            published_by_id: HashMap::default(),
+            published_by_level: HashMap::default(),
             columns: HashMap::new(),
             defaults: BTreeSet::new(),
             parent,
             children,
-            addrs: HCAddrs::new(),
+            sets: HCSet::new(),
         };
         let children = t.children.keys().cloned().collect::<Vec<_>>();
         for child in children {
@@ -149,10 +154,10 @@ impl Store {
             let n = Path::levels(p);
             if !save {
                 save = p == "/"
-                    || self.by_path.contains_key(p)
+                    || self.published_by_path.contains_key(p)
                     || self.children.contains_key(p)
                     || self
-                        .by_level
+                        .published_by_level
                         .get(&(n + 1))
                         .map(|l| {
                             let mut r = l.range::<str, (Bound<&str>, Bound<&str>)>((
@@ -164,12 +169,12 @@ impl Store {
                         .unwrap_or(false);
             }
             if save {
-                let m = self.by_level.entry(n).or_insert_with(BTreeMap::new);
+                let m = self.published_by_level.entry(n).or_insert_with(BTreeMap::new);
                 if let Some(cn) = m.get_mut(p) {
                     **cn += 1;
                 }
             } else {
-                self.by_level.get_mut(&n).into_iter().for_each(|l| {
+                self.published_by_level.get_mut(&n).into_iter().for_each(|l| {
                     l.remove(p);
                 })
             }
@@ -184,7 +189,7 @@ impl Store {
         loop {
             p = Path::dirname(p).unwrap_or("/");
             let n = Path::levels(p);
-            let l = self.by_level.entry(n).or_insert_with(BTreeMap::new);
+            let l = self.published_by_level.entry(n).or_insert_with(BTreeMap::new);
             match l.get_mut(p) {
                 Some(cn) => {
                     **cn += 1;
@@ -206,7 +211,6 @@ impl Store {
                     path: Path::from("/"),
                     ttl: r.ttl,
                     addrs: r.addrs.clone(),
-                    krb5_spns: r.krb5_spns.clone(),
                 });
             }
         }
@@ -237,7 +241,6 @@ impl Store {
                     path: Path::from("/"),
                     ttl: r.ttl,
                     addrs: r.addrs.clone(),
-                    krb5_spns: r.krb5_spns.clone(),
                 });
             }
         }
@@ -301,62 +304,74 @@ impl Store {
     pub(crate) fn publish(
         &mut self,
         path: Path,
-        addr: SocketAddr,
+        publisher: &Arc<Publisher>,
         default: bool,
         flags: Option<u16>,
     ) {
-        self.by_addr.entry(addr).or_insert_with(HashSet::new).insert(path.clone());
-        let addrs = self.by_path.entry(path.clone()).or_insert_with(Set::new);
-        let len = addrs.len();
-        *addrs = self.addrs.add_address(addrs, Addr(addr));
+        let publisher = self.publishers_by_id.entry(publisher.id).or_insert_with(|| {
+            let p = publisher.clone();
+            self.publishers_by_addr.insert(publisher.addr, publisher.id);
+            p
+        });
+        self.published_by_id
+            .entry(publisher.id)
+            .or_insert_with(HashSet::new)
+            .insert(path.clone());
+        let pubs = self.published_by_path.entry(path.clone()).or_insert_with(Set::new);
+        let len = pubs.len();
+        *pubs = self.sets.add(pubs, publisher.id);
         if let Some(flags) = flags {
-            self.by_path_flags.insert(path.clone(), flags);
+            self.flags_by_path.insert(path.clone(), flags);
         }
         if default {
             self.defaults.insert(path.clone());
         }
-        if addrs.len() > len {
+        if pubs.len() > len {
             self.add_column(&path);
             self.add_parents(path.as_ref());
             let n = Path::levels(path.as_ref());
-            self.by_level
+            // CR estokes: wrong? Shouldn't it increment if the path
+            // is already present?
+            self.published_by_level
                 .entry(n)
                 .or_insert_with(BTreeMap::new)
                 .insert(path.clone(), Z64(1));
         }
     }
 
-    pub(crate) fn unpublish(&mut self, path: Path, addr: SocketAddr) {
+    pub(crate) fn unpublish(&mut self, publisher: &Arc<Publisher>, path: Path) {
         let client_gone = self
-            .by_addr
-            .get_mut(&addr)
+            .published_by_id
+            .get_mut(&publisher.id)
             .map(|s| {
                 s.remove(&path);
                 s.is_empty()
             })
             .unwrap_or(true);
         if client_gone {
-            self.by_addr.remove(&addr);
+            self.published_by_id.remove(&publisher.id);
+            self.publishers_by_id.remove(&publisher.id);
+            self.publishers_by_addr.remove(&publisher.addr);
         }
-        match self.by_path.get_mut(&path) {
+        match self.published_by_path.get_mut(&path) {
             None => (),
-            Some(addrs) => {
-                let len = addrs.len();
+            Some(pubs) => {
+                let len = pubs.len();
                 let n = Path::levels(path.as_ref());
-                match self.addrs.remove_address(addrs, &Addr(addr)) {
-                    Some(new_addrs) => {
-                        *addrs = new_addrs;
-                        if addrs.len() < len {
+                match self.sets.remove(pubs, &publisher.id) {
+                    Some(new_pubs) => {
+                        *pubs = new_pubs;
+                        if pubs.len() < len {
                             self.remove_column(&path);
                             self.remove_parents(path.as_ref());
                         }
                     }
                     None => {
-                        self.by_path.remove(&path);
-                        self.by_path_flags.remove(&path);
+                        self.published_by_path.remove(&path);
+                        self.flags_by_path.remove(&path);
                         self.defaults.remove(&path);
                         self.remove_column(&path);
-                        self.by_level.get_mut(&n).into_iter().for_each(|s| {
+                        self.published_by_level.get_mut(&n).into_iter().for_each(|s| {
                             s.remove(&path);
                         });
                         self.remove_parents(path.as_ref());
@@ -366,24 +381,33 @@ impl Store {
         }
     }
 
-    pub(crate) fn published_for_addr(&self, addr: &SocketAddr) -> HashSet<Path> {
-        match self.by_addr.get(addr) {
-            None => HashSet::new(),
-            Some(paths) => paths.clone(),
+    pub(crate) fn published_for_id(&self, id: &PublisherId) -> HashSet<Path> {
+        self.published_by_id.get(id).map(|s| s.clone()).unwrap_or_else(HashSet::new)
+    }
+
+    pub(crate) fn clear(&mut self, publisher: &Arc<Publisher>) {
+        for path in self.published_for_id(&publisher.id).drain() {
+            self.unpublish(publisher, path);
         }
     }
 
-    pub(crate) fn clear(&mut self, addr: &SocketAddr) {
-        for path in self.published_for_addr(addr).drain() {
-            self.unpublish(path, *addr);
-        }
+    fn get_flags(&self, path: &str) -> u32 {
+        self.flags_by_path.get(path).copied().unwrap_or(0)
     }
 
-    fn get_flags(&self, path: &str) -> u16 {
-        self.by_path_flags.get(path).copied().unwrap_or(0)
+    fn record_publisher(
+        &self,
+        publishers: &mut FxHashMap<PublisherId, Publisher>,
+        id: &PublisherId,
+    ) {
+        publishers.entry(*id).or_insert_with(|| (*self.publishers_by_id[id]).clone());
     }
 
-    fn resolve_default(&self, path: &Path) -> (u16, Pooled<Vec<(SocketAddr, Bytes)>>) {
+    fn resolve_default(
+        &self,
+        publishers: &mut FxHashMap<PublisherId, Publisher>,
+        path: &Path,
+    ) -> (u32, Pooled<Vec<PublisherRef>>) {
         let default = self
             .defaults
             .range::<str, (Bound<&str>, Bound<&str>)>((
@@ -392,105 +416,105 @@ impl Store {
             ))
             .next_back();
         match default {
-            None => (0, SIGNED_ADDRS_POOL.take()),
-            Some(p) if Path::is_parent(p, path) => match self.by_path.get(p.as_ref()) {
-                None => (0, SIGNED_ADDRS_POOL.take()),
-                Some(a) => {
-                    let mut addrs = SIGNED_ADDRS_POOL.take();
-                    addrs.extend(a.into_iter().map(|a| (a.0, Bytes::new())));
-                    (self.get_flags(p.as_ref()), addrs)
+            None => (0, SIGNED_PUBS_POOL.take()),
+            Some(p) if Path::is_parent(p, path) => {
+                match self.published_by_path.get(p.as_ref()) {
+                    None => (0, SIGNED_PUBS_POOL.take()),
+                    Some(ids) => {
+                        let mut pubs = SIGNED_PUBS_POOL.take();
+                        let refs = ids.into_iter().map(|id| {
+                            self.record_publisher(publishers, id);
+                            PublisherRef { id: *id, token: Bytes::new() }
+                        });
+                        pubs.extend(refs);
+                        (self.get_flags(p.as_ref()), pubs)
+                    }
                 }
-            },
-            Some(_) => (0, SIGNED_ADDRS_POOL.take()),
+            }
+            Some(_) => (0, SIGNED_PUBS_POOL.take()),
         }
     }
 
-    pub(crate) fn resolve(&self, path: &Path) -> (u16, Pooled<Vec<(SocketAddr, Bytes)>>) {
-        let (flags, mut addrs) = self.resolve_default(path);
-        if addrs.len() == 0 {
-            match self.by_path.get(path.as_ref()) {
-                None => (flags, addrs),
-                Some(a) => {
-                    addrs.extend(a.into_iter().map(|a| (a.0, Bytes::new())));
-                    (self.get_flags(path.as_ref()), addrs)
-                }
-            }
-        } else {
-            let mut by_addr = BY_ADDR_POOL.take();
-            by_addr.extend(addrs.drain(..));
-            let flags = match self.by_path.get(path.as_ref()) {
-                None => flags,
-                Some(a) => {
-                    by_addr.extend(a.into_iter().map(|a| (a.0, Bytes::new())));
+    pub(crate) fn resolve(
+        &self,
+        publishers: &mut FxHashMap<PublisherId, Publisher>,
+        path: &Path,
+    ) -> (u32, Pooled<Vec<PublisherRef>>) {
+        let (flags, mut pubs) = self.resolve_default(publishers, path);
+        let flags = match self.published_by_path.get(path.as_ref()) {
+            None => flags,
+            Some(ids) => {
+                if pubs.len() == 0 {
+                    pubs.extend(ids.into_iter().map(|id| {
+                        self.record_publisher(publishers, id);
+                        PublisherRef { id: *id, token: Bytes::new() }
+                    }));
+                    self.get_flags(path.as_ref())
+                } else {
+                    let mut by_id = BY_ID_POOL.take();
+                    by_id.extend(pubs.drain(..).map(|r| (r.id, r)));
+                    by_id.extend(ids.into_iter().map(|id| {
+                        self.record_publisher(publishers, id);
+                        (*id, PublisherRef { id: *id, token: Bytes::new() })
+                    }));
+                    pubs.extend(by_id.drain().map(|(_, r)| r));
                     self.get_flags(path.as_ref())
                 }
-            };
-            addrs.extend(by_addr.drain());
-            (flags, addrs)
-        }
+            }
+        };
+        (flags, pubs)
     }
 
     pub(crate) fn resolve_and_sign(
         &self,
+        publishers: &mut FxHashMap<PublisherId, Publisher>,
         sec: &SecCtxDataReadGuard,
         now: u64,
         perm: Permissions,
         path: &Path,
-    ) -> (u16, Pooled<FxHashMap<SocketAddr, Chars>>, Pooled<Vec<(SocketAddr, Bytes)>>)
-    {
-        let mut krb5_spns = SPN_POOL.take();
-        let mut sign_addr = |addr: &SocketAddr| {
+    ) -> (u32, Pooled<Vec<PublisherRef>>) {
+        let sign = |id: PublisherId| {
             let secret = match sec {
                 SecCtxDataReadGuard::Anonymous => None,
-                SecCtxDataReadGuard::Local(sec) => sec.get_local(addr),
-                SecCtxDataReadGuard::Krb5(sec) => {
-                    sec.get_k5_full(addr).map(|(spn, secret, _)| {
-                        if !krb5_spns.contains_key(addr) {
-                            krb5_spns.insert(*addr, spn.clone());
-                        }
-                        *secret
-                    })
-                }
+                SecCtxDataReadGuard::Local(sec) => sec.get_secret_by_id(&id),
+                SecCtxDataReadGuard::Krb5(sec) => sec.get_secret_by_id(&id),
             };
             match secret {
-                None => (*addr, Bytes::new()),
-                Some(secret) => (
-                    *addr,
-                    utils::make_sha3_token(
-                        None,
-                        &[
-                            &secret.to_be_bytes(),
-                            &now.to_be_bytes(),
-                            &(perm.bits() as u32).to_be_bytes(),
-                            path.as_bytes(),
-                        ],
-                    ),
-                ),
+                None => PublisherRef { id, token: Bytes::new() },
+                Some(secret) => PublisherRef {
+                    id,
+                    token: utils::make_sha3_token(&[
+                        &secret.to_be_bytes(),
+                        &now.to_be_bytes(),
+                        &perm.bits().to_be_bytes(),
+                        path.as_bytes(),
+                    ]),
+                },
             }
         };
-        let (flags, mut addrs) = self.resolve_default(path);
-        let flags = if addrs.len() == 0 {
-            match self.by_path.get(&*path) {
-                None => flags,
-                Some(a) => {
-                    addrs.extend(a.into_iter().map(|a| sign_addr(&a.0)));
+        let (flags, mut pubs) = self.resolve_default(publishers, path);
+        let flags = match self.published_by_path.get(&*path) {
+            None => flags,
+            Some(ids) => {
+                if pubs.len() == 0 {
+                    pubs.extend(ids.into_iter().map(|id| {
+                        self.record_publisher(publishers, id);
+                        sign(*id)
+                    }));
+                    self.get_flags(&*path)
+                } else {
+                    let mut by_id = BY_ID_POOL.take();
+                    by_id.extend(pubs.drain(..).map(|r| (r.id, r)));
+                    by_id.extend(ids.into_iter().map(|id| {
+                        self.record_publisher(publishers, id);
+                        (*id, sign(*id))
+                    }));
+                    pubs.extend(by_id.drain().map(|(_, r)| r));
                     self.get_flags(&*path)
                 }
             }
-        } else {
-            let mut by_addr = BY_ADDR_POOL.take();
-            by_addr.extend(addrs.drain(..).map(|(a, _)| sign_addr(&a)));
-            let flags = match self.by_path.get(&*path) {
-                None => flags,
-                Some(a) => {
-                    by_addr.extend(a.into_iter().map(|a| sign_addr(&a.0)));
-                    self.get_flags(&*path)
-                }
-            };
-            addrs.extend(by_addr.drain());
-            flags
         };
-        (flags, krb5_spns, addrs)
+        (flags, pubs)
     }
 
     pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
