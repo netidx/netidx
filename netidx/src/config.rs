@@ -1,8 +1,6 @@
-use crate::{
-    chars::Chars, path::Path, pool::Pooled, protocol::resolver::Referral, utils,
-};
+pub use crate::protocol::resolver::{Auth, Referral};
+use crate::{chars::Chars, path::Path, pool::Pooled, utils};
 use anyhow::Result;
-use fxhash::FxBuildHasher;
 use log::debug;
 use serde_json::from_str;
 use std::{
@@ -23,90 +21,31 @@ use std::{
     time::Duration,
 };
 
-/// The type of authentication used by a resolver server or publisher
-#[derive(Debug, Clone)]
-pub enum Auth {
-    Anonymous,
-    Krb5(Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>),
-    Local(String),
-}
-
-/// A description of a resolver server
-#[derive(Debug, Clone)]
-pub struct Server {
-    pub path: Path,
-    pub ttl: u64,
-    pub addrs: Pooled<Vec<SocketAddr>>,
-    pub auth: Auth,
-}
-
-impl Hash for Server {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        Hash::hash(&self.addrs, state)
-    }
-}
-
-impl PartialEq for Server {
-    fn eq(&self, other: &Server) -> bool {
-        self.addrs == other.addrs
-    }
-}
-
-impl Eq for Server {}
-
-impl Into<Referral> for Server {
-    fn into(self) -> Referral {
-        Referral {
-            path: self.path,
-            ttl: self.ttl,
-            addrs: self.addrs,
-            krb5_spns: match self.auth {
-                Auth::Anonymous | Auth::Local(_) => Pooled::orphan(HashMap::default()),
-                Auth::Krb5(spns) => spns,
-            },
-        }
-    }
-}
-
-impl From<Referral> for Server {
-    fn from(r: Referral) -> Server {
-        Server {
-            path: r.path,
-            ttl: r.ttl,
-            addrs: r.addrs,
-            auth: {
-                if r.krb5_spns.is_empty() {
-                    Auth::Anonymous
-                } else {
-                    Auth::Krb5(r.krb5_spns)
-                }
-            },
-        }
-    }
-}
-
-impl From<client::Config> for Server {
-    fn from(c: client::Config) -> Server {
-        Server {
-            path: c.base,
-            ttl: u32::MAX as u64,
-            addrs: Pooled::orphan(c.addrs),
-            auth: c.auth.into(),
-        }
-    }
-}
-
-fn check_addrs(a: &Vec<SocketAddr>) -> Result<()> {
+fn check_addrs(a: &Vec<(SocketAddr, server::file::Auth)>) -> Result<()> {
+    use server::file::Auth;
     if a.is_empty() {
         bail!("empty addrs")
     }
-    for addr in a {
+    for (addr, auth) in a {
         utils::check_addr(addr.ip(), &[])?;
         if cfg!(not(test)) && addr.port() == 0 {
             bail!("non zero port required {:?}", addr);
         }
+        match auth {
+            Auth::Anonymous => (),
+            Auth::Local(_) if !addr.ip().is_loopback() => {
+                bail!("local auth is not allowed for a network server")
+            }
+            Auth::Local(_) => (),
+            Auth::Krb5(spn) => {
+                if spn.is_empty() {
+                    bail!("spn is required in krb5 mode")
+                }
+            }
+        }
     }
-    if !a.iter().all(|a| a.ip().is_loopback()) && !a.iter().all(|a| !a.ip().is_loopback())
+    if !a.iter().all(|(a, _)| a.ip().is_loopback())
+        && !a.iter().all(|(a, _)| !a.ip().is_loopback())
     {
         bail!("can't mix loopback addrs with non loopback addrs")
     }
@@ -152,94 +91,72 @@ pub mod server {
         use super::PMap;
         use crate::{chars::Chars, path::Path, pool::Pooled};
         use anyhow::Result;
-        use std::{collections::HashMap, net::SocketAddr};
+        use std::net::SocketAddr;
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(crate) enum Auth {
             Anonymous,
-            Krb5(HashMap<SocketAddr, String>),
+            Krb5(String),
             Local(String),
         }
 
         impl Into<super::Auth> for Auth {
             fn into(self) -> super::Auth {
                 match self {
-                    Auth::Anonymous => super::Auth::Anonymous,
-                    Auth::Local(s) => super::Auth::Local(s),
-                    Auth::Krb5(spns) => super::Auth::Krb5(Pooled::orphan(
-                        spns.into_iter().map(|(a, s)| (a, Chars::from(s))).collect(),
-                    )),
+                    Self::Anonymous => super::Auth::Anonymous,
+                    Self::Local(path) => super::Auth::Local { path: Chars::from(path) },
+                    Self::Krb5(spn) => super::Auth::Krb5 { spn: Chars::from(spn) },
                 }
             }
         }
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
-        pub(super) struct Server {
+        pub(super) struct Referral {
             path: String,
             ttl: u64,
-            addrs: Vec<SocketAddr>,
-            auth: Auth,
+            addrs: Vec<(SocketAddr, Auth)>,
         }
 
-        impl Server {
+        impl Referral {
             pub(super) fn check(
                 self,
-                us: Option<&Vec<SocketAddr>>,
-            ) -> Result<super::Server> {
+                us: Option<&Vec<(SocketAddr, Auth)>>,
+            ) -> Result<super::Referral> {
                 let path = Path::from(self.path);
                 if !Path::is_absolute(&path) {
                     bail!("absolute server path is required")
                 }
                 check_addrs(&self.addrs)?;
-                match &self.auth {
-                    Auth::Anonymous => (),
-                    Auth::Local(_) if !self.addrs[0].ip().is_loopback() => {
-                        bail!("local auth is not allowed for a network server")
-                    }
-                    Auth::Local(_) => (),
-                    Auth::Krb5(spns) => {
-                        if spns.is_empty() {
-                            bail!("at least one SPN is required in krb5 mode")
-                        }
-                        for a in &self.addrs {
-                            if !spns.contains_key(a) {
-                                bail!("spn for server {:?} is required", a)
-                            }
-                        }
-                        if spns.len() > self.addrs.len() {
-                            bail!("there should be exactly 1 spn for each server address")
-                        }
-                    }
-                }
                 if self.ttl == 0 {
                     bail!("ttl must be non zero");
                 }
                 if let Some(us) = us {
-                    for a in us {
-                        if self.addrs.contains(a) {
+                    for (a, _) in us {
+                        if self.addrs.iter().any(|(s, _)| s == a) {
                             bail!("server may not be it's own parent");
                         }
                     }
                 }
-                Ok(super::Server {
+                Ok(super::Referral {
                     path,
                     ttl: self.ttl,
-                    addrs: Pooled::orphan(self.addrs),
-                    auth: self.auth.into(),
+                    addrs: Pooled::orphan(
+                        self.addrs.into_iter().map(|(s, a)| (s, a.into())).collect(),
+                    ),
                 })
             }
         }
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
-            pub(super) parent: Option<Server>,
-            pub(super) children: Vec<Server>,
+            pub(super) parent: Option<Referral>,
+            pub(super) children: Vec<Referral>,
             pub(super) pid_file: String,
             pub(super) max_connections: usize,
             pub(super) reader_ttl: u64,
             pub(super) writer_ttl: u64,
             pub(super) hello_timeout: u64,
-            pub(super) addrs: Vec<SocketAddr>,
+            pub(super) addr: SocketAddr,
             pub(super) auth: Auth,
             pub(super) perms: PMap,
         }
@@ -247,14 +164,14 @@ pub mod server {
 
     #[derive(Debug, Clone)]
     pub struct Config {
-        pub parent: Option<Server>,
-        pub children: BTreeMap<Path, Server>,
+        pub parent: Option<Referral>,
+        pub children: BTreeMap<Path, Referral>,
         pub pid_file: String,
         pub max_connections: usize,
         pub reader_ttl: Duration,
         pub writer_ttl: Duration,
         pub hello_timeout: Duration,
-        pub addrs: Vec<SocketAddr>,
+        pub addr: SocketAddr,
         pub auth: Auth,
         pub perms: PMap,
     }
@@ -262,8 +179,8 @@ pub mod server {
     impl Config {
         pub fn parse(s: &str) -> Result<Config> {
             let cfg: file::Config = from_str(s)?;
-            check_addrs(&cfg.addrs)?;
-            let addrs = cfg.addrs;
+            let addrs = vec![(cfg.addr, cfg.auth.clone())];
+            check_addrs(&addrs)?;
             let parent = cfg.parent.map(|r| r.check(Some(&addrs))).transpose()?;
             let children = {
                 let root = parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/");
@@ -274,7 +191,7 @@ pub mod server {
                         let r = r.check(Some(&addrs))?;
                         Ok((r.path.clone(), r))
                     })
-                    .collect::<Result<BTreeMap<Path, Server>>>()?;
+                    .collect::<Result<BTreeMap<Path, Referral>>>()?;
                 for (p, r) in children.iter() {
                     if !p.starts_with(&*root) {
                         bail!("child paths much be under the root path {}", p)
@@ -301,11 +218,11 @@ pub mod server {
                 parent,
                 children,
                 pid_file: cfg.pid_file,
-                addrs,
                 max_connections: cfg.max_connections,
                 reader_ttl: Duration::from_secs(cfg.reader_ttl),
                 writer_ttl: Duration::from_secs(cfg.writer_ttl),
                 hello_timeout: Duration::from_secs(cfg.hello_timeout),
+                addr: cfg.addr,
                 auth: cfg.auth.into(),
                 perms: cfg.perms,
             })
@@ -336,16 +253,14 @@ pub mod client {
         #[derive(Debug, Clone, Serialize, Deserialize)]
         pub(super) struct Config {
             pub(super) base: String,
-            pub(super) addrs: Vec<SocketAddr>,
-            pub(super) auth: Auth,
+            pub(super) addrs: Vec<(SocketAddr, Auth)>,
         }
     }
 
     #[derive(Debug, Clone)]
     pub struct Config {
         pub base: Path,
-        pub addrs: Vec<SocketAddr>,
-        pub auth: Auth,
+        pub addrs: Vec<(SocketAddr, Auth)>,
     }
 
     impl Config {
@@ -354,32 +269,39 @@ pub mod client {
             if cfg.addrs.is_empty() {
                 bail!("you must specify at least one address");
             }
-            for addr in &cfg.addrs {
+            for (addr, auth) in &cfg.addrs {
                 utils::check_addr(addr.ip(), &[])?;
-            }
-            if !cfg.addrs.iter().all(|a| a.ip().is_loopback())
-                && !cfg.addrs.iter().all(|a| !a.ip().is_loopback())
-            {
-                bail!("can't mix loopback addrs with non loopback addrs")
-            }
-            match &cfg.auth {
-                server::file::Auth::Anonymous | server::file::Auth::Krb5(_) => (),
-                server::file::Auth::Local(_) => {
-                    if !cfg.addrs[0].ip().is_loopback() {
-                        bail!("local auth is not allowed for remote servers")
+                match auth {
+                    server::file::Auth::Anonymous | server::file::Auth::Krb5(_) => (),
+                    server::file::Auth::Local(_) => {
+                        if !addr.ip().is_loopback() {
+                            bail!("local auth is not allowed for remote servers")
+                        }
                     }
                 }
             }
+            if !cfg.addrs.iter().all(|(a, _)| a.ip().is_loopback())
+                && !cfg.addrs.iter().all(|(a, _)| !a.ip().is_loopback())
+            {
+                bail!("can't mix loopback addrs with non loopback addrs")
+            }
             Ok(Config {
                 base: Path::from(cfg.base),
-                addrs: cfg.addrs,
-                auth: cfg.auth.into(),
+                addrs: cfg.addrs.into_iter().map(|(s, a)| (s, a.into())).collect(),
             })
         }
 
         /// Load the cluster config from the specified file.
         pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
             Config::parse(&read_to_string(file)?)
+        }
+
+        pub fn to_referral(self) -> Referral {
+            Referral {
+                path: self.base,
+                ttl: u32::MAX as u64,
+                addrs: Pooled::orphan(self.addrs),
+            }
         }
 
         /// This will try in order,

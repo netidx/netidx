@@ -3,13 +3,13 @@ use bytes::{Buf, BufMut, Bytes};
 use fxhash::FxBuildHasher;
 use netidx_core::{
     chars::Chars,
-    pack::{Pack, PackError, Z64},
+    pack::{self, Pack, PackError, Z64},
     path::Path,
     pool::Pooled,
 };
 use std::{
     cmp::{Eq, PartialEq},
-    collections::HashMap,
+    collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     net::SocketAddr,
     result,
@@ -339,31 +339,31 @@ impl Pack for ToRead {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TargetAuth {
+pub enum Auth {
     Anonymous,
-    Local(Chars),
-    Krb5(Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>),
+    Local { path: Chars },
+    Krb5 { spn: Chars },
 }
 
-impl Pack for TargetAuth {
+impl Pack for Auth {
     fn encoded_len(&self) -> usize {
         1 + match self {
             Self::Anonymous => 0,
-            Self::Local(path) => Pack::encoded_len(path),
-            Self::Krb5(spns) => Pack::encoded_len(spns),
+            Self::Local { path } => Pack::encoded_len(path),
+            Self::Krb5 { spn } => Pack::encoded_len(spn),
         }
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
             Self::Anonymous => Ok(buf.put_u8(0)),
-            Self::Local(path) => {
+            Self::Local { path } => {
                 buf.put_u8(1);
                 Pack::encode(path, buf)
             }
-            Self::Krb5(spns) => {
+            Self::Krb5 { spn } => {
                 buf.put_u8(2);
-                Pack::encode(spns, buf)
+                Pack::encode(spn, buf)
             }
         }
     }
@@ -371,62 +371,117 @@ impl Pack for TargetAuth {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
             0 => Ok(Self::Anonymous),
-            1 => Ok(Self::Local(Pack::decode(buf)?)),
-            2 => Ok(Self::Krb5(Pack::decode(buf)?)),
+            1 => Ok(Self::Local { path: Pack::decode(buf)? }),
+            2 => Ok(Self::Krb5 { spn: Pack::decode(buf)? }),
             _ => Err(Error::UnknownTag),
         }
     }
 }
 
+atomic_id!(PublisherId);
+
+impl Pack for PublisherId {
+    fn encoded_len(&self) -> usize {
+        pack::varint_len(self.0)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        Ok(pack::encode_varint(self.0, buf))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        Ok(Self(pack::decode_varint(buf)?))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Publisher {
+    pub id: PublisherId,
+    pub addr: SocketAddr,
+    pub hash_method: HashMethod,
+    pub target_auth: Auth,
+}
+
+impl Pack for Publisher {
+    fn encoded_len(&self) -> usize {
+        Pack::encoded_len(&self.id)
+            + Pack::encoded_len(&self.addr)
+            + Pack::encoded_len(&self.hash_method)
+            + Pack::encoded_len(&self.target_auth)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        Pack::encode(&self.id, buf)?;
+        Pack::encode(&self.addr, buf)?;
+        Pack::encode(&self.hash_method, buf)?;
+        Pack::encode(&self.target_auth, buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        let id = Pack::decode(buf)?;
+        let addr = Pack::decode(buf)?;
+        let hash_method = Pack::decode(buf)?;
+        let target_auth = Pack::decode(buf)?;
+        Ok(Publisher { id, addr, hash_method, target_auth })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublisherRef {
+    id: PublisherId,
+    token: Bytes,
+}
+
+impl Pack for PublisherRef {
+    fn encoded_len(&self) -> usize {
+        Pack::encoded_len(&self.id) + Pack::encoded_len(&self.token)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        Pack::encode(&self.id, buf)?;
+        Pack::encode(&self.token, buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        let id = Pack::decode(buf)?;
+        let token = Pack::decode(buf)?;
+        Ok(PublisherRef { id, token })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
-    pub hash_method: HashMethod,
-    pub target_auth: TargetAuth,
     pub resolver: SocketAddr,
-    pub addrs: Pooled<Vec<(SocketAddr, Bytes)>>,
+    pub publishers: Pooled<Vec<PublisherRef>>,
     pub timestamp: u64,
-    pub flags: u16,
-    pub permissions: u16,
+    pub flags: u32,
+    pub permissions: u32,
 }
 
 impl Pack for Resolved {
     fn encoded_len(&self) -> usize {
-        Pack::encoded_len(&self.hash_method)
-            + Pack::encoded_len(&self.target_auth)
-            + Pack::encoded_len(&self.resolver)
-            + Pack::encoded_len(&self.addrs)
+        Pack::encoded_len(&self.resolver)
+            + Pack::encoded_len(&self.publishers)
             + Pack::encoded_len(&self.timestamp)
             + Pack::encoded_len(&self.flags)
             + Pack::encoded_len(&self.permissions)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        Pack::encode(&self.hash_method, buf)?;
-        Pack::encode(&self.target_auth, buf)?;
         Pack::encode(&self.resolver, buf)?;
-        Pack::encode(&self.addrs, buf)?;
+        Pack::encode(&self.publishers, buf)?;
         Pack::encode(&self.timestamp, buf)?;
         Pack::encode(&self.flags, buf)?;
         Pack::encode(&self.permissions, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        let hash_method = Pack::decode(buf)?;
-        let target_auth = Pack::decode(buf)?;
         let resolver = Pack::decode(buf)?;
-        let addrs = Pack::decode(buf)?;
+        let publishers = Pack::decode(buf)?;
         let timestamp = Pack::decode(buf)?;
         let flags = Pack::decode(buf)?;
         let permissions = Pack::decode(buf)?;
-        Ok(Resolved {
-            hash_method,
-            target_auth,
-            resolver,
-            addrs,
-            timestamp,
-            permissions,
-            flags,
-        })
+        Ok(Resolved { resolver, publishers, timestamp, permissions, flags })
     }
 }
 
@@ -434,19 +489,20 @@ impl Pack for Resolved {
 pub struct Referral {
     pub path: Path,
     pub ttl: u64,
-    pub addrs: Pooled<Vec<SocketAddr>>,
-    pub target_auth: TargetAuth,
+    pub addrs: Pooled<Vec<(SocketAddr, Auth)>>,
 }
 
 impl Hash for Referral {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        Hash::hash(&self.addrs, state)
+        for (addr, _) in &*self.addrs {
+            Hash::hash(&addr, state)
+        }
     }
 }
 
 impl PartialEq for Referral {
     fn eq(&self, other: &Referral) -> bool {
-        self.addrs == other.addrs
+        self.addrs.iter().zip(other.addrs.iter()).all(|(l, r)| l == r)
     }
 }
 
@@ -457,22 +513,19 @@ impl Pack for Referral {
         Pack::encoded_len(&self.path)
             + Pack::encoded_len(&self.ttl)
             + Pack::encoded_len(&self.addrs)
-            + Pack::encoded_len(&self.target_auth)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         Pack::encode(&self.path, buf)?;
         Pack::encode(&self.ttl, buf)?;
-        Pack::encode(&self.addrs, buf)?;
-        Pack::encode(&self.target_auth, buf)
+        Pack::encode(&self.addrs, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         let path = Pack::decode(buf)?;
         let ttl = Pack::decode(buf)?;
         let addrs = Pack::decode(buf)?;
-        let target_auth = Pack::decode(buf)?;
-        Ok(Referral { path, ttl, addrs, target_auth })
+        Ok(Referral { path, ttl, addrs })
     }
 }
 
@@ -552,6 +605,7 @@ impl Pack for GetChangeNr {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FromRead {
+    Publisher(Publisher),
     Resolved(Resolved),
     List(Pooled<Vec<Path>>),
     ListMatching(ListMatching),
@@ -565,6 +619,7 @@ pub enum FromRead {
 impl Pack for FromRead {
     fn encoded_len(&self) -> usize {
         1 + match self {
+            FromRead::Publisher(p) => Pack::encoded_len(p),
             FromRead::Resolved(a) => Pack::encoded_len(a),
             FromRead::List(l) => Pack::encoded_len(l),
             FromRead::Table(t) => Pack::encoded_len(t),
@@ -578,33 +633,37 @@ impl Pack for FromRead {
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
         match self {
-            FromRead::Resolved(a) => {
+            FromRead::Publisher(p) => {
                 buf.put_u8(0);
+                Pack::encode(p, buf)
+            }
+            FromRead::Resolved(a) => {
+                buf.put_u8(1);
                 Pack::encode(a, buf)
             }
             FromRead::List(l) => {
-                buf.put_u8(1);
+                buf.put_u8(2);
                 Pack::encode(l, buf)
             }
             FromRead::Table(t) => {
-                buf.put_u8(2);
+                buf.put_u8(3);
                 Pack::encode(t, buf)
             }
             FromRead::Referral(r) => {
-                buf.put_u8(3);
+                buf.put_u8(4);
                 Pack::encode(r, buf)
             }
-            FromRead::Denied => Ok(buf.put_u8(4)),
+            FromRead::Denied => Ok(buf.put_u8(5)),
             FromRead::Error(e) => {
-                buf.put_u8(5);
+                buf.put_u8(6);
                 Pack::encode(e, buf)
             }
             FromRead::ListMatching(l) => {
-                buf.put_u8(6);
+                buf.put_u8(7);
                 Pack::encode(l, buf)
             }
             FromRead::GetChangeNr(l) => {
-                buf.put_u8(7);
+                buf.put_u8(8);
                 Pack::encode(l, buf)
             }
         }
@@ -612,14 +671,15 @@ impl Pack for FromRead {
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         match buf.get_u8() {
-            0 => Ok(FromRead::Resolved(Pack::decode(buf)?)),
-            1 => Ok(FromRead::List(Pack::decode(buf)?)),
-            2 => Ok(FromRead::Table(Pack::decode(buf)?)),
-            3 => Ok(FromRead::Referral(Pack::decode(buf)?)),
-            4 => Ok(FromRead::Denied),
-            5 => Ok(FromRead::Error(Pack::decode(buf)?)),
-            6 => Ok(FromRead::ListMatching(Pack::decode(buf)?)),
-            7 => Ok(FromRead::GetChangeNr(Pack::decode(buf)?)),
+            0 => Ok(FromRead::Publisher(Pack::decode(buf)?)),
+            1 => Ok(FromRead::Resolved(Pack::decode(buf)?)),
+            2 => Ok(FromRead::List(Pack::decode(buf)?)),
+            3 => Ok(FromRead::Table(Pack::decode(buf)?)),
+            4 => Ok(FromRead::Referral(Pack::decode(buf)?)),
+            5 => Ok(FromRead::Denied),
+            6 => Ok(FromRead::Error(Pack::decode(buf)?)),
+            7 => Ok(FromRead::ListMatching(Pack::decode(buf)?)),
+            8 => Ok(FromRead::GetChangeNr(Pack::decode(buf)?)),
             _ => Err(Error::UnknownTag),
         }
     }
