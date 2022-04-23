@@ -13,6 +13,7 @@ use crate::{
             ServerHelloWrite, TargetAuth, ToRead, ToWrite,
         },
     },
+    publisher::ClId,
     secctx::SecCtx,
     shard_resolver_store::Store,
     utils,
@@ -25,8 +26,9 @@ use log::{debug, info, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
+use serde_json::map::VacantEntry;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     fmt::Debug,
     mem,
     net::SocketAddr,
@@ -65,12 +67,127 @@ impl CTracker {
 }
 
 enum ClientInfo {
-    Running(Arc<Publisher>, oneshot::Sender<()>),
     CleaningUp(Vec<oneshot::Sender<()>>),
+    Running { publisher: Arc<Publisher>, stop: oneshot::Sender<()> },
 }
 
 #[derive(Clone)]
 struct Clinfos(Arc<Mutex<FxHashMap<SocketAddr, ClientInfo>>>);
+
+impl Clinfos {
+    async fn wait_running<F, R>(&self, addr: &SocketAddr, f: F) -> R
+    where
+        R: 'static,
+        F: FnOnce(Entry<SocketAddr, ClientInfo>) -> R,
+    {
+        loop {
+            let rx = {
+                let mut inner = self.0.lock();
+                match inner.get_mut(&addr) {
+                    None => break f(inner.entry(*addr)),
+                    Some(ClientInfo::Running { .. }) => break f(inner.entry(*addr)),
+                    Some(ClientInfo::CleaningUp(w)) => {
+                        let (tx, rx) = oneshot::channel();
+                        w.push(tx);
+                        rx
+                    }
+                }
+            };
+            let _ = rx.await;
+        }
+    }
+
+    async fn cleanup(
+        &self,
+        secctx: &SecCtx,
+        store: &mut Store,
+        publisher: &Arc<Publisher>,
+        uifo: &Arc<UserInfo>,
+    ) -> Result<()> {
+        let cleanup = self
+            .wait_running(&publisher.addr, |e| match e {
+                Entry::Vacant(_) => false,
+                Entry::Occupied(mut e) => {
+                    *e.get_mut() = ClientInfo::CleaningUp(Vec::new());
+                    secctx.remove(&publisher.id);
+                    true
+                }
+            })
+            .await;
+        if cleanup {
+            store.handle_clear(uifo.clone(), publisher.clone()).await?;
+            self.0.lock().remove(&publisher.addr);
+        }
+        Ok(())
+    }
+
+    async fn new_client(
+        &self,
+        secctx: &SecCtx,
+        store: &mut Store,
+        uifo: &Arc<UserInfo>,
+        resolver: SocketAddr,
+        addr: SocketAddr,
+        target_auth: AuthWrite,
+    ) -> Result<(Arc<Publisher>, bool, oneshot::Receiver<()>)> {
+        enum R {
+            ClearClient(Arc<Publisher>),
+            Finished(Arc<Publisher>, bool, oneshot::Receiver<()>),
+        }
+        loop {
+            let r = self
+                .wait_running(&addr, |e| match e {
+                    Entry::Vacant(e) => {
+                        let publisher = Arc::new(Publisher {
+                            addr,
+                            resolver,
+                            id: PublisherId::new(),
+                            hash_method: HashMethod::Sha3_512,
+                            target_auth: target_auth.clone().try_into()?,
+                        });
+                        let (tx, rx) = oneshot::channel();
+                        e.insert(ClientInfo::Running {
+                            publisher: publisher.clone(),
+                            stop: tx,
+                        });
+                        Ok(R::Finished(publisher, true, rx))
+                    }
+                    Entry::Occupied(mut e) => {
+                        let ifo = e.get_mut();
+                        match ifo {
+                            ClientInfo::Running { publisher, stop } => {
+                                match (&target_auth, &publisher.target_auth) {
+                                    (AuthWrite::Anonymous, TargetAuth::Anonymous) => (),
+                                    (AuthWrite::Anonymous, _) => bail!("not permitted"),
+                                    (AuthWrite::Reuse, _) => (),
+                                    (AuthWrite::Krb5 { .. } | AuthWrite::Local, _) => {
+                                        let publisher = publisher.clone();
+                                        *ifo = ClientInfo::CleaningUp(Vec::new());
+                                        secctx.remove(&publisher.id);
+                                        return Ok(R::ClearClient(publisher));
+                                    }
+                                }
+                                let (tx, rx) = oneshot::channel();
+                                *stop = tx;
+                                Ok(R::Finished(publisher.clone(), false, rx))
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                })
+                .await?;
+            match r {
+                R::Finished(publisher, ttl_expired, rx) => {
+                    break Ok((publisher, ttl_expired, rx))
+                }
+                R::ClearClient(publisher) => {
+                    store.handle_clear(uifo.clone(), publisher).await?;
+                    self.0.lock().remove(&addr);
+                }
+            }
+        }
+    }
+}
 
 lazy_static! {
     static ref WRITE_BATCHES: Pool<Vec<ToWrite>> = Pool::new(5000, 100000);
@@ -115,26 +232,7 @@ async fn client_loop_write(
                 } else {
                     drop(con);
                     ctracker.close(connection_id);
-                    {
-                        let mut inner = clinfos.0.lock();
-                        match inner.remove(&publisher.addr) {
-                            None => (),
-                            Some(ClientInfo::CleaningUp(_)) => unreachable!(),
-                            Some(ClientInfo::Running(_, stop)) => {
-                                let _ = stop.send(());
-                            }
-                        }
-                        let state = ClientInfo::CleaningUp(Vec::new());
-                        inner.insert(publisher.addr, state);
-                        match &secctx {
-                            SecCtx::Krb5(a) => a.1.write().remove_by_id(&publisher.id),
-                            SecCtx::Local(a) => a.1.write().remove_by_id(&publisher.id),
-                            SecCtx::Anonymous => ()
-                        }
-                    }
-                    store.handle_clear(uifo.clone(), publisher.clone()).await?;
-                    let mut inner = clinfos.0.lock();
-                    inner.remove(&publisher.addr);
+                    clinfos.clear(&secctx, &mut store, &publisher, &uifo).await?;
                     bail!("write client timed out");
                 }
             },
@@ -284,36 +382,7 @@ async fn hello_client_write(
         Ok(())
     }
     utils::check_addr(hello.write_addr.ip(), &[listen_addr])?;
-    let (ttl_expired, publisher) = loop {
-        let rx = {
-            let mut inner = clinfos.0.lock();
-            match inner.get_mut(&hello.write_addr) {
-                Some(ClientInfo::CleaningUp(waiters)) => {
-                    let (tx, rx) = oneshot::channel();
-                    waiters.push(tx);
-                    rx
-                }
-                Some(ClientInfo::Running(publisher, _)) => {
-                    publisher.target_auth.check_mismatch(&hello.auth)?;
-                    break (false, publisher.clone())
-                }
-                None => {
-                    break (
-                        true,
-                        Arc::new(Publisher {
-                            addr: hello.write_addr,
-                            hash_method: HashMethod::Sha3_512,
-                            id: PublisherId::new(),
-                            resolver: resolver_id,
-                            target_auth: hello.auth.clone().try_into()?,
-                        }),
-                    )
-                }
-            }
-        };
-        let _ = rx.await;
-    };
-    let (uifo, publisher) = match hello.auth {
+    let (uifo, publisher, rx_stop) = match hello.auth {
         AuthWrite::Anonymous => {
             let h = ServerHelloWrite {
                 ttl: cfg.writer_ttl.as_secs(),
@@ -324,7 +393,7 @@ async fn hello_client_write(
             info!("hello_write accepting Anonymous authentication");
             debug!("hello_write sending hello {:?}", h);
             send(cfg.hello_timeout, &mut con, &h).await?;
-            ANONYMOUS.clone()
+            (ANONYMOUS.clone(), publisher, rx_stop)
         }
         AuthWrite::Local => match secctx {
             SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("authentication not supported"),

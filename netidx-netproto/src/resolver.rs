@@ -414,21 +414,6 @@ impl TryFrom<AuthWrite> for TargetAuth {
     }
 }
 
-impl TargetAuth {
-    pub fn check_mismatch(&self, wa: &AuthWrite) -> anyhow::Result<()> {
-        match (self, wa) {
-            (Self::Anonymous, AuthWrite::Anonymous) | (Self::Local, AuthWrite::Local) => {
-                Ok(())
-            }
-            (Self::Krb5 { spn: spn0 }, AuthWrite::Krb5 { spn: spn1 }) if spn0 == spn1 => {
-                Ok(())
-            }
-            (Self::Krb5 { .. } | Self::Local, AuthWrite::Reuse) => Ok(()),
-            (_, _) => bail!("auth type mismatch"),
-        }
-    }
-}
-
 impl Pack for TargetAuth {
     fn encoded_len(&self) -> usize {
         1 + match self {

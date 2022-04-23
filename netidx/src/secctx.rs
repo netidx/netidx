@@ -7,7 +7,7 @@ use crate::{
         local_auth::{AuthServer, Credential},
         Mapper,
     },
-    protocol::resolver::{Publisher, PublisherId},
+    protocol::resolver::PublisherId,
 };
 use anyhow::{bail, Result};
 use cross_krb5::{K5Ctx, ServerCtx};
@@ -41,47 +41,33 @@ pub(crate) mod local {
 }
 
 trait SecDataCommon {
-    fn publisher(&self) -> &Publisher;
     fn secret(&self) -> u128;
 }
 
 pub(crate) struct SecCtxData<S: 'static> {
     pub(crate) users: UserDb,
-    by_id: FxHashMap<PublisherId, S>,
-    by_addr: FxHashMap<SocketAddr, PublisherId>,
     pub(crate) pmap: PMap,
+    data: FxHashMap<PublisherId, S>,
 }
 
 impl<S: 'static + SecDataCommon> SecCtxData<S> {
     pub(crate) fn new(cfg: &Arc<config::server::Config>) -> Result<Self> {
         let mut users = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(&cfg.perms, &mut users, cfg.root(), &cfg.children)?;
-        Ok(Self { users, pmap, by_id: HashMap::default(), by_addr: HashMap::default() })
+        Ok(Self { users, pmap, data: HashMap::default() })
     }
 
-    pub(crate) fn remove_by_id(&mut self, id: &PublisherId) {
-        if let Some(s) = self.by_id.remove(&id) {
-            self.by_addr.remove(&s.publisher().addr);
-        }
+    pub(crate) fn remove(&mut self, id: &PublisherId) {
+        self.data.remove(&id);
     }
 
-    pub(crate) fn remove_by_addr(&mut self, addr: &SocketAddr) {
-        if let Some(id) = self.by_addr.remove(addr) {
-            self.by_id.remove(&id);
-        }
+    pub(crate) fn insert(&mut self, id: PublisherId, data: S) {
+        self.remove(&id);
+        self.data.insert(id, data);
     }
 
-    pub(crate) fn insert(&mut self, data: S) {
-        let addr = data.publisher().addr;
-        let id = data.publisher().id;
-        self.remove_by_id(&id);
-        self.remove_by_addr(&addr);
-        self.by_addr.insert(addr, id);
-        self.by_id.insert(id, data);
-    }
-
-    pub(crate) fn get_secret_by_id(&self, id: &PublisherId) -> Option<u128> {
-        self.by_id.get(id).map(|d| d.secret())
+    pub(crate) fn secret(&self, id: &PublisherId) -> Option<u128> {
+        self.data.get(id).map(|d| d.secret())
     }
 }
 
@@ -89,32 +75,25 @@ pub(crate) struct K5SecData {
     pub(crate) spn: Chars,
     pub(crate) secret: u128,
     pub(crate) ctx: K5CtxWrap<ServerCtx>,
-    pub(crate) publisher: Arc<Publisher>,
 }
 
 impl SecDataCommon for K5SecData {
-    fn publisher(&self) -> &Publisher {
-        &self.publisher
-    }
-
     fn secret(&self) -> u128 {
         self.secret
     }
 }
 
 impl SecCtxData<K5SecData> {
-    pub(crate) fn get(&self, id: &SocketAddr) -> Option<&K5SecData> {
-        self.by_addr.get(id).and_then(|id| {
-            self.by_id.get(id).and_then(|r| {
-                match task::block_in_place(|| r.ctx.lock().ttl()) {
-                    Ok(ttl) if ttl.as_secs() > 0 => Some(r),
-                    _ => None,
-                }
-            })
+    pub(crate) fn get(&self, id: &PublisherId) -> Option<&K5SecData> {
+        self.data.get(id).and_then(|r| {
+            match task::block_in_place(|| r.ctx.lock().ttl()) {
+                Ok(ttl) if ttl.as_secs() > 0 => Some(r),
+                _ => None,
+            }
         })
     }
 
-    pub(crate) fn get_ctx(&self, id: &SocketAddr) -> Option<K5CtxWrap<ServerCtx>> {
+    pub(crate) fn get_ctx(&self, id: &PublisherId) -> Option<K5CtxWrap<ServerCtx>> {
         self.get(id).map(|d| d.ctx.clone())
     }
 }
@@ -122,22 +101,17 @@ impl SecCtxData<K5SecData> {
 pub(crate) struct LocalSecData {
     pub(crate) user: Chars,
     pub(crate) secret: u128,
-    pub(crate) publisher: Arc<Publisher>,
 }
 
 impl SecDataCommon for LocalSecData {
-    fn publisher(&self) -> &Publisher {
-        &self.publisher
-    }
-
     fn secret(&self) -> u128 {
         self.secret
     }
 }
 
 impl SecCtxData<LocalSecData> {
-    pub(crate) fn get(&self, id: &SocketAddr) -> Option<&LocalSecData> {
-        self.by_addr.get(id).and_then(|id| self.by_id.get(id))
+    pub(crate) fn get(&self, id: &PublisherId) -> Option<&LocalSecData> {
+        self.data.get(id)
     }
 }
 
@@ -189,6 +163,14 @@ impl SecCtx {
             SecCtx::Anonymous => SecCtxDataReadGuard::Anonymous,
             SecCtx::Krb5(a) => SecCtxDataReadGuard::Krb5(a.1.read()),
             SecCtx::Local(a) => SecCtxDataReadGuard::Local(a.1.read()),
+        }
+    }
+
+    pub(crate) fn remove(&self, id: &PublisherId) {
+        match self {
+            SecCtx::Krb5(a) => a.1.write().remove(id),
+            SecCtx::Local(a) => a.1.write().remove(id),
+            SecCtx::Anonymous => (),
         }
     }
 }
