@@ -395,12 +395,76 @@ impl Pack for PublisherId {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TargetAuth {
+    Anonymous,
+    Local,
+    Krb5 { spn: Chars },
+}
+
+impl TryFrom<AuthWrite> for TargetAuth {
+    type Error = anyhow::Error;
+
+    fn try_from(v: AuthWrite) -> result::Result<Self, Self::Error> {
+        match v {
+            AuthWrite::Anonymous => Ok(Self::Anonymous),
+            AuthWrite::Local => Ok(Self::Local),
+            AuthWrite::Krb5 { spn } => Ok(Self::Krb5 { spn }),
+            AuthWrite::Reuse => bail!("no session to reuse"),
+        }
+    }
+}
+
+impl TargetAuth {
+    pub fn check_mismatch(&self, wa: &AuthWrite) -> anyhow::Result<()> {
+        match (self, wa) {
+            (Self::Anonymous, AuthWrite::Anonymous) | (Self::Local, AuthWrite::Local) => {
+                Ok(())
+            }
+            (Self::Krb5 { spn: spn0 }, AuthWrite::Krb5 { spn: spn1 }) if spn0 == spn1 => {
+                Ok(())
+            }
+            (Self::Krb5 { .. } | Self::Local, AuthWrite::Reuse) => Ok(()),
+            (_, _) => bail!("auth type mismatch"),
+        }
+    }
+}
+
+impl Pack for TargetAuth {
+    fn encoded_len(&self) -> usize {
+        1 + match self {
+            Self::Anonymous | Self::Local => 0,
+            Self::Krb5 { spn } => Pack::encoded_len(spn),
+        }
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        match self {
+            Self::Anonymous => Ok(buf.put_u8(0)),
+            Self::Local => Ok(buf.put_u8(1)),
+            Self::Krb5 { spn } => {
+                buf.put_u8(2);
+                Pack::encode(spn, buf)
+            }
+        }
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        match buf.get_u8() {
+            0 => Ok(Self::Anonymous),
+            1 => Ok(Self::Local),
+            2 => Ok(Self::Krb5 { spn: Pack::decode(buf)? }),
+            _ => Err(PackError::UnknownTag),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Publisher {
     pub resolver: SocketAddr,
     pub id: PublisherId,
     pub addr: SocketAddr,
     pub hash_method: HashMethod,
-    pub target_auth: Auth,
+    pub target_auth: TargetAuth,
 }
 
 impl Pack for Publisher {

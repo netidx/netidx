@@ -9,8 +9,8 @@ use crate::{
         publisher,
         resolver::{
             AuthChallenge, AuthRead, AuthWrite, ClientHello, ClientHelloWrite, FromWrite,
-            HashMethod, ReadyForOwnershipCheck, Secret, ServerHelloWrite, ToRead,
-            ToWrite,
+            HashMethod, Publisher, PublisherId, ReadyForOwnershipCheck, Secret,
+            ServerHelloWrite, TargetAuth, ToRead, ToWrite,
         },
     },
     secctx::SecCtx,
@@ -18,9 +18,9 @@ use crate::{
     utils,
 };
 use anyhow::Result;
-use bytes::Bytes;
 use cross_krb5::{AcceptFlags, K5ServerCtx, ServerCtx, Step};
 use futures::{channel::oneshot, prelude::*, select_biased};
+use fxhash::FxHashMap;
 use log::{debug, info, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use parking_lot::Mutex;
@@ -65,12 +65,12 @@ impl CTracker {
 }
 
 enum ClientInfo {
-    Running(oneshot::Sender<()>),
+    Running(Arc<Publisher>, oneshot::Sender<()>),
     CleaningUp(Vec<oneshot::Sender<()>>),
 }
 
 #[derive(Clone)]
-struct Clinfos(Arc<Mutex<HashMap<SocketAddr, ClientInfo>>>);
+struct Clinfos(Arc<Mutex<FxHashMap<SocketAddr, ClientInfo>>>);
 
 lazy_static! {
     static ref WRITE_BATCHES: Pool<Vec<ToWrite>> = Pool::new(5000, 100000);
@@ -88,7 +88,7 @@ async fn client_loop_write(
     server_stop: oneshot::Receiver<()>,
     rx_stop: oneshot::Receiver<()>,
     uifo: Arc<UserInfo>,
-    write_addr: SocketAddr,
+    publisher: Arc<Publisher>,
 ) -> Result<()> {
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
@@ -117,24 +117,24 @@ async fn client_loop_write(
                     ctracker.close(connection_id);
                     {
                         let mut inner = clinfos.0.lock();
-                        match inner.remove(&write_addr) {
+                        match inner.remove(&publisher.addr) {
                             None => (),
                             Some(ClientInfo::CleaningUp(_)) => unreachable!(),
-                            Some(ClientInfo::Running(stop)) => {
+                            Some(ClientInfo::Running(_, stop)) => {
                                 let _ = stop.send(());
                             }
                         }
                         let state = ClientInfo::CleaningUp(Vec::new());
-                        inner.insert(write_addr, state);
+                        inner.insert(publisher.addr, state);
                         match &secctx {
-                            SecCtx::Krb5(a) => a.1.write().remove(&write_addr),
-                            SecCtx::Local(a) => a.1.write().remove(&write_addr),
+                            SecCtx::Krb5(a) => a.1.write().remove_by_id(&publisher.id),
+                            SecCtx::Local(a) => a.1.write().remove_by_id(&publisher.id),
                             SecCtx::Anonymous => ()
                         }
                     }
-                    store.handle_clear(uifo.clone(), write_addr).await?;
+                    store.handle_clear(uifo.clone(), publisher.clone()).await?;
                     let mut inner = clinfos.0.lock();
-                    inner.remove(&write_addr);
+                    inner.remove(&publisher.addr);
                     bail!("write client timed out");
                 }
             },
@@ -171,7 +171,7 @@ async fn client_loop_write(
                                 ToWrite::Clear => {
                                     store.handle_clear(
                                         uifo.clone(),
-                                        write_addr
+                                        publisher.clone()
                                     ).await?;
                                     c.queue_send(&FromWrite::Unpublished)?
                                 }
@@ -183,7 +183,7 @@ async fn client_loop_write(
                     if let Err(e) = store.handle_batch_write(
                         Some(c),
                         uifo.clone(),
-                        write_addr,
+                        publisher.clone(),
                         batch.drain(..)
                     ).await {
                         warn!("handle_write_batch failed {}", e);
@@ -284,22 +284,36 @@ async fn hello_client_write(
         Ok(())
     }
     utils::check_addr(hello.write_addr.ip(), &[listen_addr])?;
-    let ttl_expired = loop {
+    let (ttl_expired, publisher) = loop {
         let rx = {
             let mut inner = clinfos.0.lock();
             match inner.get_mut(&hello.write_addr) {
-                None => break true,
-                Some(ClientInfo::Running(_)) => break false,
                 Some(ClientInfo::CleaningUp(waiters)) => {
                     let (tx, rx) = oneshot::channel();
                     waiters.push(tx);
                     rx
                 }
+                Some(ClientInfo::Running(publisher, _)) => {
+                    publisher.target_auth.check_mismatch(&hello.auth)?;
+                    break (false, publisher.clone())
+                }
+                None => {
+                    break (
+                        true,
+                        Arc::new(Publisher {
+                            addr: hello.write_addr,
+                            hash_method: HashMethod::Sha3_512,
+                            id: PublisherId::new(),
+                            resolver: resolver_id,
+                            target_auth: hello.auth.clone().try_into()?,
+                        }),
+                    )
+                }
             }
         };
         let _ = rx.await;
     };
-    let uifo = match hello.auth {
+    let (uifo, publisher) = match hello.auth {
         AuthWrite::Anonymous => {
             let h = ServerHelloWrite {
                 ttl: cfg.writer_ttl.as_secs(),
@@ -652,10 +666,7 @@ impl Drop for Server {
 }
 
 impl Server {
-    pub async fn new(
-        cfg: config::server::Config,
-        delay_reads: bool,
-    ) -> Result<Server> {
+    pub async fn new(cfg: config::server::Config, delay_reads: bool) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         let tsk = server_loop(cfg, delay_reads, recv_stop, send_ready);

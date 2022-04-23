@@ -59,15 +59,23 @@ impl<S: 'static + SecDataCommon> SecCtxData<S> {
         Ok(Self { users, pmap, by_id: HashMap::default(), by_addr: HashMap::default() })
     }
 
-    pub(crate) fn remove(&mut self, id: &SocketAddr) {
-        if let Some(id) = self.by_addr.remove(id) {
+    pub(crate) fn remove_by_id(&mut self, id: &PublisherId) {
+        if let Some(s) = self.by_id.remove(&id) {
+            self.by_addr.remove(&s.publisher().addr);
+        }
+    }
+
+    pub(crate) fn remove_by_addr(&mut self, addr: &SocketAddr) {
+        if let Some(id) = self.by_addr.remove(addr) {
             self.by_id.remove(&id);
         }
     }
 
-    pub(crate) fn insert(&mut self, addr: SocketAddr, data: S) {
-        self.remove(&addr);
+    pub(crate) fn insert(&mut self, data: S) {
+        let addr = data.publisher().addr;
         let id = data.publisher().id;
+        self.remove_by_id(&id);
+        self.remove_by_addr(&addr);
         self.by_addr.insert(addr, id);
         self.by_id.insert(id, data);
     }
