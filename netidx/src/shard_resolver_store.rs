@@ -27,11 +27,11 @@ use futures::{
     prelude::*,
     select,
 };
-use fxhash::{FxBuildHasher, FxHashMap};
+use fxhash::FxHashMap;
 use log::info;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    hash::{BuildHasher, Hash, Hasher},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
     iter,
     net::SocketAddr,
     result,
@@ -360,7 +360,6 @@ macro_rules! same {
 #[derive(Clone)]
 pub(crate) struct Store {
     shards: Vec<Shard>,
-    build_hasher: FxBuildHasher,
     shard_mask: usize,
 }
 
@@ -379,11 +378,11 @@ impl Store {
                 Shard::new(i, parent.clone(), children.clone(), secctx.clone(), resolver)
             })
             .collect();
-        Store { shards, shard_mask, build_hasher: FxBuildHasher::default() }
+        Store { shards, shard_mask }
     }
 
     fn shard(&self, path: &Path) -> usize {
-        let mut hasher = self.build_hasher.build_hasher();
+        let mut hasher = DefaultHasher::new();
         path.hash(&mut hasher);
         hasher.finish() as usize & self.shard_mask
     }
