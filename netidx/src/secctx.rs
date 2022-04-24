@@ -71,6 +71,7 @@ impl<S: 'static + SecDataCommon> SecCtxData<S> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct K5SecData {
     pub(crate) spn: Chars,
     pub(crate) secret: u128,
@@ -98,6 +99,7 @@ impl SecCtxData<K5SecData> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct LocalSecData {
     pub(crate) user: Chars,
     pub(crate) secret: u128,
