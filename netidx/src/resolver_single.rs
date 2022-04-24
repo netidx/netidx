@@ -2,16 +2,16 @@ use crate::{
     channel::Channel,
     channel::K5CtxWrap,
     chars::Chars,
-    config::{Auth, Server},
+    config::{Auth, Referral},
     os::local_auth::AuthClient,
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::{
         AuthChallenge, AuthRead, AuthWrite, ClientHello, ClientHelloWrite, FromRead,
-        FromWrite, HashMethod, ReadyForOwnershipCheck, Secret, ServerHelloWrite, ToRead,
-        ToWrite,
+        FromWrite, HashMethod, Publisher, ReadyForOwnershipCheck, Secret,
+        ServerHelloWrite, ToRead, ToWrite,
     },
-    utils,
+    utils::{self, Either},
 };
 use anyhow::{anyhow, Error, Result};
 use cross_krb5::{ClientCtx, InitiateFlags, K5Ctx, PendingClientCtx, Step};
@@ -43,6 +43,7 @@ static TTL: u64 = 120;
 lazy_static! {
     pub(crate) static ref TOREADPOOL: Pool<Vec<(usize, ToRead)>> = Pool::new(1000, 10000);
     static ref FROMREADPOOL: Pool<Vec<(usize, FromRead)>> = Pool::new(1000, 10000);
+    static ref PUBLISHERPOOL: Pool<Vec<Publisher>> = Pool::new(1000, 1000);
     pub(crate) static ref RAWFROMREADPOOL: Pool<Vec<FromRead>> = Pool::new(1000, 10000);
     pub(crate) static ref TOWRITEPOOL: Pool<Vec<(usize, ToWrite)>> =
         Pool::new(1000, 10000);
@@ -113,14 +114,14 @@ macro_rules! cwt {
 }
 
 async fn connect_read(
-    resolver: &Server,
+    resolver: &Referral,
     desired_auth: &DesiredAuth,
 ) -> Result<Channel<ClientCtx>> {
     let mut addrs = resolver.addrs.clone();
     addrs.as_mut_slice().shuffle(&mut thread_rng());
     let mut n = 0;
     loop {
-        let addr = addrs[n % addrs.len()];
+        let (addr, auth) = &addrs[n % addrs.len()];
         let tries = n / addrs.len();
         if tries >= 3 {
             bail!("can't connect to any resolver servers");
@@ -133,7 +134,7 @@ async fn connect_read(
         let con = cwt!("connect", TcpStream::connect(&addr));
         try_cf!("no delay", con.set_nodelay(true));
         let mut con = Channel::new(con);
-        match (desired_auth, &resolver.auth) {
+        match (desired_auth, auth) {
             (DesiredAuth::Anonymous, _) => {
                 cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Anonymous)));
                 match cwt!("reply", con.receive::<AuthRead>()) {
@@ -141,8 +142,8 @@ async fn connect_read(
                     AuthRead::Local | AuthRead::Krb5 => bail!("protocol error"),
                 }
             }
-            (DesiredAuth::Local | DesiredAuth::Krb5 { .. }, Auth::Local(path)) => {
-                let tok = cwt!("local token", AuthClient::token(path));
+            (DesiredAuth::Local | DesiredAuth::Krb5 { .. }, Auth::Local { path }) => {
+                let tok = cwt!("local token", AuthClient::token(&*path));
                 cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Local)));
                 cwt!("token", con.send_one(&tok));
                 match cwt!("reply", con.receive::<AuthRead>()) {
@@ -150,13 +151,10 @@ async fn connect_read(
                     AuthRead::Krb5 | AuthRead::Anonymous => bail!("protocol error"),
                 }
             }
-            (DesiredAuth::Krb5 { upn, .. }, Auth::Krb5(spns)) => {
+            (DesiredAuth::Krb5 { upn, .. }, Auth::Krb5 { spn }) => {
                 let upn = upn.as_ref().map(|s| s.as_str());
-                let target_spn = spns
-                    .get(&addr)
-                    .ok_or_else(|| anyhow!("no target spn for resolver {:?}", addr))?;
                 cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Krb5)));
-                let ctx = cwt!("k5auth", krb5_authentication(upn, target_spn, &mut con));
+                let ctx = cwt!("k5auth", krb5_authentication(upn, &*spn, &mut con));
                 match cwt!("reply", con.receive::<AuthRead>()) {
                     AuthRead::Krb5 => con.set_ctx(K5CtxWrap::new(ctx)).await,
                     AuthRead::Local | AuthRead::Anonymous => bail!("protocol error"),
@@ -167,12 +165,28 @@ async fn connect_read(
     }
 }
 
-type ReadBatch =
-    (Pooled<Vec<(usize, ToRead)>>, oneshot::Sender<Pooled<Vec<(usize, FromRead)>>>);
+type ReadBatch = (
+    Pooled<Vec<(usize, ToRead)>>,
+    oneshot::Sender<(Pooled<Vec<Publisher>>, Pooled<Vec<(usize, FromRead)>>)>,
+);
+
+fn partition_publishers(m: FromRead) -> Either<FromRead, Publisher> {
+    match m {
+        FromRead::Publisher(p) => Either::Right(p),
+        FromRead::Denied
+        | FromRead::Error(_)
+        | FromRead::GetChangeNr(_)
+        | FromRead::List(_)
+        | FromRead::ListMatching(_)
+        | FromRead::Referral(_)
+        | FromRead::Resolved(_)
+        | FromRead::Table(_) => Either::Left(m),
+    }
+}
 
 async fn connection_read(
     mut receiver: mpsc::UnboundedReceiver<ReadBatch>,
-    resolver: Arc<Server>,
+    resolver: Arc<Referral>,
     desired_auth: DesiredAuth,
 ) {
     let mut con: Option<Channel<ClientCtx>> = None;
@@ -229,8 +243,13 @@ async fn connection_read(
                         }
                         Ok(()) => {
                             let mut rx_batch = RAWFROMREADPOOL.take();
+                            let mut publishers = PUBLISHERPOOL.take();
                             while rx_batch.len() < tx_batch.len() {
-                                let f = c.receive_batch(&mut *rx_batch);
+                                let f = c.receive_batch_partition(
+                                    &mut *rx_batch,
+                                    &mut *publishers,
+                                    partition_publishers,
+                                );
                                 match time::timeout(timeout, f).await {
                                     Ok(Ok(())) => (),
                                     Ok(Err(e)) => {
@@ -252,7 +271,7 @@ async fn connection_read(
                                     .enumerate()
                                     .map(|(i, m)| (tx_batch[i].0, m)),
                             );
-                            let _ = reply.send(result);
+                            let _ = reply.send((publishers, result));
                             break;
                         }
                     }
@@ -266,7 +285,10 @@ async fn connection_read(
 pub(crate) struct ResolverRead(mpsc::UnboundedSender<ReadBatch>);
 
 impl ResolverRead {
-    pub(crate) fn new(resolver: Arc<Server>, desired_auth: DesiredAuth) -> ResolverRead {
+    pub(crate) fn new(
+        resolver: Arc<Referral>,
+        desired_auth: DesiredAuth,
+    ) -> ResolverRead {
         let (to_tx, to_rx) = mpsc::unbounded();
         task::spawn(async move {
             connection_read(to_rx, resolver, desired_auth).await;
@@ -278,7 +300,7 @@ impl ResolverRead {
     pub(crate) fn send(
         &mut self,
         batch: Pooled<Vec<(usize, ToRead)>>,
-    ) -> oneshot::Receiver<Pooled<Vec<(usize, FromRead)>>> {
+    ) -> oneshot::Receiver<(Pooled<Vec<Publisher>>, Pooled<Vec<(usize, FromRead)>>)> {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.unbounded_send((batch, tx));
         rx
@@ -292,8 +314,8 @@ macro_rules! wt {
 }
 
 async fn connect_write(
-    resolver: &Server,
     resolver_addr: SocketAddr,
+    resolver_auth: &Auth,
     write_addr: SocketAddr,
     published: &Arc<RwLock<HashMap<Path, ToWrite>>>,
     secrets: &Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
@@ -301,6 +323,15 @@ async fn connect_write(
     desired_auth: &DesiredAuth,
     degraded: &mut bool,
 ) -> Result<(u64, Channel<ClientCtx>)> {
+    async fn auth_challenge(con: &mut Channel<ClientCtx>, secret: u128) -> Result<()> {
+        let c: AuthChallenge = con.receive().await?;
+        if c.hash_method != HashMethod::Sha3_512 {
+            bail!("hash method not supported")
+        }
+        let answer =
+            utils::make_sha3_token(&[&c.challenge.to_be_bytes(), &secret.to_be_bytes()]);
+        Ok(con.send_one(&answer).await?)
+    }
     info!("write_con connecting to resolver {:?}", resolver_addr);
     let con = wt!(TcpStream::connect(&resolver_addr))??;
     con.set_nodelay(true)?;
@@ -313,61 +344,55 @@ async fn connect_write(
         debug!("write_con connection established hello {:?}", h);
         h
     };
-    let (r, ownership_check) = match (desired_auth, &resolver.auth) {
+    let (r, ownership_check) = match (desired_auth, resolver_auth) {
         (DesiredAuth::Anonymous, _) => {
             wt!(con.send_one(&hello(AuthWrite::Anonymous)))??;
             (wt!(con.receive::<ServerHelloWrite>())??, false)
         }
-        (DesiredAuth::Krb5 { .. } | DesiredAuth::Local, Auth::Local(path)) => {
+        (DesiredAuth::Krb5 { .. } | DesiredAuth::Local, Auth::Local { path }) => {
             let secret = secrets.read().get(&resolver_addr).map(|u| *u);
             match secret {
+                Some(secret) => {
+                    wt!(con.send_one(&hello(AuthWrite::Reuse)))??;
+                    wt!(auth_challenge(&mut con, secret))??;
+                    (wt!(con.receive::<ServerHelloWrite>())??, false)
+                }
                 None => {
-                    let tok = wt!(AuthClient::token(path))??;
+                    let tok = wt!(AuthClient::token(&*path))??;
                     wt!(con.send_one(&hello(AuthWrite::Local)))??;
                     wt!(con.send_one(&tok))??;
                     (wt!(con.receive::<ServerHelloWrite>())??, true)
                 }
-                Some(secret) => {
+            }
+        }
+        (DesiredAuth::Krb5 { upn, spn }, Auth::Krb5 { spn: target_spn }) => {
+            let secret = secrets.read().get(&resolver_addr).map(|u| *u);
+            match (&security_context, secret) {
+                (Some(ctx), Some(secret))
+                    if task::block_in_place(|| ctx.lock().ttl()).unwrap_or(sec) > sec =>
+                {
                     wt!(con.send_one(&hello(AuthWrite::Reuse)))??;
-                    let c: AuthChallenge = wt!(con.receive())??;
-                    if c.hash_method != HashMethod::Sha3_512 {
-                        bail!("hash method not supported")
-                    }
-                    let answer = utils::make_sha3_token(&[
-                        &c.challenge.to_be_bytes(),
-                        &secret.to_be_bytes(),
-                    ]);
-                    wt!(con.send_one(&answer))??;
-                    (wt!(con.receive::<ServerHelloWrite>())??, false)
+                    con.set_ctx(ctx.clone()).await;
+                    wt!(auth_challenge(&mut con, secret))??;
+                    let r: ServerHelloWrite = wt!(con.receive())??;
+                    (r, false)
+                }
+                (None | Some(_), _) => {
+                    let upn = upn.as_ref().map(|s| s.as_str());
+                    let spn = Chars::from(
+                        spn.clone()
+                            .ok_or_else(|| anyhow!("spn is required for writers"))?,
+                    );
+                    wt!(con.send_one(&hello(AuthWrite::Krb5 { spn })))??;
+                    let ctx = krb5_authentication(upn, &*target_spn, &mut con).await?;
+                    let ctx = K5CtxWrap::new(ctx);
+                    con.set_ctx(ctx.clone());
+                    let r: ServerHelloWrite = wt!(con.receive())??;
+                    *security_context = Some(ctx);
+                    (r, true)
                 }
             }
         }
-        (DesiredAuth::Krb5 { upn, spn }, Auth::Krb5(spns)) => match security_context {
-            Some(ctx)
-                if task::block_in_place(|| ctx.lock().ttl()).unwrap_or(sec) > sec =>
-            {
-                wt!(con.send_one(&hello(AuthWrite::Reuse)))??;
-                let r: ServerHelloWrite = wt!(con.receive())??;
-                con.set_ctx(ctx.clone()).await;
-                (r, false)
-            }
-            None | Some(_) => {
-                let upn = upn.as_ref().map(|s| s.as_str());
-                let spn = Chars::from(
-                    spn.clone().ok_or_else(|| anyhow!("spn is required for writers"))?,
-                );
-                let target_spn = spns.get(&resolver_addr).ok_or_else(|| {
-                    anyhow!("no target spn for resolver {:?}", resolver_addr)
-                })?;
-                wt!(con.send_one(&hello(AuthWrite::Krb5 { spn })))??;
-                let ctx = krb5_authentication(upn, target_spn, &mut con).await?;
-                let ctx = K5CtxWrap::new(ctx);
-                let r: ServerHelloWrite = wt!(con.receive())??;
-                con.set_ctx(ctx.clone());
-                *security_context = Some(ctx);
-                (r, true)
-            }
-        },
     };
     debug!("write_con resolver hello {:?}", r);
     if ownership_check {
@@ -433,8 +458,8 @@ async fn connection_write(
         Arc<Pooled<Vec<(usize, ToWrite)>>>,
         oneshot::Sender<Pooled<Vec<(usize, FromWrite)>>>,
     )>,
-    resolver: Arc<Server>,
     resolver_addr: SocketAddr,
+    resolver_auth: Auth,
     write_addr: SocketAddr,
     published: Arc<RwLock<HashMap<Path, ToWrite>>>,
     desired_auth: DesiredAuth,
@@ -484,7 +509,7 @@ async fn connection_write(
                             }
                             None => {
                                 let r = connect_write(
-                                    &resolver, resolver_addr, write_addr, &published,
+                                    resolver_addr, &resolver_auth, write_addr, &published,
                                     &secrets, &mut ctx, &desired_auth, &mut degraded
                                 ).await;
                                 match r {
@@ -528,7 +553,7 @@ async fn connection_write(
                             Some(ref mut c) => c,
                             None => {
                                 let r = connect_write(
-                                    &resolver, resolver_addr, write_addr, &published,
+                                    resolver_addr, &resolver_auth, write_addr, &published,
                                     &secrets, &mut ctx, &desired_auth, &mut degraded
                                 ).await;
                                 match r {
@@ -607,7 +632,7 @@ type WriteBatch =
 
 async fn write_mgr(
     mut receiver: mpsc::UnboundedReceiver<WriteBatch>,
-    resolver: Arc<Server>,
+    resolver: Arc<Referral>,
     desired_auth: DesiredAuth,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     write_addr: SocketAddr,
@@ -616,10 +641,10 @@ async fn write_mgr(
         Arc::new(RwLock::new(HashMap::new()));
     let mut senders = {
         let mut senders = Vec::new();
-        for addr in resolver.addrs.iter() {
+        for (addr, auth) in resolver.addrs.iter() {
             let (sender, receiver) = mpsc::channel(100);
             let addr = *addr;
-            let resolver = resolver.clone();
+            let auth = auth.clone();
             let published = published.clone();
             let desired_auth = desired_auth.clone();
             let secrets = secrets.clone();
@@ -627,8 +652,8 @@ async fn write_mgr(
             task::spawn(async move {
                 connection_write(
                     receiver,
-                    resolver,
                     addr,
+                    auth,
                     write_addr,
                     published,
                     desired_auth,
@@ -680,7 +705,7 @@ pub(crate) struct ResolverWrite(mpsc::UnboundedSender<WriteBatch>);
 
 impl ResolverWrite {
     pub(crate) fn new(
-        resolver: Arc<Server>,
+        resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
         write_addr: SocketAddr,
         secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,

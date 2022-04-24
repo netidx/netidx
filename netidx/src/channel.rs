@@ -1,4 +1,4 @@
-use crate::pack::Pack;
+use crate::{pack::Pack, utils::Either};
 use anyhow::{anyhow, Error, Result};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, BytesMut};
@@ -14,7 +14,7 @@ use futures::{
 };
 use log::info;
 use parking_lot::Mutex;
-use std::{fmt::Debug, mem, ops::Deref, clone::Clone, sync::Arc, time::Duration};
+use std::{clone::Clone, fmt::Debug, mem, ops::Deref, sync::Arc, time::Duration};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
@@ -325,6 +325,33 @@ impl<C: K5Ctx + Debug + Send + Sync + 'static> ReadChannel<C> {
         }
         Ok(())
     }
+
+    pub(crate) async fn receive_batch_partition<F, T, L, R>(
+        &mut self,
+        left: &mut Vec<L>,
+        right: &mut Vec<R>,
+        mut f: F,
+    ) -> Result<()>
+    where
+        T: Pack + Debug,
+        F: FnMut(T) -> Either<L, R>,
+        L: 'static,
+        R: 'static,
+    {
+        let m = self.receive().await?;
+        match f(m) {
+            Either::Left(l) => left.push(l),
+            Either::Right(r) => right.push(r),
+        }
+        while self.buf.has_remaining() {
+            let m = T::decode(&mut self.buf)?;
+            match f(m) {
+                Either::Left(l) => left.push(l),
+                Either::Right(r) => right.push(r),
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct Channel<C: K5Ctx + Debug + Send + Sync + 'static> {
@@ -387,5 +414,20 @@ impl<C: K5Ctx + Debug + Send + Sync + 'static> Channel<C> {
         batch: &mut Vec<T>,
     ) -> Result<(), Error> {
         self.read.receive_batch(batch).await
+    }
+
+    pub(crate) async fn receive_batch_partition<F, T, L, R>(
+        &mut self,
+        left: &mut Vec<L>,
+        right: &mut Vec<R>,
+        f: F,
+    ) -> Result<()>
+    where
+        T: Pack + Debug,
+        F: FnMut(T) -> Either<L, R>,
+        L: 'static,
+        R: 'static,
+    {
+        self.read.receive_batch_partition(left, right, f).await
     }
 }
