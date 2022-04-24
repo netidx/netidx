@@ -349,7 +349,7 @@ async fn hello_client_write(
     ctracker: CTracker,
     connection_id: CId,
     listen_addr: SocketAddr,
-    store: Store,
+    mut store: Store,
     mut con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     secctx: SecCtx,
@@ -447,7 +447,7 @@ async fn hello_client_write(
                 (uifo, publisher, rx_stop)
             }
         },
-        AuthWrite::Krb5 { spn } => match secctx {
+        AuthWrite::Krb5 { ref spn } => match secctx {
             SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
             SecCtx::Krb5(ref a) => {
                 info!(
@@ -475,7 +475,7 @@ async fn hello_client_write(
                 let (publisher, _, rx_stop) = clinfos
                     .insert(&secctx, &mut store, &uifo, resolver_id, &hello)
                     .await?;
-                let d = K5SecData {ctx, secret, spn};
+                let d = K5SecData { ctx, secret, spn: spn.clone() };
                 a.1.write().insert(publisher.id, d);
                 (uifo, publisher, rx_stop)
             }
@@ -533,20 +533,6 @@ async fn hello_client_write(
             }
         },
     };
-    let (tx_stop, rx_stop) = oneshot::channel();
-    {
-        let mut inner = clinfos.0.lock();
-        match inner.get_mut(&hello.write_addr) {
-            None => {
-                inner.insert(hello.write_addr, ClientInfo::Running(tx_stop));
-            }
-            Some(ClientInfo::Running(cl)) => {
-                let cl = mem::replace(cl, tx_stop);
-                let _ = cl.send(());
-            }
-            Some(ClientInfo::CleaningUp(_)) => bail!("unexpected cleaning up"),
-        }
-    }
     Ok(client_loop_write(
         cfg,
         clinfos,
@@ -558,7 +544,7 @@ async fn hello_client_write(
         server_stop,
         rx_stop,
         uifo,
-        hello.write_addr,
+        publisher,
     )
     .await?)
 }
@@ -695,7 +681,7 @@ async fn server_loop(
         if delay_reads { Some(Instant::now() + cfg.writer_ttl) } else { None };
     let cfg = Arc::new(cfg);
     let ctracker = CTracker::new();
-    let clinfos = Clinfos(Arc::new(Mutex::new(HashMap::new())));
+    let clinfos = Clinfos(Arc::new(Mutex::new(HashMap::default())));
     let id = cfg.addr;
     let secctx = SecCtx::new(&cfg, &id).await?;
     let published = Store::new(
