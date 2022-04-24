@@ -401,7 +401,7 @@ impl Store {
     }
 
     pub(crate) async fn handle_batch_read(
-        &mut self,
+        &self,
         con: &mut Channel<ServerCtx>,
         uifo: Arc<UserInfo>,
         mut msgs: impl Iterator<Item = ToRead>,
@@ -598,7 +598,7 @@ impl Store {
     }
 
     pub(crate) async fn handle_batch_write(
-        &mut self,
+        &self,
         mut con: Option<&mut Channel<ServerCtx>>,
         uifo: Arc<UserInfo>,
         publisher: Arc<Publisher>,
@@ -715,12 +715,12 @@ impl Store {
     }
 
     pub(crate) async fn handle_clear(
-        &mut self,
+        &self,
         uifo: Arc<UserInfo>,
         publisher: Arc<Publisher>,
     ) -> Result<()> {
         use rand::{prelude::*, thread_rng};
-        let mut published_paths = join_all(self.shards.iter_mut().map(|shard| {
+        let mut published_paths = join_all(self.shards.iter().map(|shard| {
             let (tx, rx) = oneshot::channel();
             let _ = shard.internal.unbounded_send((publisher.id, tx));
             rx

@@ -51,7 +51,7 @@ pub(crate) struct SecCtxData<S: 'static> {
 }
 
 impl<S: 'static + SecDataCommon> SecCtxData<S> {
-    pub(crate) fn new(cfg: &Arc<config::server::Config>) -> Result<Self> {
+    pub(crate) fn new(cfg: &config::server::Config) -> Result<Self> {
         let mut users = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(&cfg.perms, &mut users, cfg.root(), &cfg.children)?;
         Ok(Self { users, pmap, data: HashMap::default() })
@@ -142,7 +142,7 @@ pub(crate) enum SecCtx {
 
 impl SecCtx {
     pub(crate) async fn new(
-        cfg: &Arc<config::server::Config>,
+        cfg: &config::server::Config,
         id: &SocketAddr,
     ) -> Result<Self> {
         let t = match &cfg.auth {
