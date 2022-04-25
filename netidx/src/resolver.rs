@@ -1,9 +1,9 @@
 use crate::{
-    config::{client::Config, Server},
+    config::{client::Config, Referral},
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
-    protocol::resolver::{FromRead, FromWrite, ToRead, ToWrite},
+    protocol::resolver::{FromRead, FromWrite, Publisher, ToRead, ToWrite},
     resolver_single::{
         ResolverRead as SingleRead, ResolverWrite as SingleWrite, RAWFROMREADPOOL,
         RAWFROMWRITEPOOL,
@@ -20,7 +20,6 @@ use anyhow::Result;
 use futures::{channel::oneshot, future};
 use fxhash::FxBuildHasher;
 use parking_lot::{Mutex, RwLock};
-use netidx_netproto::resolver::Referral;
 use std::{
     collections::{
         hash_map::Entry,
@@ -68,7 +67,7 @@ impl ToPath for ToWrite {
 
 #[derive(Debug)]
 struct Router {
-    cached: BTreeMap<Path, (Instant, Arc<Server>)>,
+    cached: BTreeMap<Path, (Instant, Arc<Referral>)>,
 }
 
 impl Router {
@@ -80,7 +79,7 @@ impl Router {
         &mut self,
         pool: &Pool<Vec<(usize, T)>>,
         batch: &Pooled<Vec<T>>,
-    ) -> impl Iterator<Item = (Option<Arc<Server>>, Pooled<Vec<(usize, T)>>)>
+    ) -> impl Iterator<Item = (Option<Arc<Referral>>, Pooled<Vec<(usize, T)>>)>
     where
         T: ToPath + Clone + Send + Sync + 'static,
     {
@@ -140,7 +139,7 @@ impl Router {
         })
     }
 
-    fn add_server(&mut self, r: Arc<Server>) -> Arc<Server> {
+    fn add_referral(&mut self, r: Arc<Referral>) -> Arc<Referral> {
         let exp = Instant::now() + Duration::from_secs(r.ttl);
         let key = r.path.clone();
         self.cached.insert(key, (exp, r.clone()));
@@ -148,21 +147,21 @@ impl Router {
     }
 }
 
-trait ToServer: Sized {
-    fn server(self) -> result::Result<Server, Self>;
+trait ToReferral: Sized {
+    fn referral(self) -> result::Result<Referral, Self>;
 }
 
-impl ToServer for FromRead {
-    fn server(self) -> result::Result<Server, Self> {
+impl ToReferral for FromRead {
+    fn referral(self) -> result::Result<Referral, Self> {
         match self {
-            FromRead::Referral(r) => Ok(r.into()),
+            FromRead::Referral(r) => Ok(r),
             m => Err(m),
         }
     }
 }
 
-impl ToServer for FromWrite {
-    fn server(self) -> result::Result<Server, Self> {
+impl ToReferral for FromWrite {
+    fn referral(self) -> result::Result<Referral, Self> {
         match self {
             FromWrite::Referral(r) => Ok(r.into()),
             m => Err(m),
@@ -170,26 +169,28 @@ impl ToServer for FromWrite {
     }
 }
 
+type ReadRes<F> = oneshot::Receiver<(
+    Pooled<FxHashMap<PublisherId, Publisher>>,
+    Pooled<Vec<(usize, F)>>,
+)>;
+
 trait Connection<T, F>
 where
     T: ToPath + Send + Sync + 'static,
-    F: ToServer + Send + Sync + 'static,
+    F: ToReferral + Send + Sync + 'static,
 {
     fn new(
-        resolver: Arc<Server>,
+        resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
         secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     ) -> Self;
-    fn send(
-        &mut self,
-        batch: Pooled<Vec<(usize, T)>>,
-    ) -> oneshot::Receiver<Pooled<Vec<(usize, F)>>>;
+    fn send(&mut self, batch: Pooled<Vec<(usize, T)>>) -> ReadRes<F>;
 }
 
 impl Connection<ToRead, FromRead> for SingleRead {
     fn new(
-        resolver: Arc<Server>,
+        resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
         _writer_addr: SocketAddr,
         _secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
@@ -197,17 +198,14 @@ impl Connection<ToRead, FromRead> for SingleRead {
         SingleRead::new(resolver, desired_auth)
     }
 
-    fn send(
-        &mut self,
-        batch: Pooled<Vec<(usize, ToRead)>>,
-    ) -> oneshot::Receiver<Pooled<Vec<(usize, FromRead)>>> {
+    fn send(&mut self, batch: Pooled<Vec<(usize, ToRead)>>) -> ReadRes<FromRead> {
         SingleRead::send(self, batch)
     }
 }
 
 impl Connection<ToWrite, FromWrite> for SingleWrite {
     fn new(
-        resolver: Arc<Server>,
+        resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
         secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
@@ -215,10 +213,7 @@ impl Connection<ToWrite, FromWrite> for SingleWrite {
         SingleWrite::new(resolver, desired_auth, writer_addr, secrets)
     }
 
-    fn send(
-        &mut self,
-        batch: Pooled<Vec<(usize, ToWrite)>>,
-    ) -> oneshot::Receiver<Pooled<Vec<(usize, FromWrite)>>> {
+    fn send(&mut self, batch: Pooled<Vec<(usize, ToWrite)>>) -> ReadRes<FromWrite> {
         SingleWrite::send(self, batch)
     }
 }
@@ -242,8 +237,8 @@ where
 {
     router: Router,
     desired_auth: DesiredAuth,
-    default: Arc<Server>,
-    by_server: HashMap<Arc<Server>, C>,
+    default: Arc<Referral>,
+    by_server: HashMap<Arc<Referral>, C>,
     writer_addr: SocketAddr,
     secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
     phantom: PhantomData<(T, F)>,
@@ -256,13 +251,13 @@ impl<C, T, F> ResolverWrapInner<C, T, F>
 where
     C: Connection<T, F> + Clone + 'static,
     T: ToPath + Clone + Send + Sync + 'static,
-    F: ToServer + Clone + Send + Sync + 'static,
+    F: ToReferral + Clone + Send + Sync + 'static,
 {
     fn send_to_server(
         &mut self,
-        server: Option<Arc<Server>>,
+        server: Option<Arc<Referral>>,
         batch: Pooled<Vec<(usize, T)>>,
-    ) -> oneshot::Receiver<Pooled<Vec<(usize, F)>>> {
+    ) -> ReadRes<F> {
         let r = server.unwrap_or_else(|| self.default.clone());
         match self.by_server.get_mut(&r) {
             Some(con) => con.send(batch),
@@ -281,15 +276,16 @@ where
 }
 
 #[derive(Debug, Clone)]
-struct ResolverWrap<C, T: Send + Sync + 'static, F: Send + Sync + 'static>(
-    Arc<Mutex<ResolverWrapInner<C, T, F>>>,
-);
+struct ResolverWrap<C, T, F>(Arc<Mutex<ResolverWrapInner<C, T, F>>>)
+where
+    T: Send + Sync + 'static,
+    F: Send + Sync + 'static;
 
 impl<C, T, F> ResolverWrap<C, T, F>
 where
-    C: Connection<T, F> + Clone + 'static,
+    C: Connection<T, F, P> + Clone + 'static,
     T: ToPath + Clone + Send + Sync + 'static,
-    F: ToServer + Clone + Send + Sync + 'static,
+    F: ToReferral + Clone + Send + Sync + 'static,
 {
     fn new(
         default: Config,
@@ -302,8 +298,8 @@ where
         let secrets =
             Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
         let mut router = Router::new();
-        let default: Arc<Server> = Arc::new(default.into());
-        router.add_server(default.clone());
+        let default: Arc<Referral> = Arc::new(default.to_referral());
+        router.add_referral(default.clone());
         ResolverWrap(Arc::new(Mutex::new(ResolverWrapInner {
             router,
             desired_auth,
@@ -322,7 +318,7 @@ where
         self.0.lock().secrets.clone()
     }
 
-    async fn send(&self, batch: &Pooled<Vec<T>>) -> Result<Pooled<Vec<F>>> {
+    async fn send(&self, batch: &Pooled<Vec<T>>) -> ReadRes<F> {
         let mut referrals = 0;
         loop {
             let mut waiters = Vec::new();
@@ -341,10 +337,10 @@ where
             for r in future::join_all(waiters).await {
                 let mut r = r?;
                 for (id, reply) in r.drain(..) {
-                    match reply.server() {
+                    match reply.referral() {
                         Err(m) => finished.push((id, m)),
                         Ok(r) => {
-                            self.0.lock().router.add_server(Arc::new(r));
+                            self.0.lock().router.add_referral(Arc::new(r));
                             referral = true;
                         }
                     }
@@ -575,7 +571,11 @@ impl ResolverRead {
 pub struct ResolverWrite(ResolverWrap<SingleWrite, ToWrite, FromWrite>);
 
 impl ResolverWrite {
-    pub fn new(default: Config, desired_auth: DesiredAuth, writer_addr: SocketAddr) -> Self {
+    pub fn new(
+        default: Config,
+        desired_auth: DesiredAuth,
+        writer_addr: SocketAddr,
+    ) -> Self {
         ResolverWrite(ResolverWrap::new(
             default,
             desired_auth,
