@@ -8,28 +8,27 @@ use crate::{
     pool::{Pool, Pooled},
     protocol::resolver::{
         AuthChallenge, AuthRead, AuthWrite, ClientHello, ClientHelloWrite, FromRead,
-        FromWrite, HashMethod, Publisher, ReadyForOwnershipCheck, Secret,
+        FromWrite, HashMethod, Publisher, PublisherId, ReadyForOwnershipCheck, Secret,
         ServerHelloWrite, ToRead, ToWrite,
     },
     utils::{self, Either},
 };
 use anyhow::{anyhow, Error, Result};
-use cross_krb5::{ClientCtx, InitiateFlags, K5Ctx, PendingClientCtx, Step};
-use crossbeam::epoch::Pointable;
+use cross_krb5::{ClientCtx, InitiateFlags, K5Ctx, Step};
 use futures::{
     channel::{mpsc, oneshot},
     future::select_ok,
     prelude::*,
     select_biased,
 };
-use fxhash::FxBuildHasher;
-use log::{debug, error, info, warn};
+use fxhash::FxHashMap;
+use log::{debug, info, warn};
 use netidx_core::pack::BoundedBytes;
 use parking_lot::RwLock;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
-    arch::x86_64::_MM_FLUSH_ZERO_MASK, cmp::max, collections::HashMap, fmt::Debug,
-    net::SocketAddr, str::FromStr, sync::Arc, time::Duration,
+    cmp::max, collections::HashMap, fmt::Debug, net::SocketAddr, str::FromStr, sync::Arc,
+    time::Duration,
 };
 use tokio::{
     net::TcpStream,
@@ -43,7 +42,8 @@ static TTL: u64 = 120;
 lazy_static! {
     pub(crate) static ref TOREADPOOL: Pool<Vec<(usize, ToRead)>> = Pool::new(1000, 10000);
     static ref FROMREADPOOL: Pool<Vec<(usize, FromRead)>> = Pool::new(1000, 10000);
-    static ref PUBLISHERPOOL: Pool<Vec<Publisher>> = Pool::new(1000, 1000);
+    static ref PUBLISHERPOOL: Pool<FxHashMap<PublisherId, Publisher>> =
+        Pool::new(1000, 1000);
     pub(crate) static ref RAWFROMREADPOOL: Pool<Vec<FromRead>> = Pool::new(1000, 10000);
     pub(crate) static ref TOWRITEPOOL: Pool<Vec<(usize, ToWrite)>> =
         Pool::new(1000, 10000);
@@ -165,10 +165,12 @@ async fn connect_read(
     }
 }
 
-type ReadBatch = (
-    Pooled<Vec<(usize, ToRead)>>,
-    oneshot::Sender<(Pooled<Vec<Publisher>>, Pooled<Vec<(usize, FromRead)>>)>,
-);
+pub(crate) type Response<F> =
+    (Pooled<FxHashMap<PublisherId, Publisher>>, Pooled<Vec<(usize, F)>>);
+
+pub(crate) type ResponseChan<F> = oneshot::Receiver<Response<F>>;
+
+type ReadBatch = (Pooled<Vec<(usize, ToRead)>>, oneshot::Sender<Response<FromRead>>);
 
 fn partition_publishers(m: FromRead) -> Either<FromRead, Publisher> {
     match m {
@@ -245,11 +247,15 @@ async fn connection_read(
                             let mut rx_batch = RAWFROMREADPOOL.take();
                             let mut publishers = PUBLISHERPOOL.take();
                             while rx_batch.len() < tx_batch.len() {
-                                let f = c.receive_batch_partition(
-                                    &mut *rx_batch,
-                                    &mut *publishers,
-                                    partition_publishers,
-                                );
+                                let f =
+                                    c.receive_batch_fn(|m| {
+                                        match partition_publishers(m) {
+                                            Either::Left(m) => rx_batch.push(m),
+                                            Either::Right(p) => {
+                                                publishers.insert(p.id, p);
+                                            }
+                                        }
+                                    });
                                 match time::timeout(timeout, f).await {
                                     Ok(Ok(())) => (),
                                     Ok(Err(e)) => {
@@ -300,7 +306,7 @@ impl ResolverRead {
     pub(crate) fn send(
         &mut self,
         batch: Pooled<Vec<(usize, ToRead)>>,
-    ) -> oneshot::Receiver<(Pooled<Vec<Publisher>>, Pooled<Vec<(usize, FromRead)>>)> {
+    ) -> ResponseChan<FromRead> {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.unbounded_send((batch, tx));
         rx

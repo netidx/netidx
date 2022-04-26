@@ -283,7 +283,7 @@ where
 
 impl<C, T, F> ResolverWrap<C, T, F>
 where
-    C: Connection<T, F, P> + Clone + 'static,
+    C: Connection<T, F> + Clone + 'static,
     T: ToPath + Clone + Send + Sync + 'static,
     F: ToReferral + Clone + Send + Sync + 'static,
 {

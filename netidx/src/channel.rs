@@ -326,29 +326,14 @@ impl<C: K5Ctx + Debug + Send + Sync + 'static> ReadChannel<C> {
         Ok(())
     }
 
-    pub(crate) async fn receive_batch_partition<F, T, L, R>(
-        &mut self,
-        left: &mut Vec<L>,
-        right: &mut Vec<R>,
-        mut f: F,
-    ) -> Result<()>
+    pub(crate) async fn receive_batch_fn<T, F>(&mut self, mut f: F) -> Result<()>
     where
         T: Pack + Debug,
-        F: FnMut(T) -> Either<L, R>,
-        L: 'static,
-        R: 'static,
+        F: FnMut(T),
     {
-        let m = self.receive().await?;
-        match f(m) {
-            Either::Left(l) => left.push(l),
-            Either::Right(r) => right.push(r),
-        }
+        f(self.receive().await?);
         while self.buf.has_remaining() {
-            let m = T::decode(&mut self.buf)?;
-            match f(m) {
-                Either::Left(l) => left.push(l),
-                Either::Right(r) => right.push(r),
-            }
+            f(T::decode(&mut self.buf)?);
         }
         Ok(())
     }
@@ -416,18 +401,11 @@ impl<C: K5Ctx + Debug + Send + Sync + 'static> Channel<C> {
         self.read.receive_batch(batch).await
     }
 
-    pub(crate) async fn receive_batch_partition<F, T, L, R>(
-        &mut self,
-        left: &mut Vec<L>,
-        right: &mut Vec<R>,
-        f: F,
-    ) -> Result<()>
+    pub(crate) async fn receive_batch_fn<T, F>(&mut self, f: F) -> Result<()>
     where
         T: Pack + Debug,
-        F: FnMut(T) -> Either<L, R>,
-        L: 'static,
-        R: 'static,
+        F: FnMut(T),
     {
-        self.read.receive_batch_partition(left, right, f).await
+        self.read.receive_batch_fn(f).await
     }
 }
