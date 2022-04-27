@@ -1,5 +1,11 @@
-use crate::{
+use super::{
     auth::{Permissions, UserInfo},
+    store::{
+        self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL,
+    },
+    secctx::SecCtx,
+};
+use crate::{
     channel::Channel,
     pack::Z64,
     path::Path,
@@ -11,10 +17,6 @@ use crate::{
             Referral, Resolved, Table, ToRead, ToWrite,
         },
     },
-    resolver_store::{
-        self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL,
-    },
-    secctx::SecCtx,
 };
 use anyhow::Result;
 use cross_krb5::ServerCtx;
@@ -30,7 +32,7 @@ use futures::{
 use fxhash::FxHashMap;
 use log::info;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
+    collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},
     iter,
     net::SocketAddr,
@@ -98,7 +100,7 @@ impl Shard {
         let mut write_rx = write_rx.fuse();
         let t = Shard { read, write, internal };
         task::spawn(async move {
-            let mut store = resolver_store::Store::new(parent, children);
+            let mut store = store::Store::new(parent, children);
             loop {
                 select! {
                     batch = read_rx.next() => match batch {
@@ -140,7 +142,7 @@ impl Shard {
 
     fn process_read_batch(
         shard: usize,
-        store: &mut resolver_store::Store,
+        store: &mut store::Store,
         secctx: &SecCtx,
         resolver: SocketAddr,
         mut req: ReadRequest,
@@ -284,7 +286,7 @@ impl Shard {
     }
 
     fn process_write_batch(
-        store: &mut resolver_store::Store,
+        store: &mut store::Store,
         secctx: &SecCtx,
         mut req: WriteRequest,
     ) -> Pooled<WriteR> {
@@ -292,7 +294,7 @@ impl Shard {
         let publisher = req.publisher;
         let secctx = secctx.read();
         let pmap = secctx.pmap();
-        let publish = |s: &mut resolver_store::Store,
+        let publish = |s: &mut store::Store,
                        path: Path,
                        default: bool,
                        flags: Option<u32>|

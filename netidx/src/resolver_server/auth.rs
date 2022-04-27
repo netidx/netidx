@@ -1,4 +1,9 @@
-use crate::{config, os::Mapper, path::Path, protocol::glob::Scope};
+use super::config;
+use crate::{
+    os::Mapper,
+    path::Path,
+    protocol::{glob::Scope, resolver::Referral},
+};
 use anyhow::{anyhow, Error, Result};
 use std::{
     collections::{BTreeMap, Bound, HashMap},
@@ -127,14 +132,14 @@ impl UserDb {
 }
 
 #[derive(Debug)]
-pub(crate) struct PMap(BTreeMap<Path, HashMap<Entity, Permissions>>);
+pub(super) struct PMap(BTreeMap<Path, HashMap<Entity, Permissions>>);
 
 impl PMap {
-    pub(crate) fn from_file(
-        file: &config::server::PMap,
+    pub(super) fn from_file(
+        file: &config::PMap,
         db: &mut UserDb,
         root: &str,
-        children: &BTreeMap<Path, config::Referral>,
+        children: &BTreeMap<Path, Referral>,
     ) -> Result<Self> {
         let mut pmap = BTreeMap::new();
         for (path, tbl) in file.0.iter() {

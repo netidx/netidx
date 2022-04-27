@@ -1,6 +1,5 @@
+use super::{auth::Permissions, secctx::SecCtxDataReadGuard};
 use crate::{
-    auth::Permissions,
-    chars::Chars,
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
@@ -8,7 +7,6 @@ use crate::{
         glob::{GlobSet, Scope},
         resolver::{Publisher, PublisherId, PublisherRef, Referral},
     },
-    secctx::SecCtxDataReadGuard,
     utils,
 };
 use bytes::Bytes;
@@ -34,15 +32,15 @@ lazy_static! {
     static ref SIGNED_PUBS_POOL: Pool<Vec<PublisherRef>> = Pool::new(256, 100);
     static ref BY_ID_POOL: Pool<FxHashMap<PublisherId, PublisherRef>> =
         Pool::new(256, 100);
-    pub(crate) static ref PATH_POOL: Pool<Vec<Path>> = Pool::new(256, 10000);
-    pub(crate) static ref COLS_POOL: Pool<Vec<(Path, Z64)>> = Pool::new(256, 10000);
-    pub(crate) static ref REF_POOL: Pool<Vec<Referral>> = Pool::new(256, 100);
+    pub(super) static ref PATH_POOL: Pool<Vec<Path>> = Pool::new(256, 10000);
+    pub(super) static ref COLS_POOL: Pool<Vec<(Path, Z64)>> = Pool::new(256, 10000);
+    pub(super) static ref REF_POOL: Pool<Vec<Referral>> = Pool::new(256, 100);
 }
 
 type Set<T> = ISet<T, 8>;
-pub(crate) const MAX_WRITE_BATCH: usize = 100_000;
-pub(crate) const MAX_READ_BATCH: usize = 1_000_000;
-pub(crate) const GC_THRESHOLD: usize = 100_000;
+pub(super) const MAX_WRITE_BATCH: usize = 100_000;
+pub(super) const MAX_READ_BATCH: usize = 1_000_000;
+pub(super) const GC_THRESHOLD: usize = 100_000;
 
 // We hashcons the address sets because on average a publisher should
 // publish many paths.
@@ -104,7 +102,7 @@ fn column_path_parts<S: AsRef<str>>(path: &S) -> Option<(&str, &str)> {
 }
 
 #[derive(Debug)]
-pub(crate) struct Store {
+pub(super) struct Store {
     publishers_by_id: FxHashMap<PublisherId, Arc<Publisher>>,
     publishers_by_addr: FxHashMap<SocketAddr, PublisherId>,
     published_by_path: HashMap<Path, Set<PublisherId>>,
@@ -119,7 +117,7 @@ pub(crate) struct Store {
 }
 
 impl Store {
-    pub(crate) fn new(
+    pub(super) fn new(
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
     ) -> Self {
@@ -204,7 +202,7 @@ impl Store {
         }
     }
 
-    pub(crate) fn check_referral(&self, path: &Path) -> Option<Referral> {
+    pub(super) fn check_referral(&self, path: &Path) -> Option<Referral> {
         if let Some(r) = self.parent.as_ref() {
             if !Path::is_parent(&r.path, path) {
                 return Some(Referral {
@@ -228,7 +226,7 @@ impl Store {
         }
     }
 
-    pub(crate) fn referrals_in_scope<T: AsRef<str> + ?Sized>(
+    pub(super) fn referrals_in_scope<T: AsRef<str> + ?Sized>(
         &self,
         refs: &mut Vec<Referral>,
         base_path: &T,
@@ -301,7 +299,7 @@ impl Store {
         }
     }
 
-    pub(crate) fn publish(
+    pub(super) fn publish(
         &mut self,
         path: Path,
         publisher: &Arc<Publisher>,
@@ -340,7 +338,7 @@ impl Store {
         }
     }
 
-    pub(crate) fn unpublish(&mut self, publisher: &Arc<Publisher>, path: Path) {
+    pub(super) fn unpublish(&mut self, publisher: &Arc<Publisher>, path: Path) {
         let client_gone = self
             .published_by_id
             .get_mut(&publisher.id)
@@ -389,11 +387,11 @@ impl Store {
         }
     }
 
-    pub(crate) fn published_for_id(&self, id: &PublisherId) -> HashSet<Path> {
+    pub(super) fn published_for_id(&self, id: &PublisherId) -> HashSet<Path> {
         self.published_by_id.get(id).map(|s| s.clone()).unwrap_or_else(HashSet::new)
     }
 
-    pub(crate) fn clear(&mut self, publisher: &Arc<Publisher>) {
+    pub(super) fn clear(&mut self, publisher: &Arc<Publisher>) {
         for path in self.published_for_id(&publisher.id).drain() {
             self.unpublish(publisher, path);
         }
@@ -443,7 +441,7 @@ impl Store {
         }
     }
 
-    pub(crate) fn resolve(
+    pub(super) fn resolve(
         &self,
         publishers: &mut FxHashMap<PublisherId, Publisher>,
         path: &Path,
@@ -473,7 +471,7 @@ impl Store {
         (flags, pubs)
     }
 
-    pub(crate) fn resolve_and_sign(
+    pub(super) fn resolve_and_sign(
         &self,
         publishers: &mut FxHashMap<PublisherId, Publisher>,
         sec: &SecCtxDataReadGuard,
@@ -484,8 +482,8 @@ impl Store {
         let sign = |id: PublisherId| {
             let secret = match sec {
                 SecCtxDataReadGuard::Anonymous => None,
-                SecCtxDataReadGuard::Local(sec) => sec.get_secret_by_id(&id),
-                SecCtxDataReadGuard::Krb5(sec) => sec.get_secret_by_id(&id),
+                SecCtxDataReadGuard::Local(sec) => sec.secret(&id),
+                SecCtxDataReadGuard::Krb5(sec) => sec.secret(&id),
             };
             match secret {
                 None => PublisherRef { id, token: Bytes::new() },
@@ -525,7 +523,7 @@ impl Store {
         (flags, pubs)
     }
 
-    pub(crate) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
+    pub(super) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
         let n = Path::levels(parent);
         let mut paths = PATH_POOL.take();
         if let Some(l) = self.published_by_level.get(&(n + 1)) {
@@ -542,7 +540,7 @@ impl Store {
         paths
     }
 
-    pub(crate) fn list_matching(&self, pat: &GlobSet) -> Pooled<Vec<Path>> {
+    pub(super) fn list_matching(&self, pat: &GlobSet) -> Pooled<Vec<Path>> {
         let mut paths = PATH_POOL.take();
         let mut cur: Option<&str> = None;
         for glob in pat.iter() {
@@ -580,14 +578,14 @@ impl Store {
         paths
     }
 
-    pub(crate) fn get_change_nr(&self, path: &Path) -> Z64 {
+    pub(super) fn get_change_nr(&self, path: &Path) -> Z64 {
         self.published_by_level
             .get(&Path::levels(path))
             .and_then(|l| l.get(path).map(|cn| *cn))
             .unwrap_or(Z64(0))
     }
 
-    pub(crate) fn columns(&self, root: &Path) -> Pooled<Vec<(Path, Z64)>> {
+    pub(super) fn columns(&self, root: &Path) -> Pooled<Vec<(Path, Z64)>> {
         let mut cols = COLS_POOL.take();
         if let Some(c) = self.columns.get(root) {
             cols.extend(c.iter().map(|(name, cnt)| (name.clone(), *cnt)));
@@ -596,7 +594,7 @@ impl Store {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn invariant(&self) {
+    pub(super) fn invariant(&self) {
         debug!("resolver_store: checking invariants");
         for (id, paths) in self.published_by_id.iter() {
             for path in paths.iter() {

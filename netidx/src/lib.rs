@@ -126,17 +126,12 @@ pub use netidx_core::{chars, pack, pool, path, utils};
 pub use netidx_netproto as protocol;
 
 mod batch_channel;
-mod auth;
 mod channel;
 pub mod config;
 mod os;
 pub mod publisher;
-pub mod resolver;
+pub mod resolver_client;
 pub mod resolver_server;
-mod resolver_single;
-mod shard_resolver_store;
-mod resolver_store;
-mod secctx;
 pub mod subscriber;
 #[cfg(test)]
 mod test;

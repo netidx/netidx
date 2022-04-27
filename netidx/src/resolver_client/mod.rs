@@ -1,25 +1,30 @@
+mod common;
+mod read_client;
+mod write_client;
+
+pub use crate::protocol::{
+    glob::{Glob, GlobSet},
+    resolver::{Resolved, Table},
+};
 use crate::{
-    config::{client::Config, Referral},
+    config::Config,
     pack::Z64,
     path::Path,
     pool::{Pool, Pooled},
-    protocol::resolver::{FromRead, FromWrite, Publisher, ToRead, ToWrite},
-    resolver_single::{
-        ResolverRead as SingleRead, ResolverWrite as SingleWrite, RAWFROMREADPOOL,
-        RAWFROMWRITEPOOL,
+    protocol::resolver::{
+        FromRead, FromWrite, Publisher, PublisherId, Referral, ToRead, ToWrite,
     },
-};
-pub use crate::{
-    protocol::{
-        glob::{Glob, GlobSet},
-        resolver::{Resolved, Table},
-    },
-    resolver_single::DesiredAuth,
 };
 use anyhow::Result;
+pub use common::DesiredAuth;
+use common::{
+    ResponseChan, FROMREADPOOL, FROMWRITEPOOL, LISTPOOL, PUBLISHERPOOL, RAWFROMREADPOOL,
+    RAWFROMWRITEPOOL, RAWTOREADPOOL, RESOLVEDPOOL, TOREADPOOL, TOWRITEPOOL, RAWTOWRITEPOOL,
+};
 use futures::{channel::oneshot, future};
-use fxhash::FxBuildHasher;
+use fxhash::FxHashMap;
 use parking_lot::{Mutex, RwLock};
+use read_client::ReadClient;
 use std::{
     collections::{
         hash_map::Entry,
@@ -35,6 +40,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
+use write_client::WriteClient;
 
 const MAX_REFERRALS: usize = 128;
 
@@ -169,11 +175,6 @@ impl ToReferral for FromWrite {
     }
 }
 
-type ReadRes<F> = oneshot::Receiver<(
-    Pooled<FxHashMap<PublisherId, Publisher>>,
-    Pooled<Vec<(usize, F)>>,
-)>;
-
 trait Connection<T, F>
 where
     T: ToPath + Send + Sync + 'static,
@@ -183,50 +184,39 @@ where
         resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
-        secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
+        secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     ) -> Self;
-    fn send(&mut self, batch: Pooled<Vec<(usize, T)>>) -> ReadRes<F>;
+    fn send(&mut self, batch: Pooled<Vec<(usize, T)>>) -> ResponseChan<F>;
 }
 
-impl Connection<ToRead, FromRead> for SingleRead {
+impl Connection<ToRead, FromRead> for ReadClient {
     fn new(
         resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
         _writer_addr: SocketAddr,
-        _secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
+        _secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     ) -> Self {
-        SingleRead::new(resolver, desired_auth)
+        ReadClient::new(resolver, desired_auth)
     }
 
-    fn send(&mut self, batch: Pooled<Vec<(usize, ToRead)>>) -> ReadRes<FromRead> {
-        SingleRead::send(self, batch)
+    fn send(&mut self, batch: Pooled<Vec<(usize, ToRead)>>) -> ResponseChan<FromRead> {
+        ReadClient::send(self, batch)
     }
 }
 
-impl Connection<ToWrite, FromWrite> for SingleWrite {
+impl Connection<ToWrite, FromWrite> for WriteClient {
     fn new(
         resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
-        secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
+        secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     ) -> Self {
-        SingleWrite::new(resolver, desired_auth, writer_addr, secrets)
+        WriteClient::new(resolver, desired_auth, writer_addr, secrets)
     }
 
-    fn send(&mut self, batch: Pooled<Vec<(usize, ToWrite)>>) -> ReadRes<FromWrite> {
-        SingleWrite::send(self, batch)
+    fn send(&mut self, batch: Pooled<Vec<(usize, ToWrite)>>) -> ResponseChan<FromWrite> {
+        WriteClient::send(self, batch)
     }
-}
-
-lazy_static! {
-    static ref RAWTOREADPOOL: Pool<Vec<ToRead>> = Pool::new(1000, 10000);
-    static ref TOREADPOOL: Pool<Vec<(usize, ToRead)>> = Pool::new(1000, 10000);
-    static ref FROMREADPOOL: Pool<Vec<(usize, FromRead)>> = Pool::new(1000, 10000);
-    static ref RAWTOWRITEPOOL: Pool<Vec<ToWrite>> = Pool::new(1000, 10000);
-    static ref TOWRITEPOOL: Pool<Vec<(usize, ToWrite)>> = Pool::new(1000, 10000);
-    static ref FROMWRITEPOOL: Pool<Vec<(usize, FromWrite)>> = Pool::new(1000, 10000);
-    static ref RESOLVEDPOOL: Pool<Vec<Resolved>> = Pool::new(1000, 10000);
-    static ref LISTPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(1000, 10000);
 }
 
 #[derive(Debug)]
@@ -240,7 +230,7 @@ where
     default: Arc<Referral>,
     by_server: HashMap<Arc<Referral>, C>,
     writer_addr: SocketAddr,
-    secrets: Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>>,
+    secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     phantom: PhantomData<(T, F)>,
     f_pool: Pool<Vec<F>>,
     fi_pool: Pool<Vec<(usize, F)>>,
@@ -257,7 +247,7 @@ where
         &mut self,
         server: Option<Arc<Referral>>,
         batch: Pooled<Vec<(usize, T)>>,
-    ) -> ReadRes<F> {
+    ) -> ResponseChan<F> {
         let r = server.unwrap_or_else(|| self.default.clone());
         match self.by_server.get_mut(&r) {
             Some(con) => con.send(batch),
@@ -295,8 +285,7 @@ where
         fi_pool: Pool<Vec<(usize, F)>>,
         ti_pool: Pool<Vec<(usize, T)>>,
     ) -> ResolverWrap<C, T, F> {
-        let secrets =
-            Arc::new(RwLock::new(HashMap::with_hasher(FxBuildHasher::default())));
+        let secrets = Arc::new(RwLock::new(HashMap::default()));
         let mut router = Router::new();
         let default: Arc<Referral> = Arc::new(default.to_referral());
         router.add_referral(default.clone());
@@ -314,11 +303,14 @@ where
         })))
     }
 
-    fn secrets(&self) -> Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>> {
-        self.0.lock().secrets.clone()
+    fn secrets(&self) -> Arc<RwLock<FxHashMap<SocketAddr, u128>>> {
+        Arc::clone(&self.0.lock().secrets)
     }
 
-    async fn send(&self, batch: &Pooled<Vec<T>>) -> ReadRes<F> {
+    async fn send(
+        &self,
+        batch: &Pooled<Vec<T>>,
+    ) -> Result<(Pooled<FxHashMap<PublisherId, Publisher>>, Pooled<Vec<F>>)> {
         let mut referrals = 0;
         loop {
             let mut waiters = Vec::new();
@@ -334,8 +326,18 @@ where
                 (inner.fi_pool.take(), inner.f_pool.take())
             };
             let mut referral = false;
+            //: Option<Pooled<FxHashMap<PublisherId, Publisher>>>
+            let mut publishers = None;
             for r in future::join_all(waiters).await {
-                let mut r = r?;
+                let (mut p, mut r) = r?;
+                match publishers.as_mut() {
+                    None => {
+                        publishers = Some(p);
+                    }
+                    Some(publishers) => {
+                        publishers.extend(p.drain());
+                    }
+                };
                 for (id, reply) in r.drain(..) {
                     match reply.referral() {
                         Err(m) => finished.push((id, m)),
@@ -349,7 +351,8 @@ where
             if !referral {
                 finished.sort_by_key(|(id, _)| *id);
                 res.extend(finished.drain(..).map(|(_, m)| m));
-                break Ok(res);
+                let publishers = publishers.unwrap_or_else(|| PUBLISHERPOOL.take());
+                break Ok((publishers, res));
             }
             referrals += 1;
             if referrals > MAX_REFERRALS {
@@ -362,15 +365,12 @@ where
 #[derive(Debug, Clone)]
 pub struct ChangeTracker {
     path: Path,
-    by_resolver: HashMap<SocketAddr, Z64, FxBuildHasher>,
+    by_resolver: FxHashMap<SocketAddr, Z64>,
 }
 
 impl ChangeTracker {
     pub fn new(path: Path) -> Self {
-        ChangeTracker {
-            path,
-            by_resolver: HashMap::with_hasher(FxBuildHasher::default()),
-        }
+        ChangeTracker { path, by_resolver: HashMap::default() }
     }
 
     pub fn path(&self) -> &Path {
@@ -379,7 +379,7 @@ impl ChangeTracker {
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolverRead(ResolverWrap<SingleRead, ToRead, FromRead>);
+pub struct ResolverRead(ResolverWrap<ReadClient, ToRead, FromRead>);
 
 impl ResolverRead {
     pub fn new(default: Config, desired_auth: DesiredAuth) -> Self {
@@ -397,18 +397,21 @@ impl ResolverRead {
     pub async fn send(
         &self,
         batch: &Pooled<Vec<ToRead>>,
-    ) -> Result<Pooled<Vec<FromRead>>> {
+    ) -> Result<(Pooled<FxHashMap<PublisherId, Publisher>>, Pooled<Vec<FromRead>>)> {
         self.0.send(batch).await
     }
 
     /// resolve the specified paths, results are in send order
-    pub async fn resolve<I>(&self, batch: I) -> Result<Pooled<Vec<Resolved>>>
+    pub async fn resolve<I>(
+        &self,
+        batch: I,
+    ) -> Result<(Pooled<FxHashMap<PublisherId, Publisher>>, Pooled<Vec<Resolved>>)>
     where
         I: IntoIterator<Item = Path>,
     {
         let mut to = RAWTOREADPOOL.take();
         to.extend(batch.into_iter().map(ToRead::Resolve));
-        let mut result = self.send(&to).await?;
+        let (publishers, mut result) = self.send(&to).await?;
         if result.len() != to.len() {
             bail!(
                 "unexpected number of resolve results {} expected {}",
@@ -425,7 +428,7 @@ impl ResolverRead {
                     m => bail!("unexpected resolve response {:?}", m),
                 }
             }
-            Ok(out)
+            Ok((publishers, out))
         }
     }
 
@@ -433,7 +436,7 @@ impl ResolverRead {
     pub async fn list(&self, path: Path) -> Result<Pooled<Vec<Path>>> {
         let mut to = RAWTOREADPOOL.take();
         to.push(ToRead::List(path));
-        let mut result = self.send(&to).await?;
+        let (_, mut result) = self.send(&to).await?;
         if result.len() != 1 {
             bail!("expected 1 result from list got {}", result.len());
         } else {
@@ -449,26 +452,26 @@ impl ResolverRead {
         message: ToRead,
         mut process_reply: F,
     ) -> Result<()> {
-        let mut pending: Vec<Option<Arc<Server>>> = vec![None];
-        let mut done: HashSet<Arc<Server>> = HashSet::new();
+        let mut pending: Vec<Option<Arc<Referral>>> = vec![None];
+        let mut done: HashSet<Arc<Referral>> = HashSet::new();
         let mut referral_cycles = 0;
         while pending.len() > 0 {
             let mut waiters = Vec::new();
             {
                 let mut inner = self.0 .0.lock();
-                for server in pending.drain(..) {
-                    let server = server.unwrap_or_else(|| inner.default.clone());
-                    if !done.contains(&server) {
-                        done.insert(server.clone());
-                        let server = inner.router.add_server(server);
+                for referral in pending.drain(..) {
+                    let referral = referral.unwrap_or_else(|| inner.default.clone());
+                    if !done.contains(&referral) {
+                        done.insert(referral.clone());
+                        let server = inner.router.add_referral(referral.clone());
                         let mut to = TOREADPOOL.take();
                         to.push((0, message.clone()));
-                        waiters.push(inner.send_to_server(Some(server), to));
+                        waiters.push(inner.send_to_server(Some(referral), to));
                     }
                 }
             }
             for r in future::join_all(waiters).await {
-                let mut r = r?;
+                let (_, mut r) = r?;
                 for (_, reply) in r.drain(..) {
                     let mut referrals = process_reply(reply)?;
                     for r in referrals.drain(..) {
@@ -555,7 +558,7 @@ impl ResolverRead {
     pub async fn table(&self, path: Path) -> Result<Table> {
         let mut to = RAWTOREADPOOL.take();
         to.push(ToRead::Table(path));
-        let mut result = self.send(&to).await?;
+        let (_, mut result) = self.send(&to).await?;
         if result.len() != 1 {
             bail!("expected 1 result from table got {}", result.len());
         } else {
@@ -568,7 +571,7 @@ impl ResolverRead {
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolverWrite(ResolverWrap<SingleWrite, ToWrite, FromWrite>);
+pub struct ResolverWrite(ResolverWrap<WriteClient, ToWrite, FromWrite>);
 
 impl ResolverWrite {
     pub fn new(
@@ -590,7 +593,8 @@ impl ResolverWrite {
         &self,
         batch: &Pooled<Vec<ToWrite>>,
     ) -> Result<Pooled<Vec<FromWrite>>> {
-        self.0.send(batch).await
+        let (_, r) = self.0.send(batch).await?;
+        Ok(r)
     }
 
     async fn send_expect<V, F, I>(
@@ -606,7 +610,7 @@ impl ResolverWrite {
         let mut to = RAWTOWRITEPOOL.take();
         let len = to.len();
         to.extend(batch.into_iter().map(f));
-        let mut from = self.0.send(&to).await?;
+        let (_, mut from) = self.0.send(&to).await?;
         if from.len() != to.len() {
             bail!("unexpected number of responses {} vs expected {}", from.len(), len);
         }
@@ -622,7 +626,7 @@ impl ResolverWrite {
         self.send_expect(batch, FromWrite::Published, ToWrite::Publish).await
     }
 
-    pub async fn publish_with_flags<I: IntoIterator<Item = (Path, Option<u16>)>>(
+    pub async fn publish_with_flags<I: IntoIterator<Item = (Path, Option<u32>)>>(
         &self,
         batch: I,
     ) -> Result<()> {
@@ -641,7 +645,7 @@ impl ResolverWrite {
     }
 
     pub async fn publish_default_with_flags<
-        I: IntoIterator<Item = (Path, Option<u16>)>,
+        I: IntoIterator<Item = (Path, Option<u32>)>,
     >(
         &self,
         batch: I,
@@ -669,7 +673,7 @@ impl ResolverWrite {
     pub async fn clear(&self) -> Result<()> {
         let mut batch = RAWTOWRITEPOOL.take();
         batch.push(ToWrite::Clear);
-        let r = self.0.send(&batch).await?;
+        let (_, r) = self.0.send(&batch).await?;
         if r.len() != 1 {
             bail!("unexpected response to clear command {:?}", r)
         } else {
@@ -682,7 +686,7 @@ impl ResolverWrite {
 
     pub(crate) fn secrets(
         &self,
-    ) -> Arc<RwLock<HashMap<SocketAddr, u128, FxBuildHasher>>> {
+    ) -> Arc<RwLock<FxHashMap<SocketAddr, u128>>> {
         self.0.secrets()
     }
 }

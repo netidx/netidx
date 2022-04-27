@@ -1,13 +1,15 @@
-use crate::{
+use super::{
     auth::{PMap, UserDb},
+    config::Config,
+};
+use crate::{
     channel::K5CtxWrap,
     chars::Chars,
-    config,
     os::{
         local_auth::{AuthServer, Credential},
         Mapper,
     },
-    protocol::resolver::PublisherId,
+    protocol::resolver::{Auth, PublisherId},
 };
 use anyhow::{bail, Result};
 use cross_krb5::{K5Ctx, ServerCtx};
@@ -51,7 +53,7 @@ pub(crate) struct SecCtxData<S: 'static> {
 }
 
 impl<S: 'static + SecDataCommon> SecCtxData<S> {
-    pub(crate) fn new(cfg: &config::server::Config) -> Result<Self> {
+    pub(crate) fn new(cfg: &Config) -> Result<Self> {
         let mut users = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(&cfg.perms, &mut users, cfg.root(), &cfg.children)?;
         Ok(Self { users, pmap, data: HashMap::default() })
@@ -141,18 +143,15 @@ pub(crate) enum SecCtx {
 }
 
 impl SecCtx {
-    pub(crate) async fn new(
-        cfg: &config::server::Config,
-        id: &SocketAddr,
-    ) -> Result<Self> {
+    pub(crate) async fn new(cfg: &Config, id: &SocketAddr) -> Result<Self> {
         let t = match &cfg.auth {
-            config::Auth::Anonymous => SecCtx::Anonymous,
-            config::Auth::Local { path } => {
+            Auth::Anonymous => SecCtx::Anonymous,
+            Auth::Local { path } => {
                 let auth = local::Authenticator::new(&path).await?;
                 let store = RwLock::new(SecCtxData::new(cfg)?);
                 SecCtx::Local(Arc::new((auth, store)))
             }
-            config::Auth::Krb5 { spn } => {
+            Auth::Krb5 { spn } => {
                 let store = RwLock::new(SecCtxData::new(cfg)?);
                 SecCtx::Krb5(Arc::new((spn.clone(), store)))
             }

@@ -1,8 +1,17 @@
+pub mod config;
+mod auth;
+mod store;
+mod secctx;
+mod shard_store;
+
+use auth::{UserInfo, ANONYMOUS};
+use secctx::{K5SecData, LocalSecData, SecCtx};
+use shard_store::Store;
+use config::Config;
+
 use crate::{
-    auth::{UserInfo, ANONYMOUS},
     channel::{Channel, K5CtxWrap},
     chars::Chars,
-    config,
     pack::Pack,
     pool::{Pool, Pooled},
     protocol::{
@@ -13,9 +22,6 @@ use crate::{
             ServerHelloWrite, TargetAuth, ToRead, ToWrite,
         },
     },
-    publisher::ClId,
-    secctx::{K5SecData, LocalSecData, SecCtx},
-    shard_resolver_store::Store,
     utils,
 };
 use anyhow::Result;
@@ -26,7 +32,6 @@ use log::{debug, info, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
-use serde_json::map::VacantEntry;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
     fmt::Debug,
@@ -201,7 +206,7 @@ struct Ctx {
     clinfos: Clinfos,
     ctracker: CTracker,
     secctx: SecCtx,
-    cfg: config::server::Config,
+    cfg: Config,
     id: SocketAddr,
     listen_addr: SocketAddr,
     store: Store,
@@ -360,7 +365,7 @@ async fn hello_client_write(
     info!("hello_write starting negotiation");
     debug!("hello_write client_hello: {:?}", hello);
     async fn challenge_auth(
-        cfg: &config::server::Config,
+        cfg: &Config,
         con: &mut Channel<ServerCtx>,
         secret: u128,
     ) -> Result<()> {
@@ -634,7 +639,7 @@ async fn hello_client(
 }
 
 async fn server_loop(
-    cfg: config::server::Config,
+    cfg: Config,
     delay_reads: bool,
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
@@ -717,7 +722,7 @@ impl Drop for Server {
 }
 
 impl Server {
-    pub async fn new(cfg: config::server::Config, delay_reads: bool) -> Result<Server> {
+    pub async fn new(cfg: Config, delay_reads: bool) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         let tsk = server_loop(cfg, delay_reads, recv_stop, send_ready);

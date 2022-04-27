@@ -1,4 +1,4 @@
-use crate::{pack::Pack, utils::Either};
+use crate::pack::Pack;
 use anyhow::{anyhow, Error, Result};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, BytesMut};
