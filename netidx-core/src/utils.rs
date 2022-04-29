@@ -1,6 +1,6 @@
 use crate::pack::{Pack, PackError};
 use anyhow::{self, Result};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use digest::Digest;
 use futures::{
     channel::mpsc,
@@ -9,7 +9,6 @@ use futures::{
     stream::FusedStream,
     task::{Context, Poll},
 };
-use rand::Rng;
 use sha3::Sha3_512;
 use std::{
     borrow::Borrow,

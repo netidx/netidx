@@ -1,6 +1,5 @@
 use crate::glob::GlobSet;
 use bytes::{Buf, BufMut, Bytes};
-use fxhash::FxBuildHasher;
 use netidx_core::{
     chars::Chars,
     pack::{self, Pack, PackError, Z64},
@@ -9,7 +8,6 @@ use netidx_core::{
 };
 use std::{
     cmp::{Eq, PartialEq},
-    collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     net::SocketAddr,
     result,

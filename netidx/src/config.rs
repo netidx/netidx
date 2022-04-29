@@ -42,7 +42,7 @@ impl Config {
             bail!("you must specify at least one address");
         }
         for (addr, auth) in &cfg.addrs {
-            utils::check_addr(addr.ip(), &[])?;
+            utils::check_addr::<()>(addr.ip(), &[])?;
             match auth {
                 FAuth::Anonymous | FAuth::Krb5(_) => (),
                 FAuth::Local(_) => {

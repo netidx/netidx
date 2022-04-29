@@ -9,14 +9,13 @@ use crate::{
     pack::BoundedBytes,
     path::Path,
     pool::{Pool, Pooled},
-    protocol::{self, publisher, resolver::Auth},
+    protocol::{self, publisher},
     resolver_client::{DesiredAuth, ResolverWrite},
     resolver_server::{auth::Permissions, krb5_authentication},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
-use bytes::Buf;
-use cross_krb5::{AcceptFlags, ServerCtx, Step};
+use cross_krb5::ServerCtx;
 use futures::{
     channel::{
         mpsc::{

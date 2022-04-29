@@ -29,7 +29,7 @@ pub(crate) fn check_addrs(a: &Vec<(SocketAddr, file::Auth)>) -> Result<()> {
         bail!("empty addrs")
     }
     for (addr, auth) in a {
-        utils::check_addr(addr.ip(), &[])?;
+        utils::check_addr::<()>(addr.ip(), &[])?;
         if cfg!(not(test)) && addr.port() == 0 {
             bail!("non zero port required {:?}", addr);
         }
