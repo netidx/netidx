@@ -6,7 +6,7 @@ use netidx::{
     path::Path,
     pool::Pooled,
     publisher::{Publisher, Val, Value, WriteRequest},
-    resolver::ChangeTracker,
+    resolver_client::ChangeTracker,
     subscriber::{Dval, Event, Subscriber},
 };
 use serde::{de::DeserializeOwned, Serialize};

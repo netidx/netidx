@@ -1,9 +1,9 @@
 use netidx::{
     chars::Chars,
-    config::client::Config,
+    config::Config,
     path::Path,
     protocol::glob::{Glob, GlobSet},
-    resolver::{DesiredAuth, ChangeTracker, ResolverRead, ResolverWrite},
+    resolver_client::{DesiredAuth, ChangeTracker, ResolverRead, ResolverWrite},
 };
 use std::{collections::HashSet, iter, time::Duration, net::SocketAddr};
 use tokio::{runtime::Runtime, time};
@@ -11,7 +11,7 @@ use arcstr::ArcStr;
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug)]
-pub(crate) enum ResolverCmd {
+pub(super) enum ResolverCmd {
     #[structopt(name = "resolve", about = "resolve an in the resolver server")]
     Resolve { path: Path },
     #[structopt(name = "list", about = "list entries in the resolver server")]
@@ -52,19 +52,20 @@ pub(crate) enum ResolverCmd {
     },
 }
 
-pub(crate) fn run(config: Config, auth: DesiredAuth, cmd: ResolverCmd) {
+pub(super) fn run(config: Config, auth: DesiredAuth, cmd: ResolverCmd) {
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         match cmd {
             ResolverCmd::Resolve { path } => {
                 let resolver = ResolverRead::new(config, auth);
-                let resolved = resolver.resolve(vec![path]).await.unwrap();
-                println!("resolver: {:?}", resolved[0].resolver);
-                for (addr, principal) in resolved[0].krb5_spns.iter() {
-                    println!("{}: {}", addr, principal);
-                }
-                for (addr, _) in resolved[0].addrs.iter() {
-                    println!("{}", addr);
+                let (publishers, resolved) = resolver.resolve(vec![path]).await.unwrap();
+                if publishers.len() > 0 {
+                    for pb in publishers.values() {
+                        println!("publisher: {:?}", pb);
+                    }
+                    for pref in resolved[0].publishers.iter() {
+                        println!("{:?}", pref.id);
+                    }
                 }
             }
             ResolverCmd::List { watch, no_structure, path } => {

@@ -1,6 +1,6 @@
 use daemonize::Daemonize;
 use futures::future;
-use netidx::{config::server::Config, resolver_server::Server};
+use netidx::resolver_server::{config::Config, Server};
 use structopt::StructOpt;
 use tokio::runtime::Runtime;
 
@@ -33,9 +33,8 @@ pub(crate) fn run(params: Params) {
     }
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
-        let server = Server::new(config, params.delay_reads, params.id)
-            .await
-            .expect("starting server");
+        let server =
+            Server::new(config, params.delay_reads).await.expect("starting server");
         future::pending::<()>().await;
         drop(server)
     });

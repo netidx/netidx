@@ -7,7 +7,7 @@ extern crate anyhow;
 #[cfg(unix)]
 #[macro_use]
 extern crate serde_derive;
-use netidx::{config, resolver::DesiredAuth};
+use netidx::{config::Config, resolver_client::DesiredAuth};
 use structopt::StructOpt;
 
 mod publisher;
@@ -36,12 +36,12 @@ struct ClientParams {
 }
 
 impl ClientParams {
-    fn load(self) -> (config::client::Config, DesiredAuth) {
+    fn load(self) -> (Config, DesiredAuth) {
         let cfg = match self.config {
-            None => config::client::Config::load_default()
+            None => Config::load_default()
                 .expect("failed to load default netidx config"),
             Some(path) => {
-                config::client::Config::load(path).expect("failed to load netidx config")
+                Config::load(path).expect("failed to load netidx config")
             }
         };
         let auth = match self.auth {

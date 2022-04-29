@@ -1,4 +1,5 @@
 pub use crate::protocol::value::{FromValue, Typ, Value};
+pub use crate::resolver_client::DesiredAuth;
 use crate::{
     batch_channel::{self, BatchReceiver, BatchSender},
     channel::{Channel, K5CtxWrap, ReadChannel, WriteChannel},
@@ -12,7 +13,7 @@ use crate::{
         resolver::{Publisher, PublisherId, Resolved, TargetAuth},
     },
     publisher::PublishFlags,
-    resolver_client::{common::krb5_authentication, DesiredAuth, ResolverRead},
+    resolver_client::{common::krb5_authentication, ResolverRead},
     utils::{BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};

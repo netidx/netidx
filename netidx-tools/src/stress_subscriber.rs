@@ -1,9 +1,9 @@
 use futures::channel::mpsc;
 use futures::{prelude::*, select_biased};
 use netidx::{
-    config::client::Config,
+    config::Config,
     path::Path,
-    resolver::{DesiredAuth, ResolverRead},
+    resolver_client::{DesiredAuth, ResolverRead},
     subscriber::{Subscriber, UpdatesFlags},
 };
 use std::time::Duration;
@@ -14,7 +14,7 @@ use tokio::{
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug)]
-pub(crate) struct Params {
+pub(super) struct Params {
     #[structopt(
         long = "base",
         help = "base path",
@@ -23,7 +23,7 @@ pub(crate) struct Params {
     base: String,
 }
 
-pub(crate) fn run(config: Config, auth: DesiredAuth, p: Params) {
+pub(super) fn run(config: Config, auth: DesiredAuth, p: Params) {
     let rt = Runtime::new().expect("runtime");
     rt.block_on(async {
         let r = ResolverRead::new(config.clone(), auth.clone());

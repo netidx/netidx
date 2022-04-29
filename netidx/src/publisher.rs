@@ -2,6 +2,7 @@ pub use crate::protocol::{
     publisher::Id,
     value::{FromValue, Typ, Value},
 };
+pub use crate::resolver_client::DesiredAuth;
 use crate::{
     channel::{Channel, K5CtxWrap},
     chars::Chars,
@@ -10,7 +11,7 @@ use crate::{
     path::Path,
     pool::{Pool, Pooled},
     protocol::{self, publisher},
-    resolver_client::{DesiredAuth, ResolverWrite},
+    resolver_client::ResolverWrite,
     resolver_server::{auth::Permissions, krb5_authentication},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };

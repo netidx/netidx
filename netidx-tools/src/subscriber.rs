@@ -8,10 +8,10 @@ use futures::{
     stream::{self, FusedStream},
 };
 use netidx::{
-    config::client::Config,
+    config::Config,
     path::Path,
     pool::Pooled,
-    resolver::DesiredAuth,
+    resolver_client::DesiredAuth,
     subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
     utils::{split_escaped, splitn_escaped, BatchItem, Batched},
 };
@@ -31,7 +31,7 @@ use tokio::{
 };
 
 #[derive(StructOpt, Debug)]
-pub(crate) struct Params {
+pub(super) struct Params {
     #[structopt(
         short = "o",
         long = "oneshot",
@@ -391,7 +391,7 @@ async fn subscribe(cfg: Config, auth: DesiredAuth, p: Params) {
     }
 }
 
-pub(crate) fn run(cfg: Config, auth: DesiredAuth, params: Params) {
+pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) {
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(subscribe(cfg, auth, params));
 }

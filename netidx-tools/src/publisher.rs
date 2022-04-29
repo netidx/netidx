@@ -6,11 +6,10 @@ use futures::{
 use fxhash::FxBuildHasher;
 use log::{error, warn};
 use netidx::{
-    config::client::Config,
+    config::Config,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, Id, Publisher, Typ, Val, Value, WriteRequest},
-    resolver::DesiredAuth,
+    publisher::{BindCfg, Id, Publisher, Typ, Val, Value, WriteRequest, DesiredAuth},
     utils,
 };
 use parking_lot::Mutex;
@@ -23,7 +22,7 @@ use tokio::{
 };
 
 #[derive(StructOpt, Debug)]
-pub(crate) struct Params {
+pub(super) struct Params {
     #[structopt(
         short = "b",
         long = "bind",
@@ -77,7 +76,7 @@ async fn handle_writes_loop(
     Ok(())
 }
 
-pub(crate) fn run(config: Config, auth: DesiredAuth, params: Params) {
+pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         let timeout = params.timeout.map(Duration::from_secs);

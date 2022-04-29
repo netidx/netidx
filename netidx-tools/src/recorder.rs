@@ -11,7 +11,7 @@ use fxhash::FxBuildHasher;
 use log::{error, info, warn};
 use netidx::{
     chars::Chars,
-    config::client::Config,
+    config::Config,
     path::Path,
     pool::Pooled,
     protocol::{
@@ -21,7 +21,7 @@ use netidx::{
     publisher::{
         BindCfg, ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest,
     },
-    resolver::{ChangeTracker, DesiredAuth, ResolverRead},
+    resolver_client::{ChangeTracker, DesiredAuth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
     utils,
 };
@@ -47,7 +47,7 @@ use tokio::{runtime::Runtime, sync::broadcast, task, time};
 use uuid::{adapter::SimpleRef, Uuid};
 
 #[derive(StructOpt, Debug)]
-pub(crate) struct Params {
+pub(super) struct Params {
     #[structopt(
         short = "b",
         long = "bind",
@@ -1435,7 +1435,7 @@ async fn run_async(
     }
 }
 
-pub(crate) fn run(config: Config, auth: DesiredAuth, params: Params) {
+pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
     let image_frequency =
         if params.image_frequency == 0 { None } else { Some(params.image_frequency) };
     let poll_interval = if params.poll_interval == 0 {

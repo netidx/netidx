@@ -15,7 +15,7 @@ use futures::{
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use netidx::{
     chars::Chars,
-    config,
+    config::Config,
     pack::Pack,
     path::Path,
     pool::{Pool, Pooled},
@@ -23,7 +23,7 @@ use netidx::{
         BindCfg, DefaultHandle, Event as PEvent, Id, PublishFlags, Publisher,
         UpdateBatch, Val, WriteRequest,
     },
-    resolver::DesiredAuth,
+    resolver_client::DesiredAuth,
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
     utils::BatchItem,
 };
@@ -758,7 +758,7 @@ struct Container {
 
 impl Container {
     async fn new(
-        cfg: config::client::Config,
+        cfg: Config,
         auth: DesiredAuth,
         params: Params,
     ) -> Result<Self> {
@@ -1687,7 +1687,7 @@ impl Container {
     }
 }
 
-pub(super) fn run(cfg: config::client::Config, auth: DesiredAuth, params: Params) {
+pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) {
     Runtime::new().expect("failed to create runtime").block_on(async move {
         let t =
             Container::new(cfg, auth, params).await.expect("failed to create context");

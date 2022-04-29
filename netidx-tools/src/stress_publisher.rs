@@ -1,9 +1,8 @@
 use futures::{prelude::*, select};
 use netidx::{
-    config::client::Config,
+    config::Config,
     path::Path,
-    publisher::{BindCfg, Publisher, Value},
-    resolver::DesiredAuth,
+    publisher::{BindCfg, Publisher, Value, DesiredAuth},
 };
 use std::{
     mem,
@@ -13,7 +12,7 @@ use structopt::StructOpt;
 use tokio::{runtime::Runtime, signal, time};
 
 #[derive(StructOpt, Debug)]
-pub(crate) struct Params {
+pub(super) struct Params {
     #[structopt(
         short = "b",
         long = "bind",
@@ -90,7 +89,7 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) {
     }
 }
 
-pub(crate) fn run(config: Config, auth: DesiredAuth, params: Params) {
+pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
         run_publisher(config, auth, params).await;
