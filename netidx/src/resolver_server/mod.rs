@@ -168,6 +168,11 @@ impl Clinfos {
                                     (AuthWrite::Anonymous, TargetAuth::Anonymous) => (),
                                     (AuthWrite::Anonymous, _) => bail!("not permitted"),
                                     (AuthWrite::Reuse, _) => (),
+                                    (
+                                        AuthWrite::Krb5 { spn: cspn },
+                                        TargetAuth::Krb5 { spn },
+                                    ) if cspn == spn => (),
+                                    (AuthWrite::Local, TargetAuth::Local) => (),
                                     (AuthWrite::Krb5 { .. } | AuthWrite::Local, _) => {
                                         let publisher = publisher.clone();
                                         *ifo = ClientInfo::CleaningUp(Vec::new());
