@@ -1291,14 +1291,21 @@ async fn hello_publisher(
                 _ => bail!("unexpected response from publisher"),
             }
         }
-        (DesiredAuth::Anonymous, _) => bail!("anonymous access not allowed"),
-        (DesiredAuth::Local, TargetAuth::Local | TargetAuth::Krb5 { .. })
-        | (DesiredAuth::Krb5 { .. }, TargetAuth::Local) => {
+        (DesiredAuth::Anonymous, TargetAuth::Local { .. } | TargetAuth::Krb5 { .. }) => {
+            bail!("anonymous access not allowed")
+        }
+        (DesiredAuth::Local | DesiredAuth::Krb5 { .. }, TargetAuth::Anonymous) => {
+            bail!("authentication not supported")
+        }
+        (DesiredAuth::Local | DesiredAuth::Krb5 { .. }, TargetAuth::Local) => {
             con.send_one(&Hello::Local).await?;
             match con.receive().await? {
                 Hello::Local => (),
                 _ => bail!("unexpected response from publisher"),
             }
+        }
+        (DesiredAuth::Local, TargetAuth::Krb5 { .. }) => {
+            bail!("local auth not supported")
         }
         (DesiredAuth::Krb5 { upn, .. }, TargetAuth::Krb5 { spn }) => {
             let upn = upn.as_ref().map(|p| p.as_str());

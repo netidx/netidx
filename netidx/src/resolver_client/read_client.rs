@@ -63,6 +63,9 @@ async fn connect(
                     AuthRead::Local | AuthRead::Krb5 => bail!("protocol error"),
                 }
             }
+            (DesiredAuth::Krb5 {..} | DesiredAuth::Local, Auth::Anonymous) => {
+                bail!("authentication not supported")
+            }
             (DesiredAuth::Local | DesiredAuth::Krb5 { .. }, Auth::Local { path }) => {
                 let tok = cwt!("local token", AuthClient::token(&*path));
                 cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Local)));
@@ -72,6 +75,7 @@ async fn connect(
                     AuthRead::Krb5 | AuthRead::Anonymous => bail!("protocol error"),
                 }
             }
+            (DesiredAuth::Local, Auth::Krb5 {..}) => bail!("local auth not supported"),
             (DesiredAuth::Krb5 { upn, .. }, Auth::Krb5 { spn }) => {
                 let upn = upn.as_ref().map(|s| s.as_str());
                 cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Krb5)));
