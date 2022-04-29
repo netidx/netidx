@@ -3,14 +3,15 @@ pub use crate::protocol::{
     value::{FromValue, Typ, Value},
 };
 use crate::{
-    resolver_server::auth::Permissions,
     channel::{Channel, K5CtxWrap},
     chars::Chars,
     config::Config,
+    pack::BoundedBytes,
     path::Path,
     pool::{Pool, Pooled},
     protocol::{self, publisher, resolver::Auth},
     resolver_client::{DesiredAuth, ResolverWrite},
+    resolver_server::{auth::Permissions, krb5_authentication},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
@@ -31,6 +32,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use get_if_addrs::get_if_addrs;
 use log::{debug, error, info};
 use parking_lot::{Mutex, RwLock};
+use protocol::resolver::{AuthChallenge, HashMethod};
 use rand::{self, Rng};
 use std::{
     boxed::Box,
@@ -60,10 +62,10 @@ use tokio::{
 /// - no broadcast (255.255.255.255)
 /// - no multicast addresses (224.0.0.0/8)
 /// - no link local addresses (169.254.0.0/16)
-/// - loopback (127.0.0.1, or ::1) is only allowed if all the resolvers are also loopback
-/// - private addresses (192.168.0.0/16, 10.0.0.0/8,
-///   172.16.0.0/12) are only allowed if all the resolvers are also
-///   using private addresses.
+/// - loopback (127.0.0.1, or ::1) is only allowed if the default resolver is local
+/// - private addresses (192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12)
+/// are only allowed if the default resolver is also using a private
+/// address
 ///
 /// As well as the above rules we will enumerate all the network
 /// interface addresses present at startup time and check that the
@@ -206,7 +208,7 @@ static MAX_CLIENTS: usize = 768;
 
 lazy_static! {
     static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(100, 10_000);
-    static ref TOPUB: Pool<HashMap<Path, Option<u16>>> = Pool::new(10, 10_000);
+    static ref TOPUB: Pool<HashMap<Path, Option<u32>>> = Pool::new(10, 10_000);
     static ref TOUPUB: Pool<HashSet<Path>> = Pool::new(5, 10_000);
     static ref TOUSUB: Pool<HashMap<Id, Subscribed>> = Pool::new(5, 10_000);
     static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(100, 10_000);
@@ -232,7 +234,7 @@ lazy_static! {
 }
 
 bitflags! {
-    pub struct PublishFlags: u16 {
+    pub struct PublishFlags: u32 {
         /// if set, then subscribers will be forced to use an existing
         /// connection, if it exists, when subscribing to this value.
         ///
@@ -594,8 +596,8 @@ struct PublisherInner {
     on_write: FxHashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>>,
     resolver: ResolverWrite,
     advertised: HashMap<Path, HashSet<Path>>,
-    to_publish: Pooled<HashMap<Path, Option<u16>>>,
-    to_publish_default: Pooled<HashMap<Path, Option<u16>>>,
+    to_publish: Pooled<HashMap<Path, Option<u32>>>,
+    to_publish_default: Pooled<HashMap<Path, Option<u32>>>,
     to_unpublish: Pooled<HashSet<Path>>,
     to_unpublish_default: Pooled<HashSet<Path>>,
     to_unsubscribe: Pooled<HashMap<Id, Subscribed>>,
@@ -709,11 +711,6 @@ impl Publisher {
         desired_auth: DesiredAuth,
         bind_cfg: BindCfg,
     ) -> Result<Publisher> {
-        if let (DesiredAuth::Local | DesiredAuth::Krb5 { .. }, Auth::Anonymous) =
-            (&desired_auth, &resolver.auth)
-        {
-            bail!("only anonynymous auth supported by this resolver")
-        }
         let ip = bind_cfg.select()?;
         utils::check_addr(ip, &resolver.addrs)?;
         let (addr, listener) = match bind_cfg {
@@ -1292,7 +1289,7 @@ async fn handle_batch(
         let mut gc_on_write = Vec::new();
         for msg in msgs {
             match msg {
-                Subscribe { path, resolver, timestamp, permissions, mut token } => {
+                Subscribe { path, resolver, timestamp, permissions, token } => {
                     gc = true;
                     match auth {
                         DesiredAuth::Anonymous => subscribe(
@@ -1313,28 +1310,23 @@ async fn handle_batch(
                                     if token.len() < mem::size_of::<u64>() {
                                         bail!("error, token too short");
                                     }
-                                    let salt = token.get_u64();
-                                    let expected = utils::make_sha3_token(
-                                        Some(salt),
-                                        &[
-                                            &secret.to_be_bytes(),
-                                            &timestamp.to_be_bytes(),
-                                            &permissions.to_be_bytes(),
-                                            path.as_bytes(),
-                                        ],
-                                    );
-                                    let permissions =
-                                        Permissions::from_bits(permissions as u16)
-                                            .ok_or_else(|| {
-                                                anyhow!("invalid permission bits")
-                                            })?;
+                                    let expected = utils::make_sha3_token(&[
+                                        &secret.to_be_bytes(),
+                                        &timestamp.to_be_bytes(),
+                                        &permissions.to_be_bytes(),
+                                        path.as_bytes(),
+                                    ]);
+                                    let permissions = Permissions::from_bits(permissions)
+                                        .ok_or_else(|| {
+                                            anyhow!("invalid permission bits")
+                                        })?;
                                     let age = std::cmp::max(
                                         u64::saturating_sub(now, timestamp),
                                         u64::saturating_sub(timestamp, now),
                                     );
                                     if age > 300
                                         || !permissions.contains(Permissions::SUBSCRIBE)
-                                        || &*token != &expected[mem::size_of::<u64>()..]
+                                        || &*token != &expected
                                     {
                                         debug!("subscribe permission denied");
                                         con.queue_send(&From::Denied(path))?
@@ -1408,12 +1400,9 @@ async fn hello_client(
     con: &mut Channel<ServerCtx>,
     auth: &DesiredAuth,
 ) -> Result<()> {
+    const TIMEOUT: Duration = Duration::from_secs(10);
     use protocol::publisher::Hello;
     debug!("hello_client");
-    // negotiate protocol version
-    con.send_one(&1u64).await?;
-    let _ver: u64 = con.receive().await?;
-    debug!("protocol version {}", _ver);
     let hello: Hello = con.receive().await?;
     debug!("hello_client received {:?}", hello);
     match hello {
@@ -1425,7 +1414,7 @@ async fn hello_client(
             con.send_one(&Hello::Local).await?;
             client_arrived(publisher);
         }
-        Hello::Token(tok) => match auth {
+        Hello::Krb5 => match auth {
             DesiredAuth::Anonymous => bail!("authentication not supported"),
             DesiredAuth::Local => {
                 con.send_one(&Hello::Local).await?;
@@ -1433,25 +1422,27 @@ async fn hello_client(
             }
             DesiredAuth::Krb5 { upn, spn } => {
                 let p = spn.as_ref().or(upn.as_ref()).map(|s| s.as_str());
-                let (ctx, tok) = task::block_in_place(|| {
-                    let ctx = ServerCtx::new(AcceptFlags::empty(), p)?;
-                    match ctx.step(&*tok)? {
-                        Step::Finished((ctx, Some(tok))) => Ok((ctx, tok)),
-                        Step::Finished((_, None)) => bail!("expected token"),
-                        Step::Continue(_) => bail!("unexpected gss continue"),
-                    }
-                })?;
-                con.send_one(&Hello::Token(utils::bytes(&*tok))).await?;
+                let spn = spn.as_ref().map(|s| s.as_str());
+                let ctx = krb5_authentication(TIMEOUT, spn, con).await?;
                 con.set_ctx(K5CtxWrap::new(ctx)).await;
                 client_arrived(publisher);
             }
         },
-        Hello::ResolverAuthenticate(id, _) => {
+        Hello::ResolverAuthenticate(id) => {
             info!("hello_client processing listener ownership check from resolver");
             let secret =
                 secrets.read().get(&id).copied().ok_or_else(|| anyhow!("no secret"))?;
-            let reply = utils::make_sha3_token(None, &[&(!secret).to_be_bytes()]);
-            con.send_one(&Hello::ResolverAuthenticate(id, reply)).await?;
+            let challenge: AuthChallenge = con.receive().await?;
+            if challenge.hash_method != HashMethod::Sha3_512 {
+                bail!("requested hash method not supported")
+            }
+            let reply = utils::make_sha3_token(&[
+                &challenge.challenge.to_be_bytes(),
+                &secret.to_be_bytes(),
+            ]);
+            con.send_one(&BoundedBytes::<4096>(reply)).await?;
+            // prevent fishing for the key
+            time::sleep(Duration::from_secs(1)).await;
             bail!("resolver authentication complete");
         }
     }

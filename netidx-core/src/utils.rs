@@ -145,7 +145,7 @@ macro_rules! atomic_id {
     };
 }
 
-pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
+pub fn check_addr<A>(ip: IpAddr, resolvers: &[(SocketAddr, A)]) -> Result<()> {
     match ip {
         IpAddr::V4(ip) if ip.is_link_local() => {
             bail!("addr is a link local address");
@@ -154,7 +154,7 @@ pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
             bail!("addr is a broadcast address");
         }
         IpAddr::V4(ip) if ip.is_private() => {
-            let ok = resolvers.iter().all(|a| match a.ip() {
+            let ok = resolvers.iter().all(|(a, _)| match a.ip() {
                 IpAddr::V4(ip) if ip.is_private() || ip.is_loopback() => true,
                 IpAddr::V6(_) => true,
                 _ => false,
@@ -171,7 +171,7 @@ pub fn check_addr(ip: IpAddr, resolvers: &[SocketAddr]) -> Result<()> {
     if ip.is_multicast() {
         bail!("addr is a multicast address");
     }
-    if ip.is_loopback() && !resolvers.iter().all(|a| a.ip().is_loopback()) {
+    if ip.is_loopback() && !resolvers.iter().all(|(a, _)| a.ip().is_loopback()) {
         bail!("addr is a loopback address and the resolver is not");
     }
     Ok(())

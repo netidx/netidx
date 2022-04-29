@@ -1,6 +1,6 @@
 use super::common::{
     krb5_authentication, DesiredAuth, Response, ResponseChan, FROMWRITEPOOL, HELLO_TO,
-    PUBLISHERPOOL, RAWFROMWRITEPOOL
+    PUBLISHERPOOL, RAWFROMWRITEPOOL,
 };
 
 use crate::{
@@ -27,7 +27,7 @@ use futures::{
 use fxhash::FxHashMap;
 use log::{debug, info, warn};
 use parking_lot::RwLock;
-use rand::{seq::SliceRandom, thread_rng, Rng};
+use rand::{thread_rng, Rng};
 use std::{
     cmp::max, collections::HashMap, fmt::Debug, net::SocketAddr, sync::Arc,
     time::Duration,
@@ -159,6 +159,9 @@ impl Connection {
             (DesiredAuth::Anonymous, _) => {
                 wt!(con.send_one(&hello(AuthWrite::Anonymous)))??;
                 (wt!(con.receive::<ServerHelloWrite>())??, false)
+            }
+            (DesiredAuth::Krb5 { .. } | DesiredAuth::Local, Auth::Anonymous) => {
+                bail!("resolver does not support autentication")
             }
             (DesiredAuth::Krb5 { .. } | DesiredAuth::Local, Auth::Local { path }) => {
                 let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);

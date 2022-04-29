@@ -1,13 +1,13 @@
+pub(crate) mod auth;
 pub mod config;
-mod auth;
-mod store;
 mod secctx;
 mod shard_store;
+mod store;
 
 use auth::{UserInfo, ANONYMOUS};
+use config::Config;
 use secctx::{K5SecData, LocalSecData, SecCtx};
 use shard_store::Store;
-use config::Config;
 
 use crate::{
     channel::{Channel, K5CtxWrap},
@@ -329,13 +329,12 @@ async fn send(
 
 pub(crate) async fn krb5_authentication(
     timeout: Duration,
-    spn: &str,
+    spn: Option<&str>,
     con: &mut Channel<ServerCtx>,
 ) -> Result<ServerCtx> {
     // the GSS token shouldn't ever be bigger than 1 MB
     const L: usize = 1 * 1024 * 1024;
-    let mut ctx =
-        task::block_in_place(|| ServerCtx::new(AcceptFlags::empty(), Some(spn)))?;
+    let mut ctx = task::block_in_place(|| ServerCtx::new(AcceptFlags::empty(), spn))?;
     loop {
         let token: BoundedBytes<L> = recv(timeout, con).await?;
         match task::block_in_place(|| ctx.step(&*token))? {
@@ -403,7 +402,7 @@ async fn hello_client_write(
         }
         Ok(())
     }
-    utils::check_addr(hello.write_addr.ip(), &[ctx.listen_addr])?;
+    utils::check_addr(hello.write_addr.ip(), &[(ctx.listen_addr, ())])?;
     let (uifo, publisher, rx_stop) = match hello.auth {
         AuthWrite::Anonymous => {
             let uifo = &*ANONYMOUS;
@@ -457,7 +456,8 @@ async fn hello_client_write(
                 );
                 let secret = thread_rng().gen::<u128>();
                 let k5ctx =
-                    krb5_authentication(ctx.cfg.hello_timeout, &*a.0, &mut con).await?;
+                    krb5_authentication(ctx.cfg.hello_timeout, Some(&*a.0), &mut con)
+                        .await?;
                 let k5ctx = K5CtxWrap::new(k5ctx);
                 con.set_ctx(k5ctx.clone()).await;
                 info!("hello_write all traffic now encrypted");
@@ -597,7 +597,8 @@ async fn hello_client_read(
             }
             SecCtx::Krb5(ref a) => {
                 let k5ctx =
-                    krb5_authentication(ctx.cfg.hello_timeout, &*a.0, &mut con).await?;
+                    krb5_authentication(ctx.cfg.hello_timeout, Some(&*a.0), &mut con)
+                        .await?;
                 let k5ctx = K5CtxWrap::new(k5ctx);
                 send(ctx.cfg.hello_timeout, &mut con, &AuthRead::Krb5).await?;
                 con.set_ctx(k5ctx.clone()).await;
