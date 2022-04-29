@@ -1,20 +1,13 @@
 {
     "parent": {
-        "path": "/app/huge1",
+        "path": "/app/huge0",
         "ttl": 3600,
         "addrs": ["127.0.0.1:1200", "127.0.0.1:1201"],
         "auth": "Anonymous"
     },
-    "children": [
-        {
-            "path": "/app/huge1/sub",
-            "ttl": 3600,
-            "addrs": ["127.0.0.1:1230", "127.0.0.1:1231"],
-            "auth": "Anonymous"
-        }
-    ],
+    "children": [],
     "pid_file": "",
-    "addrs": ["127.0.0.1:1220", "127.0.0.1:1221"],
+    "addr": "127.0.0.1:1210",
     "max_connections": 768,
     "hello_timeout": 10,
     "reader_ttl": 60,

@@ -15,7 +15,7 @@
         }
     ],
     "pid_file": "",
-    "addrs": ["127.0.0.1:1200", "127.0.0.1:1201"],
+    "addr": "127.0.0.1:1200",
     "max_connections": 768,
     "hello_timeout": 10,
     "reader_ttl": 60,

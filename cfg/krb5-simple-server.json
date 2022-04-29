@@ -2,7 +2,7 @@
     "parent": null,
     "children": [],
     "pid_file": "",
-    "addrs": ["192.168.0.1:4564"],
+    "addr": "192.168.0.1:4564",
     "max_connections": 768,
     "hello_timeout": 10,
     "reader_ttl": 60,

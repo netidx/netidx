@@ -1,14 +1,12 @@
-use crate::config;
-
 mod resolver {
-    use super::*;
     use crate::{
         chars::Chars,
+        config::Config as ClientConfig,
         path::Path,
         protocol::glob::{Glob, GlobSet},
         publisher::PublishFlags,
-        resolver::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
-        resolver_server::Server,
+        resolver_client::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
+        resolver_server::{config::Config as ServerConfig, Server},
     };
     use std::{iter, net::SocketAddr, time::Duration};
     use tokio::{runtime::Runtime, time};
@@ -20,12 +18,11 @@ mod resolver {
     #[test]
     fn publish_resolve_simple() {
         Runtime::new().unwrap().block_on(async {
-            let server_cfg = config::server::Config::load("../cfg/simple-server.json")
+            let server_cfg = ServerConfig::load("../cfg/simple-server.json")
                 .expect("load simple server config");
-            let mut client_cfg =
-                config::client::Config::load("../cfg/simple-client.json")
-                    .expect("load simple client config");
-            let server = Server::new(server_cfg, false, 0).await.expect("start server");
+            let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
+                .expect("load simple client config");
+            let server = Server::new(server_cfg, false).await.expect("start server");
             client_cfg.addrs[0] = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr);
