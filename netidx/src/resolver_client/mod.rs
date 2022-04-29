@@ -19,9 +19,10 @@ use anyhow::Result;
 pub use common::DesiredAuth;
 use common::{
     ResponseChan, FROMREADPOOL, FROMWRITEPOOL, LISTPOOL, PUBLISHERPOOL, RAWFROMREADPOOL,
-    RAWFROMWRITEPOOL, RAWTOREADPOOL, RESOLVEDPOOL, TOREADPOOL, TOWRITEPOOL, RAWTOWRITEPOOL,
+    RAWFROMWRITEPOOL, RAWTOREADPOOL, RAWTOWRITEPOOL, RESOLVEDPOOL, TOREADPOOL,
+    TOWRITEPOOL,
 };
-use futures::{channel::oneshot, future};
+use futures::future;
 use fxhash::FxHashMap;
 use parking_lot::{Mutex, RwLock};
 use read_client::ReadClient;
@@ -684,9 +685,7 @@ impl ResolverWrite {
         }
     }
 
-    pub(crate) fn secrets(
-        &self,
-    ) -> Arc<RwLock<FxHashMap<SocketAddr, u128>>> {
+    pub(crate) fn secrets(&self) -> Arc<RwLock<FxHashMap<SocketAddr, u128>>> {
         self.0.secrets()
     }
 }

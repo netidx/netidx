@@ -3,14 +3,14 @@ pub use crate::protocol::{
     value::{FromValue, Typ, Value},
 };
 use crate::{
-    auth::Permissions,
+    resolver_server::auth::Permissions,
     channel::{Channel, K5CtxWrap},
     chars::Chars,
-    config::{client::Config, Auth},
+    config::Config,
     path::Path,
     pool::{Pool, Pooled},
-    protocol::{self, publisher},
-    resolver::{DesiredAuth, ResolverWrite},
+    protocol::{self, publisher, resolver::Auth},
+    resolver_client::{DesiredAuth, ResolverWrite},
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
