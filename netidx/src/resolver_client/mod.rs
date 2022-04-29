@@ -1,4 +1,4 @@
-mod common;
+pub(crate) mod common;
 mod read_client;
 mod write_client;
 

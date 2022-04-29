@@ -1425,6 +1425,7 @@ async fn hello_client(
                 let spn = spn.as_ref().map(|s| s.as_str());
                 let ctx = krb5_authentication(TIMEOUT, spn, con).await?;
                 con.set_ctx(K5CtxWrap::new(ctx)).await;
+                con.send_one(&Hello::Krb5).await?;
                 client_arrived(publisher);
             }
         },

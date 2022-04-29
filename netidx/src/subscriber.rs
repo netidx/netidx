@@ -2,23 +2,22 @@ pub use crate::protocol::value::{FromValue, Typ, Value};
 use crate::{
     batch_channel::{self, BatchReceiver, BatchSender},
     channel::{Channel, K5CtxWrap, ReadChannel, WriteChannel},
-    chars::Chars,
-    config::client::Config,
+    config::Config,
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
     protocol::{
         self,
         publisher::{From, Id, To},
-        resolver::Resolved,
+        resolver::{Publisher, PublisherId, Resolved, TargetAuth},
     },
     publisher::PublishFlags,
-    resolver::{DesiredAuth, ResolverRead},
-    utils::{self, BatchItem, Batched, ChanId, ChanWrap},
+    resolver_client::{common::krb5_authentication, DesiredAuth, ResolverRead},
+    utils::{BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::{Buf, BufMut, Bytes};
-use cross_krb5::{ClientCtx, InitiateFlags, Step};
+use cross_krb5::ClientCtx;
 use futures::{
     channel::{
         mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
@@ -28,7 +27,7 @@ use futures::{
     select_biased,
     stream::FuturesUnordered,
 };
-use fxhash::FxBuildHasher;
+use fxhash::FxHashMap;
 use log::{info, warn};
 use parking_lot::Mutex;
 use rand::Rng;
@@ -344,7 +343,7 @@ struct DvDead {
 #[derive(Debug)]
 enum DvState {
     Subscribed(Val),
-    Dead(Box<DvDead>),
+    Dead(Box<DvDead>), // the box ensures that DvState is tag + 1 word
 }
 
 #[derive(Debug)]
@@ -546,7 +545,7 @@ impl Dval {
 #[derive(Debug)]
 enum SubStatus {
     Subscribed(ValWeak),
-    Pending(Vec<oneshot::Sender<Result<Val>>>),
+    Pending(Box<Vec<oneshot::Sender<Result<Val>>>>), // the box ensures SubStatus is tag + 1 word
 }
 
 const REMEBER_FAILED: Duration = Duration::from_secs(60);
@@ -560,8 +559,8 @@ fn pick(n: usize) -> usize {
 struct SubscriberInner {
     id: SubscriberId,
     resolver: ResolverRead,
-    connections: HashMap<SocketAddr, BatchSender<ToCon>, FxBuildHasher>,
-    recently_failed: HashMap<SocketAddr, Instant, FxBuildHasher>,
+    connections: FxHashMap<SocketAddr, BatchSender<ToCon>>,
+    recently_failed: FxHashMap<SocketAddr, Instant>,
     subscribed: HashMap<Path, SubStatus>,
     durable_dead: HashMap<Path, DvalWeak>,
     durable_pending: HashMap<Path, DvalWeak>,
@@ -580,26 +579,37 @@ impl SubscriberInner {
             .map(|d| d.id())
     }
 
-    fn choose_addr(&mut self, resolved: &Resolved) -> (SocketAddr, Bytes) {
+    fn choose_addr(
+        &mut self,
+        publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
+        resolved: &Resolved,
+    ) -> Option<(SocketAddr, TargetAuth, Bytes)> {
         use rand::seq::IteratorRandom;
-        let flags = unsafe { PublishFlags::from_bits_unchecked(resolved.flags) };
+        let flags = PublishFlags::from_bits(resolved.flags)?;
         if flags.contains(PublishFlags::USE_EXISTING) {
-            for (addr, tok) in &*resolved.addrs {
-                if self.connections.contains_key(addr) {
-                    return (*addr, tok.clone());
+            for pref in &*resolved.publishers {
+                if let Some(pb) = publishers.get(&pref.id) {
+                    if self.connections.contains_key(&pb.addr) {
+                        return Some((
+                            pb.addr,
+                            pb.target_auth.clone(),
+                            pref.token.clone(),
+                        ));
+                    }
                 }
             }
         }
-        let mut rng = rand::thread_rng();
-        match resolved
-            .addrs
+        resolved
+            .publishers
             .iter()
-            .filter(|(a, _)| !self.recently_failed.contains_key(a))
-            .choose(&mut rng)
-        {
-            None => resolved.addrs.iter().choose(&mut rng).unwrap().clone(),
-            Some((addr, tok)) => (*addr, tok.clone()),
-        }
+            .filter_map(|pref| {
+                publishers
+                    .get(&pref.id)
+                    .filter(|pb| !self.recently_failed.contains_key(&pb.addr))
+                    .map(|pb| (pref, pb))
+            })
+            .choose(&mut rand::thread_rng())
+            .map(|(pref, pb)| (pb.addr, pb.target_auth.clone(), pref.token.clone()))
     }
 
     fn gc_recently_failed(&mut self) {
@@ -637,12 +647,12 @@ impl Subscriber {
             id: SubscriberId::new(),
             resolver,
             desired_auth,
-            connections: HashMap::with_hasher(FxBuildHasher::default()),
-            recently_failed: HashMap::with_hasher(FxBuildHasher::default()),
-            subscribed: HashMap::new(),
-            durable_dead: HashMap::new(),
-            durable_pending: HashMap::new(),
-            durable_alive: HashMap::new(),
+            connections: HashMap::default(),
+            recently_failed: HashMap::default(),
+            subscribed: HashMap::default(),
+            durable_dead: HashMap::default(),
+            durable_pending: HashMap::default(),
+            durable_alive: HashMap::default(),
             trigger_resub: tx,
         })));
         t.start_resub_task(rx);
@@ -942,7 +952,7 @@ impl Subscriber {
             for p in paths.clone() {
                 match t.subscribed.entry(p.clone()) {
                     Entry::Vacant(e) => {
-                        e.insert(SubStatus::Pending(vec![]));
+                        e.insert(SubStatus::Pending(Box::new(vec![])));
                         pending.insert(p, St::Resolve);
                     }
                     Entry::Occupied(mut e) => match e.get_mut() {
@@ -956,7 +966,7 @@ impl Subscriber {
                                 pending.insert(p, St::Subscribed(r));
                             }
                             None => {
-                                e.insert(SubStatus::Pending(vec![]));
+                                e.insert(SubStatus::Pending(Box::new(vec![])));
                                 pending.insert(p, St::Resolve);
                             }
                         },
@@ -992,30 +1002,26 @@ impl Subscriber {
                         pending.insert(p, s);
                     }
                 }
-                Ok(Ok(mut res)) => {
+                Ok(Ok((publishers, mut res))) => {
                     let mut t = self.0.lock();
                     let deadline = timeout.map(|t| now + t);
                     let desired_auth = t.desired_auth.clone();
                     for (p, resolved) in to_resolve.into_iter().zip(res.drain(..)) {
-                        if resolved.addrs.len() == 0 {
+                        if resolved.publishers.len() == 0 {
                             pending.insert(p, St::Error(anyhow!("path not found")));
-                        } else {
-                            let addr = t.choose_addr(&resolved);
+                        } else if let Some((addr, target_auth, token)) =
+                            t.choose_addr(&publishers, &resolved)
+                        {
                             let sub_id = t.durable_id(&p).unwrap_or_else(SubId::new);
-                            let con = t.connections.entry(addr.0).or_insert_with(|| {
+                            let con = t.connections.entry(addr).or_insert_with(|| {
                                 let (tx, rx) = batch_channel::channel();
-                                let target_spn = match resolved.krb5_spns.get(&addr.0) {
-                                    None => Chars::new(),
-                                    Some(p) => p.clone(),
-                                };
                                 let subscriber = self.downgrade();
                                 let desired_auth = desired_auth.clone();
-                                let addr = addr.0;
                                 task::spawn(async move {
                                     let res = connection(
                                         subscriber.clone(),
                                         addr,
-                                        target_spn,
+                                        target_auth,
                                         rx,
                                         desired_auth,
                                     )
@@ -1049,7 +1055,7 @@ impl Subscriber {
                                 sub_id,
                                 timestamp: resolved.timestamp,
                                 permissions: resolved.permissions as u32,
-                                token: addr.1,
+                                token,
                                 resolver: resolved.resolver,
                                 finished: tx,
                                 con: con_,
@@ -1063,6 +1069,9 @@ impl Subscriber {
                                     St::Error(Error::from(anyhow!("connection closed"))),
                                 );
                             }
+                        } else {
+                            let e = anyhow!("missing publisher record");
+                            pending.insert(p, St::Error(e));
                         }
                     }
                 }
@@ -1079,7 +1088,7 @@ impl Subscriber {
                         match sub {
                             SubStatus::Subscribed(_) => unreachable!(),
                             SubStatus::Pending(waiters) => {
-                                for w in waiters {
+                                for w in waiters.into_iter() {
                                     let err = Err(anyhow!("{}", e));
                                     let _ = w.send(err);
                                 }
@@ -1106,7 +1115,7 @@ impl Subscriber {
                             Err(err) => match e.remove() {
                                 SubStatus::Subscribed(_) => unreachable!(),
                                 SubStatus::Pending(waiters) => {
-                                    for w in waiters {
+                                    for w in waiters.into_iter() {
                                         let err = Err(anyhow!("{}", err));
                                         let _ = w.send(err);
                                     }
@@ -1121,7 +1130,7 @@ impl Subscriber {
                                 match s {
                                     SubStatus::Subscribed(_) => unreachable!(),
                                     SubStatus::Pending(waiters) => {
-                                        for w in waiters {
+                                        for w in waiters.into_iter() {
                                             let _ = w.send(Ok(raw.clone()));
                                         }
                                         (path, Ok(raw))
@@ -1212,10 +1221,9 @@ struct Sub {
     last: Option<TArc<Mutex<Event>>>,
 }
 
-type ByChan = HashMap<
+type ByChan = FxHashMap<
     ChanId,
     (ChanWrap<Pooled<Vec<(SubId, Event)>>>, Pooled<Vec<(SubId, Event)>>),
-    FxBuildHasher,
 >;
 
 fn unsubscribe(
@@ -1271,47 +1279,34 @@ fn unsubscribe(
 
 async fn hello_publisher(
     con: &mut Channel<ClientCtx>,
-    auth: &DesiredAuth,
-    target_spn: &Chars,
+    desired_auth: &DesiredAuth,
+    target_auth: &TargetAuth,
 ) -> Result<()> {
     use protocol::publisher::Hello;
-    // negotiate protocol version
-    con.send_one(&1u64).await?;
-    let _ver: u64 = con.receive().await?;
-    match auth {
-        DesiredAuth::Anonymous => {
+    match (desired_auth, target_auth) {
+        (DesiredAuth::Anonymous, TargetAuth::Anonymous) => {
             con.send_one(&Hello::Anonymous).await?;
             match con.receive().await? {
                 Hello::Anonymous => (),
                 _ => bail!("unexpected response from publisher"),
             }
         }
-        DesiredAuth::Local => {
+        (DesiredAuth::Anonymous, _) => bail!("anonymous access not allowed"),
+        (DesiredAuth::Local, TargetAuth::Local | TargetAuth::Krb5 { .. })
+        | (DesiredAuth::Krb5 { .. }, TargetAuth::Local) => {
             con.send_one(&Hello::Local).await?;
             match con.receive().await? {
                 Hello::Local => (),
                 _ => bail!("unexpected response from publisher"),
             }
         }
-        DesiredAuth::Krb5 { upn, .. } => {
-            let p = upn.as_ref().map(|p| p.as_str());
-            let (ctx, tok) = task::block_in_place(|| {
-                ClientCtx::new(InitiateFlags::empty(), p, target_spn, None)
-            })?;
-            con.send_one(&Hello::Token(utils::bytes(&*tok))).await?;
-            match con.receive().await? {
-                Hello::Anonymous => bail!("publisher failed mutual authentication"),
-                Hello::ResolverAuthenticate(_, _) => bail!("protocol error"),
-                Hello::Local => (),
-                Hello::Token(tok) => {
-                    let ctx = match task::block_in_place(|| ctx.step(&*tok))? {
-                        Step::Finished((ctx, None)) => ctx,
-                        Step::Finished((_, Some(_))) | Step::Continue(_) => {
-                            bail!("unexpected extra token in gss auth")
-                        }
-                    };
-                    con.set_ctx(K5CtxWrap::new(ctx)).await
-                }
+        (DesiredAuth::Krb5 { upn, .. }, TargetAuth::Krb5 { spn }) => {
+            let upn = upn.as_ref().map(|p| p.as_str());
+            con.send_one(&Hello::Krb5).await?;
+            let ctx = krb5_authentication(upn, spn, con).await?;
+            con.set_ctx(K5CtxWrap::new(ctx)).await;
+            if con.receive::<Hello>().await? != Hello::Krb5 {
+                bail!("protocol error")
             }
         }
     }
@@ -1326,7 +1321,7 @@ const PERIOD: Duration = Duration::from_secs(100);
 async fn process_updates_batch(
     by_chan: &mut ByChan,
     mut batch: Pooled<Vec<From>>,
-    subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
+    subscriptions: &mut FxHashMap<Id, Sub>,
 ) {
     for m in batch.drain(..) {
         if let From::Update(i, m) = m {
@@ -1352,9 +1347,9 @@ async fn process_updates_batch(
 async fn process_batch(
     mut batch: Pooled<Vec<From>>,
     by_chan: &mut ByChan,
-    subscriptions: &mut HashMap<Id, Sub, FxBuildHasher>,
+    subscriptions: &mut FxHashMap<Id, Sub>,
     pending: &mut HashMap<Path, SubscribeValRequest>,
-    pending_writes: &mut HashMap<Id, VecDeque<oneshot::Sender<Value>>, FxBuildHasher>,
+    pending_writes: &mut FxHashMap<Id, VecDeque<oneshot::Sender<Value>>>,
     con: &mut WriteChannel<ClientCtx>,
     subscriber: &Subscriber,
     conid: ConId,
@@ -1484,28 +1479,27 @@ fn decode_task(
 async fn connection(
     subscriber: SubscriberWeak,
     addr: SocketAddr,
-    target_spn: Chars,
+    target_auth: TargetAuth,
     from_sub: BatchReceiver<ToCon>,
     auth: DesiredAuth,
 ) -> Result<()> {
     let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
-    let mut subscriptions: HashMap<Id, Sub, FxBuildHasher> =
-        HashMap::with_hasher(FxBuildHasher::default());
+    let mut subscriptions: FxHashMap<Id, Sub> = HashMap::default();
     let mut msg_recvd = false;
     let soc = time::timeout(PERIOD, TcpStream::connect(addr)).await??;
     let conid = ConId::new();
     soc.set_nodelay(true)?;
     let mut con = Channel::new(soc);
-    hello_publisher(&mut con, &auth, &target_spn).await?;
+    hello_publisher(&mut con, &auth, &target_auth).await?;
     let (read_con, mut write_con) = con.split();
     let (tx_stop, rx_stop) = oneshot::channel();
-    let mut pending_writes: HashMap<Id, VecDeque<oneshot::Sender<Value>>, FxBuildHasher> =
-        HashMap::with_hasher(FxBuildHasher::default());
+    let mut pending_writes: FxHashMap<Id, VecDeque<oneshot::Sender<Value>>> =
+        HashMap::default();
     let mut batches = decode_task(read_con, rx_stop);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD);
-    let mut by_receiver: HashMap<ChanWrap<Pooled<Vec<(SubId, Event)>>>, ChanId> =
-        HashMap::new();
-    let mut by_chan: ByChan = HashMap::with_hasher(FxBuildHasher::default());
+    let mut by_receiver: FxHashMap<ChanWrap<Pooled<Vec<(SubId, Event)>>>, ChanId> =
+        HashMap::default();
+    let mut by_chan: ByChan = FxHashMap::default();
     let res = 'main: loop {
         select_biased! {
             now = periodic.tick().fuse() => {
