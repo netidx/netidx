@@ -452,7 +452,7 @@ async fn hello_client_write(
                 (uifo, publisher, rx_stop)
             }
         },
-        AuthWrite::Krb5 { ref spn } => match ctx.secctx {
+        AuthWrite::Krb5 { .. } => match ctx.secctx {
             SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
             SecCtx::Krb5(ref a) => {
                 info!(
@@ -480,7 +480,7 @@ async fn hello_client_write(
                 info!("hello_write listener ownership check succeeded");
                 let (publisher, _, rx_stop) =
                     ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
-                let d = K5SecData { ctx: k5ctx, secret, spn: spn.clone() };
+                let d = K5SecData { ctx: k5ctx, secret };
                 a.1.write().insert(publisher.id, d);
                 (uifo, publisher, rx_stop)
             }
@@ -653,7 +653,7 @@ async fn server_loop(
     let delay_reads =
         if delay_reads { Some(Instant::now() + cfg.writer_ttl) } else { None };
     let id = cfg.addr;
-    let secctx = SecCtx::new(&cfg, &id).await?;
+    let secctx = SecCtx::new(&cfg).await?;
     let store = Store::new(
         cfg.parent.clone().map(|s| s.into()),
         cfg.children.iter().map(|(p, s)| (p.clone(), s.clone().into())).collect(),

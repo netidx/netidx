@@ -160,8 +160,8 @@ impl Connection {
                 wt!(con.send_one(&hello(AuthWrite::Anonymous)))??;
                 (wt!(con.receive::<ServerHelloWrite>())??, false)
             }
-            (DesiredAuth::Krb5 { .. } | DesiredAuth::Local, Auth::Anonymous) => {
-                bail!("resolver does not support autentication")
+            (DesiredAuth::Krb5 {..} | DesiredAuth::Local, Auth::Anonymous) => {
+                bail!("authentication not supported")
             }
             (DesiredAuth::Krb5 { .. } | DesiredAuth::Local, Auth::Local { path }) => {
                 let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
@@ -179,6 +179,7 @@ impl Connection {
                     }
                 }
             }
+            (DesiredAuth::Local, Auth::Krb5 {..}) => bail!("local auth not supported"),
             (DesiredAuth::Krb5 { upn, spn }, Auth::Krb5 { spn: target_spn }) => {
                 let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
                 match (&self.security_context, secret) {
@@ -202,7 +203,7 @@ impl Connection {
                         let ctx =
                             krb5_authentication(upn, &*target_spn, &mut con).await?;
                         let ctx = K5CtxWrap::new(ctx);
-                        con.set_ctx(ctx.clone());
+                        con.set_ctx(ctx.clone()).await;
                         let r: ServerHelloWrite = wt!(con.receive())??;
                         self.security_context = Some(ctx);
                         (r, true)

@@ -360,13 +360,13 @@ macro_rules! same {
 }
 
 #[derive(Clone)]
-pub(crate) struct Store {
+pub(super) struct Store {
     shards: Vec<Shard>,
     shard_mask: usize,
 }
 
 impl Store {
-    pub(crate) fn new(
+    pub(super) fn new(
         parent: Option<Referral>,
         children: BTreeMap<Path, Referral>,
         secctx: SecCtx,
@@ -401,7 +401,7 @@ impl Store {
         b
     }
 
-    pub(crate) async fn handle_batch_read(
+    pub(super) async fn handle_batch_read(
         &self,
         con: &mut Channel<ServerCtx>,
         uifo: Arc<UserInfo>,
@@ -598,7 +598,7 @@ impl Store {
         }
     }
 
-    pub(crate) async fn handle_batch_write(
+    pub(super) async fn handle_batch_write(
         &self,
         mut con: Option<&mut Channel<ServerCtx>>,
         uifo: Arc<UserInfo>,
@@ -715,7 +715,7 @@ impl Store {
         }
     }
 
-    pub(crate) async fn handle_clear(
+    pub(super) async fn handle_clear(
         &self,
         uifo: Arc<UserInfo>,
         publisher: Arc<Publisher>,

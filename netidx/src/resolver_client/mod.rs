@@ -464,7 +464,7 @@ impl ResolverRead {
                     let referral = referral.unwrap_or_else(|| inner.default.clone());
                     if !done.contains(&referral) {
                         done.insert(referral.clone());
-                        let server = inner.router.add_referral(referral.clone());
+                        let referral = inner.router.add_referral(referral);
                         let mut to = TOREADPOOL.take();
                         to.push((0, message.clone()));
                         waiters.push(inner.send_to_server(Some(referral), to));

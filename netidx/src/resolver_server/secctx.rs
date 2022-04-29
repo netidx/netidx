@@ -16,68 +16,63 @@ use cross_krb5::{K5Ctx, ServerCtx};
 use fxhash::FxHashMap;
 use netidx_core::pack::Pack;
 use parking_lot::{RwLock, RwLockReadGuard};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use tokio::task;
 
-pub(crate) mod local {
-    use super::*;
+pub(super) struct LocalAuth(AuthServer);
 
-    pub(crate) struct Authenticator(AuthServer);
+impl LocalAuth {
+    pub(super) async fn new(socket_path: &str) -> Result<Self> {
+        Ok(Self(AuthServer::start(socket_path).await?))
+    }
 
-    impl Authenticator {
-        pub(crate) async fn new(socket_path: &str) -> Result<Self> {
-            Ok(Authenticator(AuthServer::start(socket_path).await?))
+    pub(super) fn authenticate(&self, mut token: &[u8]) -> Result<Credential> {
+        if token.len() < 10 {
+            bail!("token short")
         }
-
-        pub(crate) fn authenticate(&self, mut token: &[u8]) -> Result<Credential> {
-            if token.len() < 10 {
-                bail!("token short")
-            }
-            let cred = <Credential as Pack>::decode(&mut token)?;
-            if !self.0.validate(&cred) {
-                bail!("invalid token")
-            }
-            Ok(cred)
+        let cred = <Credential as Pack>::decode(&mut token)?;
+        if !self.0.validate(&cred) {
+            bail!("invalid token")
         }
+        Ok(cred)
     }
 }
 
-trait SecDataCommon {
+pub(super) trait SecDataCommon {
     fn secret(&self) -> u128;
 }
 
-pub(crate) struct SecCtxData<S: 'static> {
-    pub(crate) users: UserDb,
-    pub(crate) pmap: PMap,
+pub(super) struct SecCtxData<S: 'static> {
+    pub(super) users: UserDb,
+    pub(super) pmap: PMap,
     data: FxHashMap<PublisherId, S>,
 }
 
 impl<S: 'static + SecDataCommon> SecCtxData<S> {
-    pub(crate) fn new(cfg: &Config) -> Result<Self> {
+    pub(super) fn new(cfg: &Config) -> Result<Self> {
         let mut users = UserDb::new(Mapper::new()?);
         let pmap = PMap::from_file(&cfg.perms, &mut users, cfg.root(), &cfg.children)?;
         Ok(Self { users, pmap, data: HashMap::default() })
     }
 
-    pub(crate) fn remove(&mut self, id: &PublisherId) {
+    pub(super) fn remove(&mut self, id: &PublisherId) {
         self.data.remove(&id);
     }
 
-    pub(crate) fn insert(&mut self, id: PublisherId, data: S) {
+    pub(super) fn insert(&mut self, id: PublisherId, data: S) {
         self.remove(&id);
         self.data.insert(id, data);
     }
 
-    pub(crate) fn secret(&self, id: &PublisherId) -> Option<u128> {
+    pub(super) fn secret(&self, id: &PublisherId) -> Option<u128> {
         self.data.get(id).map(|d| d.secret())
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct K5SecData {
-    pub(crate) spn: Chars,
-    pub(crate) secret: u128,
-    pub(crate) ctx: K5CtxWrap<ServerCtx>,
+pub(super) struct K5SecData {
+    pub(super) secret: u128,
+    pub(super) ctx: K5CtxWrap<ServerCtx>,
 }
 
 impl SecDataCommon for K5SecData {
@@ -87,7 +82,7 @@ impl SecDataCommon for K5SecData {
 }
 
 impl SecCtxData<K5SecData> {
-    pub(crate) fn get(&self, id: &PublisherId) -> Option<&K5SecData> {
+    pub(super) fn get(&self, id: &PublisherId) -> Option<&K5SecData> {
         self.data.get(id).and_then(|r| {
             match task::block_in_place(|| r.ctx.lock().ttl()) {
                 Ok(ttl) if ttl.as_secs() > 0 => Some(r),
@@ -95,16 +90,12 @@ impl SecCtxData<K5SecData> {
             }
         })
     }
-
-    pub(crate) fn get_ctx(&self, id: &PublisherId) -> Option<K5CtxWrap<ServerCtx>> {
-        self.get(id).map(|d| d.ctx.clone())
-    }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct LocalSecData {
-    pub(crate) user: Chars,
-    pub(crate) secret: u128,
+pub(super) struct LocalSecData {
+    pub(super) user: Chars,
+    pub(super) secret: u128,
 }
 
 impl SecDataCommon for LocalSecData {
@@ -114,19 +105,19 @@ impl SecDataCommon for LocalSecData {
 }
 
 impl SecCtxData<LocalSecData> {
-    pub(crate) fn get(&self, id: &PublisherId) -> Option<&LocalSecData> {
+    pub(super) fn get(&self, id: &PublisherId) -> Option<&LocalSecData> {
         self.data.get(id)
     }
 }
 
-pub(crate) enum SecCtxDataReadGuard<'a> {
+pub(super) enum SecCtxDataReadGuard<'a> {
     Anonymous,
     Krb5(RwLockReadGuard<'a, SecCtxData<K5SecData>>),
     Local(RwLockReadGuard<'a, SecCtxData<LocalSecData>>),
 }
 
 impl<'a> SecCtxDataReadGuard<'a> {
-    pub(crate) fn pmap(&'a self) -> Option<&'a PMap> {
+    pub(super) fn pmap(&'a self) -> Option<&'a PMap> {
         match self {
             SecCtxDataReadGuard::Anonymous => None,
             SecCtxDataReadGuard::Krb5(r) => Some(&r.pmap),
@@ -136,18 +127,18 @@ impl<'a> SecCtxDataReadGuard<'a> {
 }
 
 #[derive(Clone)]
-pub(crate) enum SecCtx {
+pub(super) enum SecCtx {
     Anonymous,
     Krb5(Arc<(Chars, RwLock<SecCtxData<K5SecData>>)>),
-    Local(Arc<(local::Authenticator, RwLock<SecCtxData<LocalSecData>>)>),
+    Local(Arc<(LocalAuth, RwLock<SecCtxData<LocalSecData>>)>),
 }
 
 impl SecCtx {
-    pub(crate) async fn new(cfg: &Config, id: &SocketAddr) -> Result<Self> {
+    pub(super) async fn new(cfg: &Config) -> Result<Self> {
         let t = match &cfg.auth {
             Auth::Anonymous => SecCtx::Anonymous,
             Auth::Local { path } => {
-                let auth = local::Authenticator::new(&path).await?;
+                let auth = LocalAuth::new(&path).await?;
                 let store = RwLock::new(SecCtxData::new(cfg)?);
                 SecCtx::Local(Arc::new((auth, store)))
             }
@@ -159,7 +150,7 @@ impl SecCtx {
         Ok(t)
     }
 
-    pub(crate) fn read(&self) -> SecCtxDataReadGuard {
+    pub(super) fn read(&self) -> SecCtxDataReadGuard {
         match self {
             SecCtx::Anonymous => SecCtxDataReadGuard::Anonymous,
             SecCtx::Krb5(a) => SecCtxDataReadGuard::Krb5(a.1.read()),
@@ -167,7 +158,7 @@ impl SecCtx {
         }
     }
 
-    pub(crate) fn remove(&self, id: &PublisherId) {
+    pub(super) fn remove(&self, id: &PublisherId) {
         match self {
             SecCtx::Krb5(a) => a.1.write().remove(id),
             SecCtx::Local(a) => a.1.write().remove(id),

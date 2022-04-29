@@ -54,29 +54,13 @@ pub(crate) fn check_addrs(a: &Vec<(SocketAddr, file::Auth)>) -> Result<()> {
     Ok(())
 }
 
-/// The permissions file format
+/// The permissions format
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PMap(pub HashMap<String, HashMap<Entity, Permissions>>);
 
 impl Default for PMap {
     fn default() -> Self {
         PMap(HashMap::new())
-    }
-}
-
-impl PMap {
-    pub(super) fn parse(s: &str) -> Result<PMap> {
-        let pmap: PMap = from_str(s)?;
-        for p in pmap.0.keys() {
-            if !Path::is_absolute(p) {
-                bail!("permission paths must be absolute {}", p)
-            }
-        }
-        Ok(pmap)
-    }
-
-    pub(super) fn load(file: &str) -> Result<PMap> {
-        PMap::parse(&read_to_string(file)?)
     }
 }
 
@@ -159,16 +143,16 @@ pub(crate) mod file {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub parent: Option<Referral>,
-    pub children: BTreeMap<Path, Referral>,
+    pub(super) parent: Option<Referral>,
+    pub(super) children: BTreeMap<Path, Referral>,
     pub pid_file: String,
-    pub max_connections: usize,
-    pub reader_ttl: Duration,
-    pub writer_ttl: Duration,
-    pub hello_timeout: Duration,
-    pub addr: SocketAddr,
-    pub auth: Auth,
-    pub perms: PMap,
+    pub(super) max_connections: usize,
+    pub(super) reader_ttl: Duration,
+    pub(super) writer_ttl: Duration,
+    pub(super) hello_timeout: Duration,
+    pub(super) addr: SocketAddr,
+    pub(super) auth: Auth,
+    pub(super) perms: PMap,
 }
 
 impl Config {

@@ -1419,8 +1419,7 @@ async fn hello_client(
                 con.send_one(&Hello::Local).await?;
                 client_arrived(publisher);
             }
-            DesiredAuth::Krb5 { upn, spn } => {
-                let p = spn.as_ref().or(upn.as_ref()).map(|s| s.as_str());
+            DesiredAuth::Krb5 { upn: _, spn } => {
                 let spn = spn.as_ref().map(|s| s.as_str());
                 let ctx = krb5_authentication(TIMEOUT, spn, con).await?;
                 con.set_ctx(K5CtxWrap::new(ctx)).await;
