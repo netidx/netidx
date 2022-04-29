@@ -1,14 +1,7 @@
 {
-  "addrs":
-  [
-    "192.168.0.1:4564"
-  ],
-  "auth":
-  {
-    "Krb5":
-    {
-      "192.168.0.1:4564": "netidx/your-fqdn@YOUR-KRB5-REALM"
-    }
-  },
-  "base": "/"
+    "addrs":
+    [
+        ["192.168.0.1:4564", {"Krb5": "netidx/your-fqdn@YOUR-KRB5-REALM"}]
+    ],
+    "base": "/"
 }

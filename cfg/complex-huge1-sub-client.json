@@ -1,9 +1,8 @@
 {
-  "addrs":
-  [
-    "127.0.0.1:1230",
-    "127.0.0.1:1231"
-  ],
-  "auth": "Anonymous",
-  "base": "/app/huge1/sub"
+    "addrs":
+    [
+        ["127.0.0.1:1230", "Anonymous"],
+        ["127.0.0.1:1231", "Anonymous"]
+    ],
+    "base": "/app/huge1/sub"
 }

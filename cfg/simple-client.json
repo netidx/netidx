@@ -1,8 +1,7 @@
 {
-  "addrs":
-  [
-    "127.0.0.1:0"
-  ],
-  "auth": "Anonymous",
-  "base": "/"
+    "addrs":
+    [
+        ["127.0.0.1:0", "Anonymous"]
+    ],
+    "base": "/"
 }
