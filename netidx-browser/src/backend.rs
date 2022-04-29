@@ -11,11 +11,11 @@ use glib;
 use log::{info, warn};
 use netidx::{
     chars::Chars,
-    config::client::Config,
+    config::Config,
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver,
-    resolver::{DesiredAuth, ResolverRead},
+    resolver_client::{DesiredAuth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
 use netidx_bscript::vm::RpcCallId;

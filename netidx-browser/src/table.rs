@@ -22,7 +22,7 @@ use indexmap::IndexMap;
 use netidx::{
     chars::Chars,
     path::Path,
-    resolver,
+    resolver_client,
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
 };
 use netidx_bscript::vm;
@@ -54,7 +54,7 @@ struct RaeifiedTableInner {
     subscribed: RefCell<HashMap<String, HashSet<u32>>>,
     focus_column: RefCell<Option<TreeViewColumn>>,
     focus_row: RefCell<Option<String>>,
-    descriptor: resolver::Table,
+    descriptor: resolver_client::Table,
     vector_mode: bool,
     sort_column: Cell<Option<u32>>,
     sort_temp_disabled: Cell<bool>,
@@ -266,7 +266,7 @@ impl RaeifiedTable {
         on_select: Rc<RefCell<BSNode>>,
         on_activate: Rc<RefCell<BSNode>>,
         on_edit: Rc<RefCell<BSNode>>,
-        mut descriptor: resolver::Table,
+        mut descriptor: resolver_client::Table,
         selected_path: Label,
     ) -> RaeifiedTable {
         let mut filter_errors = Vec::new();

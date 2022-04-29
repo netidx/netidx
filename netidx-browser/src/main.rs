@@ -24,11 +24,11 @@ use glib::{clone, idle_add_local, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use netidx::{
     chars::Chars,
-    config::client::Config,
+    config::Config,
     path::Path,
     pool::{Pool, Pooled},
-    resolver::{self, DesiredAuth},
-    subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
+    subscriber::{Dval, Event, SubId, UpdatesFlags, Value, DesiredAuth},
+    resolver_client,
 };
 use netidx_bscript::{
     expr::{ExprId, ExprKind},
@@ -144,7 +144,7 @@ enum ToGui {
     Update(Batch),
     UpdateVar(Path, Chars, Value),
     UpdateRpc(RpcCallId, Value),
-    TableResolved(Path, resolver::Table),
+    TableResolved(Path, resolver_client::Table),
     ShowError(String),
     SaveError(String),
     Terminate,

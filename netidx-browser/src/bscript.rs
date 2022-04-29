@@ -1,11 +1,11 @@
 use super::{util::ask_modal, ToGui, ViewLoc, WidgetCtx};
-use netidx::{chars::Chars, path::Path, resolver, subscriber::Value};
+use netidx::{chars::Chars, path::Path, resolver_client, subscriber::Value};
 use netidx_bscript::vm::{self, Apply, ExecCtx, InitFn, Node, Register, Ctx};
 use std::{cell::RefCell, mem, result::Result, sync::Arc};
 
 pub(crate) enum LocalEvent {
     Event(Value),
-    TableResolved(Path, resolver::Table),
+    TableResolved(Path, resolver_client::Table),
 }
 
 pub(crate) struct Event {
