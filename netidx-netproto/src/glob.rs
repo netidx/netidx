@@ -1,4 +1,5 @@
 use anyhow::Result;
+use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use globset;
 use netidx_core::{
@@ -14,7 +15,6 @@ use std::{
     result,
     sync::Arc,
 };
-use arcstr::ArcStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -76,6 +76,16 @@ impl Glob {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mk(raw: Chars) -> Glob {
+        Glob {
+            raw,
+            base: Path::root(),
+            scope: Scope::Subtree,
+            glob: globset::Glob::new("*").unwrap(),
         }
     }
 
@@ -161,6 +171,18 @@ impl PartialEq for GlobSet {
 impl Eq for GlobSet {}
 
 impl GlobSet {
+    #[cfg(test)]
+    pub(crate) fn mk(
+        published_only: bool,
+        raw: Pooled<Vec<Glob>>,
+    ) -> GlobSet {
+        GlobSet(Arc::new(GlobSetInner {
+            raw,
+            published_only,
+            glob: globset::GlobSet::empty(),
+        }))
+    }
+
     /// create a new globset from the specified globs. if
     /// published_only is true, then the globset will only match
     /// published paths, otherwise it will match both structural and

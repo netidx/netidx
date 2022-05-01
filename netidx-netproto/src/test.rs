@@ -30,63 +30,62 @@ fn path() -> impl Strategy<Value = Path> {
 
 mod resolver {
     use super::*;
-    use crate::resolver::{
-        ClientAuthRead, ClientAuthWrite, ClientHello, ClientHelloWrite, CtxId, FromRead,
-        FromWrite, ReadyForOwnershipCheck, Referral, Resolved, Secret, ServerAuthWrite,
-        ServerHelloRead, ServerHelloWrite, Table, ToRead, ToWrite,
+    use crate::{
+        glob::{Glob, GlobSet},
+        resolver::{
+            Auth, AuthChallenge, AuthRead, AuthWrite, ClientHello, ClientHelloWrite,
+            FromRead, FromWrite, GetChangeNr, HashMethod, ListMatching, Publisher,
+            PublisherId, PublisherRef, ReadyForOwnershipCheck, Referral, Resolved,
+            Secret, ServerHelloWrite, Table, TargetAuth, ToRead, ToWrite,
+        },
     };
-    use fxhash::FxBuildHasher;
-    use proptest::{collection, option};
-    use std::{collections::HashMap, net::SocketAddr};
+    use proptest::collection;
+    use std::net::SocketAddr;
 
-    fn client_auth_read() -> impl Strategy<Value = ClientAuthRead> {
+    fn auth_challenge() -> impl Strategy<Value = AuthChallenge> {
+        (hash_method(), any::<u128>())
+            .prop_map(|(hash_method, challenge)| AuthChallenge { hash_method, challenge })
+    }
+
+    fn auth_read() -> impl Strategy<Value = AuthRead> {
         prop_oneof![
-            Just(ClientAuthRead::Anonymous),
-            any::<u64>().prop_map(|i| ClientAuthRead::Reuse(CtxId::mk(i))),
-            bytes().prop_map(ClientAuthRead::Initiate)
+            Just(AuthRead::Anonymous),
+            Just(AuthRead::Krb5),
+            Just(AuthRead::Local),
         ]
     }
 
-    fn client_auth_write() -> impl Strategy<Value = ClientAuthWrite> {
+    fn auth_write() -> impl Strategy<Value = AuthWrite> {
         prop_oneof![
-            Just(ClientAuthWrite::Anonymous),
-            Just(ClientAuthWrite::Reuse),
-            (option::of(chars()), bytes())
-                .prop_map(|(spn, token)| ClientAuthWrite::Initiate { spn, token })
+            Just(AuthWrite::Anonymous),
+            Just(AuthWrite::Reuse),
+            Just(AuthWrite::Local),
+            chars().prop_map(|spn| AuthWrite::Krb5 { spn })
+        ]
+    }
+
+    fn target_auth() -> impl Strategy<Value = TargetAuth> {
+        prop_oneof![
+            Just(TargetAuth::Anonymous),
+            Just(TargetAuth::Local),
+            chars().prop_map(|spn| TargetAuth::Krb5 { spn }),
         ]
     }
 
     fn client_hello_write() -> impl Strategy<Value = ClientHelloWrite> {
-        (any::<SocketAddr>(), client_auth_write())
+        (any::<SocketAddr>(), auth_write())
             .prop_map(|(write_addr, auth)| ClientHelloWrite { write_addr, auth })
     }
 
     fn client_hello() -> impl Strategy<Value = ClientHello> {
         prop_oneof![
-            client_auth_read().prop_map(ClientHello::ReadOnly),
+            auth_read().prop_map(ClientHello::ReadOnly),
             client_hello_write().prop_map(ClientHello::WriteOnly)
         ]
     }
 
-    fn server_hello_read() -> impl Strategy<Value = ServerHelloRead> {
-        prop_oneof![
-            Just(ServerHelloRead::Anonymous),
-            Just(ServerHelloRead::Reused),
-            (bytes(), any::<u64>())
-                .prop_map(|(tok, id)| ServerHelloRead::Accepted(tok, CtxId::mk(id)))
-        ]
-    }
-
-    fn server_auth_write() -> impl Strategy<Value = ServerAuthWrite> {
-        prop_oneof![
-            Just(ServerAuthWrite::Anonymous),
-            Just(ServerAuthWrite::Reused),
-            bytes().prop_map(ServerAuthWrite::Accepted)
-        ]
-    }
-
     fn server_hello_write() -> impl Strategy<Value = ServerHelloWrite> {
-        (any::<u64>(), any::<bool>(), any::<SocketAddr>(), server_auth_write()).prop_map(
+        (any::<u64>(), any::<bool>(), any::<SocketAddr>(), auth_write()).prop_map(
             |(ttl, ttl_expired, resolver_id, auth)| ServerHelloWrite {
                 ttl,
                 ttl_expired,
@@ -96,36 +95,67 @@ mod resolver {
         )
     }
 
+    fn glob() -> impl Strategy<Value = Glob> {
+        chars().prop_map(Glob::mk)
+    }
+
+    fn globset() -> impl Strategy<Value = GlobSet> {
+        let published_only = any::<bool>();
+        let globs = collection::vec(glob(), (0, 100)).prop_map(Pooled::orphan);
+        (published_only, globs)
+            .prop_map(|(published_only, globs)| GlobSet::mk(published_only, globs))
+    }
+
     fn to_read() -> impl Strategy<Value = ToRead> {
         prop_oneof![
             path().prop_map(ToRead::Resolve),
             path().prop_map(ToRead::List),
             path().prop_map(ToRead::Table),
+            globset().prop_map(ToRead::ListMatching),
+            path().prop_map(ToRead::GetChangeNr),
         ]
     }
 
-    fn krb5_spns(
-    ) -> impl Strategy<Value = Pooled<HashMap<SocketAddr, Chars, FxBuildHasher>>> {
-        collection::hash_map(any::<SocketAddr>(), chars(), (0, 100)).prop_map(|h| {
-            let mut hm =
-                HashMap::with_capacity_and_hasher(h.len(), FxBuildHasher::default());
-            hm.extend(h.into_iter());
-            Pooled::orphan(hm)
-        })
+    fn publisher_id() -> impl Strategy<Value = PublisherId> {
+        any::<u64>().prop_map(PublisherId::mk)
+    }
+
+    fn hash_method() -> impl Strategy<Value = HashMethod> {
+        prop_oneof![Just(HashMethod::Sha3_512)]
+    }
+
+    fn publisher() -> impl Strategy<Value = Publisher> {
+        let resolver = any::<SocketAddr>();
+        let id = publisher_id();
+        let addr = any::<SocketAddr>();
+        let hash_method = hash_method();
+        let target_auth = target_auth();
+        (resolver, id, addr, hash_method, target_auth).prop_map(
+            |(resolver, id, addr, hash_method, target_auth)| Publisher {
+                resolver,
+                id,
+                addr,
+                hash_method,
+                target_auth,
+            },
+        )
+    }
+
+    fn publisher_ref() -> impl Strategy<Value = PublisherRef> {
+        (publisher_id(), bytes()).prop_map(|(id, token)| PublisherRef { id, token })
     }
 
     fn resolved() -> impl Strategy<Value = Resolved> {
         let resolver = any::<SocketAddr>();
-        let addrs = collection::vec((any::<SocketAddr>(), bytes()), (0, 10))
-            .prop_map(Pooled::orphan);
+        let publishers =
+            collection::vec(publisher_ref(), (0, 10)).prop_map(Pooled::orphan);
         let timestamp = any::<u64>();
-        let flags = any::<u16>();
-        let permissions = any::<u16>();
-        (krb5_spns(), resolver, addrs, timestamp, flags, permissions).prop_map(
-            |(krb5_spns, resolver, addrs, timestamp, flags, permissions)| Resolved {
-                krb5_spns,
+        let flags = any::<u32>();
+        let permissions = any::<u32>();
+        (resolver, publishers, timestamp, flags, permissions).prop_map(
+            |(resolver, publishers, timestamp, flags, permissions)| Resolved {
                 resolver,
-                addrs,
+                publishers,
                 timestamp,
                 flags,
                 permissions,
@@ -133,13 +163,20 @@ mod resolver {
         )
     }
 
+    fn auth() -> impl Strategy<Value = Auth> {
+        prop_oneof![
+            Just(Auth::Anonymous),
+            chars().prop_map(|path| Auth::Local { path }),
+            chars().prop_map(|spn| Auth::Krb5 { spn }),
+        ]
+    }
+
     fn referral() -> impl Strategy<Value = Referral> {
-        (path(), any::<u64>(), collection::vec(any::<SocketAddr>(), (0, 10)), krb5_spns())
-            .prop_map(|(path, ttl, addrs, krb5_spns)| Referral {
+        (path(), any::<u64>(), collection::vec((any::<SocketAddr>(), auth()), (0, 10)))
+            .prop_map(|(path, ttl, addrs)| Referral {
                 path,
                 ttl,
                 addrs: Pooled::orphan(addrs),
-                krb5_spns,
             })
     }
 
@@ -154,13 +191,40 @@ mod resolver {
             })
     }
 
+    fn list_matching() -> impl Strategy<Value = ListMatching> {
+        let matched = collection::vec(
+            collection::vec(path(), (0, 10)).prop_map(Pooled::orphan),
+            (0, 100),
+        )
+        .prop_map(Pooled::orphan);
+        let referrals = collection::vec(referral(), (0, 100)).prop_map(Pooled::orphan);
+        (matched, referrals)
+            .prop_map(|(matched, referrals)| ListMatching { matched, referrals })
+    }
+
+    fn get_change_nr() -> impl Strategy<Value = GetChangeNr> {
+        let change_number = any::<u64>().prop_map(|v| Z64(v));
+        let resolver = any::<SocketAddr>();
+        let referrals = collection::vec(referral(), (0, 100));
+        (change_number, resolver, referrals).prop_map(
+            |(change_number, resolver, referrals)| GetChangeNr {
+                change_number,
+                resolver,
+                referrals: Pooled::orphan(referrals),
+            },
+        )
+    }
+
     fn from_read() -> impl Strategy<Value = FromRead> {
         prop_oneof![
+            publisher().prop_map(FromRead::Publisher),
             resolved().prop_map(FromRead::Resolved),
             collection::vec(path(), (0, 1000))
                 .prop_map(|v| FromRead::List(Pooled::orphan(v))),
-            referral().prop_map(FromRead::Referral),
+            list_matching().prop_map(FromRead::ListMatching),
+            get_change_nr().prop_map(FromRead::GetChangeNr),
             table().prop_map(FromRead::Table),
+            referral().prop_map(FromRead::Referral),
             Just(FromRead::Denied),
             chars().prop_map(FromRead::Error)
         ]
@@ -180,7 +244,12 @@ mod resolver {
             path().prop_map(ToWrite::PublishDefault),
             path().prop_map(ToWrite::Unpublish),
             Just(ToWrite::Clear),
-            Just(ToWrite::Heartbeat)
+            Just(ToWrite::Heartbeat),
+            (path(), any::<u32>())
+                .prop_map(|(path, flags)| ToWrite::PublishWithFlags(path, flags)),
+            (path(), any::<u32>())
+                .prop_map(|(path, flags)| ToWrite::PublishDefaultWithFlags(path, flags)),
+            path().prop_map(ToWrite::UnpublishDefault),
         ]
     }
 
@@ -196,12 +265,12 @@ mod resolver {
 
     proptest! {
         #[test]
-        fn test_client_hello(a in client_hello()) {
+        fn test_auth_challenge(a in auth_challenge()) {
             check(a)
         }
 
         #[test]
-        fn test_server_hello_read(a in server_hello_read()) {
+        fn test_client_hello(a in client_hello()) {
             check(a)
         }
 
@@ -255,9 +324,9 @@ mod publisher {
     fn hello() -> impl Strategy<Value = Hello> {
         prop_oneof![
             Just(Hello::Anonymous),
-            bytes().prop_map(Hello::Token),
-            (any::<SocketAddr>(), bytes())
-                .prop_map(|(i, b)| Hello::ResolverAuthenticate(i, b))
+            Just(Hello::Krb5),
+            Just(Hello::Local),
+            any::<SocketAddr>().prop_map(Hello::ResolverAuthenticate)
         ]
     }
 

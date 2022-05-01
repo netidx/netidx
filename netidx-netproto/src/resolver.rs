@@ -40,7 +40,7 @@ impl Pack for HashMethod {
     }
 }
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, PartialEq)]
 pub struct AuthChallenge {
     pub hash_method: HashMethod,
     pub challenge: u128,
