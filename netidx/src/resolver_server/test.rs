@@ -4,6 +4,7 @@ use crate::{
     path::Path,
     protocol::resolver::{HashMethod, Publisher, PublisherId, PublisherRef, TargetAuth},
 };
+use fxhash::FxHashMap;
 use bytes::Bytes;
 use rand::{self, Rng};
 use std::{
@@ -14,7 +15,7 @@ use std::{
 
 #[test]
 fn test_resolver_store() {
-    let mut publishers = HashMap::default();
+    let mut publishers: FxHashMap<SocketAddr, Arc<Publisher>> = HashMap::default();
     let mut hm = HashMap::new();
     hm.insert(Path::from("foo"), 0);
     assert_eq!(hm.get(&Path::from("foo")).copied(), Some(0));
@@ -148,9 +149,14 @@ fn test_resolver_store() {
     for (paths, addr) in &apps {
         let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
         let addr = addr.parse::<SocketAddr>().unwrap();
+        let publisher = &publishers[&addr];
         for path in parsed.clone() {
-            store.unpublish(path.clone(), addr);
-            if store.resolve(&path).1.contains(&(addr, Bytes::new())) {
+            store.unpublish(publisher, path.clone());
+            if store
+                .resolve(&mut HashMap::default(), &path)
+                .1
+                .contains(&PublisherRef { id: publisher.id, token: Bytes::new() })
+            {
                 panic!()
             }
         }
