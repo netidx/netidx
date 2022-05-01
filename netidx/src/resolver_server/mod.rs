@@ -3,6 +3,8 @@ pub mod config;
 mod secctx;
 mod shard_store;
 mod store;
+#[cfg(test)]
+mod test;
 
 use auth::{UserInfo, ANONYMOUS};
 use config::Config;

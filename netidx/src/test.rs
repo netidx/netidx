@@ -8,6 +8,7 @@ mod resolver {
         resolver_client::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
         resolver_server::{config::Config as ServerConfig, Server},
     };
+    use netidx_netproto::resolver::TargetAuth;
     use std::{iter, net::SocketAddr, time::Duration};
     use tokio::{runtime::Runtime, time};
 
@@ -23,16 +24,18 @@ mod resolver {
             let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
                 .expect("load simple client config");
             let server = Server::new(server_cfg, false).await.expect("start server");
-            client_cfg.addrs[0] = *server.local_addr();
+            client_cfg.addrs[0].0 = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr);
             let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
             let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
             let flags = Some(PublishFlags::USE_EXISTING.bits());
             w.publish_with_flags(paths.iter().map(|p| (p.clone(), flags))).await.unwrap();
-            for r in r.resolve(paths.clone()).await.unwrap().drain(..) {
-                assert_eq!(r.addrs.len(), 1);
-                assert_eq!(r.addrs[0].0, paddr);
+            let (publishers, mut resolved) = r.resolve(paths.clone()).await.unwrap();
+            for r in resolved.drain(..) {
+                assert_eq!(r.publishers.len(), 1);
+                let pb = publishers.get(&r.publishers[0].id).unwrap();
+                assert_eq!(pb.addr, paddr);
             }
             let mut l = r.list(p("/")).await.unwrap();
             l.sort();
@@ -50,27 +53,29 @@ mod resolver {
     #[test]
     fn publish_default() {
         Runtime::new().unwrap().block_on(async {
-            let server_cfg = config::server::Config::load("../cfg/simple-server.json")
+            let server_cfg = ServerConfig::load("../cfg/simple-server.json")
                 .expect("load simple server config");
-            let mut client_cfg =
-                config::client::Config::load("../cfg/simple-client.json")
-                    .expect("load simple client config");
-            let server = Server::new(server_cfg, false, 0).await.expect("start server");
-            client_cfg.addrs[0] = *server.local_addr();
+            let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
+                .expect("load simple client config");
+            let server = Server::new(server_cfg, false).await.expect("start server");
+            client_cfg.addrs[0].0 = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr);
             let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
             w.publish_default(iter::once(p("/default"))).await.unwrap();
             let paths = vec![p("/default/foo/bar"), p("/default/foo/baz")];
-            for r in r.resolve(paths.clone()).await.unwrap().drain(..) {
-                assert_eq!(r.addrs.len(), 1);
-                assert_eq!(r.addrs[0].0, paddr);
+            let (publishers, mut resolved) = r.resolve(paths.clone()).await.unwrap();
+            for r in resolved.drain(..) {
+                assert_eq!(r.publishers.len(), 1);
+                let pb = publishers.get(&r.publishers[0].id).unwrap();
+                assert_eq!(pb.addr, paddr);
             }
             let l = r.list(p("/")).await.unwrap();
             assert_eq!(&**l, &[p("/default")]);
             w.clear().await.unwrap();
-            for r in r.resolve(paths.clone()).await.unwrap().drain(..) {
-                assert_eq!(r.addrs.len(), 0);
+            let (_, mut resolved) = r.resolve(paths.clone()).await.unwrap();
+            for r in resolved.drain(..) {
+                assert_eq!(r.publishers.len(), 0);
             }
             let l = r.list(p("/")).await.unwrap();
             assert_eq!(&**l, &[]);
@@ -83,57 +88,61 @@ mod resolver {
         _huge0: (Server, Server),
         _huge1: (Server, Server),
         _huge1_sub: (Server, Server),
-        cfg_root: config::client::Config,
-        cfg_huge0: config::client::Config,
-        cfg_huge1: config::client::Config,
-        cfg_huge1_sub: config::client::Config,
+        cfg_root: ClientConfig,
+        cfg_huge0: ClientConfig,
+        cfg_huge1: ClientConfig,
+        cfg_huge1_sub: ClientConfig,
     }
 
     impl Ctx {
         async fn new() -> Ctx {
-            let server_cfg_root =
-                config::server::Config::load("../cfg/complex-root-server.json")
-                    .expect("root server config");
-            let cfg_root =
-                config::client::Config::load("../cfg/complex-root-client.json")
-                    .expect("root client config");
-            let server_cfg_huge0 =
-                config::server::Config::load("../cfg/complex-huge0-server.json")
+            let server_cfg_root0 = ServerConfig::load("../cfg/complex-root-server0.json")
+                .expect("root server config");
+            let server_cfg_root1 = ServerConfig::load("../cfg/complex-root-server1.json")
+                .expect("root server config");
+            let cfg_root = ClientConfig::load("../cfg/complex-root-client.json")
+                .expect("root client config");
+            let server_cfg_huge0_0 =
+                ServerConfig::load("../cfg/complex-huge0-server0.json")
                     .expect("huge0 server config");
-            let cfg_huge0 =
-                config::client::Config::load("../cfg/complex-huge0-client.json")
-                    .expect("huge0 client config");
-            let server_cfg_huge1 =
-                config::server::Config::load("../cfg/complex-huge1-server.json")
+            let server_cfg_huge0_1 =
+                ServerConfig::load("../cfg/complex-huge0-server1.json")
+                    .expect("huge0 server config");
+            let cfg_huge0 = ClientConfig::load("../cfg/complex-huge0-client.json")
+                .expect("huge0 client config");
+            let server_cfg_huge1_0 =
+                ServerConfig::load("../cfg/complex-huge1-server0.json")
                     .expect("huge1 server config");
-            let cfg_huge1 =
-                config::client::Config::load("../cfg/complex-huge1-client.json")
-                    .expect("huge1 client config");
-            let server_cfg_huge1_sub =
-                config::server::Config::load("../cfg/complex-huge1-sub-server.json")
+            let server_cfg_huge1_1 =
+                ServerConfig::load("../cfg/complex-huge1-server1.json")
+                    .expect("huge1 server config");
+            let cfg_huge1 = ClientConfig::load("../cfg/complex-huge1-client.json")
+                .expect("huge1 client config");
+            let server_cfg_huge1_sub0 =
+                ServerConfig::load("../cfg/complex-huge1-sub-server0.json")
+                    .expect("huge1 sub server config");
+            let server_cfg_huge1_sub1 =
+                ServerConfig::load("../cfg/complex-huge1-sub-server1.json")
                     .expect("huge1 sub server config");
             let cfg_huge1_sub =
-                config::client::Config::load("../cfg/complex-huge1-sub-client.json")
+                ClientConfig::load("../cfg/complex-huge1-sub-client.json")
                     .expect("huge1 sub client config");
-            let server0_root = Server::new(server_cfg_root.clone(), false, 0)
-                .await
-                .expect("root server 0");
+            let server0_root =
+                Server::new(server_cfg_root0, false).await.expect("root server 0");
             let server1_root =
-                Server::new(server_cfg_root, false, 1).await.expect("root server 1");
-            let server0_huge0 = Server::new(server_cfg_huge0.clone(), false, 0)
-                .await
-                .expect("huge0 server0");
+                Server::new(server_cfg_root1, false).await.expect("root server 1");
+            let server0_huge0 =
+                Server::new(server_cfg_huge0_0, false).await.expect("huge0 server0");
             let server1_huge0 =
-                Server::new(server_cfg_huge0, false, 1).await.expect("huge0 server1");
-            let server0_huge1 = Server::new(server_cfg_huge1.clone(), false, 0)
-                .await
-                .expect("huge1 server0");
+                Server::new(server_cfg_huge0_1, false).await.expect("huge0 server1");
+            let server0_huge1 =
+                Server::new(server_cfg_huge1_0, false).await.expect("huge1 server0");
             let server1_huge1 =
-                Server::new(server_cfg_huge1, false, 1).await.expect("huge1 server0");
-            let server0_huge1_sub = Server::new(server_cfg_huge1_sub.clone(), false, 0)
+                Server::new(server_cfg_huge1_1, false).await.expect("huge1 server0");
+            let server0_huge1_sub = Server::new(server_cfg_huge1_sub0, false)
                 .await
                 .expect("huge1 sub server0");
-            let server1_huge1_sub = Server::new(server_cfg_huge1_sub, false, 1)
+            let server1_huge1_sub = Server::new(server_cfg_huge1_sub1, false)
                 .await
                 .expect("huge1 sub server0");
             Ctx {
@@ -205,29 +214,31 @@ mod resolver {
         paths: &[Path],
         addrs: &[SocketAddr],
     ) {
-        let mut answer = r.resolve(paths.iter().cloned()).await.unwrap();
+        let (publishers, mut answer) = r.resolve(paths.iter().cloned()).await.unwrap();
         let mut i = 0;
-        for (p, mut r) in paths.iter().zip(answer.drain(..)) {
-            r.addrs.sort();
-            assert_eq!(r.addrs.len(), addrs.len());
-            assert!(r.addrs.iter().map(|(a, _)| a).eq(addrs.iter()));
-            assert_eq!(r.krb5_spns.len(), 0);
+        for (p, r) in paths.iter().zip(answer.drain(..)) {
+            let mut r_addrs =
+                r.publishers.iter().map(|pr| publishers[&pr.id].addr).collect::<Vec<_>>();
+            r_addrs.sort();
+            assert_eq!(r_addrs.len(), addrs.len());
+            assert_eq!(r_addrs, addrs);
+            assert!(publishers.values().all(|p| p.target_auth == TargetAuth::Anonymous));
             match p.as_ref() {
                 "/tmp/x" | "/tmp/y" | "/tmp/z" => assert!(
-                    r.resolver == ctx.cfg_root.addrs[0]
-                        || r.resolver == ctx.cfg_root.addrs[1]
+                    r.resolver == ctx.cfg_root.addrs[0].0
+                        || r.resolver == ctx.cfg_root.addrs[1].0
                 ),
                 "/app/huge0/x" | "/app/huge0/y" | "/app/huge0/z" => assert!(
-                    r.resolver == ctx.cfg_huge0.addrs[0]
-                        || r.resolver == ctx.cfg_huge0.addrs[1]
+                    r.resolver == ctx.cfg_huge0.addrs[0].0
+                        || r.resolver == ctx.cfg_huge0.addrs[1].0
                 ),
                 "/app/huge1/x" | "/app/huge1/y" | "/app/huge1/z" => assert!(
-                    r.resolver == ctx.cfg_huge1.addrs[0]
-                        || r.resolver == ctx.cfg_huge1.addrs[1]
+                    r.resolver == ctx.cfg_huge1.addrs[0].0
+                        || r.resolver == ctx.cfg_huge1.addrs[1].0
                 ),
                 "/app/huge1/sub/x" | "/app/huge1/sub/y" | "/app/huge1/sub/z" => assert!(
-                    r.resolver == ctx.cfg_huge1_sub.addrs[0]
-                        || r.resolver == ctx.cfg_huge1_sub.addrs[1]
+                    r.resolver == ctx.cfg_huge1_sub.addrs[0].0
+                        || r.resolver == ctx.cfg_huge1_sub.addrs[1].0
                 ),
                 p => unreachable!("unexpected path {}", p),
             }
@@ -320,11 +331,12 @@ mod resolver {
 }
 
 mod publisher {
-    use super::*;
     use crate::{
-        publisher::{BindCfg, Event as PEvent, PublishFlags, Publisher, Val},
-        resolver::DesiredAuth,
-        resolver_server::Server,
+        config::Config as ClientConfig,
+        publisher::{
+            BindCfg, DesiredAuth, Event as PEvent, PublishFlags, Publisher, Val,
+        },
+        resolver_server::{config::Config as ServerConfig, Server},
         subscriber::{Event, Subscriber, UpdatesFlags, Value},
     };
     use futures::{channel::mpsc, channel::oneshot, prelude::*, select_biased};
@@ -357,7 +369,7 @@ mod publisher {
     }
 
     async fn run_publisher(
-        cfg: config::client::Config,
+        cfg: ClientConfig,
         default_destroyed: Arc<Mutex<bool>>,
         tx: oneshot::Sender<()>,
     ) {
@@ -413,14 +425,14 @@ mod publisher {
     }
 
     async fn run_subscriber(
-        cfg: config::client::Config,
+        cfg: ClientConfig,
         default_destroyed: Arc<Mutex<bool>>,
     ) {
         let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
         let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
         let q = subscriber.subscribe_one("/app/q/foo".into(), None).await.unwrap();
         assert_eq!(q.last(), Event::Update(Value::True));
-        let res =
+        let (_, res) =
             subscriber.resolver().resolve(iter::once("/app/q/adv".into())).await.unwrap();
         assert_eq!(res.len(), 1);
         let a = subscriber.subscribe_one("/app/q/adv".into(), None).await.unwrap();
@@ -459,13 +471,13 @@ mod publisher {
     fn publish_subscribe() {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let server_cfg = config::server::Config::load("../cfg/simple-server.json")
+            let server_cfg = ServerConfig::load("../cfg/simple-server.json")
                 .expect("load simple server config");
             let mut client_cfg =
-                config::client::Config::load("../cfg/simple-client.json")
+                ClientConfig::load("../cfg/simple-client.json")
                     .expect("load simple client config");
-            let server = Server::new(server_cfg, false, 0).await.expect("start server");
-            client_cfg.addrs[0] = *server.local_addr();
+            let server = Server::new(server_cfg, false).await.expect("start server");
+            client_cfg.addrs[0].0 = *server.local_addr();
             let default_destroyed = Arc::new(Mutex::new(false));
             let (tx, ready) = oneshot::channel();
             task::spawn(run_publisher(client_cfg.clone(), default_destroyed.clone(), tx));
@@ -473,146 +485,5 @@ mod publisher {
             run_subscriber(client_cfg, default_destroyed).await;
             drop(server);
         });
-    }
-}
-
-mod resolver_store {
-    use crate::{pack::Z64, path::Path, resolver_store::*};
-    use bytes::Bytes;
-    use rand::{self, Rng};
-    use std::{
-        collections::{BTreeMap, HashMap},
-        net::SocketAddr,
-    };
-
-    #[test]
-    fn test_resolver_store() {
-        let mut hm = HashMap::new();
-        hm.insert(Path::from("foo"), 0);
-        assert_eq!(hm.get(&Path::from("foo")).copied(), Some(0));
-        let apps = vec![
-            (vec!["/app/test/app0/v0", "/app/test/app0/v1"], "127.0.0.1:100"),
-            (vec!["/app/test/app0/v0", "/app/test/app0/v1"], "127.0.0.1:101"),
-            (
-                vec!["/app/test/app1/v2", "/app/test/app1/v3", "/app/test/app1/v4"],
-                "127.0.0.1:105",
-            ),
-        ];
-        let mut store = Store::new(None, BTreeMap::new());
-        for (paths, addr) in &apps {
-            let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
-            let addr = addr.parse::<SocketAddr>().unwrap();
-            for path in parsed.clone() {
-                store.publish(path.clone(), addr, false, None);
-                if !store.resolve(&path).1.contains(&(addr, Bytes::new())) {
-                    panic!()
-                }
-                if rand::thread_rng().gen_bool(0.5) {
-                    // check that this is idempotent
-                    store.publish(path.clone(), addr, false, None);
-                }
-            }
-        }
-        let paths = store.list(&Path::from("/"));
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].as_ref(), "/app");
-        let cols = store.columns(&Path::from("/"));
-        assert_eq!(cols.len(), 0);
-        let paths = store.list(&Path::from("/app"));
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].as_ref(), "/app/test");
-        let cols = store.columns(&Path::from("/app"));
-        assert_eq!(cols.len(), 0);
-        let paths = store.list(&Path::from("/app/test"));
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0].as_ref(), "/app/test/app0");
-        assert_eq!(paths[1].as_ref(), "/app/test/app1");
-        let mut cols = store.columns(&Path::from("/app/test"));
-        cols.sort();
-        assert_eq!(cols.len(), 5);
-        assert_eq!(cols[0].0.as_ref(), "v0");
-        assert_eq!(cols[0].1, Z64(2));
-        assert_eq!(cols[1].0.as_ref(), "v1");
-        assert_eq!(cols[1].1, Z64(2));
-        assert_eq!(cols[2].0.as_ref(), "v2");
-        assert_eq!(cols[2].1, Z64(1));
-        assert_eq!(cols[3].0.as_ref(), "v3");
-        assert_eq!(cols[3].1, Z64(1));
-        assert_eq!(cols[4].0.as_ref(), "v4");
-        assert_eq!(cols[4].1, Z64(1));
-        let paths = store.list(&Path::from("/app/test/app0"));
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
-        assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
-        let cols = store.columns(&Path::from("/app/test/app0"));
-        assert_eq!(cols.len(), 0);
-        let paths = store.list(&Path::from("/app/test/app1"));
-        assert_eq!(paths.len(), 3);
-        assert_eq!(paths[0].as_ref(), "/app/test/app1/v2");
-        assert_eq!(paths[1].as_ref(), "/app/test/app1/v3");
-        assert_eq!(paths[2].as_ref(), "/app/test/app1/v4");
-        let cols = store.columns(&Path::from("/app/test/app1"));
-        assert_eq!(cols.len(), 0);
-        let paths = store.list(&Path::from("/app/test/"));
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0].as_ref(), "/app/test/app0");
-        assert_eq!(paths[1].as_ref(), "/app/test/app1");
-        let (ref paths, ref addr) = apps[2];
-        let addr = addr.parse::<SocketAddr>().unwrap();
-        let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
-        for path in parsed.clone() {
-            store.unpublish(path.clone(), addr);
-            if store.resolve(&path).1.contains(&(addr, Bytes::new())) {
-                panic!()
-            }
-            if rand::thread_rng().gen_bool(0.5) {
-                // check that this is idempotent
-                store.unpublish(path.clone(), addr);
-            }
-        }
-        let paths = store.list(&Path::from("/"));
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].as_ref(), "/app");
-        let cols = store.columns(&Path::from("/"));
-        assert_eq!(cols.len(), 0);
-        let paths = store.list(&Path::from("/app"));
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].as_ref(), "/app/test");
-        let cols = store.columns(&Path::from("/app"));
-        assert_eq!(cols.len(), 0);
-        let paths = store.list(&Path::from("/app/test"));
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].as_ref(), "/app/test/app0");
-        let mut cols = store.columns(&Path::from("/app/test"));
-        cols.sort();
-        assert_eq!(cols.len(), 2);
-        assert_eq!(cols[0].0.as_ref(), "v0");
-        assert_eq!(cols[0].1, Z64(2));
-        assert_eq!(cols[1].0.as_ref(), "v1");
-        assert_eq!(cols[1].1, Z64(2));
-        let paths = store.list(&Path::from("/app/test/app1"));
-        assert_eq!(paths.len(), 0);
-        let cols = store.columns(&Path::from("/app/test/app1"));
-        assert_eq!(cols.len(), 0);
-        let paths = store.list(&Path::from("/app/test/app0"));
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0].as_ref(), "/app/test/app0/v0");
-        assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
-        let cols = store.columns(&Path::from("/app/test/app0"));
-        assert_eq!(cols.len(), 0);
-        for (paths, addr) in &apps {
-            let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
-            let addr = addr.parse::<SocketAddr>().unwrap();
-            for path in parsed.clone() {
-                store.unpublish(path.clone(), addr);
-                if store.resolve(&path).1.contains(&(addr, Bytes::new())) {
-                    panic!()
-                }
-            }
-        }
-        let paths = store.list(&Path::from("/"));
-        assert_eq!(paths.len(), 0);
-        let cols = store.columns(&Path::from("/app/test"));
-        assert_eq!(cols.len(), 0);
     }
 }
