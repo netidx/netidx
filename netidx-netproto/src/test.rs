@@ -6,7 +6,7 @@ use netidx_core::{
     pool::Pooled,
     utils::pack,
 };
-use proptest::prelude::*;
+use proptest::{prelude::*, string::string_regex};
 use std::{fmt::Debug, sync::Arc};
 
 fn check<T: Pack + Debug + PartialEq>(t: T) {
@@ -18,6 +18,10 @@ fn check<T: Pack + Debug + PartialEq>(t: T) {
 
 fn chars() -> impl Strategy<Value = Chars> {
     any::<String>().prop_map(Chars::from)
+}
+
+fn chars_regex(rex: &str) -> impl Strategy<Value = Chars> {
+    string_regex(rex).unwrap().prop_map(Chars::from)
 }
 
 fn bytes() -> impl Strategy<Value = Bytes> {
@@ -96,14 +100,14 @@ mod resolver {
     }
 
     fn glob() -> impl Strategy<Value = Glob> {
-        chars().prop_map(Glob::mk)
+        chars_regex("/[a-zA-Z0-9*/]+").prop_map(|c| Glob::new(c).unwrap())
     }
 
     fn globset() -> impl Strategy<Value = GlobSet> {
         let published_only = any::<bool>();
-        let globs = collection::vec(glob(), (0, 100)).prop_map(Pooled::orphan);
+        let globs = collection::vec(glob(), (0, 100));
         (published_only, globs)
-            .prop_map(|(published_only, globs)| GlobSet::mk(published_only, globs))
+            .prop_map(|(published_only, globs)| GlobSet::new(published_only, globs).unwrap())
     }
 
     fn to_read() -> impl Strategy<Value = ToRead> {

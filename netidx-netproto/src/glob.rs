@@ -79,16 +79,6 @@ impl Glob {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn mk(raw: Chars) -> Glob {
-        Glob {
-            raw,
-            base: Path::root(),
-            scope: Scope::Subtree,
-            glob: globset::Glob::new("*").unwrap(),
-        }
-    }
-
     pub fn new(raw: Chars) -> Result<Glob> {
         if !Path::is_absolute(&raw) {
             bail!("glob paths must be absolute")
@@ -171,18 +161,6 @@ impl PartialEq for GlobSet {
 impl Eq for GlobSet {}
 
 impl GlobSet {
-    #[cfg(test)]
-    pub(crate) fn mk(
-        published_only: bool,
-        raw: Pooled<Vec<Glob>>,
-    ) -> GlobSet {
-        GlobSet(Arc::new(GlobSetInner {
-            raw,
-            published_only,
-            glob: globset::GlobSet::empty(),
-        }))
-    }
-
     /// create a new globset from the specified globs. if
     /// published_only is true, then the globset will only match
     /// published paths, otherwise it will match both structural and
