@@ -20,7 +20,7 @@ pub use common::DesiredAuth;
 use common::{
     ResponseChan, FROMREADPOOL, FROMWRITEPOOL, LISTPOOL, PUBLISHERPOOL, RAWFROMREADPOOL,
     RAWFROMWRITEPOOL, RAWTOREADPOOL, RAWTOWRITEPOOL, RESOLVEDPOOL, TOREADPOOL,
-    TOWRITEPOOL,
+    TOWRITEPOOL, PATHPOOL
 };
 use futures::future;
 use fxhash::FxHashMap;
@@ -436,15 +436,25 @@ impl ResolverRead {
     /// list children of the specified path. Order is unspecified.
     pub async fn list(&self, path: Path) -> Result<Pooled<Vec<Path>>> {
         let mut to = RAWTOREADPOOL.take();
-        to.push(ToRead::List(path));
+        to.push(ToRead::List(path.clone()));
         let (_, mut result) = self.send(&to).await?;
         if result.len() != 1 {
             bail!("expected 1 result from list got {}", result.len());
         } else {
-            match result.pop().unwrap() {
-                FromRead::List(paths) => Ok(paths),
+            let mut from_server = match result.pop().unwrap() {
+                FromRead::List(paths) => paths,
                 m => bail!("unexpected result from list {:?}", m),
+            };
+            from_server.sort();
+            for p in (self.0).0.lock().router.cached.keys() {
+                if Path::is_immediate_parent(&path, p) {
+                    match from_server.binary_search(p) {
+                        Ok(_) => (),
+                        Err(i) => from_server.insert(i, p.clone())
+                    }
+                }
             }
+            Ok(from_server)
         }
     }
 
@@ -507,6 +517,17 @@ impl ResolverRead {
             m => bail!("unexpected list_matching response {:?}", m),
         })
         .await?;
+        if !globset.published_only() {
+            let mut refs = PATHPOOL.take();
+            for p in (self.0).0.lock().router.cached.keys() {
+                if globset.is_match(p) {
+                    refs.push(p.clone());
+                }
+            }
+            if refs.len() > 0 {
+                results.push(refs);
+            }
+        }
         Ok(results)
     }
 

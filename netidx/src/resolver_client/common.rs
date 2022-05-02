@@ -33,6 +33,7 @@ lazy_static! {
         Pool::new(1000, 10000);
     pub(super) static ref RESOLVEDPOOL: Pool<Vec<Resolved>> = Pool::new(1000, 10000);
     pub(super) static ref LISTPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(1000, 10000);
+    pub(super) static ref PATHPOOL: Pool<Vec<Path>> = Pool::new(100, 100);
 }
 
 #[derive(Debug, Clone)]

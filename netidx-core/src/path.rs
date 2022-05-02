@@ -10,7 +10,7 @@ use std::{
     cmp::{Eq, Ord, PartialEq, PartialOrd},
     convert::{AsRef, From},
     fmt,
-    iter::{Iterator, DoubleEndedIterator},
+    iter::{DoubleEndedIterator, Iterator},
     ops::Deref,
     result::Result,
     str::{self, FromStr},
@@ -195,15 +195,17 @@ impl<'a> Iterator for DirNames<'a> {
 impl<'a> DoubleEndedIterator for DirNames<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self {
-            DirNames::Path { cur: _, ref mut all, base: _} => match Path::dirname(*all) {
-                Some(dn) => {
-                    let res = *all;
-                    *all = dn;
-                    Some(res)
-                }
-                None => {
-                    *self = DirNames::Root(false);
-                    Some("/")
+            DirNames::Path { cur: _, ref mut all, base: _ } => {
+                match Path::dirname(*all) {
+                    Some(dn) => {
+                        let res = *all;
+                        *all = dn;
+                        Some(res)
+                    }
+                    None => {
+                        *self = DirNames::Root(false);
+                        Some("/")
+                    }
                 }
             }
             DirNames::Root(true) => {
@@ -247,6 +249,25 @@ impl Path {
             || (other.starts_with(parent)
                 && (other.len() == parent.len()
                     || other.as_bytes()[parent.len()] == SEP as u8))
+    }
+
+    /// true if this path is the parent to the specified path, and is
+    /// exactly 1 level above the specfied path.
+    ///
+    /// # Examples
+    /// ```
+    /// use netidx_core::path::Path;
+    /// assert!(!Path::is_immediate_parent("/", "/foo/bar/baz"));
+    /// assert!(Path::is_immediate_parent("/foo/bar", "/foo/bar/baz"));
+    /// assert!(!Path::is_parent("/foo/bar", "/foo/bareth/bazeth"));
+    /// assert!(!Path::is_parent("/foo/bar", "/foo/bar"));
+    /// ```
+    pub fn is_immediate_parent<T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(
+        parent: &T,
+        other: &U,
+    ) -> bool {
+        let parent = if parent.as_ref() == "/" { None } else { Some(parent.as_ref()) };
+        other.as_ref().len() > 0 && Path::dirname(other) == parent
     }
 
     /// finds the longest common parent of the two specified paths, /
