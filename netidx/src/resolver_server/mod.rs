@@ -397,6 +397,11 @@ async fn hello_client_write(
         info!("hello_write connecting to {:?} for listener ownership check", write_addr);
         let mut con: Channel<ServerCtx> =
             Channel::new(time::timeout(timeout, TcpStream::connect(write_addr)).await??);
+        time::timeout(timeout, con.send_one(&2u64)).await??;
+        let version: u64 = time::timeout(timeout, con.receive()).await??;
+        if version != 2 {
+            bail!("incompatible protocol version")
+        }
         use publisher::Hello as PHello;
         let n = thread_rng().gen::<u128>();
         let answer = utils::make_sha3_token(&[&n.to_be_bytes(), &secret.to_be_bytes()]);
@@ -626,6 +631,11 @@ async fn hello_client(
 ) -> Result<()> {
     s.set_nodelay(true)?;
     let mut con = Channel::new(s);
+    time::timeout(ctx.cfg.hello_timeout, con.send_one(&2u64)).await??;
+    let version: u64 = time::timeout(ctx.cfg.hello_timeout, con.receive()).await??;
+    if version != 2 {
+        bail!("unsupported protocol version")
+    }
     let hello: ClientHello =
         time::timeout(ctx.cfg.hello_timeout, con.receive()).await??;
     match hello {

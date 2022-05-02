@@ -1393,6 +1393,8 @@ fn client_arrived(publisher: &PublisherWeak) {
     }
 }
 
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
 // CR estokes: Implement periodic rekeying to improve security
 async fn hello_client(
     publisher: &PublisherWeak,
@@ -1400,9 +1402,13 @@ async fn hello_client(
     con: &mut Channel<ServerCtx>,
     auth: &DesiredAuth,
 ) -> Result<()> {
-    const TIMEOUT: Duration = Duration::from_secs(10);
     use protocol::publisher::Hello;
     debug!("hello_client");
+    con.send_one(&2u64).await?;
+    let version: u64 = con.receive().await?;
+    if version != 2 {
+        bail!("incompatible protocol version")
+    }
     let hello: Hello = con.receive().await?;
     debug!("hello_client received {:?}", hello);
     match hello {
@@ -1422,7 +1428,7 @@ async fn hello_client(
             }
             DesiredAuth::Krb5 { upn: _, spn } => {
                 let spn = spn.as_ref().map(|s| s.as_str());
-                let ctx = krb5_authentication(TIMEOUT, spn, con).await?;
+                let ctx = krb5_authentication(HELLO_TIMEOUT, spn, con).await?;
                 con.set_ctx(K5CtxWrap::new(ctx)).await;
                 con.send_one(&Hello::Krb5).await?;
                 client_arrived(publisher);
@@ -1470,7 +1476,8 @@ async fn client_loop(
     let mut deferred_subs_batch: Vec<(Path, Permissions)> = Vec::new();
     // make sure the deferred subs stream never ends
     deferred_subs.inner_mut().push(Box::new(stream::pending()));
-    hello_client(&t, &secrets, &mut con, &desired_auth).await?;
+    time::timeout(HELLO_TIMEOUT, hello_client(&t, &secrets, &mut con, &desired_auth))
+        .await??;
     loop {
         select_biased! {
             _ = hb.tick().fuse() => {
