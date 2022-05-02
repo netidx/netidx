@@ -17,7 +17,7 @@ pub(crate) struct Params {
     delay_reads: bool,
     #[structopt(
         long = "id",
-        help = "index of the address to bind to",
+        help = "index of the member server to run",
         default_value = "0"
     )]
     id: usize,
@@ -26,15 +26,17 @@ pub(crate) struct Params {
 pub(crate) fn run(params: Params) {
     let config =
         Config::load(params.config).expect("failed to load resolver server config");
+    let member = &config.member_servers[params.id];
     if !params.foreground {
-        let mut file = config.pid_file.clone();
+        let mut file = member.pid_file.clone();
         file.push_str(&format!("{}.pid", params.id));
         Daemonize::new().pid_file(file).start().expect("failed to daemonize");
     }
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
-        let server =
-            Server::new(config, params.delay_reads).await.expect("starting server");
+        let server = Server::new(config, params.delay_reads, params.id)
+            .await
+            .expect("starting server");
         future::pending::<()>().await;
         drop(server)
     });

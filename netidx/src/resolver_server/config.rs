@@ -162,7 +162,7 @@ pub struct Config {
     pub(super) parent: Option<Referral>,
     pub(super) children: BTreeMap<Path, Referral>,
     pub(super) perms: PMap,
-    pub(super) member_servers: Vec<MemberServer>,
+    pub member_servers: Vec<MemberServer>,
 }
 
 impl Config {
