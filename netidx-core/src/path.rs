@@ -259,8 +259,8 @@ impl Path {
     /// use netidx_core::path::Path;
     /// assert!(!Path::is_immediate_parent("/", "/foo/bar/baz"));
     /// assert!(Path::is_immediate_parent("/foo/bar", "/foo/bar/baz"));
-    /// assert!(!Path::is_parent("/foo/bar", "/foo/bareth/bazeth"));
-    /// assert!(!Path::is_parent("/foo/bar", "/foo/bar"));
+    /// assert!(!Path::is_immediate_parent("/foo/bar", "/foo/bareth/bazeth"));
+    /// assert!(!Path::is_immediate_parent("/foo/bar", "/foo/bar"));
     /// ```
     pub fn is_immediate_parent<T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(
         parent: &T,
