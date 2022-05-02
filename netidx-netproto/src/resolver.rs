@@ -229,7 +229,6 @@ impl Pack for ServerHelloWrite {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        dbg!(buf.remaining());
         let ttl = Pack::decode(buf)?;
         let ttl_expired = Pack::decode(buf)?;
         let auth = Pack::decode(buf)?;

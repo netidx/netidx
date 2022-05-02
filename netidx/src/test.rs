@@ -183,7 +183,7 @@ mod resolver {
         let mut l = r.list(p("/")).await.unwrap();
         l.sort();
         if local {
-            assert_eq!(&*l, &[p("/app"), p("/tmp"), p("/local")]);
+            assert_eq!(&*l, &[p("/app"), p("/local"), p("/tmp")]);
         } else {
             assert_eq!(&*l, &[p("/app"), p("/tmp")]);
         }
@@ -270,6 +270,9 @@ mod resolver {
                     r.resolver == ctx.cfg_huge1_sub.addrs[0].0
                         || r.resolver == ctx.cfg_huge1_sub.addrs[1].0
                 ),
+                "/local/foo" | "/local/bar" => {
+                    assert_eq!(r.resolver, ctx.cfg_local.addrs[0].0)
+                }
                 p => unreachable!("unexpected path {}", p),
             }
             i += 1
