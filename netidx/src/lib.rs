@@ -28,9 +28,8 @@
 //! ```no_run
 //! # fn get_cpu_temp() -> f32 { 42. }
 //! use netidx::{
-//!     publisher::{Publisher, Value, BindCfg},
-//!     config::client::Config,
-//!     resolver::DesiredAuth,
+//!     publisher::{Publisher, Value, BindCfg, DesiredAuth},
+//!     config::Config,
 //!     path::Path,
 //! };
 //! use tokio::time;
@@ -63,9 +62,8 @@
 //! # Subscriber
 //! ```no_run
 //! use netidx::{
-//!     subscriber::{Subscriber, UpdatesFlags},
-//!     config::client::Config,
-//!     resolver::DesiredAuth,
+//!     subscriber::{Subscriber, UpdatesFlags, DesiredAuth},
+//!     config::Config,
 //!     path::Path,
 //! };
 //! use futures::{prelude::*, channel::mpsc};
