@@ -144,6 +144,10 @@ impl Connection {
         let con = wt!(TcpStream::connect(&self.resolver_addr))??;
         con.set_nodelay(true)?;
         let mut con = Channel::new(con);
+        wt!(con.send_one(&2u64))??;
+        if wt!(con.receive::<u64>())?? != 2 {
+            bail!("incompatible protocol version")
+        }
         let sec = Duration::from_secs(1);
         let hello = |auth| {
             let h = ClientHello::WriteOnly(ClientHelloWrite {

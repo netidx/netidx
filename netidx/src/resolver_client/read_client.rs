@@ -55,6 +55,10 @@ async fn connect(
         let con = cwt!("connect", TcpStream::connect(&addr));
         try_cf!("no delay", con.set_nodelay(true));
         let mut con = Channel::new(con);
+        cwt!("send version", con.send_one(&2u64));
+        if cwt!("recv version", con.receive::<u64>()) != 2 {
+            continue
+        }
         match (desired_auth, auth) {
             (DesiredAuth::Anonymous, _) => {
                 cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Anonymous)));
