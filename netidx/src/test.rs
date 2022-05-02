@@ -9,6 +9,7 @@ mod resolver {
         resolver_server::{config::Config as ServerConfig, Server},
     };
     use netidx_netproto::resolver::TargetAuth;
+    use rand::{thread_rng, Rng};
     use std::{iter, net::SocketAddr, time::Duration};
     use tokio::{runtime::Runtime, time};
 
@@ -84,10 +85,12 @@ mod resolver {
     }
 
     struct Ctx {
+        _local: Server,
         _root: (Server, Server),
         _huge0: (Server, Server),
         _huge1: (Server, Server),
         _huge1_sub: (Server, Server),
+        cfg_local: ClientConfig,
         cfg_root: ClientConfig,
         cfg_huge0: ClientConfig,
         cfg_huge1: ClientConfig,
@@ -95,7 +98,21 @@ mod resolver {
     }
 
     impl Ctx {
+        fn random_server(&self) -> ClientConfig {
+            match thread_rng().gen_range(0. ..=1.) {
+                n if n >= 0. && n <= 0.20 => self.cfg_root.clone(),
+                n if n > 0.20 && n <= 0.40 => self.cfg_huge0.clone(),
+                n if n > 0.40 && n <= 0.60 => self.cfg_huge1.clone(),
+                n if n > 0.60 && n <= 0.80 => self.cfg_huge1_sub.clone(),
+                _ => self.cfg_local.clone(),
+            }
+        }
+
         async fn new() -> Ctx {
+            let server_cfg_local = ServerConfig::load("../cfg/complex-local-server.json")
+                .expect("local server config");
+            let cfg_local = ClientConfig::load("../cfg/complex-local-client.json")
+                .expect("local client config");
             let server_cfg_root0 = ServerConfig::load("../cfg/complex-root-server0.json")
                 .expect("root server config");
             let server_cfg_root1 = ServerConfig::load("../cfg/complex-root-server1.json")
@@ -127,6 +144,8 @@ mod resolver {
             let cfg_huge1_sub =
                 ClientConfig::load("../cfg/complex-huge1-sub-client.json")
                     .expect("huge1 sub client config");
+            let server_local =
+                Server::new(server_cfg_local, false).await.expect("local server");
             let server0_root =
                 Server::new(server_cfg_root0, false).await.expect("root server 0");
             let server1_root =
@@ -146,10 +165,12 @@ mod resolver {
                 .await
                 .expect("huge1 sub server0");
             Ctx {
+                _local: server_local,
                 _root: (server0_root, server1_root),
                 _huge0: (server0_huge0, server1_huge0),
                 _huge1: (server0_huge1, server1_huge1),
                 _huge1_sub: (server0_huge1_sub, server1_huge1_sub),
+                cfg_local,
                 cfg_root,
                 cfg_huge0,
                 cfg_huge1,
@@ -158,10 +179,19 @@ mod resolver {
         }
     }
 
-    async fn check_list(r: &ResolverRead) {
+    async fn check_list(local: bool, r: &ResolverRead) {
         let mut l = r.list(p("/")).await.unwrap();
         l.sort();
-        assert_eq!(&*l, &[p("/app"), p("/tmp")]);
+        if local {
+            assert_eq!(&*l, &[p("/app"), p("/tmp"), p("/local")]);
+        } else {
+            assert_eq!(&*l, &[p("/app"), p("/tmp")]);
+        }
+        if local {
+            let mut l = r.list(p("/local")).await.unwrap();
+            l.sort();
+            assert_eq!(&*l, &[p("/local/bar"), p("/local/foo")])
+        }
         let mut l = r.list(p("/tmp")).await.unwrap();
         l.sort();
         assert_eq!(&*l, &[p("/tmp/x"), p("/tmp/y"), p("/tmp/z")]);
@@ -268,22 +298,29 @@ mod resolver {
         .iter()
         .map(|r| Path::from(*r))
         .collect::<Vec<_>>();
+        let local_paths = ["/local/foo", "/local/bar"]
+            .iter()
+            .map(|r| Path::from(*r))
+            .collect::<Vec<_>>();
         let mut ct_root = ChangeTracker::new(Path::from("/"));
         let mut ct_app = ChangeTracker::new(Path::from("/app"));
         let r_root = ResolverRead::new(ctx.cfg_root.clone(), DesiredAuth::Anonymous);
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(r_root.check_changed(&mut ct_app).await.unwrap());
         let w0 =
-            ResolverWrite::new(ctx.cfg_root.clone(), DesiredAuth::Anonymous, waddrs[0]);
+            ResolverWrite::new(ctx.random_server(), DesiredAuth::Anonymous, waddrs[0]);
         let w1 =
-            ResolverWrite::new(ctx.cfg_root.clone(), DesiredAuth::Anonymous, waddrs[1]);
+            ResolverWrite::new(ctx.random_server(), DesiredAuth::Anonymous, waddrs[1]);
         w0.publish(paths.iter().cloned()).await.unwrap();
+        let wl =
+            ResolverWrite::new(ctx.cfg_local.clone(), DesiredAuth::Anonymous, waddrs[0]);
+        wl.publish(local_paths.iter().cloned()).await.unwrap();
         time::sleep(Duration::from_millis(1000)).await;
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(r_root.check_changed(&mut ct_app).await.unwrap());
         assert!(!r_root.check_changed(&mut ct_app).await.unwrap());
-        check_list(&r_root).await;
+        check_list(false, &r_root).await;
         check_resolve(&ctx, &r_root, &paths, &[waddrs[0]][..]).await;
         w1.publish(paths.iter().cloned()).await.unwrap();
         time::sleep(Duration::from_millis(1000)).await;
@@ -295,17 +332,21 @@ mod resolver {
         // in the cluster will have finished publishing all the paths
         // when this method returns, as such this test could fail
         // spuriously.
-        check_list(&r_root).await;
+        check_list(false, &r_root).await;
         check_resolve(&ctx, &r_root, &paths, &waddrs).await;
+        let r_local = ResolverRead::new(ctx.cfg_local.clone(), DesiredAuth::Anonymous);
+        check_list(true, &r_local).await;
+        check_resolve(&ctx, &r_local, &paths, &waddrs).await;
+        check_resolve(&ctx, &r_local, &local_paths, &[waddrs[0]]).await;
         let r_huge0 = ResolverRead::new(ctx.cfg_huge0.clone(), DesiredAuth::Anonymous);
-        check_list(&r_huge0).await;
+        check_list(false, &r_huge0).await;
         check_resolve(&ctx, &r_huge0, &paths, &waddrs).await;
         let r_huge1 = ResolverRead::new(ctx.cfg_huge1.clone(), DesiredAuth::Anonymous);
-        check_list(&r_huge1).await;
+        check_list(false, &r_huge1).await;
         check_resolve(&ctx, &r_huge1, &paths, &waddrs).await;
         let r_huge1_sub =
             ResolverRead::new(ctx.cfg_huge1.clone(), DesiredAuth::Anonymous);
-        check_list(&r_huge1_sub).await;
+        check_list(false, &r_huge1_sub).await;
         check_resolve(&ctx, &r_huge1_sub, &paths, &waddrs).await;
         assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(!r_root.check_changed(&mut ct_app).await.unwrap());
@@ -314,13 +355,13 @@ mod resolver {
         assert!(!r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(r_root.check_changed(&mut ct_app).await.unwrap());
         assert!(!r_root.check_changed(&mut ct_app).await.unwrap());
-        check_list(&r_root).await;
+        check_list(false, &r_root).await;
         check_resolve(&ctx, &r_root, &paths, &[waddrs[1]][..]).await;
-        check_list(&r_huge1_sub).await;
+        check_list(false, &r_huge1_sub).await;
         check_resolve(&ctx, &r_huge1_sub, &paths, &[waddrs[1]][..]).await;
-        check_list(&r_huge1).await;
+        check_list(false, &r_huge1).await;
         check_resolve(&ctx, &r_huge1, &paths, &[waddrs[1]][..]).await;
-        check_list(&r_huge0).await;
+        check_list(false, &r_huge0).await;
         check_resolve(&ctx, &r_huge0, &paths, &[waddrs[1]][..]).await;
     }
 
@@ -424,10 +465,7 @@ mod publisher {
         }
     }
 
-    async fn run_subscriber(
-        cfg: ClientConfig,
-        default_destroyed: Arc<Mutex<bool>>,
-    ) {
+    async fn run_subscriber(cfg: ClientConfig, default_destroyed: Arc<Mutex<bool>>) {
         let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
         let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
         let q = subscriber.subscribe_one("/app/q/foo".into(), None).await.unwrap();
@@ -473,9 +511,8 @@ mod publisher {
         rt.block_on(async {
             let server_cfg = ServerConfig::load("../cfg/simple-server.json")
                 .expect("load simple server config");
-            let mut client_cfg =
-                ClientConfig::load("../cfg/simple-client.json")
-                    .expect("load simple client config");
+            let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
+                .expect("load simple client config");
             let server = Server::new(server_cfg, false).await.expect("start server");
             client_cfg.addrs[0].0 = *server.local_addr();
             let default_destroyed = Arc::new(Mutex::new(false));
