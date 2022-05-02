@@ -23,6 +23,7 @@ pub enum PackError {
     UnknownTag,
     TooBig,
     InvalidFormat,
+    BufferShort,
 }
 
 impl fmt::Display for PackError {
@@ -113,20 +114,20 @@ impl Pack for net::SocketAddr {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => {
-                let ip = net::Ipv4Addr::from(u32::to_be_bytes(buf.get_u32()));
-                let port = buf.get_u16();
+                let ip = net::Ipv4Addr::from(u32::to_be_bytes(<u32 as Pack>::decode(buf)?));
+                let port = <u16 as Pack>::decode(buf)?;
                 Ok(net::SocketAddr::V4(net::SocketAddrV4::new(ip, port)))
             }
             1 => {
                 let mut segments = [0u16; 8];
                 for i in 0..8 {
-                    segments[i] = buf.get_u16();
+                    segments[i] = <u16 as Pack>::decode(buf)?;
                 }
-                let port = buf.get_u16();
-                let flowinfo = buf.get_u32();
-                let scope_id = buf.get_u32();
+                let port = <u16 as Pack>::decode(buf)?;
+                let flowinfo = <u32 as Pack>::decode(buf)?;
+                let scope_id = <u32 as Pack>::decode(buf)?;
                 let ip = net::Ipv6Addr::from(segments);
                 let v6 = net::SocketAddrV6::new(ip, port, flowinfo, scope_id);
                 Ok(net::SocketAddr::V6(v6))
@@ -316,7 +317,7 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
     let mut value = 0;
     let mut i = 0;
     while i < 10 {
-        let byte = buf.get_u8();
+        let byte = <u8 as Pack>::decode(buf)?;
         value |= u64::from(byte & 0x7F) << (i * 7);
         if byte <= 0x7F {
             return Ok(value);
@@ -324,6 +325,50 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
         i += 1;
     }
     Err(PackError::InvalidFormat)
+}
+
+impl Pack for f32 {
+    fn const_encoded_len() -> Option<usize> {
+        Some(mem::size_of::<f32>())
+    }
+
+    fn encoded_len(&self) -> usize {
+        mem::size_of::<f32>()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Ok(buf.put_f32(*self))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        if buf.remaining() < mem::size_of::<f32>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_f32())
+        }
+    }
+}
+
+impl Pack for f64 {
+    fn const_encoded_len() -> Option<usize> {
+        Some(mem::size_of::<f64>())
+    }
+
+    fn encoded_len(&self) -> usize {
+        mem::size_of::<f64>()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Ok(buf.put_f64(*self))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        if buf.remaining() < mem::size_of::<f64>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_f64())
+        }
+    }
 }
 
 impl Pack for u128 {
@@ -340,7 +385,33 @@ impl Pack for u128 {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        Ok(buf.get_u128())
+        if buf.remaining() < mem::size_of::<u128>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_u128())
+        }
+    }
+}
+
+impl Pack for i128 {
+    fn const_encoded_len() -> Option<usize> {
+        Some(mem::size_of::<i128>())
+    }
+
+    fn encoded_len(&self) -> usize {
+        mem::size_of::<i128>()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Ok(buf.put_i128(*self))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        if buf.remaining() < mem::size_of::<i128>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_i128())
+        }
     }
 }
 
@@ -358,7 +429,33 @@ impl Pack for u64 {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        Ok(buf.get_u64())
+        if buf.remaining() < mem::size_of::<u64>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_u64())
+        }
+    }
+}
+
+impl Pack for i64 {
+    fn const_encoded_len() -> Option<usize> {
+        Some(mem::size_of::<i64>())
+    }
+
+    fn encoded_len(&self) -> usize {
+        mem::size_of::<i64>()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Ok(buf.put_i64(*self))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        if buf.remaining() < mem::size_of::<i64>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_i64())
+        }
     }
 }
 
@@ -407,7 +504,33 @@ impl Pack for u32 {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        Ok(buf.get_u32())
+        if buf.remaining() < mem::size_of::<u32>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_u32())
+        }
+    }
+}
+
+impl Pack for i32 {
+    fn const_encoded_len() -> Option<usize> {
+        Some(mem::size_of::<i32>())
+    }
+
+    fn encoded_len(&self) -> usize {
+        mem::size_of::<i32>()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Ok(buf.put_i32(*self))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        if buf.remaining() < mem::size_of::<i32>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_i32())
+        }
     }
 }
 
@@ -425,7 +548,78 @@ impl Pack for u16 {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        Ok(buf.get_u16())
+        if buf.remaining() < mem::size_of::<u16>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_u16())
+        }
+    }
+}
+
+impl Pack for i16 {
+    fn const_encoded_len() -> Option<usize> {
+        Some(mem::size_of::<i16>())
+    }
+
+    fn encoded_len(&self) -> usize {
+        mem::size_of::<i16>()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Ok(buf.put_i16(*self))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        if buf.remaining() < mem::size_of::<i16>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_i16())
+        }
+    }
+}
+
+
+impl Pack for u8 {
+    fn const_encoded_len() -> Option<usize> {
+        Some(mem::size_of::<u8>())
+    }
+
+    fn encoded_len(&self) -> usize {
+        mem::size_of::<u8>()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Ok(buf.put_u8(*self))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        if buf.remaining() < mem::size_of::<u8>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_u8())
+        }
+    }
+}
+
+impl Pack for i8 {
+    fn const_encoded_len() -> Option<usize> {
+        Some(mem::size_of::<i8>())
+    }
+
+    fn encoded_len(&self) -> usize {
+        mem::size_of::<i8>()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Ok(buf.put_i8(*self))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        if buf.remaining() < mem::size_of::<i8>() {
+            Err(PackError::BufferShort)
+        } else {
+            Ok(buf.get_i8())
+        }
     }
 }
 
@@ -524,7 +718,7 @@ impl<T: Pack> Pack for Option<T> {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(None),
             1 => Ok(Some(<T as Pack>::decode(buf)?)),
             _ => return Err(PackError::UnknownTag),
@@ -563,7 +757,7 @@ impl Pack for bool {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(false),
             1 => Ok(true),
             _ => Err(PackError::UnknownTag),
@@ -586,8 +780,8 @@ impl Pack for DateTime<Utc> {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        let ts = buf.get_i64();
-        let ns = buf.get_u32();
+        let ts = Pack::decode(buf)?;
+        let ns = Pack::decode(buf)?;
         let ndt = NaiveDateTime::from_timestamp_opt(ts, ns)
             .ok_or_else(|| PackError::InvalidFormat)?;
         Ok(DateTime::from_utc(ndt, Utc))
@@ -609,8 +803,8 @@ impl Pack for Duration {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        let secs = buf.get_u64();
-        let ns = buf.get_u32();
+        let secs = Pack::decode(buf)?;
+        let ns = Pack::decode(buf)?;
         Ok(Duration::new(secs, ns))
     }
 }

@@ -74,7 +74,7 @@ impl Pack for Hello {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(Hello::Anonymous),
             1 => Ok(Hello::Krb5),
             2 => Ok(Hello::Local),
@@ -147,7 +147,7 @@ impl Pack for To {
     }
 
     fn decode(buf: &mut impl Buf) -> anyhow::Result<Self, PackError> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => {
                 let path = Pack::decode(buf)?;
                 let resolver = Pack::decode(buf)?;
@@ -244,7 +244,7 @@ impl Pack for From {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(From::NoSuchValue(Pack::decode(buf)?)),
             1 => Ok(From::Denied(Pack::decode(buf)?)),
             2 => Ok(From::Unsubscribed(Pack::decode(buf)?)),

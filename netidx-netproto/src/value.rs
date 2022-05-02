@@ -817,21 +817,21 @@ impl Pack for Value {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
-            0 => Ok(Value::U32(buf.get_u32())),
+        match <u8 as Pack>::decode(buf)? {
+            0 => Ok(Value::U32(Pack::decode(buf)?)),
             1 => Ok(Value::V32(pack::decode_varint(buf)? as u32)),
-            2 => Ok(Value::I32(buf.get_i32())),
+            2 => Ok(Value::I32(Pack::decode(buf)?)),
             3 => Ok(Value::Z32(pack::i32_uzz(pack::decode_varint(buf)? as u32))),
-            4 => Ok(Value::U64(buf.get_u64())),
+            4 => Ok(Value::U64(Pack::decode(buf)?)),
             5 => Ok(Value::V64(pack::decode_varint(buf)?)),
-            6 => Ok(Value::I64(buf.get_i64())),
+            6 => Ok(Value::I64(Pack::decode(buf)?)),
             7 => Ok(Value::Z64(pack::i64_uzz(pack::decode_varint(buf)?))),
-            8 => Ok(Value::F32(buf.get_f32())),
-            9 => Ok(Value::F64(buf.get_f64())),
-            10 => Ok(Value::DateTime(<DateTime<Utc> as Pack>::decode(buf)?)),
-            11 => Ok(Value::Duration(<Duration as Pack>::decode(buf)?)),
-            12 => Ok(Value::String(<Chars as Pack>::decode(buf)?)),
-            13 => Ok(Value::Bytes(<Bytes as Pack>::decode(buf)?)),
+            8 => Ok(Value::F32(Pack::decode(buf)?)),
+            9 => Ok(Value::F64(Pack::decode(buf)?)),
+            10 => Ok(Value::DateTime(Pack::decode(buf)?)),
+            11 => Ok(Value::Duration(Pack::decode(buf)?)),
+            12 => Ok(Value::String(Pack::decode(buf)?)),
+            13 => Ok(Value::Bytes(Pack::decode(buf)?)),
             14 => Ok(Value::True),
             15 => Ok(Value::False),
             16 => Ok(Value::Null),

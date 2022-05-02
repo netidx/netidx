@@ -33,7 +33,7 @@ impl Pack for HashMethod {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(Self::Sha3_512),
             _ => Err(PackError::UnknownTag),
         }
@@ -84,7 +84,7 @@ impl Pack for AuthRead {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(Self::Anonymous),
             1 => Ok(Self::Krb5),
             2 => Ok(Self::Local),
@@ -122,7 +122,7 @@ impl Pack for AuthWrite {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(Self::Anonymous),
             1 => Ok(Self::Reuse),
             2 => Ok(Self::Krb5 { spn: Pack::decode(buf)? }),
@@ -197,7 +197,7 @@ impl Pack for ClientHello {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(ClientHello::ReadOnly(Pack::decode(buf)?)),
             1 => Ok(ClientHello::WriteOnly(Pack::decode(buf)?)),
             _ => Err(Error::UnknownTag),
@@ -268,7 +268,7 @@ impl Pack for ReadyForOwnershipCheck {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(ReadyForOwnershipCheck),
             _ => Err(PackError::UnknownTag),
         }
@@ -326,7 +326,7 @@ impl Pack for ToRead {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(ToRead::Resolve(Pack::decode(buf)?)),
             1 => Ok(ToRead::List(Pack::decode(buf)?)),
             2 => Ok(ToRead::Table(Pack::decode(buf)?)),
@@ -368,7 +368,7 @@ impl Pack for Auth {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(Self::Anonymous),
             1 => Ok(Self::Local { path: Pack::decode(buf)? }),
             2 => Ok(Self::Krb5 { spn: Pack::decode(buf)? }),
@@ -433,7 +433,7 @@ impl Pack for TargetAuth {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(Self::Anonymous),
             1 => Ok(Self::Local),
             2 => Ok(Self::Krb5 { spn: Pack::decode(buf)? }),
@@ -722,7 +722,7 @@ impl Pack for FromRead {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(FromRead::Publisher(Pack::decode(buf)?)),
             1 => Ok(FromRead::Resolved(Pack::decode(buf)?)),
             2 => Ok(FromRead::List(Pack::decode(buf)?)),
@@ -809,7 +809,7 @@ impl Pack for ToWrite {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(ToWrite::Publish(Pack::decode(buf)?)),
             1 => Ok(ToWrite::PublishDefault(Pack::decode(buf)?)),
             2 => Ok(ToWrite::Unpublish(Pack::decode(buf)?)),
@@ -868,7 +868,7 @@ impl Pack for FromWrite {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match buf.get_u8() {
+        match <u8 as Pack>::decode(buf)? {
             0 => Ok(FromWrite::Published),
             1 => Ok(FromWrite::Unpublished),
             2 => Ok(FromWrite::Referral(Pack::decode(buf)?)),
