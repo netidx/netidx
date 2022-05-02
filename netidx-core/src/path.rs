@@ -261,13 +261,16 @@ impl Path {
     /// assert!(Path::is_immediate_parent("/foo/bar", "/foo/bar/baz"));
     /// assert!(!Path::is_immediate_parent("/foo/bar", "/foo/bareth/bazeth"));
     /// assert!(!Path::is_immediate_parent("/foo/bar", "/foo/bar"));
+    /// assert!(!Path::is_immediate_parent("/", "/"));
     /// ```
     pub fn is_immediate_parent<T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(
         parent: &T,
         other: &U,
     ) -> bool {
         let parent = if parent.as_ref() == "/" { None } else { Some(parent.as_ref()) };
-        other.as_ref().len() > 0 && Path::dirname(other) == parent
+        other.as_ref().len() > 0
+            && other.as_ref() != "/"
+            && Path::dirname(other) == parent
     }
 
     /// finds the longest common parent of the two specified paths, /
