@@ -24,7 +24,7 @@ mod resolver {
                 .expect("load simple server config");
             let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
                 .expect("load simple client config");
-            let server = Server::new(server_cfg, false).await.expect("start server");
+            let server = Server::new(server_cfg, false, 0).await.expect("start server");
             client_cfg.addrs[0].0 = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr);
@@ -58,7 +58,7 @@ mod resolver {
                 .expect("load simple server config");
             let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
                 .expect("load simple client config");
-            let server = Server::new(server_cfg, false).await.expect("start server");
+            let server = Server::new(server_cfg, false, 0).await.expect("start server");
             client_cfg.addrs[0].0 = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
             let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr);
@@ -113,55 +113,45 @@ mod resolver {
                 .expect("local server config");
             let cfg_local = ClientConfig::load("../cfg/complex-local-client.json")
                 .expect("local client config");
-            let server_cfg_root0 = ServerConfig::load("../cfg/complex-root-server0.json")
-                .expect("root server config");
-            let server_cfg_root1 = ServerConfig::load("../cfg/complex-root-server1.json")
+            let server_cfg_root = ServerConfig::load("../cfg/complex-root-server.json")
                 .expect("root server config");
             let cfg_root = ClientConfig::load("../cfg/complex-root-client.json")
                 .expect("root client config");
-            let server_cfg_huge0_0 =
-                ServerConfig::load("../cfg/complex-huge0-server0.json")
-                    .expect("huge0 server config");
-            let server_cfg_huge0_1 =
-                ServerConfig::load("../cfg/complex-huge0-server1.json")
-                    .expect("huge0 server config");
+            let server_cfg_huge0 = ServerConfig::load("../cfg/complex-huge0-server.json")
+                .expect("huge0 server config");
             let cfg_huge0 = ClientConfig::load("../cfg/complex-huge0-client.json")
                 .expect("huge0 client config");
-            let server_cfg_huge1_0 =
-                ServerConfig::load("../cfg/complex-huge1-server0.json")
-                    .expect("huge1 server config");
-            let server_cfg_huge1_1 =
-                ServerConfig::load("../cfg/complex-huge1-server1.json")
-                    .expect("huge1 server config");
+            let server_cfg_huge1 = ServerConfig::load("../cfg/complex-huge1-server.json")
+                .expect("huge1 server config");
             let cfg_huge1 = ClientConfig::load("../cfg/complex-huge1-client.json")
                 .expect("huge1 client config");
-            let server_cfg_huge1_sub0 =
-                ServerConfig::load("../cfg/complex-huge1-sub-server0.json")
-                    .expect("huge1 sub server config");
-            let server_cfg_huge1_sub1 =
-                ServerConfig::load("../cfg/complex-huge1-sub-server1.json")
+            let server_cfg_huge1_sub =
+                ServerConfig::load("../cfg/complex-huge1-sub-server.json")
                     .expect("huge1 sub server config");
             let cfg_huge1_sub =
                 ClientConfig::load("../cfg/complex-huge1-sub-client.json")
                     .expect("huge1 sub client config");
             let server_local =
-                Server::new(server_cfg_local, false).await.expect("local server");
-            let server0_root =
-                Server::new(server_cfg_root0, false).await.expect("root server 0");
+                Server::new(server_cfg_local, false, 0).await.expect("local server");
+            let server0_root = Server::new(server_cfg_root.clone(), false, 0)
+                .await
+                .expect("root server 0");
             let server1_root =
-                Server::new(server_cfg_root1, false).await.expect("root server 1");
-            let server0_huge0 =
-                Server::new(server_cfg_huge0_0, false).await.expect("huge0 server0");
+                Server::new(server_cfg_root, false, 1).await.expect("root server 1");
+            let server0_huge0 = Server::new(server_cfg_huge0.clone(), false, 0)
+                .await
+                .expect("huge0 server0");
             let server1_huge0 =
-                Server::new(server_cfg_huge0_1, false).await.expect("huge0 server1");
-            let server0_huge1 =
-                Server::new(server_cfg_huge1_0, false).await.expect("huge1 server0");
+                Server::new(server_cfg_huge0, false, 1).await.expect("huge0 server1");
+            let server0_huge1 = Server::new(server_cfg_huge1.clone(), false, 0)
+                .await
+                .expect("huge1 server0");
             let server1_huge1 =
-                Server::new(server_cfg_huge1_1, false).await.expect("huge1 server0");
-            let server0_huge1_sub = Server::new(server_cfg_huge1_sub0, false)
+                Server::new(server_cfg_huge1, false, 1).await.expect("huge1 server0");
+            let server0_huge1_sub = Server::new(server_cfg_huge1_sub.clone(), false, 0)
                 .await
                 .expect("huge1 sub server0");
-            let server1_huge1_sub = Server::new(server_cfg_huge1_sub1, false)
+            let server1_huge1_sub = Server::new(server_cfg_huge1_sub, false, 1)
                 .await
                 .expect("huge1 sub server0");
             Ctx {
@@ -516,7 +506,7 @@ mod publisher {
                 .expect("load simple server config");
             let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
                 .expect("load simple client config");
-            let server = Server::new(server_cfg, false).await.expect("start server");
+            let server = Server::new(server_cfg, false, 0).await.expect("start server");
             client_cfg.addrs[0].0 = *server.local_addr();
             let default_destroyed = Arc::new(Mutex::new(false));
             let (tx, ready) = oneshot::channel();

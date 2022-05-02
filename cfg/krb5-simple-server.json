@@ -1,14 +1,20 @@
 {
-    "parent": null,
-    "children": [],
-    "pid_file": "",
-    "addr": "192.168.0.1:4564",
-    "max_connections": 768,
-    "hello_timeout": 10,
-    "reader_ttl": 60,
-    "writer_ttl": 120,
-    "auth": {
-        "Krb5": {"192.168.0.1:4564": "netidx/your-fqdn@YOUR-KRB5-REALM"}
-    },
-    "perms": {}
+  "parent": null,
+  "children": [],
+  "member_servers": [
+    {
+      "pid_file": "",
+      "addr": "192.168.0.1:4564",
+      "max_connections": 768,
+      "hello_timeout": 10,
+      "reader_ttl": 60,
+      "writer_ttl": 120,
+      "auth": {
+        "Krb5": {
+          "192.168.0.1:4564": "netidx/your-fqdn@YOUR-KRB5-REALM"
+        }
+      }
+    }
+  ],
+  "perms": {}
 }

@@ -7,7 +7,7 @@ mod store;
 mod test;
 
 use auth::{UserInfo, ANONYMOUS};
-use config::Config;
+use config::{Config, MemberServer};
 use secctx::{K5SecData, LocalSecData, SecCtx};
 use shard_store::Store;
 
@@ -213,7 +213,7 @@ struct Ctx {
     clinfos: Clinfos,
     ctracker: CTracker,
     secctx: SecCtx,
-    cfg: Config,
+    cfg: MemberServer,
     id: SocketAddr,
     listen_addr: SocketAddr,
     store: Store,
@@ -371,7 +371,7 @@ async fn hello_client_write(
     info!("hello_write starting negotiation");
     debug!("hello_write client_hello: {:?}", hello);
     async fn challenge_auth(
-        cfg: &Config,
+        cfg: &MemberServer,
         con: &mut Channel<ServerCtx>,
         secret: u128,
     ) -> Result<()> {
@@ -648,11 +648,13 @@ async fn server_loop(
     delay_reads: bool,
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
+    id: usize,
 ) -> Result<SocketAddr> {
+    let member = cfg.member_servers[id].clone();
     let delay_reads =
-        if delay_reads { Some(Instant::now() + cfg.writer_ttl) } else { None };
-    let id = cfg.addr;
-    let secctx = SecCtx::new(&cfg).await?;
+        if delay_reads { Some(Instant::now() + member.writer_ttl) } else { None };
+    let id = member.addr;
+    let secctx = SecCtx::new(&cfg, &member).await?;
     let store = Store::new(
         cfg.parent.clone().map(|s| s.into()),
         cfg.children.iter().map(|(p, s)| (p.clone(), s.clone().into())).collect(),
@@ -662,7 +664,7 @@ async fn server_loop(
     let listener = TcpListener::bind(id).await?;
     let listen_addr = listener.local_addr()?;
     let ctx = Arc::new(Ctx {
-        cfg,
+        cfg: member,
         secctx,
         clinfos: Clinfos::new(),
         ctracker: CTracker::new(),
@@ -727,10 +729,10 @@ impl Drop for Server {
 }
 
 impl Server {
-    pub async fn new(cfg: Config, delay_reads: bool) -> Result<Server> {
+    pub async fn new(cfg: Config, delay_reads: bool, id: usize) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        let tsk = server_loop(cfg, delay_reads, recv_stop, send_ready);
+        let tsk = server_loop(cfg, delay_reads, recv_stop, send_ready, id);
         let local_addr = select_biased! {
             a = task::spawn(tsk).fuse() => a??,
             a = recv_ready.fuse() => a?,

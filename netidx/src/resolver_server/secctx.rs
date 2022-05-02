@@ -1,6 +1,6 @@
 use super::{
     auth::{PMap, UserDb},
-    config::Config,
+    config::{Config, MemberServer},
 };
 use crate::{
     channel::K5CtxWrap,
@@ -134,8 +134,8 @@ pub(super) enum SecCtx {
 }
 
 impl SecCtx {
-    pub(super) async fn new(cfg: &Config) -> Result<Self> {
-        let t = match &cfg.auth {
+    pub(super) async fn new(cfg: &Config, member: &MemberServer) -> Result<Self> {
+        let t = match &member.auth {
             Auth::Anonymous => SecCtx::Anonymous,
             Auth::Local { path } => {
                 let auth = LocalAuth::new(&path).await?;

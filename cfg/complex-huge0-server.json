@@ -1,14 +1,14 @@
 {
   "parent": {
-    "path": "/local",
+    "path": "/app/huge0",
     "ttl": 3600,
     "addrs": [
       [
-        "127.0.0.1:1230",
+        "127.0.0.1:1200",
         "Anonymous"
       ],
       [
-        "127.0.0.1:1231",
+        "127.0.0.1:1201",
         "Anonymous"
       ]
     ]
@@ -17,7 +17,16 @@
   "member_servers": [
     {
       "pid_file": "",
-      "addr": "127.0.0.1:1100",
+      "addr": "127.0.0.1:1210",
+      "max_connections": 768,
+      "hello_timeout": 10,
+      "reader_ttl": 60,
+      "writer_ttl": 120,
+      "auth": "Anonymous"
+    },
+    {
+      "pid_file": "",
+      "addr": "127.0.0.1:1211",
       "max_connections": 768,
       "hello_timeout": 10,
       "reader_ttl": 60,
