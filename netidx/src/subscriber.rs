@@ -1284,6 +1284,10 @@ async fn hello_publisher(
     target_auth: &TargetAuth,
 ) -> Result<()> {
     use protocol::publisher::Hello;
+    con.send_one(&2u64).await?;
+    if con.receive::<u64>().await? != 2 {
+        bail!("incompatible protocol version")
+    }
     match (desired_auth, target_auth) {
         (DesiredAuth::Anonymous, TargetAuth::Anonymous) => {
             con.send_one(&Hello::Anonymous).await?;
@@ -1498,7 +1502,9 @@ async fn connection(
     let conid = ConId::new();
     soc.set_nodelay(true)?;
     let mut con = Channel::new(soc);
-    hello_publisher(&mut con, &auth, &target_auth).await?;
+    const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+    time::timeout(HELLO_TIMEOUT, hello_publisher(&mut con, &auth, &target_auth))
+        .await??;
     let (read_con, mut write_con) = con.split();
     let (tx_stop, rx_stop) = oneshot::channel();
     let mut pending_writes: FxHashMap<Id, VecDeque<oneshot::Sender<Value>>> =

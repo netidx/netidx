@@ -1405,8 +1405,7 @@ async fn hello_client(
     use protocol::publisher::Hello;
     debug!("hello_client");
     con.send_one(&2u64).await?;
-    let version: u64 = con.receive().await?;
-    if version != 2 {
+    if con.receive::<u64>().await? != 2 {
         bail!("incompatible protocol version")
     }
     let hello: Hello = con.receive().await?;

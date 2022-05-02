@@ -398,8 +398,7 @@ async fn hello_client_write(
         let mut con: Channel<ServerCtx> =
             Channel::new(time::timeout(timeout, TcpStream::connect(write_addr)).await??);
         time::timeout(timeout, con.send_one(&2u64)).await??;
-        let version: u64 = time::timeout(timeout, con.receive()).await??;
-        if version != 2 {
+        if time::timeout(timeout, con.receive::<u64>()).await?? != 2 {
             bail!("incompatible protocol version")
         }
         use publisher::Hello as PHello;
