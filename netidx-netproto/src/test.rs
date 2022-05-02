@@ -43,9 +43,37 @@ mod resolver {
             Secret, ServerHelloWrite, Table, TargetAuth, ToRead, ToWrite,
         },
     };
+    use netidx_core::pack::PackError;
     use proptest::collection;
     use std::net::SocketAddr;
 
+    fn fuzz(b: Bytes) {
+        type Result<T> = std::result::Result<T, PackError>;
+        let _: Result<Auth> = Pack::decode(&mut &*b);
+        let _: Result<AuthChallenge> = Pack::decode(&mut &*b);
+        let _: Result<AuthRead> = Pack::decode(&mut &*b);
+        let _: Result<AuthWrite> = Pack::decode(&mut &*b);
+        let _: Result<ClientHello> = Pack::decode(&mut &*b);
+        let _: Result<ClientHelloWrite> = Pack::decode(&mut &*b);
+        let _: Result<FromRead> = Pack::decode(&mut &*b);
+        let _: Result<FromWrite> = Pack::decode(&mut &*b);
+        let _: Result<GetChangeNr> = Pack::decode(&mut &*b);
+        let _: Result<HashMethod> = Pack::decode(&mut &*b);
+        let _: Result<ListMatching> = Pack::decode(&mut &*b);
+        let _: Result<Publisher> = Pack::decode(&mut &*b);
+        let _: Result<PublisherId> = Pack::decode(&mut &*b);
+        let _: Result<PublisherRef> = Pack::decode(&mut &*b);
+        let _: Result<ReadyForOwnershipCheck> = Pack::decode(&mut &*b);
+        let _: Result<Referral> = Pack::decode(&mut &*b);
+        let _: Result<Resolved> = Pack::decode(&mut &*b);
+        let _: Result<Secret> = Pack::decode(&mut &*b);
+        let _: Result<ServerHelloWrite> = Pack::decode(&mut &*b);
+        let _: Result<Table> = Pack::decode(&mut &*b);
+        let _: Result<TargetAuth> = Pack::decode(&mut &*b);
+        let _: Result<ToRead> = Pack::decode(&mut &*b);
+        let _: Result<ToWrite> = Pack::decode(&mut &*b);
+    }
+    
     fn auth_challenge() -> impl Strategy<Value = AuthChallenge> {
         (hash_method(), any::<u128>())
             .prop_map(|(hash_method, challenge)| AuthChallenge { hash_method, challenge })
@@ -269,6 +297,11 @@ mod resolver {
 
     proptest! {
         #[test]
+        fn test_fuzz(b in bytes()) {
+            fuzz(b)
+        }
+        
+        #[test]
         fn test_auth_challenge(a in auth_challenge()) {
             check(a)
         }
@@ -322,9 +355,19 @@ mod publisher {
         value::Value,
     };
     use chrono::{prelude::*, MAX_DATETIME, MIN_DATETIME};
+    use netidx_core::pack::PackError;
     use proptest::collection;
     use std::{net::SocketAddr, time::Duration};
 
+    fn fuzz(b: Bytes) {
+        type Result<T> = std::result::Result<T, PackError>;
+        let _: Result<From> = Pack::decode(&mut &*b);
+        let _: Result<To> = Pack::decode(&mut &*b);
+        let _: Result<Hello> = Pack::decode(&mut &*b);
+        let _: Result<Id> = Pack::decode(&mut &*b);
+        let _: Result<Value> = Pack::decode(&mut &*b);
+    }
+    
     fn hello() -> impl Strategy<Value = Hello> {
         prop_oneof![
             Just(Hello::Anonymous),
@@ -431,6 +474,11 @@ mod publisher {
     }
 
     proptest! {
+        #[test]
+        fn test_fuzz(b in bytes()) {
+            fuzz(b)
+        }
+
         #[test]
         fn test_hello(a in hello()) {
             check(a)
