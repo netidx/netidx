@@ -144,8 +144,6 @@ impl Connection {
         let con = wt!(TcpStream::connect(&self.resolver_addr))??;
         con.set_nodelay(true)?;
         let mut con = Channel::new(con);
-        wt!(con.send_one(&1u64))??;
-        let _version: u64 = wt!(con.receive())??;
         let sec = Duration::from_secs(1);
         let hello = |auth| {
             let h = ClientHello::WriteOnly(ClientHelloWrite {
