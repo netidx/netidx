@@ -213,8 +213,7 @@ lazy_static! {
     static ref TOUPUB: Pool<HashSet<Path>> = Pool::new(5, 10_000);
     static ref TOUSUB: Pool<HashMap<Id, Subscribed>> = Pool::new(5, 10_000);
     static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(100, 10_000);
-    static ref RAWBATCH: Pool<Vec<(Option<ClId>, ToClientMsg)>> =
-        Pool::new(100, 10_000);
+    static ref RAWBATCH: Pool<Vec<BatchMsg>> = Pool::new(100, 10_000);
     static ref BATCHMSGS: Pool<FxHashMap<ClId, Pooled<Vec<ToClientMsg>>>> =
         Pool::new(100, 100);
 
@@ -351,19 +350,25 @@ impl Val {
     /// Clients that subscribe after an update is queued, but before
     /// the batch is committed will still receive the update.
     pub fn update(&self, batch: &mut UpdateBatch, v: Value) {
-        batch.msgs.push((None, ToClientMsg::Val(self.0, v)));
+        batch.msgs.push(BatchMsg::ToCl(None, ToClientMsg::Val(self.0, v)));
+    }
+
+    /// update the current value only if the new value is different
+    /// from the existing one. Otherwise exactly the same as update.
+    pub fn update_changed(&self, batch: &mut UpdateBatch, v: Value) {
+        batch.msgs.push(BatchMsg::UpdateChanged(self.0, v));
     }
 
     /// Queue sending `v` as an update ONLY to the specified
     /// subscriber, and do not update `current`.
     pub fn update_subscriber(&self, batch: &mut UpdateBatch, dst: ClId, v: Value) {
-        batch.msgs.push((Some(dst), ToClientMsg::Val(self.0, v)));
+        batch.msgs.push(BatchMsg::ToCl(Some(dst), ToClientMsg::Val(self.0, v)));
     }
 
     /// Queue unsubscribing the specified client. Like update, this
     /// will only take effect when the specified batch is committed.
     pub fn unsubscribe(&self, batch: &mut UpdateBatch, dst: ClId) {
-        batch.msgs.push((Some(dst), ToClientMsg::Unpublish(self.0)));
+        batch.msgs.push(BatchMsg::ToCl(Some(dst), ToClientMsg::Unpublish(self.0)));
     }
 
     /// Get the unique `Id` of this `Val`
@@ -493,11 +498,17 @@ impl Drop for DefaultHandle {
     }
 }
 
+#[derive(Debug, Clone)]
+enum BatchMsg {
+    UpdateChanged(Id, Value),
+    ToCl(Option<ClId>, ToClientMsg),
+}
+
 /// A batch of updates to Vals
 #[must_use = "update batches do nothing unless committed"]
 pub struct UpdateBatch {
     origin: Publisher,
-    msgs: Pooled<Vec<(Option<ClId>, ToClientMsg)>>,
+    msgs: Pooled<Vec<BatchMsg>>,
 }
 
 impl UpdateBatch {
@@ -524,9 +535,9 @@ impl UpdateBatch {
         let fut = {
             let mut msgs = BATCHMSGS.take();
             let mut pb = self.origin.0.lock();
-            for (dest, m) in self.msgs.drain(..) {
-                match dest {
-                    None => {
+            for m in self.msgs.drain(..) {
+                match m {
+                    BatchMsg::ToCl(None, m) => {
                         if let Some(pbl) = pb.by_id.get_mut(&m.id()) {
                             for cl in pbl.subscribed.iter() {
                                 msgs.entry(*cl)
@@ -541,7 +552,21 @@ impl UpdateBatch {
                             }
                         }
                     }
-                    Some(cl) => msgs.entry(cl).or_insert_with(|| TOCL.take()).push(m),
+                    BatchMsg::UpdateChanged(id, v) => {
+                        if let Some(pbl) = pb.by_id.get_mut(&id) {
+                            if pbl.current != v {
+                                for cl in pbl.subscribed.iter() {
+                                    msgs.entry(*cl)
+                                        .or_insert_with(|| TOCL.take())
+                                        .push(ToClientMsg::Val(id, v.clone()));
+                                }
+                                pbl.current = v;
+                            }
+                        }
+                    }
+                    BatchMsg::ToCl(Some(cl), m) => {
+                        msgs.entry(cl).or_insert_with(|| TOCL.take()).push(m)
+                    }
                 }
             }
             future::join_all(
@@ -598,7 +623,7 @@ impl Published {
     }
 }
 
-pub struct PublisherInner {
+struct PublisherInner {
     addr: SocketAddr,
     stop: Option<oneshot::Sender<()>>,
     clients: FxHashMap<ClId, Client>,
@@ -624,14 +649,6 @@ pub struct PublisherInner {
 }
 
 impl PublisherInner {
-    fn path(&self, id: &Id) -> Option<&Path> {
-        self.by_id.get(id).map(|p| &p.path)
-    }
-
-    fn current(&self, id: &Id) -> Option<&Value> {
-        self.by_id.get(id).map(|p| &p.current)
-    }
-
     fn cleanup(&mut self) -> bool {
         match mem::replace(&mut self.stop, None) {
             None => false,
@@ -1737,7 +1754,8 @@ async fn publish_loop(
                 let mut batch = publisher.start_batch();
                 for (id, subs) in to_unsubscribe.drain() {
                     for cl in subs.iter() {
-                        batch.msgs.push((Some(*cl), ToClientMsg::Unpublish(id)));
+                        let m = BatchMsg::ToCl(Some(*cl), ToClientMsg::Unpublish(id));
+                        batch.msgs.push(m);
                     }
                 }
                 batch.commit(None).await;
