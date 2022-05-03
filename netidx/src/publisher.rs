@@ -578,13 +578,27 @@ struct Client {
     subscribed: FxHashMap<Id, Permissions>,
 }
 
-struct Published {
+pub struct Published {
     current: Value,
     subscribed: Subscribed,
     path: Path,
 }
 
-struct PublisherInner {
+impl Published {
+    pub fn current(&self) -> &Value {
+        &self.current
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn subscribed(&self) -> &FxHashSet<ClId> {
+        &self.subscribed
+    }
+}
+
+pub struct PublisherInner {
     addr: SocketAddr,
     stop: Option<oneshot::Sender<()>>,
     clients: FxHashMap<ClId, Client>,
@@ -610,6 +624,14 @@ struct PublisherInner {
 }
 
 impl PublisherInner {
+    fn path(&self, id: &Id) -> Option<&Path> {
+        self.by_id.get(id).map(|p| &p.path)
+    }
+
+    fn current(&self, id: &Id) -> Option<&Value> {
+        self.by_id.get(id).map(|p| &p.current)
+    }
+
     fn cleanup(&mut self) -> bool {
         match mem::replace(&mut self.stop, None) {
             None => false,
