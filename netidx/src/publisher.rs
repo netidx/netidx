@@ -16,6 +16,7 @@ use crate::{
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
+use bytes::Bytes;
 use cross_krb5::ServerCtx;
 use futures::{
     channel::{
@@ -1265,79 +1266,235 @@ fn write(
     Ok(())
 }
 
-async fn handle_batch(
-    t: &PublisherWeak,
-    client: ClId,
-    msgs: impl Iterator<Item = publisher::To>,
-    con: &mut Channel<ServerCtx>,
-    write_batches: &mut FxHashMap<
-        ChanId,
-        (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
-    >,
-    secrets: &Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
-    auth: &DesiredAuth,
+fn check_token(
+    token: Bytes,
     now: u64,
-    deferred_subs: &mut DeferredSubs,
-) -> Result<()> {
-    use protocol::publisher::{From, To::*};
-    let mut wait_write_res = Vec::new();
-    {
-        let t_st = t.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
+    secret: u128,
+    timestamp: u64,
+    permissions: u32,
+    path: &Path,
+) -> Result<(bool, Permissions)> {
+    if token.len() < mem::size_of::<u64>() {
+        bail!("error, token too short");
+    }
+    let expected = utils::make_sha3_token(&[
+        &secret.to_be_bytes(),
+        &timestamp.to_be_bytes(),
+        &permissions.to_be_bytes(),
+        path.as_bytes(),
+    ]);
+    let permissions = Permissions::from_bits(permissions)
+        .ok_or_else(|| anyhow!("invalid permission bits"))?;
+    let age = std::cmp::max(
+        u64::saturating_sub(now, timestamp),
+        u64::saturating_sub(timestamp, now),
+    );
+    let valid = age <= 300
+        && permissions.contains(Permissions::SUBSCRIBE)
+        && &*token == &expected;
+    Ok((valid, permissions))
+}
+
+const HB: Duration = Duration::from_secs(5);
+
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+struct ClientCtx {
+    con: Channel<ServerCtx>,
+    desired_auth: DesiredAuth,
+    client: ClId,
+    publisher: PublisherWeak,
+    secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+    batch: Vec<publisher::To>,
+    write_batches:
+        FxHashMap<ChanId, (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>)>,
+    deferred_subs: DeferredSubs,
+    deferred_subs_batch: Vec<(Path, Permissions)>,
+    wait_write_res: Vec<(Id, oneshot::Receiver<Value>)>,
+    gc_on_write: Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
+    msg_sent: bool,
+}
+
+impl ClientCtx {
+    fn new(
+        socket: TcpStream,
+        client: ClId,
+        secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+        publisher: PublisherWeak,
+        desired_auth: DesiredAuth,
+    ) -> ClientCtx {
+        let mut deferred_subs: DeferredSubs =
+            Batched::new(SelectAll::new(), MAX_DEFERRED);
+        deferred_subs.inner_mut().push(Box::new(stream::pending()));
+        ClientCtx {
+            con: Channel::new(socket),
+            desired_auth,
+            client,
+            publisher,
+            secrets,
+            batch: Vec::new(),
+            write_batches: HashMap::default(),
+            deferred_subs,
+            deferred_subs_batch: Vec::new(),
+            wait_write_res: Vec::new(),
+            gc_on_write: Vec::new(),
+            msg_sent: false,
+        }
+    }
+
+    fn client_arrived(&mut self) {
+        if let Some(publisher) = self.publisher.upgrade() {
+            let mut pb = publisher.0.lock();
+            for tx in pb.wait_any_client.drain(..) {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    // CR estokes: Implement periodic rekeying to improve security
+    async fn hello(&mut self) -> Result<()> {
+        use protocol::publisher::Hello;
+        debug!("hello_client");
+        self.con.send_one(&2u64).await?;
+        if self.con.receive::<u64>().await? != 2 {
+            bail!("incompatible protocol version")
+        }
+        let hello: Hello = self.con.receive().await?;
+        debug!("hello_client received {:?}", hello);
+        match hello {
+            Hello::Anonymous => {
+                self.con.send_one(&Hello::Anonymous).await?;
+                self.client_arrived();
+            }
+            Hello::Local => {
+                self.con.send_one(&Hello::Local).await?;
+                self.client_arrived();
+            }
+            Hello::Krb5 => match &self.desired_auth {
+                DesiredAuth::Anonymous => bail!("authentication not supported"),
+                DesiredAuth::Local => {
+                    self.con.send_one(&Hello::Local).await?;
+                    self.client_arrived();
+                }
+                DesiredAuth::Krb5 { upn: _, spn } => {
+                    let spn = spn.as_ref().map(|s| s.as_str());
+                    let ctx =
+                        krb5_authentication(HELLO_TIMEOUT, spn, &mut self.con).await?;
+                    self.con.set_ctx(K5CtxWrap::new(ctx)).await;
+                    self.con.send_one(&Hello::Krb5).await?;
+                    self.client_arrived();
+                }
+            },
+            Hello::ResolverAuthenticate(id) => {
+                info!("hello_client processing listener ownership check from resolver");
+                let secret = self
+                    .secrets
+                    .read()
+                    .get(&id)
+                    .copied()
+                    .ok_or_else(|| anyhow!("no secret"))?;
+                let challenge: AuthChallenge = self.con.receive().await?;
+                if challenge.hash_method != HashMethod::Sha3_512 {
+                    bail!("requested hash method not supported")
+                }
+                let reply = utils::make_sha3_token(&[
+                    &challenge.challenge.to_be_bytes(),
+                    &secret.to_be_bytes(),
+                ]);
+                self.con.send_one(&BoundedBytes::<4096>(reply)).await?;
+                // prevent fishing for the key
+                time::sleep(Duration::from_secs(1)).await;
+                bail!("resolver authentication complete");
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_deferred_sub(
+        &mut self,
+        s: Option<BatchItem<(Path, Permissions)>>,
+    ) -> Result<()> {
+        match s {
+            None => (),
+            Some(BatchItem::InBatch(v)) => {
+                self.deferred_subs_batch.push(v);
+            }
+            Some(BatchItem::EndBatch) => match self.publisher.upgrade() {
+                None => {
+                    self.deferred_subs_batch.clear();
+                }
+                Some(t) => {
+                    {
+                        let mut pb = t.0.lock();
+                        for (path, perms) in self.deferred_subs_batch.drain(..) {
+                            if !pb.by_path.contains_key(path.as_ref()) {
+                                let m = publisher::From::NoSuchValue(path);
+                                self.con.queue_send(&m)?
+                            } else {
+                                subscribe(
+                                    &mut *pb,
+                                    &mut self.con,
+                                    self.client,
+                                    path,
+                                    perms,
+                                    &mut self.deferred_subs,
+                                )?
+                            }
+                        }
+                    }
+                    self.con.flush().await?
+                }
+            },
+        }
+        Ok(())
+    }
+
+    fn handle_batch_inner(&mut self) -> Result<()> {
+        use protocol::publisher::{From, To::*};
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+        let t_st = self.publisher.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
         let mut pb = t_st.0.lock();
-        let secrets = secrets.read();
+        let secrets = self.secrets.read();
         let mut gc = false;
-        let mut gc_on_write = Vec::new();
-        for msg in msgs {
+        for msg in self.batch.drain(..) {
             match msg {
                 Subscribe { path, resolver, timestamp, permissions, token } => {
                     gc = true;
-                    match auth {
+                    match self.desired_auth {
                         DesiredAuth::Anonymous => subscribe(
                             &mut *pb,
-                            con,
-                            client,
+                            &mut self.con,
+                            self.client,
                             path,
                             Permissions::all(),
-                            deferred_subs,
+                            &mut self.deferred_subs,
                         )?,
                         DesiredAuth::Krb5 { .. } | DesiredAuth::Local => {
                             match secrets.get(&resolver) {
                                 None => {
                                     debug!("denied, no stored secret for {}", resolver);
-                                    con.queue_send(&From::Denied(path))?
+                                    self.con.queue_send(&From::Denied(path))?
                                 }
                                 Some(secret) => {
-                                    if token.len() < mem::size_of::<u64>() {
-                                        bail!("error, token too short");
-                                    }
-                                    let expected = utils::make_sha3_token(&[
-                                        &secret.to_be_bytes(),
-                                        &timestamp.to_be_bytes(),
-                                        &permissions.to_be_bytes(),
-                                        path.as_bytes(),
-                                    ]);
-                                    let permissions = Permissions::from_bits(permissions)
-                                        .ok_or_else(|| {
-                                            anyhow!("invalid permission bits")
-                                        })?;
-                                    let age = std::cmp::max(
-                                        u64::saturating_sub(now, timestamp),
-                                        u64::saturating_sub(timestamp, now),
-                                    );
-                                    if age > 300
-                                        || !permissions.contains(Permissions::SUBSCRIBE)
-                                        || &*token != &expected
-                                    {
+                                    let (valid, permissions) = check_token(
+                                        token,
+                                        now,
+                                        *secret,
+                                        timestamp,
+                                        permissions,
+                                        &path,
+                                    )?;
+                                    if !valid {
                                         debug!("subscribe permission denied");
-                                        con.queue_send(&From::Denied(path))?
+                                        self.con.queue_send(&From::Denied(path))?
                                     } else {
                                         subscribe(
                                             &mut *pb,
-                                            con,
-                                            client,
+                                            &mut self.con,
+                                            self.client,
                                             path,
                                             permissions,
-                                            deferred_subs,
+                                            &mut self.deferred_subs,
                                         )?
                                     }
                                 }
@@ -1347,217 +1504,103 @@ async fn handle_batch(
                 }
                 Write(id, v, r) => write(
                     &mut *pb,
-                    con,
-                    client,
-                    &mut gc_on_write,
-                    &mut wait_write_res,
-                    write_batches,
+                    &mut self.con,
+                    self.client,
+                    &mut self.gc_on_write,
+                    &mut self.wait_write_res,
+                    &mut self.write_batches,
                     id,
                     v,
                     r,
                 )?,
                 Unsubscribe(id) => {
                     gc = true;
-                    unsubscribe(&mut *pb, client, id);
-                    con.queue_send(&From::Unsubscribed(id))?;
+                    unsubscribe(&mut *pb, self.client, id);
+                    self.con.queue_send(&From::Unsubscribed(id))?;
                 }
             }
         }
         if gc {
             pb.hc_subscribed.retain(|_, v| Arc::get_mut(v).is_none());
         }
-        for c in gc_on_write {
+        for c in self.gc_on_write.drain(..) {
             pb.on_write_chans.remove(&c);
         }
+        Ok(())
     }
-    for (_, (batch, mut sender)) in write_batches.drain() {
-        let _ = sender.send(batch).await;
-    }
-    for (id, rx) in wait_write_res {
-        match rx.await {
-            Ok(v) => con.queue_send(&From::WriteResult(id, v))?,
-            Err(_) => con.queue_send(&From::WriteResult(id, Value::Ok))?,
-        }
-    }
-    Ok(())
-}
 
-const HB: Duration = Duration::from_secs(5);
-
-fn client_arrived(publisher: &PublisherWeak) {
-    if let Some(publisher) = publisher.upgrade() {
-        let mut pb = publisher.0.lock();
-        for tx in pb.wait_any_client.drain(..) {
-            let _ = tx.send(());
+    async fn handle_batch(&mut self) -> Result<()> {
+        use protocol::publisher::From;
+        self.handle_batch_inner()?;
+        for (_, (batch, mut sender)) in self.write_batches.drain() {
+            let _ = sender.send(batch).await;
         }
-    }
-}
-
-const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
-
-// CR estokes: Implement periodic rekeying to improve security
-async fn hello_client(
-    publisher: &PublisherWeak,
-    secrets: &Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
-    con: &mut Channel<ServerCtx>,
-    auth: &DesiredAuth,
-) -> Result<()> {
-    use protocol::publisher::Hello;
-    debug!("hello_client");
-    con.send_one(&2u64).await?;
-    if con.receive::<u64>().await? != 2 {
-        bail!("incompatible protocol version")
-    }
-    let hello: Hello = con.receive().await?;
-    debug!("hello_client received {:?}", hello);
-    match hello {
-        Hello::Anonymous => {
-            con.send_one(&Hello::Anonymous).await?;
-            client_arrived(publisher);
-        }
-        Hello::Local => {
-            con.send_one(&Hello::Local).await?;
-            client_arrived(publisher);
-        }
-        Hello::Krb5 => match auth {
-            DesiredAuth::Anonymous => bail!("authentication not supported"),
-            DesiredAuth::Local => {
-                con.send_one(&Hello::Local).await?;
-                client_arrived(publisher);
+        for (id, rx) in self.wait_write_res.drain(..) {
+            match rx.await {
+                Ok(v) => self.con.queue_send(&From::WriteResult(id, v))?,
+                Err(_) => self.con.queue_send(&From::WriteResult(id, Value::Ok))?,
             }
-            DesiredAuth::Krb5 { upn: _, spn } => {
-                let spn = spn.as_ref().map(|s| s.as_str());
-                let ctx = krb5_authentication(HELLO_TIMEOUT, spn, con).await?;
-                con.set_ctx(K5CtxWrap::new(ctx)).await;
-                con.send_one(&Hello::Krb5).await?;
-                client_arrived(publisher);
-            }
-        },
-        Hello::ResolverAuthenticate(id) => {
-            info!("hello_client processing listener ownership check from resolver");
-            let secret =
-                secrets.read().get(&id).copied().ok_or_else(|| anyhow!("no secret"))?;
-            let challenge: AuthChallenge = con.receive().await?;
-            if challenge.hash_method != HashMethod::Sha3_512 {
-                bail!("requested hash method not supported")
-            }
-            let reply = utils::make_sha3_token(&[
-                &challenge.challenge.to_be_bytes(),
-                &secret.to_be_bytes(),
-            ]);
-            con.send_one(&BoundedBytes::<4096>(reply)).await?;
-            // prevent fishing for the key
-            time::sleep(Duration::from_secs(1)).await;
-            bail!("resolver authentication complete");
         }
+        Ok(self.con.flush().await?)
     }
-    Ok(())
-}
 
-async fn client_loop(
-    t: PublisherWeak,
-    secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
-    client: ClId,
-    updates: Receiver<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>,
-    s: TcpStream,
-    desired_auth: DesiredAuth,
-) -> Result<()> {
-    let mut con: Channel<ServerCtx> = Channel::new(s);
-    let mut batch: Vec<publisher::To> = Vec::new();
-    let mut write_batches: FxHashMap<
-        ChanId,
-        (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
-    > = HashMap::default();
-    let mut updates = updates.fuse();
-    let mut hb = time::interval(HB);
-    let mut msg_sent = false;
-    let mut deferred_subs: DeferredSubs = Batched::new(SelectAll::new(), MAX_DEFERRED);
-    let mut deferred_subs_batch: Vec<(Path, Permissions)> = Vec::new();
-    // make sure the deferred subs stream never ends
-    deferred_subs.inner_mut().push(Box::new(stream::pending()));
-    time::timeout(HELLO_TIMEOUT, hello_client(&t, &secrets, &mut con, &desired_auth))
-        .await??;
-    loop {
-        select_biased! {
-            _ = hb.tick().fuse() => {
-                if !msg_sent {
-                    con.queue_send(&publisher::From::Heartbeat)?;
-                    con.flush().await?;
+    async fn handle_updates(
+        &mut self,
+        (timeout, mut msgs): (Option<Duration>, Pooled<Vec<ToClientMsg>>),
+    ) -> Result<()> {
+        use publisher::{From, To};
+        for m in msgs.drain(..) {
+            match m {
+                ToClientMsg::Val(id, v) => {
+                    self.con.queue_send(&From::Update(id, v))?;
                 }
-                msg_sent = false;
-            },
-            s = deferred_subs.next() => match s {
-                None => (),
-                Some(BatchItem::InBatch(v)) => { deferred_subs_batch.push(v); }
-                Some(BatchItem::EndBatch) => match t.upgrade() {
-                    None => { deferred_subs_batch.clear(); }
-                    Some(t) => {
-                        {
-                            let mut pb = t.0.lock();
-                            for (path, perms) in deferred_subs_batch.drain(..) {
-                                if !pb.by_path.contains_key(path.as_ref()) {
-                                    let m = publisher::From::NoSuchValue(path);
-                                    con.queue_send(&m)?
-                                } else {
-                                    subscribe(
-                                        &mut *pb, &mut con, client,
-                                        path, perms, &mut deferred_subs
-                                    )?
-                                }
-                            }
-                        }
-                        con.flush().await?
-                    }
+                ToClientMsg::Unpublish(id) => {
+                    // handle this as if the client had requested it
+                    self.batch.push(To::Unsubscribe(id));
                 }
-            },
-            from_cl = con.receive_batch(&mut batch).fuse() => match from_cl {
-                Err(e) => return Err(Error::from(e)),
-                Ok(()) => {
-                    let now = SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)?
-                        .as_secs();
-                    handle_batch(
-                        &t, client, batch.drain(..), &mut con,
-                        &mut write_batches, &secrets, &desired_auth, now,
-                        &mut deferred_subs,
-                    ).await?;
-                    con.flush().await?
-                }
-            },
-            to_cl = updates.next() => match to_cl {
-                None => break Ok(()),
-                Some((timeout, mut msgs)) => {
-                    for m in msgs.drain(..) {
-                        match m {
-                            ToClientMsg::Val(id, v) => {
-                                con.queue_send(&publisher::From::Update(id, v))?;
-                            }
-                            ToClientMsg::Unpublish(id) => {
-                                // handle this as if the client had requested it
-                                batch.push(publisher::To::Unsubscribe(id));
-                            }
-                        }
+            }
+        }
+        if self.batch.len() > 0 {
+            self.handle_batch().await?;
+        }
+        if self.con.bytes_queued() > 0 {
+            self.msg_sent = true;
+            let f = self.con.flush();
+            match timeout {
+                None => f.await?,
+                Some(d) => time::timeout(d, f).await??,
+            }
+        }
+        Ok(())
+    }
+
+    async fn run(
+        mut self,
+        updates: Receiver<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>,
+    ) -> Result<()> {
+        let mut updates = updates.fuse();
+        let mut hb = time::interval(HB);
+        // make sure the deferred subs stream never ends
+        time::timeout(HELLO_TIMEOUT, self.hello()).await??;
+        loop {
+            select_biased! {
+                _ = hb.tick().fuse() => {
+                    if !self.msg_sent {
+                        self.con.queue_send(&publisher::From::Heartbeat)?;
+                        self.con.flush().await?;
                     }
-                    if batch.len() > 0 {
-                        let now = SystemTime::now()
-                            .duration_since(SystemTime::UNIX_EPOCH)?
-                            .as_secs();
-                        handle_batch(
-                            &t, client, batch.drain(..),
-                            &mut con, &mut write_batches, &secrets,
-                            &desired_auth, now, &mut deferred_subs,
-                        ).await?;
-                    }
-                    if con.bytes_queued() > 0 {
-                        msg_sent = true;
-                        let f = con.flush();
-                        match timeout {
-                            None => f.await?,
-                            Some(d) => time::timeout(d, f).await??
-                        }
-                    }
-                }
-            },
+                    self.msg_sent = false;
+                },
+                s = self.deferred_subs.next() => self.handle_deferred_sub(s).await?,
+                r = self.con.receive_batch(&mut self.batch).fuse() => match r {
+                    Err(e) => return Err(Error::from(e)),
+                    Ok(()) => self.handle_batch().await?
+                },
+                u = updates.next() => match u {
+                    None => break Ok(()),
+                    Some(u) => self.handle_updates(u).await?,
+                },
+            }
         }
     }
 }
@@ -1593,9 +1636,14 @@ async fn accept_loop(
                         });
                         let desired_auth = desired_auth.clone();
                         task::spawn(async move {
-                            let r = client_loop(
-                                t_weak.clone(), secrets, clid, rx, s, desired_auth
-                            ).await;
+                            let ctx = ClientCtx::new(
+                                s,
+                                clid,
+                                secrets,
+                                t_weak.clone(),
+                                desired_auth
+                            );
+                            let r = ctx.run(rx).await;
                             info!("accept_loop client shutdown {:?}", r);
                             if let Some(t) = t_weak.upgrade() {
                                 let mut pb = t.0.lock();

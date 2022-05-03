@@ -10,9 +10,7 @@
       "reader_ttl": 60,
       "writer_ttl": 120,
       "auth": {
-        "Krb5": {
-          "192.168.0.1:4564": "netidx/your-fqdn@YOUR-KRB5-REALM"
-        }
+        "Krb5": "netidx/your-fqdn@YOUR-KRB5-REALM"
       }
     }
   ],
