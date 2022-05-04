@@ -539,7 +539,7 @@ impl Pack for Resolved {
 #[derive(Clone, Debug)]
 pub struct Referral {
     pub path: Path,
-    pub ttl: u64,
+    pub ttl: Option<u16>,
     pub addrs: Pooled<Vec<(SocketAddr, Auth)>>,
 }
 

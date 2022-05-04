@@ -92,7 +92,7 @@ pub(crate) mod file {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) struct Referral {
         path: String,
-        ttl: u64,
+        ttl: Option<u16>,
         addrs: Vec<(SocketAddr, Auth)>,
     }
 
@@ -106,8 +106,10 @@ pub(crate) mod file {
                 bail!("absolute server path is required")
             }
             check_addrs(&self.addrs)?;
-            if self.ttl == 0 {
-                bail!("ttl must be non zero");
+            if let Some(ttl) = self.ttl {
+                if ttl == 0 {
+                    bail!("ttl must be non zero");
+                }
             }
             if let Some(us) = us {
                 for (a, _) in us {

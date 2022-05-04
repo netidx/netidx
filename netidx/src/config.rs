@@ -71,7 +71,7 @@ impl Config {
     pub fn to_referral(self) -> Referral {
         Referral {
             path: self.base,
-            ttl: u32::MAX as u64,
+            ttl: None,
             addrs: Pooled::orphan(self.addrs),
         }
     }

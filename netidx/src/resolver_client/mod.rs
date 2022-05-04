@@ -18,9 +18,9 @@ use crate::{
 use anyhow::Result;
 pub use common::DesiredAuth;
 use common::{
-    ResponseChan, FROMREADPOOL, FROMWRITEPOOL, LISTPOOL, PUBLISHERPOOL, RAWFROMREADPOOL,
-    RAWFROMWRITEPOOL, RAWTOREADPOOL, RAWTOWRITEPOOL, RESOLVEDPOOL, TOREADPOOL,
-    TOWRITEPOOL, PATHPOOL
+    ResponseChan, FROMREADPOOL, FROMWRITEPOOL, LISTPOOL, PATHPOOL, PUBLISHERPOOL,
+    RAWFROMREADPOOL, RAWFROMWRITEPOOL, RAWTOREADPOOL, RAWTOWRITEPOOL, RESOLVEDPOOL,
+    TOREADPOOL, TOWRITEPOOL,
 };
 use futures::future;
 use fxhash::FxHashMap;
@@ -74,7 +74,7 @@ impl ToPath for ToWrite {
 
 #[derive(Debug)]
 struct Router {
-    cached: BTreeMap<Path, (Instant, Arc<Referral>)>,
+    cached: BTreeMap<Path, (Option<Instant>, Arc<Referral>)>,
 }
 
 impl Router {
@@ -116,7 +116,7 @@ impl Router {
                                 if !Path::is_parent(p, path) {
                                     continue;
                                 } else {
-                                    if &now < exp {
+                                    if exp.is_none() || now < exp.unwrap() {
                                         batches
                                             .entry(Some(r.clone()))
                                             .or_insert_with(|| pool.take())
@@ -147,7 +147,7 @@ impl Router {
     }
 
     fn add_referral(&mut self, r: Arc<Referral>) -> Arc<Referral> {
-        let exp = Instant::now() + Duration::from_secs(r.ttl);
+        let exp = r.ttl.map(|ttl| Instant::now() + Duration::from_secs(ttl as u64));
         let key = r.path.clone();
         self.cached.insert(key, (exp, r.clone()));
         r
@@ -450,7 +450,7 @@ impl ResolverRead {
                 if Path::is_immediate_parent(&path, p) {
                     match from_server.binary_search(p) {
                         Ok(_) => (),
-                        Err(i) => from_server.insert(i, p.clone())
+                        Err(i) => from_server.insert(i, p.clone()),
                     }
                 }
             }
