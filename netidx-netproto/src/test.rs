@@ -204,7 +204,7 @@ mod resolver {
     }
 
     fn referral() -> impl Strategy<Value = Referral> {
-        (path(), any::<u64>(), collection::vec((any::<SocketAddr>(), auth()), (0, 10)))
+        (path(), any::<Option<u16>>(), collection::vec((any::<SocketAddr>(), auth()), (0, 10)))
             .prop_map(|(path, ttl, addrs)| Referral {
                 path,
                 ttl,
