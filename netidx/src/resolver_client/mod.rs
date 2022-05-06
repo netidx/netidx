@@ -16,6 +16,7 @@ use crate::{
     },
 };
 use anyhow::Result;
+use arcstr::ArcStr;
 pub use common::DesiredAuth;
 use common::{
     ResponseChan, FROMREADPOOL, FROMWRITEPOOL, LISTPOOL, PATHPOOL, PUBLISHERPOOL,
@@ -448,9 +449,8 @@ impl ResolverRead {
             from_server.sort();
             for p in (self.0).0.lock().router.cached.keys() {
                 if Path::is_immediate_parent(&path, p) {
-                    match from_server.binary_search(p) {
-                        Ok(_) => (),
-                        Err(i) => from_server.insert(i, p.clone()),
+                    if let Err(i) = from_server.binary_search(p) {
+                        from_server.insert(i, p.clone())
                     }
                 }
             }
@@ -579,13 +579,27 @@ impl ResolverRead {
 
     pub async fn table(&self, path: Path) -> Result<Table> {
         let mut to = RAWTOREADPOOL.take();
-        to.push(ToRead::Table(path));
+        to.push(ToRead::Table(path.clone()));
         let (_, mut result) = self.send(&to).await?;
         if result.len() != 1 {
             bail!("expected 1 result from table got {}", result.len());
         } else {
             match result.pop().unwrap() {
-                FromRead::Table(table) => Ok(table),
+                FromRead::Table(mut table) => {
+                    let lvls = Path::levels(&path);
+                    table.rows.sort();
+                    for p in (self.0).0.lock().router.cached.keys() {
+                        if Path::is_immediate_parent(&path, p) {
+                            if let Some(part) = Path::parts(p).skip(lvls).next() {
+                                let part = Path::from(ArcStr::from(part));
+                                if let Err(i) = table.rows.binary_search(&part) {
+                                    table.rows.insert(i, Path::from(part));
+                                }
+                            }
+                        }
+                    }
+                    Ok(table)
+                }
                 m => bail!("unexpected result from table {:?}", m),
             }
         }
