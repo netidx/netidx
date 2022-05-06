@@ -586,11 +586,11 @@ impl ResolverRead {
         } else {
             match result.pop().unwrap() {
                 FromRead::Table(mut table) => {
-                    let lvls = Path::levels(&path);
+                    let skip = Path::levels(&path) + 1;
                     table.rows.sort();
                     for p in (self.0).0.lock().router.cached.keys() {
                         if Path::is_immediate_parent(&path, p) {
-                            if let Some(part) = Path::dirnames(p).skip(lvls).next() {
+                            if let Some(part) = Path::dirnames(p).skip(skip).next() {
                                 let part = Path::from(ArcStr::from(part));
                                 if let Err(i) = table.rows.binary_search(&part) {
                                     table.rows.insert(i, Path::from(part));
