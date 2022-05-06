@@ -30,9 +30,6 @@ pub(crate) fn check_addrs(a: &Vec<(SocketAddr, file::Auth)>) -> Result<()> {
     }
     for (addr, auth) in a {
         utils::check_addr::<()>(addr.ip(), &[])?;
-        if cfg!(not(test)) && addr.port() == 0 {
-            bail!("non zero port required {:?}", addr);
-        }
         match auth {
             Auth::Anonymous => (),
             Auth::Local(_) if !addr.ip().is_loopback() => {

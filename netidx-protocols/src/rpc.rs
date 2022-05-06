@@ -392,26 +392,31 @@ pub mod client {
 #[cfg(test)]
 mod test {
     use super::*;
-    use netidx::{config, resolver::Auth, resolver_server::Server};
+    use netidx::{
+        config::Config as ClientConfig,
+        resolver_client::DesiredAuth,
+        resolver_server::{config::Config as ServerConfig, Server},
+    };
     use tokio::{runtime::Runtime, time};
 
     #[test]
     fn call_proc() {
         Runtime::new().unwrap().block_on(async move {
-            let mut cfg =
-                config::Config::load("../cfg/simple.json").expect("load simple config");
-            let server = Server::new(cfg.clone(), config::PMap::default(), false, 0)
-                .await
-                .expect("start resolver server");
-            cfg.addrs[0] = *server.local_addr();
+            let cfg = ServerConfig::load("../cfg/simple-server.json")
+                .expect("load simple server config");
+            let server =
+                Server::new(cfg.clone(), false, 0).await.expect("start resolver server");
+            let mut cfg = ClientConfig::load("../cfg/simple-client.json")
+                .expect("load simple client config");
+            cfg.addrs[0].0 = *server.local_addr();
             let publisher = Publisher::new(
                 cfg.clone(),
-                Auth::Anonymous,
+                DesiredAuth::Anonymous,
                 "127.0.0.1/32".parse().unwrap(),
             )
             .await
             .unwrap();
-            let subscriber = Subscriber::new(cfg, Auth::Anonymous).unwrap();
+            let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
             let proc_name = Path::from("/rpc/procedure");
             let _server_proc: server::Proc = server::Proc::new(
                 &publisher,
