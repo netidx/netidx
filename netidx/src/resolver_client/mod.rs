@@ -590,7 +590,7 @@ impl ResolverRead {
                     table.rows.sort();
                     for p in (self.0).0.lock().router.cached.keys() {
                         if Path::is_immediate_parent(&path, p) {
-                            if let Some(part) = Path::parts(p).skip(lvls).next() {
+                            if let Some(part) = Path::dirnames(p).skip(lvls).next() {
                                 let part = Path::from(ArcStr::from(part));
                                 if let Err(i) = table.rows.binary_search(&part) {
                                     table.rows.insert(i, Path::from(part));
