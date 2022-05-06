@@ -294,8 +294,8 @@ impl RaeifiedTable {
         });
         match column_filter {
             Filter::Auto => {
-                let nrows = (descriptor.rows.len() >> 1) as u64;
-                descriptor.cols.retain(|(_, i)| i.0 >= nrows)
+                let half = descriptor.rows.len() as f32 / 2.;
+                descriptor.cols.retain(|(_, i)| i.0 as f32 >= half)
             }
             filter => descriptor.cols.retain(|col| match Path::basename(&col.0) {
                 None => true,
