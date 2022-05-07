@@ -212,10 +212,11 @@ lazy_static! {
     static ref TOPUB: Pool<HashMap<Path, Option<u32>>> = Pool::new(10, 10_000);
     static ref TOUPUB: Pool<HashSet<Path>> = Pool::new(5, 10_000);
     static ref TOUSUB: Pool<HashMap<Id, Subscribed>> = Pool::new(5, 10_000);
-    static ref TOCL: Pool<Vec<ToClientMsg>> = Pool::new(100, 10_000);
-    static ref RAWBATCH: Pool<Vec<BatchMsg>> = Pool::new(100, 10_000);
-    static ref BATCHMSGS: Pool<FxHashMap<ClId, Pooled<Vec<ToClientMsg>>>> =
-        Pool::new(100, 100);
+    static ref RAWBATCH: Pool<Vec<BatchMsg>> = Pool::new(100, 100_000);
+    static ref UPDATES: Pool<Vec<publisher::From>> = Pool::new(100, 100_000);
+    static ref RAWUNSUBS: Pool<Vec<(ClId, Id)>> = Pool::new(100, 100_000);
+    static ref UNSUBS: Pool<Vec<Id>> = Pool::new(100, 100_000);
+    static ref BATCH: Pool<FxHashMap<ClId, Update>> = Pool::new(100, 1000);
 
     // estokes 2021: This is reasonable because there will never be
     // that many publishers in a process. Since a publisher wraps
@@ -309,7 +310,18 @@ pub enum Event {
     Unsubscribe(Id, ClId),
 }
 
-type MsgQ = Sender<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>;
+struct Update {
+    updates: Pooled<Vec<publisher::From>>,
+    unsubscribes: Pooled<Vec<Id>>,
+}
+
+impl Update {
+    fn new() -> Self {
+        Self { updates: UPDATES.take(), unsubscribes: UNSUBS.take() }
+    }
+}
+
+type MsgQ = Sender<(Option<Duration>, Update)>;
 
 // The set of clients subscribed to a given value is hashconsed.
 // Instead of having a seperate hash table for each published value,
@@ -350,25 +362,25 @@ impl Val {
     /// Clients that subscribe after an update is queued, but before
     /// the batch is committed will still receive the update.
     pub fn update(&self, batch: &mut UpdateBatch, v: Value) {
-        batch.msgs.push(BatchMsg::ToCl(None, ToClientMsg::Val(self.0, v)));
+        batch.updates.push(BatchMsg::Update(None, self.0, v));
     }
 
     /// update the current value only if the new value is different
     /// from the existing one. Otherwise exactly the same as update.
     pub fn update_changed(&self, batch: &mut UpdateBatch, v: Value) {
-        batch.msgs.push(BatchMsg::UpdateChanged(self.0, v));
+        batch.updates.push(BatchMsg::UpdateChanged(self.0, v));
     }
 
     /// Queue sending `v` as an update ONLY to the specified
     /// subscriber, and do not update `current`.
     pub fn update_subscriber(&self, batch: &mut UpdateBatch, dst: ClId, v: Value) {
-        batch.msgs.push(BatchMsg::ToCl(Some(dst), ToClientMsg::Val(self.0, v)));
+        batch.updates.push(BatchMsg::Update(Some(dst), self.0, v));
     }
 
     /// Queue unsubscribing the specified client. Like update, this
     /// will only take effect when the specified batch is committed.
     pub fn unsubscribe(&self, batch: &mut UpdateBatch, dst: ClId) {
-        batch.msgs.push(BatchMsg::ToCl(Some(dst), ToClientMsg::Unpublish(self.0)));
+        batch.unsubscribes.push((dst, self.0));
     }
 
     /// Get the unique `Id` of this `Val`
@@ -501,20 +513,21 @@ impl Drop for DefaultHandle {
 #[derive(Debug, Clone)]
 enum BatchMsg {
     UpdateChanged(Id, Value),
-    ToCl(Option<ClId>, ToClientMsg),
+    Update(Option<ClId>, Id, Value),
 }
 
 /// A batch of updates to Vals
 #[must_use = "update batches do nothing unless committed"]
 pub struct UpdateBatch {
     origin: Publisher,
-    msgs: Pooled<Vec<BatchMsg>>,
+    updates: Pooled<Vec<BatchMsg>>,
+    unsubscribes: Pooled<Vec<(ClId, Id)>>,
 }
 
 impl UpdateBatch {
     /// return the number of queued updates in the batch
     pub fn len(&self) -> usize {
-        self.msgs.len()
+        self.updates.len()
     }
 
     /// merge all the updates from `other` into `self` assuming they
@@ -524,7 +537,8 @@ impl UpdateBatch {
         if Arc::as_ptr(&self.origin.0) != Arc::as_ptr(&other.origin.0) {
             bail!("can't merge batches from different publishers");
         } else {
-            Ok(self.msgs.extend(other.msgs.drain(..)))
+            self.updates.extend(other.updates.drain(..));
+            Ok(self.unsubscribes.extend(other.unsubscribes.drain(..)))
         }
     }
 
@@ -533,44 +547,49 @@ impl UpdateBatch {
     /// `timeout` will be disconnected.
     pub async fn commit(mut self, timeout: Option<Duration>) {
         let fut = {
-            let mut msgs = BATCHMSGS.take();
+            let mut batch = BATCH.take();
             let mut pb = self.origin.0.lock();
-            for m in self.msgs.drain(..) {
+            for m in self.updates.drain(..) {
                 match m {
-                    BatchMsg::ToCl(None, m) => {
-                        if let Some(pbl) = pb.by_id.get_mut(&m.id()) {
+                    BatchMsg::Update(None, id, v) => {
+                        if let Some(pbl) = pb.by_id.get_mut(&id) {
                             for cl in pbl.subscribed.iter() {
-                                msgs.entry(*cl)
-                                    .or_insert_with(|| TOCL.take())
-                                    .push(m.clone());
+                                batch
+                                    .entry(*cl)
+                                    .or_insert_with(Update::new)
+                                    .updates
+                                    .push(publisher::From::Update(id, v.clone()));
                             }
-                            match m {
-                                ToClientMsg::Val(_, v) => {
-                                    pbl.current = v;
-                                }
-                                ToClientMsg::Unpublish(_) => (),
-                            }
+                            pbl.current = v;
                         }
                     }
                     BatchMsg::UpdateChanged(id, v) => {
                         if let Some(pbl) = pb.by_id.get_mut(&id) {
                             if pbl.current != v {
                                 for cl in pbl.subscribed.iter() {
-                                    msgs.entry(*cl)
-                                        .or_insert_with(|| TOCL.take())
-                                        .push(ToClientMsg::Val(id, v.clone()));
+                                    batch
+                                        .entry(*cl)
+                                        .or_insert_with(Update::new)
+                                        .updates
+                                        .push(publisher::From::Update(id, v.clone()));
                                 }
                                 pbl.current = v;
                             }
                         }
                     }
-                    BatchMsg::ToCl(Some(cl), m) => {
-                        msgs.entry(cl).or_insert_with(|| TOCL.take()).push(m)
-                    }
+                    BatchMsg::Update(Some(cl), id, v) => batch
+                        .entry(cl)
+                        .or_insert_with(Update::new)
+                        .updates
+                        .push(publisher::From::Update(id, v)),
                 }
             }
+            for (cl, id) in self.unsubscribes.drain(..) {
+                batch.entry(cl).or_insert_with(Update::new).unsubscribes.push(id);
+            }
             future::join_all(
-                msgs.drain()
+                batch
+                    .drain()
                     .filter_map(|(cl, batch)| {
                         pb.clients.get(&cl).map(move |cl| (cl.msg_queue.clone(), batch))
                     })
@@ -580,21 +599,6 @@ impl UpdateBatch {
             )
         };
         fut.await;
-    }
-}
-
-#[derive(Debug, Clone)]
-enum ToClientMsg {
-    Val(Id, Value),
-    Unpublish(Id),
-}
-
-impl ToClientMsg {
-    fn id(&self) -> Id {
-        match self {
-            ToClientMsg::Val(id, _) => *id,
-            ToClientMsg::Unpublish(id) => *id,
-        }
     }
 }
 
@@ -985,7 +989,11 @@ impl Publisher {
     ///
     /// Multiple batches may be started concurrently.
     pub fn start_batch(&self) -> UpdateBatch {
-        UpdateBatch { origin: self.clone(), msgs: RAWBATCH.take() }
+        UpdateBatch {
+            origin: self.clone(),
+            updates: RAWBATCH.take(),
+            unsubscribes: RAWUNSUBS.take(),
+        }
     }
 
     /// Wait until all previous publish or unpublish commands have
@@ -1595,27 +1603,21 @@ impl ClientCtx {
 
     async fn handle_updates(
         &mut self,
-        (timeout, mut msgs): (Option<Duration>, Pooled<Vec<ToClientMsg>>),
+        (timeout, mut up): (Option<Duration>, Update),
     ) -> Result<()> {
-        use publisher::{From, To};
-        for m in msgs.drain(..) {
-            match m {
-                ToClientMsg::Val(id, v) => {
-                    let m = From::Update(id, v);
-                    if let Err(e) = self.con.queue_send(&m) {
-                        if self.con.bytes_queued() > 0 {
-                            self.flush_with_timeout(timeout).await?;
-                            self.con.queue_send(&m)?;
-                        } else {
-                            return Err(e)
-                        }
-                    }
-                }
-                ToClientMsg::Unpublish(id) => {
-                    // handle this as if the client had requested it
-                    self.batch.push(To::Unsubscribe(id));
+        use publisher::To;
+        for m in up.updates.drain(..) {
+            if let Err(e) = self.con.queue_send(&m) {
+                if self.con.bytes_queued() > 0 {
+                    self.flush_with_timeout(timeout).await?;
+                    self.con.queue_send(&m)?;
+                } else {
+                    return Err(e);
                 }
             }
+        }
+        for id in up.unsubscribes.drain(..) {
+            self.batch.push(To::Unsubscribe(id));
         }
         if self.batch.len() > 0 {
             self.handle_batch().await?;
@@ -1626,10 +1628,7 @@ impl ClientCtx {
         Ok(())
     }
 
-    async fn run(
-        mut self,
-        updates: Receiver<(Option<Duration>, Pooled<Vec<ToClientMsg>>)>,
-    ) -> Result<()> {
+    async fn run(mut self, updates: Receiver<(Option<Duration>, Update)>) -> Result<()> {
         let mut updates = updates.fuse();
         let mut hb = time::interval(HB);
         // make sure the deferred subs stream never ends
@@ -1767,8 +1766,7 @@ async fn publish_loop(
                 let mut batch = publisher.start_batch();
                 for (id, subs) in to_unsubscribe.drain() {
                     for cl in subs.iter() {
-                        let m = BatchMsg::ToCl(Some(*cl), ToClientMsg::Unpublish(id));
-                        batch.msgs.push(m);
+                        batch.unsubscribes.push((*cl, id));
                     }
                 }
                 batch.commit(None).await;
