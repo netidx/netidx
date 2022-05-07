@@ -1583,6 +1583,16 @@ impl ClientCtx {
         Ok(self.con.flush().await?)
     }
 
+    async fn flush_with_timeout(&mut self, timeout: Option<Duration>) -> Result<()> {
+        self.msg_sent = true;
+        let f = self.con.flush();
+        match timeout {
+            None => f.await?,
+            Some(d) => time::timeout(d, f).await??,
+        }
+        Ok(())
+    }
+
     async fn handle_updates(
         &mut self,
         (timeout, mut msgs): (Option<Duration>, Pooled<Vec<ToClientMsg>>),
@@ -1591,7 +1601,15 @@ impl ClientCtx {
         for m in msgs.drain(..) {
             match m {
                 ToClientMsg::Val(id, v) => {
-                    self.con.queue_send(&From::Update(id, v))?;
+                    let m = From::Update(id, v);
+                    if let Err(e) = self.con.queue_send(&m) {
+                        if self.con.bytes_queued() > 0 {
+                            self.flush_with_timeout(timeout).await?;
+                            self.con.queue_send(&m)?;
+                        } else {
+                            return Err(e)
+                        }
+                    }
                 }
                 ToClientMsg::Unpublish(id) => {
                     // handle this as if the client had requested it
@@ -1603,12 +1621,7 @@ impl ClientCtx {
             self.handle_batch().await?;
         }
         if self.con.bytes_queued() > 0 {
-            self.msg_sent = true;
-            let f = self.con.flush();
-            match timeout {
-                None => f.await?,
-                Some(d) => time::timeout(d, f).await??,
-            }
+            self.flush_with_timeout(timeout).await?
         }
         Ok(())
     }
