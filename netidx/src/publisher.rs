@@ -312,12 +312,12 @@ pub enum Event {
 
 struct Update {
     updates: Pooled<Vec<publisher::From>>,
-    unsubscribes: Pooled<Vec<Id>>,
+    unsubscribes: Option<Pooled<Vec<Id>>>,
 }
 
 impl Update {
     fn new() -> Self {
-        Self { updates: UPDATES.take(), unsubscribes: UNSUBS.take() }
+        Self { updates: UPDATES.take(), unsubscribes: None }
     }
 }
 
@@ -380,7 +380,14 @@ impl Val {
     /// Queue unsubscribing the specified client. Like update, this
     /// will only take effect when the specified batch is committed.
     pub fn unsubscribe(&self, batch: &mut UpdateBatch, dst: ClId) {
-        batch.unsubscribes.push((dst, self.0));
+        match &mut batch.unsubscribes {
+            Some(u) => u.push((dst, self.0)),
+            None => {
+                let mut u = RAWUNSUBS.take();
+                u.push((dst, self.0));
+                batch.unsubscribes = Some(u);
+            }
+        }
     }
 
     /// Get the unique `Id` of this `Val`
@@ -521,7 +528,7 @@ enum BatchMsg {
 pub struct UpdateBatch {
     origin: Publisher,
     updates: Pooled<Vec<BatchMsg>>,
-    unsubscribes: Pooled<Vec<(ClId, Id)>>,
+    unsubscribes: Option<Pooled<Vec<(ClId, Id)>>>,
 }
 
 impl UpdateBatch {
@@ -538,7 +545,16 @@ impl UpdateBatch {
             bail!("can't merge batches from different publishers");
         } else {
             self.updates.extend(other.updates.drain(..));
-            Ok(self.unsubscribes.extend(other.unsubscribes.drain(..)))
+            match (&mut self.unsubscribes, &mut other.unsubscribes) {
+                (None, None) | (Some(_), None) => (),
+                (None, Some(_)) => {
+                    self.unsubscribes = other.unsubscribes.take();
+                }
+                (Some(l), Some(r)) => {
+                    l.extend(r.drain(..));
+                }
+            }
+            Ok(())
         }
     }
 
@@ -584,8 +600,18 @@ impl UpdateBatch {
                         .push(publisher::From::Update(id, v)),
                 }
             }
-            for (cl, id) in self.unsubscribes.drain(..) {
-                batch.entry(cl).or_insert_with(Update::new).unsubscribes.push(id);
+            if let Some(usubs) = &mut self.unsubscribes {
+                for (cl, id) in usubs.drain(..) {
+                    let update = batch.entry(cl).or_insert_with(Update::new);
+                    match &mut update.unsubscribes {
+                        Some(u) => u.push(id),
+                        None => {
+                            let mut u = UNSUBS.take();
+                            u.push(id);
+                            update.unsubscribes = Some(u);
+                        }
+                    }
+                }
             }
             future::join_all(
                 batch
@@ -989,11 +1015,7 @@ impl Publisher {
     ///
     /// Multiple batches may be started concurrently.
     pub fn start_batch(&self) -> UpdateBatch {
-        UpdateBatch {
-            origin: self.clone(),
-            updates: RAWBATCH.take(),
-            unsubscribes: RAWUNSUBS.take(),
-        }
+        UpdateBatch { origin: self.clone(), updates: RAWBATCH.take(), unsubscribes: None }
     }
 
     /// Wait until all previous publish or unpublish commands have
@@ -1616,8 +1638,10 @@ impl ClientCtx {
                 }
             }
         }
-        for id in up.unsubscribes.drain(..) {
-            self.batch.push(To::Unsubscribe(id));
+        if let Some(usubs) = &mut up.unsubscribes {
+            for id in usubs.drain(..) {
+                self.batch.push(To::Unsubscribe(id));
+            }
         }
         if self.batch.len() > 0 {
             self.handle_batch().await?;
@@ -1763,12 +1787,14 @@ async fn publish_loop(
                 }
             }
             if to_unsubscribe.len() > 0 {
-                let mut batch = publisher.start_batch();
+                let mut usubs = RAWUNSUBS.take();
                 for (id, subs) in to_unsubscribe.drain() {
                     for cl in subs.iter() {
-                        batch.unsubscribes.push((*cl, id));
+                        usubs.push((*cl, id));
                     }
                 }
+                let mut batch = publisher.start_batch();
+                batch.unsubscribes = Some(usubs);
                 batch.commit(None).await;
             }
         }
