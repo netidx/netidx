@@ -1,8 +1,11 @@
+#[macro_use]
+extern crate lazy_static;
+
 mod db;
 mod rpcs;
 mod stats;
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use db::{Datum, DatumKind, Reply, Sendable, Txn};
 use futures::{
@@ -32,6 +35,7 @@ use netidx_bscript::{
     vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register, RpcCallId},
 };
 use netidx_protocols::rpc;
+use log::{info, error};
 use parking_lot::Mutex;
 use rpcs::{RpcRequest, RpcRequestKind};
 use stats::Stats;
@@ -48,39 +52,40 @@ use std::{
     pin::Pin,
     sync::Arc,
     time::Duration,
+    thread,
 };
 use structopt::StructOpt;
 use tokio::{
-    runtime::Runtime,
-    signal, task,
+    task::{self, LocalSet},
     time::{self, Instant},
+    runtime,
 };
 
 #[derive(StructOpt, Debug)]
-pub(crate) struct Params {
+pub struct Params {
     #[structopt(
         short = "b",
         long = "bind",
         help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
     )]
-    bind: BindCfg,
+    pub bind: BindCfg,
     #[structopt(
         long = "timeout",
         help = "require subscribers to consume values before timeout (seconds)"
     )]
-    timeout: Option<u64>,
+    pub timeout: Option<u64>,
     #[structopt(long = "api-path", help = "the netidx path of the container api")]
-    api_path: Path,
+    pub api_path: Path,
     #[structopt(long = "db", help = "the db file")]
-    db: String,
+    pub db: String,
     #[structopt(long = "compress", help = "use zstd compression")]
-    compress: bool,
+    pub compress: bool,
     #[structopt(long = "compress-level", help = "zstd compression level")]
-    compress_level: Option<u32>,
+    pub compress_level: Option<u32>,
     #[structopt(long = "cache-size", help = "db page cache size in bytes")]
-    cache_size: Option<u64>,
+    pub cache_size: Option<u64>,
     #[structopt(long = "sparse", help = "don't even advertise the contents of the db")]
-    sparse: bool,
+    pub sparse: bool,
 }
 
 lazy_static! {
@@ -735,7 +740,7 @@ enum Compiled {
     OnWrite(Node<Lc, UserEv>),
 }
 
-struct Container {
+struct ContainerInner {
     params: Params,
     api_path: Path,
     stats: Stats,
@@ -756,12 +761,8 @@ struct Container {
     >,
 }
 
-impl Container {
-    async fn new(
-        cfg: Config,
-        auth: DesiredAuth,
-        params: Params,
-    ) -> Result<Self> {
+impl ContainerInner {
+    async fn new(cfg: Config, auth: DesiredAuth, params: Params) -> Result<Self> {
         let (publish_events_tx, publish_events) = mpsc::unbounded();
         let publisher = Publisher::new(cfg.clone(), auth.clone(), params.bind).await?;
         publisher.events(publish_events_tx);
@@ -779,7 +780,7 @@ impl Container {
         Ref::register(&mut ctx);
         Rel::register(&mut ctx);
         OnWriteEvent::register(&mut ctx);
-        Ok(Container {
+        Ok(Self {
             params,
             api_path,
             stats,
@@ -1632,9 +1633,8 @@ impl Container {
         }
     }
 
-    async fn run(mut self) -> Result<()> {
+    pub async fn run(mut self, cmd: mpsc::UnboundedReceiver<ToInner>) -> Result<()> {
         let mut gc_rpcs = time::interval(Duration::from_secs(60));
-        let mut ctrl_c = Box::pin(signal::ctrl_c().fuse());
         let mut rpcbatch = Vec::new();
         self.init().await?;
         let mut batch = self.ctx.user.publisher.start_batch();
@@ -1666,10 +1666,6 @@ impl Container {
                 u = self.db_updates.select_next_some() => {
                     self.process_update(&mut batch, u);
                 }
-                r = ctrl_c => match r {
-                    Err(e) => panic!("failed to wait for ctrl_c: {}", e),
-                    Ok(()) => break
-                },
                 complete => break
             }
             if txn.dirty() {
@@ -1687,10 +1683,37 @@ impl Container {
     }
 }
 
-pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) {
-    Runtime::new().expect("failed to create runtime").block_on(async move {
-        let t =
-            Container::new(cfg, auth, params).await.expect("failed to create context");
-        t.run().await.expect("container main loop failed")
-    })
+enum ToInner {
+    Stop
+}
+
+pub struct Container {
+    chan: mpsc::UnboundedSender<ToInner>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl Container {
+    pub fn start(
+        cfg: Config,
+        auth: DesiredAuth,
+        params: Params,
+    ) -> Result<Container> {
+        let (w, r) = mpsc::unbounded();
+        let h = thread::spawn(|| {
+            let local = LocalSet::new();
+            local.
+            let _ = task::spawn_local(async move {
+                match ContainerInner::new(cfg, auth, params).await {
+                    Ok(c) => {
+                        match c.run(r).await {
+                            Err(e) => error!("container error {}", e),
+                            Ok(()) => info!("container shut down cleanly"),
+                        }
+                    }
+                    Err(_) => (),
+                }
+            });
+        });
+        Ok(Container(w))
+    }
 }

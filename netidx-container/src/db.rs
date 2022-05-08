@@ -1,5 +1,5 @@
 use super::Params;
-use anyhow::Result;
+use anyhow::{bail, anyhow, Result};
 use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use futures::{

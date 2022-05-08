@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use futures::{
     channel::{mpsc, oneshot},

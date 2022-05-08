@@ -1,8 +1,6 @@
 #![recursion_limit = "2048"]
 #[cfg(unix)]
 #[macro_use]
-extern crate lazy_static;
-#[macro_use]
 extern crate anyhow;
 #[cfg(unix)]
 #[macro_use]
