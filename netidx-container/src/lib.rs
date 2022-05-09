@@ -1633,7 +1633,11 @@ impl ContainerInner {
         }
     }
 
-    fn process_command(&mut self, _c: ToInner) {}
+    fn process_command(&mut self, txn: &mut Txn, c: ToInner) {
+        match c {
+            ToInner::ExecuteTxn(t) => { *txn = t.0; }
+        }
+    }
 
     async fn run(mut self, mut cmd: mpsc::UnboundedReceiver<ToInner>) -> Result<()> {
         let mut gc_rpcs = time::interval(Duration::from_secs(60));
@@ -1669,7 +1673,7 @@ impl ContainerInner {
                     self.process_update(&mut batch, u);
                 }
                 c = cmd.select_next_some() => {
-                    self.process_command(c);
+                    self.process_command(&mut txn, c);
                 }
                 complete => break
             }
@@ -1688,7 +1692,111 @@ impl ContainerInner {
     }
 }
 
-enum ToInner {}
+pub struct Transaction(Txn);
+
+impl Transaction {
+    pub fn new() -> Self {
+        Self(Txn::new())
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.0.dirty()
+    }
+
+    pub fn remove(&mut self, path: Path) {
+        self.0.remove(path, None)
+    }
+
+    pub fn set_data(&mut self, path: Path, value: Value) {
+        self.0.set_data(true, path, value, None)
+    }
+
+    pub fn set_formula(&mut self, path: Path, value: Value) {
+        self.0.set_formula(path, value, None)
+    }
+
+    pub fn set_on_write(&mut self, path: Path, value: Value) {
+        self.0.set_on_write(path, value, None)
+    }
+
+    pub fn create_sheet(
+        &mut self,
+        base: Path,
+        rows: usize,
+        cols: usize,
+        max_rows: usize,
+        max_columns: usize,
+        lock: bool,
+    ) {
+        self.0.create_sheet(base, rows, cols, max_rows, max_columns, lock, None)
+    }
+
+    pub fn add_sheet_columns(&mut self, base: Path, cols: usize) {
+        self.0.add_sheet_columns(base, cols, None)
+    }
+
+    pub fn add_sheet_rows(&mut self, base: Path, rows: usize) {
+        self.0.add_sheet_rows(base, rows, None)
+    }
+
+    pub fn del_sheet_columns(&mut self, base: Path, cols: usize) {
+        self.0.del_sheet_columns(base, cols, None)
+    }
+
+    pub fn del_sheet_rows(&mut self, base: Path, rows: usize) {
+        self.0.del_sheet_rows(base, rows, None)
+    }
+
+    pub fn create_table(
+        &mut self,
+        base: Path,
+        rows: Vec<Chars>,
+        cols: Vec<Chars>,
+        lock: bool,
+    ) {
+        self.0.create_table(base, rows, cols, lock, None)
+    }
+
+    pub fn add_table_columns(&mut self, base: Path, cols: Vec<Chars>) {
+        self.0.add_table_columns(base, cols, None)
+    }
+
+    pub fn add_table_rows(&mut self, base: Path, rows: Vec<Chars>) {
+        self.0.add_table_rows(base, rows, None)
+    }
+
+    pub fn del_table_columns(&mut self, base: Path, cols: Vec<Chars>) {
+        self.0.del_table_columns(base, cols, None)
+    }
+
+    pub fn del_table_rows(&mut self, base: Path, rows: Vec<Chars>) {
+        self.0.del_table_rows(base, rows, None)
+    }
+
+    pub fn set_locked(&mut self, path: Path) {
+        self.0.set_locked(path, None)
+    }
+
+    pub fn set_unlocked(&mut self, path: Path) {
+        self.0.set_unlocked(path, None)
+    }
+
+    pub fn add_root(&mut self, path: Path) {
+        self.0.add_root(path, None)
+    }
+
+    pub fn del_root(&mut self, path: Path) {
+        self.0.del_root(path, None)
+    }
+
+    pub fn remove_subtree(&mut self, path: Path) {
+        self.0.remove_subtree(path, None)
+    }
+}
+
+enum ToInner {
+    ExecuteTxn(Transaction),
+}
 
 pub struct Container(mpsc::UnboundedSender<ToInner>);
 
@@ -1727,5 +1835,9 @@ impl Container {
         });
         res_r.await??;
         Ok(Container(w))
+    }
+
+    pub fn execute_txn(&self, txn: Transaction) -> Result<()> {
+        Ok(self.0.unbounded_send(ToInner::ExecuteTxn(txn))?)
     }
 }
