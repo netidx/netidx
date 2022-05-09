@@ -1636,6 +1636,7 @@ impl ContainerInner {
     fn process_command(&mut self, c: ToInner) {
         match c {
             ToInner::GetDb(s) => { let _ = s.send(self.ctx.user.db.clone()); }
+            ToInner::GetPub(s) => { let _ = s.send(self.ctx.user.publisher.clone()); }
         }
     }
 
@@ -1694,6 +1695,7 @@ impl ContainerInner {
 
 enum ToInner {
     GetDb(oneshot::Sender<Db>),
+    GetPub(oneshot::Sender<Publisher>),
 }
 
 pub struct Container(mpsc::UnboundedSender<ToInner>);
@@ -1738,6 +1740,12 @@ impl Container {
     pub async fn db(&self) -> Result<Db> {
         let (w, r) = oneshot::channel();
         self.0.unbounded_send(ToInner::GetDb(w))?;
+        Ok(r.await?)
+    }
+
+    pub async fn publisher(&self) -> Result<Publisher> {
+        let (w, r) = oneshot::channel();
+        self.0.unbounded_send(ToInner::GetPub(w))?;
         Ok(r.await?)
     }
 }

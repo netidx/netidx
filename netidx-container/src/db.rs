@@ -1,5 +1,5 @@
 use super::Params;
-use anyhow::{bail, anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use futures::{
@@ -288,13 +288,7 @@ impl Txn {
         self.0.push((TxnOp::Remove(path), reply))
     }
 
-    pub fn set_data(
-        &mut self,
-        update: bool,
-        path: Path,
-        value: Value,
-        reply: Reply,
-    ) {
+    pub fn set_data(&mut self, update: bool, path: Path, value: Value, reply: Reply) {
         self.0.push((TxnOp::SetData(update, path, value), reply))
     }
 
@@ -349,12 +343,7 @@ impl Txn {
         self.0.push((TxnOp::CreateTable { base, rows, cols, lock }, reply))
     }
 
-    pub fn add_table_columns(
-        &mut self,
-        base: Path,
-        cols: Vec<Chars>,
-        reply: Reply,
-    ) {
+    pub fn add_table_columns(&mut self, base: Path, cols: Vec<Chars>, reply: Reply) {
         self.0.push((TxnOp::AddTableColumns { base, cols }, reply))
     }
 
@@ -362,12 +351,7 @@ impl Txn {
         self.0.push((TxnOp::AddTableRows { base, rows }, reply))
     }
 
-    pub fn del_table_columns(
-        &mut self,
-        base: Path,
-        cols: Vec<Chars>,
-        reply: Reply,
-    ) {
+    pub fn del_table_columns(&mut self, base: Path, cols: Vec<Chars>, reply: Reply) {
         self.0.push((TxnOp::DelTableColumns { base, cols }, reply))
     }
 
@@ -1035,7 +1019,7 @@ fn is_locked(locked: &sled::Tree, path: &Path, parent_only: bool) -> Result<bool
                 let (k, v) = r?;
                 let k = str::from_utf8(&k)?;
                 if Path::is_parent(k, &path) {
-                    break Ok(&*v == &[1u8])
+                    break Ok(&*v == &[1u8]);
                 }
             }
         }
@@ -1122,7 +1106,7 @@ fn del_root(
                     let k = r?;
                     let k = str::from_utf8(&k)?;
                     if Path::is_parent(k, &path) {
-                        break true
+                        break true;
                     }
                 }
             }
@@ -1456,7 +1440,7 @@ async fn commit_txns_task(
 
 #[derive(Clone)]
 pub struct Db {
-    _db: sled::Db,
+    db: sled::Db,
     data: sled::Tree,
     locked: sled::Tree,
     roots: sled::Tree,
@@ -1490,10 +1474,14 @@ impl Db {
             rx_incoming,
             tx_outgoing,
         ));
-        Ok((
-            Db { _db: db, data, locked, roots, submit_txn: tx_incoming, stats },
-            rx_outgoing,
-        ))
+        Ok((Db { db, data, locked, roots, submit_txn: tx_incoming, stats }, rx_outgoing))
+    }
+
+    pub fn open_tree(&self, name: &str) -> Result<sled::Tree> {
+        if name == "data" || name == "locked" || name == "roots" {
+            bail!("tree name reserved")
+        }
+        Ok(self.db.open_tree(name)?)
     }
 
     pub fn commit(&self, txn: Txn) {
@@ -1510,11 +1498,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn relative_column(
-        &self,
-        base: &Path,
-        offset: i32,
-    ) -> Result<Option<Path>> {
+    pub fn relative_column(&self, base: &Path, offset: i32) -> Result<Option<Path>> {
         use std::ops::Bound::{self, *};
         let rowbase = Path::dirname(base).ok_or_else(|| anyhow!("no row"))?;
         let mut i = 0;
@@ -1644,15 +1628,28 @@ impl Db {
         lookup_value(&self.data, path)
     }
 
-    pub fn iter(
-        &self,
+    fn decode_iter(
+        iter: sled::Iter,
     ) -> impl Iterator<Item = Result<(Path, DatumKind, sled::IVec)>> + 'static {
-        self.data.iter().map(|res| {
+        iter.map(|res| {
             let (key, val) = res?;
             let path = Path::from(ArcStr::from(str::from_utf8(&key)?));
             let value = DatumKind::decode(&mut &*val);
             Ok((path, value, val))
         })
+    }
+
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<Item = Result<(Path, DatumKind, sled::IVec)>> + 'static {
+        Self::decode_iter(self.data.iter())
+    }
+
+    pub fn iter_prefix<P: AsRef<[u8]>>(
+        &self,
+        prefix: P,
+    ) -> impl Iterator<Item = Result<(Path, DatumKind, sled::IVec)>> + 'static {
+        Self::decode_iter(self.data.scan_prefix(prefix))
     }
 
     pub fn locked(&self) -> impl Iterator<Item = Result<(Path, bool)>> + 'static {
