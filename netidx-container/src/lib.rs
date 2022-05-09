@@ -7,7 +7,7 @@ mod stats;
 
 use anyhow::{anyhow, bail, Error, Result};
 use arcstr::ArcStr;
-use db::{Datum, DatumKind, Reply, Sendable, Txn};
+pub use db::{Db, Datum, DatumKind, Reply, Sendable, Txn};
 use futures::{
     self,
     channel::{mpsc, oneshot},
@@ -182,7 +182,7 @@ enum LcEvent {
 
 struct Lc {
     current_path: Path,
-    db: db::Db,
+    db: Db,
     var: FxHashMap<Chars, FxHashMap<ExprId, usize>>,
     sub: FxHashMap<SubId, FxHashMap<ExprId, usize>>,
     rpc: FxHashMap<Path, FxHashSet<ExprId>>,
@@ -229,7 +229,7 @@ fn remove_eid_from_set<K: Hash + Eq>(
 
 impl Lc {
     fn new(
-        db: db::Db,
+        db: Db,
         subscriber: Subscriber,
         publisher: Publisher,
         sub_updates: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
@@ -767,7 +767,7 @@ impl ContainerInner {
         let publisher = Publisher::new(cfg.clone(), auth.clone(), params.bind).await?;
         publisher.events(publish_events_tx);
         let (db, db_updates) =
-            db::Db::new(&params, publisher.clone(), params.api_path.clone())?;
+            Db::new(&params, publisher.clone(), params.api_path.clone())?;
         let subscriber = Subscriber::new(cfg, auth)?;
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
@@ -1633,9 +1633,9 @@ impl ContainerInner {
         }
     }
 
-    fn process_command(&mut self, txn: &mut Txn, c: ToInner) {
+    fn process_command(&mut self, c: ToInner) {
         match c {
-            ToInner::ExecuteTxn(t) => { *txn = t.0; }
+            ToInner::GetDb(s) => { let _ = s.send(self.ctx.user.db.clone()); }
         }
     }
 
@@ -1673,7 +1673,7 @@ impl ContainerInner {
                     self.process_update(&mut batch, u);
                 }
                 c = cmd.select_next_some() => {
-                    self.process_command(&mut txn, c);
+                    self.process_command(c);
                 }
                 complete => break
             }
@@ -1692,110 +1692,8 @@ impl ContainerInner {
     }
 }
 
-pub struct Transaction(Txn);
-
-impl Transaction {
-    pub fn new() -> Self {
-        Self(Txn::new())
-    }
-
-    pub fn dirty(&self) -> bool {
-        self.0.dirty()
-    }
-
-    pub fn remove(&mut self, path: Path) {
-        self.0.remove(path, None)
-    }
-
-    pub fn set_data(&mut self, path: Path, value: Value) {
-        self.0.set_data(true, path, value, None)
-    }
-
-    pub fn set_formula(&mut self, path: Path, value: Value) {
-        self.0.set_formula(path, value, None)
-    }
-
-    pub fn set_on_write(&mut self, path: Path, value: Value) {
-        self.0.set_on_write(path, value, None)
-    }
-
-    pub fn create_sheet(
-        &mut self,
-        base: Path,
-        rows: usize,
-        cols: usize,
-        max_rows: usize,
-        max_columns: usize,
-        lock: bool,
-    ) {
-        self.0.create_sheet(base, rows, cols, max_rows, max_columns, lock, None)
-    }
-
-    pub fn add_sheet_columns(&mut self, base: Path, cols: usize) {
-        self.0.add_sheet_columns(base, cols, None)
-    }
-
-    pub fn add_sheet_rows(&mut self, base: Path, rows: usize) {
-        self.0.add_sheet_rows(base, rows, None)
-    }
-
-    pub fn del_sheet_columns(&mut self, base: Path, cols: usize) {
-        self.0.del_sheet_columns(base, cols, None)
-    }
-
-    pub fn del_sheet_rows(&mut self, base: Path, rows: usize) {
-        self.0.del_sheet_rows(base, rows, None)
-    }
-
-    pub fn create_table(
-        &mut self,
-        base: Path,
-        rows: Vec<Chars>,
-        cols: Vec<Chars>,
-        lock: bool,
-    ) {
-        self.0.create_table(base, rows, cols, lock, None)
-    }
-
-    pub fn add_table_columns(&mut self, base: Path, cols: Vec<Chars>) {
-        self.0.add_table_columns(base, cols, None)
-    }
-
-    pub fn add_table_rows(&mut self, base: Path, rows: Vec<Chars>) {
-        self.0.add_table_rows(base, rows, None)
-    }
-
-    pub fn del_table_columns(&mut self, base: Path, cols: Vec<Chars>) {
-        self.0.del_table_columns(base, cols, None)
-    }
-
-    pub fn del_table_rows(&mut self, base: Path, rows: Vec<Chars>) {
-        self.0.del_table_rows(base, rows, None)
-    }
-
-    pub fn set_locked(&mut self, path: Path) {
-        self.0.set_locked(path, None)
-    }
-
-    pub fn set_unlocked(&mut self, path: Path) {
-        self.0.set_unlocked(path, None)
-    }
-
-    pub fn add_root(&mut self, path: Path) {
-        self.0.add_root(path, None)
-    }
-
-    pub fn del_root(&mut self, path: Path) {
-        self.0.del_root(path, None)
-    }
-
-    pub fn remove_subtree(&mut self, path: Path) {
-        self.0.remove_subtree(path, None)
-    }
-}
-
 enum ToInner {
-    ExecuteTxn(Transaction),
+    GetDb(oneshot::Sender<Db>),
 }
 
 pub struct Container(mpsc::UnboundedSender<ToInner>);
@@ -1837,7 +1735,9 @@ impl Container {
         Ok(Container(w))
     }
 
-    pub fn execute_txn(&self, txn: Transaction) -> Result<()> {
-        Ok(self.0.unbounded_send(ToInner::ExecuteTxn(txn))?)
+    pub async fn db(&self) -> Result<Db> {
+        let (w, r) = oneshot::channel();
+        self.0.unbounded_send(ToInner::GetDb(w))?;
+        Ok(r.await?)
     }
 }

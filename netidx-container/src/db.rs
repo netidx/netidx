@@ -33,13 +33,13 @@ use std::{
 };
 use tokio::task;
 
-pub(super) enum Sendable {
+pub enum Sendable {
     Rpc(oneshot::Sender<Value>),
     Write(SendResult),
 }
 
 impl Sendable {
-    pub(super) fn send(self, v: Value) {
+    pub fn send(self, v: Value) {
         match self {
             Sendable::Rpc(reply) => {
                 let _: Result<_, _> = reply.send(v);
@@ -51,7 +51,7 @@ impl Sendable {
     }
 }
 
-pub(super) type Reply = Option<Sendable>;
+pub type Reply = Option<Sendable>;
 type Txns = Vec<(TxnOp, Reply)>;
 
 lazy_static! {
@@ -108,7 +108,7 @@ impl Update {
     }
 }
 
-pub(super) enum DatumKind {
+pub enum DatumKind {
     Data,
     Formula,
     Deleted,
@@ -127,7 +127,7 @@ impl DatumKind {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum Datum {
+pub enum Datum {
     Data(Value),
     Formula(Value, Value),
     Deleted,
@@ -273,22 +273,22 @@ impl TxnOp {
     }
 }
 
-pub(super) struct Txn(Pooled<Txns>);
+pub struct Txn(Pooled<Txns>);
 
 impl Txn {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self(TXNS.take())
     }
 
-    pub(super) fn dirty(&self) -> bool {
+    pub fn dirty(&self) -> bool {
         self.0.len() > 0
     }
 
-    pub(super) fn remove(&mut self, path: Path, reply: Reply) {
+    pub fn remove(&mut self, path: Path, reply: Reply) {
         self.0.push((TxnOp::Remove(path), reply))
     }
 
-    pub(super) fn set_data(
+    pub fn set_data(
         &mut self,
         update: bool,
         path: Path,
@@ -298,15 +298,15 @@ impl Txn {
         self.0.push((TxnOp::SetData(update, path, value), reply))
     }
 
-    pub(super) fn set_formula(&mut self, path: Path, value: Value, reply: Reply) {
+    pub fn set_formula(&mut self, path: Path, value: Value, reply: Reply) {
         self.0.push((TxnOp::SetFormula(path, value), reply))
     }
 
-    pub(super) fn set_on_write(&mut self, path: Path, value: Value, reply: Reply) {
+    pub fn set_on_write(&mut self, path: Path, value: Value, reply: Reply) {
         self.0.push((TxnOp::SetOnWrite(path, value), reply))
     }
 
-    pub(super) fn create_sheet(
+    pub fn create_sheet(
         &mut self,
         base: Path,
         rows: usize,
@@ -322,23 +322,23 @@ impl Txn {
         ))
     }
 
-    pub(super) fn add_sheet_columns(&mut self, base: Path, cols: usize, reply: Reply) {
+    pub fn add_sheet_columns(&mut self, base: Path, cols: usize, reply: Reply) {
         self.0.push((TxnOp::AddSheetColumns { base, cols }, reply))
     }
 
-    pub(super) fn add_sheet_rows(&mut self, base: Path, rows: usize, reply: Reply) {
+    pub fn add_sheet_rows(&mut self, base: Path, rows: usize, reply: Reply) {
         self.0.push((TxnOp::AddSheetRows { base, rows }, reply))
     }
 
-    pub(super) fn del_sheet_columns(&mut self, base: Path, cols: usize, reply: Reply) {
+    pub fn del_sheet_columns(&mut self, base: Path, cols: usize, reply: Reply) {
         self.0.push((TxnOp::DelSheetColumns { base, cols }, reply))
     }
 
-    pub(super) fn del_sheet_rows(&mut self, base: Path, rows: usize, reply: Reply) {
+    pub fn del_sheet_rows(&mut self, base: Path, rows: usize, reply: Reply) {
         self.0.push((TxnOp::DelSheetRows { base, rows }, reply))
     }
 
-    pub(super) fn create_table(
+    pub fn create_table(
         &mut self,
         base: Path,
         rows: Vec<Chars>,
@@ -349,7 +349,7 @@ impl Txn {
         self.0.push((TxnOp::CreateTable { base, rows, cols, lock }, reply))
     }
 
-    pub(super) fn add_table_columns(
+    pub fn add_table_columns(
         &mut self,
         base: Path,
         cols: Vec<Chars>,
@@ -358,11 +358,11 @@ impl Txn {
         self.0.push((TxnOp::AddTableColumns { base, cols }, reply))
     }
 
-    pub(super) fn add_table_rows(&mut self, base: Path, rows: Vec<Chars>, reply: Reply) {
+    pub fn add_table_rows(&mut self, base: Path, rows: Vec<Chars>, reply: Reply) {
         self.0.push((TxnOp::AddTableRows { base, rows }, reply))
     }
 
-    pub(super) fn del_table_columns(
+    pub fn del_table_columns(
         &mut self,
         base: Path,
         cols: Vec<Chars>,
@@ -371,27 +371,27 @@ impl Txn {
         self.0.push((TxnOp::DelTableColumns { base, cols }, reply))
     }
 
-    pub(super) fn del_table_rows(&mut self, base: Path, rows: Vec<Chars>, reply: Reply) {
+    pub fn del_table_rows(&mut self, base: Path, rows: Vec<Chars>, reply: Reply) {
         self.0.push((TxnOp::DelTableRows { base, rows }, reply))
     }
 
-    pub(super) fn set_locked(&mut self, path: Path, reply: Reply) {
+    pub fn set_locked(&mut self, path: Path, reply: Reply) {
         self.0.push((TxnOp::SetLocked(path), reply))
     }
 
-    pub(super) fn set_unlocked(&mut self, path: Path, reply: Reply) {
+    pub fn set_unlocked(&mut self, path: Path, reply: Reply) {
         self.0.push((TxnOp::SetUnlocked(path), reply))
     }
 
-    pub(super) fn add_root(&mut self, path: Path, reply: Reply) {
+    pub fn add_root(&mut self, path: Path, reply: Reply) {
         self.0.push((TxnOp::AddRoot(path), reply));
     }
 
-    pub(super) fn del_root(&mut self, path: Path, reply: Reply) {
+    pub fn del_root(&mut self, path: Path, reply: Reply) {
         self.0.push((TxnOp::DelRoot(path), reply));
     }
 
-    pub(super) fn remove_subtree(&mut self, path: Path, reply: Reply) {
+    pub fn remove_subtree(&mut self, path: Path, reply: Reply) {
         self.0.push((TxnOp::RemoveSubtree(path), reply))
     }
 }
@@ -1454,7 +1454,8 @@ async fn commit_txns_task(
     }
 }
 
-pub(super) struct Db {
+#[derive(Clone)]
+pub struct Db {
     _db: sled::Db,
     data: sled::Tree,
     locked: sled::Tree,
@@ -1495,12 +1496,12 @@ impl Db {
         ))
     }
 
-    pub(super) fn commit(&self, txn: Txn) {
+    pub fn commit(&self, txn: Txn) {
         self.stats.inc_queued();
         let _: Result<_, _> = self.submit_txn.unbounded_send(txn);
     }
 
-    pub(super) async fn flush_async(&self) -> Result<()> {
+    pub async fn flush_async(&self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let mut txn = Txn::new();
         txn.0.push((TxnOp::Flush(tx), None));
@@ -1509,7 +1510,7 @@ impl Db {
         Ok(())
     }
 
-    pub(super) fn relative_column(
+    pub fn relative_column(
         &self,
         base: &Path,
         offset: i32,
@@ -1562,7 +1563,7 @@ impl Db {
         }
     }
 
-    pub(super) fn relative_row(&self, base: &Path, offset: i32) -> Result<Option<Path>> {
+    pub fn relative_row(&self, base: &Path, offset: i32) -> Result<Option<Path>> {
         use std::ops::Bound::{self, *};
         macro_rules! or_none {
             ($e:expr) => {
@@ -1639,11 +1640,11 @@ impl Db {
         }
     }
 
-    pub(super) fn lookup<P: AsRef<[u8]>>(&self, path: P) -> Result<Option<Datum>> {
+    pub fn lookup<P: AsRef<[u8]>>(&self, path: P) -> Result<Option<Datum>> {
         lookup_value(&self.data, path)
     }
 
-    pub(super) fn iter(
+    pub fn iter(
         &self,
     ) -> impl Iterator<Item = Result<(Path, DatumKind, sled::IVec)>> + 'static {
         self.data.iter().map(|res| {
@@ -1654,7 +1655,7 @@ impl Db {
         })
     }
 
-    pub(super) fn locked(&self) -> impl Iterator<Item = Result<(Path, bool)>> + 'static {
+    pub fn locked(&self) -> impl Iterator<Item = Result<(Path, bool)>> + 'static {
         self.locked.iter().map(|r| {
             let (k, v) = r?;
             let path = Path::from(ArcStr::from(str::from_utf8(&k)?));
@@ -1663,7 +1664,7 @@ impl Db {
         })
     }
 
-    pub(super) fn roots(&self) -> impl Iterator<Item = Result<Path>> + 'static {
+    pub fn roots(&self) -> impl Iterator<Item = Result<Path>> + 'static {
         iter_paths(&self.roots)
     }
 }
