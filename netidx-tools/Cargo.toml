@@ -16,6 +16,10 @@ categories = ["network-programming"]
 name = "netidx"
 path = "src/main.rs"
 
+[lib]
+name = "netidx_tools"
+path = "src/lib.rs"
+
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.4"
 
