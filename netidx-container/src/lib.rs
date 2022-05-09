@@ -5,7 +5,7 @@ mod db;
 mod rpcs;
 mod stats;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Error, Result};
 use arcstr::ArcStr;
 use db::{Datum, DatumKind, Reply, Sendable, Txn};
 use futures::{
@@ -16,6 +16,7 @@ use futures::{
     stream::FusedStream,
 };
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
+use log::{error, info};
 use netidx::{
     chars::Chars,
     config::Config,
@@ -35,7 +36,6 @@ use netidx_bscript::{
     vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register, RpcCallId},
 };
 use netidx_protocols::rpc;
-use log::{info, error};
 use parking_lot::Mutex;
 use rpcs::{RpcRequest, RpcRequestKind};
 use stats::Stats;
@@ -51,14 +51,14 @@ use std::{
     ops::{Deref, DerefMut},
     pin::Pin,
     sync::Arc,
-    time::Duration,
     thread,
+    time::Duration,
 };
 use structopt::StructOpt;
 use tokio::{
+    runtime,
     task::{self, LocalSet},
     time::{self, Instant},
-    runtime,
 };
 
 #[derive(StructOpt, Debug)]
@@ -1633,7 +1633,9 @@ impl ContainerInner {
         }
     }
 
-    pub async fn run(mut self, cmd: mpsc::UnboundedReceiver<ToInner>) -> Result<()> {
+    fn process_command(&mut self, _c: ToInner) {}
+
+    async fn run(mut self, mut cmd: mpsc::UnboundedReceiver<ToInner>) -> Result<()> {
         let mut gc_rpcs = time::interval(Duration::from_secs(60));
         let mut rpcbatch = Vec::new();
         self.init().await?;
@@ -1666,6 +1668,9 @@ impl ContainerInner {
                 u = self.db_updates.select_next_some() => {
                     self.process_update(&mut batch, u);
                 }
+                c = cmd.select_next_some() => {
+                    self.process_command(c);
+                }
                 complete => break
             }
             if txn.dirty() {
@@ -1683,37 +1688,44 @@ impl ContainerInner {
     }
 }
 
-enum ToInner {
-    Stop
-}
+enum ToInner {}
 
-pub struct Container {
-    chan: mpsc::UnboundedSender<ToInner>,
-    handle: thread::JoinHandle<()>,
-}
+pub struct Container(mpsc::UnboundedSender<ToInner>);
 
 impl Container {
-    pub fn start(
+    pub async fn start(
         cfg: Config,
         auth: DesiredAuth,
         params: Params,
     ) -> Result<Container> {
+        let (res_w, res_r) = oneshot::channel();
         let (w, r) = mpsc::unbounded();
-        let h = thread::spawn(|| {
+        thread::spawn(move || {
+            let rt = match runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = res_w.send(Err(Error::from(e)));
+                    return;
+                }
+            };
             let local = LocalSet::new();
-            local.
-            let _ = task::spawn_local(async move {
+            local.spawn_local(async move {
                 match ContainerInner::new(cfg, auth, params).await {
                     Ok(c) => {
+                        let _ = res_w.send(Ok(()));
                         match c.run(r).await {
                             Err(e) => error!("container error {}", e),
                             Ok(()) => info!("container shut down cleanly"),
                         }
                     }
-                    Err(_) => (),
+                    Err(e) => {
+                        let _ = res_w.send(Err(Error::from(e)));
+                    }
                 }
             });
+            rt.block_on(local);
         });
+        res_r.await??;
         Ok(Container(w))
     }
 }
