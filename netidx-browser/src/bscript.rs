@@ -1,6 +1,8 @@
 use super::{util::ask_modal, ToGui, ViewLoc, WidgetCtx};
+use glib::thread_guard::ThreadGuard;
 use netidx::{chars::Chars, path::Path, resolver_client, subscriber::Value};
-use netidx_bscript::vm::{self, Apply, ExecCtx, InitFn, Node, Register, Ctx};
+use netidx_bscript::vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register};
+use parking_lot::Mutex;
 use std::{cell::RefCell, mem, result::Result, sync::Arc};
 
 pub(crate) enum LocalEvent {
@@ -15,8 +17,9 @@ pub(crate) struct Event {
 
 impl Register<WidgetCtx, LocalEvent> for Event {
     fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
-        let f: InitFn<WidgetCtx, LocalEvent> =
-            Arc::new(|_, from, _, _| Box::new(Event { cur: None, invalid: from.len() > 0 }));
+        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|_, from, _, _| {
+            Box::new(Event { cur: None, invalid: from.len() > 0 })
+        });
         ctx.functions.insert("event".into(), f);
         ctx.user.register_fn("event".into(), Path::root());
     }
@@ -63,10 +66,12 @@ enum ConfirmState {
     Ready { message: Option<Value>, value: Value },
 }
 
-pub(crate) struct Confirm {
+pub(crate) struct ConfirmInner {
     window: gtk::ApplicationWindow,
     state: RefCell<ConfirmState>,
 }
+
+pub(crate) struct Confirm(Mutex<ThreadGuard<ConfirmInner>>);
 
 impl Register<WidgetCtx, LocalEvent> for Confirm {
     fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
@@ -87,10 +92,10 @@ impl Register<WidgetCtx, LocalEvent> for Confirm {
                     state = ConfirmState::Invalid;
                 }
             }
-            Box::new(Confirm {
+            Box::new(Confirm(Mutex::new(ThreadGuard::new(ConfirmInner {
                 window: ctx.user.window.clone(),
                 state: RefCell::new(state),
-            })
+            }))))
         });
         ctx.functions.insert("confirm".into(), f);
         ctx.user.register_fn("confirm".into(), Path::root());
@@ -99,7 +104,10 @@ impl Register<WidgetCtx, LocalEvent> for Confirm {
 
 impl Apply<WidgetCtx, LocalEvent> for Confirm {
     fn current(&self) -> Option<Value> {
-        match mem::replace(&mut *self.state.borrow_mut(), ConfirmState::Empty) {
+        let inner = self.0.lock();
+        let inner = inner.get_ref();
+        let c = mem::replace(&mut *inner.state.borrow_mut(), ConfirmState::Empty);
+        match c {
             ConfirmState::Empty => None,
             ConfirmState::Invalid => Confirm::usage(),
             ConfirmState::Ready { message, value } => {
@@ -151,7 +159,9 @@ impl Confirm {
     fn ask(&self, msg: Option<&Value>, val: &Value) -> bool {
         let default = Value::from("proceed with");
         let msg = msg.unwrap_or(&default);
-        ask_modal(&self.window, &format!("{} {}?", msg, val))
+        let inner = self.0.lock();
+        let inner = inner.get_ref();
+        ask_modal(&inner.window, &format!("{} {}?", msg, val))
     }
 }
 

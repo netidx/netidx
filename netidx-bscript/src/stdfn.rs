@@ -111,13 +111,13 @@ pub trait CachedCurEval {
     fn name() -> &'static str;
 }
 
-pub struct CachedCur<T: CachedCurEval> {
+pub struct CachedCur<T: CachedCurEval + Send + Sync> {
     cached: CachedVals,
     current: Option<Value>,
     t: PhantomData<T>,
 }
 
-impl<C: Ctx, E, T: CachedCurEval + 'static> Register<C, E> for CachedCur<T> {
+impl<C: Ctx, E, T: CachedCurEval + Send + Sync + 'static> Register<C, E> for CachedCur<T> {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_ctx, from, _, _| {
             let cached = CachedVals::new(from);
@@ -129,7 +129,7 @@ impl<C: Ctx, E, T: CachedCurEval + 'static> Register<C, E> for CachedCur<T> {
     }
 }
 
-impl<C: Ctx, E, T: CachedCurEval + 'static> Apply<C, E> for CachedCur<T> {
+impl<C: Ctx, E, T: CachedCurEval + Send + Sync + 'static> Apply<C, E> for CachedCur<T> {
     fn current(&self) -> Option<Value> {
         self.current.clone()
     }

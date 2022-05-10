@@ -1,6 +1,6 @@
 use super::super::{util::ask_modal, BSCtx};
 use super::{completion::BScriptCompletionProvider, Scope};
-use glib::{clone, prelude::*, subclass::prelude::*};
+use glib::{clone, prelude::*, subclass::prelude::*, thread_guard::ThreadGuard};
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 use sv::traits::ViewExt;
+use parking_lot::Mutex;
 
 #[derive(Clone, Boxed)]
 #[boxed_type(name = "NetidxExprInspectorWrap")]
@@ -31,13 +32,23 @@ fn add_watch(
     expr: expr::Expr,
 ) {
     let id = expr.id;
-    let watch: Arc<dyn Fn(&Value)> = {
-        let store = store.clone();
-        let iter = iter.clone();
-        let log = log.clone();
+    let watch: Arc<dyn Fn(&Value) + Send + Sync> = {
+        struct CtxInner {
+            store: gtk::TreeStore,
+            iter: gtk::TreeIter,
+            log: gtk::ListStore,
+        }
+        struct Ctx(Mutex<ThreadGuard<CtxInner>>);
+        let ctx = Ctx(Mutex::new(ThreadGuard::new(CtxInner {
+            store: store.clone(),
+            iter: iter.clone(),
+            log: log.clone(),
+        })));
         Arc::new(move |v: &Value| {
-            store.set_value(&iter, 1, &format!("{}", v).to_value());
-            log_expr_val(&log, &expr, v)
+            let inner = ctx.0.lock();
+            let inner = inner.get_ref();
+            inner.store.set_value(&inner.iter, 1, &format!("{}", v).to_value());
+            log_expr_val(&inner.log, &expr, v)
         })
     };
     ctx.borrow_mut().dbg_ctx.add_watch(id, &watch);

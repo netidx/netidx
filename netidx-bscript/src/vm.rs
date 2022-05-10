@@ -18,7 +18,7 @@ use std::{
 
 pub struct DbgCtx {
     events: VecDeque<(ExprId, Value)>,
-    watch: HashMap<ExprId, Vec<Weak<dyn Fn(&Value)>>, FxBuildHasher>,
+    watch: HashMap<ExprId, Vec<Weak<dyn Fn(&Value) + Send + Sync>>, FxBuildHasher>,
     current: HashMap<ExprId, Value, FxBuildHasher>,
 }
 
@@ -31,7 +31,7 @@ impl DbgCtx {
         }
     }
 
-    pub fn add_watch(&mut self, id: ExprId, watch: &Arc<dyn Fn(&Value)>) {
+    pub fn add_watch(&mut self, id: ExprId, watch: &Arc<dyn Fn(&Value) + Send + Sync>) {
         let watches = self.watch.entry(id).or_insert_with(Vec::new);
         if let Some(v) = self.current.get(&id) {
             watch(v);
@@ -86,8 +86,16 @@ pub enum Event<E> {
     User(E),
 }
 
-pub type InitFn<C, E> =
-    Arc<dyn Fn(&mut ExecCtx<C, E>, &[Node<C, E>], Path, ExprId) -> Box<dyn Apply<C, E>>>;
+pub type InitFn<C, E> = Arc<
+    dyn Fn(
+            &mut ExecCtx<C, E>,
+            &[Node<C, E>],
+            Path,
+            ExprId,
+        ) -> Box<dyn Apply<C, E> + Send + Sync>
+        + Send
+        + Sync,
+>;
 
 pub trait Register<C: Ctx, E> {
     fn register(ctx: &mut ExecCtx<C, E>);
@@ -257,7 +265,11 @@ impl<C: Ctx, E> ExecCtx<C, E> {
 pub enum Node<C: Ctx, E> {
     Error(Expr, Value),
     Constant(Expr, Value),
-    Apply { spec: Expr, args: Vec<Node<C, E>>, function: Box<dyn Apply<C, E>> },
+    Apply {
+        spec: Expr,
+        args: Vec<Node<C, E>>,
+        function: Box<dyn Apply<C, E> + Send + Sync>,
+    },
 }
 
 impl<C: Ctx, E> fmt::Display for Node<C, E> {

@@ -5,9 +5,9 @@ mod db;
 mod rpcs;
 mod stats;
 
-use anyhow::{anyhow, bail, Error, Result};
+use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
-pub use db::{Db, Datum, DatumKind, Reply, Sendable, Txn};
+pub use db::{Datum, DatumKind, Db, Reply, Sendable, Txn};
 use futures::{
     self,
     channel::{mpsc, oneshot},
@@ -51,13 +51,11 @@ use std::{
     ops::{Deref, DerefMut},
     pin::Pin,
     sync::Arc,
-    thread,
     time::Duration,
 };
 use structopt::StructOpt;
 use tokio::{
-    runtime,
-    task::{self, LocalSet},
+    task,
     time::{self, Instant},
 };
 
@@ -1635,15 +1633,18 @@ impl ContainerInner {
 
     fn process_command(&mut self, c: ToInner) {
         match c {
-            ToInner::GetDb(s) => { let _ = s.send(self.ctx.user.db.clone()); }
-            ToInner::GetPub(s) => { let _ = s.send(self.ctx.user.publisher.clone()); }
+            ToInner::GetDb(s) => {
+                let _ = s.send(self.ctx.user.db.clone());
+            }
+            ToInner::GetPub(s) => {
+                let _ = s.send(self.ctx.user.publisher.clone());
+            }
         }
     }
 
     async fn run(mut self, mut cmd: mpsc::UnboundedReceiver<ToInner>) -> Result<()> {
         let mut gc_rpcs = time::interval(Duration::from_secs(60));
         let mut rpcbatch = Vec::new();
-        self.init().await?;
         let mut batch = self.ctx.user.publisher.start_batch();
         let mut txn = Txn::new();
         loop {
@@ -1687,7 +1688,7 @@ impl ContainerInner {
                 mem::replace(&mut batch, new_batch).commit(timeout).await;
             }
         }
-        self.ctx.user.publisher.shutdown().await;
+        self.ctx.user.publisher.clone().shutdown().await;
         self.ctx.user.db.flush_async().await?;
         Ok(())
     }
@@ -1706,34 +1707,15 @@ impl Container {
         auth: DesiredAuth,
         params: Params,
     ) -> Result<Container> {
-        let (res_w, res_r) = oneshot::channel();
         let (w, r) = mpsc::unbounded();
-        thread::spawn(move || {
-            let rt = match runtime::Builder::new_current_thread().enable_all().build() {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = res_w.send(Err(Error::from(e)));
-                    return;
-                }
-            };
-            let local = LocalSet::new();
-            local.spawn_local(async move {
-                match ContainerInner::new(cfg, auth, params).await {
-                    Ok(c) => {
-                        let _ = res_w.send(Ok(()));
-                        match c.run(r).await {
-                            Err(e) => error!("container error {}", e),
-                            Ok(()) => info!("container shut down cleanly"),
-                        }
-                    }
-                    Err(e) => {
-                        let _ = res_w.send(Err(Error::from(e)));
-                    }
-                }
-            });
-            rt.block_on(local);
+        let mut c = ContainerInner::new(cfg, auth, params).await?;
+        c.init().await?;
+        task::spawn(async move {
+            match c.run(r).await {
+                Err(e) => error!("container stopped with error {}", e),
+                Ok(()) => info!("container stopped gracefully"),
+            }
         });
-        res_r.await??;
         Ok(Container(w))
     }
 
