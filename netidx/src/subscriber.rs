@@ -600,7 +600,7 @@ impl SubscriberInner {
                 }
             }
         }
-        resolved
+        let res = resolved
             .publishers
             .iter()
             .filter_map(|pref| {
@@ -610,7 +610,17 @@ impl SubscriberInner {
                     .map(|pb| (pref, pb))
             })
             .choose(&mut rand::thread_rng())
-            .map(|(pref, pb)| (pb.addr, pb.target_auth.clone(), pref.token.clone()))
+            .map(|(pref, pb)| (pb.addr, pb.target_auth.clone(), pref.token.clone()));
+        if res.is_some() {
+            res
+        } else {
+            resolved
+                .publishers
+                .iter()
+                .filter_map(|pref| publishers.get(&pref.id).map(|pb| (pref, pb)))
+                .choose(&mut rand::thread_rng())
+                .map(|(pref, pb)| (pb.addr, pb.target_auth.clone(), pref.token.clone()))
+        }
     }
 
     fn gc_recently_failed(&mut self) {

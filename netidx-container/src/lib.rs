@@ -1631,13 +1631,17 @@ impl ContainerInner {
         }
     }
 
-    fn process_command(&mut self, c: ToInner) {
+    fn process_command(&mut self, txn: &mut Txn, c: ToInner) {
         match c {
             ToInner::GetDb(s) => {
                 let _ = s.send(self.ctx.user.db.clone());
             }
             ToInner::GetPub(s) => {
                 let _ = s.send(self.ctx.user.publisher.clone());
+            }
+            ToInner::Commit(t, s) => {
+                *txn = t;
+                let _ = s.send(());
             }
         }
     }
@@ -1675,7 +1679,7 @@ impl ContainerInner {
                     self.process_update(&mut batch, u);
                 }
                 c = cmd.select_next_some() => {
-                    self.process_command(c);
+                    self.process_command(&mut txn, c);
                 }
                 complete => break
             }
@@ -1697,11 +1701,17 @@ impl ContainerInner {
 enum ToInner {
     GetDb(oneshot::Sender<Db>),
     GetPub(oneshot::Sender<Publisher>),
+    Commit(Txn, oneshot::Sender<()>),
 }
 
 pub struct Container(mpsc::UnboundedSender<ToInner>);
 
 impl Container {
+    /// Start the container with the specified
+    /// parameters. Initialization is performed on the calling task,
+    /// and an error is returned if it fails. Once initialization is
+    /// complete, the container continues to run on a background task,
+    /// and errors are reported by log::error!.
     pub async fn start(
         cfg: Config,
         auth: DesiredAuth,
@@ -1719,12 +1729,33 @@ impl Container {
         Ok(Container(w))
     }
 
+    /// Fetch the database associated with the container. You can
+    /// perform any read operations you like on the database, however
+    /// keep in mind that clients can write while you are
+    /// reading. Transactions must be submitted to the main task to
+    /// ensure some level of coordination between client writes and
+    /// application transactions.
     pub async fn db(&self) -> Result<Db> {
         let (w, r) = oneshot::channel();
         self.0.unbounded_send(ToInner::GetDb(w))?;
         Ok(r.await?)
     }
 
+    /// Submit a database transaction to be processed, wait for it to
+    /// be accepted.
+    pub async fn commit(&self, txn: Txn) -> Result<()> {
+        let (w, r) = oneshot::channel();
+        self.0.unbounded_send(ToInner::Commit(txn, w))?;
+        Ok(r.await?)
+    }
+
+    /// Submit a database transaction without waiting
+    pub fn commit_unbounded(&self, txn: Txn) -> Result<()> {
+        let (w, _r) = oneshot::channel();
+        Ok(self.0.unbounded_send(ToInner::Commit(txn, w))?)
+    }
+
+    /// Retreive the container's publisher.
     pub async fn publisher(&self) -> Result<Publisher> {
         let (w, r) = oneshot::channel();
         self.0.unbounded_send(ToInner::GetPub(w))?;

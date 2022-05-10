@@ -1484,12 +1484,12 @@ impl Db {
         Ok(self.db.open_tree(name)?)
     }
 
-    pub fn commit(&self, txn: Txn) {
+    pub(super) fn commit(&self, txn: Txn) {
         self.stats.inc_queued();
         let _: Result<_, _> = self.submit_txn.unbounded_send(txn);
     }
 
-    pub async fn flush_async(&self) -> Result<()> {
+    pub(super) async fn flush_async(&self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let mut txn = Txn::new();
         txn.0.push((TxnOp::Flush(tx), None));
@@ -1663,5 +1663,12 @@ impl Db {
 
     pub fn roots(&self) -> impl Iterator<Item = Result<Path>> + 'static {
         iter_paths(&self.roots)
+    }
+
+    pub fn clear(&self) -> Result<()> {
+        self.db.clear()?;
+        self.data.clear()?;
+        self.locked.clear()?;
+        Ok(self.roots.clear()?)
     }
 }
