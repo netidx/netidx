@@ -499,6 +499,9 @@ impl Store {
             }
         };
         let (flags, mut pubs) = self.resolve_default(publishers, path);
+        for i in 0..pubs.len() {
+            pubs[i] = sign(pubs[i].id);
+        }
         let flags = match self.published_by_path.get(&*path) {
             None => flags,
             Some(ids) => {
