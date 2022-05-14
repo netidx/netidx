@@ -27,8 +27,8 @@ use netidx::{
     config::Config,
     path::Path,
     pool::{Pool, Pooled},
-    subscriber::{Dval, Event, SubId, UpdatesFlags, Value, DesiredAuth},
     resolver_client,
+    subscriber::{DesiredAuth, Dval, Event, SubId, UpdatesFlags, Value},
 };
 use netidx_bscript::{
     expr::{ExprId, ExprKind},
@@ -758,8 +758,10 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         Some("document-page-setup"),
         gtk::IconSize::SmallToolbar,
     );
-    let save_img =
-        gtk::Image::from_icon_name(Some("media-floppy"), gtk::IconSize::SmallToolbar);
+    let save_img = gtk::Image::from_icon_name(
+        Some("media-floppy-symbolic"),
+        gtk::IconSize::SmallToolbar,
+    );
     let save_button = gtk::ToolButton::new(Some(&save_img), None);
     let prefs_button = gtk::MenuButton::new();
     let menu_img =
