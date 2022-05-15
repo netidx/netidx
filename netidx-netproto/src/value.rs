@@ -1,3 +1,4 @@
+use anyhow::{bail, Result as Res};
 use bytes::{Buf, BufMut, Bytes};
 use chrono::{naive::NaiveDateTime, prelude::*};
 use netidx_core::{
@@ -87,7 +88,7 @@ impl Typ {
             Typ::Bool => match s.parse::<bool>()? {
                 true => Ok(Value::True),
                 false => Ok(Value::False),
-            }
+            },
             Typ::String => Ok(Value::String(Chars::from(String::from(s)))),
             Typ::Bytes => {
                 let mut tmp = String::from("bytes:");
@@ -105,7 +106,7 @@ impl Typ {
             }
         }
     }
-    
+
     pub fn name(&self) -> &'static str {
         match self {
             Typ::U32 => "u32",
@@ -851,10 +852,8 @@ impl Pack for Value {
 }
 
 pub trait FromValue {
-    type Error: fmt::Debug;
-
     /// attempt to cast v to the type of self using any reasonable means
-    fn from_value(v: Value) -> result::Result<Self, Self::Error>
+    fn from_value(v: Value) -> Res<Self>
     where
         Self: Sized;
 
@@ -889,8 +888,8 @@ impl Value {
             Value::False => write!(f, "false"),
             Value::Null => write!(f, "null"),
             Value::Ok => write!(f, "ok"),
-            v@ Value::Error(_) => write!(f, "{}", v),
-            v@ Value::Array(_) => write!(f, "{}", v),
+            v @ Value::Error(_) => write!(f, "{}", v),
+            v @ Value::Array(_) => write!(f, "{}", v),
         }
     }
 
@@ -1183,7 +1182,7 @@ impl Value {
     }
 
     /// cast value directly to any type implementing `FromValue`
-    pub fn cast_to<T: FromValue + Sized>(self) -> result::Result<T, T::Error> {
+    pub fn cast_to<T: FromValue + Sized>(self) -> Res<T> {
         <T as FromValue>::from_value(self)
     }
 
@@ -1273,14 +1272,12 @@ impl<T: Into<Value> + Copy> convert::From<&T> for Value {
 }
 
 impl FromValue for u8 {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+    fn from_value(v: Value) -> Res<Self> {
         let v = v.cast_to::<u32>()?;
         if v <= u8::MAX as u32 {
             Ok(v as u8)
         } else {
-            Err(CantCast)
+            bail!("can't cast")
         }
     }
 
@@ -1302,14 +1299,12 @@ impl convert::From<u8> for Value {
 }
 
 impl FromValue for i8 {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+    fn from_value(v: Value) -> Res<Self> {
         let v = v.cast_to::<i32>()?;
         if v <= i8::MAX as i32 && v >= i8::MIN as i32 {
             Ok(v as i8)
         } else {
-            Err(CantCast)
+            bail!("can't cast")
         }
     }
 
@@ -1331,14 +1326,12 @@ impl convert::From<i8> for Value {
 }
 
 impl FromValue for u16 {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+    fn from_value(v: Value) -> Res<Self> {
         let v = v.cast_to::<u32>()?;
         if v <= u16::MAX as u32 {
             Ok(v as u16)
         } else {
-            Err(CantCast)
+            bail!("can't cast")
         }
     }
 
@@ -1360,14 +1353,12 @@ impl convert::From<u16> for Value {
 }
 
 impl FromValue for i16 {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+    fn from_value(v: Value) -> Res<Self> {
         let v = v.cast_to::<i32>()?;
         if v <= i16::MAX as i32 && v >= i16::MIN as i32 {
             Ok(v as i16)
         } else {
-            Err(CantCast)
+            bail!("can't cast")
         }
     }
 
@@ -1389,12 +1380,10 @@ impl convert::From<i16> for Value {
 }
 
 impl FromValue for u32 {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::U32).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::U32).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::U32(v) => Ok(v),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1416,12 +1405,10 @@ impl convert::From<u32> for Value {
 }
 
 impl FromValue for i32 {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::I32).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::I32).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::I32(v) => Ok(v),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1443,12 +1430,10 @@ impl convert::From<i32> for Value {
 }
 
 impl FromValue for u64 {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::U64).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::U64).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::U64(v) => Ok(v),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1476,12 +1461,10 @@ impl convert::From<usize> for Value {
 }
 
 impl FromValue for usize {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::U64).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::U64).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::U64(v) => Ok(v as usize),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1497,12 +1480,10 @@ impl FromValue for usize {
 }
 
 impl FromValue for i64 {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::I64).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::I64).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::I64(v) => Ok(v),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1524,12 +1505,10 @@ impl convert::From<i64> for Value {
 }
 
 impl FromValue for f32 {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::F32).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::F32).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::F32(v) => Ok(v),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1549,12 +1528,10 @@ impl convert::From<f32> for Value {
 }
 
 impl FromValue for f64 {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::F64).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::F64).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::F64(v) => Ok(v),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1574,12 +1551,10 @@ impl convert::From<f64> for Value {
 }
 
 impl FromValue for Chars {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::String).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::String).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::String(v) => Ok(v),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1598,9 +1573,7 @@ impl convert::From<Chars> for Value {
 }
 
 impl FromValue for String {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
+    fn from_value(v: Value) -> Res<Self> {
         v.cast_to::<Chars>().map(|c| c.into())
     }
 
@@ -1625,12 +1598,10 @@ impl convert::From<&'static str> for Value {
 }
 
 impl FromValue for DateTime<Utc> {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::DateTime).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::DateTime).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::DateTime(d) => Ok(d),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1649,12 +1620,10 @@ impl convert::From<DateTime<Utc>> for Value {
 }
 
 impl FromValue for Duration {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::Duration).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Duration).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::Duration(d) => Ok(d),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1673,13 +1642,11 @@ impl convert::From<Duration> for Value {
 }
 
 impl FromValue for bool {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::Bool).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Bool).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::True => Ok(true),
             Value::False => Ok(false),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1703,12 +1670,10 @@ impl convert::From<bool> for Value {
 }
 
 impl FromValue for Arc<[Value]> {
-    type Error = CantCast;
-
-    fn from_value(v: Value) -> result::Result<Self, Self::Error> {
-        v.cast(Typ::Array).ok_or(CantCast).and_then(|v| match v {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
             Value::Array(elts) => Ok(elts),
-            _ => Err(CantCast),
+            _ => bail!("can't cast"),
         })
     }
 
@@ -1723,5 +1688,35 @@ impl FromValue for Arc<[Value]> {
 impl convert::From<Arc<[Value]>> for Value {
     fn from(v: Arc<[Value]>) -> Value {
         Value::Array(v)
+    }
+}
+
+impl<T: FromValue> FromValue for Vec<T> {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Array(elts) => elts
+                .iter()
+                .map(|v| <T as FromValue>::from_value(v.clone()))
+                .collect::<Res<Vec<_>>>(),
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(elts) => Some(
+                elts.iter()
+                    .map(|v| FromValue::get(v.clone()))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            _ => None,
+        }
+    }
+}
+
+impl<T: convert::Into<Value>> convert::From<Vec<T>> for Value {
+    fn from(v: Vec<T>) -> Value {
+        let v = v.into_iter().map(|e| e.into()).collect::<Vec<Value>>();
+        Value::Array(Arc::from(v))
     }
 }

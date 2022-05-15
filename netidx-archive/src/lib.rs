@@ -272,8 +272,6 @@ impl FromStr for Seek {
 }
 
 impl FromValue for Seek {
-    type Error = Error;
-
     fn from_value(v: Value) -> Result<Self> {
         match v {
             Value::DateTime(ts) => Ok(Seek::Absolute(ts)),
