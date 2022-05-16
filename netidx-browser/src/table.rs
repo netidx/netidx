@@ -5,7 +5,7 @@ use super::{
 use crate::bscript::LocalEvent;
 use arcstr::ArcStr;
 use futures::channel::oneshot;
-use fxhash::{FxBuildHasher, FxHashSet};
+use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use gdk::{keys, EventButton, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{
@@ -19,12 +19,12 @@ use gtk::{
     Widget as GtkWidget,
 };
 use indexmap::{IndexMap, IndexSet};
-use log::debug;
 use netidx::{
     chars::Chars,
     path::Path,
     resolver_client,
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
+    utils::Either,
 };
 use netidx_bscript::vm;
 use netidx_protocols::view;
@@ -44,27 +44,26 @@ struct Subscription {
 }
 
 struct RaeifiedTableInner {
-    path: Path,
-    ctx: BSCtx,
-    root: ScrolledWindow,
-    view: TreeView,
-    style: StyleContext,
-    selected_path: Label,
-    store: ListStore,
     by_id: RefCell<HashMap<SubId, Subscription>>,
-    subscribed: RefCell<HashMap<String, HashSet<u32>>>,
-    selected_columns: RefCell<FxHashSet<TreeViewColumn>>,
-    selected_rows: RefCell<FxHashSet<String>>,
-    selected_paths: RefCell<FxHashSet<Path>>,
+    columns: RefCell<IndexSet<TreeViewColumn, FxBuildHasher>>,
+    ctx: BSCtx,
     descriptor: resolver_client::Table,
-    vector_mode: bool,
-    sort_column: Cell<Option<u32>>,
-    sort_temp_disabled: Cell<bool>,
-    update: RefCell<IndexMap<SubId, Value, FxBuildHasher>>,
     destroyed: Cell<bool>,
-    on_select: Rc<RefCell<BSNode>>,
     on_activate: Rc<RefCell<BSNode>>,
     on_edit: Rc<RefCell<BSNode>>,
+    on_select: Rc<RefCell<BSNode>>,
+    path: Path,
+    root: ScrolledWindow,
+    selected_path: Label,
+    selected: RefCell<FxHashMap<String, FxHashSet<TreeViewColumn>>>,
+    sort_column: Cell<Option<u32>>,
+    sort_temp_disabled: Cell<bool>,
+    store: ListStore,
+    style: StyleContext,
+    subscribed: RefCell<HashMap<String, HashSet<u32>>>,
+    update: RefCell<IndexMap<SubId, Value, FxBuildHasher>>,
+    vector_mode: bool,
+    view: TreeView,
 }
 
 #[derive(Clone)]
@@ -359,11 +358,10 @@ impl RaeifiedTable {
             on_select,
             on_activate,
             on_edit,
+            columns: RefCell::new(IndexSet::default()),
             by_id: RefCell::new(HashMap::new()),
             subscribed: RefCell::new(HashMap::new()),
-            selected_columns: RefCell::new(HashSet::default()),
-            selected_rows: RefCell::new(HashSet::default()),
-            selected_paths: RefCell::new(HashSet::default()),
+            selected: RefCell::new(HashMap::default()),
             sort_column: Cell::new(None),
             sort_temp_disabled: Cell::new(false),
             update: RefCell::new(IndexMap::with_hasher(FxBuildHasher::default())),
@@ -416,6 +414,7 @@ impl RaeifiedTable {
             column.set_resizable(true);
             t.view().append_column(&column);
         }
+        t.0.columns.borrow_mut().extend(t.view().columns());
         t.store().connect_sort_column_changed(
             clone!(@weak t => move |_| t.handle_sort_column_changed()),
         );
@@ -496,33 +495,30 @@ impl RaeifiedTable {
 
     fn render_cell(&self, id: i32, c: &TreeViewColumn, cr: &CellRenderer, i: &TreeIter) {
         let cr = cr.clone().downcast::<CellRendererText>().unwrap();
-        let rn_v = self.store().value(i, 0);
-        let rn = rn_v.get::<&str>();
         cr.set_text(match self.store().value(i, id).get::<&str>() {
             Ok(v) => Some(v),
             Err(ValueTypeMismatchOrNoneError::UnexpectedNone) => None,
             _ => return,
         });
-        let selected_columns = self.0.selected_columns.borrow();
-        let selected_rows = self.0.selected_rows.borrow();
-        if selected_columns.contains(c)
-            && rn.is_ok()
-            && selected_rows.contains(rn.unwrap())
-        {
-            let st = StateFlags::SELECTED;
-            let fg = self.0.style.color(st);
-            let bg = StyleContextExt::style_property_for_state(
-                &self.0.style,
-                "background-color",
-                st,
-            )
-            .get::<RGBA>()
-            .unwrap();
-            cr.set_cell_background_rgba(Some(&bg));
-            cr.set_foreground_rgba(Some(&fg));
-        } else {
-            cr.set_cell_background(None);
-            cr.set_foreground(None);
+        let sel = self.0.selected.borrow();
+        match self.row_of(Either::Right(i)).as_ref().map(|r| r.get::<&str>().unwrap()) {
+            Some(r) if sel.get(r).map(|t| t.contains(c)).unwrap_or(false) => {
+                let st = StateFlags::SELECTED;
+                let fg = self.0.style.color(st);
+                let bg = StyleContextExt::style_property_for_state(
+                    &self.0.style,
+                    "background-color",
+                    st,
+                )
+                .get::<RGBA>()
+                .unwrap();
+                cr.set_cell_background_rgba(Some(&bg));
+                cr.set_foreground_rgba(Some(&fg));
+            }
+            Some(_) | None => {
+                cr.set_cell_background(None);
+                cr.set_foreground(None);
+            }
         }
     }
 
@@ -530,10 +526,8 @@ impl RaeifiedTable {
         if key.keyval() == keys::constants::Escape {
             // unset the focus
             self.view().set_cursor(&TreePath::new(), None::<&TreeViewColumn>, false);
-            self.0.selected_columns.borrow_mut().clear();
-            self.0.selected_rows.borrow_mut().clear();
             let n = {
-                let mut paths = self.0.selected_paths.borrow_mut();
+                let mut paths = self.0.selected.borrow_mut();
                 let n = paths.len();
                 paths.clear();
                 n
@@ -555,16 +549,13 @@ impl RaeifiedTable {
         let (x, y) = ev.position();
         let n = ev.button();
         let typ = ev.event_type();
-        match self.view().path_at_pos(x as i32, y as i32) {
-            None | Some((None, _, _, _)) | Some((_, None, _, _)) => {
-                debug!("handle_button typ: {:?}, button: {}, pos: ({}, {})", typ, n, x, y)
+        match (self.view().path_at_pos(x as i32, y as i32), typ) {
+            (Some((Some(_), Some(_), _, _)), gdk::EventType::ButtonPress) if n == 1 => {
+                if !ev.state().contains(gdk::ModifierType::SHIFT_MASK) {
+                    self.0.selected.borrow_mut().clear();
+                }
             }
-            Some((Some(path), Some(col), _, _)) => {
-                debug!(
-                    "handle_button typ: {:?}, button: {}, pos: ({}, {}), path: {:?}, col: {:?}",
-                    typ, n, x, y, path, col
-                )
-            }
+            (None, _) | (Some((_, _, _, _)), _) => (),
         }
         Inhibit(false)
     }
@@ -655,52 +646,57 @@ impl RaeifiedTable {
         }
     }
 
-    fn cursor_changed(&self) {
-        let (p, c) = self.view().cursor();
-        let row_name = match p {
-            None => None,
-            Some(p) => match self.store().iter(&p) {
+    fn row_of(&self, row: Either<&gtk::TreePath, &gtk::TreeIter>) -> Option<glib::Value> {
+        let row_name = match row {
+            Either::Right(i) => Some(self.store().value(i, 0)),
+            Either::Left(row) => match self.store().iter(&row) {
                 None => None,
                 Some(i) => Some(self.store().value(&i, 0)),
             },
         };
-        let path = match row_name {
+        match row_name {
             None => None,
             Some(row_name) => match row_name.get::<&str>() {
                 Err(_) => None,
-                Ok(row_name) => {
-                    if let Some(c) = c.clone() {
-                        self.0.selected_columns.borrow_mut().insert(c);
-                        self.0.selected_rows.borrow_mut().insert(String::from(row_name));
-                    }
-                    let col_name = if self.0.vector_mode {
-                        None
-                    } else if self.view().column(0) == c {
-                        None
-                    } else {
-                        c.as_ref().and_then(|c| c.title())
-                    };
-                    match col_name {
-                        None => Some(self.0.path.append(row_name)),
-                        Some(col_name) => {
-                            Some(self.0.path.append(row_name).append(col_name.as_str()))
-                        }
-                    }
-                }
+                Ok(_) => Some(row_name),
             },
-        };
-        self.0.selected_path.set_label(path.as_ref().map(|c| c.as_ref()).unwrap_or(""));
-        if let Some(path) = path {
-            self.0.selected_paths.borrow_mut().insert(path.clone());
-            self.handle_selection_changed();
+        }
+    }
+
+    fn path_from_selected(&self, row: &str, col: Option<&TreeViewColumn>) -> Path {
+        match col.and_then(|c| c.title()) {
+            None => self.0.path.append(row),
+            Some(col) => self.0.path.append(row).append(col.as_str()),
+        }
+    }
+
+    fn cursor_changed(&self) {
+        if let (Some(p), c) = self.view().cursor() {
+            if let Some(row) =
+                self.row_of(Either::Left(&p)).as_ref().map(|r| r.get::<&str>().unwrap())
+            {
+                let path = self.path_from_selected(row, c.as_ref());
+                self.0.selected_path.set_label(path.as_ref());
+                let mut sel = self.0.selected.borrow_mut();
+                let cols = sel.entry(String::from(row)).or_insert_with(HashSet::default);
+                if let Some(c) = c {
+                    cols.insert(c);
+                }
+                self.handle_selection_changed();
+            }
         }
     }
 
     fn handle_selection_changed(&self) {
         let v = Value::from(
-            self.0.selected_paths.borrow()
+            self.0
+                .selected
+                .borrow()
                 .iter()
-                .map(|p| Chars::from(String::from(&**p)))
+                .flat_map(|(row, cols)| {
+                    cols.iter().map(|c| self.path_from_selected(row, Some(c)))
+                })
+                .map(|p| Value::from(Chars::from(String::from(&*p))))
                 .collect::<Vec<_>>(),
         );
         let ev = vm::Event::User(LocalEvent::Event(v));
