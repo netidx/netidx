@@ -5,8 +5,8 @@ use super::{
 use crate::bscript::LocalEvent;
 use arcstr::ArcStr;
 use futures::channel::oneshot;
-use fxhash::FxBuildHasher;
-use gdk::{keys, EventKey, RGBA};
+use fxhash::{FxBuildHasher, FxHashSet};
+use gdk::{keys, EventButton, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{
     self, clone, idle_add_local, signal::Inhibit, source::Continue,
@@ -18,7 +18,8 @@ use gtk::{
     TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
     Widget as GtkWidget,
 };
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
+use log::debug;
 use netidx::{
     chars::Chars,
     path::Path,
@@ -52,8 +53,9 @@ struct RaeifiedTableInner {
     store: ListStore,
     by_id: RefCell<HashMap<SubId, Subscription>>,
     subscribed: RefCell<HashMap<String, HashSet<u32>>>,
-    focus_column: RefCell<Option<TreeViewColumn>>,
-    focus_row: RefCell<Option<String>>,
+    selected_columns: RefCell<FxHashSet<TreeViewColumn>>,
+    selected_rows: RefCell<FxHashSet<String>>,
+    selected_paths: RefCell<FxHashSet<Path>>,
     descriptor: resolver_client::Table,
     vector_mode: bool,
     sort_column: Cell<Option<u32>>,
@@ -106,10 +108,10 @@ enum Filter {
     All,
     Auto,
     None,
-    Include(HashSet<String>),
-    Exclude(HashSet<String>),
-    IncludeMatch(HashSet<String>, RegexSet),
-    ExcludeMatch(HashSet<String>, RegexSet),
+    Include(IndexSet<String, FxBuildHasher>),
+    Exclude(IndexSet<String, FxBuildHasher>),
+    IncludeMatch(IndexSet<String, FxBuildHasher>, RegexSet),
+    ExcludeMatch(IndexSet<String, FxBuildHasher>, RegexSet),
 }
 
 impl PartialEq for Filter {
@@ -152,15 +154,15 @@ impl Filter {
                     .flatten()
                     .map(|v| v.cast_to::<String>().map_err(|e| format!("{}", e)));
                 if &*mode == "include" {
-                    Ok(Filter::Include(i.collect::<Result<HashSet<_, _>, _>>()?))
+                    Ok(Filter::Include(i.collect::<Result<IndexSet<_, _>, _>>()?))
                 } else if &*mode == "exclude" {
-                    Ok(Filter::Exclude(i.collect::<Result<HashSet<_, _>, _>>()?))
+                    Ok(Filter::Exclude(i.collect::<Result<IndexSet<_, _>, _>>()?))
                 } else if &*mode == "include_match" {
-                    let set = i.collect::<Result<HashSet<_>, _>>()?;
+                    let set = i.collect::<Result<IndexSet<_, _>, _>>()?;
                     let matcher = RegexSet::new(&set).map_err(|e| format!("{}", e))?;
                     Ok(Filter::IncludeMatch(set, matcher))
                 } else if &*mode == "exclude_match" {
-                    let set = i.collect::<Result<HashSet<_>, _>>()?;
+                    let set = i.collect::<Result<IndexSet<_, _>, _>>()?;
                     let matcher = RegexSet::new(&set).map_err(|e| format!("{}", e))?;
                     Ok(Filter::ExcludeMatch(set, matcher))
                 } else {
@@ -179,6 +181,18 @@ impl Filter {
             Filter::Exclude(set) => !set.contains(s),
             Filter::IncludeMatch(_, set) => set.is_match(s),
             Filter::ExcludeMatch(_, set) => !set.is_match(s),
+        }
+    }
+
+    fn sort_index(&self, s: &str) -> Option<usize> {
+        match self {
+            Filter::Include(set) => set.get_index_of(s),
+            Filter::All
+            | Filter::Auto
+            | Filter::None
+            | Filter::Exclude(_)
+            | Filter::IncludeMatch(_, _)
+            | Filter::ExcludeMatch(_, _) => None,
         }
     }
 }
@@ -292,7 +306,7 @@ impl RaeifiedTable {
             None => true,
             Some(row) => row_filter.is_match(row),
         });
-        match column_filter {
+        match &column_filter {
             Filter::Auto => {
                 let half = descriptor.rows.len() as f32 / 2.;
                 descriptor.cols.retain(|(_, i)| i.0 as f32 >= half)
@@ -302,6 +316,16 @@ impl RaeifiedTable {
                 Some(col) => filter.is_match(&col),
             }),
         }
+        descriptor.cols.sort_by(|v0, v1| {
+            let v0 = Path::basename(&v0.0);
+            let v1 = Path::basename(&v1.0);
+            let i0 = v0.and_then(|v| column_filter.sort_index(v));
+            let i1 = v1.and_then(|v| column_filter.sort_index(v));
+            match (i0, i1) {
+                (Some(i0), Some(i1)) => i0.cmp(&i1),
+                (_, _) => v0.cmp(&v1),
+            }
+        });
         let view = TreeView::new();
         root.add(&view);
         view.selection().set_mode(SelectionMode::None);
@@ -337,8 +361,9 @@ impl RaeifiedTable {
             on_edit,
             by_id: RefCell::new(HashMap::new()),
             subscribed: RefCell::new(HashMap::new()),
-            focus_column: RefCell::new(None),
-            focus_row: RefCell::new(None),
+            selected_columns: RefCell::new(HashSet::default()),
+            selected_rows: RefCell::new(HashSet::default()),
+            selected_paths: RefCell::new(HashSet::default()),
             sort_column: Cell::new(None),
             sort_temp_disabled: Cell::new(false),
             update: RefCell::new(IndexMap::with_hasher(FxBuildHasher::default())),
@@ -391,38 +416,18 @@ impl RaeifiedTable {
             column.set_resizable(true);
             t.view().append_column(&column);
         }
-        t.store().connect_sort_column_changed(clone!(@weak t => move |_| {
-            if t.0.sort_temp_disabled.get() {
-                return
-            }
-            match get_sort_column(t.store()) {
-                Some(col) => { t.0.sort_column.set(Some(col)); }
-                None => {
-                    t.0.sort_column.set(None);
-                    t.store().set_unsorted();
-                }
-            }
-            idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
-                t.update_subscriptions();
-                Continue(false)
-            }));
-        }));
+        t.store().connect_sort_column_changed(
+            clone!(@weak t => move |_| t.handle_sort_column_changed()),
+        );
         t.view().set_fixed_height_mode(true);
         t.view().set_model(Some(t.store()));
         t.view().connect_key_press_event(clone!(
             @weak t => @default-return Inhibit(false), move |_, k| t.handle_key(k)));
-        t.view().connect_row_activated(clone!(@weak t => move |_, p, _| {
-            if let Some(iter) = t.store().iter(&p) {
-                if let Ok(row_name) = t.store().value(&iter, 0).get::<&str>() {
-                    let path = String::from(&*t.0.path.append(row_name));
-                    let e = LocalEvent::Event(Value::String(Chars::from(path)));
-                    t.0.on_activate.borrow_mut().update(
-                        &mut t.0.ctx.borrow_mut(),
-                        &vm::Event::User(e)
-                    );
-                }
-            }
-        }));
+        t.view().connect_button_press_event(clone!(
+            @weak t => @default-return Inhibit(false), move |_, b| t.handle_button(b)));
+        t.view().connect_row_activated(
+            clone!(@weak t => move |_, p, _| t.handle_row_activated(p)),
+        );
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         t.0.root.vadjustment().connect_value_changed(clone!(@weak t => move |_| {
             idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
@@ -456,6 +461,39 @@ impl RaeifiedTable {
         t
     }
 
+    fn handle_row_activated(&self, p: &TreePath) {
+        if let Some(iter) = self.store().iter(&p) {
+            if let Ok(row_name) = self.store().value(&iter, 0).get::<&str>() {
+                let path = String::from(&*self.0.path.append(row_name));
+                let e = LocalEvent::Event(Value::String(Chars::from(path)));
+                self.0
+                    .on_activate
+                    .borrow_mut()
+                    .update(&mut self.0.ctx.borrow_mut(), &vm::Event::User(e));
+            }
+        }
+    }
+
+    fn handle_sort_column_changed(&self) {
+        if self.0.sort_temp_disabled.get() {
+            return;
+        }
+        match get_sort_column(self.store()) {
+            Some(col) => {
+                self.0.sort_column.set(Some(col));
+            }
+            None => {
+                self.0.sort_column.set(None);
+                self.store().set_unsorted();
+            }
+        }
+        let t = self;
+        idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
+            t.update_subscriptions();
+            Continue(false)
+        }));
+    }
+
     fn render_cell(&self, id: i32, c: &TreeViewColumn, cr: &CellRenderer, i: &TreeIter) {
         let cr = cr.clone().downcast::<CellRendererText>().unwrap();
         let rn_v = self.store().value(i, 0);
@@ -465,24 +503,26 @@ impl RaeifiedTable {
             Err(ValueTypeMismatchOrNoneError::UnexpectedNone) => None,
             _ => return,
         });
-        match (&*self.0.focus_column.borrow(), &*self.0.focus_row.borrow(), rn) {
-            (Some(fc), Some(fr), Ok(rn)) if fc == c && fr.as_str() == rn => {
-                let st = StateFlags::SELECTED;
-                let fg = self.0.style.color(st);
-                let bg = StyleContextExt::style_property_for_state(
-                    &self.0.style,
-                    "background-color",
-                    st,
-                )
-                .get::<RGBA>()
-                .unwrap();
-                cr.set_cell_background_rgba(Some(&bg));
-                cr.set_foreground_rgba(Some(&fg));
-            }
-            _ => {
-                cr.set_cell_background(None);
-                cr.set_foreground(None);
-            }
+        let selected_columns = self.0.selected_columns.borrow();
+        let selected_rows = self.0.selected_rows.borrow();
+        if selected_columns.contains(c)
+            && rn.is_ok()
+            && selected_rows.contains(rn.unwrap())
+        {
+            let st = StateFlags::SELECTED;
+            let fg = self.0.style.color(st);
+            let bg = StyleContextExt::style_property_for_state(
+                &self.0.style,
+                "background-color",
+                st,
+            )
+            .get::<RGBA>()
+            .unwrap();
+            cr.set_cell_background_rgba(Some(&bg));
+            cr.set_foreground_rgba(Some(&fg));
+        } else {
+            cr.set_cell_background(None);
+            cr.set_foreground(None);
         }
     }
 
@@ -490,14 +530,41 @@ impl RaeifiedTable {
         if key.keyval() == keys::constants::Escape {
             // unset the focus
             self.view().set_cursor(&TreePath::new(), None::<&TreeViewColumn>, false);
-            *self.0.focus_column.borrow_mut() = None;
-            *self.0.focus_row.borrow_mut() = None;
+            self.0.selected_columns.borrow_mut().clear();
+            self.0.selected_rows.borrow_mut().clear();
+            let n = {
+                let mut paths = self.0.selected_paths.borrow_mut();
+                let n = paths.len();
+                paths.clear();
+                n
+            };
             self.0.selected_path.set_label("");
+            if n > 0 {
+                self.handle_selection_changed();
+            }
         }
         if key.keyval() == keys::constants::w
             && key.state().contains(gdk::ModifierType::CONTROL_MASK)
         {
             self.write_dialog()
+        }
+        Inhibit(false)
+    }
+
+    fn handle_button(&self, ev: &EventButton) -> Inhibit {
+        let (x, y) = ev.position();
+        let n = ev.button();
+        let typ = ev.event_type();
+        match self.view().path_at_pos(x as i32, y as i32) {
+            None | Some((None, _, _, _)) | Some((_, None, _, _)) => {
+                debug!("handle_button typ: {:?}, button: {}, pos: ({}, {})", typ, n, x, y)
+            }
+            Some((Some(path), Some(col), _, _)) => {
+                debug!(
+                    "handle_button typ: {:?}, button: {}, pos: ({}, {}), path: {:?}, col: {:?}",
+                    typ, n, x, y, path, col
+                )
+            }
         }
         Inhibit(false)
     }
@@ -602,8 +669,10 @@ impl RaeifiedTable {
             Some(row_name) => match row_name.get::<&str>() {
                 Err(_) => None,
                 Ok(row_name) => {
-                    *self.0.focus_column.borrow_mut() = c.clone();
-                    *self.0.focus_row.borrow_mut() = Some(String::from(row_name));
+                    if let Some(c) = c.clone() {
+                        self.0.selected_columns.borrow_mut().insert(c);
+                        self.0.selected_rows.borrow_mut().insert(String::from(row_name));
+                    }
                     let col_name = if self.0.vector_mode {
                         None
                     } else if self.view().column(0) == c {
@@ -622,10 +691,20 @@ impl RaeifiedTable {
         };
         self.0.selected_path.set_label(path.as_ref().map(|c| c.as_ref()).unwrap_or(""));
         if let Some(path) = path {
-            let v = Value::from(String::from(&*path));
-            let ev = vm::Event::User(LocalEvent::Event(v));
-            self.0.on_select.borrow_mut().update(&mut self.0.ctx.borrow_mut(), &ev);
+            self.0.selected_paths.borrow_mut().insert(path.clone());
+            self.handle_selection_changed();
         }
+    }
+
+    fn handle_selection_changed(&self) {
+        let v = Value::from(
+            self.0.selected_paths.borrow()
+                .iter()
+                .map(|p| Chars::from(String::from(&**p)))
+                .collect::<Vec<_>>(),
+        );
+        let ev = vm::Event::User(LocalEvent::Event(v));
+        self.0.on_select.borrow_mut().update(&mut self.0.ctx.borrow_mut(), &ev);
     }
 
     pub(super) fn update_subscriptions(&self) {
