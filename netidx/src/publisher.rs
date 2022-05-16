@@ -562,6 +562,11 @@ impl UpdateBatch {
     /// sent. Any subscriber that can't accept all the updates within
     /// `timeout` will be disconnected.
     pub async fn commit(mut self, timeout: Option<Duration>) {
+        let empty = self.updates.is_empty()
+            && self.unsubscribes.as_ref().map(|v| v.len()).unwrap_or(0) == 0;
+        if empty {
+            return;
+        }
         let fut = {
             let mut batch = BATCH.take();
             let mut pb = self.origin.0.lock();

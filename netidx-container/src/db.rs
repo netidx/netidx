@@ -1645,11 +1645,16 @@ impl Db {
         Self::decode_iter(self.data.iter())
     }
 
-    pub fn iter_prefix<P: AsRef<[u8]>>(
+    pub fn iter_prefix(
         &self,
-        prefix: P,
+        prefix: Path,
     ) -> impl Iterator<Item = Result<(Path, DatumKind, sled::IVec)>> + 'static {
-        Self::decode_iter(self.data.scan_prefix(prefix))
+        Self::decode_iter(self.data.scan_prefix(&*prefix))
+    }
+
+    /// This is O(N)
+    pub fn prefix_len(&self, prefix: &Path) -> usize {
+        self.data.scan_prefix(&**prefix).count()
     }
 
     pub fn locked(&self) -> impl Iterator<Item = Result<(Path, bool)>> + 'static {
