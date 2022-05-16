@@ -540,11 +540,10 @@ impl RaeifiedTable {
             clear_selection();
             self.view().set_cursor(&TreePath::new(), None::<&TreeViewColumn>, false);
         }
-        dbg!(&kv);
-        if kv == keys::constants::uparrow
-            || kv == keys::constants::downarrow
-            || kv == keys::constants::rightarrow
-            || kv == keys::constants::leftarrow
+        if kv == keys::constants::Down
+            || kv == keys::constants::Up
+            || kv == keys::constants::Left
+            || kv == keys::constants::Right
         {
             if !key.state().contains(gdk::ModifierType::SHIFT_MASK) {
                 clear_selection();
