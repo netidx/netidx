@@ -677,10 +677,12 @@ impl RaeifiedTable {
             {
                 let path = self.path_from_selected(row, c.as_ref());
                 self.0.selected_path.set_label(path.as_ref());
-                let mut sel = self.0.selected.borrow_mut();
-                let cols = sel.entry(String::from(row)).or_insert_with(HashSet::default);
-                if let Some(c) = c {
-                    cols.insert(c);
+                {
+                    let mut sel = self.0.selected.borrow_mut();
+                    let cols = sel.entry(String::from(row)).or_insert_with(HashSet::default);
+                    if let Some(c) = c {
+                        cols.insert(c);
+                    }
                 }
                 self.handle_selection_changed();
             }
