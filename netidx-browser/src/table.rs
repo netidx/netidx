@@ -531,26 +531,23 @@ impl RaeifiedTable {
             let data_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
             data_box.add(&data_lbl);
             data_box.add(&data);
-            let err = gtk::Label::new(None);
-            let err_attrs = pango::AttrList::new();
-            err_attrs.insert(pango::AttrColor::new_foreground(0xFFFFu16, 0, 0));
-            err.set_attributes(Some(&err_attrs));
             if let Some(v) = &*val.borrow() {
-                data.set_text(&format!("{}", WVal(v)));
+                data.set_text(&format!("{}", v));
             }
             data.connect_changed(clone!(
-                @strong val,
-                @strong err => move |data| match data.text().parse::<Value>() {
+                @strong val => move |data| match data.text().parse::<Value>() {
                     Err(e) => {
                         *val.borrow_mut() = None;
-                        err.set_text(&format!("{}", e));
                         data.set_icon_from_icon_name(
                             gtk::EntryIconPosition::Secondary,
                             Some("dialog-error")
                         );
+                        data.set_icon_tooltip_text(
+                            gtk::EntryIconPosition::Secondary,
+                            Some(&format!("{}", e))
+                        );
                     }
                     Ok(v) => {
-                        err.set_text("");
                         data.set_icon_from_icon_name(
                             gtk::EntryIconPosition::Secondary,
                             None
@@ -559,7 +556,6 @@ impl RaeifiedTable {
                     }
             }));
             root.add(&data_box);
-            root.add(&err);
             root.show_all();
             match d.run() {
                 gtk::ResponseType::Accept => match &*val.borrow() {
