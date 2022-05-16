@@ -663,27 +663,30 @@ impl RaeifiedTable {
         }
     }
 
-    fn path_from_selected(&self, row: &str, col: Option<&TreeViewColumn>) -> Path {
-        match col.and_then(|c| c.title()) {
-            None => self.0.path.append(row),
-            Some(col) => self.0.path.append(row).append(col.as_str()),
+    fn path_from_selected(&self, row: &str, col: &TreeViewColumn) -> Path {
+        if self.0.vector_mode {
+            self.0.path.append(row)
+        } else {
+            match col.title() {
+                None => self.0.path.append(row),
+                Some(col) => self.0.path.append(row).append(col.as_str()),
+            }
         }
     }
 
     fn cursor_changed(&self) {
-        if let (Some(p), c) = self.view().cursor() {
+        if let (Some(p), Some(c)) = self.view().cursor() {
             if let Some(row) =
                 self.row_of(Either::Left(&p)).as_ref().map(|r| r.get::<&str>().unwrap())
             {
-                let path = self.path_from_selected(row, c.as_ref());
+                let path = self.path_from_selected(row, &c);
                 self.0.selected_path.set_label(path.as_ref());
-                {
-                    let mut sel = self.0.selected.borrow_mut();
-                    let cols = sel.entry(String::from(row)).or_insert_with(HashSet::default);
-                    if let Some(c) = c {
-                        cols.insert(c);
-                    }
-                }
+                self.0
+                    .selected
+                    .borrow_mut()
+                    .entry(String::from(row))
+                    .or_insert_with(HashSet::default)
+                    .insert(c);
                 self.handle_selection_changed();
             }
         }
@@ -697,7 +700,7 @@ impl RaeifiedTable {
                 .borrow()
                 .iter()
                 .flat_map(|(row, cols)| {
-                    cols.iter().map(|c| self.path_from_selected(row, Some(c)))
+                    cols.iter().map(|c| self.path_from_selected(row, c))
                 })
                 .map(|p| Value::from(Chars::from(String::from(&*p))))
                 .collect::<Vec<_>>(),
@@ -867,7 +870,7 @@ impl RaeifiedTable {
             start.next();
         }
     }
-    
+
     pub(super) fn update(
         &self,
         _ctx: BSCtxRef,
