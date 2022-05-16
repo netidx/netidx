@@ -523,9 +523,7 @@ impl RaeifiedTable {
     }
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {
-        if key.keyval() == keys::constants::Escape {
-            // unset the focus
-            self.view().set_cursor(&TreePath::new(), None::<&TreeViewColumn>, false);
+        let clear_selection = || {
             let n = {
                 let mut paths = self.0.selected.borrow_mut();
                 let n = paths.len();
@@ -536,8 +534,23 @@ impl RaeifiedTable {
             if n > 0 {
                 self.handle_selection_changed();
             }
+        };
+        let kv = key.keyval();
+        if kv == keys::constants::Escape {
+            clear_selection();
+            self.view().set_cursor(&TreePath::new(), None::<&TreeViewColumn>, false);
         }
-        if key.keyval() == keys::constants::w
+        dbg!(&kv);
+        if kv == keys::constants::uparrow
+            || kv == keys::constants::downarrow
+            || kv == keys::constants::rightarrow
+            || kv == keys::constants::leftarrow
+        {
+            if !key.state().contains(gdk::ModifierType::SHIFT_MASK) {
+                clear_selection();
+            }
+        }
+        if kv == keys::constants::w
             && key.state().contains(gdk::ModifierType::CONTROL_MASK)
         {
             self.write_dialog()
