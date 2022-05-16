@@ -535,7 +535,8 @@ impl RaeifiedTable {
                 data.set_text(&format!("{}", v));
             }
             data.connect_changed(clone!(
-                @strong val => move |data| match data.text().parse::<Value>() {
+                @strong val,
+                @strong d => move |data| match data.text().parse::<Value>() {
                     Err(e) => {
                         *val.borrow_mut() = None;
                         data.set_icon_from_icon_name(
@@ -546,14 +547,29 @@ impl RaeifiedTable {
                             gtk::EntryIconPosition::Secondary,
                             Some(&format!("{}", e))
                         );
+                        if let Some(w) = d.widget_for_response(gtk::ResponseType::Accept) {
+                            w.set_sensitive(false);
+                        }
                     }
                     Ok(v) => {
                         data.set_icon_from_icon_name(
                             gtk::EntryIconPosition::Secondary,
                             None
                         );
-                        *val.borrow_mut() = Some(v)
+                        *val.borrow_mut() = Some(v);
+                        if let Some(w) = d.widget_for_response(gtk::ResponseType::Accept) {
+                            w.set_sensitive(true);
+                        }
                     }
+            }));
+            data.connect_activate(clone!(@strong d => move |_| {
+                if let Some(w) = d.widget_for_response(gtk::ResponseType::Accept) {
+                    if w.is_sensitive() {
+                        if let Some(w) = w.downcast_ref::<gtk::Button>() {
+                            w.clicked();
+                        }
+                    }
+                }
             }));
             root.add(&data_box);
             root.show_all();
