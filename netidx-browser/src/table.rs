@@ -690,6 +690,7 @@ impl RaeifiedTable {
     }
 
     fn handle_selection_changed(&self) {
+        self.visible_changed();
         let v = Value::from(
             self.0
                 .selected
@@ -847,22 +848,26 @@ impl RaeifiedTable {
                         let _: result::Result<_, _> = tx.send(());
                     }
                     t.enable_sort(sctx);
-                    let (mut start, end) = match t.view().visible_range() {
-                        None => return Continue(false),
-                        Some((s, e)) => (s, e),
-                    };
-                    while start <= end {
-                        if let Some(i) = t.store().iter(&start) {
-                            t.store().row_changed(&start, &i);
-                        }
-                        start.next();
-                    }
+                    t.visible_changed();
                     Continue(false)
                 }
             }
         }));
     }
 
+    fn visible_changed(&self) {
+        let (mut start, end) = match self.view().visible_range() {
+            None => return,
+            Some((s, e)) => (s, e),
+        };
+        while start <= end {
+            if let Some(i) = self.store().iter(&start) {
+                self.store().row_changed(&start, &i);
+            }
+            start.next();
+        }
+    }
+    
     pub(super) fn update(
         &self,
         _ctx: BSCtxRef,
