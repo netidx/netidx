@@ -236,6 +236,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::Filter::register(&mut t);
         stdfn::Get::register(&mut t);
         stdfn::If::register(&mut t);
+        stdfn::Index::register(&mut t);
         stdfn::Isa::register(&mut t);
         stdfn::IsErr::register(&mut t);
         stdfn::Load::register(&mut t);

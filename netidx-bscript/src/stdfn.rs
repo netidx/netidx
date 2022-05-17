@@ -405,6 +405,31 @@ impl CachedCurEval for StartsWithEv {
 
 pub type StartsWith = CachedCur<StartsWithEv>;
 
+pub struct IndexEv;
+
+impl CachedCurEval for IndexEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::Array(elts)), Some(Value::I64(i))] if *i > 0 => {
+                let i = *i as usize;
+                if elts.len() < i {
+                    Some(elts[i].clone())
+                } else {
+                    Some(Value::Error(Chars::from("array index out of bounds")))
+                }
+            }
+            _ => Some(Value::Error(Chars::from("index expected an array and a positive index"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "index"
+    }
+}
+
+pub type Index = CachedCur<IndexEv>;
+
+
 // CR estokes: document
 pub struct EndsWithEv;
 

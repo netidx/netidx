@@ -1628,6 +1628,13 @@ impl Db {
         lookup_value(&self.data, path)
     }
 
+    pub fn lookup_value<P: AsRef<[u8]>>(&self, path: P) -> Option<Value> {
+        self.lookup(path).ok().flatten().and_then(|d| match d {
+            Datum::Deleted | Datum::Formula(_, _) => None,
+            Datum::Data(v) => Some(v)
+        })
+    }
+    
     fn decode_iter(
         iter: sled::Iter,
     ) -> impl Iterator<Item = Result<(Path, DatumKind, sled::IVec)>> + 'static {
