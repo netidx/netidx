@@ -45,7 +45,6 @@ struct Subscription {
 
 struct RaeifiedTableInner {
     by_id: RefCell<HashMap<SubId, Subscription>>,
-    columns: RefCell<IndexSet<TreeViewColumn, FxBuildHasher>>,
     ctx: BSCtx,
     descriptor: resolver_client::Table,
     destroyed: Cell<bool>,
@@ -362,7 +361,6 @@ impl RaeifiedTable {
             on_activate,
             on_edit,
             column_widths,
-            columns: RefCell::new(IndexSet::default()),
             by_id: RefCell::new(HashMap::new()),
             subscribed: RefCell::new(HashMap::new()),
             selected: RefCell::new(HashMap::default()),
@@ -372,6 +370,11 @@ impl RaeifiedTable {
             destroyed: Cell::new(false),
         }));
         t.view().connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
+        if t.0.column_widths.borrow().len() > 1000 {
+            let cols =
+                t.0.descriptor.cols.iter().map(|c| c.0.clone()).collect::<FxHashSet<_>>();
+            t.0.column_widths.borrow_mut().retain(|name, _| cols.contains(name.as_str()));
+        }
         t.view().append_column(&{
             let column = TreeViewColumn::new();
             let cell = CellRendererText::new();
@@ -434,7 +437,6 @@ impl RaeifiedTable {
             }));
             t.view().append_column(&column);
         }
-        t.0.columns.borrow_mut().extend(t.view().columns());
         t.store().connect_sort_column_changed(
             clone!(@weak t => move |_| t.handle_sort_column_changed()),
         );
