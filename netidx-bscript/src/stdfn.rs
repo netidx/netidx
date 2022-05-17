@@ -569,6 +569,50 @@ impl CachedCurEval for ReplaceEv {
 
 pub type Replace = CachedCur<ReplaceEv>;
 
+pub struct DirnameEv;
+
+impl CachedCurEval for DirnameEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::String(path))] => {
+                match Path::dirname(path) {
+                    None => Some(Value::Null),
+                    Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
+                }
+            }
+            _ => Some(Value::Error(Chars::from("dirname expected 1 argument"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "dirname"
+    }
+}
+
+pub type Dirname = CachedCur<DirnameEv>;
+
+pub struct BasenameEv;
+
+impl CachedCurEval for BasenameEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [Some(Value::String(path))] => {
+                match Path::basename(path) {
+                    None => Some(Value::Null),
+                    Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
+                }
+            }
+            _ => Some(Value::Error(Chars::from("basename expected 1 argument"))),
+        }
+    }
+
+    fn name() -> &'static str {
+        "basename"
+    }
+}
+
+pub type Basename = CachedCur<BasenameEv>;
+
 pub struct CmpEv;
 
 impl CachedCurEval for CmpEv {

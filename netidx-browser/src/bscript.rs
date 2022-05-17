@@ -3,7 +3,7 @@ use glib::thread_guard::ThreadGuard;
 use netidx::{chars::Chars, path::Path, resolver_client, subscriber::Value};
 use netidx_bscript::vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register};
 use parking_lot::Mutex;
-use std::{cell::RefCell, mem, result::Result, sync::Arc};
+use std::{cell::RefCell, mem, rc::Rc, result::Result, sync::Arc};
 
 pub(crate) enum LocalEvent {
     Event(Value),
@@ -57,6 +57,43 @@ impl Apply<WidgetCtx, LocalEvent> for Event {
 impl Event {
     fn err() -> Option<Value> {
         Some(Value::Error(Chars::from("event(): expected 0 arguments")))
+    }
+}
+
+pub(crate) struct CurrentPath(Mutex<ThreadGuard<Rc<RefCell<ViewLoc>>>>);
+
+impl Register<WidgetCtx, LocalEvent> for CurrentPath {
+    fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
+        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, _, _, _| {
+            Box::new(CurrentPath(Mutex::new(ThreadGuard::new(
+                ctx.user.current_loc.clone(),
+            ))))
+        });
+        ctx.functions.insert("current_path".into(), f);
+        ctx.user.register_fn("current_path".into(), Path::root());
+    }
+}
+
+impl Apply<WidgetCtx, LocalEvent> for CurrentPath {
+    fn current(&self) -> Option<Value> {
+        let inner = self.0.lock();
+        let inner = inner.get_ref();
+        let inner = inner.borrow();
+        match &*inner {
+            ViewLoc::File(_) => None,
+            ViewLoc::Netidx(path) => {
+                Some(Value::from(Chars::from(String::from(&**path))))
+            }
+        }
+    }
+
+    fn update(
+        &mut self,
+        _ctx: &mut ExecCtx<WidgetCtx, LocalEvent>,
+        _from: &mut [Node<WidgetCtx, LocalEvent>],
+        _event: &vm::Event<LocalEvent>,
+    ) -> Option<Value> {
+        None
     }
 }
 
@@ -277,6 +314,7 @@ impl Navigate {
 pub(crate) fn create_ctx(ctx: WidgetCtx) -> ExecCtx<WidgetCtx, LocalEvent> {
     let mut t = ExecCtx::new(ctx);
     Event::register(&mut t);
+    CurrentPath::register(&mut t);
     Confirm::register(&mut t);
     Navigate::register(&mut t);
     t

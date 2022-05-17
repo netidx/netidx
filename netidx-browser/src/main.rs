@@ -166,6 +166,7 @@ struct WidgetCtx {
     raw_view: Arc<AtomicBool>,
     window: gtk::ApplicationWindow,
     new_window_loc: Rc<RefCell<ViewLoc>>,
+    current_loc: Rc<RefCell<ViewLoc>>,
     view_saved: Cell<bool>,
     fns: Trie<String, ()>,
     vars: Trie<String, Trie<String, ()>>,
@@ -791,8 +792,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         }
     }
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
-    let current_loc: Rc<RefCell<ViewLoc>> =
-        Rc::new(RefCell::new(ViewLoc::Netidx(Path::from("/"))));
+    let current_loc: Rc<RefCell<ViewLoc>> = ctx.borrow().user.current_loc.clone();
     let current_spec: Rc<RefCell<view::View>> =
         Rc::new(RefCell::new(default_view(Path::from("/"))));
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
@@ -1119,6 +1119,7 @@ fn main() {
                     raw_view,
                     window: window.clone(),
                     new_window_loc: new_window_loc.clone(),
+                    current_loc: Rc::new(RefCell::new(default_loc.clone())),
                     view_saved: Cell::new(true),
                     fns: Trie::new(),
                     vars: Trie::new(),
