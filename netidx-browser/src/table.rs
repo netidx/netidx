@@ -35,6 +35,7 @@ use std::{
     collections::{HashMap, HashSet},
     rc::{Rc, Weak},
     result::{self, Result},
+    sync::Arc,
 };
 
 struct Subscription {
@@ -1109,6 +1110,9 @@ impl Table {
                                 self.selected_path.clone(),
                             );
                             table.update_subscriptions();
+                            let v = Value::Array(Arc::from([]));
+                            let ev = vm::Event::User(LocalEvent::Event(v));
+                            self.on_select.borrow_mut().update(ctx, &ev);
                             *state = TableState::Raeified(table);
                         }
                     }
