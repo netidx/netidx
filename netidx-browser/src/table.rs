@@ -52,6 +52,7 @@ struct RaeifiedTableInner {
     on_activate: Rc<RefCell<BSNode>>,
     on_edit: Rc<RefCell<BSNode>>,
     on_select: Rc<RefCell<BSNode>>,
+    column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
     path: Path,
     root: ScrolledWindow,
     selected_path: Label,
@@ -213,6 +214,7 @@ pub(super) struct Table {
     default_sort_column: RefCell<Result<SortSpec, String>>,
     column_filter_expr: BSNode,
     column_filter: RefCell<Result<Filter, String>>,
+    column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
     row_filter_expr: BSNode,
     row_filter: RefCell<Result<Filter, String>>,
     column_editable_expr: BSNode,
@@ -274,6 +276,7 @@ impl RaeifiedTable {
         path: Path,
         default_sort_column: Result<SortSpec, String>,
         column_filter: Result<Filter, String>,
+        column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
         row_filter: Result<Filter, String>,
         column_editable: Result<Filter, String>,
         on_select: Rc<RefCell<BSNode>>,
@@ -358,6 +361,7 @@ impl RaeifiedTable {
             on_select,
             on_activate,
             on_edit,
+            column_widths,
             columns: RefCell::new(IndexSet::default()),
             by_id: RefCell::new(HashMap::new()),
             subscribed: RefCell::new(HashMap::new()),
@@ -377,6 +381,13 @@ impl RaeifiedTable {
             column.set_sort_column_id(0);
             column.set_sizing(TreeViewColumnSizing::Fixed);
             column.set_resizable(true);
+            let column_widths = t.0.column_widths.clone();
+            if let Some(w) = column_widths.borrow().get("name") {
+                column.set_fixed_width(*w);
+            }
+            column.connect_width_notify(clone!(@strong column_widths => move |c| {
+                *column_widths.borrow_mut().entry("name".into()).or_insert(1) = c.width();
+            }));
             column
         });
         for col in 0..ncols {
@@ -412,6 +423,15 @@ impl RaeifiedTable {
             column.set_sort_column_id(id);
             column.set_sizing(TreeViewColumnSizing::Fixed);
             column.set_resizable(true);
+            let column_widths = t.0.column_widths.clone();
+            if let Some(w) = column_widths.borrow().get(&*name) {
+                column.set_fixed_width(*w);
+            }
+            column.connect_width_notify(clone!(
+                @strong column_widths, @strong name => move |c| {
+                    let mut saved = column_widths.borrow_mut();
+                    *saved.entry((&*name).into()).or_insert(1) = c.width();
+            }));
             t.view().append_column(&column);
         }
         t.0.columns.borrow_mut().extend(t.view().columns());
@@ -975,6 +995,7 @@ impl Table {
             default_sort_column,
             column_filter_expr,
             column_filter,
+            column_widths: Rc::new(RefCell::new(HashMap::default())),
             row_filter_expr,
             row_filter,
             column_editable_expr,
@@ -1076,6 +1097,7 @@ impl Table {
                                 path.clone(),
                                 self.default_sort_column.borrow().clone(),
                                 self.column_filter.borrow().clone(),
+                                self.column_widths.clone(),
                                 self.row_filter.borrow().clone(),
                                 self.column_editable.borrow().clone(),
                                 self.on_select.clone(),
