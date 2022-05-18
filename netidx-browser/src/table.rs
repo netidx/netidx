@@ -202,7 +202,7 @@ enum TableState {
     Empty,
     Resolving(Path),
     Raeified(RaeifiedTable),
-    Refresh(RaeifiedTable),
+    Refresh { descriptor: Option<resolver_client::Table>, path: Option<Path> },
 }
 
 pub(super) struct Table {
@@ -1015,10 +1015,22 @@ impl Table {
         let path = &*self.path.borrow();
         match state {
             TableState::Resolving(rpath) if path.as_ref() == Some(rpath) => (),
-            TableState::Refresh(table) if Some(&table.0.path) == path.as_ref() => (),
+            TableState::Refresh { path: ref p, .. } if p.as_ref() == path.as_ref() => (),
+            TableState::Raeified(table) if Some(&table.0.path) == path.as_ref() => {
+                let descriptor = Some(table.0.original_descriptor.clone());
+                let path = Some(path.clone());
+                match path {
+                    None => {
+                        *state = TableState::Empty;
+                    }
+                    Some(path) => {
+                        *state = TableState::Refresh { descriptor, path };
+                    }
+                }
+            }
             TableState::Resolving(_)
             | TableState::Raeified(_)
-            | TableState::Refresh(_)
+            | TableState::Refresh { .. }
             | TableState::Empty => match path {
                 None => {
                     *state = TableState::Empty;
@@ -1119,18 +1131,21 @@ impl Table {
         self.on_select.borrow_mut().update(ctx, event);
         self.on_edit.borrow_mut().update(ctx, event);
         match &*self.state.borrow() {
-            TableState::Empty | TableState::Resolving(_) => (),
-            TableState::Raeified(table) | TableState::Refresh(table) => {
-                table.update(ctx, waits, event)
+            TableState::Empty | TableState::Resolving(_) | TableState::Refresh { .. } => {
+                ()
             }
+            TableState::Raeified(table) => table.update(ctx, waits, event),
         }
         let state = &mut *self.state.borrow_mut();
         match state {
             TableState::Empty | TableState::Raeified(_) => (),
-            TableState::Refresh(table) => {
-                let path = table.0.path.clone();
-                let descriptor = table.0.original_descriptor.clone();
-                self.raeify(ctx, state, path, descriptor)
+            TableState::Refresh { descriptor, path } => {
+                match (path.take(), descriptor.take()) {
+                    (Some(path), Some(descriptor)) => {
+                        self.raeify(ctx, state, path, descriptor)
+                    }
+                    (_, _) => unreachable!(),
+                }
             }
             TableState::Resolving(rpath) => match event {
                 vm::Event::Netidx(_, _)
