@@ -47,6 +47,7 @@ struct Subscription {
 struct RaeifiedTableInner {
     by_id: RefCell<HashMap<SubId, Subscription>>,
     ctx: BSCtx,
+    original_descriptor: resolver_client::Table,
     descriptor: resolver_client::Table,
     destroyed: Cell<bool>,
     on_activate: Rc<RefCell<BSNode>>,
@@ -201,6 +202,7 @@ enum TableState {
     Empty,
     Resolving(Path),
     Raeified(RaeifiedTable),
+    Refresh(RaeifiedTable),
 }
 
 pub(super) struct Table {
@@ -282,9 +284,10 @@ impl RaeifiedTable {
         on_select: Rc<RefCell<BSNode>>,
         on_activate: Rc<RefCell<BSNode>>,
         on_edit: Rc<RefCell<BSNode>>,
-        mut descriptor: resolver_client::Table,
+        original_descriptor: resolver_client::Table,
         selected_path: Label,
     ) -> RaeifiedTable {
+        let mut descriptor = original_descriptor.clone();
         let mut filter_errors = Vec::new();
         let row_filter = row_filter.unwrap_or_else(|e| {
             filter_errors.push(format!("invalid row filter: {}", e));
@@ -355,6 +358,7 @@ impl RaeifiedTable {
             view,
             selected_path,
             store,
+            original_descriptor,
             descriptor,
             vector_mode,
             style,
@@ -1011,8 +1015,10 @@ impl Table {
         let path = &*self.path.borrow();
         match state {
             TableState::Resolving(rpath) if path.as_ref() == Some(rpath) => (),
+            TableState::Refresh(table) if Some(&table.0.path) == path.as_ref() => (),
             TableState::Resolving(_)
-            | TableState::Raeified { .. }
+            | TableState::Raeified(_)
+            | TableState::Refresh(_)
             | TableState::Empty => match path {
                 None => {
                     *state = TableState::Empty;
@@ -1030,6 +1036,39 @@ impl Table {
 
     pub(super) fn root(&self) -> &GtkWidget {
         self.root.upcast_ref()
+    }
+
+    fn clear_selection(&self, ctx: BSCtxRef) {
+        let v = Value::Array(Arc::from([]));
+        let ev = vm::Event::User(LocalEvent::Event(v));
+        self.on_select.borrow_mut().update(ctx, &ev);
+    }
+
+    fn raeify(
+        &self,
+        ctx: BSCtxRef,
+        state: &mut TableState,
+        path: Path,
+        descriptor: resolver_client::Table,
+    ) {
+        let table = RaeifiedTable::new(
+            self.ctx.clone(),
+            self.root.clone(),
+            path,
+            self.default_sort_column.borrow().clone(),
+            self.column_filter.borrow().clone(),
+            self.column_widths.clone(),
+            self.row_filter.borrow().clone(),
+            self.column_editable.borrow().clone(),
+            self.on_select.clone(),
+            self.on_activate.clone(),
+            self.on_edit.clone(),
+            descriptor.clone(),
+            self.selected_path.clone(),
+        );
+        table.update_subscriptions();
+        self.clear_selection(ctx);
+        *state = TableState::Raeified(table);
     }
 
     pub(super) fn update(
@@ -1081,43 +1120,29 @@ impl Table {
         self.on_edit.borrow_mut().update(ctx, event);
         match &*self.state.borrow() {
             TableState::Empty | TableState::Resolving(_) => (),
-            TableState::Raeified(table) => table.update(ctx, waits, event),
+            TableState::Raeified(table) | TableState::Refresh(table) => {
+                table.update(ctx, waits, event)
+            }
         }
-        match event {
-            vm::Event::Netidx(_, _)
-            | vm::Event::Rpc(_, _)
-            | vm::Event::Variable(_, _, _)
-            | vm::Event::User(LocalEvent::Event(_)) => (),
-            vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {
-                let state = &mut *self.state.borrow_mut();
-                match state {
-                    TableState::Empty | TableState::Raeified { .. } => (),
-                    TableState::Resolving(rpath) => {
-                        if path == rpath {
-                            let table = RaeifiedTable::new(
-                                self.ctx.clone(),
-                                self.root.clone(),
-                                path.clone(),
-                                self.default_sort_column.borrow().clone(),
-                                self.column_filter.borrow().clone(),
-                                self.column_widths.clone(),
-                                self.row_filter.borrow().clone(),
-                                self.column_editable.borrow().clone(),
-                                self.on_select.clone(),
-                                self.on_activate.clone(),
-                                self.on_edit.clone(),
-                                descriptor.clone(),
-                                self.selected_path.clone(),
-                            );
-                            table.update_subscriptions();
-                            let v = Value::Array(Arc::from([]));
-                            let ev = vm::Event::User(LocalEvent::Event(v));
-                            self.on_select.borrow_mut().update(ctx, &ev);
-                            *state = TableState::Raeified(table);
-                        }
+        let state = &mut *self.state.borrow_mut();
+        match state {
+            TableState::Empty | TableState::Raeified(_) => (),
+            TableState::Refresh(table) => {
+                let path = table.0.path.clone();
+                let descriptor = table.0.original_descriptor.clone();
+                self.raeify(ctx, state, path, descriptor)
+            }
+            TableState::Resolving(rpath) => match event {
+                vm::Event::Netidx(_, _)
+                | vm::Event::Rpc(_, _)
+                | vm::Event::Variable(_, _, _)
+                | vm::Event::User(LocalEvent::Event(_)) => (),
+                vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {
+                    if path == rpath {
+                        self.raeify(ctx, state, path.clone(), descriptor.clone())
                     }
                 }
-            }
+            },
         }
     }
 }
