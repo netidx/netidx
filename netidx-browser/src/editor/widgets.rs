@@ -102,16 +102,19 @@ fn expr(
 
 #[derive(Clone)]
 pub(super) struct Table {
-    root: TwoColGrid,
+    root: gtk::Box,
     spec: Rc<RefCell<view::Table>>,
     _dbg_path: DbgExpr,
-    _dbg_default_sort_column: DbgExpr,
+    _dbg_sort_mode: DbgExpr,
     _dbg_column_filter: DbgExpr,
     _dbg_row_filter: DbgExpr,
     _dbg_column_editable: DbgExpr,
+    _dbg_multi_select: DbgExpr,
+    _dbg_show_row_name: DbgExpr,
     _dbg_on_activate: DbgExpr,
     _dbg_on_select: DbgExpr,
     _dbg_on_edit: DbgExpr,
+    _dbg_on_header_click: DbgExpr,
 }
 
 impl Table {
@@ -122,7 +125,12 @@ impl Table {
         spec: view::Table,
     ) -> Self {
         let spec = Rc::new(RefCell::new(spec));
-        let mut root = TwoColGrid::new();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let config_exp = gtk::Expander::new(Some("Config"));
+        let mut config = TwoColGrid::new();
+        util::expander_touch_enable(&config_exp);
+        root.pack_start(&config_exp, false, false, 0);
+        config_exp.add(config.root());
         let (l, e, _dbg_path) = expr(
             ctx,
             "Path:",
@@ -133,18 +141,18 @@ impl Table {
                 on_change()
             }),
         );
-        root.add((l, e));
-        let (l, e, _dbg_default_sort_column) = expr(
+        config.add((l, e));
+        let (l, e, _dbg_sort_mode) = expr(
             ctx,
-            "Default Sort Column:",
+            "Sort Mode:",
             scope.clone(),
-            &spec.borrow().default_sort_column,
+            &spec.borrow().sort_mode,
             clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().default_sort_column = e;
+                spec.borrow_mut().sort_mode = e;
                 on_change();
             }),
         );
-        root.add((l, e));
+        config.add((l, e));
         let (l, e, _dbg_column_filter) = expr(
             ctx,
             "Column Filter:",
@@ -155,7 +163,7 @@ impl Table {
                 on_change()
             }),
         );
-        root.add((l, e));
+        config.add((l, e));
         let (l, e, _dbg_row_filter) = expr(
             ctx,
             "Row Filter:",
@@ -166,7 +174,7 @@ impl Table {
                 on_change()
             }),
         );
-        root.add((l, e));
+        config.add((l, e));
         let (l, e, _dbg_column_editable) = expr(
             ctx,
             "Column Editable:",
@@ -177,7 +185,34 @@ impl Table {
                 on_change()
             }),
         );
-        root.add((l, e));
+        config.add((l, e));
+        let (l, e, _dbg_multi_select) = expr(
+            ctx,
+            "Mutli Select:",
+            scope.clone(),
+            &spec.borrow().multi_select,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().multi_select = e;
+                on_change()
+            }),
+        );
+        config.add((l, e));
+        let (l, e, _dbg_show_row_name) = expr(
+            ctx,
+            "Show Row Name:",
+            scope.clone(),
+            &spec.borrow().show_row_name,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().show_row_name = e;
+                on_change()
+            }),
+        );
+        config.add((l, e));
+        let event_exp = gtk::Expander::new(Some("Events"));
+        let mut event = TwoColGrid::new();
+        util::expander_touch_enable(&event_exp);
+        root.pack_start(&event_exp, false, false, 0);
+        event_exp.add(event.root());
         let (l, e, _dbg_on_activate) = expr(
             ctx,
             "On Activate:",
@@ -188,7 +223,7 @@ impl Table {
                 on_change()
             }),
         );
-        root.add((l, e));
+        event.add((l, e));
         let (l, e, _dbg_on_select) = expr(
             ctx,
             "On Select:",
@@ -199,7 +234,7 @@ impl Table {
                 on_change()
             }),
         );
-        root.add((l, e));
+        event.add((l, e));
         let (l, e, _dbg_on_edit) = expr(
             ctx,
             "On Edit:",
@@ -210,18 +245,32 @@ impl Table {
                 on_change()
             }),
         );
-        root.add((l, e));
+        event.add((l, e));
+        let (l, e, _dbg_on_header_click) = expr(
+            ctx,
+            "On Header Click:",
+            scope.clone(),
+            &spec.borrow().on_header_click,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().on_header_click = e;
+                on_change()
+            }),
+        );
+        event.add((l, e));
         Table {
             root,
             spec,
             _dbg_path,
-            _dbg_default_sort_column,
+            _dbg_sort_mode,
             _dbg_column_filter,
             _dbg_row_filter,
             _dbg_column_editable,
+            _dbg_multi_select,
+            _dbg_show_row_name,
             _dbg_on_activate,
             _dbg_on_select,
             _dbg_on_edit,
+            _dbg_on_header_click,
         }
     }
 
@@ -230,7 +279,7 @@ impl Table {
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.root().upcast_ref()
+        self.root.upcast_ref()
     }
 }
 

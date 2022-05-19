@@ -1,0 +1,16 @@
+* test publisher/subscriber robust to resolver failure
+observed demoscene not reconnecting when resolver was down for a while
+and then brought back up)
+* publisher periodic rekeying
+* Make a final decision on protocol backwards compat
+* at least two more proof of concept gui apps
+** triangle db
+I actually need this pretty bad, as the old system isn't so great
+** gconf/dconf/dbus adapter
+This could really be useful to hook into existing desktop
+infrastructure, and could provide a way to use the browser to make
+dbus centric apps. The translation should be an enlightening exercize,
+and may be a good place to steal ideas from dbus/gconf/dconf.
+** process/hardware/system monitor
+Fun project that I would personally use. Could even be a compelling
+solution for managing/monitoring a lot of servers or a cluster.

@@ -24,33 +24,91 @@ pub struct Table {
     /// display. If the expr updates, the table will display the
     /// updated path.
     pub path: Expr,
-    /// (null | column | [column, (ascending|descending)]) null means
-    /// no default sort. column alone means sort by that column
-    /// descending. Otherwise, as specified.
-    pub default_sort_column: Expr,
-    /// (null | true | false | [mode, (col | [cols])])
-    /// modes
-    /// include: col/cols is a list of columns to show
-    /// exclude: col/cols is a list of columns to hide
-    /// include_match: col/cols is a list of regex patterns of columns to show
-    /// exclude_match: col/cols is a list of regex patterns of columns to hide
+    /// (null | "disabled" | <column> | spec)
+    /// spec: [<column>, ("ascending" | "descending")]
+    /// - null: no default sort. Sorting is processed within the
+    /// browser and is under the control of the user. Click events will
+    /// also be generated when the user clicks on the header button,
+    /// see on_header_click.
+    /// - "disabled": sorting within the browser is disabled, but
+    /// click events will still be generated when the user clicks on
+    /// the header buttons. These events could be used to trigger
+    /// publisher side sorting, or any other desired action. See,
+    /// on_header_click.
+    /// - <column>: by default sort by <column> in descending
+    /// order. Sorting is processed within the browser and is under
+    /// the user's control. Click events will also be generated when
+    /// the user clicks on the header button, see on_header_click.
+    /// - spec: Same as column, except the sort direction is
+    /// explicitly specified.
+    pub sort_mode: Expr,
+    /// (null | true | false | list | range)
+    /// list: [list-mode, (<col> | [<col>, ...])]
+    /// range: [range-mode, ([(<n> | "start"), (<m> | "end")])]
+    /// list-mode: ("include" | "exclude" | "include_match" | "exclude_match")
+    /// range-mode: ("keep" | "drop")
+    /// - null: all columns are included
+    /// - true: all columns are included
+    /// - false: no columns are included
+    /// - list: Specify a list of columns or column regexes to include or exclude.
+    ///     - "include": col/cols is a list of columns to show. The
+    ///     order of the columns in the list controls the order of the
+    ///     columns that are displayed.
+    ///     - "exclude": col/cols is a list of columns to hide
+    ///     - "include_match": col/cols is a list of regex patterns of columns to show
+    ///     - "exclude_match": col/cols is a list of regex patterns of columns to hide
+    /// - range: Specify columns to keep or drop by numeric ranges
+    ///     - "keep": keep the columns specified by the range, drop
+    ///     any others. If the range specifies more columns than exist
+    ///     all columns will be kept.
+    ///     - "drop": drop the columns specified by the range, keeping
+    ///     the rest. If the range specifies more columns than exist
+    ///     all the columns will be dropped.
     pub column_filter: Expr,
-    /// (null | true | false | [mode, (col | [cols])])
-    /// null/true: show all rows
-    /// otherwise, the same format as the column filter
+    /// see column_filter. This is exactly the same, but applies to
+    /// the rows instead of the columns.
     pub row_filter: Expr,
-    /// (null | true | false | [mode, (col | [cols])])
+    /// Exactly the same format as the column_filter and the row_filter.
     /// null: not editable
     /// true: every column is editable
-    /// otherwise exactly the same format as the column/row filter
+    /// otherwise exactly the same semantics as the column/row filter
     pub column_editable: Expr,
+    /// (null | widths)
+    /// widths: [<w>, ...]
+    /// - null: initial column widths are automatically determined
+    /// - widths: The list of floating point values specify the
+    /// percentage of the available space the corresponding column
+    /// will have. If the values do not add up to 1, add up to more
+    /// than 1, don't specify enough columns, or specify too many
+    /// columns then the entire directive will be ignored, the columns
+    /// will behave as if null had been specified, and a warning will
+    /// be prited.
+    pub column_widths: Expr,
+    /// (true | false)
+    /// - true: columns may be resized by the user
+    /// - false: columns may not be resized by the user
+    pub column_resizable: Expr,
+    /// (true | false)
+    /// true: multi selection is enabled, multiple rows can be
+    /// selected, on_select will produce an array of selected columns
+    /// false: only a single cell can be selected at once, on_select
+    /// will produce a single string
+    pub multi_select: Expr,
+    /// (true | false)
+    /// true: show the row name column
+    /// false: do not show the row name column
+    pub show_row_name: Expr,
     /// event() will yield the selected path when the user selects a
     /// cell
     pub on_select: Expr,
-    /// event() will yield the row path when the user activates a row
+    /// event() will yield the row path when the user activates a row,
+    /// see multi_select
     pub on_activate: Expr,
     /// event() will yield the new value when the user edits a cell
     pub on_edit: Expr,
+    /// event() will yield the name of the column header that was
+    /// clicked
+    pub on_header_click: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
