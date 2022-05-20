@@ -117,7 +117,11 @@ impl PartialEq for Filter {
             | (Filter::Exclude(_), _)
             | (_, Filter::Exclude(_))
             | (Filter::IncludeMatch(_, _), _)
-            | (_, Filter::IncludeMatch(_, _)) => false,
+            | (_, Filter::IncludeMatch(_, _))
+            | (Filter::IncludeRange(_, _), _)
+            | (_, Filter::IncludeRange(_, _))
+            | (Filter::ExcludeRange(_, _), _)
+            | (_, Filter::ExcludeRange(_, _)) => false,
         }
     }
 }
@@ -155,11 +159,11 @@ impl Filter {
                             unreachable!()
                         }
                     }
-                    "keep" | "drop" => match a[1] {
+                    "keep" | "drop" => match &a[1] {
                         Value::Array(a) if a.len() == 2 => {
                             let start = match &a[0] {
                                 Value::String(v) if &**v == "start" => None,
-                                v => match v.cast_to::<u64>() {
+                                v => match v.clone().cast_to::<u64>() {
                                     Err(_) => {
                                         return Err(
                                             "expected start or a positive integer".into(),
@@ -170,7 +174,7 @@ impl Filter {
                             };
                             let end = match &a[1] {
                                 Value::String(v) if &**v == "end" => None,
-                                v => match v.cast_to::<u64>() {
+                                v => match v.clone().cast_to::<u64>() {
                                     Err(_) => {
                                         return Err(
                                             "expected end or a positive integer".into()
@@ -1141,7 +1145,7 @@ impl Table {
         )));
         let on_edit = Rc::new(RefCell::new(BSNode::compile(
             &mut ctx.borrow_mut(),
-            scope,
+            scope.clone(),
             spec.on_edit,
         )));
         let on_header_click = Rc::new(RefCell::new(BSNode::compile(
@@ -1236,7 +1240,7 @@ impl Table {
             self.saved_column_widths.clone(),
             self.sort_mode.borrow().clone(),
             self.column_filter.borrow().clone(),
-            self.show_name_column.get(),
+            self.show_row_name.get(),
             self.row_filter.borrow().clone(),
             self.column_editable.borrow().clone(),
             self.on_select.clone(),
@@ -1267,10 +1271,10 @@ impl Table {
                 self.refresh(ctx);
             }
         }
-        if let Some(col) = self.default_sort_column_expr.update(ctx, event) {
-            let new_col = SortSpec::new(col);
-            if &*self.default_sort_column.borrow() != &new_col {
-                *self.default_sort_column.borrow_mut() = new_col;
+        if let Some(col) = self.sort_mode_expr.update(ctx, event) {
+            let new = SortSpec::new(col);
+            if &*self.sort_mode.borrow() != &new {
+                *self.sort_mode.borrow_mut() = new;
                 self.refresh(ctx);
             }
         }
@@ -1295,9 +1299,30 @@ impl Table {
                 self.refresh(ctx);
             }
         }
+        if let Some(v) = self.multi_select_expr.update(ctx, event) {
+            let new = match v {
+                Value::True => true,
+                _ => false,
+            };
+            if self.multi_select.get() != new {
+                self.multi_select.set(new);
+                self.refresh(ctx);
+            }
+        }
+        if let Some(v) = self.show_row_name_expr.update(ctx, event) {
+            let new = match v {
+                Value::False => false,
+                _ => true,
+            };
+            if self.show_row_name.get() != new {
+                self.show_row_name.set(new);
+                self.refresh(ctx);
+            }
+        }
         self.on_activate.borrow_mut().update(ctx, event);
         self.on_select.borrow_mut().update(ctx, event);
         self.on_edit.borrow_mut().update(ctx, event);
+        self.on_header_click.borrow_mut().update(ctx, event);
         match &*self.state.borrow() {
             TableState::Empty | TableState::Resolving(_) | TableState::Refresh { .. } => {
                 ()
