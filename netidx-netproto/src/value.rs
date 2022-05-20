@@ -4,12 +4,16 @@ use chrono::{naive::NaiveDateTime, prelude::*};
 use netidx_core::{
     chars::Chars,
     pack::{self, Pack, PackError},
+    path::Path,
     utils,
 };
 use smallvec::SmallVec;
 use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
-    convert, error, fmt, iter, mem,
+    collections::{HashMap, HashSet},
+    convert, fmt,
+    hash::{BuildHasher, Hash},
+    iter, mem,
     num::Wrapping,
     ops::{Add, Div, Mul, Not, Sub},
     panic::{catch_unwind, AssertUnwindSafe},
@@ -1254,17 +1258,6 @@ impl Value {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct CantCast;
-
-impl fmt::Display for CantCast {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "could not cast to the requested type")
-    }
-}
-
-impl error::Error for CantCast {}
-
 impl<T: Into<Value> + Copy> convert::From<&T> for Value {
     fn from(v: &T) -> Value {
         (*v).into()
@@ -1572,6 +1565,25 @@ impl convert::From<Chars> for Value {
     }
 }
 
+impl FromValue for Path {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast_to::<String>().map(Path::from)
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::String(c) => Some(Path::from(String::from(&*c))),
+            _ => None,
+        }
+    }
+}
+
+impl convert::From<Path> for Value {
+    fn from(v: Path) -> Value {
+        Value::String(Chars::from(String::from(&*v)))
+    }
+}
+
 impl FromValue for String {
     fn from_value(v: Value) -> Res<Self> {
         v.cast_to::<Chars>().map(|c| c.into())
@@ -1789,5 +1801,60 @@ impl<T: convert::Into<Value>, U: convert::Into<Value>, V: convert::Into<Value>>
         let v2 = v.into();
         let elts = Arc::from([v0, v1, v2]);
         Value::Array(elts)
+    }
+}
+
+impl<K: FromValue + Eq + Hash, V: FromValue, S: BuildHasher + Default> FromValue
+    for HashMap<K, V, S>
+{
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Array(elts) => {
+                elts.iter().map(|v| v.clone().cast_to::<(K, V)>()).collect()
+            }
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(elts) => {
+                elts.iter().map(|v| v.clone().get_as::<(K, V)>()).collect()
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<K: convert::Into<Value>, V: convert::Into<Value>> convert::From<HashMap<K, V>>
+    for Value
+{
+    fn from(h: HashMap<K, V>) -> Value {
+        h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
+    }
+}
+
+impl<K: FromValue + Eq + Hash, S: BuildHasher + Default> FromValue for HashSet<K, S> {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Array(elts) => elts
+                .iter()
+                .map(|v| v.clone().cast_to::<K>())
+                .collect::<Res<HashSet<K, S>>>(),
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(elts) => elts.iter().map(|v| v.clone().get_as::<K>()).collect(),
+            _ => None,
+        }
+    }
+}
+
+impl<K: convert::Into<Value>> convert::From<HashSet<K>> for Value {
+    fn from(h: HashSet<K>) -> Value {
+        h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
     }
 }
