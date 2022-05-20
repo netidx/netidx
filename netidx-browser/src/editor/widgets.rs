@@ -109,6 +109,8 @@ pub(super) struct Table {
     _dbg_column_filter: DbgExpr,
     _dbg_row_filter: DbgExpr,
     _dbg_column_editable: DbgExpr,
+    _dbg_column_widths: DbgExpr,
+    _dbg_columns_resizable: DbgExpr,
     _dbg_multi_select: DbgExpr,
     _dbg_show_row_name: DbgExpr,
     _dbg_on_activate: DbgExpr,
@@ -182,6 +184,28 @@ impl Table {
             &spec.borrow().column_editable,
             clone!(@strong spec, @strong on_change => move |e| {
                 spec.borrow_mut().column_editable = e;
+                on_change()
+            }),
+        );
+        config.add((l, e));
+        let (l, e, _dbg_column_widths) = expr(
+            ctx,
+            "Column Widths:",
+            scope.clone(),
+            &spec.borrow().column_editable,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().column_widths = e;
+                on_change()
+            }),
+        );
+        config.add((l, e));
+        let (l, e, _dbg_columns_resizable) = expr(
+            ctx,
+            "Columns Resizable:",
+            scope.clone(),
+            &spec.borrow().columns_resizable,
+            clone!(@strong spec, @strong on_change => move |e| {
+                spec.borrow_mut().columns_resizable = e;
                 on_change()
             }),
         );
@@ -265,6 +289,8 @@ impl Table {
             _dbg_column_filter,
             _dbg_row_filter,
             _dbg_column_editable,
+            _dbg_column_widths,
+            _dbg_columns_resizable,
             _dbg_multi_select,
             _dbg_show_row_name,
             _dbg_on_activate,

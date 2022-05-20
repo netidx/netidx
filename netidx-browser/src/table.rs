@@ -44,38 +44,10 @@ struct Subscription {
     col: u32,
 }
 
-struct RaeifiedTableInner {
-    by_id: RefCell<HashMap<SubId, Subscription>>,
-    ctx: BSCtx,
-    original_descriptor: resolver_client::Table,
-    descriptor: resolver_client::Table,
-    destroyed: Cell<bool>,
-    on_activate: Rc<RefCell<BSNode>>,
-    on_edit: Rc<RefCell<BSNode>>,
-    on_select: Rc<RefCell<BSNode>>,
-    column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
-    path: Path,
-    root: ScrolledWindow,
-    selected_path: Label,
-    selected: RefCell<FxHashMap<String, FxHashSet<TreeViewColumn>>>,
-    sort_column: Cell<Option<u32>>,
-    sort_temp_disabled: Cell<bool>,
-    store: ListStore,
-    style: StyleContext,
-    subscribed: RefCell<HashMap<String, HashSet<u32>>>,
-    update: RefCell<IndexMap<SubId, Value, FxBuildHasher>>,
-    vector_mode: bool,
-    view: TreeView,
-}
-
-#[derive(Clone)]
-struct RaeifiedTable(Rc<RaeifiedTableInner>);
-
-struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SortSpec {
     None,
+    Disabled,
     Ascending(String),
     Descending(String),
 }
@@ -84,6 +56,7 @@ impl SortSpec {
     fn new(v: Value) -> Result<Self, String> {
         match v {
             Value::Null => Ok(SortSpec::None),
+            Value::False => Ok(SortSpec::Disabled),
             Value::String(col) => Ok(SortSpec::Descending(String::from(&*col))),
             Value::Array(a) if a.len() == 2 => {
                 let column =
@@ -99,7 +72,7 @@ impl SortSpec {
                     _ => Err("invalid mode".into()),
                 }
             }
-            _ => Err("expected null, col, or a pair of [column, mode]".into()),
+            _ => Err("expected null, false, col, or a pair of [column, mode]".into()),
         }
     }
 }
@@ -113,6 +86,8 @@ enum Filter {
     Exclude(IndexSet<String, FxBuildHasher>),
     IncludeMatch(IndexSet<String, FxBuildHasher>, RegexSet),
     ExcludeMatch(IndexSet<String, FxBuildHasher>, RegexSet),
+    IncludeRange(Option<usize>, Option<usize>),
+    ExcludeRange(Option<usize>, Option<usize>),
 }
 
 impl PartialEq for Filter {
@@ -125,6 +100,12 @@ impl PartialEq for Filter {
             (Filter::Exclude(s0), Filter::Exclude(s1)) => s0 == s1,
             (Filter::IncludeMatch(s0, _), Filter::IncludeMatch(s1, _)) => s0 == s1,
             (Filter::ExcludeMatch(s0, _), Filter::ExcludeMatch(s1, _)) => s0 == s1,
+            (Filter::IncludeRange(s0, e0), Filter::IncludeRange(s1, e1)) => {
+                s0 == s1 && e0 == e1
+            }
+            (Filter::ExcludeRange(s0, e0), Filter::ExcludeRange(s1, e1)) => {
+                s0 == s1 && e0 == e1
+            }
             (Filter::All, _)
             | (_, Filter::All)
             | (Filter::Auto, _)
@@ -150,31 +131,72 @@ impl Filter {
             Value::Array(a) if a.len() == 2 => {
                 let mode =
                     a[0].clone().cast_to::<Chars>().map_err(|e| format!("{}", e))?;
-                let i = a[1]
-                    .clone()
-                    .flatten()
-                    .map(|v| v.cast_to::<String>().map_err(|e| format!("{}", e)));
-                if &*mode == "include" {
-                    Ok(Filter::Include(i.collect::<Result<IndexSet<_, _>, _>>()?))
-                } else if &*mode == "exclude" {
-                    Ok(Filter::Exclude(i.collect::<Result<IndexSet<_, _>, _>>()?))
-                } else if &*mode == "include_match" {
-                    let set = i.collect::<Result<IndexSet<_, _>, _>>()?;
-                    let matcher = RegexSet::new(&set).map_err(|e| format!("{}", e))?;
-                    Ok(Filter::IncludeMatch(set, matcher))
-                } else if &*mode == "exclude_match" {
-                    let set = i.collect::<Result<IndexSet<_, _>, _>>()?;
-                    let matcher = RegexSet::new(&set).map_err(|e| format!("{}", e))?;
-                    Ok(Filter::ExcludeMatch(set, matcher))
-                } else {
-                    Err("invalid filter mode".into())
+                match &*mode {
+                    "include" | "exclude" | "include_match" | "exclude_match" => {
+                        let i = a[1]
+                            .clone()
+                            .flatten()
+                            .map(|v| v.cast_to::<String>().map_err(|e| format!("{}", e)));
+                        if &*mode == "include" {
+                            Ok(Filter::Include(i.collect::<Result<IndexSet<_, _>, _>>()?))
+                        } else if &*mode == "exclude" {
+                            Ok(Filter::Exclude(i.collect::<Result<IndexSet<_, _>, _>>()?))
+                        } else if &*mode == "include_match" {
+                            let set = i.collect::<Result<IndexSet<_, _>, _>>()?;
+                            let matcher =
+                                RegexSet::new(&set).map_err(|e| format!("{}", e))?;
+                            Ok(Filter::IncludeMatch(set, matcher))
+                        } else if &*mode == "exclude_match" {
+                            let set = i.collect::<Result<IndexSet<_, _>, _>>()?;
+                            let matcher =
+                                RegexSet::new(&set).map_err(|e| format!("{}", e))?;
+                            Ok(Filter::ExcludeMatch(set, matcher))
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                    "keep" | "drop" => match a[1] {
+                        Value::Array(a) if a.len() == 2 => {
+                            let start = match &a[0] {
+                                Value::String(v) if &**v == "start" => None,
+                                v => match v.cast_to::<u64>() {
+                                    Err(_) => {
+                                        return Err(
+                                            "expected start or a positive integer".into(),
+                                        )
+                                    }
+                                    Ok(i) => Some(i as usize),
+                                },
+                            };
+                            let end = match &a[1] {
+                                Value::String(v) if &**v == "end" => None,
+                                v => match v.cast_to::<u64>() {
+                                    Err(_) => {
+                                        return Err(
+                                            "expected end or a positive integer".into()
+                                        )
+                                    }
+                                    Ok(i) => Some(i as usize),
+                                },
+                            };
+                            if &*mode == "keep" {
+                                Ok(Filter::IncludeRange(start, end))
+                            } else if &*mode == "drop" {
+                                Ok(Filter::ExcludeRange(start, end))
+                            } else {
+                                unreachable!()
+                            }
+                        }
+                        _ => Err("keep/drop expect 2 arguments".into()),
+                    },
+                    _ => Err("invalid filter mode".into()),
                 }
             }
             _ => Err("expected null, true, false, or a pair".into()),
         }
     }
 
-    fn is_match(&self, s: &str) -> bool {
+    fn is_match(&self, i: usize, s: &str) -> bool {
         match self {
             Filter::All | Filter::Auto => true,
             Filter::None => false,
@@ -182,6 +204,16 @@ impl Filter {
             Filter::Exclude(set) => !set.contains(s),
             Filter::IncludeMatch(_, set) => set.is_match(s),
             Filter::ExcludeMatch(_, set) => !set.is_match(s),
+            Filter::IncludeRange(start, end) => {
+                let start_ok = start.map(|start| i >= start).unwrap_or(true);
+                let end_ok = end.map(|end| i < end).unwrap_or(true);
+                start_ok && end_ok
+            }
+            Filter::ExcludeRange(start, end) => {
+                let start_ok = start.map(|start| i < start).unwrap_or(false);
+                let end_ok = end.map(|end| i >= end).unwrap_or(false);
+                start_ok || end_ok
+            }
         }
     }
 
@@ -193,7 +225,9 @@ impl Filter {
             | Filter::None
             | Filter::Exclude(_)
             | Filter::IncludeMatch(_, _)
-            | Filter::ExcludeMatch(_, _) => None,
+            | Filter::ExcludeMatch(_, _)
+            | Filter::IncludeRange(_, _)
+            | Filter::ExcludeRange(_, _) => None,
         }
     }
 }
@@ -203,27 +237,6 @@ enum TableState {
     Resolving(Path),
     Raeified(RaeifiedTable),
     Refresh { descriptor: Option<resolver_client::Table>, path: Option<Path> },
-}
-
-pub(super) struct Table {
-    ctx: BSCtx,
-    state: RefCell<TableState>,
-    root: ScrolledWindow,
-    selected_path: Label,
-    path_expr: BSNode,
-    path: RefCell<Option<Path>>,
-    default_sort_column_expr: BSNode,
-    default_sort_column: RefCell<Result<SortSpec, String>>,
-    column_filter_expr: BSNode,
-    column_filter: RefCell<Result<Filter, String>>,
-    column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
-    row_filter_expr: BSNode,
-    row_filter: RefCell<Result<Filter, String>>,
-    column_editable_expr: BSNode,
-    column_editable: RefCell<Result<Filter, String>>,
-    on_select: Rc<RefCell<BSNode>>,
-    on_activate: Rc<RefCell<BSNode>>,
-    on_edit: Rc<RefCell<BSNode>>,
 }
 
 fn get_sort_column(store: &ListStore) -> Option<u32> {
@@ -271,66 +284,204 @@ impl clone::Upgrade for RaeifiedTableWeak {
     }
 }
 
+fn apply_filters(
+    original_descriptor: &resolver_client::Table,
+    filter_errors: &mut Vec<String>,
+    row_filter: Result<Filter, String>,
+    column_filter: Result<Filter, String>,
+) -> resolver_client::Table {
+    let mut descriptor = original_descriptor.clone();
+    let row_filter = row_filter.unwrap_or_else(|e| {
+        filter_errors.push(format!("invalid row filter: {}", e));
+        Filter::All
+    });
+    let column_filter = column_filter.unwrap_or_else(|e| {
+        filter_errors.push(format!("invalid column filter {}", e));
+        Filter::Auto
+    });
+    descriptor.cols.sort_by_key(|(p, _)| p.clone());
+    descriptor.rows.sort();
+    {
+        let mut i = 0;
+        descriptor.rows.retain(|row| match Path::basename(&row) {
+            None => true,
+            Some(row) => {
+                let res = row_filter.is_match(i, row);
+                i += 1;
+                res
+            }
+        });
+    }
+    match &column_filter {
+        Filter::Auto => {
+            let half = descriptor.rows.len() as f32 / 2.;
+            descriptor.cols.retain(|(_, i)| i.0 as f32 >= half)
+        }
+        filter => {
+            let mut i = 0;
+            descriptor.cols.retain(|col| match Path::basename(&col.0) {
+                None => true,
+                Some(col) => {
+                    let res = filter.is_match(i, &col);
+                    i += 1;
+                    res
+                }
+            })
+        }
+    }
+    descriptor.cols.sort_by(|v0, v1| {
+        let v0 = Path::basename(&v0.0);
+        let v1 = Path::basename(&v1.0);
+        let i0 = v0.and_then(|v| column_filter.sort_index(v));
+        let i1 = v1.and_then(|v| column_filter.sort_index(v));
+        match (i0, i1) {
+            (Some(i0), Some(i1)) => i0.cmp(&i1),
+            (_, _) => v0.cmp(&v1),
+        }
+    });
+    descriptor.rows.sort_by(|v0, v1| {
+        let v0 = Path::basename(&v0);
+        let v1 = Path::basename(&v1);
+        let i0 = v0.and_then(|v| column_filter.sort_index(v));
+        let i1 = v1.and_then(|v| column_filter.sort_index(v));
+        match (i0, i1) {
+            (Some(i0), Some(i1)) => i0.cmp(&i1),
+            (_, _) => v0.cmp(&v1),
+        }
+    });
+    descriptor
+}
+
+struct RaeifiedTableInner {
+    by_id: RefCell<HashMap<SubId, Subscription>>,
+    ctx: BSCtx,
+    original_descriptor: resolver_client::Table,
+    descriptor: resolver_client::Table,
+    destroyed: Cell<bool>,
+    on_activate: Rc<RefCell<BSNode>>,
+    on_edit: Rc<RefCell<BSNode>>,
+    on_select: Rc<RefCell<BSNode>>,
+    on_header_click: Rc<RefCell<BSNode>>,
+    column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
+    path: Path,
+    root: ScrolledWindow,
+    selected_path: Label,
+    selected: RefCell<FxHashMap<String, FxHashSet<TreeViewColumn>>>,
+    sort_column: Cell<Option<u32>>,
+    sort_temp_disabled: Cell<bool>,
+    store: ListStore,
+    style: StyleContext,
+    subscribed: RefCell<HashMap<String, HashSet<u32>>>,
+    update: RefCell<IndexMap<SubId, Value, FxBuildHasher>>,
+    vector_mode: bool,
+    view: TreeView,
+}
+
+#[derive(Clone)]
+struct RaeifiedTable(Rc<RaeifiedTableInner>);
+
+struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
+
 impl RaeifiedTable {
+    fn add_data_columns(
+        &self,
+        ncols: usize,
+        vector_mode: bool,
+        sorting_disabled: bool,
+        column_editable: &Filter,
+    ) {
+        let t = self;
+        for col in 0..ncols {
+            let id = (col + 1) as i32;
+            let column = TreeViewColumn::new();
+            let cell = CellRendererText::new();
+            let name = if vector_mode {
+                Path::from("value")
+            } else {
+                t.0.descriptor.cols[col].0.clone()
+            };
+            column.pack_start(&cell, true);
+            if column_editable.is_match(col, &*name) {
+                cell.set_editable(true);
+            }
+            let f = Box::new(clone!(@weak t =>
+                move |c: &TreeViewColumn,
+                      cr: &CellRenderer,
+                      _: &TreeModel,
+                      i: &TreeIter| t.render_cell(id, c, cr, i)));
+            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            cell.connect_edited(clone!(@weak t => move |_, _, v| {
+                let ev = LocalEvent::Event(Value::String(Chars::from(String::from(v))));
+                t.0.on_edit.borrow_mut().update(
+                    &mut t.0.ctx.borrow_mut(),
+                    &vm::Event::User(ev)
+                );
+            }));
+            column.connect_clicked(clone!(@weak t, @strong name => move |_| {
+                let v = Value::String(Chars::from(String::from(&*name)));
+                let ev = LocalEvent::Event(v);
+                t.0.on_header_click.borrow_mut().update(
+                    &mut t.0.ctx.borrow_mut(),
+                    &vm::Event::User(ev)
+                );
+            }));
+            column.set_title(&name);
+            if sorting_disabled {
+                column.set_clickable(true);
+            } else {
+                t.store()
+                    .set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
+                        compare_row(id, m, r0, r1)
+                    });
+                column.set_sort_column_id(id);
+            }
+            column.set_sizing(TreeViewColumnSizing::Fixed);
+            column.set_resizable(true);
+            let column_widths = t.0.column_widths.clone();
+            if let Some(w) = column_widths.borrow().get(&*name) {
+                column.set_fixed_width(*w);
+            }
+            column.connect_width_notify(clone!(
+                @strong column_widths, @strong name => move |c| {
+                    let mut saved = column_widths.borrow_mut();
+                    *saved.entry((&*name).into()).or_insert(1) = c.width();
+            }));
+            t.view().append_column(&column);
+        }
+    }
+
     fn new(
         ctx: BSCtx,
         root: ScrolledWindow,
         path: Path,
-        default_sort_column: Result<SortSpec, String>,
-        column_filter: Result<Filter, String>,
         column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
+        sort_mode: Result<SortSpec, String>,
+        column_filter: Result<Filter, String>,
+        show_name_column: bool,
         row_filter: Result<Filter, String>,
         column_editable: Result<Filter, String>,
         on_select: Rc<RefCell<BSNode>>,
         on_activate: Rc<RefCell<BSNode>>,
         on_edit: Rc<RefCell<BSNode>>,
+        on_header_click: Rc<RefCell<BSNode>>,
         original_descriptor: resolver_client::Table,
         selected_path: Label,
     ) -> RaeifiedTable {
-        let mut descriptor = original_descriptor.clone();
         let mut filter_errors = Vec::new();
-        let row_filter = row_filter.unwrap_or_else(|e| {
-            filter_errors.push(format!("invalid row filter: {}", e));
-            Filter::All
-        });
-        let column_filter = column_filter.unwrap_or_else(|e| {
-            filter_errors.push(format!("invalid column filter {}", e));
-            Filter::Auto
-        });
         let column_editable = column_editable.unwrap_or_else(|e| {
             filter_errors.push(format!("invalid column editable {}", e));
             Filter::None
         });
-        let default_sort_column = default_sort_column.unwrap_or_else(|e| {
-            filter_errors.push(format!("invalid default sort column {}", e));
+        let sort_mode = sort_mode.unwrap_or_else(|e| {
+            filter_errors.push(format!("invalid sort mode {}", e));
             SortSpec::None
         });
-        descriptor.cols.sort_by_key(|(p, _)| p.clone());
-        descriptor.rows.sort();
-        descriptor.rows.retain(|row| match Path::basename(&row) {
-            None => true,
-            Some(row) => row_filter.is_match(row),
-        });
-        match &column_filter {
-            Filter::Auto => {
-                let half = descriptor.rows.len() as f32 / 2.;
-                descriptor.cols.retain(|(_, i)| i.0 as f32 >= half)
-            }
-            filter => descriptor.cols.retain(|col| match Path::basename(&col.0) {
-                None => true,
-                Some(col) => filter.is_match(&col),
-            }),
-        }
-        descriptor.cols.sort_by(|v0, v1| {
-            let v0 = Path::basename(&v0.0);
-            let v1 = Path::basename(&v1.0);
-            let i0 = v0.and_then(|v| column_filter.sort_index(v));
-            let i1 = v1.and_then(|v| column_filter.sort_index(v));
-            match (i0, i1) {
-                (Some(i0), Some(i1)) => i0.cmp(&i1),
-                (_, _) => v0.cmp(&v1),
-            }
-        });
+        let descriptor = apply_filters(
+            &original_descriptor,
+            &mut filter_errors,
+            row_filter,
+            column_filter,
+        );
         let view = TreeView::new();
         root.add(&view);
         view.selection().set_mode(SelectionMode::None);
@@ -365,6 +516,7 @@ impl RaeifiedTable {
             on_select,
             on_activate,
             on_edit,
+            on_header_click,
             column_widths,
             by_id: RefCell::new(HashMap::new()),
             subscribed: RefCell::new(HashMap::new()),
@@ -380,68 +532,35 @@ impl RaeifiedTable {
                 t.0.descriptor.cols.iter().map(|c| c.0.clone()).collect::<FxHashSet<_>>();
             t.0.column_widths.borrow_mut().retain(|name, _| cols.contains(name.as_str()));
         }
-        t.view().append_column(&{
-            let column = TreeViewColumn::new();
-            let cell = CellRendererText::new();
-            column.pack_start(&cell, true);
-            column.set_title("name");
-            column.add_attribute(&cell, "text", 0);
-            column.set_sort_column_id(0);
-            column.set_sizing(TreeViewColumnSizing::Fixed);
-            column.set_resizable(true);
-            let column_widths = t.0.column_widths.clone();
-            if let Some(w) = column_widths.borrow().get("name") {
-                column.set_fixed_width(*w);
-            }
-            column.connect_width_notify(clone!(@strong column_widths => move |c| {
-                *column_widths.borrow_mut().entry("name".into()).or_insert(1) = c.width();
-            }));
-            column
-        });
-        for col in 0..ncols {
-            let id = (col + 1) as i32;
-            let column = TreeViewColumn::new();
-            let cell = CellRendererText::new();
-            let name = if vector_mode {
-                Path::from("value")
-            } else {
-                t.0.descriptor.cols[col].0.clone()
-            };
-            column.pack_start(&cell, true);
-            if column_editable.is_match(&*name) {
-                cell.set_editable(true);
-            }
-            let f = Box::new(clone!(@weak t =>
-                move |c: &TreeViewColumn,
-                      cr: &CellRenderer,
-                      _: &TreeModel,
-                      i: &TreeIter| t.render_cell(id, c, cr, i)));
-            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
-            cell.connect_edited(clone!(@weak t => move |_, _, v| {
-                let ev = LocalEvent::Event(Value::String(Chars::from(String::from(v))));
-                t.0.on_edit.borrow_mut().update(
-                    &mut t.0.ctx.borrow_mut(),
-                    &vm::Event::User(ev)
-                );
-            }));
-            column.set_title(&name);
-            t.store().set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
-                compare_row(id, m, r0, r1)
+        let sorting_disabled = match &sort_mode {
+            SortSpec::Disabled => true,
+            SortSpec::Ascending(_) | SortSpec::Descending(_) | SortSpec::None => false,
+        };
+        if show_name_column {
+            t.view().append_column(&{
+                let column = TreeViewColumn::new();
+                let cell = CellRendererText::new();
+                column.pack_start(&cell, true);
+                column.set_title("name");
+                column.add_attribute(&cell, "text", 0);
+                if sorting_disabled {
+                    column.set_clickable(true);
+                } else {
+                    column.set_sort_column_id(0);
+                }
+                column.set_sizing(TreeViewColumnSizing::Fixed);
+                column.set_resizable(true);
+                let column_widths = t.0.column_widths.clone();
+                if let Some(w) = column_widths.borrow().get("name") {
+                    column.set_fixed_width(*w);
+                }
+                column.connect_width_notify(clone!(@strong column_widths => move |c| {
+                    *column_widths.borrow_mut().entry("name".into()).or_insert(1) = c.width();
+                }));
+                column
             });
-            column.set_sort_column_id(id);
-            column.set_sizing(TreeViewColumnSizing::Fixed);
-            column.set_resizable(true);
-            let column_widths = t.0.column_widths.clone();
-            if let Some(w) = column_widths.borrow().get(&*name) {
-                column.set_fixed_width(*w);
-            }
-            column.connect_width_notify(clone!(
-                @strong column_widths, @strong name => move |c| {
-                    let mut saved = column_widths.borrow_mut();
-                    *saved.entry((&*name).into()).or_insert(1) = c.width();
-            }));
-            t.view().append_column(&column);
         }
+        t.add_data_columns(ncols, vector_mode, sorting_disabled, &column_editable);
         t.store().connect_sort_column_changed(
             clone!(@weak t => move |_| t.handle_sort_column_changed()),
         );
@@ -461,8 +580,9 @@ impl RaeifiedTable {
                 Continue(false)
             }));
         }));
-        match &default_sort_column {
+        match &sort_mode {
             SortSpec::None => (),
+            SortSpec::Disabled => (),
             SortSpec::Ascending(col) | SortSpec::Descending(col) => {
                 let col = Path::from(col.clone());
                 let idx =
@@ -473,10 +593,10 @@ impl RaeifiedTable {
                             None
                         }
                     });
-                let dir = match &default_sort_column {
+                let dir = match &sort_mode {
                     SortSpec::Ascending(_) => gtk::SortType::Ascending,
                     SortSpec::Descending(_) => gtk::SortType::Descending,
-                    SortSpec::None => unreachable!(),
+                    SortSpec::Disabled | SortSpec::None => unreachable!(),
                 };
                 if let Some(i) = idx {
                     t.store().set_sort_column_id(gtk::SortColumn::Index(i as u32), dir)
@@ -932,6 +1052,32 @@ impl RaeifiedTable {
     }
 }
 
+pub(super) struct Table {
+    ctx: BSCtx,
+    state: RefCell<TableState>,
+    root: ScrolledWindow,
+    selected_path: Label,
+    saved_column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
+    path_expr: BSNode,
+    path: RefCell<Option<Path>>,
+    sort_mode_expr: BSNode,
+    sort_mode: RefCell<Result<SortSpec, String>>,
+    column_filter_expr: BSNode,
+    column_filter: RefCell<Result<Filter, String>>,
+    row_filter_expr: BSNode,
+    row_filter: RefCell<Result<Filter, String>>,
+    column_editable_expr: BSNode,
+    column_editable: RefCell<Result<Filter, String>>,
+    multi_select_expr: BSNode,
+    multi_select: Cell<bool>,
+    show_row_name_expr: BSNode,
+    show_row_name: Cell<bool>,
+    on_select: Rc<RefCell<BSNode>>,
+    on_activate: Rc<RefCell<BSNode>>,
+    on_edit: Rc<RefCell<BSNode>>,
+    on_header_click: Rc<RefCell<BSNode>>,
+}
+
 impl Table {
     pub(super) fn new(
         ctx: BSCtx,
@@ -944,14 +1090,10 @@ impl Table {
             Value::String(path) => Some(Path::from(ArcStr::from(&*path))),
             _ => None,
         }));
-        let default_sort_column_expr = BSNode::compile(
-            &mut ctx.borrow_mut(),
-            scope.clone(),
-            spec.default_sort_column,
-        );
-        let default_sort_column = RefCell::new(SortSpec::new(
-            default_sort_column_expr.current().unwrap_or(Value::Null),
-        ));
+        let sort_mode_expr =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.sort_mode);
+        let sort_mode =
+            RefCell::new(SortSpec::new(sort_mode_expr.current().unwrap_or(Value::Null)));
         let column_filter_expr =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_filter);
         let column_filter = RefCell::new(Filter::new(
@@ -966,6 +1108,20 @@ impl Table {
         let column_editable = RefCell::new(Filter::new(
             column_editable_expr.current().unwrap_or(Value::Null),
         ));
+        let multi_select_expr =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.multi_select);
+        let multi_select =
+            Cell::new(match multi_select_expr.current().unwrap_or(Value::False) {
+                Value::True => true,
+                _ => false,
+            });
+        let show_row_name_expr =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.show_row_name);
+        let show_row_name =
+            Cell::new(match show_row_name_expr.current().unwrap_or(Value::True) {
+                Value::True => true,
+                _ => false,
+            });
         let state = RefCell::new(match &*path.borrow() {
             None => TableState::Empty,
             Some(path) => {
@@ -988,6 +1144,11 @@ impl Table {
             scope,
             spec.on_edit,
         )));
+        let on_header_click = Rc::new(RefCell::new(BSNode::compile(
+            &mut ctx.borrow_mut(),
+            scope,
+            spec.on_header_click,
+        )));
         Table {
             ctx,
             state,
@@ -995,18 +1156,23 @@ impl Table {
             selected_path,
             path_expr,
             path,
+            saved_column_widths: Rc::new(RefCell::new(HashMap::default())),
             on_select,
             on_activate,
             on_edit,
-            default_sort_column_expr,
-            default_sort_column,
+            on_header_click,
+            sort_mode_expr,
+            sort_mode,
             column_filter_expr,
             column_filter,
-            column_widths: Rc::new(RefCell::new(HashMap::default())),
             row_filter_expr,
             row_filter,
             column_editable_expr,
             column_editable,
+            multi_select_expr,
+            multi_select,
+            show_row_name_expr,
+            show_row_name,
         }
     }
 
@@ -1067,14 +1233,16 @@ impl Table {
             self.ctx.clone(),
             self.root.clone(),
             path,
-            self.default_sort_column.borrow().clone(),
+            self.saved_column_widths.clone(),
+            self.sort_mode.borrow().clone(),
             self.column_filter.borrow().clone(),
-            self.column_widths.clone(),
+            self.show_name_column.get(),
             self.row_filter.borrow().clone(),
             self.column_editable.borrow().clone(),
             self.on_select.clone(),
             self.on_activate.clone(),
             self.on_edit.clone(),
+            self.on_header_click.clone(),
             descriptor.clone(),
             self.selected_path.clone(),
         );

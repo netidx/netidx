@@ -74,10 +74,14 @@ fn default_view(path: Path) -> view::View {
                     &*path,
                 ))))
                 .to_expr(),
-                default_sort_column: ExprKind::Constant(Value::Null).to_expr(),
+                sort_mode: ExprKind::Constant(Value::Null).to_expr(),
                 column_filter: ExprKind::Constant(Value::Null).to_expr(),
                 row_filter: ExprKind::Constant(Value::Null).to_expr(),
                 column_editable: ExprKind::Constant(Value::False).to_expr(),
+                column_widths: ExprKind::Constant(Value::Null).to_expr(),
+                columns_resizable: ExprKind::Constant(Value::True).to_expr(),
+                multi_select: ExprKind::Constant(Value::False).to_expr(),
+                show_row_name: ExprKind::Constant(Value::True).to_expr(),
                 on_select: ExprKind::Constant(Value::Null).to_expr(),
                 on_edit: ExprKind::Constant(Value::Null).to_expr(),
                 on_activate: ExprKind::Apply {
@@ -89,6 +93,7 @@ fn default_view(path: Path) -> view::View {
                     .to_expr()],
                 }
                 .to_expr(),
+                on_header_click: ExprKind::Constant(Value::Null).to_expr(),
             }),
             props: None,
         },

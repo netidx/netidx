@@ -24,13 +24,13 @@ pub struct Table {
     /// display. If the expr updates, the table will display the
     /// updated path.
     pub path: Expr,
-    /// (null | "disabled" | <column> | spec)
+    /// (null | false | <column> | spec)
     /// spec: [<column>, ("ascending" | "descending")]
     /// - null: no default sort. Sorting is processed within the
     /// browser and is under the control of the user. Click events will
     /// also be generated when the user clicks on the header button,
     /// see on_header_click.
-    /// - "disabled": sorting within the browser is disabled, but
+    /// - false: sorting within the browser is disabled, but
     /// click events will still be generated when the user clicks on
     /// the header buttons. These events could be used to trigger
     /// publisher side sorting, or any other desired action. See,
@@ -57,21 +57,27 @@ pub struct Table {
     ///     - "exclude": col/cols is a list of columns to hide
     ///     - "include_match": col/cols is a list of regex patterns of columns to show
     ///     - "exclude_match": col/cols is a list of regex patterns of columns to hide
-    /// - range: Specify columns to keep or drop by numeric ranges
+
+    /// - range: Specify columns to keep or drop by numeric
+    /// ranges. Range patterns apply to the positions of columns
+    /// sorted set.
     ///     - "keep": keep the columns specified by the range, drop
     ///     any others. If the range specifies more columns than exist
-    ///     all columns will be kept.
+    ///     all columns will be kept. Matched items will be >= start
+    ///     and < end.
     ///     - "drop": drop the columns specified by the range, keeping
     ///     the rest. If the range specifies more columns than exist
-    ///     all the columns will be dropped.
+    ///     all the columns will be dropped. Matched items will be <
+    ///     start or >= end.
     pub column_filter: Expr,
     /// see column_filter. This is exactly the same, but applies to
     /// the rows instead of the columns.
     pub row_filter: Expr,
     /// Exactly the same format as the column_filter and the row_filter.
-    /// null: not editable
-    /// true: every column is editable
-    /// otherwise exactly the same semantics as the column/row filter
+    /// - null: not editable
+    /// - true: every column is editable
+    /// - otherwise: exactly the same semantics as the column/row filter
+    /// except it decides whether the column is editable or not.
     pub column_editable: Expr,
     /// (null | widths)
     /// widths: [<w>, ...]
@@ -87,7 +93,7 @@ pub struct Table {
     /// (true | false)
     /// - true: columns may be resized by the user
     /// - false: columns may not be resized by the user
-    pub column_resizable: Expr,
+    pub columns_resizable: Expr,
     /// (true | false)
     /// true: multi selection is enabled, multiple rows can be
     /// selected, on_select will produce an array of selected columns
