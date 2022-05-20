@@ -1826,10 +1826,10 @@ impl<K: FromValue + Eq + Hash, V: FromValue, S: BuildHasher + Default> FromValue
     }
 }
 
-impl<K: convert::Into<Value>, V: convert::Into<Value>> convert::From<HashMap<K, V>>
+impl<K: convert::Into<Value>, V: convert::Into<Value>, S: BuildHasher + Default> convert::From<HashMap<K, V, S>>
     for Value
 {
-    fn from(h: HashMap<K, V>) -> Value {
+    fn from(h: HashMap<K, V, S>) -> Value {
         h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
     }
 }
@@ -1853,8 +1853,8 @@ impl<K: FromValue + Eq + Hash, S: BuildHasher + Default> FromValue for HashSet<K
     }
 }
 
-impl<K: convert::Into<Value>> convert::From<HashSet<K>> for Value {
-    fn from(h: HashSet<K>) -> Value {
+impl<K: convert::Into<Value>, S: BuildHasher + Default> convert::From<HashSet<K, S>> for Value {
+    fn from(h: HashSet<K, S>) -> Value {
         h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
     }
 }
