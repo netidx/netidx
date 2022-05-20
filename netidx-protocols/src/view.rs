@@ -80,15 +80,10 @@ pub struct Table {
     /// except it decides whether the column is editable or not.
     pub column_editable: Expr,
     /// (null | widths)
-    /// widths: [<w>, ...]
+    /// widths: [[<name>, <w>], ...]
     /// - null: initial column widths are automatically determined
-    /// - widths: The list of floating point values specify the
-    /// percentage of the available space the corresponding column
-    /// will have. If the values do not add up to 1, add up to more
-    /// than 1, don't specify enough columns, or specify too many
-    /// columns then the entire directive will be ignored, the columns
-    /// will behave as if null had been specified, and a warning will
-    /// be prited.
+    /// - widths: The list of numeric values specify the initial width of the
+    /// corresponding column.
     pub column_widths: Expr,
     /// (true | false)
     /// - true: columns may be resized by the user

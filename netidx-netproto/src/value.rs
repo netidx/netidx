@@ -1720,3 +1720,74 @@ impl<T: convert::Into<Value>> convert::From<Vec<T>> for Value {
         Value::Array(Arc::from(v))
     }
 }
+
+impl<T: FromValue, U: FromValue> FromValue for (T, U) {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Array(elts) if elts.len() == 2 => {
+                let v0 = elts[0].clone().cast_to::<T>()?;
+                let v1 = elts[1].clone().cast_to::<U>()?;
+                Ok((v0, v1))
+            }
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(elts) if elts.len() == 2 => {
+                let v0 = elts[0].clone().get_as::<T>()?;
+                let v1 = elts[1].clone().get_as::<U>()?;
+                Some((v0, v1))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<T: convert::Into<Value>, U: convert::Into<Value>> convert::From<(T, U)> for Value {
+    fn from((t, u): (T, U)) -> Value {
+        let v0 = t.into();
+        let v1 = u.into();
+        let elts = Arc::from([v0, v1]);
+        Value::Array(elts)
+    }
+}
+
+impl<T: FromValue, U: FromValue, V: FromValue> FromValue for (T, U, V) {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Array(elts) if elts.len() == 3 => {
+                let v0 = elts[0].clone().cast_to::<T>()?;
+                let v1 = elts[1].clone().cast_to::<U>()?;
+                let v2 = elts[1].clone().cast_to::<V>()?;
+                Ok((v0, v1, v2))
+            }
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(elts) if elts.len() == 3 => {
+                let v0 = elts[0].clone().get_as::<T>()?;
+                let v1 = elts[1].clone().get_as::<U>()?;
+                let v2 = elts[1].clone().get_as::<V>()?;
+                Some((v0, v1, v2))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<T: convert::Into<Value>, U: convert::Into<Value>, V: convert::Into<Value>>
+    convert::From<(T, U, V)> for Value
+{
+    fn from((t, u, v): (T, U, V)) -> Value {
+        let v0 = t.into();
+        let v1 = u.into();
+        let v2 = v.into();
+        let elts = Arc::from([v0, v1, v2]);
+        Value::Array(elts)
+    }
+}
