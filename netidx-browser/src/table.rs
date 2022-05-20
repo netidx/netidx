@@ -574,9 +574,7 @@ impl RaeifiedTable {
         if t.0.column_widths.borrow().len() > 1000 {
             let cols =
                 t.0.descriptor.cols.iter().map(|c| c.0.clone()).collect::<FxHashSet<_>>();
-            t.0.column_widths
-                .borrow_mut()
-                .retain(|name, _| cols.contains(name.as_str()));
+            t.0.column_widths.borrow_mut().retain(|name, _| cols.contains(name.as_str()));
         }
         let sorting_disabled = match &sort_mode {
             SortSpec::Disabled => true,
@@ -1168,9 +1166,15 @@ impl Table {
             });
         let column_widths_expr =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_widths);
-        let column_widths = RefCell::new(
-            column_widths_expr.current().and_then(|v| v.cast_to::<Vec<u32>>().ok()),
-        );
+        let column_widths = Rc::new(RefCell::new(
+            column_widths_expr
+                .current()
+                .unwrap_or(Value::Null)
+                .cast_to::<Vec<(String, i32)>>()
+                .ok()
+                .map(|v| v.into_iter().collect::<FxHashMap<_, _>>())
+                .unwrap_or_else(HashMap::default),
+        ));
         let state = RefCell::new(match &*path.borrow() {
             None => TableState::Empty,
             Some(path) => {
@@ -1206,7 +1210,7 @@ impl Table {
             columns_resizable,
             columns_resizable_expr,
             column_widths_expr,
-            column_widths: Rc::new(RefCell::new(HashMap::default())),
+            column_widths,
             ctx,
             multi_select,
             multi_select_expr,
@@ -1380,7 +1384,11 @@ impl Table {
             }
         }
         if let Some(v) = self.column_widths_expr.update(ctx, event) {
-            let new = v.cast_to::<Vec<u32>>().ok();
+            let new = v
+                .cast_to::<Vec<(String, i32)>>()
+                .ok()
+                .map(|v| v.into_iter().collect::<FxHashMap<_, _>>())
+                .unwrap_or_else(HashMap::default);
             if &*self.column_widths.borrow() != &new {
                 *self.column_widths.borrow_mut() = new;
                 self.refresh(ctx);
