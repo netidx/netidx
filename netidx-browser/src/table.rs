@@ -394,6 +394,7 @@ impl RaeifiedTable {
         vector_mode: bool,
         sorting_disabled: bool,
         show_name_column: bool,
+        columns_resizable: bool,
         column_editable: &Filter,
     ) {
         let t = self;
@@ -410,7 +411,7 @@ impl RaeifiedTable {
                     column.set_sort_column_id(0);
                 }
                 column.set_sizing(TreeViewColumnSizing::Fixed);
-                column.set_resizable(true);
+                column.set_resizable(columns_resizable);
                 let saved_column_widths = t.0.saved_column_widths.clone();
                 if let Some(w) = saved_column_widths.borrow().get("name") {
                     column.set_fixed_width(*w);
@@ -466,7 +467,7 @@ impl RaeifiedTable {
                 column.set_sort_column_id(id);
             }
             column.set_sizing(TreeViewColumnSizing::Fixed);
-            column.set_resizable(true);
+            column.set_resizable(columns_resizable);
             let saved_column_widths = t.0.saved_column_widths.clone();
             if let Some(w) = saved_column_widths.borrow().get(&*name) {
                 column.set_fixed_width(*w);
@@ -489,6 +490,7 @@ impl RaeifiedTable {
         column_filter: Result<Filter, String>,
         multi_select: bool,
         show_name_column: bool,
+        columns_resizable: bool,
         row_filter: Result<Filter, String>,
         column_editable: Result<Filter, String>,
         on_select: Rc<RefCell<BSNode>>,
@@ -575,6 +577,7 @@ impl RaeifiedTable {
             vector_mode,
             sorting_disabled,
             show_name_column,
+            columns_resizable,
             &column_editable,
         );
         t.store().connect_sort_column_changed(
@@ -1092,6 +1095,8 @@ pub(super) struct Table {
     multi_select: Cell<bool>,
     show_row_name_expr: BSNode,
     show_row_name: Cell<bool>,
+    columns_resizable_expr: BSNode,
+    columns_resizable: Cell<bool>,
     on_select: Rc<RefCell<BSNode>>,
     on_activate: Rc<RefCell<BSNode>>,
     on_edit: Rc<RefCell<BSNode>>,
@@ -1141,6 +1146,13 @@ impl Table {
             Cell::new(match show_row_name_expr.current().unwrap_or(Value::True) {
                 Value::True => true,
                 _ => false,
+            });
+        let columns_resizable_expr =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.columns_resizable);
+        let columns_resizable =
+            Cell::new(match columns_resizable_expr.current().unwrap_or(Value::True) {
+                Value::False => false,
+                _ => true,
             });
         let state = RefCell::new(match &*path.borrow() {
             None => TableState::Empty,
@@ -1193,6 +1205,8 @@ impl Table {
             multi_select,
             show_row_name_expr,
             show_row_name,
+            columns_resizable_expr,
+            columns_resizable,
         }
     }
 
@@ -1258,6 +1272,7 @@ impl Table {
             self.column_filter.borrow().clone(),
             self.multi_select.get(),
             self.show_row_name.get(),
+            self.columns_resizable.get(),
             self.row_filter.borrow().clone(),
             self.column_editable.borrow().clone(),
             self.on_select.clone(),
@@ -1333,6 +1348,16 @@ impl Table {
             };
             if self.show_row_name.get() != new {
                 self.show_row_name.set(new);
+                self.refresh(ctx);
+            }
+        }
+        if let Some(v) = self.columns_resizable_expr.update(ctx, event) {
+            let new = match v {
+                Value::False => false,
+                _ => true,
+            };
+            if self.columns_resizable.get() != new {
+                self.columns_resizable.set(new);
                 self.refresh(ctx);
             }
         }
