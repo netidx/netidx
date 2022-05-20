@@ -366,7 +366,7 @@ struct RaeifiedTableInner {
     on_edit: Rc<RefCell<BSNode>>,
     on_select: Rc<RefCell<BSNode>>,
     on_header_click: Rc<RefCell<BSNode>>,
-    column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
+    saved_column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
     path: Path,
     root: ScrolledWindow,
     selected_path: Label,
@@ -378,6 +378,7 @@ struct RaeifiedTableInner {
     subscribed: RefCell<HashMap<String, HashSet<u32>>>,
     update: RefCell<IndexMap<SubId, Value, FxBuildHasher>>,
     vector_mode: bool,
+    multi_select: bool,
     view: TreeView,
 }
 
@@ -387,14 +388,39 @@ struct RaeifiedTable(Rc<RaeifiedTableInner>);
 struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
 
 impl RaeifiedTable {
-    fn add_data_columns(
+    fn add_columns(
         &self,
         ncols: usize,
         vector_mode: bool,
         sorting_disabled: bool,
+        show_name_column: bool,
         column_editable: &Filter,
     ) {
         let t = self;
+        if show_name_column {
+            t.view().append_column(&{
+                let column = TreeViewColumn::new();
+                let cell = CellRendererText::new();
+                column.pack_start(&cell, true);
+                column.set_title("name");
+                column.add_attribute(&cell, "text", 0);
+                if sorting_disabled {
+                    column.set_clickable(true);
+                } else {
+                    column.set_sort_column_id(0);
+                }
+                column.set_sizing(TreeViewColumnSizing::Fixed);
+                column.set_resizable(true);
+                let saved_column_widths = t.0.saved_column_widths.clone();
+                if let Some(w) = saved_column_widths.borrow().get("name") {
+                    column.set_fixed_width(*w);
+                }
+                column.connect_width_notify(clone!(@strong saved_column_widths => move |c| {
+                    *saved_column_widths.borrow_mut().entry("name".into()).or_insert(1) = c.width();
+                }));
+                column
+            });
+        }
         for col in 0..ncols {
             let id = (col + 1) as i32;
             let column = TreeViewColumn::new();
@@ -441,13 +467,13 @@ impl RaeifiedTable {
             }
             column.set_sizing(TreeViewColumnSizing::Fixed);
             column.set_resizable(true);
-            let column_widths = t.0.column_widths.clone();
-            if let Some(w) = column_widths.borrow().get(&*name) {
+            let saved_column_widths = t.0.saved_column_widths.clone();
+            if let Some(w) = saved_column_widths.borrow().get(&*name) {
                 column.set_fixed_width(*w);
             }
             column.connect_width_notify(clone!(
-                @strong column_widths, @strong name => move |c| {
-                    let mut saved = column_widths.borrow_mut();
+                @strong saved_column_widths, @strong name => move |c| {
+                    let mut saved = saved_column_widths.borrow_mut();
                     *saved.entry((&*name).into()).or_insert(1) = c.width();
             }));
             t.view().append_column(&column);
@@ -458,9 +484,10 @@ impl RaeifiedTable {
         ctx: BSCtx,
         root: ScrolledWindow,
         path: Path,
-        column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
+        saved_column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
         sort_mode: Result<SortSpec, String>,
         column_filter: Result<Filter, String>,
+        multi_select: bool,
         show_name_column: bool,
         row_filter: Result<Filter, String>,
         column_editable: Result<Filter, String>,
@@ -516,12 +543,13 @@ impl RaeifiedTable {
             original_descriptor,
             descriptor,
             vector_mode,
+            multi_select,
             style,
             on_select,
             on_activate,
             on_edit,
             on_header_click,
-            column_widths,
+            saved_column_widths,
             by_id: RefCell::new(HashMap::new()),
             subscribed: RefCell::new(HashMap::new()),
             selected: RefCell::new(HashMap::default()),
@@ -531,40 +559,24 @@ impl RaeifiedTable {
             destroyed: Cell::new(false),
         }));
         t.view().connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
-        if t.0.column_widths.borrow().len() > 1000 {
+        if t.0.saved_column_widths.borrow().len() > 1000 {
             let cols =
                 t.0.descriptor.cols.iter().map(|c| c.0.clone()).collect::<FxHashSet<_>>();
-            t.0.column_widths.borrow_mut().retain(|name, _| cols.contains(name.as_str()));
+            t.0.saved_column_widths
+                .borrow_mut()
+                .retain(|name, _| cols.contains(name.as_str()));
         }
         let sorting_disabled = match &sort_mode {
             SortSpec::Disabled => true,
             SortSpec::Ascending(_) | SortSpec::Descending(_) | SortSpec::None => false,
         };
-        if show_name_column {
-            t.view().append_column(&{
-                let column = TreeViewColumn::new();
-                let cell = CellRendererText::new();
-                column.pack_start(&cell, true);
-                column.set_title("name");
-                column.add_attribute(&cell, "text", 0);
-                if sorting_disabled {
-                    column.set_clickable(true);
-                } else {
-                    column.set_sort_column_id(0);
-                }
-                column.set_sizing(TreeViewColumnSizing::Fixed);
-                column.set_resizable(true);
-                let column_widths = t.0.column_widths.clone();
-                if let Some(w) = column_widths.borrow().get("name") {
-                    column.set_fixed_width(*w);
-                }
-                column.connect_width_notify(clone!(@strong column_widths => move |c| {
-                    *column_widths.borrow_mut().entry("name".into()).or_insert(1) = c.width();
-                }));
-                column
-            });
-        }
-        t.add_data_columns(ncols, vector_mode, sorting_disabled, &column_editable);
+        t.add_columns(
+            ncols,
+            vector_mode,
+            sorting_disabled,
+            show_name_column,
+            &column_editable,
+        );
         t.store().connect_sort_column_changed(
             clone!(@weak t => move |_| t.handle_sort_column_changed()),
         );
@@ -696,7 +708,9 @@ impl RaeifiedTable {
             || kv == keys::constants::Left
             || kv == keys::constants::Right
         {
-            if !key.state().contains(gdk::ModifierType::SHIFT_MASK) {
+            if !key.state().contains(gdk::ModifierType::SHIFT_MASK)
+                || !self.0.multi_select
+            {
                 clear_selection();
             }
         }
@@ -714,7 +728,9 @@ impl RaeifiedTable {
         let typ = ev.event_type();
         match (self.view().path_at_pos(x as i32, y as i32), typ) {
             (Some((Some(_), Some(_), _, _)), gdk::EventType::ButtonPress) if n == 1 => {
-                if !ev.state().contains(gdk::ModifierType::SHIFT_MASK) {
+                if !ev.state().contains(gdk::ModifierType::SHIFT_MASK)
+                    || !self.0.multi_select
+                {
                     self.0.selected.borrow_mut().clear();
                 }
             }
@@ -1240,6 +1256,7 @@ impl Table {
             self.saved_column_widths.clone(),
             self.sort_mode.borrow().clone(),
             self.column_filter.borrow().clone(),
+            self.multi_select.get(),
             self.show_row_name.get(),
             self.row_filter.borrow().clone(),
             self.column_editable.borrow().clone(),
