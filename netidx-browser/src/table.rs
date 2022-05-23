@@ -22,6 +22,7 @@ use indexmap::{IndexMap, IndexSet};
 use netidx::{
     chars::Chars,
     path::Path,
+    pool::Pooled,
     resolver_client,
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
     utils::Either,
@@ -333,26 +334,24 @@ fn apply_filters(
             })
         }
     }
-    descriptor.cols.sort_by(|v0, v1| {
-        let v0 = Path::basename(&v0.0);
-        let v1 = Path::basename(&v1.0);
-        let i0 = v0.and_then(|v| column_filter.sort_index(v));
-        let i1 = v1.and_then(|v| column_filter.sort_index(v));
-        match (i0, i1) {
-            (Some(i0), Some(i1)) => i0.cmp(&i1),
-            (_, _) => v0.cmp(&v1),
-        }
-    });
-    descriptor.rows.sort_by(|v0, v1| {
-        let v0 = Path::basename(&v0);
-        let v1 = Path::basename(&v1);
-        let i0 = v0.and_then(|v| column_filter.sort_index(v));
-        let i1 = v1.and_then(|v| column_filter.sort_index(v));
-        match (i0, i1) {
-            (Some(i0), Some(i1)) => i0.cmp(&i1),
-            (_, _) => v0.cmp(&v1),
-        }
-    });
+    fn sort<V: Send + Sync + 'static, F: Fn(&V) -> &Path>(
+        vals: &mut Pooled<Vec<V>>,
+        filter: &Filter,
+        f: F,
+    ) {
+        vals.sort_by(|v0, v1| {
+            let v0 = Path::basename(f(&v0));
+            let v1 = Path::basename(f(&v1));
+            let i0 = v0.and_then(|v| filter.sort_index(v));
+            let i1 = v1.and_then(|v| filter.sort_index(v));
+            match (i0, i1) {
+                (Some(i0), Some(i1)) => i0.cmp(&i1),
+                (_, _) => v0.cmp(&v1),
+            }
+        })
+    }
+    sort(&mut descriptor.cols, &column_filter, |v| &v.0);
+    sort(&mut descriptor.rows, &row_filter, |v| &v);
     descriptor
 }
 
