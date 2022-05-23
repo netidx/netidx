@@ -8,6 +8,7 @@ use netidx_core::{
     utils,
 };
 use smallvec::SmallVec;
+use indexmap::{IndexMap, IndexSet};
 use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
     collections::{HashMap, HashSet},
@@ -1826,8 +1827,8 @@ impl<K: FromValue + Eq + Hash, V: FromValue, S: BuildHasher + Default> FromValue
     }
 }
 
-impl<K: convert::Into<Value>, V: convert::Into<Value>, S: BuildHasher + Default> convert::From<HashMap<K, V, S>>
-    for Value
+impl<K: convert::Into<Value>, V: convert::Into<Value>, S: BuildHasher + Default>
+    convert::From<HashMap<K, V, S>> for Value
 {
     fn from(h: HashMap<K, V, S>) -> Value {
         h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
@@ -1853,8 +1854,67 @@ impl<K: FromValue + Eq + Hash, S: BuildHasher + Default> FromValue for HashSet<K
     }
 }
 
-impl<K: convert::Into<Value>, S: BuildHasher + Default> convert::From<HashSet<K, S>> for Value {
+impl<K: convert::Into<Value>, S: BuildHasher + Default> convert::From<HashSet<K, S>>
+    for Value
+{
     fn from(h: HashSet<K, S>) -> Value {
+        h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
+    }
+}
+
+impl<K: FromValue + Eq + Hash, V: FromValue, S: BuildHasher + Default> FromValue
+    for IndexMap<K, V, S>
+{
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Array(elts) => {
+                elts.iter().map(|v| v.clone().cast_to::<(K, V)>()).collect()
+            }
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(elts) => {
+                elts.iter().map(|v| v.clone().get_as::<(K, V)>()).collect()
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<K: convert::Into<Value>, V: convert::Into<Value>, S: BuildHasher + Default>
+    convert::From<IndexMap<K, V, S>> for Value
+{
+    fn from(h: IndexMap<K, V, S>) -> Value {
+        h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
+    }
+}
+
+impl<K: FromValue + Eq + Hash, S: BuildHasher + Default> FromValue for IndexSet<K, S> {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Array(elts) => elts
+                .iter()
+                .map(|v| v.clone().cast_to::<K>())
+                .collect::<Res<IndexSet<K, S>>>(),
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(elts) => elts.iter().map(|v| v.clone().get_as::<K>()).collect(),
+            _ => None,
+        }
+    }
+}
+
+impl<K: convert::Into<Value>, S: BuildHasher + Default> convert::From<IndexSet<K, S>>
+    for Value
+{
+    fn from(h: IndexSet<K, S>) -> Value {
         h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
     }
 }

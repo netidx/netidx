@@ -24,6 +24,7 @@ serde_derive = "1"
 base64 = "0.13"
 arcstr = { version = "1", features = ["serde"] }
 smallvec = "1"
+indexmap = "1"
 
 [dev-dependencies]
 proptest = "1"
