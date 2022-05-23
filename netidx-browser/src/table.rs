@@ -97,7 +97,7 @@ impl PartialEq for Filter {
             (Filter::All, Filter::All)
             | (Filter::Auto, Filter::Auto)
             | (Filter::None, Filter::None) => true,
-            (Filter::Include(s0), Filter::Include(s1)) => s0 == s1,
+            (Filter::Include(s0), Filter::Include(s1)) => s0.iter().eq(s1.iter()), // order matters
             (Filter::Exclude(s0), Filter::Exclude(s1)) => s0 == s1,
             (Filter::IncludeMatch(s0, _), Filter::IncludeMatch(s1, _)) => s0 == s1,
             (Filter::ExcludeMatch(s0, _), Filter::ExcludeMatch(s1, _)) => s0 == s1,
