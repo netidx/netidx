@@ -131,11 +131,9 @@ impl Notebook {
     ) -> Self {
         let scope = scope.append("n");
         let root = gtk::Notebook::new();
-        let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut ctx_r;
-        let page = BSNode::compile(ctx_r, scope.clone(), spec.page);
+        let page = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.page);
         let on_switch_page = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
+            &mut *ctx.borrow_mut(),
             scope.clone(),
             spec.on_switch_page,
         )));

@@ -975,14 +975,10 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             ctx.borrow_mut().clear();
             *current_spec.borrow_mut() = spec.clone();
             let cur = View::new(&ctx, &*current_loc.borrow(), spec);
-            {
-                let ctx = ctx.borrow();
-                ctx.user
-                    .window
-                    .set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
-                ctx.user.window.add(cur.root());
-                ctx.user.window.show_all();
-            }
+            let window = ctx.borrow().user.window.clone();
+            window.set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
+            window.add(cur.root());
+            window.show_all();
             let hl = highlight.borrow();
             cur.widget.set_highlight(hl.iter().copied(), true);
             *current.borrow_mut() = Some(cur);
