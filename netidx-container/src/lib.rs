@@ -59,6 +59,8 @@ use tokio::{
     time::{self, Instant},
 };
 
+use crate::rpcs::RpcApi;
+
 #[derive(StructOpt, Debug)]
 pub struct Params {
     #[structopt(
@@ -73,7 +75,7 @@ pub struct Params {
     )]
     pub timeout: Option<u64>,
     #[structopt(long = "api-path", help = "the netidx path of the container api")]
-    pub api_path: Path,
+    pub api_path: Option<Path>,
     #[structopt(long = "db", help = "the db file")]
     pub db: String,
     #[structopt(long = "compress", help = "use zstd compression")]
@@ -740,8 +742,8 @@ enum Compiled {
 
 struct ContainerInner {
     params: Params,
-    api_path: Path,
-    stats: Stats,
+    api_path: Option<Path>,
+    stats: Option<Stats>,
     locked: BTreeMap<Path, bool>,
     ctx: ExecCtx<Lc, UserEv>,
     compiled: FxHashMap<ExprId, Compiled>,
@@ -751,7 +753,7 @@ struct ContainerInner {
     publish_events: mpsc::UnboundedReceiver<PEvent>,
     roots: Roots,
     db_updates: mpsc::UnboundedReceiver<db::Update>,
-    api: rpcs::RpcApi,
+    api: Option<rpcs::RpcApi>,
     bscript_event: mpsc::UnboundedReceiver<LcEvent>,
     rpcs: FxHashMap<
         Path,
@@ -770,9 +772,18 @@ impl ContainerInner {
         let (sub_updates_tx, sub_updates) = mpsc::channel(3);
         let (write_updates_tx, write_updates_rx) = mpsc::channel(3);
         let (bs_tx, bs_rx) = mpsc::unbounded();
-        let api_path = params.api_path.append("rpcs");
-        let api = rpcs::RpcApi::new(&publisher, &api_path)?;
-        let stats = Stats::new(publisher.clone(), params.api_path.clone());
+        let (api_path, api) = match params.api_path.as_ref() {
+            None => (None, None),
+            Some(api_path) => {
+                let api_path = api_path.append("rpcs");
+                let api = rpcs::RpcApi::new(&publisher, &api_path)?;
+                (Some(api_path), Some(api))
+            }
+        };
+        let stats = match params.api_path.as_ref() {
+            None => None,
+            Some(p) => Some(Stats::new(publisher.clone(), p.clone())),
+        };
         let mut ctx =
             ExecCtx::new(Lc::new(db, subscriber, publisher, sub_updates_tx, bs_tx));
         Ref::register(&mut ctx);
@@ -923,13 +934,17 @@ impl ContainerInner {
             let def = self.ctx.user.publisher.publish_default(path.clone())?;
             self.roots.insert(path, def);
         }
-        let _ = self.stats.set_roots(&mut batch, &self.roots);
+        if let Some(stats) = &mut self.stats {
+            let _ = stats.set_roots(&mut batch, &self.roots);
+        }
         for res in self.ctx.user.db.locked() {
             let (path, locked) = res?;
             let path = self.check_path(path)?;
             self.locked.insert(path, locked);
         }
-        let _ = self.stats.set_locked(&mut batch, &self.locked);
+        if let Some(stats) = &mut self.stats {
+            let _ = stats.set_locked(&mut batch, &self.locked);
+        }
         for res in self.ctx.user.db.iter() {
             let (path, kind, raw) = res?;
             match kind {
@@ -1186,9 +1201,14 @@ impl ContainerInner {
                         Ok(Some(Datum::Formula(_, _))) => unreachable!(),
                         Err(_) | Ok(Some(Datum::Deleted)) | Ok(None) => {
                             let locked = self.is_locked(&path);
-                            if !locked && !Path::is_parent(&self.api_path, &path) {
+                            let api = self
+                                .api_path
+                                .as_ref()
+                                .map(|p| Path::is_parent(p, &path))
+                                .unwrap_or(false);
+                            if !locked && !api {
                                 let _: Result<()> = self.publish_data(path, Value::Null);
-                            }
+                            };
                         }
                     }
                 }
@@ -1623,11 +1643,15 @@ impl ContainerInner {
         }
         if locked {
             // CR estokes: log this
-            let _: Result<_> = self.stats.set_locked(batch, &self.locked);
+            if let Some(stats) = &mut self.stats {
+                let _: Result<_> = stats.set_locked(batch, &self.locked);
+            }
         }
         if roots {
             // CR estokes: log this
-            let _: Result<_> = self.stats.set_roots(batch, &self.roots);
+            if let Some(stats) = &mut self.stats {
+                let _: Result<_> = stats.set_roots(batch, &self.roots);
+            }
         }
     }
 
@@ -1645,12 +1669,18 @@ impl ContainerInner {
             }
         }
     }
-
+    
     async fn run(mut self, mut cmd: mpsc::UnboundedReceiver<ToInner>) -> Result<()> {
         let mut gc_rpcs = time::interval(Duration::from_secs(60));
         let mut rpcbatch = Vec::new();
         let mut batch = self.ctx.user.publisher.start_batch();
         let mut txn = Txn::new();
+        async fn api_rx(api: &mut Option<RpcApi>) -> BatchItem<RpcRequest> {
+            match api {
+                Some(api) => api.rx.select_next_some().await,
+                None => future::pending().await,
+            }
+        }
         loop {
             select_biased! {
                 r = self.publish_events.select_next_some() => {
@@ -1665,7 +1695,7 @@ impl ContainerInner {
                 r = self.write_updates_rx.select_next_some() => {
                     self.process_writes(&mut batch, &mut txn, r)
                 }
-                r = self.api.rx.select_next_some() => match r {
+                r = api_rx(&mut self.api).fuse() => match r {
                     BatchItem::InBatch(v) => rpcbatch.push(v),
                     BatchItem::EndBatch => self.process_rpc_requests(&mut txn, &mut rpcbatch)
                 },

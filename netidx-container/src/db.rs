@@ -1350,8 +1350,10 @@ impl Stats {
     }
 }
 
-async fn background_delete_task(data: sled::Tree, stats: Arc<Stats>) {
-    stats.set_deleting(true);
+async fn background_delete_task(data: sled::Tree, stats: Option<Arc<Stats>>) {
+    if let Some(stats) = &stats {
+        stats.set_deleting(true);
+    }
     task::block_in_place(|| {
         for r in data.iter() {
             if let Ok((k, v)) = r {
@@ -1363,11 +1365,13 @@ async fn background_delete_task(data: sled::Tree, stats: Arc<Stats>) {
             }
         }
     });
-    stats.set_deleting(false);
+    if let Some(stats) = &stats {
+        stats.set_deleting(false);
+    }
 }
 
 async fn commit_txns_task(
-    stats: Arc<Stats>,
+    stats: Option<Arc<Stats>>,
     data: sled::Tree,
     locked: sled::Tree,
     roots: sled::Tree,
@@ -1392,7 +1396,9 @@ async fn commit_txns_task(
                 delete_task = None;
             }
             txn = incoming.select_next_some() => {
-                stats.dec_queued();
+                if let Some(stats) = &stats {
+                    stats.dec_queued();
+                }
                 let (simple, delete) =
                     txn.0.iter().fold((true, false), |(simple, delete), op| match &op.0 {
                         TxnOp::CreateSheet { .. }
@@ -1422,7 +1428,9 @@ async fn commit_txns_task(
                 } else {
                     task::block_in_place(|| commit_complex(&data, &locked, &roots, txn))
                 };
-                stats.set_busy(false);
+                if let Some(stats) = &stats {
+                    stats.set_busy(false);
+                }
                 match outgoing.unbounded_send(pending) {
                     Ok(()) => (),
                     Err(_) => break,
@@ -1445,16 +1453,19 @@ pub struct Db {
     locked: sled::Tree,
     roots: sled::Tree,
     submit_txn: UnboundedSender<Txn>,
-    stats: Arc<Stats>,
+    stats: Option<Arc<Stats>>,
 }
 
 impl Db {
     pub(super) fn new(
         cfg: &Params,
         publisher: Publisher,
-        base_path: Path,
+        base_path: Option<Path>,
     ) -> Result<(Self, UnboundedReceiver<Update>)> {
-        let stats = Stats::new(publisher, base_path)?;
+        let stats = match base_path {
+            None => None,
+            Some(p) => Some(Stats::new(publisher, p)?)
+        };
         let db = sled::Config::default()
             .use_compression(cfg.compress)
             .compression_factor(cfg.compress_level.unwrap_or(5) as i32)
@@ -1485,7 +1496,9 @@ impl Db {
     }
 
     pub(super) fn commit(&self, txn: Txn) {
-        self.stats.inc_queued();
+        if let Some(stats) = &self.stats {
+            stats.inc_queued();
+        }
         let _: Result<_, _> = self.submit_txn.unbounded_send(txn);
     }
 
