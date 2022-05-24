@@ -40,6 +40,8 @@ pub(super) struct Params {
     oneshot: bool,
     #[structopt(short = "n", long = "no-stdin", help = "don't read commands from stdin")]
     no_stdin: bool,
+    #[structopt(short = "r", long = "raw", help = "don't print the path or the type")]
+    raw: bool,
     #[structopt(
         short = "t",
         long = "subscribe-timeout",
@@ -126,6 +128,7 @@ impl<'a> fmt::Display for WVal<'a> {
 
 #[derive(Debug, Clone)]
 struct Out<'a> {
+    raw: bool,
     path: &'a str,
     value: Event,
 }
@@ -134,18 +137,25 @@ impl<'a> Out<'a> {
     fn write(&self, to_stdout: &mut BytesMut) {
         match &self.value {
             Event::Unsubscribed => {
-                to_stdout.extend_from_slice(b"Unsubscribed");
-                to_stdout.extend_from_slice(b"|");
-                to_stdout.extend_from_slice(self.path.as_bytes());
-                to_stdout.extend_from_slice(b"\n");
+                if !self.raw {
+                    to_stdout.extend_from_slice(b"Unsubscribed");
+                    to_stdout.extend_from_slice(b"|");
+                    to_stdout.extend_from_slice(self.path.as_bytes());
+                    to_stdout.extend_from_slice(b"\n");
+                }
             }
             Event::Update(v) => {
-                to_stdout.extend_from_slice(self.path.as_bytes());
-                to_stdout.extend_from_slice(b"|");
-                let typ = Typ::get(v);
-                let w = &mut BytesWriter(to_stdout);
-                write!(w, "{}|", typ).unwrap();
-                writeln!(w, "{}", WVal(v)).unwrap()
+                if self.raw {
+                    let w = &mut BytesWriter(to_stdout);
+                    writeln!(w, "{}", WVal(v)).unwrap()
+                } else {
+                    to_stdout.extend_from_slice(self.path.as_bytes());
+                    to_stdout.extend_from_slice(b"|");
+                    let typ = Typ::get(v);
+                    let w = &mut BytesWriter(to_stdout);
+                    write!(w, "{}|", typ).unwrap();
+                    writeln!(w, "{}", WVal(v)).unwrap()
+                }
             }
         }
     }
@@ -166,6 +176,7 @@ struct Ctx {
     to_stderr: BytesMut,
     oneshot: bool,
     requests_finished: bool,
+    raw: bool,
     subscribe_timeout: Option<Duration>,
 }
 
@@ -210,6 +221,7 @@ impl Ctx {
             to_stderr: BytesMut::new(),
             oneshot: p.oneshot,
             requests_finished: false,
+            raw: p.raw,
         }
     }
 
@@ -350,7 +362,7 @@ impl Ctx {
                         if self.subscribe_timeout.is_some() {
                             self.subscribe_ts.remove(path);
                         }
-                        Out { path: &**path, value }.write(&mut self.to_stdout);
+                        Out { raw: self.raw, path: &**path, value }.write(&mut self.to_stdout);
                         if self.oneshot {
                             if let Some(path) = self.paths.get(&id).cloned() {
                                 self.remove_subscription(&path);
