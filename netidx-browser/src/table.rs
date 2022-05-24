@@ -23,6 +23,7 @@ use netidx::{
     chars::Chars,
     path::Path,
     pool::Pooled,
+    protocol::value::FromValue,
     resolver_client,
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
     utils::Either,
@@ -36,6 +37,7 @@ use std::{
     collections::{HashMap, HashSet},
     rc::{Rc, Weak},
     result::{self, Result},
+    str::FromStr,
     sync::Arc,
 };
 
@@ -46,35 +48,61 @@ struct Subscription {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum SortDir {
+    Ascending,
+    Descending,
+}
+
+impl FromStr for SortDir {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ascending" => Ok(SortDir::Ascending),
+            "descending" => Ok(SortDir::Descending),
+            _ => anyhow::bail!("invalid sort direction"),
+        }
+    }
+}
+
+impl FromValue for SortDir {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
+        v.cast_to::<Chars>().and_then(|c| c.parse())
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        v.get_as::<Chars>().and_then(|c| c.parse().ok())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SortSpec {
     None,
     Disabled,
-    Ascending(String),
-    Descending(String),
+    Column(Chars, SortDir),
+    External(FxHashMap<Chars, SortDir>),
 }
 
-impl SortSpec {
-    fn new(v: Value) -> Result<Self, String> {
+impl FromValue for SortSpec {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
         match v {
             Value::Null => Ok(SortSpec::None),
             Value::False => Ok(SortSpec::Disabled),
-            Value::String(col) => Ok(SortSpec::Descending(String::from(&*col))),
-            Value::Array(a) if a.len() == 2 => {
-                let column =
-                    a[0].clone().cast_to::<String>().map_err(|e| format!("{}", e))?;
-                match a[1]
-                    .clone()
-                    .cast_to::<String>()
-                    .map_err(|e| format!("{}", e))?
-                    .as_str()
-                {
-                    "ascending" => Ok(SortSpec::Ascending(column)),
-                    "descending" => Ok(SortSpec::Descending(column)),
-                    _ => Err("invalid mode".into()),
-                }
+            Value::String(col) => Ok(SortSpec::Column(col, SortDir::Descending)),
+            Value::Array(a) if a.len() == 2 && a[0] == Value::False => {
+                Ok(SortSpec::External(a[1].clone().cast_to()?))
             }
-            _ => Err("expected null, false, col, or a pair of [column, mode]".into()),
+            Value::Array(a) if a.len() == 2 => {
+                let column = a[0].clone().cast_to()?;
+                let spec = a[1].clone().cast_to()?;
+                Ok(SortSpec::Column(column, spec))
+            }
+            _ => anyhow::bail!("expected null, false, col, or a pair of [column, mode]"),
         }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        FromValue::from_value(v).ok()
     }
 }
 
@@ -576,8 +604,8 @@ impl RaeifiedTable {
             t.0.column_widths.borrow_mut().retain(|name, _| cols.contains(name.as_str()));
         }
         let sorting_disabled = match &sort_mode {
-            SortSpec::Disabled => true,
-            SortSpec::Ascending(_) | SortSpec::Descending(_) | SortSpec::None => false,
+            SortSpec::Disabled | SortSpec::External(_) => true,
+            SortSpec::Column(_, _) | SortSpec::None => false,
         };
         t.add_columns(
             ncols,
@@ -610,7 +638,21 @@ impl RaeifiedTable {
         match &sort_mode {
             SortSpec::None => (),
             SortSpec::Disabled => (),
-            SortSpec::Ascending(col) | SortSpec::Descending(col) => {
+            SortSpec::External(spec) => {
+                for col in t.view().columns() {
+                    col.set_sort_indicator(false);
+                    if let Some(title) = col.title() {
+                        if let Some(dir) = spec.get(&*title) {
+                            col.set_sort_indicator(true);
+                            col.set_sort_order(match dir {
+                                SortDir::Ascending => gtk::SortType::Ascending,
+                                SortDir::Descending => gtk::SortType::Descending,
+                            });
+                        }
+                    }
+                }
+            }
+            SortSpec::Column(col, dir) => {
                 let col = Path::from(col.clone());
                 let idx =
                     t.0.descriptor.cols.iter().enumerate().find_map(|(i, (c, _))| {
@@ -620,10 +662,9 @@ impl RaeifiedTable {
                             None
                         }
                     });
-                let dir = match &sort_mode {
-                    SortSpec::Ascending(_) => gtk::SortType::Ascending,
-                    SortSpec::Descending(_) => gtk::SortType::Descending,
-                    SortSpec::Disabled | SortSpec::None => unreachable!(),
+                let dir = match dir {
+                    SortDir::Ascending => gtk::SortType::Ascending,
+                    SortDir::Descending => gtk::SortType::Descending,
                 };
                 if let Some(i) = idx {
                     t.store().set_sort_column_id(gtk::SortColumn::Index(i as u32), dir)
@@ -1126,8 +1167,12 @@ impl Table {
         }));
         let sort_mode_expr =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.sort_mode);
-        let sort_mode =
-            RefCell::new(SortSpec::new(sort_mode_expr.current().unwrap_or(Value::Null)));
+        let sort_mode = sort_mode_expr
+            .current()
+            .unwrap_or(Value::Null)
+            .cast_to()
+            .map_err(|e| e.to_string());
+        let sort_mode = RefCell::new(sort_mode);
         let column_filter_expr =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_filter);
         let column_filter = RefCell::new(Filter::new(
@@ -1325,7 +1370,7 @@ impl Table {
             }
         }
         if let Some(col) = self.sort_mode_expr.update(ctx, event) {
-            let new = SortSpec::new(col);
+            let new = col.cast_to().map_err(|e| e.to_string());
             if &*self.sort_mode.borrow() != &new {
                 *self.sort_mode.borrow_mut() = new;
                 self.refresh(ctx);

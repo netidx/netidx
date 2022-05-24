@@ -24,8 +24,9 @@ pub struct Table {
     /// display. If the expr updates, the table will display the
     /// updated path.
     pub path: Expr,
-    /// (null | false | <column> | spec)
+    /// (null | false | external | <column> | spec)
     /// spec: [<column>, ("ascending" | "descending")]
+    /// external: [false, spec]
     /// - null: no default sort. Sorting is processed within the
     /// browser and is under the control of the user. Click events will
     /// also be generated when the user clicks on the header button,
@@ -35,6 +36,10 @@ pub struct Table {
     /// the header buttons. These events could be used to trigger
     /// publisher side sorting, or any other desired action. See,
     /// on_header_click.
+    /// - external: just like `false`, however sort indicators will be
+    /// shown as specified by the indicator spec. Use this if you
+    /// implement sorting in the publisher, but want to give the user
+    /// feedback about what is sorted.
     /// - <column>: by default sort by <column> in descending
     /// order. Sorting is processed within the browser and is under
     /// the user's control. Click events will also be generated when
