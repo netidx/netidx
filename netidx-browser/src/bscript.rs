@@ -11,15 +11,13 @@ pub(crate) enum LocalEvent {
 }
 
 pub(crate) struct Event {
-    cur: Option<Value>,
     invalid: bool,
 }
 
 impl Register<WidgetCtx, LocalEvent> for Event {
     fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
-        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|_, from, _, _| {
-            Box::new(Event { cur: None, invalid: from.len() > 0 })
-        });
+        let f: InitFn<WidgetCtx, LocalEvent> =
+            Arc::new(|_, from, _, _| Box::new(Event { invalid: from.len() > 0 }));
         ctx.functions.insert("event".into(), f);
         ctx.user.register_fn("event".into(), Path::root());
     }
@@ -30,7 +28,7 @@ impl Apply<WidgetCtx, LocalEvent> for Event {
         if self.invalid {
             Event::err()
         } else {
-            self.cur.as_ref().cloned()
+            None
         }
     }
 
@@ -47,9 +45,12 @@ impl Apply<WidgetCtx, LocalEvent> for Event {
             | vm::Event::Rpc(_, _)
             | vm::Event::User(LocalEvent::TableResolved(_, _)) => None,
             vm::Event::User(LocalEvent::Event(value)) => {
-                self.cur = Some(value.clone());
-                self.current()
-            }
+                if self.invalid {
+                    Event::err()
+                } else {
+                    Some(value.clone())
+                }
+            },
         }
     }
 }
