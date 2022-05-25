@@ -394,6 +394,7 @@ impl CachedCurEval for StartsWithEv {
                     Some(Value::False)
                 }
             }
+            [None, _] | [_, None] => None,
             _ => Some(Value::Error(Chars::from("starts_with expected 2 arguments"))),
         }
     }
@@ -418,6 +419,7 @@ impl CachedCurEval for IndexEv {
                     Some(Value::Error(Chars::from("array index out of bounds")))
                 }
             }
+            [None, _] | [_, None] => None,
             _ => Some(Value::Error(Chars::from("index expected an array and a positive index"))),
         }
     }
@@ -443,6 +445,7 @@ impl CachedCurEval for EndsWithEv {
                     Some(Value::False)
                 }
             }
+            [None, _] | [_, None] => None,
             _ => Some(Value::Error(Chars::from("ends_with expected 2 arguments"))),
         }
     }
@@ -467,6 +470,7 @@ impl CachedCurEval for ContainsEv {
                     Some(Value::False)
                 }
             }
+            [None, _] | [_, None] => None,
             _ => Some(Value::Error(Chars::from("contains expected 2 arguments"))),
         }
     }
@@ -486,6 +490,7 @@ impl CachedCurEval for StripPrefixEv {
             [Some(Value::String(pfx)), Some(Value::String(val))] => val
                 .strip_prefix(&**pfx)
                 .map(|s| Value::String(Chars::from(String::from(s)))),
+            [None, _] | [_, None] => None,
             _ => Some(Value::Error(Chars::from("strip_prefix expected 2 arguments"))),
         }
     }
@@ -505,6 +510,7 @@ impl CachedCurEval for StripSuffixEv {
             [Some(Value::String(sfx)), Some(Value::String(val))] => val
                 .strip_suffix(&**sfx)
                 .map(|s| Value::String(Chars::from(String::from(s)))),
+            [None, _] | [_, None] => None,
             _ => Some(Value::Error(Chars::from("strip_suffix expected 2 arguments"))),
         }
     }
@@ -524,6 +530,7 @@ impl CachedCurEval for TrimEv {
             [Some(Value::String(val))] => {
                 Some(Value::String(Chars::from(String::from(val.trim()))))
             }
+            [None] => None,
             _ => Some(Value::Error(Chars::from("trim expected 1 arguments"))),
         }
     }
@@ -543,6 +550,7 @@ impl CachedCurEval for TrimStartEv {
             [Some(Value::String(val))] => {
                 Some(Value::String(Chars::from(String::from(val.trim_start()))))
             }
+            [None] => None,
             _ => Some(Value::Error(Chars::from("trim_start expected 1 arguments"))),
         }
     }
@@ -562,6 +570,7 @@ impl CachedCurEval for TrimEndEv {
             [Some(Value::String(val))] => {
                 Some(Value::String(Chars::from(String::from(val.trim_end()))))
             }
+            [None] => None,
             _ => Some(Value::Error(Chars::from("trim_start expected 1 arguments"))),
         }
     }
@@ -583,6 +592,7 @@ impl CachedCurEval for ReplaceEv {
                     val.replace(&**pat, &**rep),
                 ))))
             }
+            [None, _, _] | [_, None, _]  | [_, _, None] => None,
             _ => Some(Value::Error(Chars::from("replace expected 3 arguments"))),
         }
     }
@@ -605,6 +615,7 @@ impl CachedCurEval for DirnameEv {
                     Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
                 }
             }
+            [None] => None,
             _ => Some(Value::Error(Chars::from("dirname expected 1 argument"))),
         }
     }
@@ -627,6 +638,7 @@ impl CachedCurEval for BasenameEv {
                     Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
                 }
             }
+            [None] => None,
             _ => Some(Value::Error(Chars::from("basename expected 1 argument"))),
         }
     }
