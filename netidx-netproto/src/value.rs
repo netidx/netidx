@@ -1544,6 +1544,29 @@ impl convert::From<f64> for Value {
     }
 }
 
+impl FromValue for Bytes {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Bytes).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Bytes(b) => Ok(b),
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Bytes(b) => Some(b),
+            _ => None,
+        }
+    }
+}
+
+impl convert::From<Bytes> for Value {
+    fn from(v: Bytes) -> Value {
+        Value::Bytes(v)
+    }
+}
+
+
 impl FromValue for Chars {
     fn from_value(v: Value) -> Res<Self> {
         v.cast(Typ::String).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {

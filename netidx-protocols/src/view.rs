@@ -118,17 +118,61 @@ pub struct Table {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Image {
+    /// (icon-spec | <image-bytes> | image-spec)
+    /// icon-spec: [<icon-name>, icon-size]
+    /// icon-size: ("menu" | "small-toolbar" | "large-toolbar" | "dnd" | "dialog")
+    /// image-spec: [
+    ///    ["image", <image-bytes>],
+    ///    ["width": <desired-width>],
+    ///    ["height", <desired-height>],
+    ///    ["keep-aspect", (true | false)]
+    /// ]
+    /// - <icon-name>: A string naming the stock icon from the current
+    /// theme that should be displayed.
+    /// - icon-size: The size of the icon
+    /// - <image-bytes>: A bytes value containing the image in any
+    /// format supported by gdk_pixbuf.
+    /// - image-spec: an alist containing the image bytes in any format
+    /// supported by gdk_pixbuf and some metadata.
+    ///   - image: the image bytes, required.
+    ///   - width: optional, if specified the image will be scaled to
+    ///   the specified width. If keep-aspect is true then the height
+    ///   will also be scaled to keep the image's aspect ratio even if
+    ///   height is not specified.
+    ///   - height: optional, if specifed the image will be scaled to
+    ///   the specified height. If keep-aspect is true then the width
+    ///   will also be scaled to keep the image's aspect ratio even if
+    ///   width is not specified.
+    pub spec: Expr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Button {
+    /// (true | false)
+    /// - true: The button can be clicked
+    /// - false: The button can't be clicked
     pub enabled: Expr,
+    /// Should resolve to a string, or null. If image is specified and
+    /// label is non null then label will override image.
     pub label: Expr,
+    /// see Image::spec
+    pub image: Expr,
+    /// event() will yield null when the button is clicked
     pub on_click: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkButton {
+    /// (true | false)
+    /// - true: The link can be clicked
+    /// - false: The link can't be clicked
     pub enabled: Expr,
+    /// The uri formatted string of the link
     pub uri: Expr,
+    /// The link label
     pub label: Expr,
+    /// event() will yield the uri when the link is activated
     pub on_activate_link: Expr,
 }
 
@@ -294,6 +338,7 @@ pub enum WidgetKind {
     Toggle(Toggle),
     Selector(Selector),
     Entry(Entry),
+    Image(Image),
     Frame(Frame),
     Box(Box),
     BoxChild(BoxChild),

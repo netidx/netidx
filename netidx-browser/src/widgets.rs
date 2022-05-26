@@ -1,6 +1,7 @@
 use super::{val_to_bool, BSCtx, BSCtxRef, BSNode, WVal};
 use crate::{bscript::LocalEvent, view};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
+use bytes::Bytes;
 use chrono::prelude::*;
 use gdk::{self, cairo, prelude::*};
 use glib::{clone, idle_add_local};
@@ -9,15 +10,51 @@ use log::warn;
 use netidx::{
     chars::Chars,
     path::Path,
+    protocol::value::FromValue,
     subscriber::{Typ, Value},
 };
 use netidx_bscript::{expr::Expr, vm};
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{VecDeque, HashMap},
     panic::{catch_unwind, AssertUnwindSafe},
     rc::Rc,
 };
+
+enum ImageSpec {
+    Icon { name: Chars, size: gtk::IconSize },
+    PixBuf { bytes: Bytes, width: Option<u32>, height: Option<u32>, keep_aspect: bool },
+}
+
+impl FromValue for ImageSpec {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::Bytes(bytes) => {
+                Ok(Self::PixBuf { bytes, width: None, height: None, keep_aspect: true })
+            }
+            Value::Array(elts) => match &*elts {
+                [Value::String(name), Value::String(size)] => {
+                    let size = match &**size {
+                        "menu" => gtk::IconSize::Menu,
+                        "small-toolbar" => gtk::IconSize::SmallToolbar,
+                        "large-toolbar" => gtk::IconSize::LargeToolbar,
+                        "dnd" => gtk::IconSize::Dnd,
+                        "dialog" => gtk::IconSize::Dialog,
+                        _ => bail!("invalid size"),
+                    };
+                    Ok(Self::Icon { name: name.clone(), size })
+                }
+                elts => {
+                    let mut alist = Value::Array(elts.clone()).cast_to::<HashMap<String, Value>>()?;
+                    let bytes = alist
+                        .remove("image")
+                        .ok_or_else(|| anyhow!("missing bytes"))?
+                        .cast_to::<Bytes>()?;
+                }
+            },
+        }
+    }
+}
 
 pub(super) struct Button {
     enabled: BSNode,
@@ -34,12 +71,15 @@ impl Button {
         selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
-        let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut ctx_r;
-        let enabled = BSNode::compile(ctx_r, scope.clone(), spec.enabled.clone());
-        let label = BSNode::compile(ctx_r, scope.clone(), spec.label.clone());
-        let on_click =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, scope, spec.on_click.clone())));
+        let (enabled, label, on_click) = {
+            let mut ctx = ctx.borrow_mut();
+            let ctx = &mut ctx_r;
+            let enabled = BSNode::compile(ctx, scope.clone(), spec.enabled.clone());
+            let label = BSNode::compile(ctx, scope.clone(), spec.label.clone());
+            let on_click =
+                Rc::new(RefCell::new(BSNode::compile(ctx, scope, spec.on_click.clone())));
+            (enabled, label, on_click)
+        };
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
         }
@@ -595,6 +635,36 @@ impl Entry {
     }
 }
 
+pub(super) struct Image {
+    image_spec: BSNode,
+    icon_size: BSNode,
+    width: BSNode,
+    height: BSNode,
+    keep_aspect: BSNode,
+    image: gtk::Image,
+}
+
+impl Image {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::Image,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let image = gtk::Image::new();
+        let (image_spec, width, height, keep_aspect) = {
+            let mut ctx = ctx.borrow_mut();
+            let ctx = &mut ctx;
+            let image_spec = BSNode::compile(ctx, scope.clone(), spec.image);
+            let width = BSNode::compile(ctx, scope.clone(), spec.width);
+            let height = BSNode::compile(ctx, scope.clone(), spec.height);
+            let keep_aspect = BSNode::compile(ctx, scope.clone(), spec.keep_aspect);
+            (image_spec, width, height, keep_aspect)
+        };
+        if let Some(spec) = image_spec.current() {}
+    }
+}
+
 fn valid_typ(v: &Value) -> bool {
     v.number() || Typ::get(v) == Typ::DateTime
 }
@@ -660,12 +730,31 @@ impl LinePlot {
         root.pack_start(&canvas, true, true, 0);
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let x_min = Rc::new(RefCell::new(BSNode::compile(ctx_r, scope.clone(), spec.x_min.clone())));
-        let x_max = Rc::new(RefCell::new(BSNode::compile(ctx_r, scope.clone(), spec.x_max.clone())));
-        let y_min = Rc::new(RefCell::new(BSNode::compile(ctx_r, scope.clone(), spec.y_min.clone())));
-        let y_max = Rc::new(RefCell::new(BSNode::compile(ctx_r, scope.clone(), spec.y_max.clone())));
-        let keep_points =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, scope.clone(), spec.keep_points.clone())));
+        let x_min = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope.clone(),
+            spec.x_min.clone(),
+        )));
+        let x_max = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope.clone(),
+            spec.x_max.clone(),
+        )));
+        let y_min = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope.clone(),
+            spec.y_min.clone(),
+        )));
+        let y_max = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope.clone(),
+            spec.y_max.clone(),
+        )));
+        let keep_points = Rc::new(RefCell::new(BSNode::compile(
+            ctx_r,
+            scope.clone(),
+            spec.keep_points.clone(),
+        )));
         let series = Rc::new(RefCell::new(
             spec.series
                 .iter()
@@ -730,9 +819,9 @@ impl LinePlot {
         series: &Rc<RefCell<Vec<Series>>>,
         context: &cairo::Context,
     ) -> Result<()> {
+        use super::cairo_backend::CairoBackend;
         use chrono::Duration;
         use plotters::{coord::ranged1d::ValueFormatter, prelude::*, style::RGBColor};
-        use super::cairo_backend::CairoBackend;
         use std::cmp::max;
         fn get_min_max(specified: Option<Value>, computed: Value) -> Value {
             match specified {
