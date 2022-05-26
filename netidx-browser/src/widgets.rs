@@ -100,6 +100,7 @@ impl FromValue for ImageSpec {
 pub(super) struct Button {
     enabled: BSNode,
     label: BSNode,
+    image: BSNode,
     on_click: Rc<RefCell<BSNode>>,
     button: gtk::Button,
 }
@@ -112,14 +113,15 @@ impl Button {
         selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
-        let (enabled, label, on_click) = {
+        let (enabled, label, image, on_click) = {
             let mut ctx = ctx.borrow_mut();
             let ctx = &mut ctx;
-            let enabled = BSNode::compile(ctx, scope.clone(), spec.enabled.clone());
-            let label = BSNode::compile(ctx, scope.clone(), spec.label.clone());
+            let enabled = BSNode::compile(ctx, scope.clone(), spec.enabled);
+            let label = BSNode::compile(ctx, scope.clone(), spec.label);
+            let image = BSNode::compile(ctx, scope.clone(), spec.image);
             let on_click =
-                Rc::new(RefCell::new(BSNode::compile(ctx, scope, spec.on_click.clone())));
-            (enabled, label, on_click)
+                Rc::new(RefCell::new(BSNode::compile(ctx, scope, spec.on_click)));
+            (enabled, label, image, on_click)
         };
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
@@ -143,7 +145,7 @@ impl Button {
                 Inhibit(false)
             }),
         );
-        Button { enabled, label, on_click, button }
+        Button { enabled, label, image, on_click, button }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
