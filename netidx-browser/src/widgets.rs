@@ -26,9 +26,35 @@ enum ImageSpec {
     PixBuf { bytes: Bytes, width: Option<u32>, height: Option<u32>, keep_aspect: bool },
 }
 
+impl ImageSpec {
+    fn apply(&self, image: &gtk::Image) {
+        match self {
+            Self::Icon { name, size } => image.set_from_icon_name(Some(&**name), *size),
+            Self::PixBuf { bytes, width, height, keep_aspect } => {
+                let width = width.map(|i| i as i32).unwrap_or(-1);
+                let height = height.map(|i| i as i32).unwrap_or(-1);
+                let bytes = glib::Bytes::from_owned(bytes.clone());
+                let stream = gio::MemoryInputStream::from_bytes(&bytes);
+                let pixbuf = gdk_pixbuf::Pixbuf::from_stream_at_scale(
+                    &stream,
+                    width,
+                    height,
+                    *keep_aspect,
+                    gio::Cancellable::NONE,
+                )
+                .ok();
+                image.set_from_pixbuf(pixbuf.as_ref())
+            }
+        }
+    }
+}
+
 impl FromValue for ImageSpec {
     fn from_value(v: Value) -> Result<Self> {
         match v {
+            Value::String(name) => {
+                Ok(Self::Icon { name, size: gtk::IconSize::SmallToolbar })
+            }
             Value::Bytes(bytes) => {
                 Ok(Self::PixBuf { bytes, width: None, height: None, keep_aspect: true })
             }
@@ -65,6 +91,10 @@ impl FromValue for ImageSpec {
             _ => bail!("expected bytes or array"),
         }
     }
+
+    fn get(v: Value) -> Option<Self> {
+        <Self as FromValue>::from_value(v).ok()
+    }
 }
 
 pub(super) struct Button {
@@ -84,7 +114,7 @@ impl Button {
         let button = gtk::Button::new();
         let (enabled, label, on_click) = {
             let mut ctx = ctx.borrow_mut();
-            let ctx = &mut ctx_r;
+            let ctx = &mut ctx;
             let enabled = BSNode::compile(ctx, scope.clone(), spec.enabled.clone());
             let label = BSNode::compile(ctx, scope.clone(), spec.label.clone());
             let on_click =
@@ -647,11 +677,7 @@ impl Entry {
 }
 
 pub(super) struct Image {
-    image_spec: BSNode,
-    icon_size: BSNode,
-    width: BSNode,
-    height: BSNode,
-    keep_aspect: BSNode,
+    spec: BSNode,
     image: gtk::Image,
 }
 
@@ -663,16 +689,23 @@ impl Image {
         selected_path: gtk::Label,
     ) -> Self {
         let image = gtk::Image::new();
-        let (image_spec, width, height, keep_aspect) = {
-            let mut ctx = ctx.borrow_mut();
-            let ctx = &mut ctx;
-            let image_spec = BSNode::compile(ctx, scope.clone(), spec.image);
-            let width = BSNode::compile(ctx, scope.clone(), spec.width);
-            let height = BSNode::compile(ctx, scope.clone(), spec.height);
-            let keep_aspect = BSNode::compile(ctx, scope.clone(), spec.keep_aspect);
-            (image_spec, width, height, keep_aspect)
-        };
-        if let Some(spec) = image_spec.current() {}
+        let spec = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.spec);
+        if let Some(spec) = spec.current().and_then(|v| v.get_as::<ImageSpec>()) {
+            spec.apply(&image)
+        }
+        Image { spec, image }
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.image.upcast_ref()
+    }
+
+    pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
+        if let Some(spec) =
+            self.spec.update(ctx, event).and_then(|v| v.get_as::<ImageSpec>())
+        {
+            spec.apply(&self.image)
+        }
     }
 }
 

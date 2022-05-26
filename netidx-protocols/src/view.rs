@@ -119,7 +119,7 @@ pub struct Table {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Image {
-    /// (icon-spec | <image-bytes> | image-spec)
+    /// (<icon-name> | icon-spec | <image-bytes> | image-spec)
     /// icon-spec: [<icon-name>, icon-size]
     /// icon-size: ("menu" | "small-toolbar" | "large-toolbar" | "dnd" | "dialog")
     /// image-spec: [
@@ -129,7 +129,8 @@ pub struct Image {
     ///    ["keep-aspect", (true | false)]
     /// ]
     /// - <icon-name>: A string naming the stock icon from the current
-    /// theme that should be displayed.
+    /// theme that should be displayed. The default size is "small-toolbar".
+    /// - icon-spec: A pair specifying the icon name and the icon size.
     /// - icon-size: The size of the icon
     /// - <image-bytes>: A bytes value containing the image in any
     /// format supported by gdk_pixbuf.
