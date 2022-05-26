@@ -21,6 +21,7 @@ use std::{
     rc::Rc,
 };
 
+#[derive(Debug)]
 enum ImageSpec {
     Icon { name: Chars, size: gtk::IconSize },
     PixBuf { bytes: Bytes, width: Option<u32>, height: Option<u32>, keep_aspect: bool },
@@ -126,17 +127,14 @@ impl Button {
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
         }
-        match (
-            label.current(),
-            image.current().and_then(|v| v.cast_to::<ImageSpec>().ok()),
-        ) {
-            (None, None) => (),
-            (None | Some(Value::Null), Some(spec)) => {
-                let image = gtk::Image::new();
-                spec.apply(&image);
-                button.set_image(Some(&image));
-            }
-            (Some(v), _) => button.set_label(&format!("{}", WVal(&v))),
+        if let Some(v) = label.current() {
+            button.set_label(&format!("{}", WVal(&v)))
+        }
+        if let Some(spec) = image.current().and_then(|v| v.cast_to::<ImageSpec>().ok()) {
+            let image = gtk::Image::new();
+            spec.apply(&image);
+            button.set_image(Some(&image));
+            button.set_always_show_image(true);
         }
         if let Some(v) = label.current() {
             button.set_label(&format!("{}", WVal(&v)));
@@ -177,6 +175,7 @@ impl Button {
             let image = gtk::Image::new();
             s.apply(&image);
             self.button.set_image(Some(&image));
+            self.button.set_always_show_image(true);
         }
         self.on_click.borrow_mut().update(ctx, event);
     }
