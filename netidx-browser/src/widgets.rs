@@ -16,7 +16,7 @@ use netidx::{
 use netidx_bscript::{expr::Expr, vm};
 use std::{
     cell::{Cell, RefCell},
-    collections::{VecDeque, HashMap},
+    collections::{HashMap, VecDeque},
     panic::{catch_unwind, AssertUnwindSafe},
     rc::Rc,
 };
@@ -44,14 +44,25 @@ impl FromValue for ImageSpec {
                     };
                     Ok(Self::Icon { name: name.clone(), size })
                 }
-                elts => {
-                    let mut alist = Value::Array(elts.clone()).cast_to::<HashMap<String, Value>>()?;
+                _ => {
+                    let mut alist =
+                        Value::Array(elts).cast_to::<HashMap<Chars, Value>>()?;
                     let bytes = alist
                         .remove("image")
                         .ok_or_else(|| anyhow!("missing bytes"))?
                         .cast_to::<Bytes>()?;
+                    let width =
+                        alist.remove("width").and_then(|v| v.cast_to::<u32>().ok());
+                    let height =
+                        alist.remove("height").and_then(|v| v.cast_to::<u32>().ok());
+                    let keep_aspect = alist
+                        .remove("keep-aspect")
+                        .and_then(|v| v.cast_to::<bool>().ok())
+                        .unwrap_or(true);
+                    Ok(Self::PixBuf { bytes, width, height, keep_aspect })
                 }
             },
+            _ => bail!("expected bytes or array"),
         }
     }
 }

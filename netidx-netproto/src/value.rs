@@ -1,6 +1,7 @@
 use anyhow::{bail, Result as Res};
 use bytes::{Buf, BufMut, Bytes};
 use chrono::{naive::NaiveDateTime, prelude::*};
+use indexmap::{IndexMap, IndexSet};
 use netidx_core::{
     chars::Chars,
     pack::{self, Pack, PackError},
@@ -8,7 +9,6 @@ use netidx_core::{
     utils,
 };
 use smallvec::SmallVec;
-use indexmap::{IndexMap, IndexSet};
 use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
     collections::{HashMap, HashSet},
@@ -1259,6 +1259,16 @@ impl Value {
     }
 }
 
+impl FromValue for Value {
+    fn from_value(v: Value) -> Res<Self> {
+        Ok(v)
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        Some(v)
+    }
+}
+
 impl<T: Into<Value> + Copy> convert::From<&T> for Value {
     fn from(v: &T) -> Value {
         (*v).into()
@@ -1565,7 +1575,6 @@ impl convert::From<Bytes> for Value {
         Value::Bytes(v)
     }
 }
-
 
 impl FromValue for Chars {
     fn from_value(v: Value) -> Res<Self> {
