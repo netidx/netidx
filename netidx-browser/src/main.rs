@@ -268,6 +268,7 @@ fn set_common_props<T: IsA<gtk::Widget> + 'static>(props: view::WidgetProps, t: 
 enum Widget {
     Action(widgets::Action),
     Table(table::Table),
+    Image(widgets::Image),
     Label(widgets::Label),
     Button(widgets::Button),
     LinkButton(widgets::LinkButton),
@@ -295,6 +296,9 @@ impl Widget {
             }
             view::WidgetKind::Table(spec) => {
                 Widget::Table(table::Table::new(ctx.clone(), spec, scope, selected_path))
+            }
+            view::WidgetKind::Image(spec) => {
+                Widget::Image(widgets::Image::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Label(spec) => {
                 Widget::Label(widgets::Label::new(ctx, spec, scope, selected_path))
@@ -357,6 +361,7 @@ impl Widget {
         match self {
             Widget::Action(_) => None,
             Widget::Table(t) => Some(t.root()),
+            Widget::Image(t) => Some(t.root()),
             Widget::Label(t) => Some(t.root()),
             Widget::Button(t) => Some(t.root()),
             Widget::LinkButton(t) => Some(t.root()),
@@ -381,6 +386,7 @@ impl Widget {
         match self {
             Widget::Action(t) => t.update(ctx, event),
             Widget::Table(t) => t.update(ctx, waits, event),
+            Widget::Image(t) => t.update(ctx, event),
             Widget::Label(t) => t.update(ctx, event),
             Widget::Button(t) => t.update(ctx, event),
             Widget::LinkButton(t) => t.update(ctx, event),
@@ -461,6 +467,7 @@ impl Widget {
                 (WidgetPath::Leaf, Widget::Grid(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Action(_)) => (),
                 (WidgetPath::Leaf, Widget::Table(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::Image(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Label(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Button(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::LinkButton(w)) => set(w.root(), h),

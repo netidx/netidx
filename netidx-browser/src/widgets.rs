@@ -116,15 +116,27 @@ impl Button {
         let (enabled, label, image, on_click) = {
             let mut ctx = ctx.borrow_mut();
             let ctx = &mut ctx;
-            let enabled = BSNode::compile(ctx, scope.clone(), spec.enabled);
-            let label = BSNode::compile(ctx, scope.clone(), spec.label);
-            let image = BSNode::compile(ctx, scope.clone(), spec.image);
+            let enabled = BSNode::compile(ctx, scope.clone(), spec.enabled.clone());
+            let label = BSNode::compile(ctx, scope.clone(), spec.label.clone());
+            let image = BSNode::compile(ctx, scope.clone(), spec.image.clone());
             let on_click =
-                Rc::new(RefCell::new(BSNode::compile(ctx, scope, spec.on_click)));
+                Rc::new(RefCell::new(BSNode::compile(ctx, scope, spec.on_click.clone())));
             (enabled, label, image, on_click)
         };
         if let Some(v) = enabled.current() {
             button.set_sensitive(val_to_bool(&v));
+        }
+        match (
+            label.current(),
+            image.current().and_then(|v| v.cast_to::<ImageSpec>().ok()),
+        ) {
+            (None, None) => (),
+            (None | Some(Value::Null), Some(spec)) => {
+                let image = gtk::Image::new();
+                spec.apply(&image);
+                button.set_image(Some(&image));
+            }
+            (Some(v), _) => button.set_label(&format!("{}", WVal(&v))),
         }
         if let Some(v) = label.current() {
             button.set_label(&format!("{}", WVal(&v)));
@@ -158,6 +170,13 @@ impl Button {
         }
         if let Some(new) = self.label.update(ctx, event) {
             self.button.set_label(&format!("{}", WVal(&new)));
+        }
+        if let Some(s) =
+            self.image.update(ctx, event).and_then(|v| v.cast_to::<ImageSpec>().ok())
+        {
+            let image = gtk::Image::new();
+            s.apply(&image);
+            self.button.set_image(Some(&image));
         }
         self.on_click.borrow_mut().update(ctx, event);
     }
@@ -679,8 +698,9 @@ impl Entry {
 }
 
 pub(super) struct Image {
-    spec: BSNode,
+    image_spec: BSNode,
     image: gtk::Image,
+    root: gtk::EventBox,
 }
 
 impl Image {
@@ -690,21 +710,33 @@ impl Image {
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
+        let root = gtk::EventBox::new();
         let image = gtk::Image::new();
-        let spec = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.spec);
-        if let Some(spec) = spec.current().and_then(|v| v.get_as::<ImageSpec>()) {
+        root.add(&image);
+        let image_spec = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.spec.clone());
+        if let Some(spec) = image_spec.current().and_then(|v| v.get_as::<ImageSpec>()) {
             spec.apply(&image)
         }
-        Image { spec, image }
+        root.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
+            selected_path.set_label(&format!("on_click: {}", &spec.spec));
+            Inhibit(false)
+        }));
+        root.connect_enter_notify_event(
+            clone!(@strong selected_path, @strong spec => move |_, _| {
+                selected_path.set_label(&format!("on_click: {}", &spec.spec));
+                Inhibit(false)
+            }),
+        );
+        Image { image_spec, image, root }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
-        self.image.upcast_ref()
+        self.root.upcast_ref()
     }
 
     pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
         if let Some(spec) =
-            self.spec.update(ctx, event).and_then(|v| v.get_as::<ImageSpec>())
+            self.image_spec.update(ctx, event).and_then(|v| v.get_as::<ImageSpec>())
         {
             spec.apply(&self.image)
         }

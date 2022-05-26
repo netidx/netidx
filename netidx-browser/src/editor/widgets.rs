@@ -369,6 +369,45 @@ impl Action {
 }
 
 #[derive(Clone)]
+pub(super) struct Image {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::Image>>,
+    _expr: DbgExpr,
+}
+
+impl Image {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Scope,
+        spec: view::Image,
+    ) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let (l, e, _expr) = expr(
+            ctx,
+            "Spec:",
+            scope.clone(),
+            &spec.borrow().spec,
+            clone!(@strong spec => move |s| {
+                spec.borrow_mut().spec = s;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        Image { root, spec, _expr }
+    }
+
+    pub(super) fn spec(&self) -> view::WidgetKind {
+        view::WidgetKind::Image(self.spec.borrow().clone())
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct Label {
     root: gtk::Box,
     spec: Rc<RefCell<expr::Expr>>,
@@ -416,6 +455,7 @@ pub(super) struct Button {
     spec: Rc<RefCell<view::Button>>,
     _enabled_expr: DbgExpr,
     _label_expr: DbgExpr,
+    _image_expr: DbgExpr,
     _on_click_expr: DbgExpr,
 }
 
@@ -450,6 +490,17 @@ impl Button {
             }),
         );
         root.add((l, e));
+        let (l, e, _image_expr) = expr(
+            ctx,
+            "Image:",
+            scope.clone(),
+            &spec.borrow().image,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().image = s;
+                on_change()
+            }),
+        );
+        root.add((l, e));
         let (l, e, _on_click_expr) = expr(
             ctx,
             "On Click:",
@@ -461,7 +512,7 @@ impl Button {
             }),
         );
         root.add((l, e));
-        Button { root, spec, _enabled_expr, _label_expr, _on_click_expr }
+        Button { root, spec, _enabled_expr, _label_expr, _image_expr, _on_click_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {

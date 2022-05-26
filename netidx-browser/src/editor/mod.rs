@@ -179,6 +179,7 @@ impl WidgetProps {
 enum WidgetKind {
     Action(widgets::Action),
     Table(widgets::Table),
+    Image(widgets::Image),
     Label(widgets::Label),
     Button(widgets::Button),
     LinkButton(widgets::LinkButton),
@@ -202,6 +203,7 @@ impl WidgetKind {
         match self {
             WidgetKind::Action(w) => Some(w.root()),
             WidgetKind::Table(w) => Some(w.root()),
+            WidgetKind::Image(w) => Some(w.root()),
             WidgetKind::Label(w) => Some(w.root()),
             WidgetKind::Button(w) => Some(w.root()),
             WidgetKind::LinkButton(w) => Some(w.root()),
@@ -257,6 +259,16 @@ impl Widget {
             view::Widget { props, kind: view::WidgetKind::Table(s) } => (
                 "Table",
                 WidgetKind::Table(widgets::Table::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
+                Some(WidgetProps::new(on_change, props)),
+            ),
+            view::Widget { props, kind: view::WidgetKind::Image(s) } => (
+                "Image",
+                WidgetKind::Image(widgets::Image::new(
                     ctx,
                     on_change.clone(),
                     scope.clone(),
@@ -428,6 +440,7 @@ impl Widget {
         let kind = match &self.kind {
             WidgetKind::Action(w) => w.spec(),
             WidgetKind::Table(w) => w.spec(),
+            WidgetKind::Image(w) => w.spec(),
             WidgetKind::Label(w) => w.spec(),
             WidgetKind::Button(w) => w.spec(),
             WidgetKind::LinkButton(w) => w.spec(),
@@ -463,6 +476,10 @@ impl Widget {
                 expr::ExprKind::Constant(Value::U64(42)).to_expr(),
             )),
             Some("Table") => table(),
+            Some("Image") => widget(view::WidgetKind::Image(view::Image {
+                spec: expr::ExprKind::Constant(Value::from("media-floppy-symbolic"))
+                    .to_expr(),
+            })),
             Some("Label") => {
                 let s = Value::String(Chars::from("static label"));
                 widget(view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()))
@@ -472,6 +489,7 @@ impl Widget {
                 widget(view::WidgetKind::Button(view::Button {
                     enabled: expr::ExprKind::Constant(Value::True).to_expr(),
                     label: expr::ExprKind::Constant(Value::String(l)).to_expr(),
+                    image: expr::ExprKind::Constant(Value::Null).to_expr(),
                     on_click: expr::ExprKind::Apply {
                         args: vec![
                             expr::ExprKind::Constant(Value::from("/somewhere/in/netidx"))
@@ -683,6 +701,7 @@ impl Widget {
         match &self.kind {
             WidgetKind::Action(w) => w.moved(iter),
             WidgetKind::Table(_)
+            | WidgetKind::Image(_)
             | WidgetKind::Label(_)
             | WidgetKind::Button(_)
             | WidgetKind::LinkButton(_)
@@ -703,10 +722,11 @@ impl Widget {
     }
 }
 
-static KINDS: [&'static str; 18] = [
+static KINDS: [&'static str; 19] = [
     "Action",
     "Table",
     "Label",
+    "Image",
     "Button",
     "LinkButton",
     "Toggle",
@@ -1110,6 +1130,7 @@ impl Editor {
                 | WidgetKind::GridChild(_)
                 | WidgetKind::Action(_)
                 | WidgetKind::Table(_)
+                | WidgetKind::Image(_)
                 | WidgetKind::Label(_)
                 | WidgetKind::Button(_)
                 | WidgetKind::LinkButton(_)
@@ -1223,6 +1244,7 @@ impl Editor {
             }
             view::WidgetKind::Action(_)
             | view::WidgetKind::Table(_)
+            | view::WidgetKind::Image(_)
             | view::WidgetKind::Label(_)
             | view::WidgetKind::Button(_)
             | view::WidgetKind::LinkButton(_)
@@ -1327,6 +1349,7 @@ impl Editor {
                     }
                     view::WidgetKind::Action(_)
                     | view::WidgetKind::Table(_)
+                    | view::WidgetKind::Image(_)
                     | view::WidgetKind::Label(_)
                     | view::WidgetKind::Button(_)
                     | view::WidgetKind::LinkButton(_)
@@ -1356,6 +1379,10 @@ impl Editor {
                     false
                 }
                 WidgetKind::Table(_) => {
+                    path.insert(0, WidgetPath::Leaf);
+                    false
+                }
+                WidgetKind::Image(_) => {
                     path.insert(0, WidgetPath::Leaf);
                     false
                 }
