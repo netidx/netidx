@@ -18,6 +18,14 @@ pub enum Direction {
     Vertical,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum EllipsizeMode {
+    None,
+    Start,
+    Middle,
+    End,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
     /// expr should resolve to the path of the table you want to
@@ -25,8 +33,8 @@ pub struct Table {
     /// updated path.
     pub path: Expr,
     /// (null | false | external | <column> | spec)
-    /// spec: [<column>, ("ascending" | "descending")]
     /// external: [false, spec]
+    /// spec: [<column>, ("ascending" | "descending")]
     /// - null: no default sort. Sorting is processed within the
     /// browser and is under the control of the user. Click events will
     /// also be generated when the user clicks on the header button,
@@ -201,6 +209,40 @@ pub struct Entry {
     pub on_activate: Expr,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Scale {
+    pub dir: Direction,
+    pub enabled: Expr,
+    pub current: Expr,
+    pub min: Expr,
+    pub max: Expr,
+    pub on_change: Expr,
+}
+
+pub struct ProgressBar {
+    ellipsize: EllipsizeMode,
+    /// (null | <percent>)
+    /// null: in this case the progress bar will operate in "activity
+    /// mode", showing the user that something is happening, but not
+    /// giving any indication of when it will be finished. Use pulse
+    /// to indicate activity in this mode
+    /// <percent>: the progress from 0.0 to 1.0. If set the progress
+    /// bar will operate in normal mode, showing how much of a given
+    /// task is complete.
+    pub fraction: Expr,
+    /// This will indicate activity every time the pulse expression
+    /// updates. Setting this to anything but null will cause the
+    /// progress bar to operate in activity mode.
+    pub pulse: Expr,
+    /// the text that will be shown if show_text is true
+    pub text: Expr,
+    /// (true | false)
+    /// false: no text is shown
+    /// true: if text is a string then it will be shown on the
+    /// progressbar, otherwise the value of fraction will be shown.
+    pub show_text: Expr,
+}
+
 #[derive(Debug, Copy, Clone, Serialize, PartialEq, PartialOrd, Eq, Ord, Deserialize)]
 pub enum Align {
     Fill,
@@ -331,9 +373,9 @@ pub struct LinePlot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WidgetKind {
-    Action(Expr),
+    BScript(Expr),
     Table(Table),
-    Label(Expr),
+    Label(Label),
     Button(Button),
     LinkButton(LinkButton),
     Toggle(Toggle),
