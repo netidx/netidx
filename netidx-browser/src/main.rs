@@ -38,7 +38,6 @@ use netidx_protocols::view;
 use radix_trie::Trie;
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
     fmt, mem,
     path::PathBuf,
     rc::Rc,
@@ -64,39 +63,34 @@ type BSCtxRef<'a> = &'a mut ExecCtx<WidgetCtx, LocalEvent>;
 type Batch = Pooled<Vec<(SubId, Value)>>;
 type RawBatch = Pooled<Vec<(SubId, Event)>>;
 
-fn default_view(path: Path) -> view::View {
-    view::View {
-        variables: HashMap::new(),
-        keybinds: Vec::new(),
-        root: view::Widget {
-            kind: view::WidgetKind::Table(view::Table {
-                path: ExprKind::Constant(Value::String(Chars::from(String::from(
-                    &*path,
-                ))))
+fn default_view(path: Path) -> view::Widget {
+    view::Widget {
+        props: None,
+        keybinds: vec![],
+        enabled: ExprKind::Constant(Value::True).to_expr(),
+        visible: ExprKind::Constant(Value::True).to_expr(),
+        kind: view::WidgetKind::Table(view::Table {
+            path: ExprKind::Constant(Value::String(Chars::from(String::from(&*path))))
                 .to_expr(),
-                sort_mode: ExprKind::Constant(Value::Null).to_expr(),
-                column_filter: ExprKind::Constant(Value::Null).to_expr(),
-                row_filter: ExprKind::Constant(Value::Null).to_expr(),
-                column_editable: ExprKind::Constant(Value::False).to_expr(),
-                column_widths: ExprKind::Constant(Value::Null).to_expr(),
-                columns_resizable: ExprKind::Constant(Value::True).to_expr(),
-                multi_select: ExprKind::Constant(Value::False).to_expr(),
-                show_row_name: ExprKind::Constant(Value::True).to_expr(),
-                on_select: ExprKind::Constant(Value::Null).to_expr(),
-                on_edit: ExprKind::Constant(Value::Null).to_expr(),
-                on_activate: ExprKind::Apply {
-                    function: "navigate".into(),
-                    args: vec![ExprKind::Apply {
-                        function: "event".into(),
-                        args: vec![],
-                    }
-                    .to_expr()],
-                }
-                .to_expr(),
-                on_header_click: ExprKind::Constant(Value::Null).to_expr(),
-            }),
-            props: None,
-        },
+            sort_mode: ExprKind::Constant(Value::Null).to_expr(),
+            column_filter: ExprKind::Constant(Value::Null).to_expr(),
+            row_filter: ExprKind::Constant(Value::Null).to_expr(),
+            column_editable: ExprKind::Constant(Value::False).to_expr(),
+            column_widths: ExprKind::Constant(Value::Null).to_expr(),
+            columns_resizable: ExprKind::Constant(Value::True).to_expr(),
+            multi_select: ExprKind::Constant(Value::False).to_expr(),
+            show_row_name: ExprKind::Constant(Value::True).to_expr(),
+            on_select: ExprKind::Constant(Value::Null).to_expr(),
+            on_edit: ExprKind::Constant(Value::Null).to_expr(),
+            on_activate: ExprKind::Apply {
+                function: "navigate".into(),
+                args: vec![
+                    ExprKind::Apply { function: "event".into(), args: vec![] }.to_expr()
+                ],
+            }
+            .to_expr(),
+            on_header_click: ExprKind::Constant(Value::Null).to_expr(),
+        }),
     }
 }
 
@@ -143,7 +137,7 @@ impl fmt::Display for ViewLoc {
 
 #[derive(Debug, Clone)]
 enum ToGui {
-    View { loc: Option<ViewLoc>, spec: view::View, generated: bool },
+    View { loc: Option<ViewLoc>, spec: view::Widget, generated: bool },
     NavigateInWindow(ViewLoc),
     Highlight(Vec<WidgetPath>),
     Update(Batch),
@@ -158,9 +152,9 @@ enum ToGui {
 #[derive(Debug)]
 enum FromGui {
     Navigate(ViewLoc),
-    Render(view::View),
+    Render(view::Widget),
     ResolveTable(Path),
-    Save(ViewLoc, view::View, oneshot::Sender<Result<()>>),
+    Save(ViewLoc, view::Widget, oneshot::Sender<Result<()>>),
     CallRpc(Path, Vec<(Chars, Value)>, RpcCallId),
     Updated,
     Terminate,
@@ -266,14 +260,14 @@ fn set_common_props<T: IsA<gtk::Widget> + 'static>(props: view::WidgetProps, t: 
 }
 
 enum Widget {
-    Action(widgets::Action),
+    BScript(widgets::BScript),
     Table(table::Table),
     Image(widgets::Image),
     Label(widgets::Label),
     Button(widgets::Button),
     LinkButton(widgets::LinkButton),
     Toggle(widgets::Toggle),
-    Selector(widgets::Selector),
+    ComboBoxText(widgets::ComboBoxText),
     Entry(widgets::Entry),
     Frame(containers::Frame),
     Box(containers::Box),
@@ -291,8 +285,8 @@ impl Widget {
         selected_path: gtk::Label,
     ) -> Widget {
         let w = match spec.kind {
-            view::WidgetKind::Action(spec) => {
-                Widget::Action(widgets::Action::new(ctx, scope, spec))
+            view::WidgetKind::BScript(spec) => {
+                Widget::BScript(widgets::BScript::new(ctx, scope, spec))
             }
             view::WidgetKind::Table(spec) => {
                 Widget::Table(table::Table::new(ctx.clone(), spec, scope, selected_path))
@@ -312,9 +306,9 @@ impl Widget {
             view::WidgetKind::Toggle(spec) => {
                 Widget::Toggle(widgets::Toggle::new(ctx, spec, scope, selected_path))
             }
-            view::WidgetKind::Selector(spec) => {
-                Widget::Selector(widgets::Selector::new(ctx, spec, scope, selected_path))
-            }
+            view::WidgetKind::ComboBoxText(spec) => Widget::ComboBoxText(
+                widgets::ComboBoxText::new(ctx, spec, scope, selected_path),
+            ),
             view::WidgetKind::Entry(spec) => {
                 Widget::Entry(widgets::Entry::new(ctx, spec, scope, selected_path))
             }
@@ -335,7 +329,10 @@ impl Widget {
             }
             view::WidgetKind::GridRow(_) => {
                 let s = Value::String(Chars::from("orphaned grid row"));
-                let spec = ExprKind::Constant(s).to_expr();
+                let text = ExprKind::Constant(s).to_expr();
+                let width = ExprKind::Constant(Value::Null).to_expr();
+                let spec =
+                    view::Label { ellipsize: view::EllipsizeMode::None, text, width };
                 Widget::Label(widgets::Label::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Paned(spec) => {
@@ -359,14 +356,14 @@ impl Widget {
 
     fn root(&self) -> Option<&gtk::Widget> {
         match self {
-            Widget::Action(_) => None,
+            Widget::BScript(_) => None,
             Widget::Table(t) => Some(t.root()),
             Widget::Image(t) => Some(t.root()),
             Widget::Label(t) => Some(t.root()),
             Widget::Button(t) => Some(t.root()),
             Widget::LinkButton(t) => Some(t.root()),
             Widget::Toggle(t) => Some(t.root()),
-            Widget::Selector(t) => Some(t.root()),
+            Widget::ComboBoxText(t) => Some(t.root()),
             Widget::Entry(t) => Some(t.root()),
             Widget::Frame(t) => Some(t.root()),
             Widget::Box(t) => Some(t.root()),
@@ -384,14 +381,14 @@ impl Widget {
         event: &vm::Event<LocalEvent>,
     ) {
         match self {
-            Widget::Action(t) => t.update(ctx, event),
+            Widget::BScript(t) => t.update(ctx, event),
             Widget::Table(t) => t.update(ctx, waits, event),
             Widget::Image(t) => t.update(ctx, event),
             Widget::Label(t) => t.update(ctx, event),
             Widget::Button(t) => t.update(ctx, event),
             Widget::LinkButton(t) => t.update(ctx, event),
             Widget::Toggle(t) => t.update(ctx, event),
-            Widget::Selector(t) => t.update(ctx, event),
+            Widget::ComboBoxText(t) => t.update(ctx, event),
             Widget::Entry(t) => t.update(ctx, event),
             Widget::Frame(t) => t.update(ctx, waits, event),
             Widget::Box(t) => t.update(ctx, waits, event),
@@ -465,14 +462,14 @@ impl Widget {
                 (WidgetPath::Leaf, Widget::Notebook(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Box(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Grid(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::Action(_)) => (),
+                (WidgetPath::Leaf, Widget::BScript(_)) => (),
                 (WidgetPath::Leaf, Widget::Table(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Image(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Label(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Button(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::LinkButton(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Toggle(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::Selector(w)) => set(w.root(), h),
+                (WidgetPath::Leaf, Widget::ComboBoxText(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::Entry(w)) => set(w.root(), h),
                 (WidgetPath::Leaf, Widget::LinePlot(w)) => set(w.root(), h),
             },
@@ -562,7 +559,7 @@ struct View {
 }
 
 impl View {
-    fn new(ctx: &BSCtx, path: &ViewLoc, spec: view::View) -> View {
+    fn new(ctx: &BSCtx, path: &ViewLoc, spec: view::Widget) -> View {
         let selected_path = gtk::Label::new(None);
         selected_path.set_halign(gtk::Align::Start);
         selected_path.set_margin_start(0);
@@ -573,8 +570,7 @@ impl View {
         selected_path_window
             .set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
         selected_path_window.add(&selected_path);
-        let widget =
-            Widget::new(ctx, spec.root.clone(), Path::root(), selected_path.clone());
+        let widget = Widget::new(ctx, spec.clone(), Path::root(), selected_path.clone());
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         root.set_margin(2);
         root.add(&make_crumbs(ctx, path));
@@ -701,7 +697,7 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
 fn save_view(
     ctx: &BSCtx,
     save_loc: &Rc<RefCell<Option<ViewLoc>>>,
-    current_spec: &Rc<RefCell<view::View>>,
+    current_spec: &Rc<RefCell<view::Widget>>,
     save_button: &gtk::ToolButton,
     save_as: bool,
 ) {
@@ -805,7 +801,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     }
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let current_loc: Rc<RefCell<ViewLoc>> = ctx.borrow().user.current_loc.clone();
-    let current_spec: Rc<RefCell<view::View>> =
+    let current_spec: Rc<RefCell<view::Widget>> =
         Rc::new(RefCell::new(default_view(Path::from("/"))));
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));

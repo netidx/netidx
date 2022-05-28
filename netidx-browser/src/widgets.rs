@@ -98,8 +98,17 @@ impl FromValue for ImageSpec {
     }
 }
 
+fn ellipsize(e: view::EllipsizeMode) -> pango::EllipsizeMode {
+    use view::EllipsizeMode;
+    match e {
+        EllipsizeMode::None => pango::EllipsizeMode::None,
+        EllipsizeMode::Start => pango::EllipsizeMode::Start,
+        EllipsizeMode::End => pango::EllipsizeMode::End,
+        EllipsizeMode::Middle => pango::EllipsizeMode::Middle,
+    }
+}
+
 pub(super) struct Button {
-    enabled: BSNode,
     label: BSNode,
     image: BSNode,
     on_click: Rc<RefCell<BSNode>>,
@@ -114,19 +123,15 @@ impl Button {
         selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
-        let (enabled, label, image, on_click) = {
+        let (label, image, on_click) = {
             let mut ctx = ctx.borrow_mut();
             let ctx = &mut ctx;
-            let enabled = BSNode::compile(ctx, scope.clone(), spec.enabled.clone());
             let label = BSNode::compile(ctx, scope.clone(), spec.label.clone());
             let image = BSNode::compile(ctx, scope.clone(), spec.image.clone());
             let on_click =
                 Rc::new(RefCell::new(BSNode::compile(ctx, scope, spec.on_click.clone())));
-            (enabled, label, image, on_click)
+            (label, image, on_click)
         };
-        if let Some(v) = enabled.current() {
-            button.set_sensitive(val_to_bool(&v));
-        }
         if let Some(v) = label.current() {
             button.set_label(&format!("{}", WVal(&v)))
         }
@@ -155,7 +160,7 @@ impl Button {
                 Inhibit(false)
             }),
         );
-        Button { enabled, label, image, on_click, button }
+        Self { label, image, on_click, button }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -163,9 +168,6 @@ impl Button {
     }
 
     pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
-        if let Some(new) = self.enabled.update(ctx, event) {
-            self.button.set_sensitive(val_to_bool(&new));
-        }
         if let Some(new) = self.label.update(ctx, event) {
             self.button.set_label(&format!("{}", WVal(&new)));
         }
@@ -182,7 +184,6 @@ impl Button {
 }
 
 pub(super) struct LinkButton {
-    enabled: BSNode,
     uri: BSNode,
     label: BSNode,
     on_activate_link: Rc<RefCell<BSNode>>,
@@ -198,7 +199,6 @@ impl LinkButton {
     ) -> Self {
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let enabled = BSNode::compile(ctx_r, scope.clone(), spec.enabled.clone());
         let uri = BSNode::compile(ctx_r, scope.clone(), spec.uri.clone());
         let label = BSNode::compile(ctx_r, scope.clone(), spec.label.clone());
         let on_activate_link = Rc::new(RefCell::new(BSNode::compile(
@@ -211,9 +211,6 @@ impl LinkButton {
         let cur_uri = uri.current().and_then(|v| v.get_as::<Chars>());
         let cur_uri = cur_uri.as_ref().map(|s| s.as_ref()).unwrap_or("file:///");
         let button = gtk::LinkButton::with_label(cur_uri, cur_label);
-        if let Some(v) = enabled.current() {
-            button.set_sensitive(val_to_bool(&v));
-        }
         button.connect_activate_link(clone!(
         @strong ctx,
         @strong on_activate_link => move |_| {
@@ -237,7 +234,7 @@ impl LinkButton {
                 Inhibit(false)
             }),
         );
-        LinkButton { enabled, uri, label, on_activate_link, button }
+        LinkButton { uri, label, on_activate_link, button }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -245,9 +242,6 @@ impl LinkButton {
     }
 
     pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
-        if let Some(new) = self.enabled.update(ctx, event) {
-            self.button.set_sensitive(val_to_bool(&new));
-        }
         if let Some(new) = self.uri.update(ctx, event) {
             if let Some(new) = new.get_as::<Chars>() {
                 self.button.set_uri(&new);
@@ -265,34 +259,40 @@ impl LinkButton {
 pub(super) struct Label {
     label: gtk::Label,
     text: BSNode,
+    width: BSNode,
 }
 
 impl Label {
     pub(super) fn new(
         ctx: &BSCtx,
-        spec: Expr,
+        spec: view::Label,
         scope: Path,
         selected_path: gtk::Label,
     ) -> Label {
-        let text = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.clone());
+        let text = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.text.clone());
+        let width = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.width.clone());
         let txt = match text.current() {
             None => String::new(),
             Some(v) => format!("{}", WVal(&v)),
         };
         let label = gtk::Label::new(Some(txt.as_str()));
+        if let Some(w) = width.current().and_then(|v| v.cast_to::<i32>().ok()) {
+            label.set_width_chars(w);
+        }
         label.set_selectable(true);
         label.set_single_line_mode(true);
+        label.set_ellipsize(ellipsize(spec.ellipsize));
         label.connect_button_press_event(
             clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(&format!("{}", spec));
+                selected_path.set_label(&format!("{}", spec.text));
                 Inhibit(false)
             }),
         );
         label.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(&format!("{}", spec));
+            selected_path.set_label(&format!("{}", spec.text));
             Inhibit(false)
         }));
-        Label { text, label }
+        Label { text, label, width }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -303,41 +303,45 @@ impl Label {
         if let Some(new) = self.text.update(ctx, event) {
             self.label.set_label(&format!("{}", WVal(&new)));
         }
+        if let Some(w) =
+            self.width.update(ctx, event).and_then(|v| v.cast_to::<i32>().ok())
+        {
+            self.label.set_width_chars(w);
+        }
     }
 }
 
-pub(super) struct Action {
-    action: BSNode,
+pub(super) struct BScript {
+    expr: BSNode,
 }
 
-impl Action {
+impl BScript {
     pub(super) fn new(ctx: &BSCtx, scope: Path, spec: Expr) -> Self {
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let mut action = BSNode::compile(ctx_r, scope, spec.clone());
-        action.update(ctx_r, &vm::Event::User(LocalEvent::Event(Value::Null)));
-        Action { action }
+        let mut expr = BSNode::compile(ctx_r, scope, spec.clone());
+        expr.update(ctx_r, &vm::Event::User(LocalEvent::Event(Value::Null)));
+        Self { expr }
     }
 
     pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
-        self.action.update(ctx, event);
+        self.expr.update(ctx, event);
     }
 }
 
-pub(super) struct Selector {
+pub(super) struct ComboBoxText {
     root: gtk::EventBox,
     combo: gtk::ComboBoxText,
-    enabled: BSNode,
     choices: BSNode,
     selected: Rc<RefCell<BSNode>>,
     on_change: Rc<RefCell<BSNode>>,
     we_set: Rc<Cell<bool>>,
 }
 
-impl Selector {
+impl ComboBoxText {
     pub(super) fn new(
         ctx: &BSCtx,
-        spec: view::Selector,
+        spec: view::ComboBoxText,
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
@@ -360,7 +364,6 @@ impl Selector {
         );
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let enabled = BSNode::compile(ctx_r, scope.clone(), spec.enabled.clone());
         let choices = BSNode::compile(ctx_r, scope.clone(), spec.choices.clone());
         let selected = Rc::new(RefCell::new(BSNode::compile(
             ctx_r,
@@ -370,14 +373,11 @@ impl Selector {
         let on_change =
             Rc::new(RefCell::new(BSNode::compile(ctx_r, scope, spec.on_change.clone())));
         let we_set = Rc::new(Cell::new(false));
-        if let Some(v) = enabled.current() {
-            combo.set_sensitive(val_to_bool(&v));
-        }
         if let Some(choices) = choices.current() {
-            Selector::update_choices(&combo, &choices, &selected.borrow().current());
+            Self::update_choices(&combo, &choices, &selected.borrow().current());
         }
         we_set.set(true);
-        Selector::update_active(&combo, &selected.borrow().current());
+        Self::update_active(&combo, &selected.borrow().current());
         we_set.set(false);
         combo.connect_changed(clone!(
             @strong we_set,
@@ -396,14 +396,14 @@ impl Selector {
                 idle_add_local(clone!(
                     @strong selected, @strong combo, @strong we_set => move || {
                         we_set.set(true);
-                        Selector::update_active(&combo, &selected.borrow().current());
+                        Self::update_active(&combo, &selected.borrow().current());
                         we_set.set(false);
                         Continue(false)
                     })
                 );
             }
         }));
-        Selector { root, combo, enabled, choices, selected, on_change, we_set }
+        Self { root, combo, choices, selected, on_change, we_set }
     }
 
     fn update_active(combo: &gtk::ComboBoxText, source: &Option<Value>) {
@@ -443,25 +443,15 @@ impl Selector {
                 combo.append(Some(id.as_str()), val.as_str());
             }
         }
-        Selector::update_active(combo, source)
+        Self::update_active(combo, source)
     }
 
     pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
         self.we_set.set(true);
         self.on_change.borrow_mut().update(ctx, event);
-        if let Some(new) = self.enabled.update(ctx, event) {
-            self.combo.set_sensitive(val_to_bool(&new));
-        }
-        Selector::update_active(
-            &self.combo,
-            &self.selected.borrow_mut().update(ctx, event),
-        );
+        Self::update_active(&self.combo, &self.selected.borrow_mut().update(ctx, event));
         if let Some(new) = self.choices.update(ctx, event) {
-            Selector::update_choices(
-                &self.combo,
-                &new,
-                &self.selected.borrow().current(),
-            );
+            Self::update_choices(&self.combo, &new, &self.selected.borrow().current());
         }
         self.we_set.set(false);
     }
@@ -472,7 +462,6 @@ impl Selector {
 }
 
 pub(super) struct Toggle {
-    enabled: BSNode,
     value: Rc<RefCell<BSNode>>,
     on_change: Rc<RefCell<BSNode>>,
     we_set: Rc<Cell<bool>>,
@@ -489,7 +478,6 @@ impl Toggle {
         let switch = gtk::Switch::new();
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let enabled = BSNode::compile(ctx_r, scope.clone(), spec.enabled.clone());
         let value = Rc::new(RefCell::new(BSNode::compile(
             ctx_r,
             scope.clone(),
@@ -498,9 +486,6 @@ impl Toggle {
         let on_change =
             Rc::new(RefCell::new(BSNode::compile(ctx_r, scope, spec.on_change.clone())));
         let we_set = Rc::new(Cell::new(false));
-        if let Some(v) = enabled.current() {
-            switch.set_sensitive(val_to_bool(&v));
-        }
         if let Some(v) = value.borrow().current() {
             let v = val_to_bool(&v);
             switch.set_active(v);
@@ -544,7 +529,7 @@ impl Toggle {
                 Inhibit(false)
             }),
         );
-        Toggle { enabled, value, on_change, switch, we_set }
+        Toggle { value, on_change, switch, we_set }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -552,9 +537,6 @@ impl Toggle {
     }
 
     pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
-        if let Some(new) = self.enabled.update(ctx, event) {
-            self.switch.set_sensitive(val_to_bool(&new));
-        }
         if let Some(new) = self.value.borrow_mut().update(ctx, event) {
             self.we_set.set(true);
             self.switch.set_active(val_to_bool(&new));
@@ -568,8 +550,6 @@ impl Toggle {
 pub(super) struct Entry {
     entry: gtk::Entry,
     we_changed: Rc<Cell<bool>>,
-    enabled: BSNode,
-    visible: BSNode,
     text: Rc<RefCell<BSNode>>,
     on_change: Rc<RefCell<BSNode>>,
     on_activate: Rc<RefCell<BSNode>>,
@@ -585,8 +565,6 @@ impl Entry {
         let we_changed = Rc::new(Cell::new(false));
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
-        let enabled = BSNode::compile(ctx_r, scope.clone(), spec.enabled.clone());
-        let visible = BSNode::compile(ctx_r, scope.clone(), spec.visible.clone());
         let text = Rc::new(RefCell::new(BSNode::compile(
             ctx_r,
             scope.clone(),
@@ -603,12 +581,6 @@ impl Entry {
             spec.on_activate.clone(),
         )));
         let entry = gtk::Entry::new();
-        if let Some(v) = enabled.current() {
-            entry.set_sensitive(val_to_bool(&v));
-        }
-        if let Some(v) = visible.current() {
-            entry.set_visibility(val_to_bool(&v));
-        }
         match text.borrow().current() {
             None => entry.set_text(""),
             Some(Value::String(s)) => entry.set_text(&*s),
@@ -669,7 +641,7 @@ impl Entry {
             );
             Inhibit(false)
         }));
-        Entry { we_changed, entry, enabled, visible, text, on_change, on_activate }
+        Entry { we_changed, entry, text, on_change, on_activate }
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -677,12 +649,6 @@ impl Entry {
     }
 
     pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
-        if let Some(new) = self.enabled.update(ctx, event) {
-            self.entry.set_sensitive(val_to_bool(&new));
-        }
-        if let Some(new) = self.visible.update(ctx, event) {
-            self.entry.set_visibility(val_to_bool(&new));
-        }
         if let Some(new) = self.text.borrow_mut().update(ctx, event) {
             self.we_changed.set(true);
             match new {
@@ -712,7 +678,8 @@ impl Image {
         let root = gtk::EventBox::new();
         let image = gtk::Image::new();
         root.add(&image);
-        let image_spec = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.spec.clone());
+        let image_spec =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.spec.clone());
         if let Some(spec) = image_spec.current().and_then(|v| v.get_as::<ImageSpec>()) {
             spec.apply(&image)
         }

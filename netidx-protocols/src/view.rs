@@ -1,15 +1,19 @@
-use netidx::publisher::Value;
 use netidx_bscript::expr::Expr;
 use std::{
     boxed,
     cmp::{PartialEq, PartialOrd},
-    collections::HashMap,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keybind {
+    /// A string describing the keys that trigger the keybind.
+    /// modifier keys are separated by a +. Available modifiers are
+    /// ctrl, alt, shift, and super. As well as side specific variants
+    /// of those, ctrl_l, ctrl_r, alt_l, alt_r, shift_l, shift_r,
+    /// super_l, super_r.
     pub key: String,
-    pub action: Expr,
+    /// event() yields null when the key combo is pressed
+    pub expr: Expr,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -154,16 +158,25 @@ pub struct Image {
     ///   will also be scaled to keep the image's aspect ratio even if
     ///   width is not specified.
     pub spec: Expr,
+    /// event will yield null when the image is clicked
+    pub on_click: Expr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Label {
+    /// whether and where to draw elipsis if text exceeds width,
+    pub ellipsize: EllipsizeMode,
+    /// The text of the label
+    pub text: Expr,
+    /// (null | <n>)
+    /// null: no limit on width
+    /// <n>: the desired maximum width in characters
+    pub width: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Button {
-    /// (true | false)
-    /// - true: The button can be clicked
-    /// - false: The button can't be clicked
-    pub enabled: Expr,
-    /// Should resolve to a string, or null. If image is specified and
-    /// label is non null then label will override image.
+    /// The text to be displayed in the button
     pub label: Expr,
     /// see Image::spec
     pub image: Expr,
@@ -173,10 +186,6 @@ pub struct Button {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkButton {
-    /// (true | false)
-    /// - true: The link can be clicked
-    /// - false: The link can't be clicked
-    pub enabled: Expr,
     /// The uri formatted string of the link
     pub uri: Expr,
     /// The link label
@@ -187,40 +196,73 @@ pub struct LinkButton {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Toggle {
-    pub enabled: Expr,
+    /// The current state of the toggle
     pub value: Expr,
+    /// event() will yield the new state of the toggle when it is
+    /// clicked
     pub on_change: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Selector {
-    pub enabled: Expr,
+pub struct ToggleButton {
+    toggle: Toggle,
+    /// The text to be displayed in the button
+    label: Expr,
+    /// see Image::spec
+    image: Expr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpinButton {
+    pub current: Expr,
+    /// The minimum value that can be entered
+    pub min: Expr,
+    /// The maximum value that can be entered
+    pub max: Expr,
+    /// event() will yield the new value when the spinbutton is
+    /// changed.
+    pub on_change: Expr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComboBoxText {
+    /// The set of choices. This should be a list of strings.
     pub choices: Expr,
+    /// The currently selected choice
     pub selected: Expr,
+    /// event() will yield the choice the user just selected
     pub on_change: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
-    pub enabled: Expr,
-    pub visible: Expr,
+    /// The currently displayed text
     pub text: Expr,
+    /// event() will yield the new text whenever the user makes a
+    /// change
     pub on_change: Expr,
+    /// event() will yield the new text when the user activates the
+    /// entry (e.g. presses <return>)
     pub on_activate: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scale {
     pub dir: Direction,
-    pub enabled: Expr,
+    /// The current value of the scale. Should be a float between min
+    /// and max
     pub current: Expr,
+    /// The minimum value of the scale, as a float
     pub min: Expr,
+    /// The maximum value of the scale, as a float
     pub max: Expr,
+    /// event() will yield the new value of the scale when it changes
     pub on_change: Expr,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressBar {
-    ellipsize: EllipsizeMode,
+    pub ellipsize: EllipsizeMode,
     /// (null | <percent>)
     /// null: in this case the progress bar will operate in "activity
     /// mode", showing the user that something is happening, but not
@@ -373,14 +415,22 @@ pub struct LinePlot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WidgetKind {
+    /// event() will yield null when the view is initialized Note,
+    /// keybinds on BScript widgets will be ignored.
     BScript(Expr),
     Table(Table),
     Label(Label),
     Button(Button),
     LinkButton(LinkButton),
     Toggle(Toggle),
-    Selector(Selector),
+//    ToggleButton(ToggleButton),
+//    CheckButton(ToggleButton),
+//    RadioButton(ComboBoxText),
+    ComboBoxText(ComboBoxText),
     Entry(Entry),
+//    SearchEntry(Entry),
+//    ProgressBar(ProgressBar),
+//    Scale(Scale),
     Image(Image),
     Frame(Frame),
     Box(Box),
@@ -409,12 +459,14 @@ pub struct WidgetProps {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Widget {
     pub props: Option<WidgetProps>,
-    pub kind: WidgetKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct View {
-    pub variables: HashMap<String, Value>,
     pub keybinds: Vec<Keybind>,
-    pub root: Widget,
+    /// (true | false)
+    /// true: The widget can be interacted with
+    /// false: The widget can't be interacted with
+    pub enabled: Expr,
+    /// (true | false)
+    /// true: The widget is visible as long as it's parent is visible
+    /// false: The widget and all it's children are not visible
+    pub visible: Expr,
+    pub kind: WidgetKind,
 }
