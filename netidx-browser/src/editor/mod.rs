@@ -27,7 +27,12 @@ struct WidgetProps {
 }
 
 impl WidgetProps {
-    fn new(ctx: &BSCtx, scope: Scope, on_change: OnChange, spec: Option<view::WidgetProps>) -> Self {
+    fn new(
+        ctx: &BSCtx,
+        scope: Scope,
+        on_change: OnChange,
+        spec: Option<view::WidgetProps>,
+    ) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Expander::new(Some("Common Properties"));
         let on_change = Rc::new({
@@ -74,10 +79,10 @@ impl WidgetProps {
             valign.append(Some(a), a);
         }
         halign.set_active_id(Some(align_to_str(
-            spec.borrow().unwrap_or(DEFAULT_PROPS).halign,
+            spec.borrow().as_ref().unwrap_or(&DEFAULT_PROPS).halign,
         )));
         valign.set_active_id(Some(align_to_str(
-            spec.borrow().unwrap_or(DEFAULT_PROPS).valign,
+            spec.borrow().as_ref().unwrap_or(&DEFAULT_PROPS).valign,
         )));
         halign.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
             {
@@ -119,7 +124,7 @@ impl WidgetProps {
         }));
         grid.add(parse_entry(
             "Top Margin:",
-            &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_top,
+            &spec.borrow().as_ref().unwrap_or(&DEFAULT_PROPS).margin_top,
             clone!(@strong spec, @strong on_change => move |s| {
                 {
                     let mut spec = spec.borrow_mut();
@@ -131,7 +136,7 @@ impl WidgetProps {
         ));
         grid.add(parse_entry(
             "Bottom Margin:",
-            &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_bottom,
+            &spec.borrow().as_ref().unwrap_or(&DEFAULT_PROPS).margin_bottom,
             clone!(@strong spec, @strong on_change => move |s| {
                 {
                     let mut spec = spec.borrow_mut();
@@ -143,7 +148,7 @@ impl WidgetProps {
         ));
         grid.add(parse_entry(
             "Start Margin:",
-            &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_start,
+            &spec.borrow().as_ref().unwrap_or(&DEFAULT_PROPS).margin_start,
             clone!(@strong spec, @strong on_change => move |s| {
                 {
                     let mut spec = spec.borrow_mut();
@@ -155,7 +160,7 @@ impl WidgetProps {
         ));
         grid.add(parse_entry(
             "End Margin:",
-            &spec.borrow().unwrap_or(DEFAULT_PROPS).margin_end,
+            &spec.borrow().as_ref().unwrap_or(&DEFAULT_PROPS).margin_end,
             clone!(@strong spec, @strong on_change => move |s| {
                 {
                     let mut spec = spec.borrow_mut();
@@ -169,7 +174,7 @@ impl WidgetProps {
             ctx,
             "Sensitive:",
             scope.clone(),
-            &spec.borrow().unwrap_or(DEFAULT_PROPS).sensitive,
+            &spec.borrow().as_ref().unwrap_or(&DEFAULT_PROPS).sensitive,
             clone!(@strong spec, @strong on_change => move |e| {
                 let mut spec = spec.borrow_mut();
                 let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
@@ -182,7 +187,7 @@ impl WidgetProps {
             ctx,
             "Visible:",
             scope.clone(),
-            &spec.borrow().unwrap_or(DEFAULT_PROPS).visible,
+            &spec.borrow().as_ref().unwrap_or(&DEFAULT_PROPS).visible,
             clone!(@strong spec, @strong on_change => move |e| {
                 let mut spec = spec.borrow_mut();
                 let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
@@ -199,7 +204,7 @@ impl WidgetProps {
     }
 
     fn spec(&self) -> Option<view::WidgetProps> {
-        *self.spec.borrow()
+        self.spec.borrow().clone()
     }
 }
 
@@ -212,7 +217,7 @@ enum WidgetKind {
     Button(widgets::Button),
     LinkButton(widgets::LinkButton),
     Switch(widgets::Switch),
-    Selector(widgets::Selector),
+    ComboBox(widgets::ComboBox),
     Entry(widgets::Entry),
     LinePlot(widgets::LinePlot),
     Frame(widgets::Frame),
@@ -236,7 +241,7 @@ impl WidgetKind {
             WidgetKind::Button(w) => Some(w.root()),
             WidgetKind::LinkButton(w) => Some(w.root()),
             WidgetKind::Switch(w) => Some(w.root()),
-            WidgetKind::Selector(w) => Some(w.root()),
+            WidgetKind::ComboBox(w) => Some(w.root()),
             WidgetKind::Entry(w) => Some(w.root()),
             WidgetKind::LinePlot(w) => Some(w.root()),
             WidgetKind::Frame(w) => Some(w.root()),
@@ -344,9 +349,9 @@ impl Widget {
                 )),
                 Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
-            view::Widget { props, kind: view::WidgetKind::Selector(s) } => (
-                "Selector",
-                WidgetKind::Selector(widgets::Selector::new(
+            view::Widget { props, kind: view::WidgetKind::ComboBox(s) } => (
+                "ComboBox",
+                WidgetKind::ComboBox(widgets::ComboBox::new(
                     ctx,
                     on_change.clone(),
                     scope.clone(),
@@ -472,8 +477,8 @@ impl Widget {
             WidgetKind::Label(w) => w.spec(),
             WidgetKind::Button(w) => w.spec(),
             WidgetKind::LinkButton(w) => w.spec(),
-            WidgetKind::Toggle(w) => w.spec(),
-            WidgetKind::Selector(w) => w.spec(),
+            WidgetKind::Switch(w) => w.spec(),
+            WidgetKind::ComboBox(w) => w.spec(),
             WidgetKind::Entry(w) => w.spec(),
             WidgetKind::LinePlot(w) => w.spec(),
             WidgetKind::Frame(w) => w.spec(),
@@ -496,11 +501,11 @@ impl Widget {
             view::Widget { kind, props: None }
         }
         fn table() -> view::Widget {
-            default_view(Path::from("/")).root
+            default_view(Path::from("/"))
         }
         match name {
             None => table(),
-            Some("Action") => widget(view::WidgetKind::Action(
+            Some("BScript") => widget(view::WidgetKind::BScript(
                 expr::ExprKind::Constant(Value::U64(42)).to_expr(),
             )),
             Some("Table") => table(),
@@ -510,8 +515,12 @@ impl Widget {
                 on_click: expr::ExprKind::Constant(Value::Null).to_expr(),
             })),
             Some("Label") => {
-                let s = Value::String(Chars::from("static label"));
-                widget(view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()))
+                let text =
+                    expr::ExprKind::Constant(Value::String(Chars::from("static label")))
+                        .to_expr();
+                let width = expr::ExprKind::Constant(Value::Null).to_expr();
+                let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
+                widget(view::WidgetKind::Label(view::Label { text, width, ellipsize }))
             }
             Some("Button") => {
                 let l = Chars::from("click me!");
@@ -542,8 +551,7 @@ impl Widget {
                     on_activate_link: expr::ExprKind::Constant(Value::Null).to_expr(),
                 }))
             }
-            Some("Toggle") => widget(view::WidgetKind::Toggle(view::Toggle {
-                enabled: expr::ExprKind::Constant(Value::True).to_expr(),
+            Some("Switch") => widget(view::WidgetKind::Switch(view::Switch {
                 value: expr::ExprKind::Apply {
                     args: vec![
                         expr::ExprKind::Constant(Value::from("/somewhere")).to_expr()
@@ -561,12 +569,14 @@ impl Widget {
                 }
                 .to_expr(),
             })),
-            Some("Selector") => {
-                let choices =
-                    Chars::from(r#"[[{"U64": 1}, "One"], [{"U64": 2}, "Two"]]"#);
-                widget(view::WidgetKind::Selector(view::Selector {
-                    enabled: expr::ExprKind::Constant(Value::True).to_expr(),
-                    choices: expr::ExprKind::Constant(Value::String(choices)).to_expr(),
+            Some("ComboBox") => {
+                let choices: Value = vec![
+                    vec![Value::U64(1), Value::from("One")],
+                    vec![Value::U64(2), Value::from("Two")],
+                ]
+                .into();
+                widget(view::WidgetKind::ComboBox(view::ComboBox {
+                    choices: expr::ExprKind::Constant(choices).to_expr(),
                     selected: expr::ExprKind::Apply {
                         args: vec![
                             expr::ExprKind::Constant(Value::from("/somewhere")).to_expr()
@@ -619,7 +629,7 @@ impl Widget {
                 let props = Some(view::WidgetProps {
                     vexpand: true,
                     hexpand: true,
-                    ..DEFAULT_PROPS
+                    ..DEFAULT_PROPS.clone()
                 });
                 let kind = view::WidgetKind::LinePlot(view::LinePlot {
                     title: String::from("Line Plot"),
@@ -654,9 +664,12 @@ impl Widget {
                 children: Vec::new(),
             })),
             Some("BoxChild") => {
-                let s = Value::String(Chars::from("empty box child"));
+                let text = Value::from("empty box child");
+                let text = expr::ExprKind::Constant(text).to_expr();
+                let width = expr::ExprKind::Constant(Value::Null).to_expr();
+                let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
                 let w = view::Widget {
-                    kind: view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()),
+                    kind: view::WidgetKind::Label(view::Label { text, width, ellipsize }),
                     props: None,
                 };
                 widget(view::WidgetKind::BoxChild(view::BoxChild {
@@ -679,9 +692,12 @@ impl Widget {
                 second_child: None,
             })),
             Some("GridChild") => {
-                let s = Value::String(Chars::from("empty grid child"));
+                let text = Value::from("empty grid child");
+                let text = expr::ExprKind::Constant(text).to_expr();
+                let width = expr::ExprKind::Constant(Value::Null).to_expr();
+                let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
                 let w = view::Widget {
-                    kind: view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()),
+                    kind: view::WidgetKind::Label(view::Label { text, width, ellipsize }),
                     props: None,
                 };
                 widget(view::WidgetKind::GridChild(view::GridChild {
@@ -694,9 +710,12 @@ impl Widget {
                 widget(view::WidgetKind::GridRow(view::GridRow { columns: vec![] }))
             }
             Some("NotebookPage") => {
-                let s = Value::String(Chars::from("empty notebook page"));
+                let text = Value::from("empty notebook page");
+                let text = expr::ExprKind::Constant(text).to_expr();
+                let width = expr::ExprKind::Constant(Value::Null).to_expr();
+                let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
                 let w = view::Widget {
-                    kind: view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()),
+                    kind: view::WidgetKind::Label(view::Label { text, width, ellipsize }),
                     props: None,
                 };
                 widget(view::WidgetKind::NotebookPage(view::NotebookPage {
@@ -724,14 +743,14 @@ impl Widget {
 
     fn moved(&self, iter: &gtk::TreeIter) {
         match &self.kind {
-            WidgetKind::Action(w) => w.moved(iter),
+            WidgetKind::BScript(w) => w.moved(iter),
             WidgetKind::Table(_)
             | WidgetKind::Image(_)
             | WidgetKind::Label(_)
             | WidgetKind::Button(_)
             | WidgetKind::LinkButton(_)
-            | WidgetKind::Toggle(_)
-            | WidgetKind::Selector(_)
+            | WidgetKind::Switch(_)
+            | WidgetKind::ComboBox(_)
             | WidgetKind::Entry(_)
             | WidgetKind::LinePlot(_)
             | WidgetKind::Frame(_)
@@ -748,14 +767,14 @@ impl Widget {
 }
 
 static KINDS: [&'static str; 19] = [
-    "Action",
+    "BScript",
     "Table",
     "Label",
     "Image",
     "Button",
     "LinkButton",
-    "Toggle",
-    "Selector",
+    "Switch",
+    "ComboBox",
     "Entry",
     "LinePlot",
     "Frame",
@@ -774,7 +793,7 @@ pub(super) struct Editor {
 }
 
 impl Editor {
-    pub(super) fn new(ctx: BSCtx, scope: Path, spec: view::View) -> Editor {
+    pub(super) fn new(ctx: BSCtx, scope: Path, spec: view::Widget) -> Editor {
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         idle_add_local(
             clone!(@weak root => @default-return glib::Continue(false), move || {
@@ -855,7 +874,8 @@ impl Editor {
         view.set_reorderable(true);
         view.set_enable_tree_lines(true);
         let spec = Rc::new(RefCell::new(spec));
-        let undo_stack: Rc<RefCell<Vec<view::View>>> = Rc::new(RefCell::new(Vec::new()));
+        let undo_stack: Rc<RefCell<Vec<view::Widget>>> =
+            Rc::new(RefCell::new(Vec::new()));
         let undoing = Rc::new(Cell::new(false));
         let on_change: OnChange = Rc::new({
             let scope = scope.clone();
@@ -883,7 +903,7 @@ impl Editor {
                                     undo_stack.borrow_mut().push(spec.borrow().clone());
                                 }
                                 Editor::update_scope(&store, scope.clone(), &root);
-                                spec.borrow_mut().root =
+                                *spec.borrow_mut() =
                                     Editor::build_spec(&store, &root);
                                 ctx.borrow().user.backend.render(spec.borrow().clone());
                             }
@@ -899,7 +919,7 @@ impl Editor {
             &store,
             scope.clone(),
             None,
-            &spec.borrow().root,
+            &*spec.borrow(),
         );
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
@@ -1104,7 +1124,7 @@ impl Editor {
                         &store,
                         scope.clone(),
                         None,
-                        &s.root
+                        &s
                     );
                     on_change();
                 }
@@ -1153,14 +1173,14 @@ impl Editor {
                 | WidgetKind::NotebookPage(_)
                 | WidgetKind::BoxChild(_)
                 | WidgetKind::GridChild(_)
-                | WidgetKind::Action(_)
+                | WidgetKind::BScript(_)
                 | WidgetKind::Table(_)
                 | WidgetKind::Image(_)
                 | WidgetKind::Label(_)
                 | WidgetKind::Button(_)
                 | WidgetKind::LinkButton(_)
-                | WidgetKind::Toggle(_)
-                | WidgetKind::Selector(_)
+                | WidgetKind::Switch(_)
+                | WidgetKind::ComboBox(_)
                 | WidgetKind::Entry(_)
                 | WidgetKind::LinePlot(_) => scope.clone(),
             };
@@ -1267,14 +1287,14 @@ impl Editor {
                     Editor::build_tree(ctx, on_change, store, scope, Some(&iter), w);
                 }
             }
-            view::WidgetKind::Action(_)
+            view::WidgetKind::BScript(_)
             | view::WidgetKind::Table(_)
             | view::WidgetKind::Image(_)
             | view::WidgetKind::Label(_)
             | view::WidgetKind::Button(_)
             | view::WidgetKind::LinkButton(_)
-            | view::WidgetKind::Toggle(_)
-            | view::WidgetKind::Selector(_)
+            | view::WidgetKind::Switch(_)
+            | view::WidgetKind::ComboBox(_)
             | view::WidgetKind::Entry(_)
             | view::WidgetKind::LinePlot(_) => (),
         }
@@ -1284,9 +1304,12 @@ impl Editor {
         let v = store.value(root, 1);
         match v.get::<&Widget>() {
             Err(e) => {
-                let s = Value::from(format!("tree error: {}", e));
+                let text = Value::from(format!("tree error: {}", e));
+                let text = expr::ExprKind::Constant(text).to_expr();
+                let width = expr::ExprKind::Constant(Value::Null).to_expr();
+                let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
                 view::Widget {
-                    kind: view::WidgetKind::Label(expr::ExprKind::Constant(s).to_expr()),
+                    kind: view::WidgetKind::Label(view::Label {text, width, ellipsize}),
                     props: None,
                 }
             }
@@ -1372,14 +1395,14 @@ impl Editor {
                             }
                         }
                     }
-                    view::WidgetKind::Action(_)
+                    view::WidgetKind::BScript(_)
                     | view::WidgetKind::Table(_)
                     | view::WidgetKind::Image(_)
                     | view::WidgetKind::Label(_)
                     | view::WidgetKind::Button(_)
                     | view::WidgetKind::LinkButton(_)
-                    | view::WidgetKind::Toggle(_)
-                    | view::WidgetKind::Selector(_)
+                    | view::WidgetKind::Switch(_)
+                    | view::WidgetKind::ComboBox(_)
                     | view::WidgetKind::Entry(_)
                     | view::WidgetKind::LinePlot(_) => (),
                 };
@@ -1399,7 +1422,7 @@ impl Editor {
         let skip_idx = match v.get::<&Widget>() {
             Err(_) => false,
             Ok(w) => match &w.kind {
-                WidgetKind::Action(_) => {
+                WidgetKind::BScript(_) => {
                     path.insert(0, WidgetPath::Leaf);
                     false
                 }
@@ -1423,11 +1446,11 @@ impl Editor {
                     path.insert(0, WidgetPath::Leaf);
                     false
                 }
-                WidgetKind::Toggle(_) => {
+                WidgetKind::Switch(_) => {
                     path.insert(0, WidgetPath::Leaf);
                     false
                 }
-                WidgetKind::Selector(_) => {
+                WidgetKind::ComboBox(_) => {
                     path.insert(0, WidgetPath::Leaf);
                     false
                 }

@@ -61,7 +61,7 @@ impl Ctx {
             self.from_gui.unbounded_send(FromGui::Navigate(loc));
     }
 
-    pub(crate) async fn save(&self, loc: ViewLoc, spec: view::View) -> Result<()> {
+    pub(crate) async fn save(&self, loc: ViewLoc, spec: view::Widget) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let _: result::Result<_, _> =
             self.from_gui.unbounded_send(FromGui::Save(loc, spec, tx));
@@ -76,7 +76,7 @@ impl Ctx {
         let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Updated);
     }
 
-    pub(crate) fn render(&self, spec: view::View) {
+    pub(crate) fn render(&self, spec: view::Widget) {
         let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Render(spec));
     }
 
@@ -166,7 +166,7 @@ impl CtxInner {
                 let m = format!("can't load view from file {:?}, {}", file, e);
                 self.to_gui.send(ToGui::ShowError(m))?;
             }
-            Ok(s) => match serde_json::from_str::<view::View>(&s) {
+            Ok(s) => match serde_json::from_str::<view::Widget>(&s) {
                 Err(e) => {
                     let m = format!("invalid view: {:?}, {}", file, e);
                     self.to_gui.send(ToGui::ShowError(m))?;
@@ -201,7 +201,7 @@ impl CtxInner {
     async fn save_view_netidx(
         &self,
         path: Path,
-        spec: view::View,
+        spec: view::Widget,
         fin: oneshot::Sender<Result<()>>,
     ) {
         let to = Some(Duration::from_secs(10));
@@ -234,7 +234,7 @@ impl CtxInner {
     fn save_view_file(
         &self,
         file: PathBuf,
-        spec: view::View,
+        spec: view::Widget,
         fin: oneshot::Sender<Result<()>>,
     ) {
         match serde_json::to_string(&spec) {
@@ -263,7 +263,7 @@ impl CtxInner {
                 for (_, view) in batch.drain(..) {
                     match view {
                         Event::Update(Value::String(s)) => {
-                            match serde_json::from_str::<view::View>(&*s) {
+                            match serde_json::from_str::<view::Widget>(&*s) {
                                 Err(e) => warn!("error parsing view definition {}", e),
                                 Ok(spec) => {
                                     if let Some(path) = &self.view_path {
@@ -286,7 +286,7 @@ impl CtxInner {
         Ok(())
     }
 
-    fn render_view(&mut self, spec: view::View) -> Result<()> {
+    fn render_view(&mut self, spec: view::Widget) -> Result<()> {
         self.view_path = None;
         self.rx_view = None;
         self.dv_view = None;

@@ -163,7 +163,7 @@ impl BWidget for Button {
     fn update(
         &mut self,
         ctx: BSCtxRef,
-        waits: &mut Vec<oneshot::Receiver<()>>,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
         if let Some(new) = self.label.update(ctx, event) {
@@ -244,7 +244,7 @@ impl BWidget for LinkButton {
     fn update(
         &mut self,
         ctx: BSCtxRef,
-        waits: &mut Vec<oneshot::Receiver<()>>,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
         if let Some(new) = self.uri.update(ctx, event) {
@@ -279,8 +279,8 @@ impl Label {
         scope: Path,
         selected_path: gtk::Label,
     ) -> Label {
-        let text = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.text.clone());
-        let width = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.width.clone());
+        let text = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.text.clone());
+        let width = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.width.clone());
         let ellipsize = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.ellipsize.clone());
         let txt = match text.current() {
             None => String::new(),
@@ -313,7 +313,7 @@ impl BWidget for Label {
     fn update(
         &mut self,
         ctx: BSCtxRef,
-        waits: &mut Vec<oneshot::Receiver<()>>,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
         if let Some(new) = self.text.update(ctx, event) {
@@ -352,7 +352,7 @@ impl BWidget for BScript {
     fn update(
         &mut self,
         ctx: BSCtxRef,
-        waits: &mut Vec<oneshot::Receiver<()>>,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
         self.expr.update(ctx, event);
@@ -363,7 +363,7 @@ impl BWidget for BScript {
     }
 }
 
-pub(super) struct ComboBoxText {
+pub(super) struct ComboBox {
     root: gtk::EventBox,
     combo: gtk::ComboBoxText,
     choices: BSNode,
@@ -372,10 +372,10 @@ pub(super) struct ComboBoxText {
     we_set: Rc<Cell<bool>>,
 }
 
-impl ComboBoxText {
+impl ComboBox {
     pub(super) fn new(
         ctx: &BSCtx,
-        spec: view::ComboBoxText,
+        spec: view::ComboBox,
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
@@ -481,11 +481,11 @@ impl ComboBoxText {
     }
 }
 
-impl BWidget for ComboBoxText {
+impl BWidget for ComboBox {
     fn update(
         &mut self,
         ctx: BSCtxRef,
-        waits: &mut Vec<oneshot::Receiver<()>>,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
         self.we_set.set(true);
@@ -587,7 +587,7 @@ impl BWidget for Switch {
     fn update(
         &mut self,
         ctx: BSCtxRef,
-        waits: &mut Vec<oneshot::Receiver<()>>,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
         if let Some(new) = self.value.borrow_mut().update(ctx, event) {
@@ -706,7 +706,7 @@ impl BWidget for Entry {
     fn update(
         &mut self,
         ctx: BSCtxRef,
-        waits: &mut Vec<oneshot::Receiver<()>>,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
         if let Some(new) = self.text.borrow_mut().update(ctx, event) {
@@ -787,7 +787,7 @@ impl BWidget for Image {
     fn update(
         &mut self,
         ctx: BSCtxRef,
-        waits: &mut Vec<oneshot::Receiver<()>>,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
         self.on_click.borrow_mut().update(ctx, event);

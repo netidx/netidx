@@ -1,6 +1,6 @@
 use super::{
     util::{err_modal, toplevel},
-    BSCtx, BSCtxRef, BSNode, WVal, BWidget,
+    BSCtx, BSCtxRef, BSNode, BWidget, WVal,
 };
 use crate::bscript::LocalEvent;
 use arcstr::ArcStr;
@@ -16,7 +16,6 @@ use gtk::{
     prelude::*, Adjustment, CellRenderer, CellRendererText, Label, ListStore,
     ScrolledWindow, SelectionMode, SortColumn, SortType, StateFlags, StyleContext,
     TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
-    Widget as GtkWidget,
 };
 use indexmap::{IndexMap, IndexSet};
 use netidx::{

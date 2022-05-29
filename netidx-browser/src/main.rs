@@ -300,76 +300,76 @@ impl Widget {
     ) -> Self {
         let widget: Box<dyn BWidget> = match spec.kind {
             view::WidgetKind::BScript(spec) => {
-                Box::new(widgets::BScript::new(ctx, scope, spec))
+                Box::new(widgets::BScript::new(ctx, scope.clone(), spec))
             }
             view::WidgetKind::Table(spec) => {
-                Box::new(table::Table::new(ctx.clone(), spec, scope, selected_path))
+                Box::new(table::Table::new(ctx.clone(), spec, scope.clone(), selected_path))
             }
             view::WidgetKind::Image(spec) => {
-                Box::new(widgets::Image::new(ctx, spec, scope, selected_path))
+                Box::new(widgets::Image::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::Label(spec) => {
-                Box::new(widgets::Label::new(ctx, spec, scope, selected_path))
+                Box::new(widgets::Label::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::Button(spec) => {
-                Box::new(widgets::Button::new(ctx, spec, scope, selected_path))
+                Box::new(widgets::Button::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::LinkButton(spec) => {
-                Box::new(widgets::LinkButton::new(ctx, spec, scope, selected_path))
+                Box::new(widgets::LinkButton::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::Switch(spec) => {
-                Box::new(widgets::Switch::new(ctx, spec, scope, selected_path))
+                Box::new(widgets::Switch::new(ctx, spec, scope.clone(), selected_path))
             }
-            view::WidgetKind::ComboBoxText(spec) => {
-                Box::new(widgets::ComboBoxText::new(ctx, spec, scope, selected_path))
+            view::WidgetKind::ComboBox(spec) => {
+                Box::new(widgets::ComboBox::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::Entry(spec) => {
-                Box::new(widgets::Entry::new(ctx, spec, scope, selected_path))
+                Box::new(widgets::Entry::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::Frame(spec) => {
-                Box::new(containers::Frame::new(ctx, spec, scope, selected_path))
+                Box::new(containers::Frame::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::Box(spec) => {
-                Box::new(containers::Box::new(ctx, spec, scope, selected_path))
+                Box::new(containers::Box::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::BoxChild(view::BoxChild { widget: w, .. }) => {
-                Box::new(Widget::new(ctx, (&*w).clone(), scope, selected_path))
+                Box::new(Widget::new(ctx, (&*w).clone(), scope.clone(), selected_path))
             }
             view::WidgetKind::Grid(spec) => {
-                Box::new(containers::Grid::new(ctx, spec, scope, selected_path))
+                Box::new(containers::Grid::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::GridChild(view::GridChild { widget: w, .. }) => {
-                Box::new(Widget::new(ctx, (&*w).clone(), scope, selected_path))
+                Box::new(Widget::new(ctx, (&*w).clone(), scope.clone(), selected_path))
             }
             view::WidgetKind::GridRow(_) => {
                 let s = Value::String(Chars::from("orphaned grid row"));
                 let text = ExprKind::Constant(s).to_expr();
                 let width = ExprKind::Constant(Value::Null).to_expr();
-                let spec =
-                    view::Label { ellipsize: view::EllipsizeMode::None, text, width };
-                Box::new(widgets::Label::new(ctx, spec, scope, selected_path))
+                let ellipsize = ExprKind::Constant(Value::Null).to_expr();
+                let spec = view::Label { ellipsize, text, width };
+                Box::new(widgets::Label::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::Paned(spec) => {
-                Box::new(containers::Paned::new(ctx, spec, scope, selected_path))
+                Box::new(containers::Paned::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::NotebookPage(view::NotebookPage { widget: w, .. }) => {
-                Box::new(Widget::new(ctx, (&*w).clone(), scope, selected_path))
+                Box::new(Widget::new(ctx, (&*w).clone(), scope.clone(), selected_path))
             }
             view::WidgetKind::Notebook(spec) => {
-                Box::new(containers::Notebook::new(ctx, spec, scope, selected_path))
+                Box::new(containers::Notebook::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::LinePlot(spec) => {
-                Box::new(lineplot::LinePlot::new(ctx, spec, scope, selected_path))
+                Box::new(lineplot::LinePlot::new(ctx, spec, scope.clone(), selected_path))
             }
         };
-        let props = spec.props.unwrap_or(DEFAULT_PROPS);
+        let props = spec.props.as_ref().unwrap_or(&DEFAULT_PROPS);
         if let Some(r) = widget.root() {
-            set_common_props(&props, r);
+            set_common_props(props, r);
         }
         let sensitive =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), props.sensitive);
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), props.sensitive.clone());
         let visible =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), props.visible);
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), props.visible.clone());
         if let Some(b) = sensitive.current().and_then(|v| v.cast_to::<bool>().ok()) {
             widget.set_sensitive(b);
         }
@@ -412,7 +412,7 @@ impl BWidget for Widget {
         self.widget.set_sensitive(e);
     }
 
-    fn set_highlight(&self, mut path: std::slice::Iter<WidgetPath>, h: bool) {
+    fn set_highlight(&self, path: std::slice::Iter<WidgetPath>, h: bool) {
         self.widget.set_highlight(path, h)
     }
 }
@@ -538,20 +538,6 @@ impl View {
         self.widget.update(ctx, waits, event);
     }
 }
-
-static DEFAULT_PROPS: view::WidgetProps = view::WidgetProps {
-    halign: view::Align::Fill,
-    valign: view::Align::Fill,
-    hexpand: false,
-    vexpand: false,
-    margin_top: 0,
-    margin_bottom: 0,
-    margin_start: 0,
-    margin_end: 0,
-    keybinds: vec![],
-    sensitive: ExprKind::Constant(Value::True).to_expr(),
-    visible: ExprKind::Constant(Value::True).to_expr(),
-};
 
 fn setup_css(screen: &gdk::Screen) {
     let style = gtk::CssProvider::new();
@@ -687,6 +673,19 @@ fn save_view(
 
 lazy_static! {
     static ref WAITS: Pool<Vec<oneshot::Receiver<()>>> = Pool::new(10, 100);
+    static ref DEFAULT_PROPS: view::WidgetProps = view::WidgetProps {
+        halign: view::Align::Fill,
+        valign: view::Align::Fill,
+        hexpand: false,
+        vexpand: false,
+        margin_top: 0,
+        margin_bottom: 0,
+        margin_start: 0,
+        margin_end: 0,
+        keybinds: vec![],
+        sensitive: ExprKind::Constant(Value::True).to_expr(),
+        visible: ExprKind::Constant(Value::True).to_expr(),
+    };
 }
 
 fn update_single(

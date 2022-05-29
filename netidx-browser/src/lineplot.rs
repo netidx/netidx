@@ -395,7 +395,7 @@ impl BWidget for LinePlot {
     fn update(
         &mut self,
         ctx: BSCtxRef,
-        waits: &mut Vec<oneshot::Receiver<()>>,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
         let mut queue_draw = false;

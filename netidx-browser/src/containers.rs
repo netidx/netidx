@@ -1,7 +1,4 @@
-use super::{
-    set_common_props, util, BSCtx, BSCtxRef, BSNode, BWidget, Widget, WidgetPath,
-    DEFAULT_PROPS,
-};
+use super::{util, BSCtx, BSCtxRef, BSNode, BWidget, Widget, WidgetPath, DEFAULT_PROPS};
 use crate::{bscript::LocalEvent, view};
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
@@ -203,7 +200,6 @@ impl Notebook {
                         let lbl = gtk::Label::new(Some(label.as_str()));
                         root.append_page(r, Some(&lbl));
                         root.set_tab_reorderable(r, *reorderable);
-                        set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
                     }
                     children.push(w);
                 }
@@ -212,7 +208,6 @@ impl Notebook {
                         Widget::new(ctx, s.clone(), scope.clone(), selected_path.clone());
                     if let Some(r) = w.root() {
                         root.append_page(r, None::<&gtk::Label>);
-                        set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
                     }
                     children.push(w);
                 }
@@ -296,7 +291,7 @@ impl Box {
                         selected_path.clone(),
                     );
                     if let Some(r) = w.root() {
-                        let props = s.props.unwrap_or(DEFAULT_PROPS);
+                        let props = s.props.as_ref().unwrap_or(&DEFAULT_PROPS);
                         let (expand, fill) = match spec.direction {
                             view::Direction::Horizontal => {
                                 (props.hexpand, is_fill(props.halign))
@@ -313,7 +308,6 @@ impl Box {
                                 root.pack_end(r, expand, fill, *padding as u32)
                             }
                         }
-                        set_common_props(props, r);
                     }
                     children.push(w);
                 }
@@ -322,7 +316,6 @@ impl Box {
                         Widget::new(ctx, s.clone(), scope.clone(), selected_path.clone());
                     if let Some(r) = w.root() {
                         root.add(r);
-                        set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
                     }
                     children.push(w);
                 }
@@ -375,8 +368,7 @@ impl Grid {
     ) -> Self {
         let scope = scope.append("g");
         let root = gtk::Grid::new();
-        let attach_child = |props: view::WidgetProps,
-                            spec: view::GridChild,
+        let attach_child = |spec: view::GridChild,
                             max_height: &mut i32,
                             i: &mut i32,
                             j: i32|
@@ -391,7 +383,6 @@ impl Grid {
             );
             if let Some(r) = w.root() {
                 root.attach(r, *i, j, width, height);
-                set_common_props(props, r);
             }
             *i += width;
             *max_height = max(*max_height, height);
@@ -401,7 +392,6 @@ impl Grid {
             let w = Widget::new(ctx, spec.clone(), scope.clone(), selected_path.clone());
             if let Some(r) = w.root() {
                 root.attach(r, *i, j, 1, 1);
-                set_common_props(spec.props.unwrap_or(DEFAULT_PROPS), r);
             }
             *i += 1;
             w
@@ -419,24 +409,14 @@ impl Grid {
                 let mut max_height = 1;
                 let row = match spec.kind {
                     view::WidgetKind::GridChild(c) => {
-                        vec![attach_child(
-                            spec.props.unwrap_or(DEFAULT_PROPS),
-                            c,
-                            &mut max_height,
-                            &mut i,
-                            j,
-                        )]
+                        vec![attach_child(c, &mut max_height, &mut i, j)]
                     }
                     view::WidgetKind::GridRow(view::GridRow { columns }) => columns
                         .into_iter()
                         .map(|spec| match spec.kind {
-                            view::WidgetKind::GridChild(c) => attach_child(
-                                spec.props.unwrap_or(DEFAULT_PROPS),
-                                c,
-                                &mut max_height,
-                                &mut i,
-                                j,
-                            ),
+                            view::WidgetKind::GridChild(c) => {
+                                attach_child(c, &mut max_height, &mut i, j)
+                            }
                             _ => attach_normal(spec, &mut i, j),
                         })
                         .collect(),

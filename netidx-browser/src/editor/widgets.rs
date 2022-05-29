@@ -390,7 +390,7 @@ impl Image {
             "Spec:",
             scope.clone(),
             &spec.borrow().spec,
-            clone!(@strong spec => move |s| {
+            clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().spec = s;
                 on_change()
             }),
@@ -456,7 +456,7 @@ impl Label {
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().width = s;
                 on_change()
-            })
+            }),
         );
         root.add((l, e));
         let (l, e, _dbg_ellipsize) = expr(
@@ -467,7 +467,7 @@ impl Label {
             clone!(@strong spec, @strong on_change => move |s| {
                 spec.borrow_mut().ellipsize = s;
                 on_change()
-            })
+            }),
         );
         root.add((l, e));
         Self { root, spec, _dbg_text, _dbg_width, _dbg_ellipsize }
@@ -612,7 +612,6 @@ impl LinkButton {
 pub(super) struct Switch {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Switch>>,
-    _enabled_expr: DbgExpr,
     _value_expr: DbgExpr,
     _on_change_expr: DbgExpr,
 }
@@ -622,21 +621,10 @@ impl Switch {
         ctx: &BSCtx,
         on_change: OnChange,
         scope: Scope,
-        spec: view::Toggle,
+        spec: view::Switch,
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _enabled_expr) = expr(
-            ctx,
-            "Enabled:",
-            scope.clone(),
-            &spec.borrow().enabled,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().enabled = s;
-                on_change();
-            }),
-        );
-        root.add((l, e));
         let (l, e, _value_expr) = expr(
             ctx,
             "Value:",
@@ -659,7 +647,7 @@ impl Switch {
             }),
         );
         root.add((l, e));
-        Self { root, spec, _enabled_expr, _value_expr, _on_change_expr }
+        Self { root, spec, _value_expr, _on_change_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -672,35 +660,23 @@ impl Switch {
 }
 
 #[derive(Clone)]
-pub(super) struct Selector {
+pub(super) struct ComboBox {
     root: TwoColGrid,
-    spec: Rc<RefCell<view::Selector>>,
-    _enabled_expr: DbgExpr,
+    spec: Rc<RefCell<view::ComboBox>>,
     _choices_expr: DbgExpr,
     _selected_expr: DbgExpr,
     _on_change_expr: DbgExpr,
 }
 
-impl Selector {
+impl ComboBox {
     pub(super) fn new(
         ctx: &BSCtx,
         on_change: OnChange,
         scope: Scope,
-        spec: view::Selector,
+        spec: view::ComboBox,
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _enabled_expr) = expr(
-            ctx,
-            "Enabled:",
-            scope.clone(),
-            &spec.borrow().enabled,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().enabled = s;
-                on_change();
-            }),
-        );
-        root.add((l, e));
         let (l, e, _choices_expr) = expr(
             ctx,
             "Choices:",
@@ -734,18 +710,11 @@ impl Selector {
             }),
         );
         root.add((l, e));
-        Selector {
-            root,
-            spec,
-            _enabled_expr,
-            _choices_expr,
-            _selected_expr,
-            _on_change_expr,
-        }
+        Self { root, spec, _choices_expr, _selected_expr, _on_change_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Selector(self.spec.borrow().clone())
+        view::WidgetKind::ComboBox(self.spec.borrow().clone())
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {

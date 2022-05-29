@@ -218,7 +218,7 @@ pub struct SpinButton {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComboBoxText {
+pub struct ComboBox {
     /// The set of choices. This should be a list of strings.
     pub choices: Expr,
     /// The currently selected choice
@@ -420,8 +420,8 @@ pub enum WidgetKind {
     Switch(Switch),
 //    ToggleButton(ToggleButton),
 //    CheckButton(ToggleButton),
-//    RadioButton(ComboBoxText),
-    ComboBoxText(ComboBoxText),
+//    RadioButton(ComboBox),
+    ComboBox(ComboBox),
     Entry(Entry),
 //    SearchEntry(Entry),
 //    ProgressBar(ProgressBar),
