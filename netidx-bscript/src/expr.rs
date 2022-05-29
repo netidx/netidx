@@ -196,6 +196,8 @@ impl PartialEq for Expr {
     }
 }
 
+impl Eq for Expr {}
+
 impl Serialize for Expr {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

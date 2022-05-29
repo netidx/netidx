@@ -21,13 +21,15 @@ type Scope = Rc<RefCell<Path>>;
 #[derive(Clone)]
 struct WidgetProps {
     root: gtk::Expander,
+    _dbg_sensitive: widgets::DbgExpr,
+    _dbg_visible: widgets::DbgExpr,
     spec: Rc<RefCell<Option<view::WidgetProps>>>,
 }
 
 impl WidgetProps {
-    fn new(on_change: OnChange, spec: Option<view::WidgetProps>) -> Self {
+    fn new(ctx: &BSCtx, scope: Scope, on_change: OnChange, spec: Option<view::WidgetProps>) -> Self {
         let spec = Rc::new(RefCell::new(spec));
-        let root = gtk::Expander::new(Some("Layout Properties"));
+        let root = gtk::Expander::new(Some("Common Properties"));
         let on_change = Rc::new({
             let spec = spec.clone();
             move || {
@@ -80,7 +82,7 @@ impl WidgetProps {
         halign.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
             {
                 let mut spec = spec.borrow_mut();
-                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
                 spec.halign =
                     c.active_id().map(align_from_str).unwrap_or(view::Align::Fill);
             }
@@ -89,7 +91,7 @@ impl WidgetProps {
         valign.connect_changed(clone!(@strong on_change, @strong spec => move |c| {
             {
                 let mut spec = spec.borrow_mut();
-                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
                 spec.valign =
                     c.active_id().map(align_from_str).unwrap_or(view::Align::Fill);
             }
@@ -100,7 +102,7 @@ impl WidgetProps {
         hexp.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
             {
                 let mut spec = spec.borrow_mut();
-                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
                 spec.hexpand = b.is_active();
             }
             on_change()
@@ -110,7 +112,7 @@ impl WidgetProps {
         vexp.connect_toggled(clone!(@strong spec, @strong on_change => move |b| {
             {
                 let mut spec = spec.borrow_mut();
-                let spec = spec.get_or_insert(DEFAULT_PROPS);
+                let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
                 spec.vexpand = b.is_active();
             }
             on_change()
@@ -121,7 +123,7 @@ impl WidgetProps {
             clone!(@strong spec, @strong on_change => move |s| {
                 {
                     let mut spec = spec.borrow_mut();
-                    let spec = spec.get_or_insert(DEFAULT_PROPS);
+                    let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
                     spec.margin_top = s;
                 }
                 on_change()
@@ -133,7 +135,7 @@ impl WidgetProps {
             clone!(@strong spec, @strong on_change => move |s| {
                 {
                     let mut spec = spec.borrow_mut();
-                    let spec = spec.get_or_insert(DEFAULT_PROPS);
+                    let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
                     spec.margin_bottom = s;
                 }
                 on_change()
@@ -145,7 +147,7 @@ impl WidgetProps {
             clone!(@strong spec, @strong on_change => move |s| {
                 {
                     let mut spec = spec.borrow_mut();
-                    let spec = spec.get_or_insert(DEFAULT_PROPS);
+                    let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
                     spec.margin_start = s;
                 }
                 on_change()
@@ -157,13 +159,39 @@ impl WidgetProps {
             clone!(@strong spec, @strong on_change => move |s| {
                 {
                     let mut spec = spec.borrow_mut();
-                    let spec = spec.get_or_insert(DEFAULT_PROPS);
+                    let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
                     spec.margin_end = s;
                 }
                 on_change()
             }),
         ));
-        WidgetProps { root, spec }
+        let (l, e, _dbg_sensitive) = widgets::expr(
+            ctx,
+            "Sensitive:",
+            scope.clone(),
+            &spec.borrow().unwrap_or(DEFAULT_PROPS).sensitive,
+            clone!(@strong spec, @strong on_change => move |e| {
+                let mut spec = spec.borrow_mut();
+                let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
+                spec.sensitive = e;
+                on_change()
+            }),
+        );
+        grid.add((l, e));
+        let (l, e, _dbg_visible) = widgets::expr(
+            ctx,
+            "Visible:",
+            scope.clone(),
+            &spec.borrow().unwrap_or(DEFAULT_PROPS).visible,
+            clone!(@strong spec, @strong on_change => move |e| {
+                let mut spec = spec.borrow_mut();
+                let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
+                spec.visible = e;
+                on_change()
+            }),
+        );
+        grid.add((l, e));
+        WidgetProps { root, spec, _dbg_sensitive, _dbg_visible }
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -177,13 +205,13 @@ impl WidgetProps {
 
 #[derive(Clone)]
 enum WidgetKind {
-    Action(widgets::Action),
+    BScript(widgets::BScript),
     Table(widgets::Table),
     Image(widgets::Image),
     Label(widgets::Label),
     Button(widgets::Button),
     LinkButton(widgets::LinkButton),
-    Toggle(widgets::Toggle),
+    Switch(widgets::Switch),
     Selector(widgets::Selector),
     Entry(widgets::Entry),
     LinePlot(widgets::LinePlot),
@@ -201,13 +229,13 @@ enum WidgetKind {
 impl WidgetKind {
     fn root(&self) -> Option<&gtk::Widget> {
         match self {
-            WidgetKind::Action(w) => Some(w.root()),
+            WidgetKind::BScript(w) => Some(w.root()),
             WidgetKind::Table(w) => Some(w.root()),
             WidgetKind::Image(w) => Some(w.root()),
             WidgetKind::Label(w) => Some(w.root()),
             WidgetKind::Button(w) => Some(w.root()),
             WidgetKind::LinkButton(w) => Some(w.root()),
-            WidgetKind::Toggle(w) => Some(w.root()),
+            WidgetKind::Switch(w) => Some(w.root()),
             WidgetKind::Selector(w) => Some(w.root()),
             WidgetKind::Entry(w) => Some(w.root()),
             WidgetKind::LinePlot(w) => Some(w.root()),
@@ -244,9 +272,9 @@ impl Widget {
     ) {
         let scope = Rc::new(RefCell::new(scope));
         let (name, kind, props) = match spec {
-            view::Widget { props: _, kind: view::WidgetKind::Action(s) } => (
-                "Action",
-                WidgetKind::Action(widgets::Action::new(
+            view::Widget { props: _, kind: view::WidgetKind::BScript(s) } => (
+                "BScript",
+                WidgetKind::BScript(widgets::BScript::new(
                     ctx,
                     on_change.clone(),
                     store,
@@ -264,7 +292,7 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Image(s) } => (
                 "Image",
@@ -274,7 +302,7 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Label(s) } => (
                 "Label",
@@ -284,7 +312,7 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Button(s) } => (
                 "Button",
@@ -294,7 +322,7 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::LinkButton(s) } => (
                 "LinkButton",
@@ -304,17 +332,17 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
-            view::Widget { props, kind: view::WidgetKind::Toggle(s) } => (
+            view::Widget { props, kind: view::WidgetKind::Switch(s) } => (
                 "Toggle",
-                WidgetKind::Toggle(widgets::Toggle::new(
+                WidgetKind::Switch(widgets::Switch::new(
                     ctx,
                     on_change.clone(),
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Selector(s) } => (
                 "Selector",
@@ -324,7 +352,7 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Entry(s) } => (
                 "Entry",
@@ -334,7 +362,7 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Frame(s) } => (
                 "Frame",
@@ -344,7 +372,7 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Box(s) } => (
                 "Box",
@@ -353,7 +381,7 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props: _, kind: view::WidgetKind::BoxChild(s) } => (
                 "BoxChild",
@@ -363,7 +391,7 @@ impl Widget {
             view::Widget { props, kind: view::WidgetKind::Grid(s) } => (
                 "Grid",
                 WidgetKind::Grid(widgets::Grid::new(on_change.clone(), scope.clone(), s)),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props: _, kind: view::WidgetKind::GridChild(s) } => (
                 "GridChild",
@@ -384,7 +412,7 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Notebook(s) } => (
                 "Notebook",
@@ -394,7 +422,7 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props: _, kind: view::WidgetKind::NotebookPage(s) } => (
                 "NotebookPage",
@@ -413,7 +441,7 @@ impl Widget {
                     scope.clone(),
                     s,
                 )),
-                Some(WidgetProps::new(on_change, props)),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
         };
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
@@ -438,7 +466,7 @@ impl Widget {
     fn spec(&self) -> view::Widget {
         let props = self.props.as_ref().and_then(|p| p.spec());
         let kind = match &self.kind {
-            WidgetKind::Action(w) => w.spec(),
+            WidgetKind::BScript(w) => w.spec(),
             WidgetKind::Table(w) => w.spec(),
             WidgetKind::Image(w) => w.spec(),
             WidgetKind::Label(w) => w.spec(),
@@ -479,6 +507,7 @@ impl Widget {
             Some("Image") => widget(view::WidgetKind::Image(view::Image {
                 spec: expr::ExprKind::Constant(Value::from("media-floppy-symbolic"))
                     .to_expr(),
+                on_click: expr::ExprKind::Constant(Value::Null).to_expr(),
             })),
             Some("Label") => {
                 let s = Value::String(Chars::from("static label"));
@@ -487,7 +516,6 @@ impl Widget {
             Some("Button") => {
                 let l = Chars::from("click me!");
                 widget(view::WidgetKind::Button(view::Button {
-                    enabled: expr::ExprKind::Constant(Value::True).to_expr(),
                     label: expr::ExprKind::Constant(Value::String(l)).to_expr(),
                     image: expr::ExprKind::Constant(Value::Null).to_expr(),
                     on_click: expr::ExprKind::Apply {
@@ -509,7 +537,6 @@ impl Widget {
                 let u = Chars::from("file:///");
                 let l = Chars::from("click me!");
                 widget(view::WidgetKind::LinkButton(view::LinkButton {
-                    enabled: expr::ExprKind::Constant(Value::True).to_expr(),
                     uri: expr::ExprKind::Constant(Value::String(u)).to_expr(),
                     label: expr::ExprKind::Constant(Value::String(l)).to_expr(),
                     on_activate_link: expr::ExprKind::Constant(Value::Null).to_expr(),
@@ -562,8 +589,6 @@ impl Widget {
                 }))
             }
             Some("Entry") => widget(view::WidgetKind::Entry(view::Entry {
-                enabled: expr::ExprKind::Constant(Value::True).to_expr(),
-                visible: expr::ExprKind::Constant(Value::True).to_expr(),
                 text: expr::ExprKind::Apply {
                     args: vec![
                         expr::ExprKind::Constant(Value::from("/somewhere")).to_expr()

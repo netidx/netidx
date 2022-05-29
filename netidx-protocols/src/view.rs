@@ -4,7 +4,7 @@ use std::{
     cmp::{PartialEq, PartialOrd},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Keybind {
     /// A string describing the keys that trigger the keybind.
     /// modifier keys are separated by a +. Available modifiers are
@@ -20,14 +20,6 @@ pub struct Keybind {
 pub enum Direction {
     Horizontal,
     Vertical,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum EllipsizeMode {
-    None,
-    Start,
-    Middle,
-    End,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,8 +156,9 @@ pub struct Image {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Label {
+    /// ("none" | "start" | "middle" | "end")
     /// whether and where to draw elipsis if text exceeds width,
-    pub ellipsize: EllipsizeMode,
+    pub ellipsize: Expr,
     /// The text of the label
     pub text: Expr,
     /// (null | <n>)
@@ -195,7 +188,7 @@ pub struct LinkButton {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Toggle {
+pub struct Switch {
     /// The current state of the toggle
     pub value: Expr,
     /// event() will yield the new state of the toggle when it is
@@ -205,7 +198,7 @@ pub struct Toggle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToggleButton {
-    toggle: Toggle,
+    toggle: Switch,
     /// The text to be displayed in the button
     label: Expr,
     /// see Image::spec
@@ -262,7 +255,9 @@ pub struct Scale {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressBar {
-    pub ellipsize: EllipsizeMode,
+    /// ("none" | "start" | "middle" | "end")
+    /// whether and where to draw elipsis if text exceeds width,
+    pub ellipsize: Expr,
     /// (null | <percent>)
     /// null: in this case the progress bar will operate in "activity
     /// mode", showing the user that something is happening, but not
@@ -415,14 +410,14 @@ pub struct LinePlot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WidgetKind {
-    /// event() will yield null when the view is initialized Note,
+    /// event() will yield null when the view is initialized. Note,
     /// keybinds on BScript widgets will be ignored.
     BScript(Expr),
     Table(Table),
     Label(Label),
     Button(Button),
     LinkButton(LinkButton),
-    Toggle(Toggle),
+    Switch(Switch),
 //    ToggleButton(ToggleButton),
 //    CheckButton(ToggleButton),
 //    RadioButton(ComboBoxText),
@@ -444,29 +439,39 @@ pub enum WidgetKind {
     LinePlot(LinePlot),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WidgetProps {
+    /// Horizontal alignment
     pub halign: Align,
+    /// Vertical alignment
     pub valign: Align,
+    /// Expand horizontally
     pub hexpand: bool,
+    /// Expand vertically
     pub vexpand: bool,
+    /// Top margin in pixels
     pub margin_top: u32,
+    /// Bottom margin in pixels
     pub margin_bottom: u32,
+    /// Start margin in pixels
     pub margin_start: u32,
+    /// End margin in pixels
     pub margin_end: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Widget {
-    pub props: Option<WidgetProps>,
+    /// Key bindings
     pub keybinds: Vec<Keybind>,
     /// (true | false)
     /// true: The widget can be interacted with
     /// false: The widget can't be interacted with
-    pub enabled: Expr,
+    pub sensitive: Expr,
     /// (true | false)
     /// true: The widget is visible as long as it's parent is visible
     /// false: The widget and all it's children are not visible
     pub visible: Expr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Widget {
+    /// layout properties and interfaces shared by all widgets
+    pub props: Option<WidgetProps>,
     pub kind: WidgetKind,
 }

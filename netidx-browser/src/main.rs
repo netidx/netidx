@@ -9,6 +9,7 @@ mod bscript;
 mod cairo_backend;
 mod containers;
 mod editor;
+mod lineplot;
 mod table;
 mod util;
 mod widgets;
@@ -66,9 +67,6 @@ type RawBatch = Pooled<Vec<(SubId, Event)>>;
 fn default_view(path: Path) -> view::Widget {
     view::Widget {
         props: None,
-        keybinds: vec![],
-        enabled: ExprKind::Constant(Value::True).to_expr(),
-        visible: ExprKind::Constant(Value::True).to_expr(),
         kind: view::WidgetKind::Table(view::Table {
             path: ExprKind::Constant(Value::String(Chars::from(String::from(&*path))))
                 .to_expr(),
@@ -248,7 +246,7 @@ fn align_to_gtk(a: view::Align) -> gtk::Align {
     }
 }
 
-fn set_common_props<T: IsA<gtk::Widget> + 'static>(props: view::WidgetProps, t: &T) {
+fn set_common_props<T: IsA<gtk::Widget> + 'static>(props: &view::WidgetProps, t: &T) {
     t.set_halign(align_to_gtk(props.halign));
     t.set_valign(align_to_gtk(props.valign));
     t.set_hexpand(props.hexpand);
@@ -259,22 +257,38 @@ fn set_common_props<T: IsA<gtk::Widget> + 'static>(props: view::WidgetProps, t: 
     t.set_margin_end(props.margin_end as i32);
 }
 
-enum Widget {
-    BScript(widgets::BScript),
-    Table(table::Table),
-    Image(widgets::Image),
-    Label(widgets::Label),
-    Button(widgets::Button),
-    LinkButton(widgets::LinkButton),
-    Toggle(widgets::Toggle),
-    ComboBoxText(widgets::ComboBoxText),
-    Entry(widgets::Entry),
-    Frame(containers::Frame),
-    Box(containers::Box),
-    Grid(containers::Grid),
-    Paned(containers::Paned),
-    Notebook(containers::Notebook),
-    LinePlot(widgets::LinePlot),
+trait BWidget {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    );
+    fn root(&self) -> Option<&gtk::Widget>;
+
+    fn set_visible(&self, v: bool) {
+        if let Some(w) = self.root() {
+            w.set_visible(v);
+        }
+    }
+
+    fn set_sensitive(&self, e: bool) {
+        if let Some(w) = self.root() {
+            w.set_sensitive(e);
+        }
+    }
+
+    fn set_highlight(&self, mut path: std::slice::Iter<WidgetPath>, h: bool) {
+        if let (Some(WidgetPath::Leaf), Some(w)) = (path.next(), self.root()) {
+            util::set_highlight(w, h);
+        }
+    }
+}
+
+struct Widget {
+    sensitive: BSNode,
+    visible: BSNode,
+    widget: Box<dyn BWidget>,
 }
 
 impl Widget {
@@ -283,49 +297,49 @@ impl Widget {
         spec: view::Widget,
         scope: Path,
         selected_path: gtk::Label,
-    ) -> Widget {
-        let w = match spec.kind {
+    ) -> Self {
+        let widget: Box<dyn BWidget> = match spec.kind {
             view::WidgetKind::BScript(spec) => {
-                Widget::BScript(widgets::BScript::new(ctx, scope, spec))
+                Box::new(widgets::BScript::new(ctx, scope, spec))
             }
             view::WidgetKind::Table(spec) => {
-                Widget::Table(table::Table::new(ctx.clone(), spec, scope, selected_path))
+                Box::new(table::Table::new(ctx.clone(), spec, scope, selected_path))
             }
             view::WidgetKind::Image(spec) => {
-                Widget::Image(widgets::Image::new(ctx, spec, scope, selected_path))
+                Box::new(widgets::Image::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Label(spec) => {
-                Widget::Label(widgets::Label::new(ctx, spec, scope, selected_path))
+                Box::new(widgets::Label::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Button(spec) => {
-                Widget::Button(widgets::Button::new(ctx, spec, scope, selected_path))
+                Box::new(widgets::Button::new(ctx, spec, scope, selected_path))
             }
-            view::WidgetKind::LinkButton(spec) => Widget::LinkButton(
-                widgets::LinkButton::new(ctx, spec, scope, selected_path),
-            ),
-            view::WidgetKind::Toggle(spec) => {
-                Widget::Toggle(widgets::Toggle::new(ctx, spec, scope, selected_path))
+            view::WidgetKind::LinkButton(spec) => {
+                Box::new(widgets::LinkButton::new(ctx, spec, scope, selected_path))
             }
-            view::WidgetKind::ComboBoxText(spec) => Widget::ComboBoxText(
-                widgets::ComboBoxText::new(ctx, spec, scope, selected_path),
-            ),
+            view::WidgetKind::Switch(spec) => {
+                Box::new(widgets::Switch::new(ctx, spec, scope, selected_path))
+            }
+            view::WidgetKind::ComboBoxText(spec) => {
+                Box::new(widgets::ComboBoxText::new(ctx, spec, scope, selected_path))
+            }
             view::WidgetKind::Entry(spec) => {
-                Widget::Entry(widgets::Entry::new(ctx, spec, scope, selected_path))
+                Box::new(widgets::Entry::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Frame(spec) => {
-                Widget::Frame(containers::Frame::new(ctx, spec, scope, selected_path))
+                Box::new(containers::Frame::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Box(spec) => {
-                Widget::Box(containers::Box::new(ctx, spec, scope, selected_path))
+                Box::new(containers::Box::new(ctx, spec, scope, selected_path))
             }
-            view::WidgetKind::BoxChild(view::BoxChild { widget, .. }) => {
-                Widget::new(ctx, (&*widget).clone(), scope, selected_path)
+            view::WidgetKind::BoxChild(view::BoxChild { widget: w, .. }) => {
+                Box::new(Widget::new(ctx, (&*w).clone(), scope, selected_path))
             }
             view::WidgetKind::Grid(spec) => {
-                Widget::Grid(containers::Grid::new(ctx, spec, scope, selected_path))
+                Box::new(containers::Grid::new(ctx, spec, scope, selected_path))
             }
-            view::WidgetKind::GridChild(view::GridChild { widget, .. }) => {
-                Widget::new(ctx, (&*widget).clone(), scope, selected_path)
+            view::WidgetKind::GridChild(view::GridChild { widget: w, .. }) => {
+                Box::new(Widget::new(ctx, (&*w).clone(), scope, selected_path))
             }
             view::WidgetKind::GridRow(_) => {
                 let s = Value::String(Chars::from("orphaned grid row"));
@@ -333,147 +347,73 @@ impl Widget {
                 let width = ExprKind::Constant(Value::Null).to_expr();
                 let spec =
                     view::Label { ellipsize: view::EllipsizeMode::None, text, width };
-                Widget::Label(widgets::Label::new(ctx, spec, scope, selected_path))
+                Box::new(widgets::Label::new(ctx, spec, scope, selected_path))
             }
             view::WidgetKind::Paned(spec) => {
-                Widget::Paned(containers::Paned::new(ctx, spec, scope, selected_path))
+                Box::new(containers::Paned::new(ctx, spec, scope, selected_path))
             }
-            view::WidgetKind::NotebookPage(view::NotebookPage { widget, .. }) => {
-                Widget::new(ctx, (&*widget).clone(), scope, selected_path)
+            view::WidgetKind::NotebookPage(view::NotebookPage { widget: w, .. }) => {
+                Box::new(Widget::new(ctx, (&*w).clone(), scope, selected_path))
             }
-            view::WidgetKind::Notebook(spec) => Widget::Notebook(
-                containers::Notebook::new(ctx, spec, scope, selected_path),
-            ),
+            view::WidgetKind::Notebook(spec) => {
+                Box::new(containers::Notebook::new(ctx, spec, scope, selected_path))
+            }
             view::WidgetKind::LinePlot(spec) => {
-                Widget::LinePlot(widgets::LinePlot::new(ctx, spec, scope, selected_path))
+                Box::new(lineplot::LinePlot::new(ctx, spec, scope, selected_path))
             }
         };
-        if let Some(r) = w.root() {
-            set_common_props(spec.props.unwrap_or(DEFAULT_PROPS), r);
+        let props = spec.props.unwrap_or(DEFAULT_PROPS);
+        if let Some(r) = widget.root() {
+            set_common_props(&props, r);
         }
-        w
-    }
-
-    fn root(&self) -> Option<&gtk::Widget> {
-        match self {
-            Widget::BScript(_) => None,
-            Widget::Table(t) => Some(t.root()),
-            Widget::Image(t) => Some(t.root()),
-            Widget::Label(t) => Some(t.root()),
-            Widget::Button(t) => Some(t.root()),
-            Widget::LinkButton(t) => Some(t.root()),
-            Widget::Toggle(t) => Some(t.root()),
-            Widget::ComboBoxText(t) => Some(t.root()),
-            Widget::Entry(t) => Some(t.root()),
-            Widget::Frame(t) => Some(t.root()),
-            Widget::Box(t) => Some(t.root()),
-            Widget::Grid(t) => Some(t.root()),
-            Widget::Paned(t) => Some(t.root()),
-            Widget::Notebook(t) => Some(t.root()),
-            Widget::LinePlot(t) => Some(t.root()),
+        let sensitive =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), props.sensitive);
+        let visible =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), props.visible);
+        if let Some(b) = sensitive.current().and_then(|v| v.cast_to::<bool>().ok()) {
+            widget.set_sensitive(b);
         }
+        if let Some(b) = visible.current().and_then(|v| v.cast_to::<bool>().ok()) {
+            widget.set_visible(b);
+        }
+        Self { sensitive, visible, widget }
     }
+}
 
+impl BWidget for Widget {
     fn update(
         &mut self,
         ctx: BSCtxRef,
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        match self {
-            Widget::BScript(t) => t.update(ctx, event),
-            Widget::Table(t) => t.update(ctx, waits, event),
-            Widget::Image(t) => t.update(ctx, event),
-            Widget::Label(t) => t.update(ctx, event),
-            Widget::Button(t) => t.update(ctx, event),
-            Widget::LinkButton(t) => t.update(ctx, event),
-            Widget::Toggle(t) => t.update(ctx, event),
-            Widget::ComboBoxText(t) => t.update(ctx, event),
-            Widget::Entry(t) => t.update(ctx, event),
-            Widget::Frame(t) => t.update(ctx, waits, event),
-            Widget::Box(t) => t.update(ctx, waits, event),
-            Widget::Grid(t) => t.update(ctx, waits, event),
-            Widget::Paned(t) => t.update(ctx, waits, event),
-            Widget::Notebook(t) => t.update(ctx, waits, event),
-            Widget::LinePlot(t) => t.update(ctx, event),
+        if let Some(b) =
+            self.sensitive.update(ctx, event).and_then(|v| v.cast_to::<bool>().ok())
+        {
+            self.set_sensitive(b);
         }
+        if let Some(b) =
+            self.visible.update(ctx, event).and_then(|v| v.cast_to::<bool>().ok())
+        {
+            self.set_visible(b);
+        }
+        self.widget.update(ctx, waits, event)
     }
 
-    fn set_highlight(&self, mut path: impl Iterator<Item = WidgetPath>, h: bool) {
-        fn set<T: WidgetExt>(w: &T, h: bool) {
-            let s = w.style_context();
-            if h {
-                s.add_class("highlighted");
-            } else {
-                s.remove_class("highlighted");
-            }
-        }
-        match path.next() {
-            None => (),
-            Some(p) => match (p, self) {
-                (WidgetPath::Box(i), Widget::Box(w)) => {
-                    if i < w.children.len() {
-                        w.children[i].set_highlight(path, h)
-                    }
-                }
-                (WidgetPath::Box(i), Widget::Notebook(w)) => {
-                    if i < w.children.len() {
-                        w.children[i].set_highlight(path, h)
-                    }
-                }
-                (WidgetPath::Box(i), Widget::Frame(w)) => {
-                    if i == 0 {
-                        if let Some(c) = &w.child {
-                            c.set_highlight(path, h)
-                        }
-                    }
-                }
-                (WidgetPath::Box(i), Widget::Paned(w)) => {
-                    let c = if i == 0 {
-                        &w.first_child
-                    } else if i == 1 {
-                        &w.second_child
-                    } else {
-                        &None
-                    };
-                    if let Some(c) = c {
-                        c.set_highlight(path, h)
-                    }
-                }
-                (WidgetPath::GridItem(i, j), Widget::Grid(w)) => {
-                    if i < w.children.len() && j < w.children[i].len() {
-                        w.children[i][j].set_highlight(path, h)
-                    }
-                }
-                (WidgetPath::GridRow(i), Widget::Grid(w)) => {
-                    if i < w.children.len() {
-                        for c in &w.children[i] {
-                            if let Some(r) = c.root() {
-                                set(r, h);
-                            }
-                        }
-                    }
-                }
-                (WidgetPath::Box(_), _) => (),
-                (WidgetPath::GridItem(_, _), _) => (),
-                (WidgetPath::GridRow(_), _) => (),
-                (WidgetPath::Leaf, Widget::Paned(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::Frame(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::Notebook(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::Box(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::Grid(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::BScript(_)) => (),
-                (WidgetPath::Leaf, Widget::Table(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::Image(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::Label(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::Button(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::LinkButton(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::Toggle(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::ComboBoxText(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::Entry(w)) => set(w.root(), h),
-                (WidgetPath::Leaf, Widget::LinePlot(w)) => set(w.root(), h),
-            },
-        }
+    fn root(&self) -> Option<&gtk::Widget> {
+        self.widget.root()
+    }
+
+    fn set_visible(&self, v: bool) {
+        self.widget.set_visible(v)
+    }
+
+    fn set_sensitive(&self, e: bool) {
+        self.widget.set_sensitive(e);
+    }
+
+    fn set_highlight(&self, mut path: std::slice::Iter<WidgetPath>, h: bool) {
+        self.widget.set_highlight(path, h)
     }
 }
 
@@ -608,6 +548,9 @@ static DEFAULT_PROPS: view::WidgetProps = view::WidgetProps {
     margin_bottom: 0,
     margin_start: 0,
     margin_end: 0,
+    keybinds: vec![],
+    sensitive: ExprKind::Constant(Value::True).to_expr(),
+    visible: ExprKind::Constant(Value::True).to_expr(),
 };
 
 fn setup_css(screen: &gdk::Screen) {
@@ -850,7 +793,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             editor.borrow_mut().take();
             if let Some(cur) = &*current.borrow() {
                 let hl = highlight.borrow();
-                cur.widget.set_highlight(hl.iter().copied(), false);
+                cur.widget.set_highlight(hl.iter(), false);
             }
             highlight.borrow_mut().clear();
         }
@@ -983,16 +926,16 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             window.add(cur.root());
             window.show_all();
             let hl = highlight.borrow();
-            cur.widget.set_highlight(hl.iter().copied(), true);
+            cur.widget.set_highlight(hl.iter(), true);
             *current.borrow_mut() = Some(cur);
             Continue(true)
         }
         ToGui::Highlight(path) => {
             if let Some(cur) = &*current.borrow() {
                 let mut hl = highlight.borrow_mut();
-                cur.widget.set_highlight(hl.iter().copied(), false);
+                cur.widget.set_highlight(hl.iter(), false);
                 *hl = path;
-                cur.widget.set_highlight(hl.iter().copied(), true);
+                cur.widget.set_highlight(hl.iter(), true);
             }
             Continue(true)
         }

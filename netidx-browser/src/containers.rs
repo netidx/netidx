@@ -1,11 +1,14 @@
-use super::{set_common_props, BSCtx, BSCtxRef, BSNode, Widget, DEFAULT_PROPS};
+use super::{
+    set_common_props, util, BSCtx, BSCtxRef, BSNode, BWidget, Widget, WidgetPath,
+    DEFAULT_PROPS,
+};
 use crate::{bscript::LocalEvent, view};
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use gtk::{self, prelude::*, Orientation};
 use netidx::{chars::Chars, path::Path};
 use netidx_bscript::vm;
-use std::{boxed, cell::RefCell, cmp::max, rc::Rc};
+use std::{cell::RefCell, cmp::max, rc::Rc};
 
 fn dir_to_gtk(d: &view::Direction) -> gtk::Orientation {
     match d {
@@ -16,8 +19,8 @@ fn dir_to_gtk(d: &view::Direction) -> gtk::Orientation {
 
 pub(super) struct Paned {
     root: gtk::Paned,
-    pub(super) first_child: Option<boxed::Box<Widget>>,
-    pub(super) second_child: Option<boxed::Box<Widget>>,
+    first_child: Option<Widget>,
+    second_child: Option<Widget>,
 }
 
 impl Paned {
@@ -36,19 +39,21 @@ impl Paned {
             if let Some(w) = w.root() {
                 root.pack1(w, true, true);
             }
-            boxed::Box::new(w)
+            w
         });
         let second_child = spec.second_child.map(|child| {
             let w = Widget::new(ctx, (*child).clone(), scope, selected_path.clone());
             if let Some(w) = w.root() {
                 root.pack2(w, true, true);
             }
-            boxed::Box::new(w)
+            w
         });
         Paned { root, first_child, second_child }
     }
+}
 
-    pub(super) fn update(
+impl BWidget for Paned {
+    fn update(
         &mut self,
         ctx: BSCtxRef,
         waits: &mut Vec<oneshot::Receiver<()>>,
@@ -62,15 +67,34 @@ impl Paned {
         }
     }
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.root.upcast_ref())
+    }
+
+    fn set_highlight(&self, mut path: std::slice::Iter<WidgetPath>, h: bool) {
+        match path.next() {
+            Some(WidgetPath::Leaf) => util::set_highlight(&self.root, h),
+            Some(WidgetPath::Box(i)) => {
+                let c = if *i == 0 {
+                    &self.first_child
+                } else if *i == 1 {
+                    &self.second_child
+                } else {
+                    &None
+                };
+                if let Some(c) = c {
+                    c.set_highlight(path, h)
+                }
+            }
+            _ => (),
+        }
     }
 }
 
 pub(super) struct Frame {
     root: gtk::Frame,
     label: BSNode,
-    pub(super) child: Option<boxed::Box<Widget>>,
+    child: Option<Widget>,
 }
 
 impl Frame {
@@ -91,12 +115,14 @@ impl Frame {
             if let Some(w) = w.root() {
                 root.add(w);
             }
-            boxed::Box::new(w)
+            w
         });
         Frame { root, label, child }
     }
+}
 
-    pub(super) fn update(
+impl BWidget for Frame {
+    fn update(
         &mut self,
         ctx: BSCtxRef,
         waits: &mut Vec<oneshot::Receiver<()>>,
@@ -110,8 +136,22 @@ impl Frame {
         }
     }
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.root.upcast_ref())
+    }
+
+    fn set_highlight(&self, mut path: std::slice::Iter<WidgetPath>, h: bool) {
+        match path.next() {
+            Some(WidgetPath::Leaf) => util::set_highlight(&self.root, h),
+            Some(WidgetPath::Box(i)) => {
+                if *i == 0 {
+                    if let Some(c) = &self.child {
+                        c.set_highlight(path, h);
+                    }
+                }
+            }
+            _ => (),
+        }
     }
 }
 
@@ -119,7 +159,7 @@ pub(super) struct Notebook {
     root: gtk::Notebook,
     page: BSNode,
     on_switch_page: Rc<RefCell<BSNode>>,
-    pub(super) children: Vec<Widget>,
+    children: Vec<Widget>,
 }
 
 impl Notebook {
@@ -168,7 +208,8 @@ impl Notebook {
                     children.push(w);
                 }
                 _ => {
-                    let w = Widget::new(ctx, s.clone(), scope.clone(), selected_path.clone());
+                    let w =
+                        Widget::new(ctx, s.clone(), scope.clone(), selected_path.clone());
                     if let Some(r) = w.root() {
                         root.append_page(r, None::<&gtk::Label>);
                         set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
@@ -185,8 +226,10 @@ impl Notebook {
         }));
         Notebook { root, page, on_switch_page, children }
     }
+}
 
-    pub(super) fn update(
+impl BWidget for Notebook {
+    fn update(
         &mut self,
         ctx: BSCtxRef,
         waits: &mut Vec<oneshot::Receiver<()>>,
@@ -203,14 +246,26 @@ impl Notebook {
         }
     }
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.root.upcast_ref())
+    }
+
+    fn set_highlight(&self, mut path: std::slice::Iter<WidgetPath>, h: bool) {
+        match path.next() {
+            Some(WidgetPath::Leaf) => util::set_highlight(&self.root, h),
+            Some(WidgetPath::Box(i)) => {
+                if let Some(c) = self.children.get(*i) {
+                    c.set_highlight(path, h)
+                }
+            }
+            _ => (),
+        }
     }
 }
 
 pub(super) struct Box {
     root: gtk::Box,
-    pub(super) children: Vec<Widget>,
+    children: Vec<Widget>,
 }
 
 impl Box {
@@ -263,7 +318,8 @@ impl Box {
                     children.push(w);
                 }
                 _ => {
-                    let w = Widget::new(ctx, s.clone(), scope.clone(), selected_path.clone());
+                    let w =
+                        Widget::new(ctx, s.clone(), scope.clone(), selected_path.clone());
                     if let Some(r) = w.root() {
                         root.add(r);
                         set_common_props(s.props.unwrap_or(DEFAULT_PROPS), r);
@@ -274,8 +330,10 @@ impl Box {
         }
         Box { root, children }
     }
+}
 
-    pub(super) fn update(
+impl BWidget for Box {
+    fn update(
         &mut self,
         ctx: BSCtxRef,
         waits: &mut Vec<oneshot::Receiver<()>>,
@@ -286,14 +344,26 @@ impl Box {
         }
     }
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.root.upcast_ref())
+    }
+
+    fn set_highlight(&self, mut path: std::slice::Iter<WidgetPath>, h: bool) {
+        match path.next() {
+            Some(WidgetPath::Leaf) => util::set_highlight(&self.root, h),
+            Some(WidgetPath::Box(i)) => {
+                if let Some(c) = self.children.get(*i) {
+                    c.set_highlight(path, h)
+                }
+            }
+            _ => (),
+        }
     }
 }
 
 pub(super) struct Grid {
     root: gtk::Grid,
-    pub(super) children: Vec<Vec<Widget>>,
+    children: Vec<Vec<Widget>>,
 }
 
 impl Grid {
@@ -379,8 +449,10 @@ impl Grid {
             .collect::<Vec<_>>();
         Grid { root, children }
     }
+}
 
-    pub(super) fn update(
+impl BWidget for Grid {
+    fn update(
         &mut self,
         ctx: BSCtxRef,
         waits: &mut Vec<oneshot::Receiver<()>>,
@@ -393,7 +465,30 @@ impl Grid {
         }
     }
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.root.upcast_ref())
+    }
+
+    fn set_highlight(&self, mut path: std::slice::Iter<WidgetPath>, h: bool) {
+        match path.next() {
+            Some(WidgetPath::Leaf) => util::set_highlight(&self.root, h),
+            Some(WidgetPath::GridItem(i, j)) => {
+                if let Some(row) = self.children.get(*i) {
+                    if let Some(c) = row.get(*j) {
+                        c.set_highlight(path, h)
+                    }
+                }
+            }
+            Some(WidgetPath::GridRow(i)) => {
+                if let Some(row) = self.children.get(*i) {
+                    for c in row {
+                        if let Some(r) = c.root() {
+                            util::set_highlight(r, h)
+                        }
+                    }
+                }
+            }
+            _ => (),
+        }
     }
 }

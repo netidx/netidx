@@ -1,5 +1,14 @@
 use gtk::{self, prelude::*};
 
+pub(super) fn set_highlight<T: WidgetExt>(w: &T, h: bool) {
+    let s = w.style_context();
+    if h {
+        s.add_class("highlighted");
+    } else {
+        s.remove_class("highlighted");
+    }
+}
+
 pub(super) fn toplevel<W: WidgetExt>(w: &W) -> gtk::Window {
     w.toplevel()
         .expect("modal dialog must have a toplevel window")

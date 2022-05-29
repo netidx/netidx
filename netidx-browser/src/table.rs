@@ -1,6 +1,6 @@
 use super::{
     util::{err_modal, toplevel},
-    BSCtx, BSCtxRef, BSNode, WVal,
+    BSCtx, BSCtxRef, BSNode, WVal, BWidget,
 };
 use crate::bscript::LocalEvent;
 use arcstr::ArcStr;
@@ -1312,10 +1312,6 @@ impl Table {
         }
     }
 
-    pub(super) fn root(&self) -> &GtkWidget {
-        self.root.upcast_ref()
-    }
-
     fn clear_selection(&self, ctx: BSCtxRef) {
         let v = Value::Array(Arc::from([]));
         let ev = vm::Event::User(LocalEvent::Event(v));
@@ -1352,8 +1348,10 @@ impl Table {
         self.clear_selection(ctx);
         *state = TableState::Raeified(table);
     }
+}
 
-    pub(super) fn update(
+impl BWidget for Table {
+    fn update(
         &mut self,
         ctx: BSCtxRef,
         waits: &mut Vec<oneshot::Receiver<()>>,
@@ -1471,5 +1469,9 @@ impl Table {
                 }
             },
         }
+    }
+
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.root.upcast_ref())
     }
 }

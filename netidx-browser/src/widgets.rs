@@ -1,23 +1,18 @@
-use super::{val_to_bool, BSCtx, BSCtxRef, BSNode, WVal};
+use super::{val_to_bool, BSCtx, BSCtxRef, BSNode, BWidget, WVal};
 use crate::{bscript::LocalEvent, view};
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
-use chrono::prelude::*;
-use gdk::{self, cairo, prelude::*};
+
+use futures::channel::oneshot;
+use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
 use log::warn;
-use netidx::{
-    chars::Chars,
-    path::Path,
-    protocol::value::FromValue,
-    subscriber::{Typ, Value},
-};
+use netidx::{chars::Chars, path::Path, protocol::value::FromValue, subscriber::Value};
 use netidx_bscript::{expr::Expr, vm};
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
-    panic::{catch_unwind, AssertUnwindSafe},
+    collections::HashMap,
     rc::Rc,
 };
 
@@ -98,13 +93,13 @@ impl FromValue for ImageSpec {
     }
 }
 
-fn ellipsize(e: view::EllipsizeMode) -> pango::EllipsizeMode {
-    use view::EllipsizeMode;
-    match e {
-        EllipsizeMode::None => pango::EllipsizeMode::None,
-        EllipsizeMode::Start => pango::EllipsizeMode::Start,
-        EllipsizeMode::End => pango::EllipsizeMode::End,
-        EllipsizeMode::Middle => pango::EllipsizeMode::Middle,
+fn parse_ellipsize(e: Value) -> pango::EllipsizeMode {
+    match e.cast_to::<Chars>().ok() {
+        Some(c) if &*c == "none" => pango::EllipsizeMode::None,
+        Some(c) if &*c == "start" => pango::EllipsizeMode::Start,
+        Some(c) if &*c == "middle" => pango::EllipsizeMode::Middle,
+        Some(c) if &*c == "end" => pango::EllipsizeMode::End,
+        None | Some(_) => pango::EllipsizeMode::None,
     }
 }
 
@@ -162,12 +157,15 @@ impl Button {
         );
         Self { label, image, on_click, button }
     }
+}
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.button.upcast_ref()
-    }
-
-    pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
+impl BWidget for Button {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
         if let Some(new) = self.label.update(ctx, event) {
             self.button.set_label(&format!("{}", WVal(&new)));
         }
@@ -180,6 +178,10 @@ impl Button {
             self.button.set_always_show_image(true);
         }
         self.on_click.borrow_mut().update(ctx, event);
+    }
+
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.button.upcast_ref())
     }
 }
 
@@ -236,12 +238,15 @@ impl LinkButton {
         );
         LinkButton { uri, label, on_activate_link, button }
     }
+}
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.button.upcast_ref()
-    }
-
-    pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
+impl BWidget for LinkButton {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
         if let Some(new) = self.uri.update(ctx, event) {
             if let Some(new) = new.get_as::<Chars>() {
                 self.button.set_uri(&new);
@@ -254,12 +259,17 @@ impl LinkButton {
         }
         self.on_activate_link.borrow_mut().update(ctx, event);
     }
+
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.button.upcast_ref())
+    }
 }
 
 pub(super) struct Label {
     label: gtk::Label,
     text: BSNode,
     width: BSNode,
+    ellipsize: BSNode,
 }
 
 impl Label {
@@ -271,6 +281,7 @@ impl Label {
     ) -> Label {
         let text = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.text.clone());
         let width = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.width.clone());
+        let ellipsize = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.ellipsize.clone());
         let txt = match text.current() {
             None => String::new(),
             Some(v) => format!("{}", WVal(&v)),
@@ -281,7 +292,9 @@ impl Label {
         }
         label.set_selectable(true);
         label.set_single_line_mode(true);
-        label.set_ellipsize(ellipsize(spec.ellipsize));
+        if let Some(mode) = ellipsize.current().map(parse_ellipsize) {
+            label.set_ellipsize(mode);
+        }
         label.connect_button_press_event(
             clone!(@strong selected_path, @strong spec => move |_, _| {
                 selected_path.set_label(&format!("{}", spec.text));
@@ -292,14 +305,17 @@ impl Label {
             selected_path.set_label(&format!("{}", spec.text));
             Inhibit(false)
         }));
-        Label { text, label, width }
+        Label { text, label, width, ellipsize }
     }
+}
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.label.upcast_ref()
-    }
-
-    pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
+impl BWidget for Label {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
         if let Some(new) = self.text.update(ctx, event) {
             self.label.set_label(&format!("{}", WVal(&new)));
         }
@@ -308,6 +324,13 @@ impl Label {
         {
             self.label.set_width_chars(w);
         }
+        if let Some(m) = self.ellipsize.update(ctx, event).map(parse_ellipsize) {
+            self.label.set_ellipsize(m);
+        }
+    }
+
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.label.upcast_ref())
     }
 }
 
@@ -323,9 +346,20 @@ impl BScript {
         expr.update(ctx_r, &vm::Event::User(LocalEvent::Event(Value::Null)));
         Self { expr }
     }
+}
 
-    pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
+impl BWidget for BScript {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
         self.expr.update(ctx, event);
+    }
+
+    fn root(&self) -> Option<&gtk::Widget> {
+        None
     }
 }
 
@@ -445,8 +479,15 @@ impl ComboBoxText {
         }
         Self::update_active(combo, source)
     }
+}
 
-    pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
+impl BWidget for ComboBoxText {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
         self.we_set.set(true);
         self.on_change.borrow_mut().update(ctx, event);
         Self::update_active(&self.combo, &self.selected.borrow_mut().update(ctx, event));
@@ -456,22 +497,31 @@ impl ComboBoxText {
         self.we_set.set(false);
     }
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.root.upcast_ref())
+    }
+
+    fn set_visible(&self, v: bool) {
+        self.root.set_visible(v);
+        self.combo.set_visible(v);
+    }
+
+    fn set_sensitive(&self, e: bool) {
+        self.combo.set_sensitive(e);
     }
 }
 
-pub(super) struct Toggle {
+pub(super) struct Switch {
     value: Rc<RefCell<BSNode>>,
     on_change: Rc<RefCell<BSNode>>,
     we_set: Rc<Cell<bool>>,
     switch: gtk::Switch,
 }
 
-impl Toggle {
+impl Switch {
     pub(super) fn new(
         ctx: &BSCtx,
-        spec: view::Toggle,
+        spec: view::Switch,
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
@@ -529,14 +579,17 @@ impl Toggle {
                 Inhibit(false)
             }),
         );
-        Toggle { value, on_change, switch, we_set }
+        Self { value, on_change, switch, we_set }
     }
+}
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.switch.upcast_ref()
-    }
-
-    pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
+impl BWidget for Switch {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
         if let Some(new) = self.value.borrow_mut().update(ctx, event) {
             self.we_set.set(true);
             self.switch.set_active(val_to_bool(&new));
@@ -544,6 +597,10 @@ impl Toggle {
             self.we_set.set(false);
         }
         self.on_change.borrow_mut().update(ctx, event);
+    }
+
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.switch.upcast_ref())
     }
 }
 
@@ -643,12 +700,15 @@ impl Entry {
         }));
         Entry { we_changed, entry, text, on_change, on_activate }
     }
+}
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.entry.upcast_ref()
-    }
-
-    pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
+impl BWidget for Entry {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
         if let Some(new) = self.text.borrow_mut().update(ctx, event) {
             self.we_changed.set(true);
             match new {
@@ -660,10 +720,15 @@ impl Entry {
         self.on_change.borrow_mut().update(ctx, event);
         self.on_activate.borrow_mut().update(ctx, event);
     }
+
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.entry.upcast_ref())
+    }
 }
 
 pub(super) struct Image {
     image_spec: BSNode,
+    on_click: Rc<RefCell<BSNode>>,
     image: gtk::Image,
     root: gtk::EventBox,
 }
@@ -680,9 +745,30 @@ impl Image {
         root.add(&image);
         let image_spec =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.spec.clone());
+        let on_click =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.on_click.clone());
+        let on_click = Rc::new(RefCell::new(on_click));
+        let button_pressed = Rc::new(Cell::new(false));
         if let Some(spec) = image_spec.current().and_then(|v| v.get_as::<ImageSpec>()) {
             spec.apply(&image)
         }
+        root.connect_button_press_event(clone!(@strong button_pressed => move |_, e| {
+            if e.button() == 1 {
+                button_pressed.set(true);
+            }
+            Inhibit(true)
+        }));
+        root.connect_button_release_event(clone!(
+            @strong button_pressed, @strong on_click, @strong ctx => move |_, e| {
+            if e.button() == 1 && button_pressed.get() {
+                button_pressed.set(false);
+                on_click.borrow_mut().update(
+                    &mut *ctx.borrow_mut(),
+                    &vm::Event::User(LocalEvent::Event(Value::Null))
+                );
+            }
+            Inhibit(true)
+        }));
         root.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(&format!("on_click: {}", &spec.spec));
             Inhibit(false)
@@ -693,437 +779,26 @@ impl Image {
                 Inhibit(false)
             }),
         );
-        Image { image_spec, image, root }
+        Image { image_spec, on_click, image, root }
     }
+}
 
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
-    }
-
-    pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
+impl BWidget for Image {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
+        self.on_click.borrow_mut().update(ctx, event);
         if let Some(spec) =
             self.image_spec.update(ctx, event).and_then(|v| v.get_as::<ImageSpec>())
         {
             spec.apply(&self.image)
         }
     }
-}
 
-fn valid_typ(v: &Value) -> bool {
-    v.number() || Typ::get(v) == Typ::DateTime
-}
-
-struct ValidTypIter<'a, I> {
-    last_valid: Option<&'a Value>,
-    inner: I,
-}
-
-impl<'a, I: Iterator<Item = &'a Value>> ValidTypIter<'a, I> {
-    fn new(i: I) -> Self {
-        ValidTypIter { last_valid: None, inner: i }
-    }
-}
-
-impl<'a, I: Iterator<Item = &'a Value>> Iterator for ValidTypIter<'a, I> {
-    type Item = &'a Value;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            match self.inner.next() {
-                None => break None,
-                Some(v) => {
-                    if valid_typ(v) {
-                        self.last_valid = Some(v);
-                        break Some(v);
-                    } else if let Some(v) = self.last_valid {
-                        break Some(v);
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct Series {
-    line_color: view::RGB,
-    x: BSNode,
-    y: BSNode,
-    x_data: VecDeque<Value>,
-    y_data: VecDeque<Value>,
-}
-
-pub(super) struct LinePlot {
-    root: gtk::Box,
-    x_min: Rc<RefCell<BSNode>>,
-    x_max: Rc<RefCell<BSNode>>,
-    y_min: Rc<RefCell<BSNode>>,
-    y_max: Rc<RefCell<BSNode>>,
-    keep_points: Rc<RefCell<BSNode>>,
-    series: Rc<RefCell<Vec<Series>>>,
-}
-
-impl LinePlot {
-    pub(super) fn new(
-        ctx: &BSCtx,
-        spec: view::LinePlot,
-        scope: Path,
-        _selected_path: gtk::Label,
-    ) -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let canvas = gtk::DrawingArea::new();
-        root.pack_start(&canvas, true, true, 0);
-        let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut ctx_r;
-        let x_min = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
-            scope.clone(),
-            spec.x_min.clone(),
-        )));
-        let x_max = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
-            scope.clone(),
-            spec.x_max.clone(),
-        )));
-        let y_min = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
-            scope.clone(),
-            spec.y_min.clone(),
-        )));
-        let y_max = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
-            scope.clone(),
-            spec.y_max.clone(),
-        )));
-        let keep_points = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
-            scope.clone(),
-            spec.keep_points.clone(),
-        )));
-        let series = Rc::new(RefCell::new(
-            spec.series
-                .iter()
-                .map(|series| Series {
-                    line_color: series.line_color,
-                    x: BSNode::compile(ctx_r, scope.clone(), series.x.clone()),
-                    y: BSNode::compile(ctx_r, scope.clone(), series.y.clone()),
-                    x_data: VecDeque::new(),
-                    y_data: VecDeque::new(),
-                })
-                .collect::<Vec<_>>(),
-        ));
-        let allocated_width = Rc::new(Cell::new(0));
-        let allocated_height = Rc::new(Cell::new(0));
-        canvas.connect_draw(clone!(
-            @strong allocated_width,
-            @strong allocated_height,
-            @strong x_min,
-            @strong x_max,
-            @strong y_min,
-            @strong y_max,
-            @strong series => move |_, context| {
-                // CR estokes: there is a bug in plotters that causes
-                // it to somtimes panic in draw it probably isn't
-                // strictly unwind safe, but whatever happens it's a
-                // lot better than crashing the entire browser.
-            let res = catch_unwind(AssertUnwindSafe(|| LinePlot::draw(
-                &spec,
-                &allocated_width,
-                &allocated_height,
-                &x_min,
-                &x_max,
-                &y_min,
-                &y_max,
-                &series,
-                context
-            )));
-            match res {
-                Ok(Ok(())) => (),
-                Ok(Err(e)) => warn!("failed to draw lineplot {}", e),
-                Err(_) => warn!("failed to draw lineplot, draw paniced"),
-            }
-            gtk::Inhibit(true)
-        }));
-        canvas.connect_size_allocate(clone!(
-        @strong allocated_width,
-        @strong allocated_height => move |_, a| {
-            allocated_width.set(i32::abs(a.width()) as u32);
-            allocated_height.set(i32::abs(a.height()) as u32);
-        }));
-        LinePlot { root, x_min, x_max, y_min, y_max, keep_points, series }
-    }
-
-    fn draw(
-        spec: &view::LinePlot,
-        width: &Rc<Cell<u32>>,
-        height: &Rc<Cell<u32>>,
-        x_min: &Rc<RefCell<BSNode>>,
-        x_max: &Rc<RefCell<BSNode>>,
-        y_min: &Rc<RefCell<BSNode>>,
-        y_max: &Rc<RefCell<BSNode>>,
-        series: &Rc<RefCell<Vec<Series>>>,
-        context: &cairo::Context,
-    ) -> Result<()> {
-        use super::cairo_backend::CairoBackend;
-        use chrono::Duration;
-        use plotters::{coord::ranged1d::ValueFormatter, prelude::*, style::RGBColor};
-        use std::cmp::max;
-        fn get_min_max(specified: Option<Value>, computed: Value) -> Value {
-            match specified {
-                None => computed,
-                Some(v @ Value::DateTime(_)) => v,
-                Some(v @ Value::F64(_)) => v,
-                Some(v) => v.cast(Typ::F64).unwrap_or(computed),
-            }
-        }
-        fn to_style(c: view::RGB) -> RGBColor {
-            let cvt = |f| (f64::min(1., f) * 255.) as u8;
-            RGBColor(cvt(c.r), cvt(c.g), cvt(c.b))
-        }
-        fn draw_mesh<'a, DB, XT, YT, X, Y>(
-            spec: &view::LinePlot,
-            chart: &mut ChartContext<'a, DB, Cartesian2d<X, Y>>,
-        ) -> Result<()>
-        where
-            DB: DrawingBackend,
-            X: Ranged<ValueType = XT> + ValueFormatter<XT>,
-            Y: Ranged<ValueType = YT> + ValueFormatter<YT>,
-        {
-            let mut mesh = chart.configure_mesh();
-            mesh.x_desc(spec.x_label.as_str())
-                .y_desc(spec.y_label.as_str())
-                .x_labels(spec.x_labels)
-                .y_labels(spec.y_labels);
-            if !spec.x_grid {
-                mesh.disable_x_mesh();
-            }
-            if !spec.y_grid {
-                mesh.disable_y_mesh();
-            }
-            mesh.draw().map_err(|e| anyhow!("{}", e))
-        }
-        if width.get() > 0 && height.get() > 0 {
-            let (x_min, x_max, y_min, y_max) = (
-                x_min.borrow().current(),
-                x_max.borrow().current(),
-                y_min.borrow().current(),
-                y_max.borrow().current(),
-            );
-            let mut computed_x_min = series
-                .borrow()
-                .last()
-                .and_then(|s| s.x_data.iter().find(|v| valid_typ(v)))
-                .unwrap_or(&Value::F64(0.))
-                .clone();
-            let mut computed_x_max = computed_x_min.clone();
-            let mut computed_y_min = series
-                .borrow()
-                .last()
-                .and_then(|s| s.y_data.iter().find(|v| valid_typ(v)))
-                .unwrap_or(&Value::F64(0.))
-                .clone();
-            let mut computed_y_max = computed_y_min.clone();
-            for s in series.borrow().iter() {
-                for x in ValidTypIter::new(s.x_data.iter()) {
-                    if x < &computed_x_min {
-                        computed_x_min = x.clone();
-                    }
-                    if x > &computed_x_max {
-                        computed_x_max = x.clone();
-                    }
-                }
-                for y in ValidTypIter::new(s.y_data.iter()) {
-                    if y < &computed_y_min {
-                        computed_y_min = y.clone();
-                    }
-                    if y > &computed_y_max {
-                        computed_y_max = y.clone();
-                    }
-                }
-            }
-            let x_min = get_min_max(x_min, computed_x_min);
-            let x_max = get_min_max(x_max, computed_x_max);
-            let y_min = get_min_max(y_min, computed_y_min);
-            let y_max = get_min_max(y_max, computed_y_max);
-            let back = CairoBackend::new(context, (width.get(), height.get()))?
-                .into_drawing_area();
-            match spec.fill {
-                None => (),
-                Some(c) => back.fill(&to_style(c))?,
-            }
-            let mut chart = ChartBuilder::on(&back);
-            chart
-                .caption(spec.title.as_str(), ("sans-sherif", 14))
-                .margin(spec.margin)
-                .set_all_label_area_size(spec.label_area);
-            let xtyp = match (Typ::get(&x_min), Typ::get(&x_max)) {
-                (t0, t1) if t0 == t1 => Some(t0),
-                (_, _) => None,
-            };
-            let ytyp = match (Typ::get(&y_min), Typ::get(&y_max)) {
-                (t0, t1) if t0 == t1 => Some(t0),
-                (_, _) => None,
-            };
-            match (xtyp, ytyp) {
-                (Some(Typ::DateTime), Some(Typ::DateTime)) => {
-                    let xmin = x_min.cast_to::<DateTime<Utc>>().unwrap();
-                    let xmax = max(
-                        xmin + Duration::seconds(1),
-                        x_max.cast_to::<DateTime<Utc>>().unwrap(),
-                    );
-                    let ymin = y_min.cast_to::<DateTime<Utc>>().unwrap();
-                    let ymax = max(
-                        ymin + Duration::seconds(1),
-                        y_max.cast_to::<DateTime<Utc>>().unwrap(),
-                    );
-                    let mut chart = chart.build_cartesian_2d(xmin..xmax, ymin..ymax)?;
-                    draw_mesh(spec, &mut chart)?;
-                    for s in series.borrow().iter() {
-                        let data =
-                            s.x_data
-                                .iter()
-                                .cloned()
-                                .filter_map(|v| v.cast_to::<DateTime<Utc>>().ok())
-                                .zip(
-                                    s.y_data.iter().cloned().filter_map(|v| {
-                                        v.cast_to::<DateTime<Utc>>().ok()
-                                    }),
-                                );
-                        let style = to_style(s.line_color);
-                        chart.draw_series(LineSeries::new(data, &style))?;
-                    }
-                }
-                (Some(Typ::DateTime), Some(_))
-                    if y_min.clone().cast_to::<f64>().is_ok() =>
-                {
-                    let xmin = x_min.cast_to::<DateTime<Utc>>().unwrap();
-                    let xmax = max(
-                        xmin + Duration::seconds(1),
-                        x_max.cast_to::<DateTime<Utc>>().unwrap(),
-                    );
-                    let ymin = y_min.cast_to::<f64>().unwrap();
-                    let ymax = f64::max(ymin + 1., y_max.cast_to::<f64>().unwrap());
-                    let mut chart = chart.build_cartesian_2d(xmin..xmax, ymin..ymax)?;
-                    draw_mesh(spec, &mut chart)?;
-                    for s in series.borrow().iter() {
-                        let data = s
-                            .x_data
-                            .iter()
-                            .cloned()
-                            .filter_map(|v| v.cast_to::<DateTime<Utc>>().ok())
-                            .zip(
-                                s.y_data
-                                    .iter()
-                                    .cloned()
-                                    .filter_map(|v| v.cast_to::<f64>().ok()),
-                            );
-                        let style = to_style(s.line_color);
-                        chart.draw_series(LineSeries::new(data, &style))?;
-                    }
-                }
-                (Some(_), Some(Typ::DateTime))
-                    if x_min.clone().cast_to::<f64>().is_ok() =>
-                {
-                    let xmin = x_min.cast_to::<f64>().unwrap();
-                    let xmax = f64::max(xmin + 1., x_max.cast_to::<f64>().unwrap());
-                    let ymin = y_min.cast_to::<DateTime<Utc>>().unwrap();
-                    let ymax = max(
-                        ymin + Duration::seconds(1),
-                        y_max.cast_to::<DateTime<Utc>>().unwrap(),
-                    );
-                    let mut chart = chart.build_cartesian_2d(xmin..xmax, ymin..ymax)?;
-                    draw_mesh(spec, &mut chart)?;
-                    for s in series.borrow().iter() {
-                        let data =
-                            s.x_data
-                                .iter()
-                                .cloned()
-                                .filter_map(|v| v.cast_to::<f64>().ok())
-                                .zip(
-                                    s.y_data.iter().cloned().filter_map(|v| {
-                                        v.cast_to::<DateTime<Utc>>().ok()
-                                    }),
-                                );
-                        let style = to_style(s.line_color);
-                        chart.draw_series(LineSeries::new(data, &style))?;
-                    }
-                }
-                (Some(_), Some(_))
-                    if x_min.clone().cast_to::<f64>().is_ok()
-                        && y_min.clone().cast_to::<f64>().is_ok() =>
-                {
-                    let xmin = x_min.cast_to::<f64>().unwrap();
-                    let xmax = f64::max(xmin + 1., x_max.cast_to::<f64>().unwrap());
-                    let ymin = y_min.cast_to::<f64>().unwrap();
-                    let ymax = f64::max(ymin + 1., y_max.cast_to::<f64>().unwrap());
-                    let mut chart = chart.build_cartesian_2d(xmin..xmax, ymin..ymax)?;
-                    draw_mesh(spec, &mut chart)?;
-                    for s in series.borrow().iter() {
-                        let data = s
-                            .x_data
-                            .iter()
-                            .cloned()
-                            .filter_map(|v| v.cast_to::<f64>().ok())
-                            .zip(
-                                s.y_data
-                                    .iter()
-                                    .cloned()
-                                    .filter_map(|v| v.cast_to::<f64>().ok()),
-                            );
-                        let style = to_style(s.line_color);
-                        chart.draw_series(LineSeries::new(data, &style))?;
-                    }
-                }
-                (_, _) => (),
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
-    }
-
-    pub(super) fn update(&mut self, ctx: BSCtxRef, event: &vm::Event<LocalEvent>) {
-        let mut queue_draw = false;
-        if self.x_min.borrow_mut().update(ctx, event).is_some() {
-            queue_draw = true;
-        }
-        if self.x_max.borrow_mut().update(ctx, event).is_some() {
-            queue_draw = true;
-        }
-        if self.y_min.borrow_mut().update(ctx, event).is_some() {
-            queue_draw = true;
-        }
-        if self.y_max.borrow_mut().update(ctx, event).is_some() {
-            queue_draw = true;
-        }
-        if self.keep_points.borrow_mut().update(ctx, event).is_some() {
-            queue_draw = true;
-        }
-        for s in self.series.borrow_mut().iter_mut() {
-            if let Some(v) = s.x.update(ctx, event) {
-                s.x_data.push_back(v);
-                queue_draw = true;
-            }
-            if let Some(v) = s.y.update(ctx, event) {
-                s.y_data.push_back(v);
-                queue_draw = true;
-            }
-            let keep = self
-                .keep_points
-                .borrow()
-                .current()
-                .and_then(|v| v.cast_to::<u64>().ok())
-                .unwrap_or(0);
-            while s.x_data.len() > keep as usize {
-                s.x_data.pop_front();
-            }
-            while s.y_data.len() > keep as usize {
-                s.y_data.pop_front();
-            }
-        }
-        if queue_draw {
-            self.root.queue_draw();
-        }
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.root.upcast_ref())
     }
 }

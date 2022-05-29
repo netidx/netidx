@@ -15,9 +15,9 @@ use std::{
     rc::Rc,
 };
 
-type DbgExpr = Rc<RefCell<Option<(gtk::Window, ExprInspector)>>>;
+pub(super) type DbgExpr = Rc<RefCell<Option<(gtk::Window, ExprInspector)>>>;
 
-fn expr(
+pub(super) fn expr(
     ctx: &BSCtx,
     txt: &str,
     scope: Scope,
@@ -310,14 +310,14 @@ impl Table {
 }
 
 #[derive(Clone)]
-pub(super) struct Action {
+pub(super) struct BScript {
     root: TwoColGrid,
     spec: Rc<RefCell<expr::Expr>>,
     _expr: DbgExpr,
     iter: Rc<RefCell<gtk::TreeIter>>,
 }
 
-impl Action {
+impl BScript {
     pub(super) fn new(
         ctx: &BSCtx,
         on_change: OnChange,
@@ -352,7 +352,7 @@ impl Action {
             }),
         );
         root.add((l, e));
-        Action { root, spec, _expr, iter }
+        Self { root, spec, _expr, iter }
     }
 
     pub(super) fn moved(&self, iter: &gtk::TreeIter) {
@@ -360,7 +360,7 @@ impl Action {
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Action(self.spec.borrow().clone())
+        view::WidgetKind::BScript(self.spec.borrow().clone())
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -372,7 +372,8 @@ impl Action {
 pub(super) struct Image {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Image>>,
-    _expr: DbgExpr,
+    _dbg_expr: DbgExpr,
+    _dbg_on_click: DbgExpr,
 }
 
 impl Image {
@@ -384,7 +385,7 @@ impl Image {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _expr) = expr(
+        let (l, e, _dbg_expr) = expr(
             ctx,
             "Spec:",
             scope.clone(),
@@ -395,7 +396,18 @@ impl Image {
             }),
         );
         root.add((l, e));
-        Image { root, spec, _expr }
+        let (l, e, _dbg_on_click) = expr(
+            ctx,
+            "On Click:",
+            scope.clone(),
+            &spec.borrow().spec,
+            clone!(@strong spec => move |s| {
+                spec.borrow_mut().on_click = s;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        Image { root, spec, _dbg_expr, _dbg_on_click }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -409,9 +421,11 @@ impl Image {
 
 #[derive(Clone)]
 pub(super) struct Label {
-    root: gtk::Box,
-    spec: Rc<RefCell<expr::Expr>>,
-    _expr: DbgExpr,
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::Label>>,
+    _dbg_text: DbgExpr,
+    _dbg_width: DbgExpr,
+    _dbg_ellipsize: DbgExpr,
 }
 
 impl Label {
@@ -419,25 +433,44 @@ impl Label {
         ctx: &BSCtx,
         on_change: OnChange,
         scope: Scope,
-        spec: expr::Expr,
+        spec: view::Label,
     ) -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let pathbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        root.pack_start(&pathbox, false, false, 0);
-        let (l, e, _expr) = expr(
+        let (l, e, _dbg_text) = expr(
             ctx,
-            "Expr:",
+            "Text:",
             scope.clone(),
-            &*spec.borrow(),
-            clone!(@strong spec => move |s| {
-                *spec.borrow_mut() = s;
+            &spec.borrow().text,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().text = s;
                 on_change()
             }),
         );
-        pathbox.pack_start(&l, false, false, 0);
-        pathbox.pack_start(&e, true, true, 0);
-        Label { root, spec, _expr }
+        root.add((l, e));
+        let (l, e, _dbg_width) = expr(
+            ctx,
+            "Max Width:",
+            scope.clone(),
+            &spec.borrow().width,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().width = s;
+                on_change()
+            })
+        );
+        root.add((l, e));
+        let (l, e, _dbg_ellipsize) = expr(
+            ctx,
+            "Ellipsize Mode:",
+            scope.clone(),
+            &spec.borrow().ellipsize,
+            clone!(@strong spec, @strong on_change => move |s| {
+                spec.borrow_mut().ellipsize = s;
+                on_change()
+            })
+        );
+        root.add((l, e));
+        Self { root, spec, _dbg_text, _dbg_width, _dbg_ellipsize }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -445,7 +478,7 @@ impl Label {
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
+        self.root.root().upcast_ref()
     }
 }
 
@@ -453,7 +486,6 @@ impl Label {
 pub(super) struct Button {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Button>>,
-    _enabled_expr: DbgExpr,
     _label_expr: DbgExpr,
     _image_expr: DbgExpr,
     _on_click_expr: DbgExpr,
@@ -468,17 +500,6 @@ impl Button {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _enabled_expr) = expr(
-            ctx,
-            "Enabled:",
-            scope.clone(),
-            &spec.borrow().enabled,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().enabled = s;
-                on_change();
-            }),
-        );
-        root.add((l, e));
         let (l, e, _label_expr) = expr(
             ctx,
             "Label:",
@@ -512,7 +533,7 @@ impl Button {
             }),
         );
         root.add((l, e));
-        Button { root, spec, _enabled_expr, _label_expr, _image_expr, _on_click_expr }
+        Button { root, spec, _label_expr, _image_expr, _on_click_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -528,7 +549,6 @@ impl Button {
 pub(super) struct LinkButton {
     root: TwoColGrid,
     spec: Rc<RefCell<view::LinkButton>>,
-    _enabled_expr: DbgExpr,
     _uri_expr: DbgExpr,
     _label_expr: DbgExpr,
     _on_activate_link_expr: DbgExpr,
@@ -543,17 +563,6 @@ impl LinkButton {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _enabled_expr) = expr(
-            ctx,
-            "Enabled:",
-            scope.clone(),
-            &spec.borrow().enabled,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().enabled = s;
-                on_change();
-            }),
-        );
-        root.add((l, e));
         let (l, e, _label_expr) = expr(
             ctx,
             "Label:",
@@ -587,14 +596,7 @@ impl LinkButton {
             }),
         );
         root.add((l, e));
-        LinkButton {
-            root,
-            spec,
-            _enabled_expr,
-            _label_expr,
-            _uri_expr,
-            _on_activate_link_expr,
-        }
+        LinkButton { root, spec, _label_expr, _uri_expr, _on_activate_link_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
@@ -607,15 +609,15 @@ impl LinkButton {
 }
 
 #[derive(Clone)]
-pub(super) struct Toggle {
+pub(super) struct Switch {
     root: TwoColGrid,
-    spec: Rc<RefCell<view::Toggle>>,
+    spec: Rc<RefCell<view::Switch>>,
     _enabled_expr: DbgExpr,
     _value_expr: DbgExpr,
     _on_change_expr: DbgExpr,
 }
 
-impl Toggle {
+impl Switch {
     pub(super) fn new(
         ctx: &BSCtx,
         on_change: OnChange,
@@ -657,11 +659,11 @@ impl Toggle {
             }),
         );
         root.add((l, e));
-        Toggle { root, spec, _enabled_expr, _value_expr, _on_change_expr }
+        Self { root, spec, _enabled_expr, _value_expr, _on_change_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Toggle(self.spec.borrow().clone())
+        view::WidgetKind::Switch(self.spec.borrow().clone())
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -755,8 +757,6 @@ impl Selector {
 pub(super) struct Entry {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Entry>>,
-    _enabled_expr: DbgExpr,
-    _visible_expr: DbgExpr,
     _text_expr: DbgExpr,
     _on_change_expr: DbgExpr,
     _on_activate_expr: DbgExpr,
@@ -771,28 +771,6 @@ impl Entry {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _enabled_expr) = expr(
-            ctx,
-            "Enabled:",
-            scope.clone(),
-            &spec.borrow().enabled,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().enabled = s;
-                on_change()
-            }),
-        );
-        root.add((l, e));
-        let (l, e, _visible_expr) = expr(
-            ctx,
-            "Visible:",
-            scope.clone(),
-            &spec.borrow().visible,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().visible = s;
-                on_change()
-            }),
-        );
-        root.add((l, e));
         let (l, e, _text_expr) = expr(
             ctx,
             "Text:",
@@ -826,15 +804,7 @@ impl Entry {
             }),
         );
         root.add((l, e));
-        Entry {
-            root,
-            spec,
-            _enabled_expr,
-            _visible_expr,
-            _text_expr,
-            _on_change_expr,
-            _on_activate_expr,
-        }
+        Entry { root, spec, _text_expr, _on_change_expr, _on_activate_expr }
     }
 
     pub(super) fn spec(&self) -> view::WidgetKind {
