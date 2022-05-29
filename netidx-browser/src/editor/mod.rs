@@ -949,6 +949,8 @@ impl Editor {
                         }
                         let id = c.active_id();
                         let spec = Widget::default_spec(id.as_ref().map(|s| &**s));
+                        // clear description column
+                        store.set_value(&iter, 2, &"".to_value());
                         Widget::insert(
                             &ctx,
                             on_change.clone(),
