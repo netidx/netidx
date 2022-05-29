@@ -302,9 +302,12 @@ impl Widget {
             view::WidgetKind::BScript(spec) => {
                 Box::new(widgets::BScript::new(ctx, scope.clone(), spec))
             }
-            view::WidgetKind::Table(spec) => {
-                Box::new(table::Table::new(ctx.clone(), spec, scope.clone(), selected_path))
-            }
+            view::WidgetKind::Table(spec) => Box::new(table::Table::new(
+                ctx.clone(),
+                spec,
+                scope.clone(),
+                selected_path,
+            )),
             view::WidgetKind::Image(spec) => {
                 Box::new(widgets::Image::new(ctx, spec, scope.clone(), selected_path))
             }
@@ -314,9 +317,12 @@ impl Widget {
             view::WidgetKind::Button(spec) => {
                 Box::new(widgets::Button::new(ctx, spec, scope.clone(), selected_path))
             }
-            view::WidgetKind::LinkButton(spec) => {
-                Box::new(widgets::LinkButton::new(ctx, spec, scope.clone(), selected_path))
-            }
+            view::WidgetKind::LinkButton(spec) => Box::new(widgets::LinkButton::new(
+                ctx,
+                spec,
+                scope.clone(),
+                selected_path,
+            )),
             view::WidgetKind::Switch(spec) => {
                 Box::new(widgets::Switch::new(ctx, spec, scope.clone(), selected_path))
             }
@@ -355,9 +361,12 @@ impl Widget {
             view::WidgetKind::NotebookPage(view::NotebookPage { widget: w, .. }) => {
                 Box::new(Widget::new(ctx, (&*w).clone(), scope.clone(), selected_path))
             }
-            view::WidgetKind::Notebook(spec) => {
-                Box::new(containers::Notebook::new(ctx, spec, scope.clone(), selected_path))
-            }
+            view::WidgetKind::Notebook(spec) => Box::new(containers::Notebook::new(
+                ctx,
+                spec,
+                scope.clone(),
+                selected_path,
+            )),
             view::WidgetKind::LinePlot(spec) => {
                 Box::new(lineplot::LinePlot::new(ctx, spec, scope.clone(), selected_path))
             }
@@ -366,8 +375,11 @@ impl Widget {
         if let Some(r) = widget.root() {
             set_common_props(props, r);
         }
-        let sensitive =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), props.sensitive.clone());
+        let sensitive = BSNode::compile(
+            &mut ctx.borrow_mut(),
+            scope.clone(),
+            props.sensitive.clone(),
+        );
         let visible =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), props.visible.clone());
         if let Some(b) = sensitive.current().and_then(|v| v.cast_to::<bool>().ok()) {
@@ -637,24 +649,25 @@ fn save_view(
             let spec = current_spec.borrow().clone();
             let ctx = ctx.clone();
             async move {
-                let ctx_r = ctx.borrow();
-                match ctx_r.user.backend.save(loc.clone(), spec).await {
+                match ctx.borrow().user.backend.save(loc.clone(), spec).await {
                     Err(e) => {
                         let _: result::Result<_, _> =
-                            ctx_r.user.backend.to_gui.send(ToGui::SaveError(format!(
-                                "error saving to: {:?}, {}",
-                                &*save_loc.borrow(),
-                                e
-                            )));
+                            ctx.borrow().user.backend.to_gui.send(ToGui::SaveError(
+                                format!(
+                                    "error saving to: {:?}, {}",
+                                    &*save_loc.borrow(),
+                                    e
+                                ),
+                            ));
                         *save_loc.borrow_mut() = None;
                     }
                     Ok(()) => {
-                        ctx_r.user.view_saved.set(true);
+                        ctx.borrow().user.view_saved.set(true);
                         save_button.set_sensitive(false);
                         let mut sl = save_loc.borrow_mut();
                         if sl.as_ref() != Some(&loc) {
                             *sl = Some(loc.clone());
-                            ctx_r.user.backend.navigate(loc.clone());
+                            ctx.borrow().user.backend.navigate(loc.clone());
                         }
                     }
                 }
@@ -664,10 +677,13 @@ fn save_view(
     let sl = save_loc.borrow_mut();
     match &*sl {
         Some(loc) if !save_as => do_save(loc.clone()),
-        _ => match choose_location(&ctx.borrow().user.window, true) {
-            None => (),
-            Some(loc) => do_save(loc),
-        },
+        _ => {
+            let window = ctx.borrow().user.window.clone();
+            match choose_location(&window, true) {
+                None => (),
+                Some(loc) => do_save(loc),
+            }
+        }
     }
 }
 

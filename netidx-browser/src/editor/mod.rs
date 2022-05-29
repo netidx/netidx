@@ -340,7 +340,7 @@ impl Widget {
                 Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
             view::Widget { props, kind: view::WidgetKind::Switch(s) } => (
-                "Toggle",
+                "Switch",
                 WidgetKind::Switch(widgets::Switch::new(
                     ctx,
                     on_change.clone(),
