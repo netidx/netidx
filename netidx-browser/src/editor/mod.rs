@@ -216,6 +216,7 @@ enum WidgetKind {
     Label(widgets::Label),
     Button(widgets::Button),
     LinkButton(widgets::LinkButton),
+    ToggleButton(widgets::ToggleButton),
     Switch(widgets::Switch),
     ComboBox(widgets::ComboBox),
     Entry(widgets::Entry),
@@ -240,6 +241,7 @@ impl WidgetKind {
             WidgetKind::Label(w) => Some(w.root()),
             WidgetKind::Button(w) => Some(w.root()),
             WidgetKind::LinkButton(w) => Some(w.root()),
+            WidgetKind::ToggleButton(w) => Some(w.root()),
             WidgetKind::Switch(w) => Some(w.root()),
             WidgetKind::ComboBox(w) => Some(w.root()),
             WidgetKind::Entry(w) => Some(w.root()),
@@ -332,6 +334,16 @@ impl Widget {
             view::Widget { props, kind: view::WidgetKind::LinkButton(s) } => (
                 "LinkButton",
                 WidgetKind::LinkButton(widgets::LinkButton::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
+            ),
+            view::Widget { props, kind: view::WidgetKind::ToggleButton(s) } => (
+                "ToggleButton",
+                WidgetKind::ToggleButton(widgets::ToggleButton::new(
                     ctx,
                     on_change.clone(),
                     scope.clone(),
@@ -477,6 +489,7 @@ impl Widget {
             WidgetKind::Label(w) => w.spec(),
             WidgetKind::Button(w) => w.spec(),
             WidgetKind::LinkButton(w) => w.spec(),
+            WidgetKind::ToggleButton(w) => w.spec(),
             WidgetKind::Switch(w) => w.spec(),
             WidgetKind::ComboBox(w) => w.spec(),
             WidgetKind::Entry(w) => w.spec(),
@@ -749,6 +762,7 @@ impl Widget {
             | WidgetKind::Label(_)
             | WidgetKind::Button(_)
             | WidgetKind::LinkButton(_)
+            | WidgetKind::ToggleButton(_)
             | WidgetKind::Switch(_)
             | WidgetKind::ComboBox(_)
             | WidgetKind::Entry(_)
@@ -766,13 +780,14 @@ impl Widget {
     }
 }
 
-static KINDS: [&'static str; 19] = [
+static KINDS: [&'static str; 20] = [
     "BScript",
     "Table",
     "Label",
     "Image",
     "Button",
     "LinkButton",
+    "ToggleButton",
     "Switch",
     "ComboBox",
     "Entry",
@@ -1181,6 +1196,7 @@ impl Editor {
                 | WidgetKind::Label(_)
                 | WidgetKind::Button(_)
                 | WidgetKind::LinkButton(_)
+                | WidgetKind::ToggleButton(_)
                 | WidgetKind::Switch(_)
                 | WidgetKind::ComboBox(_)
                 | WidgetKind::Entry(_)
@@ -1295,6 +1311,7 @@ impl Editor {
             | view::WidgetKind::Label(_)
             | view::WidgetKind::Button(_)
             | view::WidgetKind::LinkButton(_)
+            | view::WidgetKind::ToggleButton(_)
             | view::WidgetKind::Switch(_)
             | view::WidgetKind::ComboBox(_)
             | view::WidgetKind::Entry(_)
@@ -1311,7 +1328,7 @@ impl Editor {
                 let width = expr::ExprKind::Constant(Value::Null).to_expr();
                 let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
                 view::Widget {
-                    kind: view::WidgetKind::Label(view::Label {text, width, ellipsize}),
+                    kind: view::WidgetKind::Label(view::Label { text, width, ellipsize }),
                     props: None,
                 }
             }
@@ -1403,6 +1420,7 @@ impl Editor {
                     | view::WidgetKind::Label(_)
                     | view::WidgetKind::Button(_)
                     | view::WidgetKind::LinkButton(_)
+                    | view::WidgetKind::ToggleButton(_)
                     | view::WidgetKind::Switch(_)
                     | view::WidgetKind::ComboBox(_)
                     | view::WidgetKind::Entry(_)
@@ -1424,43 +1442,17 @@ impl Editor {
         let skip_idx = match v.get::<&Widget>() {
             Err(_) => false,
             Ok(w) => match &w.kind {
-                WidgetKind::BScript(_) => {
-                    path.insert(0, WidgetPath::Leaf);
-                    false
-                }
-                WidgetKind::Table(_) => {
-                    path.insert(0, WidgetPath::Leaf);
-                    false
-                }
-                WidgetKind::Image(_) => {
-                    path.insert(0, WidgetPath::Leaf);
-                    false
-                }
-                WidgetKind::Label(_) => {
-                    path.insert(0, WidgetPath::Leaf);
-                    false
-                }
-                WidgetKind::Button(_) => {
-                    path.insert(0, WidgetPath::Leaf);
-                    false
-                }
-                WidgetKind::LinkButton(_) => {
-                    path.insert(0, WidgetPath::Leaf);
-                    false
-                }
-                WidgetKind::Switch(_) => {
-                    path.insert(0, WidgetPath::Leaf);
-                    false
-                }
-                WidgetKind::ComboBox(_) => {
-                    path.insert(0, WidgetPath::Leaf);
-                    false
-                }
-                WidgetKind::Entry(_) => {
-                    path.insert(0, WidgetPath::Leaf);
-                    false
-                }
-                WidgetKind::LinePlot(_) => {
+                WidgetKind::BScript(_)
+                | WidgetKind::Table(_)
+                | WidgetKind::Image(_)
+                | WidgetKind::Label(_)
+                | WidgetKind::Button(_)
+                | WidgetKind::LinkButton(_)
+                | WidgetKind::ToggleButton(_)
+                | WidgetKind::Switch(_)
+                | WidgetKind::ComboBox(_)
+                | WidgetKind::Entry(_)
+                | WidgetKind::LinePlot(_) => {
                     path.insert(0, WidgetPath::Leaf);
                     false
                 }

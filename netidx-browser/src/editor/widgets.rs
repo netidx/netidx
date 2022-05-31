@@ -609,6 +609,81 @@ impl LinkButton {
 }
 
 #[derive(Clone)]
+pub(super) struct ToggleButton {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::ToggleButton>>,
+    _dbg_value: DbgExpr,
+    _dbg_on_change: DbgExpr,
+    _dbg_label: DbgExpr,
+    _dbg_image: DbgExpr,
+}
+
+impl ToggleButton {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Scope,
+        spec: view::ToggleButton,
+    ) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let (l, e, _dbg_label) = expr(
+            ctx,
+            "Label:",
+            scope.clone(),
+            &spec.borrow().label,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().label = s;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        let (l, e, _dbg_image) = expr(
+            ctx,
+            "Image:",
+            scope.clone(),
+            &spec.borrow().image,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().image = s;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        let (l, e, _dbg_value) = expr(
+            ctx,
+            "Value:",
+            scope.clone(),
+            &spec.borrow().toggle.value,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().toggle.value = s;
+                on_change()
+            })
+        );
+        root.add((l, e));
+        let (l, e, _dbg_on_change) = expr(
+            ctx,
+            "On Change:",
+            scope.clone(),
+            &spec.borrow().toggle.on_change,
+            clone!(@strong on_change, @strong spec => move |s| {
+                spec.borrow_mut().toggle.on_change = s;
+                on_change()
+            }),
+        );
+        root.add((l, e));
+        Self { root, spec, _dbg_label, _dbg_image, _dbg_value, _dbg_on_change }
+    }
+
+    pub(super) fn spec(&self) -> view::WidgetKind {
+        view::WidgetKind::ToggleButton(self.spec.borrow().clone())
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct Switch {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Switch>>,
