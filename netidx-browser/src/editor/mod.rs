@@ -564,6 +564,36 @@ impl Widget {
                     on_activate_link: expr::ExprKind::Constant(Value::Null).to_expr(),
                 }))
             }
+            Some("ToggleButton") => {
+                let l = Chars::from("click me!");
+                widget(view::WidgetKind::ToggleButton(view::ToggleButton {
+                    label: expr::ExprKind::Constant(Value::String(l)).to_expr(),
+                    image: expr::ExprKind::Constant(Value::Null).to_expr(),
+                    toggle: view::Switch {
+                        value: expr::ExprKind::Apply {
+                            args: vec![expr::ExprKind::Constant(Value::from(
+                                "/somewhere",
+                            ))
+                            .to_expr()],
+                            function: "load".into(),
+                        }
+                        .to_expr(),
+                        on_change: expr::ExprKind::Apply {
+                            args: vec![
+                                expr::ExprKind::Constant(Value::from("/somewhere"))
+                                    .to_expr(),
+                                expr::ExprKind::Apply {
+                                    args: vec![],
+                                    function: "event".into(),
+                                }
+                                .to_expr(),
+                            ],
+                            function: "store".into(),
+                        }
+                        .to_expr(),
+                    },
+                }))
+            }
             Some("Switch") => widget(view::WidgetKind::Switch(view::Switch {
                 value: expr::ExprKind::Apply {
                     args: vec![
