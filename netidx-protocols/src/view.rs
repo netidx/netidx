@@ -198,11 +198,11 @@ pub struct Switch {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToggleButton {
-    toggle: Switch,
+    pub toggle: Switch,
     /// The text to be displayed in the button
-    label: Expr,
+    pub label: Expr,
     /// see Image::spec
-    image: Expr,
+    pub image: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -418,7 +418,7 @@ pub enum WidgetKind {
     Button(Button),
     LinkButton(LinkButton),
     Switch(Switch),
-//    ToggleButton(ToggleButton),
+    ToggleButton(ToggleButton),
 //    CheckButton(ToggleButton),
 //    RadioButton(ComboBox),
     ComboBox(ComboBox),
