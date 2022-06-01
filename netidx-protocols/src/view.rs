@@ -419,7 +419,7 @@ pub enum WidgetKind {
     LinkButton(LinkButton),
     Switch(Switch),
     ToggleButton(ToggleButton),
-//    CheckButton(ToggleButton),
+    CheckButton(ToggleButton),
 //    RadioButton(ComboBox),
     ComboBox(ComboBox),
     Entry(Entry),

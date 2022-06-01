@@ -326,9 +326,20 @@ impl Widget {
             view::WidgetKind::Switch(spec) => {
                 Box::new(widgets::Switch::new(ctx, spec, scope.clone(), selected_path))
             }
-            view::WidgetKind::ToggleButton(spec) => {
-                Box::new(widgets::ToggleButton::new(ctx, spec, scope.clone(), selected_path))
-            }
+            view::WidgetKind::ToggleButton(spec) => Box::new(widgets::ToggleButton::new(
+                ctx,
+                spec,
+                scope.clone(),
+                selected_path,
+                || gtk::ToggleButton::new(),
+            )),
+            view::WidgetKind::CheckButton(spec) => Box::new(widgets::ToggleButton::new(
+                ctx,
+                spec,
+                scope.clone(),
+                selected_path,
+                || gtk::CheckButton::new(),
+            )),
             view::WidgetKind::ComboBox(spec) => {
                 Box::new(widgets::ComboBox::new(ctx, spec, scope.clone(), selected_path))
             }

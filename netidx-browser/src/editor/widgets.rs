@@ -300,8 +300,8 @@ impl Table {
         }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Table(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::Table {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -359,8 +359,8 @@ impl BScript {
         *self.iter.borrow_mut() = iter.clone();
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::BScript(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> expr::Expr {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -410,8 +410,8 @@ impl Image {
         Image { root, spec, _dbg_expr, _dbg_on_click }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Image(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::Image {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -473,8 +473,8 @@ impl Label {
         Self { root, spec, _dbg_text, _dbg_width, _dbg_ellipsize }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Label(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::Label {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -536,8 +536,8 @@ impl Button {
         Button { root, spec, _label_expr, _image_expr, _on_click_expr }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Button(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::Button {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -599,8 +599,8 @@ impl LinkButton {
         LinkButton { root, spec, _label_expr, _uri_expr, _on_activate_link_expr }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::LinkButton(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::LinkButton {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -610,10 +610,8 @@ impl LinkButton {
 
 #[derive(Clone)]
 pub(super) struct ToggleButton {
-    root: TwoColGrid,
+    switch: Switch,
     spec: Rc<RefCell<view::ToggleButton>>,
-    _dbg_value: DbgExpr,
-    _dbg_on_change: DbgExpr,
     _dbg_label: DbgExpr,
     _dbg_image: DbgExpr,
 }
@@ -625,7 +623,8 @@ impl ToggleButton {
         scope: Scope,
         spec: view::ToggleButton,
     ) -> Self {
-        let mut root = TwoColGrid::new();
+        let mut switch =
+            Switch::new(ctx, on_change.clone(), scope.clone(), spec.toggle.clone());
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, _dbg_label) = expr(
             ctx,
@@ -637,7 +636,7 @@ impl ToggleButton {
                 on_change()
             }),
         );
-        root.add((l, e));
+        switch.root.add((l, e));
         let (l, e, _dbg_image) = expr(
             ctx,
             "Image:",
@@ -648,38 +647,18 @@ impl ToggleButton {
                 on_change()
             }),
         );
-        root.add((l, e));
-        let (l, e, _dbg_value) = expr(
-            ctx,
-            "Value:",
-            scope.clone(),
-            &spec.borrow().toggle.value,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().toggle.value = s;
-                on_change()
-            })
-        );
-        root.add((l, e));
-        let (l, e, _dbg_on_change) = expr(
-            ctx,
-            "On Change:",
-            scope.clone(),
-            &spec.borrow().toggle.on_change,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().toggle.on_change = s;
-                on_change()
-            }),
-        );
-        root.add((l, e));
-        Self { root, spec, _dbg_label, _dbg_image, _dbg_value, _dbg_on_change }
+        switch.root.add((l, e));
+        Self { switch, spec, _dbg_label, _dbg_image }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::ToggleButton(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::ToggleButton {
+        let mut spec = self.spec.borrow().clone();
+        spec.toggle = self.switch.spec();
+        spec
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
-        self.root.root().upcast_ref()
+        self.switch.root().upcast_ref()
     }
 }
 
@@ -725,8 +704,8 @@ impl Switch {
         Self { root, spec, _value_expr, _on_change_expr }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Switch(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::Switch {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -788,8 +767,8 @@ impl ComboBox {
         Self { root, spec, _choices_expr, _selected_expr, _on_change_expr }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::ComboBox(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::ComboBox {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -851,8 +830,8 @@ impl Entry {
         Entry { root, spec, _text_expr, _on_change_expr, _on_activate_expr }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Entry(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::Entry {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -1248,8 +1227,8 @@ impl LinePlot {
         series
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::LinePlot(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::LinePlot {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -1295,8 +1274,8 @@ impl BoxChild {
         BoxChild { root, spec }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::BoxChild(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::BoxChild {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -1353,8 +1332,8 @@ impl Paned {
         Paned { root, spec }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Paned(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::Paned {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -1408,8 +1387,8 @@ impl Frame {
         Frame { root, _label_expr, spec }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Frame(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::Frame {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -1453,8 +1432,8 @@ impl BoxContainer {
         BoxContainer { root, spec }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Box(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::Box {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -1494,8 +1473,8 @@ impl NotebookPage {
         NotebookPage { root, spec }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::NotebookPage(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::NotebookPage {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -1594,8 +1573,8 @@ impl Notebook {
         Notebook { root, spec, _page, _on_switch_page }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Notebook(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::Notebook {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -1632,8 +1611,8 @@ impl GridChild {
         GridChild { root, spec }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::GridChild(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::GridChild {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
@@ -1688,8 +1667,8 @@ impl Grid {
         Grid { root, spec }
     }
 
-    pub(super) fn spec(&self) -> view::WidgetKind {
-        view::WidgetKind::Grid(self.spec.borrow().clone())
+    pub(super) fn spec(&self) -> view::Grid {
+        self.spec.borrow().clone()
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {

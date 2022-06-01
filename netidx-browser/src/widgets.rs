@@ -376,22 +376,31 @@ impl BWidget for BScript {
     }
 }
 
-pub(super) struct ToggleButton {
-    button: gtk::ToggleButton,
+pub(super) struct ToggleButton<T> {
+    button: T,
     value: Rc<RefCell<BSNode>>,
     label: BSNode,
     image: BSNode,
     on_change: Rc<RefCell<BSNode>>,
 }
 
-impl ToggleButton {
-    pub(super) fn new(
+impl<T> ToggleButton<T>
+where
+    T: ToggleButtonExt
+        + ButtonExt
+        + WidgetExt
+        + glib::ObjectType
+        + IsA<gtk::Widget>
+        + 'static,
+{
+    pub(super) fn new<F: FnOnce() -> T>(
         ctx: &BSCtx,
         spec: view::ToggleButton,
         scope: Path,
         selected_path: gtk::Label,
+        new: F,
     ) -> Self {
-        let button = gtk::ToggleButton::new();
+        let button = new();
         let value = Rc::new(RefCell::new(BSNode::compile(
             &mut *ctx.borrow_mut(),
             scope.clone(),
@@ -443,7 +452,15 @@ impl ToggleButton {
     }
 }
 
-impl BWidget for ToggleButton {
+impl<T> BWidget for ToggleButton<T>
+where
+    T: ToggleButtonExt
+        + ButtonExt
+        + WidgetExt
+        + glib::ObjectType
+        + IsA<gtk::Widget>
+        + 'static,
+{
     fn root(&self) -> Option<&gtk::Widget> {
         Some(self.button.upcast_ref())
     }

@@ -217,6 +217,7 @@ enum WidgetKind {
     Button(widgets::Button),
     LinkButton(widgets::LinkButton),
     ToggleButton(widgets::ToggleButton),
+    CheckButton(widgets::ToggleButton),
     Switch(widgets::Switch),
     ComboBox(widgets::ComboBox),
     Entry(widgets::Entry),
@@ -242,6 +243,7 @@ impl WidgetKind {
             WidgetKind::Button(w) => Some(w.root()),
             WidgetKind::LinkButton(w) => Some(w.root()),
             WidgetKind::ToggleButton(w) => Some(w.root()),
+            WidgetKind::CheckButton(w) => Some(w.root()),
             WidgetKind::Switch(w) => Some(w.root()),
             WidgetKind::ComboBox(w) => Some(w.root()),
             WidgetKind::Entry(w) => Some(w.root()),
@@ -344,6 +346,16 @@ impl Widget {
             view::Widget { props, kind: view::WidgetKind::ToggleButton(s) } => (
                 "ToggleButton",
                 WidgetKind::ToggleButton(widgets::ToggleButton::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
+            ),
+            view::Widget { props, kind: view::WidgetKind::CheckButton(s) } => (
+                "CheckButton",
+                WidgetKind::CheckButton(widgets::ToggleButton::new(
                     ctx,
                     on_change.clone(),
                     scope.clone(),
@@ -483,25 +495,26 @@ impl Widget {
     fn spec(&self) -> view::Widget {
         let props = self.props.as_ref().and_then(|p| p.spec());
         let kind = match &self.kind {
-            WidgetKind::BScript(w) => w.spec(),
-            WidgetKind::Table(w) => w.spec(),
-            WidgetKind::Image(w) => w.spec(),
-            WidgetKind::Label(w) => w.spec(),
-            WidgetKind::Button(w) => w.spec(),
-            WidgetKind::LinkButton(w) => w.spec(),
-            WidgetKind::ToggleButton(w) => w.spec(),
-            WidgetKind::Switch(w) => w.spec(),
-            WidgetKind::ComboBox(w) => w.spec(),
-            WidgetKind::Entry(w) => w.spec(),
-            WidgetKind::LinePlot(w) => w.spec(),
-            WidgetKind::Frame(w) => w.spec(),
-            WidgetKind::Box(w) => w.spec(),
-            WidgetKind::BoxChild(w) => w.spec(),
-            WidgetKind::Grid(w) => w.spec(),
-            WidgetKind::GridChild(w) => w.spec(),
-            WidgetKind::Paned(w) => w.spec(),
-            WidgetKind::Notebook(w) => w.spec(),
-            WidgetKind::NotebookPage(w) => w.spec(),
+            WidgetKind::BScript(w) => view::WidgetKind::BScript(w.spec()),
+            WidgetKind::Table(w) => view::WidgetKind::Table(w.spec()),
+            WidgetKind::Image(w) => view::WidgetKind::Image(w.spec()),
+            WidgetKind::Label(w) => view::WidgetKind::Label(w.spec()),
+            WidgetKind::Button(w) => view::WidgetKind::Button(w.spec()),
+            WidgetKind::LinkButton(w) => view::WidgetKind::LinkButton(w.spec()),
+            WidgetKind::ToggleButton(w) => view::WidgetKind::ToggleButton(w.spec()),
+            WidgetKind::CheckButton(w) => view::WidgetKind::CheckButton(w.spec()),
+            WidgetKind::Switch(w) => view::WidgetKind::Switch(w.spec()),
+            WidgetKind::ComboBox(w) => view::WidgetKind::ComboBox(w.spec()),
+            WidgetKind::Entry(w) => view::WidgetKind::Entry(w.spec()),
+            WidgetKind::LinePlot(w) => view::WidgetKind::LinePlot(w.spec()),
+            WidgetKind::Frame(w) => view::WidgetKind::Frame(w.spec()),
+            WidgetKind::Box(w) => view::WidgetKind::Box(w.spec()),
+            WidgetKind::BoxChild(w) => view::WidgetKind::BoxChild(w.spec()),
+            WidgetKind::Grid(w) => view::WidgetKind::Grid(w.spec()),
+            WidgetKind::GridChild(w) => view::WidgetKind::GridChild(w.spec()),
+            WidgetKind::Paned(w) => view::WidgetKind::Paned(w.spec()),
+            WidgetKind::Notebook(w) => view::WidgetKind::Notebook(w.spec()),
+            WidgetKind::NotebookPage(w) => view::WidgetKind::NotebookPage(w.spec()),
             WidgetKind::GridRow => {
                 view::WidgetKind::GridRow(view::GridRow { columns: vec![] })
             }
@@ -793,6 +806,7 @@ impl Widget {
             | WidgetKind::Button(_)
             | WidgetKind::LinkButton(_)
             | WidgetKind::ToggleButton(_)
+            | WidgetKind::CheckButton(_)
             | WidgetKind::Switch(_)
             | WidgetKind::ComboBox(_)
             | WidgetKind::Entry(_)
@@ -1227,6 +1241,7 @@ impl Editor {
                 | WidgetKind::Button(_)
                 | WidgetKind::LinkButton(_)
                 | WidgetKind::ToggleButton(_)
+                | WidgetKind::CheckButton(_)
                 | WidgetKind::Switch(_)
                 | WidgetKind::ComboBox(_)
                 | WidgetKind::Entry(_)
@@ -1342,6 +1357,7 @@ impl Editor {
             | view::WidgetKind::Button(_)
             | view::WidgetKind::LinkButton(_)
             | view::WidgetKind::ToggleButton(_)
+            | view::WidgetKind::CheckButton(_)
             | view::WidgetKind::Switch(_)
             | view::WidgetKind::ComboBox(_)
             | view::WidgetKind::Entry(_)
@@ -1451,6 +1467,7 @@ impl Editor {
                     | view::WidgetKind::Button(_)
                     | view::WidgetKind::LinkButton(_)
                     | view::WidgetKind::ToggleButton(_)
+                    | view::WidgetKind::CheckButton(_)
                     | view::WidgetKind::Switch(_)
                     | view::WidgetKind::ComboBox(_)
                     | view::WidgetKind::Entry(_)
@@ -1479,6 +1496,7 @@ impl Editor {
                 | WidgetKind::Button(_)
                 | WidgetKind::LinkButton(_)
                 | WidgetKind::ToggleButton(_)
+                | WidgetKind::CheckButton(_)
                 | WidgetKind::Switch(_)
                 | WidgetKind::ComboBox(_)
                 | WidgetKind::Entry(_)
