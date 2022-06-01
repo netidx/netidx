@@ -1950,3 +1950,25 @@ impl<K: convert::Into<Value>, S: BuildHasher + Default> convert::From<IndexSet<K
         h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
     }
 }
+
+impl<T: FromValue> FromValue for Option<T> {
+    fn from_value(v: Value) -> Res<Self> {
+        match v {
+            Value::Null => Ok(None),
+            v => v.cast_to::<T>().map(|v| Some(v)),
+        }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Null => Some(None),
+            v => v.get_as::<T>().map(|v| Some(v)),
+        }
+    }
+}
+
+impl<T: convert::Into<Value>> convert::From<Option<T>> for Value {
+    fn from(o: Option<T>) -> Value {
+        o.map(|v| v.into()).unwrap_or(Value::Null)
+    }
+}

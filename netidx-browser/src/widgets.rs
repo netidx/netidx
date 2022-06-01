@@ -1,5 +1,5 @@
 use super::{val_to_bool, BSCtx, BSCtxRef, BSNode, BWidget, WVal};
-use crate::{bscript::LocalEvent, view};
+use crate::{bscript::LocalEvent, containers, view};
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 
@@ -948,5 +948,36 @@ impl BWidget for Image {
 
     fn root(&self) -> Option<&gtk::Widget> {
         Some(self.root.upcast_ref())
+    }
+}
+
+pub(super) struct Scale {
+    scale: gtk::Scale,
+    value: BSNode,
+    min: BSNode,
+    max: BSNode,
+    on_change: Rc<RefCell<BSNode>>,
+}
+
+impl Scale {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::Scale,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let scale =
+            gtk::Scale::new(containers::dir_to_gtk(&spec.dir), gtk::Adjustment::NONE);
+        let value =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.value.clone());
+        let min =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.min.clone());
+        let max =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.max.clone());
+        let on_change = Rc::new(RefCell::new(BSNode::compile(
+            &mut *ctx.borrow_mut(),
+            scope.clone(),
+            spec.on_change.clone(),
+        )));
     }
 }

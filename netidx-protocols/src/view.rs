@@ -242,9 +242,24 @@ pub struct Entry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scale {
     pub dir: Direction,
+    /// ([draw, position-spec] | [draw, position-spec, <decimal-places>])
+    /// draw: (true | false)
+    /// position-spec: ("left" | "right" | "top" | "bottom")
+    /// true: draw the current value at the specified position
+    /// false: don't draw the current value
+    /// if decimal places is specified the value will be rounded to
+    /// the specified number of decimal places. Otherwise the value
+    /// will not be rounded.
+    pub draw_value: Expr,
+    /// [mark, ...]
+    /// mark: [<pos>, position-spec, <text>]
+    /// position-spec: ("left" | "right" | "top" | "bottom")
+    /// A list of marks you want to display on the scale, along with
+    /// any text you want to display next to the mark.
+    pub marks: Expr,
     /// The current value of the scale. Should be a float between min
     /// and max
-    pub current: Expr,
+    pub value: Expr,
     /// The minimum value of the scale, as a float
     pub min: Expr,
     /// The maximum value of the scale, as a float
@@ -425,7 +440,7 @@ pub enum WidgetKind {
     Entry(Entry),
 //    SearchEntry(Entry),
 //    ProgressBar(ProgressBar),
-//    Scale(Scale),
+    Scale(Scale),
     Image(Image),
     Frame(Frame),
     Box(Box),

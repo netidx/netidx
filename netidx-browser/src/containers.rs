@@ -7,7 +7,7 @@ use netidx::{chars::Chars, path::Path};
 use netidx_bscript::vm;
 use std::{cell::RefCell, cmp::max, rc::Rc};
 
-fn dir_to_gtk(d: &view::Direction) -> gtk::Orientation {
+pub(crate) fn dir_to_gtk(d: &view::Direction) -> gtk::Orientation {
     match d {
         view::Direction::Horizontal => Orientation::Horizontal,
         view::Direction::Vertical => Orientation::Vertical,
