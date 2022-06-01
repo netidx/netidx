@@ -577,9 +577,9 @@ impl Widget {
                     on_activate_link: expr::ExprKind::Constant(Value::Null).to_expr(),
                 }))
             }
-            Some("ToggleButton") => {
+            Some("ToggleButton") | Some("CheckButton") => {
                 let l = Chars::from("click me!");
-                widget(view::WidgetKind::ToggleButton(view::ToggleButton {
+                let tb = view::ToggleButton {
                     label: expr::ExprKind::Constant(Value::String(l)).to_expr(),
                     image: expr::ExprKind::Constant(Value::Null).to_expr(),
                     toggle: view::Switch {
@@ -605,7 +605,14 @@ impl Widget {
                         }
                         .to_expr(),
                     },
-                }))
+                };
+                if name == Some("ToggleButton") {
+                    widget(view::WidgetKind::ToggleButton(tb))
+                } else if name == Some("CheckButton") {
+                    widget(view::WidgetKind::CheckButton(tb))
+                } else {
+                    unreachable!()
+                }
             }
             Some("Switch") => widget(view::WidgetKind::Switch(view::Switch {
                 value: expr::ExprKind::Apply {
@@ -824,7 +831,7 @@ impl Widget {
     }
 }
 
-static KINDS: [&'static str; 20] = [
+static KINDS: [&'static str; 21] = [
     "BScript",
     "Table",
     "Label",
@@ -832,6 +839,7 @@ static KINDS: [&'static str; 20] = [
     "Button",
     "LinkButton",
     "ToggleButton",
+    "CheckButton",
     "Switch",
     "ComboBox",
     "Entry",
