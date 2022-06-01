@@ -378,6 +378,7 @@ impl BWidget for BScript {
 
 pub(super) struct ToggleButton<T> {
     button: T,
+    we_set: Rc<Cell<bool>>,
     value: Rc<RefCell<BSNode>>,
     label: BSNode,
     image: BSNode,
@@ -401,6 +402,7 @@ where
         new: F,
     ) -> Self {
         let button = new();
+        let we_set = Rc::new(Cell::new(false));
         let value = Rc::new(RefCell::new(BSNode::compile(
             &mut *ctx.borrow_mut(),
             scope.clone(),
@@ -423,7 +425,7 @@ where
             button.set_always_show_image(true);
         }
         if let Some(val) = value.borrow().current() {
-            button.set_active(val_to_bool(&val));
+            Self::set(&button, val)
         }
         button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(&format!("on_change: {}", spec.toggle.on_change));
@@ -435,20 +437,33 @@ where
                 Inhibit(false)
             }),
         );
-        button.connect_toggled(
-            clone!(@strong value, @strong on_change, @strong ctx => move |button| {
-                let e = vm::Event::User(LocalEvent::Event(button.is_active().into()));
-                on_change.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
-                idle_add_local(clone!(@strong value, @strong button => move || {
-                    if let Some(v) = value.borrow().current() {
-                        let v = val_to_bool(&v);
-                        button.set_inconsistent(v != button.is_active());
-                    }
-                    Continue(false)
-                }));
+        button.connect_toggled(clone!(
+            @strong value, @strong on_change, @strong ctx, @strong we_set => move |button| {
+                if !we_set.get() {
+                    let e = vm::Event::User(LocalEvent::Event(button.is_active().into()));
+                    on_change.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+                    idle_add_local(clone!(@strong we_set, @strong value, @strong button => move || {
+                        we_set.set(true);
+                        if let Some(v) = value.borrow().current() {
+                            Self::set(&button, v)
+                        }
+                        we_set.set(false);
+                        Continue(false)
+                    }));
+                }
             }),
         );
-        Self { button, label, image, value, on_change }
+        Self { button, label, image, value, on_change, we_set }
+    }
+
+    fn set(button: &T, v: Value) {
+        match v.get_as::<bool>() {
+            None => button.set_inconsistent(true),
+            Some(b) => {
+                button.set_active(b);
+                button.set_inconsistent(false);
+            }
+        }
     }
 }
 
@@ -472,8 +487,9 @@ where
         event: &vm::Event<LocalEvent>,
     ) {
         if let Some(v) = self.value.borrow_mut().update(ctx, event) {
-            let v = val_to_bool(&v);
-            self.button.set_inconsistent(v != self.button.is_active());
+            self.we_set.set(true);
+            Self::set(&self.button, v);
+            self.we_set.set(false);
         }
         if let Some(v) = self.label.update(ctx, event) {
             self.button.set_label(&format!("{}", WVal(&v)));
