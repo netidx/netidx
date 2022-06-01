@@ -14,6 +14,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
+    str::FromStr,
 };
 
 #[derive(Debug)]
@@ -951,12 +952,42 @@ impl BWidget for Image {
     }
 }
 
+struct PositionSpec(gtk::PositionType);
+
+impl FromStr for PositionSpec {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "left" => Ok(PositionSpec(gtk::PositionType::Left)),
+            "right" => Ok(PositionSpec(gtk::PositionType::Right)),
+            "top" => Ok(PositionSpec(gtk::PositionType::Top)),
+            "bottom" => Ok(PositionSpec(gtk::PositionType::Bottom)),
+            _ => bail!("expected left, right, top, or bottom"),
+        }
+    }
+}
+
+impl FromValue for PositionSpec {
+    fn from_value(v: Value) -> Result<Self> {
+        v.cast_to::<Chars>()?.parse()
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        FromValue::from_value(v).ok()
+    }
+}
+
 pub(super) struct Scale {
     scale: gtk::Scale,
+    draw_value: BSNode,
+    marks: BSNode,
+    has_origin: BSNode,
     value: BSNode,
     min: BSNode,
     max: BSNode,
     on_change: Rc<RefCell<BSNode>>,
+    we_set: Rc<Cell<bool>>,
 }
 
 impl Scale {
@@ -968,6 +999,18 @@ impl Scale {
     ) -> Self {
         let scale =
             gtk::Scale::new(containers::dir_to_gtk(&spec.dir), gtk::Adjustment::NONE);
+        let draw_value = BSNode::compile(
+            &mut *ctx.borrow_mut(),
+            scope.clone(),
+            spec.draw_value.clone(),
+        );
+        let marks =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.marks.clone());
+        let has_origin = BSNode::compile(
+            &mut *ctx.borrow_mut(),
+            scope.clone(),
+            spec.has_origin.clone(),
+        );
         let value =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.value.clone());
         let min =
@@ -979,5 +1022,97 @@ impl Scale {
             scope.clone(),
             spec.on_change.clone(),
         )));
+        let we_set = Rc::new(Cell::new(false));
+        Self::set_min(&scale, min.current());
+        Self::set_max(&scale, max.current());
+        Self::set_value(&scale, value.current());
+        Self::set_draw_value(&scale, draw_value.current());
+        Self::set_marks(&scale, marks.current());
+        Self::set_has_origin(&scale, has_origin.current());
+        scale.connect_value_changed(
+            clone!(@strong on_change, @strong ctx, @strong we_set => move |scale| {
+                if !we_set.get() {
+                    on_change.borrow_mut().update(
+                        &mut *ctx.borrow_mut(),
+                        &vm::Event::User(LocalEvent::Event(scale.value().into()))
+                    );
+                }
+            }),
+        );
+        scale.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
+            selected_path.set_label(&format!("on_change: {}", &spec.on_change));
+            Inhibit(false)
+        }));
+        scale.connect_enter_notify_event(
+            clone!(@strong selected_path, @strong spec => move |_, _| {
+                selected_path.set_label(&format!("on_change: {}", &spec.on_change));
+                Inhibit(false)
+            }),
+        );
+        Self {
+            scale,
+            draw_value,
+            marks,
+            has_origin,
+            value,
+            min,
+            max,
+            on_change,
+            we_set,
+        }
+    }
+
+    fn set_min(scale: &gtk::Scale, v: Option<Value>) {
+        if let Some(v) = v.and_then(|v| v.cast_to::<f64>().ok()) {
+            scale.adjustment().set_lower(v);
+        }
+    }
+
+    fn set_max(scale: &gtk::Scale, v: Option<Value>) {
+        if let Some(v) = v.and_then(|v| v.cast_to::<f64>().ok()) {
+            scale.adjustment().set_upper(v);
+        }
+    }
+
+    fn set_value(scale: &gtk::Scale, v: Option<Value>) {
+        if let Some(v) = v.and_then(|v| v.cast_to::<f64>().ok()) {
+            scale.set_value(v);
+        }
+    }
+
+    fn set_has_origin(scale: &gtk::Scale, v: Option<Value>) {
+        if let Some(v) = v.and_then(|v| v.cast_to::<bool>().ok()) {
+            scale.set_has_origin(v);
+        }
+    }
+
+    fn set_draw_value(scale: &gtk::Scale, v: Option<Value>) {
+        if let Some(v) = v {
+            match v.clone().get_as::<bool>() {
+                Some(b) => scale.set_draw_value(b),
+                None => match v.cast_to::<(PositionSpec, Option<i32>)>().ok() {
+                    None => scale.set_draw_value(false),
+                    Some((pos, decimals)) => {
+                        scale.set_draw_value(true);
+                        scale.set_value_pos(pos.0);
+                        match decimals {
+                            Some(decimals) => scale.set_digits(decimals),
+                            None => scale.set_digits(-1),
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    fn set_marks(scale: &gtk::Scale, v: Option<Value>) {
+        scale.clear_marks();
+        if let Some(marks) =
+            v.and_then(|v| v.cast_to::<Vec<(f64, PositionSpec, Option<Chars>)>>().ok())
+        {
+            for (pos, spec, text) in marks {
+                scale.add_mark(pos, spec.0, text.as_ref().map(|c| &**c))
+            }
+        }
     }
 }

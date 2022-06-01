@@ -242,21 +242,26 @@ pub struct Entry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scale {
     pub dir: Direction,
-    /// ([draw, position-spec] | [draw, position-spec, <decimal-places>])
-    /// draw: (true | false)
+    /// (false | true | [position-spec, (null | <decimal-places>)])
     /// position-spec: ("left" | "right" | "top" | "bottom")
-    /// true: draw the current value at the specified position
+    /// true: draw the value with the default position and decimal places
     /// false: don't draw the current value
-    /// if decimal places is specified the value will be rounded to
-    /// the specified number of decimal places. Otherwise the value
-    /// will not be rounded.
+    /// if position-spec and decimal places is specified the value
+    /// will be rounded to the specified number of decimal places and
+    /// displayed at the specified position. Otherwise the value will
+    /// not be rounded and will be displayed at the default position.
     pub draw_value: Expr,
     /// [mark, ...]
-    /// mark: [<pos>, position-spec, <text>]
+    /// mark: [<pos>, position-spec, (null | <text>)]
     /// position-spec: ("left" | "right" | "top" | "bottom")
     /// A list of marks you want to display on the scale, along with
     /// any text you want to display next to the mark.
     pub marks: Expr,
+    /// (true | false)
+    /// true: highlight the trough between the origin (bottom left
+    /// side) and the current value.
+    /// false: don't highlight anything.
+    pub has_origin: Expr,
     /// The current value of the scale. Should be a float between min
     /// and max
     pub value: Expr,
