@@ -247,6 +247,7 @@ impl WidgetKind {
             WidgetKind::CheckButton(w) => Some(w.root()),
             WidgetKind::Switch(w) => Some(w.root()),
             WidgetKind::ComboBox(w) => Some(w.root()),
+            WidgetKind::Scale(w) => Some(w.root()),
             WidgetKind::Entry(w) => Some(w.root()),
             WidgetKind::LinePlot(w) => Some(w.root()),
             WidgetKind::Frame(w) => Some(w.root()),
@@ -384,6 +385,16 @@ impl Widget {
                 )),
                 Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
+            view::Widget { props, kind: view::WidgetKind::Scale(s) } => (
+                "Scale",
+                WidgetKind::Scale(widgets::Scale::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
+            ),
             view::Widget { props, kind: view::WidgetKind::Entry(s) } => (
                 "Entry",
                 WidgetKind::Entry(widgets::Entry::new(
@@ -506,6 +517,7 @@ impl Widget {
             WidgetKind::CheckButton(w) => view::WidgetKind::CheckButton(w.spec()),
             WidgetKind::Switch(w) => view::WidgetKind::Switch(w.spec()),
             WidgetKind::ComboBox(w) => view::WidgetKind::ComboBox(w.spec()),
+            WidgetKind::Scale(w) => view::WidgetKind::Scale(w.spec()),
             WidgetKind::Entry(w) => view::WidgetKind::Entry(w.spec()),
             WidgetKind::LinePlot(w) => view::WidgetKind::LinePlot(w.spec()),
             WidgetKind::Frame(w) => view::WidgetKind::Frame(w.spec()),
@@ -662,6 +674,16 @@ impl Widget {
                     .to_expr(),
                 }))
             }
+            Some("Scale") => widget(view::WidgetKind::Scale(view::Scale {
+                direction: view::Direction::Horizontal,
+                draw_value: expr::ExprKind::Constant(Value::True).to_expr(),
+                marks: expr::ExprKind::Constant(Value::Null).to_expr(),
+                has_origin: expr::ExprKind::Constant(Value::True).to_expr(),
+                value: expr::ExprKind::Constant((0.).into()).to_expr(),
+                min: expr::ExprKind::Constant((0.).into()).to_expr(),
+                max: expr::ExprKind::Constant((1.).into()).to_expr(),
+                on_change: expr::ExprKind::Constant(Value::Null).to_expr(),
+            })),
             Some("Entry") => widget(view::WidgetKind::Entry(view::Entry {
                 text: expr::ExprKind::Apply {
                     args: vec![
@@ -817,6 +839,7 @@ impl Widget {
             | WidgetKind::CheckButton(_)
             | WidgetKind::Switch(_)
             | WidgetKind::ComboBox(_)
+            | WidgetKind::Scale(_)
             | WidgetKind::Entry(_)
             | WidgetKind::LinePlot(_)
             | WidgetKind::Frame(_)
@@ -1253,6 +1276,7 @@ impl Editor {
                 | WidgetKind::CheckButton(_)
                 | WidgetKind::Switch(_)
                 | WidgetKind::ComboBox(_)
+                | WidgetKind::Scale(_)
                 | WidgetKind::Entry(_)
                 | WidgetKind::LinePlot(_) => scope.clone(),
             };
@@ -1369,6 +1393,7 @@ impl Editor {
             | view::WidgetKind::CheckButton(_)
             | view::WidgetKind::Switch(_)
             | view::WidgetKind::ComboBox(_)
+            | view::WidgetKind::Scale(_)
             | view::WidgetKind::Entry(_)
             | view::WidgetKind::LinePlot(_) => (),
         }
@@ -1479,6 +1504,7 @@ impl Editor {
                     | view::WidgetKind::CheckButton(_)
                     | view::WidgetKind::Switch(_)
                     | view::WidgetKind::ComboBox(_)
+                    | view::WidgetKind::Scale(_)
                     | view::WidgetKind::Entry(_)
                     | view::WidgetKind::LinePlot(_) => (),
                 };
@@ -1508,6 +1534,7 @@ impl Editor {
                 | WidgetKind::CheckButton(_)
                 | WidgetKind::Switch(_)
                 | WidgetKind::ComboBox(_)
+                | WidgetKind::Scale(_)
                 | WidgetKind::Entry(_)
                 | WidgetKind::LinePlot(_) => {
                     path.insert(0, WidgetPath::Leaf);

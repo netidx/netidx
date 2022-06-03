@@ -1393,7 +1393,11 @@ impl Scale {
         }
     }
 
-    fn root(&self) -> &gtk::Widget {
+    pub(super) fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
+    }
+
+    pub(super) fn spec(&self) -> view::Scale {
+        self.spec.borrow().clone()
     }
 }
