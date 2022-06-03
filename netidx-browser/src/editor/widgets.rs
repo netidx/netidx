@@ -100,6 +100,19 @@ pub(super) fn expr(
     (lbl, ibox, inspector)
 }
 
+macro_rules! expr {
+    ($ctx:ident, $name:expr, $scope:ident, $spec:ident, $on_change:ident, $field:ident) => {
+        expr($ctx, $name, $scope.clone(), &$spec.borrow().$field, {
+            let spec = $spec.clone();
+            let on_change = $on_change.clone();
+            move |e| {
+                spec.borrow_mut().$field = e;
+                on_change()
+            }
+        })
+    };
+}
+
 #[derive(Clone)]
 pub(super) struct Table {
     root: gtk::Box,
@@ -133,153 +146,48 @@ impl Table {
         util::expander_touch_enable(&config_exp);
         root.pack_start(&config_exp, false, false, 0);
         config_exp.add(config.root());
-        let (l, e, _dbg_path) = expr(
-            ctx,
-            "Path:",
-            scope.clone(),
-            &spec.borrow().path,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().path = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_path) = expr!(ctx, "Path:", scope, spec, on_change, path);
         config.add((l, e));
-        let (l, e, _dbg_sort_mode) = expr(
-            ctx,
-            "Sort Mode:",
-            scope.clone(),
-            &spec.borrow().sort_mode,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().sort_mode = e;
-                on_change();
-            }),
-        );
+        let (l, e, _dbg_sort_mode) =
+            expr!(ctx, "Sort Mode:", scope, spec, on_change, sort_mode);
         config.add((l, e));
-        let (l, e, _dbg_column_filter) = expr(
-            ctx,
-            "Column Filter:",
-            scope.clone(),
-            &spec.borrow().column_filter,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().column_filter = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_column_filter) =
+            expr!(ctx, "Column Filter:", scope, spec, on_change, column_filter);
         config.add((l, e));
-        let (l, e, _dbg_row_filter) = expr(
-            ctx,
-            "Row Filter:",
-            scope.clone(),
-            &spec.borrow().row_filter,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().row_filter = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_row_filter) =
+            expr!(ctx, "Row Filter:", scope, spec, on_change, row_filter);
         config.add((l, e));
-        let (l, e, _dbg_column_editable) = expr(
-            ctx,
-            "Column Editable:",
-            scope.clone(),
-            &spec.borrow().column_editable,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().column_editable = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_column_editable) =
+            expr!(ctx, "Column Editable:", scope, spec, on_change, column_editable);
         config.add((l, e));
-        let (l, e, _dbg_column_widths) = expr(
-            ctx,
-            "Column Widths:",
-            scope.clone(),
-            &spec.borrow().column_editable,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().column_widths = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_column_widths) =
+            expr!(ctx, "Column Widths:", scope, spec, on_change, column_widths);
         config.add((l, e));
-        let (l, e, _dbg_columns_resizable) = expr(
-            ctx,
-            "Columns Resizable:",
-            scope.clone(),
-            &spec.borrow().columns_resizable,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().columns_resizable = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_columns_resizable) =
+            expr!(ctx, "Columns Resizable:", scope, spec, on_change, columns_resizable);
         config.add((l, e));
-        let (l, e, _dbg_multi_select) = expr(
-            ctx,
-            "Mutli Select:",
-            scope.clone(),
-            &spec.borrow().multi_select,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().multi_select = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_multi_select) =
+            expr!(ctx, "Mutli Select:", scope, spec, on_change, multi_select);
         config.add((l, e));
-        let (l, e, _dbg_show_row_name) = expr(
-            ctx,
-            "Show Row Name:",
-            scope.clone(),
-            &spec.borrow().show_row_name,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().show_row_name = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_show_row_name) =
+            expr!(ctx, "Show Row Name:", scope, spec, on_change, show_row_name);
         config.add((l, e));
         let event_exp = gtk::Expander::new(Some("Events"));
         let mut event = TwoColGrid::new();
         util::expander_touch_enable(&event_exp);
         root.pack_start(&event_exp, false, false, 0);
         event_exp.add(event.root());
-        let (l, e, _dbg_on_activate) = expr(
-            ctx,
-            "On Activate:",
-            scope.clone(),
-            &spec.borrow().on_activate,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().on_activate = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_on_activate) =
+            expr!(ctx, "On Activate:", scope, spec, on_change, on_activate);
         event.add((l, e));
-        let (l, e, _dbg_on_select) = expr(
-            ctx,
-            "On Select:",
-            scope.clone(),
-            &spec.borrow().on_select,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().on_select = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_on_select) =
+            expr!(ctx, "On Select:", scope, spec, on_change, on_select);
         event.add((l, e));
-        let (l, e, _dbg_on_edit) = expr(
-            ctx,
-            "On Edit:",
-            scope.clone(),
-            &spec.borrow().on_edit,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().on_edit = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_on_edit) =
+            expr!(ctx, "On Edit:", scope, spec, on_change, on_edit);
         event.add((l, e));
-        let (l, e, _dbg_on_header_click) = expr(
-            ctx,
-            "On Header Click:",
-            scope.clone(),
-            &spec.borrow().on_header_click,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().on_header_click = e;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_on_header_click) =
+            expr!(ctx, "On Header Click:", scope, spec, on_change, on_header_click);
         event.add((l, e));
         Table {
             root,
@@ -385,27 +293,10 @@ impl Image {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _dbg_expr) = expr(
-            ctx,
-            "Spec:",
-            scope.clone(),
-            &spec.borrow().spec,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().spec = s;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_expr) = expr!(ctx, "Spec:", scope, spec, on_change, spec);
         root.add((l, e));
-        let (l, e, _dbg_on_click) = expr(
-            ctx,
-            "On Click:",
-            scope.clone(),
-            &spec.borrow().spec,
-            clone!(@strong spec => move |s| {
-                spec.borrow_mut().on_click = s;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_on_click) =
+            expr!(ctx, "On Click:", scope, spec, on_change, on_click);
         root.add((l, e));
         Image { root, spec, _dbg_expr, _dbg_on_click }
     }
@@ -437,38 +328,12 @@ impl Label {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _dbg_text) = expr(
-            ctx,
-            "Text:",
-            scope.clone(),
-            &spec.borrow().text,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().text = s;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_text) = expr!(ctx, "Text:", scope, spec, on_change, text);
         root.add((l, e));
-        let (l, e, _dbg_width) = expr(
-            ctx,
-            "Max Width:",
-            scope.clone(),
-            &spec.borrow().width,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().width = s;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_width) = expr!(ctx, "Max Width:", scope, spec, on_change, width);
         root.add((l, e));
-        let (l, e, _dbg_ellipsize) = expr(
-            ctx,
-            "Ellipsize Mode:",
-            scope.clone(),
-            &spec.borrow().ellipsize,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().ellipsize = s;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_ellipsize) =
+            expr!(ctx, "Ellipsize Mode:", scope, spec, on_change, ellipsize);
         root.add((l, e));
         Self { root, spec, _dbg_text, _dbg_width, _dbg_ellipsize }
     }
@@ -500,38 +365,12 @@ impl Button {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _label_expr) = expr(
-            ctx,
-            "Label:",
-            scope.clone(),
-            &spec.borrow().label,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().label = s;
-                on_change()
-            }),
-        );
+        let (l, e, _label_expr) = expr!(ctx, "Label:", scope, spec, on_change, label);
         root.add((l, e));
-        let (l, e, _image_expr) = expr(
-            ctx,
-            "Image:",
-            scope.clone(),
-            &spec.borrow().image,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().image = s;
-                on_change()
-            }),
-        );
+        let (l, e, _image_expr) = expr!(ctx, "Image:", scope, spec, on_change, image);
         root.add((l, e));
-        let (l, e, _on_click_expr) = expr(
-            ctx,
-            "On Click:",
-            scope.clone(),
-            &spec.borrow().on_click,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().on_click = s;
-                on_change()
-            }),
-        );
+        let (l, e, _on_click_expr) =
+            expr!(ctx, "On Click:", scope, spec, on_change, on_click);
         root.add((l, e));
         Button { root, spec, _label_expr, _image_expr, _on_click_expr }
     }
@@ -563,38 +402,12 @@ impl LinkButton {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _label_expr) = expr(
-            ctx,
-            "Label:",
-            scope.clone(),
-            &spec.borrow().label,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().label = s;
-                on_change()
-            }),
-        );
+        let (l, e, _label_expr) = expr!(ctx, "Label:", scope, spec, on_change, label);
         root.add((l, e));
-        let (l, e, _uri_expr) = expr(
-            ctx,
-            "URI:",
-            scope.clone(),
-            &spec.borrow().uri,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().uri = s;
-                on_change()
-            }),
-        );
+        let (l, e, _uri_expr) = expr!(ctx, "URI:", scope, spec, on_change, uri);
         root.add((l, e));
-        let (l, e, _on_activate_link_expr) = expr(
-            ctx,
-            "On Activate Link:",
-            scope.clone(),
-            &spec.borrow().on_activate_link,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().on_activate_link = s;
-                on_change()
-            }),
-        );
+        let (l, e, _on_activate_link_expr) =
+            expr!(ctx, "On Activate Link:", scope, spec, on_change, on_activate_link);
         root.add((l, e));
         LinkButton { root, spec, _label_expr, _uri_expr, _on_activate_link_expr }
     }
@@ -626,27 +439,9 @@ impl ToggleButton {
         let mut switch =
             Switch::new(ctx, on_change.clone(), scope.clone(), spec.toggle.clone());
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _dbg_label) = expr(
-            ctx,
-            "Label:",
-            scope.clone(),
-            &spec.borrow().label,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().label = s;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_label) = expr!(ctx, "Label:", scope, spec, on_change, label);
         switch.root.add((l, e));
-        let (l, e, _dbg_image) = expr(
-            ctx,
-            "Image:",
-            scope.clone(),
-            &spec.borrow().image,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().image = s;
-                on_change()
-            }),
-        );
+        let (l, e, _dbg_image) = expr!(ctx, "Image:", scope, spec, on_change, image);
         switch.root.add((l, e));
         Self { switch, spec, _dbg_label, _dbg_image }
     }
@@ -679,27 +474,10 @@ impl Switch {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _value_expr) = expr(
-            ctx,
-            "Value:",
-            scope.clone(),
-            &spec.borrow().value,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().value = s;
-                on_change();
-            }),
-        );
+        let (l, e, _value_expr) = expr!(ctx, "Value:", scope, spec, on_change, value);
         root.add((l, e));
-        let (l, e, _on_change_expr) = expr(
-            ctx,
-            "On Change:",
-            scope.clone(),
-            &spec.borrow().on_change,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().on_change = s;
-                on_change();
-            }),
-        );
+        let (l, e, _on_change_expr) =
+            expr!(ctx, "On Change:", scope, spec, on_change, on_change);
         root.add((l, e));
         Self { root, spec, _value_expr, _on_change_expr }
     }
@@ -731,38 +509,14 @@ impl ComboBox {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _choices_expr) = expr(
-            ctx,
-            "Choices:",
-            scope.clone(),
-            &spec.borrow().choices,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().choices = s;
-                on_change();
-            }),
-        );
+        let (l, e, _choices_expr) =
+            expr!(ctx, "Choices:", scope, spec, on_change, choices);
         root.add((l, e));
-        let (l, e, _selected_expr) = expr(
-            ctx,
-            "Selected:",
-            scope.clone(),
-            &spec.borrow().selected,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().selected = s;
-                on_change();
-            }),
-        );
+        let (l, e, _selected_expr) =
+            expr!(ctx, "Selected:", scope, spec, on_change, selected);
         root.add((l, e));
-        let (l, e, _on_change_expr) = expr(
-            ctx,
-            "On Change:",
-            scope.clone(),
-            &spec.borrow().on_change,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().on_change = s;
-                on_change();
-            }),
-        );
+        let (l, e, _on_change_expr) =
+            expr!(ctx, "On Change:", scope, spec, on_change, on_change);
         root.add((l, e));
         Self { root, spec, _choices_expr, _selected_expr, _on_change_expr }
     }
@@ -794,38 +548,13 @@ impl Entry {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _text_expr) = expr(
-            ctx,
-            "Text:",
-            scope.clone(),
-            &spec.borrow().text,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().text = s;
-                on_change()
-            }),
-        );
+        let (l, e, _text_expr) = expr!(ctx, "Text:", scope, spec, on_change, text);
         root.add((l, e));
-        let (l, e, _on_change_expr) = expr(
-            ctx,
-            "On Change:",
-            scope.clone(),
-            &spec.borrow().on_change,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().on_change = s;
-                on_change()
-            }),
-        );
+        let (l, e, _on_change_expr) =
+            expr!(ctx, "On Change:", scope, spec, on_change, on_change);
         root.add((l, e));
-        let (l, e, _on_activate_expr) = expr(
-            ctx,
-            "On Activate:",
-            scope.clone(),
-            &spec.borrow().on_activate,
-            clone!(@strong on_change, @strong spec => move |s| {
-                spec.borrow_mut().on_activate = s;
-                on_change()
-            }),
-        );
+        let (l, e, _on_activate_expr) =
+            expr!(ctx, "On Activate:", scope, spec, on_change, on_activate);
         root.add((l, e));
         Entry { root, spec, _text_expr, _on_change_expr, _on_activate_expr }
     }
@@ -963,60 +692,16 @@ impl LinePlot {
             0,
         );
         range_exp.add(range.root());
-        let (l, e, x_min) = expr(
-            ctx,
-            "x min:",
-            scope.clone(),
-            &spec.borrow().x_min,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().x_min = s;
-                on_change()
-            }),
-        );
+        let (l, e, x_min) = expr!(ctx, "x min:", scope, spec, on_change, x_min);
         range.add((l, e));
-        let (l, e, x_max) = expr(
-            ctx,
-            "x max:",
-            scope.clone(),
-            &spec.borrow().x_max,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().x_max = s;
-                on_change()
-            }),
-        );
+        let (l, e, x_max) = expr!(ctx, "x max:", scope, spec, on_change, x_max);
         range.add((l, e));
-        let (l, e, y_min) = expr(
-            ctx,
-            "y min:",
-            scope.clone(),
-            &spec.borrow().y_min,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().y_min = s;
-                on_change()
-            }),
-        );
+        let (l, e, y_min) = expr!(ctx, "y min:", scope, spec, on_change, y_min);
         range.add((l, e));
-        let (l, e, y_max) = expr(
-            ctx,
-            "y max:",
-            scope.clone(),
-            &spec.borrow().y_max,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().y_max = s;
-                on_change()
-            }),
-        );
+        let (l, e, y_max) = expr!(ctx, "y max:", scope, spec, on_change, y_max);
         range.add((l, e));
-        let (l, e, keep_points) = expr(
-            ctx,
-            "Keep Points:",
-            scope.clone(),
-            &spec.borrow().keep_points,
-            clone!(@strong spec, @strong on_change => move |s| {
-                spec.borrow_mut().keep_points = s;
-                on_change()
-            }),
-        );
+        let (l, e, keep_points) =
+            expr!(ctx, "Keep Points:", scope, spec, on_change, keep_points);
         range.add((l, e));
         (x_min, x_max, y_min, y_max, keep_points)
     }
@@ -1157,26 +842,23 @@ impl LinePlot {
                         on_change()
                     }));
                 grid.add((lbl_line_color, line_color));
-                let (l, e, _x) = expr(
-                    &ctx,
+                let _ctx = &ctx;
+                let (l, e, _x) = expr!(
+                    _ctx,
                     "X:",
-                    scope.clone(),
-                    &spec.borrow().x,
-                    clone!(@strong spec, @strong on_change => move |s| {
-                        spec.borrow_mut().x = s;
-                        on_change()
-                    })
+                    scope,
+                    spec,
+                    on_change,
+                    x
                 );
                 grid.add((l, e));
-                let (l, e, _y) = expr(
-                    &ctx,
+                let (l, e, _y) = expr!(
+                    _ctx,
                     "Y:",
-                    scope.clone(),
-                    &spec.borrow().y,
-                    clone!(@strong spec, @strong on_change => move |s| {
-                        spec.borrow_mut().y = s;
-                        on_change()
-                    })
+                    scope,
+                    spec,
+                    on_change,
+                    y
                 );
                 grid.add((l, e));
                 let remove = gtk::Button::with_label("-");
@@ -1357,16 +1039,7 @@ impl Frame {
     ) -> Self {
         let mut root = TwoColGrid::new();
         let spec = Rc::new(RefCell::new(spec));
-        let (l, e, _label_expr) = expr(
-            ctx,
-            "Label:",
-            scope.clone(),
-            &spec.borrow().label,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().label = e;
-                on_change();
-            }),
-        );
+        let (l, e, _label_expr) = expr!(ctx, "Label:", scope, spec, on_change, label);
         root.add((l, e));
         root.add(parse_entry(
             "Label Horizontal Align:",
@@ -1548,27 +1221,10 @@ impl Notebook {
             on_change()
         }));
         root.attach(&tabs_popup, 0, 2, 1);
-        let (l, e, _page) = expr(
-            ctx,
-            "Page:",
-            scope.clone(),
-            &spec.borrow().page,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().page = e;
-                on_change()
-            }),
-        );
+        let (l, e, _page) = expr!(ctx, "Page:", scope, spec, on_change, page);
         root.add((l, e));
-        let (l, e, _on_switch_page) = expr(
-            ctx,
-            "On Switch Page:",
-            scope.clone(),
-            &spec.borrow().on_switch_page,
-            clone!(@strong spec, @strong on_change => move |e| {
-                spec.borrow_mut().on_switch_page = e;
-                on_change()
-            }),
-        );
+        let (l, e, _on_switch_page) =
+            expr!(ctx, "On Switch Page:", scope, spec, on_change, on_switch_page);
         root.add((l, e));
         Notebook { root, spec, _page, _on_switch_page }
     }
@@ -1672,6 +1328,72 @@ impl Grid {
     }
 
     pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct Scale {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::Scale>>,
+    _dbg_draw_value: DbgExpr,
+    _dbg_marks: DbgExpr,
+    _dbg_has_origin: DbgExpr,
+    _dbg_value: DbgExpr,
+    _dbg_min: DbgExpr,
+    _dbg_max: DbgExpr,
+    _dbg_on_change: DbgExpr,
+}
+
+impl Scale {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Scope,
+        spec: view::Scale,
+    ) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let dirlb = gtk::Label::new(Some("Direction:"));
+        let dircb = dirselect(
+            spec.borrow().direction,
+            clone!(@strong on_change, @strong spec => move |d| {
+                spec.borrow_mut().direction = d;
+                on_change()
+            }),
+        );
+        root.add((dirlb, dircb));
+        let (l, e, _dbg_draw_value) =
+            expr!(ctx, "Draw Value:", scope, spec, on_change, draw_value);
+        root.add((l, e));
+        let (l, e, _dbg_marks) = expr!(ctx, "Marks:", scope, spec, on_change, marks);
+        root.add((l, e));
+        let (l, e, _dbg_has_origin) =
+            expr!(ctx, "Has Origin:", scope, spec, on_change, has_origin);
+        root.add((l, e));
+        let (l, e, _dbg_value) = expr!(ctx, "Value:", scope, spec, on_change, value);
+        root.add((l, e));
+        let (l, e, _dbg_min) = expr!(ctx, "Min:", scope, spec, on_change, min);
+        root.add((l, e));
+        let (l, e, _dbg_max) = expr!(ctx, "Max:", scope, spec, on_change, max);
+        root.add((l, e));
+        let (l, e, _dbg_on_change) =
+            expr!(ctx, "On Change:", scope, spec, on_change, on_change);
+        root.add((l, e));
+        Self {
+            root,
+            spec,
+            _dbg_draw_value,
+            _dbg_marks,
+            _dbg_min,
+            _dbg_max,
+            _dbg_has_origin,
+            _dbg_value,
+            _dbg_on_change,
+        }
+    }
+
+    fn root(&self) -> &gtk::Widget {
         self.root.root().upcast_ref()
     }
 }

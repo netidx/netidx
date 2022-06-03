@@ -340,6 +340,9 @@ impl Widget {
                 selected_path,
                 || gtk::CheckButton::new(),
             )),
+            view::WidgetKind::Scale(spec) => {
+                Box::new(widgets::Scale::new(ctx, spec, scope.clone(), selected_path))
+            }
             view::WidgetKind::ComboBox(spec) => {
                 Box::new(widgets::ComboBox::new(ctx, spec, scope.clone(), selected_path))
             }

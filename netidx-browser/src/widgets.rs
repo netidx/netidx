@@ -997,8 +997,10 @@ impl Scale {
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
-        let scale =
-            gtk::Scale::new(containers::dir_to_gtk(&spec.dir), gtk::Adjustment::NONE);
+        let scale = gtk::Scale::new(
+            containers::dir_to_gtk(&spec.direction),
+            gtk::Adjustment::NONE,
+        );
         let draw_value = BSNode::compile(
             &mut *ctx.borrow_mut(),
             scope.clone(),
@@ -1049,17 +1051,7 @@ impl Scale {
                 Inhibit(false)
             }),
         );
-        Self {
-            scale,
-            draw_value,
-            marks,
-            has_origin,
-            value,
-            min,
-            max,
-            on_change,
-            we_set,
-        }
+        Self { scale, draw_value, marks, has_origin, value, min, max, on_change, we_set }
     }
 
     fn set_min(scale: &gtk::Scale, v: Option<Value>) {
@@ -1114,5 +1106,28 @@ impl Scale {
                 scale.add_mark(pos, spec.0, text.as_ref().map(|c| &**c))
             }
         }
+    }
+}
+
+impl BWidget for Scale {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
+        Self::set_draw_value(&self.scale, self.draw_value.update(ctx, event));
+        Self::set_marks(&self.scale, self.marks.update(ctx, event));
+        Self::set_has_origin(&self.scale, self.has_origin.update(ctx, event));
+        self.we_set.set(true);
+        Self::set_value(&self.scale, self.value.update(ctx, event));
+        self.we_set.set(false);
+        Self::set_min(&self.scale, self.min.update(ctx, event));
+        Self::set_max(&self.scale, self.max.update(ctx, event));
+        self.on_change.borrow_mut().update(ctx, event);
+    }
+
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.scale.upcast_ref())
     }
 }

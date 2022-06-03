@@ -218,6 +218,7 @@ enum WidgetKind {
     LinkButton(widgets::LinkButton),
     ToggleButton(widgets::ToggleButton),
     CheckButton(widgets::ToggleButton),
+    Scale(widgets::Scale),
     Switch(widgets::Switch),
     ComboBox(widgets::ComboBox),
     Entry(widgets::Entry),

@@ -241,7 +241,7 @@ pub struct Entry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scale {
-    pub dir: Direction,
+    pub direction: Direction,
     /// (false | true | [position-spec, (null | <decimal-places>)])
     /// position-spec: ("left" | "right" | "top" | "bottom")
     /// true: draw the value with the default position and decimal places
