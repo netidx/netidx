@@ -364,6 +364,7 @@ mod tests {
     fn valid_fname() -> impl Strategy<Value = String> {
         prop_oneof![
             Just(String::from("any")),
+            Just(String::from("array")),
             Just(String::from("all")),
             Just(String::from("sum")),
             Just(String::from("product")),
