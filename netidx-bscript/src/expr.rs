@@ -55,8 +55,7 @@ impl ExprKind {
                     if function == "string_concat" {
                         buf.push_str(&*tmp);
                         Ok(())
-                    } else if function == "get" && args.len() == 1 && args[0].is_fn()
-                    {
+                    } else if function == "get" && args.len() == 1 && args[0].is_fn() {
                         buf.push_str(&*tmp);
                         Ok(())
                     } else if (function == "set" || function == "let")
@@ -66,11 +65,7 @@ impl ExprKind {
                         match &args[0].kind {
                             ExprKind::Constant(Value::String(c)) => {
                                 push_indent(indent, buf);
-                                let local = if function == "let" {
-                                    "let "
-                                } else {
-                                    ""
-                                };
+                                let local = if function == "let" { "let " } else { "" };
                                 writeln!(buf, "{}{} <-", local, c)?;
                                 args[1].kind.pretty_print(indent + 2, limit, buf)
                             }
@@ -89,6 +84,19 @@ impl ExprKind {
                         }
                         push_indent(indent, buf);
                         writeln!(buf, "{}", "}")
+                    } else if function == "array" {
+                        push_indent(indent, buf);
+                        writeln!(buf, "{}", "[")?;
+                        for i in 0..args.len() {
+                            args[i].kind.pretty_print(indent + 2, limit, buf)?;
+                            if i < args.len() - 1 {
+                                writeln!(buf, ",")?
+                            } else {
+                                writeln!(buf, "")?
+                            }
+                        }
+                        push_indent(indent, buf);
+                        writeln!(buf, "{}", "]")
                     } else {
                         push_indent(indent, buf);
                         writeln!(buf, "{}(", function)?;
@@ -145,8 +153,7 @@ impl fmt::Display for ExprKind {
                     // constant variable store
                     match &args[0].kind {
                         ExprKind::Constant(Value::String(c)) => {
-                            let local =
-                                if function == "let" { "let " } else { "" };
+                            let local = if function == "let" { "let " } else { "" };
                             write!(f, "{}{} <- {}", local, c, &args[1])
                         }
                         _ => unreachable!(),
@@ -162,6 +169,16 @@ impl fmt::Display for ExprKind {
                         }
                     }
                     write!(f, "{}", '}')
+                } else if function == "array" {
+                    write!(f, "{}", '[')?;
+                    for i in 0..args.len() {
+                        if i < args.len() - 1 {
+                            write!(f, "{},", &args[i])?
+                        } else {
+                            write!(f, "{}", &args[i])?
+                        }
+                    }
+                    write!(f, "{}", ']')
                 } else {
                     // it's a normal function
                     write!(f, "{}(", function)?;
