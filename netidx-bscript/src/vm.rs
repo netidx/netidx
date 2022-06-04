@@ -221,6 +221,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
     pub fn new(user: C) -> Self {
         let mut t = ExecCtx::no_std(user);
         stdfn::All::register(&mut t);
+        stdfn::Array::register(&mut t);
         stdfn::And::register(&mut t);
         stdfn::Any::register(&mut t);
         stdfn::Basename::register(&mut t);

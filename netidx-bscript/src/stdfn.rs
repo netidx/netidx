@@ -117,7 +117,9 @@ pub struct CachedCur<T: CachedCurEval + Send + Sync> {
     t: PhantomData<T>,
 }
 
-impl<C: Ctx, E, T: CachedCurEval + Send + Sync + 'static> Register<C, E> for CachedCur<T> {
+impl<C: Ctx, E, T: CachedCurEval + Send + Sync + 'static> Register<C, E>
+    for CachedCur<T>
+{
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_ctx, from, _, _| {
             let cached = CachedVals::new(from);
@@ -175,6 +177,26 @@ impl CachedCurEval for AllEv {
 }
 
 pub type All = CachedCur<AllEv>;
+
+pub struct ArrayEv;
+
+impl CachedCurEval for ArrayEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        if from.0.iter().all(|v| v.is_some()) {
+            Some(Value::Array(Arc::from_iter(
+                from.0.iter().filter_map(|v| v.as_ref().map(|v| v.clone())),
+            )))
+        } else {
+            None
+        }
+    }
+
+    fn name() -> &'static str {
+        "array"
+    }
+}
+
+pub type Array = CachedCur<ArrayEv>;
 
 fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     match (lhs, rhs) {
@@ -420,7 +442,9 @@ impl CachedCurEval for IndexEv {
                 }
             }
             [None, _] | [_, None] => None,
-            _ => Some(Value::Error(Chars::from("index expected an array and a positive index"))),
+            _ => Some(Value::Error(Chars::from(
+                "index expected an array and a positive index",
+            ))),
         }
     }
 
@@ -430,7 +454,6 @@ impl CachedCurEval for IndexEv {
 }
 
 pub type Index = CachedCur<IndexEv>;
-
 
 // CR estokes: document
 pub struct EndsWithEv;
@@ -592,7 +615,7 @@ impl CachedCurEval for ReplaceEv {
                     val.replace(&**pat, &**rep),
                 ))))
             }
-            [None, _, _] | [_, None, _]  | [_, _, None] => None,
+            [None, _, _] | [_, None, _] | [_, _, None] => None,
             _ => Some(Value::Error(Chars::from("replace expected 3 arguments"))),
         }
     }
@@ -609,12 +632,10 @@ pub struct DirnameEv;
 impl CachedCurEval for DirnameEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
-            [Some(Value::String(path))] => {
-                match Path::dirname(path) {
-                    None => Some(Value::Null),
-                    Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
-                }
-            }
+            [Some(Value::String(path))] => match Path::dirname(path) {
+                None => Some(Value::Null),
+                Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
+            },
             [None] => None,
             _ => Some(Value::Error(Chars::from("dirname expected 1 argument"))),
         }
@@ -632,12 +653,10 @@ pub struct BasenameEv;
 impl CachedCurEval for BasenameEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
-            [Some(Value::String(path))] => {
-                match Path::basename(path) {
-                    None => Some(Value::Null),
-                    Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
-                }
-            }
+            [Some(Value::String(path))] => match Path::basename(path) {
+                None => Some(Value::Null),
+                Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
+            },
             [None] => None,
             _ => Some(Value::Error(Chars::from("basename expected 1 argument"))),
         }

@@ -135,6 +135,14 @@ where
             .map(|args| ExprKind::Apply { function: "do".into(), args }.to_expr()),
         ),
         attempt(
+            between(
+                spaces().with(token('[')),
+                spaces().with(token(']')),
+                spaces().with(sep_by(expr(), attempt(spaces().with(token(','))))),
+            )
+            .map(|args| ExprKind::Apply { function: "array".into(), args }.to_expr()),
+        ),
+        attempt(
             (
                 fname(),
                 between(
@@ -146,12 +154,7 @@ where
                 .map(|(function, args)| ExprKind::Apply { function, args }.to_expr()),
         ),
         attempt(
-            (
-                string("let"),
-                spaces().with(fname()),
-                spaces().with(string("<-")),
-                expr(),
-            )
+            (string("let"), spaces().with(fname()), spaces().with(string("<-")), expr())
                 .map(|(_, var, _, e)| {
                     ExprKind::Apply {
                         function: "let".into(),

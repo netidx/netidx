@@ -5,7 +5,7 @@ lto = true
 debug = false
 
 [profile.dev]
-opt-level = "s"
+opt-level = "z"
 lto = "thin"
 debug = 1
 
