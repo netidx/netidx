@@ -44,12 +44,16 @@ pub(super) const GC_THRESHOLD: usize = 100_000;
 
 fn with_trailing<R, F: FnOnce(&str) -> R>(p: &str, f: F) -> R {
     use std::{cell::RefCell, fmt::Write};
+    const MAX: usize = 8 * 1024;
     thread_local! {
         static TMP: RefCell<String> = RefCell::new(String::new());
     }
     TMP.with(|tmp| {
         let mut tmp = tmp.borrow_mut();
         tmp.clear();
+        if tmp.capacity() > MAX {
+            tmp.shrink_to(MAX)
+        }
         write!(&mut *tmp, "{}/", p).unwrap();
         f(&*tmp)
     })
