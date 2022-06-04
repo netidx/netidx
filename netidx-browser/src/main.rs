@@ -369,7 +369,10 @@ impl Widget {
                 let text = ExprKind::Constant(s).to_expr();
                 let width = ExprKind::Constant(Value::Null).to_expr();
                 let ellipsize = ExprKind::Constant(Value::Null).to_expr();
-                let spec = view::Label { ellipsize, text, width };
+                let selectable = ExprKind::Constant(Value::True).to_expr();
+                let single_line = ExprKind::Constant(Value::True).to_expr();
+                let spec =
+                    view::Label { ellipsize, text, width, selectable, single_line };
                 Box::new(widgets::Label::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::Paned(spec) => {

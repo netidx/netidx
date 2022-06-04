@@ -317,6 +317,8 @@ pub(super) struct Label {
     _dbg_text: DbgExpr,
     _dbg_width: DbgExpr,
     _dbg_ellipsize: DbgExpr,
+    _dbg_single_line: DbgExpr,
+    _dbg_selectable: DbgExpr,
 }
 
 impl Label {
@@ -335,7 +337,21 @@ impl Label {
         let (l, e, _dbg_ellipsize) =
             expr!(ctx, "Ellipsize Mode:", scope, spec, on_change, ellipsize);
         root.add((l, e));
-        Self { root, spec, _dbg_text, _dbg_width, _dbg_ellipsize }
+        let (l, e, _dbg_single_line) =
+            expr!(ctx, "Single Line:", scope, spec, on_change, single_line);
+        root.add((l, e));
+        let (l, e, _dbg_selectable) =
+            expr!(ctx, "Selectable:", scope, spec, on_change, selectable);
+        root.add((l, e));
+        Self {
+            root,
+            spec,
+            _dbg_text,
+            _dbg_width,
+            _dbg_ellipsize,
+            _dbg_single_line,
+            _dbg_selectable,
+        }
     }
 
     pub(super) fn spec(&self) -> view::Label {

@@ -18,6 +18,25 @@ use util::{parse_entry, TwoColGrid};
 type OnChange = Rc<dyn Fn()>;
 type Scope = Rc<RefCell<Path>>;
 
+fn label_with_txt(text: &'static str) -> view::Widget {
+    let text = Value::String(Chars::from(text));
+    let text = expr::ExprKind::Constant(text).to_expr();
+    let width = expr::ExprKind::Constant(Value::Null).to_expr();
+    let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
+    let selectable = expr::ExprKind::Constant(Value::True).to_expr();
+    let single_line = expr::ExprKind::Constant(Value::True).to_expr();
+    view::Widget {
+        kind: view::WidgetKind::Label(view::Label {
+            text,
+            width,
+            ellipsize,
+            selectable,
+            single_line,
+        }),
+        props: None,
+    }
+}
+
 #[derive(Clone)]
 struct WidgetProps {
     root: gtk::Expander,
@@ -553,14 +572,7 @@ impl Widget {
                     .to_expr(),
                 on_click: expr::ExprKind::Constant(Value::Null).to_expr(),
             })),
-            Some("Label") => {
-                let text =
-                    expr::ExprKind::Constant(Value::String(Chars::from("static label")))
-                        .to_expr();
-                let width = expr::ExprKind::Constant(Value::Null).to_expr();
-                let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
-                widget(view::WidgetKind::Label(view::Label { text, width, ellipsize }))
-            }
+            Some("Label") => label_with_txt("static label"),
             Some("Button") => {
                 let l = Chars::from("click me!");
                 widget(view::WidgetKind::Button(view::Button {
@@ -679,9 +691,9 @@ impl Widget {
                 draw_value: expr::ExprKind::Constant(Value::True).to_expr(),
                 marks: expr::ExprKind::Constant(Value::Null).to_expr(),
                 has_origin: expr::ExprKind::Constant(Value::True).to_expr(),
-                value: expr::ExprKind::Constant((0.).into()).to_expr(),
-                min: expr::ExprKind::Constant((0.).into()).to_expr(),
-                max: expr::ExprKind::Constant((1.).into()).to_expr(),
+                value: expr::ExprKind::Constant((0f64).into()).to_expr(),
+                min: expr::ExprKind::Constant((0f64).into()).to_expr(),
+                max: expr::ExprKind::Constant((1f64).into()).to_expr(),
                 on_change: expr::ExprKind::Constant(Value::Null).to_expr(),
             })),
             Some("Entry") => widget(view::WidgetKind::Entry(view::Entry {
@@ -749,21 +761,11 @@ impl Widget {
                 spacing: 0,
                 children: Vec::new(),
             })),
-            Some("BoxChild") => {
-                let text = Value::from("empty box child");
-                let text = expr::ExprKind::Constant(text).to_expr();
-                let width = expr::ExprKind::Constant(Value::Null).to_expr();
-                let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
-                let w = view::Widget {
-                    kind: view::WidgetKind::Label(view::Label { text, width, ellipsize }),
-                    props: None,
-                };
-                widget(view::WidgetKind::BoxChild(view::BoxChild {
-                    pack: view::Pack::Start,
-                    padding: 0,
-                    widget: boxed::Box::new(w),
-                }))
-            }
+            Some("BoxChild") => widget(view::WidgetKind::BoxChild(view::BoxChild {
+                pack: view::Pack::Start,
+                padding: 0,
+                widget: boxed::Box::new(label_with_txt("empty box child")),
+            })),
             Some("Grid") => widget(view::WidgetKind::Grid(view::Grid {
                 homogeneous_columns: false,
                 homogeneous_rows: false,
@@ -777,37 +779,19 @@ impl Widget {
                 first_child: None,
                 second_child: None,
             })),
-            Some("GridChild") => {
-                let text = Value::from("empty grid child");
-                let text = expr::ExprKind::Constant(text).to_expr();
-                let width = expr::ExprKind::Constant(Value::Null).to_expr();
-                let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
-                let w = view::Widget {
-                    kind: view::WidgetKind::Label(view::Label { text, width, ellipsize }),
-                    props: None,
-                };
-                widget(view::WidgetKind::GridChild(view::GridChild {
-                    width: 1,
-                    height: 1,
-                    widget: boxed::Box::new(w),
-                }))
-            }
+            Some("GridChild") => widget(view::WidgetKind::GridChild(view::GridChild {
+                width: 1,
+                height: 1,
+                widget: boxed::Box::new(label_with_txt("empty grid child")),
+            })),
             Some("GridRow") => {
                 widget(view::WidgetKind::GridRow(view::GridRow { columns: vec![] }))
             }
             Some("NotebookPage") => {
-                let text = Value::from("empty notebook page");
-                let text = expr::ExprKind::Constant(text).to_expr();
-                let width = expr::ExprKind::Constant(Value::Null).to_expr();
-                let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
-                let w = view::Widget {
-                    kind: view::WidgetKind::Label(view::Label { text, width, ellipsize }),
-                    props: None,
-                };
                 widget(view::WidgetKind::NotebookPage(view::NotebookPage {
                     label: "Some Page".into(),
                     reorderable: false,
-                    widget: boxed::Box::new(w),
+                    widget: boxed::Box::new(label_with_txt("empty notebook page")),
                 }))
             }
             Some("Notebook") => widget(view::WidgetKind::Notebook(view::Notebook {
@@ -1403,16 +1387,7 @@ impl Editor {
     fn build_spec(store: &gtk::TreeStore, root: &gtk::TreeIter) -> view::Widget {
         let v = store.value(root, 1);
         match v.get::<&Widget>() {
-            Err(e) => {
-                let text = Value::from(format!("tree error: {}", e));
-                let text = expr::ExprKind::Constant(text).to_expr();
-                let width = expr::ExprKind::Constant(Value::Null).to_expr();
-                let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
-                view::Widget {
-                    kind: view::WidgetKind::Label(view::Label { text, width, ellipsize }),
-                    props: None,
-                }
-            }
+            Err(_) => label_with_txt("tree error"),
             Ok(w) => {
                 let mut spec = w.spec();
                 match &mut spec.kind {
