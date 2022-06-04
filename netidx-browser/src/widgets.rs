@@ -1103,7 +1103,7 @@ impl Scale {
             v.and_then(|v| v.cast_to::<Vec<(f64, PositionSpec, Option<Chars>)>>().ok())
         {
             scale.clear_marks();
-            for (pos, spec, text) in dbg!(marks) {
+            for (pos, spec, text) in marks {
                 scale.add_mark(pos, spec.0, text.as_ref().map(|c| &**c))
             }
         }
