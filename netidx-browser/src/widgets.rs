@@ -111,6 +111,24 @@ fn parse_ellipsize(e: Value) -> pango::EllipsizeMode {
     }
 }
 
+fn hover_path(
+    w: &impl WidgetExt,
+    selected_path: &gtk::Label,
+    name: &'static str,
+    expr: &Expr,
+) {
+    w.connect_focus(clone!(@strong selected_path, @strong expr => move |_, _| {
+        selected_path.set_label(&format!("{}: {}", name, expr));
+        Inhibit(false)
+    }));
+    w.connect_enter_notify_event(
+        clone!(@strong selected_path, @strong expr => move |_, _| {
+            selected_path.set_label(&format!("{}: {}", name, expr));
+            Inhibit(false)
+        }),
+    );
+}
+
 pub(super) struct Button {
     label: BSNode,
     image: BSNode,
@@ -135,33 +153,36 @@ impl Button {
                 Rc::new(RefCell::new(BSNode::compile(ctx, scope, spec.on_click.clone())));
             (label, image, on_click)
         };
-        if let Some(v) = label.current() {
-            button.set_label(&format!("{}", WVal(&v)))
-        }
-        if let Some(spec) = image.current().and_then(|v| v.cast_to::<ImageSpec>().ok()) {
-            button.set_image(Some(&spec.get()));
-            button.set_always_show_image(true);
-        }
-        if let Some(v) = label.current() {
-            button.set_label(&format!("{}", WVal(&v)));
-        }
+        Self::set_label(&button, label.current());
+        Self::set_image(&button, image.current());
+        hover_path(&button, &selected_path, "on_click", &spec.on_click);
         button.connect_clicked(clone!(@strong ctx, @strong on_click => move |_| {
             on_click.borrow_mut().update(
                 &mut *ctx.borrow_mut(),
                 &vm::Event::User(LocalEvent::Event(Value::Null))
             );
         }));
-        button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(&format!("on_click: {}", spec.on_click));
-            Inhibit(false)
-        }));
-        button.connect_enter_notify_event(
-            clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(&format!("on_click: {}", spec.on_click));
-                Inhibit(false)
-            }),
-        );
         Self { label, image, on_click, button }
+    }
+
+    fn set_label(button: &gtk::Button, value: Option<Value>) {
+        if let Some(v) = value {
+            button.set_label(&format!("{}", WVal(&v)))
+        }
+    }
+
+    fn set_image(button: &gtk::Button, value: Option<Value>) {
+        if let Some(s) = value.and_then(|v| v.cast_to::<ImageSpec>().ok()) {
+            match button.image() {
+                Some(image) if image.is::<gtk::Image>() => {
+                    s.apply(image.downcast_ref().unwrap())
+                }
+                Some(_) | None => {
+                    button.set_image(Some(&s.get()));
+                    button.set_always_show_image(true);
+                }
+            }
+        }
     }
 }
 
@@ -172,22 +193,8 @@ impl BWidget for Button {
         _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        if let Some(new) = self.label.update(ctx, event) {
-            self.button.set_label(&format!("{}", WVal(&new)));
-        }
-        if let Some(s) =
-            self.image.update(ctx, event).and_then(|v| v.cast_to::<ImageSpec>().ok())
-        {
-            match self.button.image() {
-                Some(image) if image.is::<gtk::Image>() => {
-                    s.apply(image.downcast_ref().unwrap())
-                }
-                Some(_) | None => {
-                    self.button.set_image(Some(&s.get()));
-                    self.button.set_always_show_image(true);
-                }
-            }
-        }
+        Self::set_label(&self.button, self.label.update(ctx, event));
+        Self::set_image(&self.button, self.image.update(ctx, event));
         self.on_click.borrow_mut().update(ctx, event);
     }
 
@@ -219,35 +226,32 @@ impl LinkButton {
             scope,
             spec.on_activate_link.clone(),
         )));
-        let cur_label = label.current().and_then(|v| v.get_as::<Chars>());
-        let cur_label = cur_label.as_ref().map(|s| s.as_ref()).unwrap_or("");
-        let cur_uri = uri.current().and_then(|v| v.get_as::<Chars>());
-        let cur_uri = cur_uri.as_ref().map(|s| s.as_ref()).unwrap_or("file:///");
-        let button = gtk::LinkButton::with_label(cur_uri, cur_label);
-        button.connect_activate_link(clone!(
-        @strong ctx,
-        @strong on_activate_link => move |_| {
-            let ev = vm::Event::User(LocalEvent::Event(Value::Null));
-            match on_activate_link.borrow_mut().update(&mut *ctx.borrow_mut(), &ev) {
-                Some(Value::True) => Inhibit(true),
-                _ => Inhibit(false),
-            }
-        }));
-        button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(
-                &format!("on_activate_link: {}", spec.on_activate_link)
-            );
-            Inhibit(false)
-        }));
-        button.connect_enter_notify_event(
-            clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(
-                    &format!("on_activate_link: {}", spec.on_activate_link)
-                );
-                Inhibit(false)
+        let button = gtk::LinkButton::new("file:///");
+        Self::set_uri(&button, uri.current());
+        Self::set_label(&button, label.current());
+        hover_path(&button, &selected_path, "on_activate_link", &spec.on_activate_link);
+        button.connect_activate_link(
+            clone!(@strong ctx, @strong on_activate_link => move |_| {
+                let ev = vm::Event::User(LocalEvent::Event(Value::Null));
+                match on_activate_link.borrow_mut().update(&mut *ctx.borrow_mut(), &ev) {
+                    Some(Value::True) => Inhibit(true),
+                    _ => Inhibit(false),
+                }
             }),
         );
         LinkButton { uri, label, on_activate_link, button }
+    }
+
+    fn set_uri(button: &gtk::LinkButton, value: Option<Value>) {
+        if let Some(new) = value.and_then(|v| v.cast_to::<Chars>().ok()) {
+            button.set_uri(&new);
+        }
+    }
+
+    fn set_label(button: &gtk::LinkButton, value: Option<Value>) {
+        if let Some(new) = value.and_then(|v| v.cast_to::<Chars>().ok()) {
+            button.set_label(&new);
+        }
     }
 }
 
@@ -258,16 +262,8 @@ impl BWidget for LinkButton {
         _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        if let Some(new) = self.uri.update(ctx, event) {
-            if let Some(new) = new.get_as::<Chars>() {
-                self.button.set_uri(&new);
-            }
-        }
-        if let Some(new) = self.label.update(ctx, event) {
-            if let Some(new) = new.get_as::<Chars>() {
-                self.button.set_label(&new);
-            }
-        }
+        Self::set_uri(&self.button, self.uri.update(ctx, event));
+        Self::set_label(&self.button, self.label.update(ctx, event));
         self.on_activate_link.borrow_mut().update(ctx, event);
     }
 
@@ -281,6 +277,8 @@ pub(super) struct Label {
     text: BSNode,
     width: BSNode,
     ellipsize: BSNode,
+    single_line: BSNode,
+    selectable: BSNode,
 }
 
 impl Label {
@@ -294,32 +292,56 @@ impl Label {
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.text.clone());
         let width =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.width.clone());
-        let ellipsize =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.ellipsize.clone());
-        let txt = match text.current() {
-            None => String::new(),
-            Some(v) => format!("{}", WVal(&v)),
-        };
-        let label = gtk::Label::new(Some(txt.as_str()));
-        if let Some(w) = width.current().and_then(|v| v.cast_to::<i32>().ok()) {
+        let ellipsize = BSNode::compile(
+            &mut *ctx.borrow_mut(),
+            scope.clone(),
+            spec.ellipsize.clone(),
+        );
+        let single_line = BSNode::compile(
+            &mut *ctx.borrow_mut(),
+            scope.clone(),
+            spec.single_line.clone(),
+        );
+        let selectable =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.selectable.clone());
+        let label = gtk::Label::new(None);
+        Self::set_text(&label, text.current());
+        Self::set_single_line(&label, single_line.current());
+        Self::set_selectable(&label, selectable.current());
+        Self::set_width(&label, width.current());
+        Self::set_ellipsize(&label, ellipsize.current());
+        hover_path(&label, &selected_path, "text", &spec.text);
+        Label { text, label, width, ellipsize, single_line, selectable }
+    }
+
+    fn set_text(label: &gtk::Label, value: Option<Value>) {
+        if let Some(txt) = value {
+            label.set_label(&format!("{}", WVal(&txt)));
+        }
+    }
+
+    fn set_width(label: &gtk::Label, value: Option<Value>) {
+        if let Some(w) = value.and_then(|v| v.cast_to::<i32>().ok()) {
             label.set_width_chars(w);
         }
-        label.set_selectable(true);
-        label.set_single_line_mode(true);
-        if let Some(mode) = ellipsize.current().map(parse_ellipsize) {
+    }
+
+    fn set_ellipsize(label: &gtk::Label, value: Option<Value>) {
+        if let Some(mode) = value.map(parse_ellipsize) {
             label.set_ellipsize(mode);
         }
-        label.connect_button_press_event(
-            clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(&format!("{}", spec.text));
-                Inhibit(false)
-            }),
-        );
-        label.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(&format!("{}", spec.text));
-            Inhibit(false)
-        }));
-        Label { text, label, width, ellipsize }
+    }
+
+    fn set_single_line(label: &gtk::Label, value: Option<Value>) {
+        if let Some(mode) = value.and_then(|v| v.cast_to::<bool>().ok()) {
+            label.set_single_line_mode(mode)
+        }
+    }
+
+    fn set_selectable(label: &gtk::Label, value: Option<Value>) {
+        if let Some(mode) = value.and_then(|v| v.cast_to::<bool>().ok()) {
+            label.set_selectable(mode)
+        }
     }
 }
 
@@ -330,17 +352,11 @@ impl BWidget for Label {
         _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        if let Some(new) = self.text.update(ctx, event) {
-            self.label.set_label(&format!("{}", WVal(&new)));
-        }
-        if let Some(w) =
-            self.width.update(ctx, event).and_then(|v| v.cast_to::<i32>().ok())
-        {
-            self.label.set_width_chars(w);
-        }
-        if let Some(m) = self.ellipsize.update(ctx, event).map(parse_ellipsize) {
-            self.label.set_ellipsize(m);
-        }
+        Self::set_text(&self.label, self.text.update(ctx, event));
+        Self::set_width(&self.label, self.width.update(ctx, event));
+        Self::set_ellipsize(&self.label, self.ellipsize.update(ctx, event));
+        Self::set_single_line(&self.label, self.single_line.update(ctx, event));
+        Self::set_selectable(&self.label, self.selectable.update(ctx, event));
     }
 
     fn root(&self) -> Option<&gtk::Widget> {
@@ -418,37 +434,17 @@ where
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.label.clone());
         let image =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.image.clone());
-        if let Some(v) = label.current() {
-            button.set_label(&format!("{}", WVal(&v)));
-        }
-        if let Some(spec) = image.current().and_then(|v| v.cast_to::<ImageSpec>().ok()) {
-            button.set_image(Some(&spec.get()));
-            button.set_always_show_image(true);
-        }
-        if let Some(val) = value.borrow().current() {
-            Self::set(&button, val)
-        }
-        button.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(&format!("on_change: {}", spec.toggle.on_change));
-            Inhibit(false)
-        }));
-        button.connect_enter_notify_event(
-            clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(&format!("on_change: {}", spec.toggle.on_change));
-                Inhibit(false)
-            }),
-        );
+        Self::set_label(&button, label.current());
+        Self::set_image(&button, image.current());
+        Self::we_set_value(&we_set, &button, value.borrow().current());
+        hover_path(&button, &selected_path, "on_change", &spec.toggle.on_change);
         button.connect_toggled(clone!(
             @strong value, @strong on_change, @strong ctx, @strong we_set => move |button| {
                 if !we_set.get() {
                     let e = vm::Event::User(LocalEvent::Event(button.is_active().into()));
                     on_change.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
                     idle_add_local(clone!(@strong we_set, @strong value, @strong button => move || {
-                        we_set.set(true);
-                        if let Some(v) = value.borrow().current() {
-                            Self::set(&button, v)
-                        }
-                        we_set.set(false);
+                        Self::we_set_value(&we_set, &button, value.borrow().current());
                         Continue(false)
                     }));
                 }
@@ -457,12 +453,38 @@ where
         Self { button, label, image, value, on_change, we_set }
     }
 
-    fn set(button: &T, v: Value) {
-        match v.get_as::<bool>() {
-            None => button.set_inconsistent(true),
-            Some(b) => {
-                button.set_active(b);
-                button.set_inconsistent(false);
+    fn set_label(button: &T, v: Option<Value>) {
+        if let Some(v) = v {
+            button.set_label(&format!("{}", WVal(&v)));
+        }
+    }
+
+    fn set_image(button: &T, v: Option<Value>) {
+        if let Some(s) = v.and_then(|v| v.cast_to::<ImageSpec>().ok()) {
+            match button.image() {
+                Some(w) if w.is::<gtk::Image>() => s.apply(w.downcast_ref().unwrap()),
+                Some(_) | None => {
+                    button.set_image(Some(&s.get()));
+                    button.set_always_show_image(true);
+                }
+            }
+        }
+    }
+
+    fn we_set_value(we_set: &Cell<bool>, button: &T, v: Option<Value>) {
+        we_set.set(true);
+        Self::set_value(button, v);
+        we_set.set(false);
+    }
+
+    fn set_value(button: &T, v: Option<Value>) {
+        if let Some(v) = v {
+            match v.get_as::<bool>() {
+                None => button.set_inconsistent(true),
+                Some(b) => {
+                    button.set_active(b);
+                    button.set_inconsistent(false);
+                }
             }
         }
     }
@@ -487,25 +509,13 @@ where
         _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        if let Some(v) = self.value.borrow_mut().update(ctx, event) {
-            self.we_set.set(true);
-            Self::set(&self.button, v);
-            self.we_set.set(false);
-        }
-        if let Some(v) = self.label.update(ctx, event) {
-            self.button.set_label(&format!("{}", WVal(&v)));
-        }
-        if let Some(s) =
-            self.image.update(ctx, event).and_then(|v| v.cast_to::<ImageSpec>().ok())
-        {
-            match self.button.image() {
-                Some(w) if w.is::<gtk::Image>() => s.apply(w.downcast_ref().unwrap()),
-                Some(_) | None => {
-                    self.button.set_image(Some(&s.get()));
-                    self.button.set_always_show_image(true);
-                }
-            }
-        }
+        Self::we_set_value(
+            &self.we_set,
+            &self.button,
+            self.value.borrow_mut().update(ctx, event),
+        );
+        Self::set_label(&self.button, self.label.update(ctx, event));
+        Self::set_image(&self.button, self.image.update(ctx, event));
         self.on_change.borrow_mut().update(ctx, event);
     }
 }
@@ -529,20 +539,6 @@ impl ComboBox {
         let combo = gtk::ComboBoxText::new();
         let root = gtk::EventBox::new();
         root.add(&combo);
-        combo.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(
-                &format!("on_change: {}, choices: {}", spec.on_change, spec.choices)
-            );
-            Inhibit(false)
-        }));
-        root.connect_enter_notify_event(
-            clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(
-                    &format!("on_change: {}, choices: {}", spec.on_change, spec.choices)
-                );
-                Inhibit(false)
-            }),
-        );
         let choices =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.choices.clone());
         let selected = Rc::new(RefCell::new(BSNode::compile(
@@ -562,6 +558,7 @@ impl ComboBox {
         we_set.set(true);
         Self::update_active(&combo, &selected.borrow().current());
         we_set.set(false);
+        hover_path(&combo, &selected_path, "on_change", &spec.on_change);
         combo.connect_changed(clone!(
             @strong we_set,
             @strong on_change,
@@ -685,11 +682,7 @@ impl Switch {
         let on_change =
             Rc::new(RefCell::new(BSNode::compile(ctx_r, scope, spec.on_change.clone())));
         let we_set = Rc::new(Cell::new(false));
-        if let Some(v) = value.borrow().current() {
-            let v = val_to_bool(&v);
-            switch.set_active(v);
-            switch.set_state(v);
-        }
+        Self::we_set_value(&we_set, &switch, value.borrow().current());
         switch.connect_state_set(clone!(
         @strong ctx, @strong on_change, @strong we_set, @strong value =>
         move |switch, state| {
@@ -702,14 +695,8 @@ impl Switch {
                 );
                 idle_add_local(
                     clone!(@strong value, @strong switch, @strong we_set => move || {
-                    we_set.set(true);
-                    if let Some(v) = value.borrow().current() {
-                        let v = val_to_bool(&v);
-                        switch.set_active(v);
-                        switch.set_state(v);
-                    }
-                    we_set.set(false);
-                    Continue(false)
+                        Self::we_set_value(&we_set, &switch, value.borrow().current());
+                        Continue(false)
                 }));
             }
             Inhibit(true)
@@ -730,6 +717,20 @@ impl Switch {
         );
         Self { value, on_change, switch, we_set }
     }
+
+    fn set_value(switch: &gtk::Switch, v: Option<Value>) {
+        if let Some(v) = v {
+            let v = val_to_bool(&v);
+            switch.set_active(v);
+            switch.set_state(v);
+        }
+    }
+
+    fn we_set_value(we_set: &Cell<bool>, switch: &gtk::Switch, v: Option<Value>) {
+        we_set.set(true);
+        Self::set_value(switch, v);
+        we_set.set(false);
+    }
 }
 
 impl BWidget for Switch {
@@ -739,12 +740,11 @@ impl BWidget for Switch {
         _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        if let Some(new) = self.value.borrow_mut().update(ctx, event) {
-            self.we_set.set(true);
-            self.switch.set_active(val_to_bool(&new));
-            self.switch.set_state(val_to_bool(&new));
-            self.we_set.set(false);
-        }
+        Self::we_set_value(
+            &self.we_set,
+            &self.switch,
+            self.value.borrow_mut().update(ctx, event),
+        );
         self.on_change.borrow_mut().update(ctx, event);
     }
 
@@ -787,11 +787,7 @@ impl Entry {
             spec.on_activate.clone(),
         )));
         let entry = gtk::Entry::new();
-        match text.borrow().current() {
-            None => entry.set_text(""),
-            Some(Value::String(s)) => entry.set_text(&*s),
-            Some(v) => entry.set_text(&format!("{}", v)),
-        }
+        Self::set_text(&entry, text.borrow().current());
         entry.set_icon_activatable(gtk::EntryIconPosition::Secondary, true);
         entry.connect_activate(clone!(
         @strong ctx,
@@ -807,13 +803,7 @@ impl Entry {
             );
             idle_add_local(clone!(
                 @strong we_changed, @strong text, @strong entry => move || {
-                    we_changed.set(true);
-                    match text.borrow().current() {
-                        None => entry.set_text(""),
-                        Some(Value::String(s)) => entry.set_text(&*s),
-                        Some(v) => entry.set_text(&format!("{}", v)),
-                    }
-                    we_changed.set(false);
+                    Self::we_set_text(&we_changed, &entry, text.borrow().current());
                     Continue(false)
                 }));
         }));
@@ -841,13 +831,20 @@ impl Entry {
             }
         }));
         entry.connect_icon_press(move |e, _, _| e.emit_activate());
-        entry.connect_focus(clone!(@strong spec, @strong selected_path => move |_, _| {
-            selected_path.set_label(
-                &format!("text: {}, on_change: {}", spec.text, spec.on_change)
-            );
-            Inhibit(false)
-        }));
+        hover_path(&entry, &selected_path, "on_change", &spec.on_change);
         Entry { we_changed, entry, text, on_change, on_activate }
+    }
+
+    fn set_text(entry: &gtk::Entry, v: Option<Value>) {
+        if let Some(s) = v.and_then(|v| v.cast_to::<Chars>().ok()) {
+            entry.set_text(&*s);
+        }
+    }
+
+    fn we_set_text(we_set: &Cell<bool>, entry: &gtk::Entry, v: Option<Value>) {
+        we_set.set(true);
+        Self::set_text(entry, v);
+        we_set.set(false);
     }
 }
 
@@ -858,14 +855,11 @@ impl BWidget for Entry {
         _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        if let Some(new) = self.text.borrow_mut().update(ctx, event) {
-            self.we_changed.set(true);
-            match new {
-                Value::String(s) => self.entry.set_text(&*s),
-                v => self.entry.set_text(&format!("{}", v)),
-            }
-            self.we_changed.set(false);
-        }
+        Self::we_set_text(
+            &self.we_changed,
+            &self.entry,
+            self.text.borrow_mut().update(ctx, event),
+        );
         self.on_change.borrow_mut().update(ctx, event);
         self.on_activate.borrow_mut().update(ctx, event);
     }
@@ -898,9 +892,7 @@ impl Image {
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.on_click.clone());
         let on_click = Rc::new(RefCell::new(on_click));
         let button_pressed = Rc::new(Cell::new(false));
-        if let Some(spec) = image_spec.current().and_then(|v| v.get_as::<ImageSpec>()) {
-            spec.apply(&image)
-        }
+        Self::set_spec(&image, image_spec.current());
         root.connect_button_press_event(clone!(@strong button_pressed => move |_, e| {
             if e.button() == 1 {
                 button_pressed.set(true);
@@ -918,17 +910,14 @@ impl Image {
             }
             Inhibit(true)
         }));
-        root.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(&format!("on_click: {}", &spec.spec));
-            Inhibit(false)
-        }));
-        root.connect_enter_notify_event(
-            clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(&format!("on_click: {}", &spec.spec));
-                Inhibit(false)
-            }),
-        );
+        hover_path(&image, &selected_path, "on_click", &spec.spec);
         Image { image_spec, on_click, image, root }
+    }
+
+    fn set_spec(image: &gtk::Image, v: Option<Value>) {
+        if let Some(spec) = v.and_then(|v| v.get_as::<ImageSpec>()) {
+            spec.apply(&image)
+        }
     }
 }
 
@@ -940,11 +929,7 @@ impl BWidget for Image {
         event: &vm::Event<LocalEvent>,
     ) {
         self.on_click.borrow_mut().update(ctx, event);
-        if let Some(spec) =
-            self.image_spec.update(ctx, event).and_then(|v| v.get_as::<ImageSpec>())
-        {
-            spec.apply(&self.image)
-        }
+        Self::set_spec(&self.image, self.image_spec.update(ctx, event));
     }
 
     fn root(&self) -> Option<&gtk::Widget> {
@@ -1042,16 +1027,7 @@ impl Scale {
                 }
             }),
         );
-        scale.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
-            selected_path.set_label(&format!("on_change: {}", &spec.on_change));
-            Inhibit(false)
-        }));
-        scale.connect_enter_notify_event(
-            clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(&format!("on_change: {}", &spec.on_change));
-                Inhibit(false)
-            }),
-        );
+        hover_path(&scale, &selected_path, "on_change", &spec.on_change);
         Self { scale, draw_value, marks, has_origin, value, min, max, on_change, we_set }
     }
 

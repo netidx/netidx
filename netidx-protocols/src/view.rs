@@ -165,6 +165,12 @@ pub struct Label {
     /// null: no limit on width
     /// <n>: the desired maximum width in characters
     pub width: Expr,
+    /// (true | false)
+    /// The label is restricted to a single line, or not.
+    pub single_line: Expr,
+    /// (true | false)
+    /// The label can be selected or note
+    pub selectable: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
