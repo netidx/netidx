@@ -377,9 +377,9 @@ impl Store {
                         self.flags_by_path.remove(&path);
                         self.defaults.remove(&path);
                         self.remove_column(&path);
-                        self.published_by_level.get_mut(&n).into_iter().for_each(|s| {
+                        if let Some(s) = self.published_by_level.get_mut(&n) {
                             s.remove(&path);
-                        });
+                        };
                         self.remove_parents(path.as_ref());
                     }
                 }
@@ -527,58 +527,76 @@ impl Store {
     }
 
     pub(super) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
-        let n = Path::levels(parent);
-        let mut paths = PATH_POOL.take();
-        if let Some(l) = self.published_by_level.get(&(n + 1)) {
-            paths.extend(
-                l.range::<str, (Bound<&str>, Bound<&str>)>((
-                    Excluded(parent.as_ref()),
-                    Unbounded,
-                ))
-                .map(|(p, _)| p)
-                .take_while(|p| Path::is_parent(parent, p))
-                .cloned(),
-            )
+        use std::{cell::RefCell, fmt::Write};
+        thread_local! {
+            static TMP: RefCell<String> = RefCell::new(String::new());
         }
-        paths
+        TMP.with(|tmp| {
+            let mut tmp = tmp.borrow_mut();
+            tmp.clear();
+            write!(&mut *tmp, "{}/", parent).unwrap();
+            let n = Path::levels(parent);
+            let mut paths = PATH_POOL.take();
+            if let Some(l) = self.published_by_level.get(&(n + 1)) {
+                paths.extend(
+                    l.range::<str, (Bound<&str>, Bound<&str>)>((
+                        Excluded(tmp.as_str()),
+                        Unbounded,
+                    ))
+                    .map(|(p, _)| p)
+                    .take_while(|p| Path::is_parent(parent, p))
+                    .cloned(),
+                )
+            }
+            paths
+        })
     }
 
     pub(super) fn list_matching(&self, pat: &GlobSet) -> Pooled<Vec<Path>> {
-        let mut paths = PATH_POOL.take();
-        let mut cur: Option<&str> = None;
-        for glob in pat.iter() {
-            if !cur.map(|p| Path::is_parent(p, glob.base())).unwrap_or(false) {
-                let base = glob.base();
-                let mut n = Path::levels(base) + 1;
-                while glob.scope().contains(n) {
-                    match self.published_by_level.get(&n) {
-                        None => break,
-                        Some(l) => {
-                            let iter = l
-                                .range::<str, (Bound<&str>, Bound<&str>)>((
-                                    Excluded(base),
-                                    Unbounded,
-                                ))
-                                .map(|(p, _)| p)
-                                .take_while(move |p| Path::is_parent(base, p));
-                            for path in iter {
-                                let dn = Path::dirname(path).unwrap_or("/");
-                                if pat.is_match(path)
-                                    && !self.children.contains_key(dn)
-                                    && (!pat.published_only()
-                                        || self.published_by_path.contains_key(path))
-                                {
-                                    paths.push(path.clone());
+        use std::{cell::RefCell, fmt::Write};
+        thread_local! {
+            static TMP: RefCell<String> = RefCell::new(String::new());
+        }
+        TMP.with(|tmp| {
+            let mut tmp = tmp.borrow_mut();
+            let mut paths = PATH_POOL.take();
+            let mut cur: Option<&str> = None;
+            for glob in pat.iter() {
+                if !cur.map(|p| Path::is_parent(p, glob.base())).unwrap_or(false) {
+                    let base = glob.base();
+                    let mut n = Path::levels(base) + 1;
+                    tmp.clear();
+                    write!(&mut *tmp, "{}/", base).unwrap();
+                    while glob.scope().contains(n) {
+                        match self.published_by_level.get(&n) {
+                            None => break,
+                            Some(l) => {
+                                let iter = l
+                                    .range::<str, (Bound<&str>, Bound<&str>)>((
+                                        Excluded(&*tmp),
+                                        Unbounded,
+                                    ))
+                                    .map(|(p, _)| p)
+                                    .take_while(move |p| Path::is_parent(base, p));
+                                for path in iter {
+                                    let dn = Path::dirname(path).unwrap_or("/");
+                                    if pat.is_match(path)
+                                        && !self.children.contains_key(dn)
+                                        && (!pat.published_only()
+                                            || self.published_by_path.contains_key(path))
+                                    {
+                                        paths.push(path.clone());
+                                    }
                                 }
                             }
                         }
+                        n += 1;
                     }
-                    n += 1;
                 }
+                cur = Some(glob.base());
             }
-            cur = Some(glob.base());
-        }
-        paths
+            paths
+        })
     }
 
     pub(super) fn get_change_nr(&self, path: &Path) -> Z64 {

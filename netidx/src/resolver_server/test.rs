@@ -6,7 +6,7 @@ use crate::{
 };
 use fxhash::FxHashMap;
 use bytes::Bytes;
-use rand::{self, Rng};
+use rand::{self, Rng, thread_rng};
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
@@ -16,6 +16,7 @@ use std::{
 #[test]
 fn test_resolver_store() {
     let mut publishers: FxHashMap<SocketAddr, Arc<Publisher>> = HashMap::default();
+    let mut default = vec![];
     let mut hm = HashMap::new();
     hm.insert(Path::from("foo"), 0);
     assert_eq!(hm.get(&Path::from("foo")).copied(), Some(0));
@@ -38,6 +39,11 @@ fn test_resolver_store() {
             resolver: addr,
             target_auth: TargetAuth::Anonymous,
         });
+        if thread_rng().gen() {
+            let path = Path::from(String::from(Path::dirname(&parsed[0]).unwrap()));
+            default.push((path.clone(), publisher.clone()));
+            store.publish(path, &publisher, true, None);
+        }
         publishers.insert(addr, publisher.clone());
         for path in parsed.clone() {
             store.publish(path.clone(), &publisher, false, None);
@@ -48,7 +54,7 @@ fn test_resolver_store() {
             {
                 panic!()
             }
-            if rand::thread_rng().gen_bool(0.5) {
+            if thread_rng().gen() {
                 // check that this is idempotent
                 store.publish(path.clone(), &publisher, false, None);
             }
@@ -101,6 +107,11 @@ fn test_resolver_store() {
     let (ref paths, ref addr) = apps[2];
     let addr = addr.parse::<SocketAddr>().unwrap();
     let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
+    for (path, publisher) in &default {
+        if parsed.iter().any(|p| Path::is_parent(&path, p)) {
+            store.unpublish(publisher, path.clone());
+        }
+    }
     for path in parsed.clone() {
         let publisher = &publishers[&addr];
         store.unpublish(publisher, path.clone());
@@ -146,6 +157,9 @@ fn test_resolver_store() {
     assert_eq!(paths[1].as_ref(), "/app/test/app0/v1");
     let cols = store.columns(&Path::from("/app/test/app0"));
     assert_eq!(cols.len(), 0);
+    for (path, publisher) in &default {
+        store.unpublish(publisher, path.clone());
+    }
     for (paths, addr) in &apps {
         let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
         let addr = addr.parse::<SocketAddr>().unwrap();

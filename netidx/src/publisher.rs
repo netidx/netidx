@@ -1163,7 +1163,8 @@ impl Publisher {
 
     /// Register `tx` to receive a message about publisher events
     ///
-    /// if you don't with to receive events on a given channel you can drop it.
+    /// if you don't want to receive events on a given channel anymore
+    /// you can just drop it.
     pub fn events(&self, tx: UnboundedSender<Event>) {
         self.0.lock().on_event_chans.push(tx)
     }
