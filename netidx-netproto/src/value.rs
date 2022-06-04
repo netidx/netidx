@@ -1805,7 +1805,7 @@ impl<T: FromValue, U: FromValue, V: FromValue> FromValue for (T, U, V) {
             Value::Array(elts) if elts.len() == 3 => {
                 let v0 = elts[0].clone().cast_to::<T>()?;
                 let v1 = elts[1].clone().cast_to::<U>()?;
-                let v2 = elts[1].clone().cast_to::<V>()?;
+                let v2 = elts[2].clone().cast_to::<V>()?;
                 Ok((v0, v1, v2))
             }
             _ => bail!("can't cast"),
@@ -1817,7 +1817,7 @@ impl<T: FromValue, U: FromValue, V: FromValue> FromValue for (T, U, V) {
             Value::Array(elts) if elts.len() == 3 => {
                 let v0 = elts[0].clone().get_as::<T>()?;
                 let v1 = elts[1].clone().get_as::<U>()?;
-                let v2 = elts[1].clone().get_as::<V>()?;
+                let v2 = elts[2].clone().get_as::<V>()?;
                 Some((v0, v1, v2))
             }
             _ => None,

@@ -952,6 +952,7 @@ impl BWidget for Image {
     }
 }
 
+#[derive(Debug)]
 struct PositionSpec(gtk::PositionType);
 
 impl FromStr for PositionSpec {
@@ -1098,11 +1099,11 @@ impl Scale {
     }
 
     fn set_marks(scale: &gtk::Scale, v: Option<Value>) {
-        scale.clear_marks();
         if let Some(marks) =
             v.and_then(|v| v.cast_to::<Vec<(f64, PositionSpec, Option<Chars>)>>().ok())
         {
-            for (pos, spec, text) in marks {
+            scale.clear_marks();
+            for (pos, spec, text) in dbg!(marks) {
                 scale.add_mark(pos, spec.0, text.as_ref().map(|c| &**c))
             }
         }
