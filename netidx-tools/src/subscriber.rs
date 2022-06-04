@@ -1,6 +1,12 @@
 use anyhow::{anyhow, Error, Result};
 use arcstr::ArcStr;
 use bytes::BytesMut;
+use combine::{
+    parser::char::spaces,
+    sep_by,
+    stream::{position, Range},
+    token, EasyParser, ParseError, Parser, RangeStream,
+};
 use futures::{
     channel::mpsc::{self, Receiver, Sender},
     prelude::*,
@@ -11,9 +17,10 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
+    protocol::value_parser::{escaped_string, value, VAL_ESC},
     resolver_client::DesiredAuth,
     subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
-    utils::{split_escaped, splitn_escaped, BatchItem, Batched},
+    utils::{splitn_escaped, BatchItem, Batched},
 };
 use netidx_protocols::rpc::client::Proc;
 use std::{
@@ -52,6 +59,29 @@ pub(super) struct Params {
     paths: Vec<String>,
 }
 
+fn rpc_arg<I>() -> impl Parser<I, Output = (String, Value)>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        spaces().with(escaped_string(&['\\', '='])),
+        spaces().with(token('=')),
+        spaces().with(value(&VAL_ESC)),
+    )
+        .map(|(arg_name, _, arg_val)| (arg_name, arg_val))
+}
+
+fn rpc_args<I>() -> impl Parser<I, Output = Vec<(String, Value)>>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    sep_by(rpc_arg(), spaces().with(token(',')))
+}
+
 #[derive(Debug, Clone)]
 enum In {
     Add(Path),
@@ -83,20 +113,10 @@ impl FromStr for In {
             let path = Path::from(ArcStr::from(path));
             let args = match parts.next() {
                 None => vec![],
-                Some(s) => {
-                    let mut args = vec![];
-                    for arg in split_escaped(s, '\\', ',') {
-                        let mut arg = splitn_escaped(arg.trim(), 2, '\\', '=');
-                        let key =
-                            arg.next().ok_or_else(|| anyhow!("expected keyword"))?;
-                        let val = arg
-                            .next()
-                            .ok_or_else(|| anyhow!("expected value"))?
-                            .parse::<Value>()?;
-                        args.push((String::from(key), val));
-                    }
-                    args
-                }
+                Some(s) => rpc_args()
+                    .easy_parse(position::Stream::new(s))
+                    .map(|(r, _)| r)
+                    .map_err(|e| anyhow!(format!("{}", e)))?,
             };
             Ok(In::Call(path, args))
         } else {
@@ -362,7 +382,8 @@ impl Ctx {
                         if self.subscribe_timeout.is_some() {
                             self.subscribe_ts.remove(path);
                         }
-                        Out { raw: self.raw, path: &**path, value }.write(&mut self.to_stdout);
+                        Out { raw: self.raw, path: &**path, value }
+                            .write(&mut self.to_stdout);
                         if self.oneshot {
                             if let Some(path) = self.paths.get(&id).cloned() {
                                 self.remove_subscription(&path);
