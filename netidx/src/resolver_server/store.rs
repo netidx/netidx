@@ -42,6 +42,19 @@ pub(super) const MAX_WRITE_BATCH: usize = 100_000;
 pub(super) const MAX_READ_BATCH: usize = 1_000_000;
 pub(super) const GC_THRESHOLD: usize = 100_000;
 
+fn with_trailing<R, F: FnOnce(&str) -> R>(p: &str, f: F) -> R {
+    use std::{cell::RefCell, fmt::Write};
+    thread_local! {
+        static TMP: RefCell<String> = RefCell::new(String::new());
+    }
+    TMP.with(|tmp| {
+        let mut tmp = tmp.borrow_mut();
+        tmp.clear();
+        write!(&mut *tmp, "{}/", p).unwrap();
+        f(&*tmp)
+    })
+}
+
 // We hashcons the address sets because on average a publisher should
 // publish many paths.
 #[derive(Debug)]
@@ -154,17 +167,20 @@ impl Store {
                 save = p == "/"
                     || self.published_by_path.contains_key(p)
                     || self.children.contains_key(p)
-                    || self
-                        .published_by_level
-                        .get(&(n + 1))
-                        .map(|l| {
-                            let mut r = l.range::<str, (Bound<&str>, Bound<&str>)>((
-                                Excluded(p),
-                                Unbounded,
-                            ));
-                            r.next().map(|(o, _)| Path::is_parent(p, o)).unwrap_or(false)
-                        })
-                        .unwrap_or(false);
+                    || with_trailing(p, |tmp| {
+                        self.published_by_level
+                            .get(&(n + 1))
+                            .map(|l| {
+                                let mut r = l.range::<str, (Bound<&str>, Bound<&str>)>((
+                                    Excluded(tmp),
+                                    Unbounded,
+                                ));
+                                r.next()
+                                    .map(|(o, _)| Path::is_parent(p, o))
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false)
+                    });
             }
             if save {
                 let m = self.published_by_level.entry(n).or_insert_with(BTreeMap::new);
@@ -527,20 +543,13 @@ impl Store {
     }
 
     pub(super) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
-        use std::{cell::RefCell, fmt::Write};
-        thread_local! {
-            static TMP: RefCell<String> = RefCell::new(String::new());
-        }
-        TMP.with(|tmp| {
-            let mut tmp = tmp.borrow_mut();
-            tmp.clear();
-            write!(&mut *tmp, "{}/", parent).unwrap();
+        with_trailing(&*parent, |tmp| {
             let n = Path::levels(parent);
             let mut paths = PATH_POOL.take();
             if let Some(l) = self.published_by_level.get(&(n + 1)) {
                 paths.extend(
                     l.range::<str, (Bound<&str>, Bound<&str>)>((
-                        Excluded(tmp.as_str()),
+                        Excluded(tmp),
                         Unbounded,
                     ))
                     .map(|(p, _)| p)
@@ -553,27 +562,20 @@ impl Store {
     }
 
     pub(super) fn list_matching(&self, pat: &GlobSet) -> Pooled<Vec<Path>> {
-        use std::{cell::RefCell, fmt::Write};
-        thread_local! {
-            static TMP: RefCell<String> = RefCell::new(String::new());
-        }
-        TMP.with(|tmp| {
-            let mut tmp = tmp.borrow_mut();
-            let mut paths = PATH_POOL.take();
-            let mut cur: Option<&str> = None;
-            for glob in pat.iter() {
-                if !cur.map(|p| Path::is_parent(p, glob.base())).unwrap_or(false) {
-                    let base = glob.base();
-                    let mut n = Path::levels(base) + 1;
-                    tmp.clear();
-                    write!(&mut *tmp, "{}/", base).unwrap();
+        let mut paths = PATH_POOL.take();
+        let mut cur: Option<&str> = None;
+        for glob in pat.iter() {
+            if !cur.map(|p| Path::is_parent(p, glob.base())).unwrap_or(false) {
+                let base = glob.base();
+                let mut n = Path::levels(base) + 1;
+                with_trailing(&*base, |tmp| {
                     while glob.scope().contains(n) {
                         match self.published_by_level.get(&n) {
                             None => break,
                             Some(l) => {
                                 let iter = l
                                     .range::<str, (Bound<&str>, Bound<&str>)>((
-                                        Excluded(&*tmp),
+                                        Excluded(tmp),
                                         Unbounded,
                                     ))
                                     .map(|(p, _)| p)
@@ -592,11 +594,11 @@ impl Store {
                         }
                         n += 1;
                     }
-                }
-                cur = Some(glob.base());
+                })
             }
-            paths
-        })
+            cur = Some(glob.base());
+        }
+        paths
     }
 
     pub(super) fn get_change_nr(&self, path: &Path) -> Z64 {
