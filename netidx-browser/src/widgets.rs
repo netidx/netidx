@@ -943,6 +943,10 @@ impl BWidget for Image {
     fn root(&self) -> Option<&gtk::Widget> {
         Some(self.root.upcast_ref())
     }
+
+    fn set_visible(&self, v: bool) {
+        self.image.set_visible(v);
+    }
 }
 
 #[derive(Debug)]

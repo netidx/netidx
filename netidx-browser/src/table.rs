@@ -597,8 +597,7 @@ impl RaeifiedTable {
             destroyed: Cell::new(false),
             columns_autosizing: Rc::new(Cell::new(false)),
         }));
-        t.view()
-            .connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
+        t.view().connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
         if t.0.column_widths.borrow().len() > 1000 {
             let cols =
                 t.0.descriptor.cols.iter().map(|c| c.0.clone()).collect::<FxHashSet<_>>();
@@ -629,8 +628,7 @@ impl RaeifiedTable {
         t.view().connect_row_activated(
             clone!(@weak t => move |_, p, _| t.handle_row_activated(p)),
         );
-        t.view()
-            .connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
+        t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         t.0.root.vadjustment().connect_value_changed(clone!(@weak t => move |_| {
             idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
                 t.update_subscriptions();
