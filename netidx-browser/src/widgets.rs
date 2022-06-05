@@ -1112,7 +1112,7 @@ impl BWidget for Scale {
 pub(super) struct ProgressBar {
     progress: gtk::ProgressBar,
     ellipsize: BSNode,
-    fraction: BSNode,
+    fraction: Rc<RefCell<BSNode>>,
     pulse: BSNode,
     text: BSNode,
     show_text: BSNode,
@@ -1127,16 +1127,24 @@ impl ProgressBar {
     ) -> Self {
         let progress = gtk::ProgressBar::new();
         hover_path(&progress, &selected_path, "fraction", &spec.fraction);
-        let ellipsize = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.ellipsize);
-        let fraction = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.fraction);
+        let ellipsize =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.ellipsize);
+        let fraction = Rc::new(RefCell::new(BSNode::compile(
+            &mut *ctx.borrow_mut(),
+            scope.clone(),
+            spec.fraction,
+        )));
         let pulse = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.pulse);
         let text = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.text);
         let show_text = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.show_text);
         Self::set_ellipsize(&progress, ellipsize.current());
-        Self::set_fraction(&progress, fraction.current());
+        Self::set_fraction(&progress, fraction.borrow().current());
         Self::set_pulse(&progress, pulse.current());
         Self::set_text(&progress, text.current());
         Self::set_show_text(&progress, show_text.current());
+        progress.connect_show(clone!(@strong fraction => move |progress| {
+            Self::set_fraction(&progress, fraction.borrow().current());
+        }));
         Self { progress, ellipsize, fraction, pulse, text, show_text }
     }
 
@@ -1179,7 +1187,7 @@ impl BWidget for ProgressBar {
         event: &vm::Event<LocalEvent>,
     ) {
         Self::set_ellipsize(&self.progress, self.ellipsize.update(ctx, event));
-        Self::set_fraction(&self.progress, self.fraction.update(ctx, event));
+        Self::set_fraction(&self.progress, self.fraction.borrow_mut().update(ctx, event));
         Self::set_pulse(&self.progress, self.pulse.update(ctx, event));
         Self::set_text(&self.progress, self.text.update(ctx, event));
         Self::set_show_text(&self.progress, self.show_text.update(ctx, event));

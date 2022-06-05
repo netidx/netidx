@@ -193,9 +193,11 @@ impl WidgetProps {
             scope.clone(),
             &spec.borrow().as_ref().unwrap_or(&DEFAULT_PROPS).sensitive,
             clone!(@strong spec, @strong on_change => move |e| {
-                let mut spec = spec.borrow_mut();
-                let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
-                spec.sensitive = e;
+                {
+                    let mut spec = spec.borrow_mut();
+                    let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
+                    spec.sensitive = e;
+                }
                 on_change()
             }),
         );
@@ -206,9 +208,11 @@ impl WidgetProps {
             scope.clone(),
             &spec.borrow().as_ref().unwrap_or(&DEFAULT_PROPS).visible,
             clone!(@strong spec, @strong on_change => move |e| {
-                let mut spec = spec.borrow_mut();
-                let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
-                spec.visible = e;
+                {
+                    let mut spec = spec.borrow_mut();
+                    let spec = spec.get_or_insert(DEFAULT_PROPS.clone());
+                    spec.visible = e;
+                }
                 on_change()
             }),
         );
