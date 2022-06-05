@@ -268,7 +268,11 @@ trait BWidget {
 
     fn set_visible(&self, v: bool) {
         if let Some(w) = self.root() {
-            w.set_visible(v);
+            if v {
+                w.show()
+            } else {
+                w.hide()
+            }
         }
     }
 

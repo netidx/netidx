@@ -551,6 +551,7 @@ impl RaeifiedTable {
             column_filter,
         );
         let view = TreeView::new();
+        view.set_no_show_all(true);
         root.add(&view);
         view.selection().set_mode(SelectionMode::None);
         let vector_mode = descriptor.cols.len() == 0;
@@ -596,7 +597,8 @@ impl RaeifiedTable {
             destroyed: Cell::new(false),
             columns_autosizing: Rc::new(Cell::new(false)),
         }));
-        t.view().connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
+        t.view()
+            .connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
         if t.0.column_widths.borrow().len() > 1000 {
             let cols =
                 t.0.descriptor.cols.iter().map(|c| c.0.clone()).collect::<FxHashSet<_>>();
@@ -627,7 +629,8 @@ impl RaeifiedTable {
         t.view().connect_row_activated(
             clone!(@weak t => move |_, p, _| t.handle_row_activated(p)),
         );
-        t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
+        t.view()
+            .connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         t.0.root.vadjustment().connect_value_changed(clone!(@weak t => move |_| {
             idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
                 t.update_subscriptions();
@@ -670,7 +673,6 @@ impl RaeifiedTable {
                 }
             }
         }
-        t.0.root.show_all();
         t
     }
 
@@ -940,7 +942,7 @@ impl RaeifiedTable {
     }
 
     pub(super) fn update_subscriptions(&self) {
-        if self.0.destroyed.get() {
+        if self.0.destroyed.get() || !self.view().is_visible() {
             return;
         }
         let ncols = if self.0.vector_mode { 1 } else { self.0.descriptor.cols.len() };
@@ -1089,15 +1091,17 @@ impl RaeifiedTable {
     }
 
     fn visible_changed(&self) {
-        let (mut start, end) = match self.view().visible_range() {
-            None => return,
-            Some((s, e)) => (s, e),
-        };
-        while start <= end {
-            if let Some(i) = self.store().iter(&start) {
-                self.store().row_changed(&start, &i);
+        if self.view().is_visible() {
+            let (mut start, end) = match self.view().visible_range() {
+                None => return,
+                Some((s, e)) => (s, e),
+            };
+            while start <= end {
+                if let Some(i) = self.store().iter(&start) {
+                    self.store().row_changed(&start, &i);
+                }
+                start.next();
             }
-            start.next();
         }
     }
 
@@ -1150,6 +1154,7 @@ pub(super) struct Table {
     sort_mode_expr: BSNode,
     sort_mode: RefCell<Result<SortSpec, String>>,
     state: RefCell<TableState>,
+    visible: Cell<bool>,
 }
 
 impl Table {
@@ -1272,6 +1277,7 @@ impl Table {
             sort_mode,
             sort_mode_expr,
             state,
+            visible: Cell::new(true),
         }
     }
 
@@ -1343,7 +1349,13 @@ impl Table {
             descriptor.clone(),
             self.selected_path.clone(),
         );
-        table.update_subscriptions();
+        if self.visible.get() {
+            table.view().show();
+        }
+        idle_add_local(clone!(@strong table => move || {
+            table.update_subscriptions();
+            Continue(false)
+        }));
         self.clear_selection(ctx);
         *state = TableState::Raeified(table);
     }
@@ -1439,15 +1451,10 @@ impl BWidget for Table {
         self.on_select.borrow_mut().update(ctx, event);
         self.on_edit.borrow_mut().update(ctx, event);
         self.on_header_click.borrow_mut().update(ctx, event);
-        match &*self.state.borrow() {
-            TableState::Empty | TableState::Resolving(_) | TableState::Refresh { .. } => {
-                ()
-            }
-            TableState::Raeified(table) => table.update(ctx, waits, event),
-        }
         let state = &mut *self.state.borrow_mut();
         match state {
-            TableState::Empty | TableState::Raeified(_) => (),
+            TableState::Empty => (),
+            TableState::Raeified(table) => table.update(ctx, waits, event),
             TableState::Refresh { descriptor, path } => {
                 match (path.take(), descriptor.take()) {
                     (Some(path), Some(descriptor)) => {
@@ -1472,5 +1479,25 @@ impl BWidget for Table {
 
     fn root(&self) -> Option<&gtk::Widget> {
         Some(self.root.upcast_ref())
+    }
+
+    fn set_visible(&self, v: bool) {
+        self.visible.set(v);
+        match &mut *self.state.borrow_mut() {
+            TableState::Raeified(t) => {
+                if v {
+                    t.view().show();
+                    idle_add_local(clone!(@strong t => move || {
+                        t.update_subscriptions();
+                        Continue(false)
+                    }));
+                } else {
+                    t.view().hide()
+                }
+            }
+            TableState::Empty | TableState::Refresh { .. } | TableState::Resolving(_) => {
+                ()
+            }
+        }
     }
 }

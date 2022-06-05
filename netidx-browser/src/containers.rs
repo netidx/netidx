@@ -29,6 +29,7 @@ impl Paned {
     ) -> Self {
         let scope = scope.append("p");
         let root = gtk::Paned::new(dir_to_gtk(&spec.direction));
+        root.set_no_show_all(true);
         root.set_wide_handle(spec.wide_handle);
         let first_child = spec.first_child.map(|child| {
             let w =
@@ -105,6 +106,7 @@ impl Frame {
         let label_val = label.current().and_then(|v| v.get_as::<Chars>());
         let label_val = label_val.as_ref().map(|s| s.as_ref());
         let root = gtk::Frame::new(label_val);
+        root.set_no_show_all(true);
         root.set_label_align(spec.label_align_horizontal, spec.label_align_vertical);
         let child = spec.child.map(|child| {
             let w =
@@ -168,6 +170,7 @@ impl Notebook {
     ) -> Self {
         let scope = scope.append("n");
         let root = gtk::Notebook::new();
+        root.set_no_show_all(true);
         let page = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.page);
         let on_switch_page = Rc::new(RefCell::new(BSNode::compile(
             &mut *ctx.borrow_mut(),
@@ -278,6 +281,7 @@ impl Box {
         }
         let scope = scope.append("b");
         let root = gtk::Box::new(dir_to_gtk(&spec.direction), 0);
+        root.set_no_show_all(true);
         root.set_homogeneous(spec.homogeneous);
         root.set_spacing(spec.spacing as i32);
         let mut children = Vec::new();
@@ -368,6 +372,7 @@ impl Grid {
     ) -> Self {
         let scope = scope.append("g");
         let root = gtk::Grid::new();
+        root.set_no_show_all(true);
         let attach_child = |spec: view::GridChild,
                             max_height: &mut i32,
                             i: &mut i32,

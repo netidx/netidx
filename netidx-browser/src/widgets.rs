@@ -144,6 +144,7 @@ impl Button {
         selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
+        button.set_no_show_all(true);
         let (label, image, on_click) = {
             let mut ctx = ctx.borrow_mut();
             let ctx = &mut ctx;
@@ -227,6 +228,7 @@ impl LinkButton {
             spec.on_activate_link.clone(),
         )));
         let button = gtk::LinkButton::new("file:///");
+        button.set_no_show_all(true);
         Self::set_uri(&button, uri.current());
         Self::set_label(&button, label.current());
         hover_path(&button, &selected_path, "on_activate_link", &spec.on_activate_link);
@@ -305,6 +307,7 @@ impl Label {
         let selectable =
             BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.selectable.clone());
         let label = gtk::Label::new(None);
+        label.set_no_show_all(true);
         Self::set_text(&label, text.current());
         Self::set_single_line(&label, single_line.current());
         Self::set_selectable(&label, selectable.current());
@@ -419,6 +422,7 @@ where
         new: F,
     ) -> Self {
         let button = new();
+        button.set_no_show_all(true);
         let we_set = Rc::new(Cell::new(false));
         let value = Rc::new(RefCell::new(BSNode::compile(
             &mut *ctx.borrow_mut(),
@@ -537,6 +541,7 @@ impl ComboBox {
         selected_path: gtk::Label,
     ) -> Self {
         let combo = gtk::ComboBoxText::new();
+        combo.set_no_show_all(true);
         let root = gtk::EventBox::new();
         root.add(&combo);
         let choices =
@@ -672,6 +677,7 @@ impl Switch {
         selected_path: gtk::Label,
     ) -> Self {
         let switch = gtk::Switch::new();
+        switch.set_no_show_all(true);
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
         let value = Rc::new(RefCell::new(BSNode::compile(
@@ -787,6 +793,7 @@ impl Entry {
             spec.on_activate.clone(),
         )));
         let entry = gtk::Entry::new();
+        entry.set_no_show_all(true);
         Self::set_text(&entry, text.borrow().current());
         entry.set_icon_activatable(gtk::EntryIconPosition::Secondary, true);
         entry.connect_activate(clone!(
@@ -885,6 +892,7 @@ impl Image {
     ) -> Self {
         let root = gtk::EventBox::new();
         let image = gtk::Image::new();
+        image.set_no_show_all(true);
         root.add(&image);
         let image_spec =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.spec.clone());
@@ -987,6 +995,7 @@ impl Scale {
             containers::dir_to_gtk(&spec.direction),
             gtk::Adjustment::NONE,
         );
+        scale.set_no_show_all(true);
         let draw_value = BSNode::compile(
             &mut *ctx.borrow_mut(),
             scope.clone(),
@@ -1126,6 +1135,7 @@ impl ProgressBar {
         selected_path: gtk::Label,
     ) -> Self {
         let progress = gtk::ProgressBar::new();
+        progress.set_no_show_all(true);
         hover_path(&progress, &selected_path, "fraction", &spec.fraction);
         let ellipsize =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.ellipsize);
