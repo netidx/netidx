@@ -1417,3 +1417,56 @@ impl Scale {
         self.spec.borrow().clone()
     }
 }
+
+#[derive(Clone)]
+pub(super) struct ProgressBar {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::ProgressBar>>,
+    _dbg_ellipsize: DbgExpr,
+    _dbg_fraction: DbgExpr,
+    _dbg_pulse: DbgExpr,
+    _dbg_text: DbgExpr,
+    _dbg_show_text: DbgExpr,
+}
+
+impl ProgressBar {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Scope,
+        spec: view::ProgressBar,
+    ) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let (l, e, _dbg_ellipsize) =
+            expr!(ctx, "Ellipsize:", scope, spec, on_change, ellipsize);
+        root.add((l, e));
+        let (l, e, _dbg_fraction) =
+            expr!(ctx, "Fraction:", scope, spec, on_change, fraction);
+        root.add((l, e));
+        let (l, e, _dbg_pulse) = expr!(ctx, "Pulse:", scope, spec, on_change, pulse);
+        root.add((l, e));
+        let (l, e, _dbg_text) = expr!(ctx, "Text:", scope, spec, on_change, text);
+        root.add((l, e));
+        let (l, e, _dbg_show_text) =
+            expr!(ctx, "Show Text:", scope, spec, on_change, show_text);
+        root.add((l, e));
+        Self {
+            root,
+            spec,
+            _dbg_ellipsize,
+            _dbg_fraction,
+            _dbg_pulse,
+            _dbg_text,
+            _dbg_show_text,
+        }
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+
+    pub(super) fn spec(&self) -> view::ProgressBar {
+        self.spec.borrow().clone()
+    }
+}

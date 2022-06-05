@@ -450,7 +450,7 @@ pub enum WidgetKind {
     ComboBox(ComboBox),
     Entry(Entry),
 //    SearchEntry(Entry),
-//    ProgressBar(ProgressBar),
+    ProgressBar(ProgressBar),
     Scale(Scale),
     Image(Image),
     Frame(Frame),

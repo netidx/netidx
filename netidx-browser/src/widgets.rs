@@ -1108,3 +1108,84 @@ impl BWidget for Scale {
         Some(self.scale.upcast_ref())
     }
 }
+
+pub(super) struct ProgressBar {
+    progress: gtk::ProgressBar,
+    ellipsize: BSNode,
+    fraction: BSNode,
+    pulse: BSNode,
+    text: BSNode,
+    show_text: BSNode,
+}
+
+impl ProgressBar {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::ProgressBar,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let progress = gtk::ProgressBar::new();
+        hover_path(&progress, &selected_path, "fraction", &spec.fraction);
+        let ellipsize = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.ellipsize);
+        let fraction = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.fraction);
+        let pulse = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.pulse);
+        let text = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.text);
+        let show_text = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.show_text);
+        Self::set_ellipsize(&progress, ellipsize.current());
+        Self::set_fraction(&progress, fraction.current());
+        Self::set_pulse(&progress, pulse.current());
+        Self::set_text(&progress, text.current());
+        Self::set_show_text(&progress, show_text.current());
+        Self { progress, ellipsize, fraction, pulse, text, show_text }
+    }
+
+    fn set_ellipsize(progress: &gtk::ProgressBar, v: Option<Value>) {
+        if let Some(mode) = v.map(parse_ellipsize) {
+            progress.set_ellipsize(mode);
+        }
+    }
+
+    fn set_fraction(progress: &gtk::ProgressBar, v: Option<Value>) {
+        if let Some(f) = v.and_then(|v| v.cast_to::<f64>().ok()) {
+            progress.set_fraction(f);
+        }
+    }
+
+    fn set_pulse(progress: &gtk::ProgressBar, v: Option<Value>) {
+        if let Some(_) = v {
+            progress.pulse();
+        }
+    }
+
+    fn set_text(progress: &gtk::ProgressBar, v: Option<Value>) {
+        if let Some(text) = v.and_then(|v| v.cast_to::<Chars>().ok()) {
+            progress.set_text(Some(&*text));
+        }
+    }
+
+    fn set_show_text(progress: &gtk::ProgressBar, v: Option<Value>) {
+        if let Some(show) = v.and_then(|v| v.cast_to::<bool>().ok()) {
+            progress.set_show_text(show);
+        }
+    }
+}
+
+impl BWidget for ProgressBar {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
+        Self::set_ellipsize(&self.progress, self.ellipsize.update(ctx, event));
+        Self::set_fraction(&self.progress, self.fraction.update(ctx, event));
+        Self::set_pulse(&self.progress, self.pulse.update(ctx, event));
+        Self::set_text(&self.progress, self.text.update(ctx, event));
+        Self::set_show_text(&self.progress, self.show_text.update(ctx, event));
+    }
+
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.progress.upcast_ref())
+    }
+}

@@ -18,20 +18,18 @@ use util::{parse_entry, TwoColGrid};
 type OnChange = Rc<dyn Fn()>;
 type Scope = Rc<RefCell<Path>>;
 
+fn ce(v: Value) -> expr::Expr {
+    expr::ExprKind::Constant(v).to_expr()
+}
+
 fn label_with_txt(text: &'static str) -> view::Widget {
-    let text = Value::String(Chars::from(text));
-    let text = expr::ExprKind::Constant(text).to_expr();
-    let width = expr::ExprKind::Constant(Value::Null).to_expr();
-    let ellipsize = expr::ExprKind::Constant(Value::Null).to_expr();
-    let selectable = expr::ExprKind::Constant(Value::True).to_expr();
-    let single_line = expr::ExprKind::Constant(Value::True).to_expr();
     view::Widget {
         kind: view::WidgetKind::Label(view::Label {
-            text,
-            width,
-            ellipsize,
-            selectable,
-            single_line,
+            text: ce(Value::String(Chars::from(text))),
+            width: ce(Value::Null),
+            ellipsize: ce(Value::Null),
+            selectable: ce(Value::True),
+            single_line: ce(Value::True),
         }),
         props: None,
     }
@@ -238,6 +236,7 @@ enum WidgetKind {
     ToggleButton(widgets::ToggleButton),
     CheckButton(widgets::ToggleButton),
     Scale(widgets::Scale),
+    ProgressBar(widgets::ProgressBar),
     Switch(widgets::Switch),
     ComboBox(widgets::ComboBox),
     Entry(widgets::Entry),
@@ -265,6 +264,7 @@ impl WidgetKind {
             WidgetKind::ToggleButton(w) => Some(w.root()),
             WidgetKind::CheckButton(w) => Some(w.root()),
             WidgetKind::Switch(w) => Some(w.root()),
+            WidgetKind::ProgressBar(w) => Some(w.root()),
             WidgetKind::ComboBox(w) => Some(w.root()),
             WidgetKind::Scale(w) => Some(w.root()),
             WidgetKind::Entry(w) => Some(w.root()),
@@ -414,6 +414,16 @@ impl Widget {
                 )),
                 Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
+            view::Widget { props, kind: view::WidgetKind::ProgressBar(s) } => (
+                "ProgressBar",
+                WidgetKind::ProgressBar(widgets::ProgressBar::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
+            ),
             view::Widget { props, kind: view::WidgetKind::Entry(s) } => (
                 "Entry",
                 WidgetKind::Entry(widgets::Entry::new(
@@ -537,6 +547,7 @@ impl Widget {
             WidgetKind::Switch(w) => view::WidgetKind::Switch(w.spec()),
             WidgetKind::ComboBox(w) => view::WidgetKind::ComboBox(w.spec()),
             WidgetKind::Scale(w) => view::WidgetKind::Scale(w.spec()),
+            WidgetKind::ProgressBar(w) => view::WidgetKind::ProgressBar(w.spec()),
             WidgetKind::Entry(w) => view::WidgetKind::Entry(w.spec()),
             WidgetKind::LinePlot(w) => view::WidgetKind::LinePlot(w.spec()),
             WidgetKind::Frame(w) => view::WidgetKind::Frame(w.spec()),
@@ -563,63 +574,47 @@ impl Widget {
         }
         match name {
             None => table(),
-            Some("BScript") => widget(view::WidgetKind::BScript(
-                expr::ExprKind::Constant(Value::U64(42)).to_expr(),
-            )),
+            Some("BScript") => widget(view::WidgetKind::BScript(ce(Value::U64(42)))),
             Some("Table") => table(),
             Some("Image") => widget(view::WidgetKind::Image(view::Image {
-                spec: expr::ExprKind::Constant(Value::from("media-floppy-symbolic"))
-                    .to_expr(),
-                on_click: expr::ExprKind::Constant(Value::Null).to_expr(),
+                spec: ce(Value::from("media-floppy-symbolic")),
+                on_click: ce(Value::Null),
             })),
             Some("Label") => label_with_txt("static label"),
-            Some("Button") => {
-                let l = Chars::from("click me!");
-                widget(view::WidgetKind::Button(view::Button {
-                    label: expr::ExprKind::Constant(Value::String(l)).to_expr(),
-                    image: expr::ExprKind::Constant(Value::Null).to_expr(),
-                    on_click: expr::ExprKind::Apply {
-                        args: vec![
-                            expr::ExprKind::Constant(Value::from("/somewhere/in/netidx"))
-                                .to_expr(),
-                            expr::ExprKind::Apply {
-                                args: vec![],
-                                function: "event".into(),
-                            }
+            Some("Button") => widget(view::WidgetKind::Button(view::Button {
+                label: ce(Value::String(Chars::from("click me!"))),
+                image: ce(Value::Null),
+                on_click: expr::ExprKind::Apply {
+                    args: vec![
+                        ce(Value::from("/somewhere/in/netidx")),
+                        expr::ExprKind::Apply { args: vec![], function: "event".into() }
                             .to_expr(),
-                        ],
-                        function: "store".into(),
-                    }
-                    .to_expr(),
-                }))
-            }
+                    ],
+                    function: "store".into(),
+                }
+                .to_expr(),
+            })),
             Some("LinkButton") => {
-                let u = Chars::from("file:///");
-                let l = Chars::from("click me!");
                 widget(view::WidgetKind::LinkButton(view::LinkButton {
-                    uri: expr::ExprKind::Constant(Value::String(u)).to_expr(),
-                    label: expr::ExprKind::Constant(Value::String(l)).to_expr(),
-                    on_activate_link: expr::ExprKind::Constant(Value::Null).to_expr(),
+                    uri: ce(Value::String(Chars::from("file:///"))),
+                    label: ce(Value::String(Chars::from("click me!"))),
+                    on_activate_link: ce(Value::Null),
                 }))
             }
             Some("ToggleButton") | Some("CheckButton") => {
                 let l = Chars::from("click me!");
                 let tb = view::ToggleButton {
-                    label: expr::ExprKind::Constant(Value::String(l)).to_expr(),
-                    image: expr::ExprKind::Constant(Value::Null).to_expr(),
+                    label: ce(Value::String(l)),
+                    image: ce(Value::Null),
                     toggle: view::Switch {
                         value: expr::ExprKind::Apply {
-                            args: vec![expr::ExprKind::Constant(Value::from(
-                                "/somewhere",
-                            ))
-                            .to_expr()],
+                            args: vec![ce(Value::from("/somewhere"))],
                             function: "load".into(),
                         }
                         .to_expr(),
                         on_change: expr::ExprKind::Apply {
                             args: vec![
-                                expr::ExprKind::Constant(Value::from("/somewhere"))
-                                    .to_expr(),
+                                ce(Value::from("/somewhere")),
                                 expr::ExprKind::Apply {
                                     args: vec![],
                                     function: "event".into(),
@@ -641,15 +636,13 @@ impl Widget {
             }
             Some("Switch") => widget(view::WidgetKind::Switch(view::Switch {
                 value: expr::ExprKind::Apply {
-                    args: vec![
-                        expr::ExprKind::Constant(Value::from("/somewhere")).to_expr()
-                    ],
+                    args: vec![ce(Value::from("/somewhere"))],
                     function: "load".into(),
                 }
                 .to_expr(),
                 on_change: expr::ExprKind::Apply {
                     args: vec![
-                        expr::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
+                        ce(Value::from("/somewhere")),
                         expr::ExprKind::Apply { args: vec![], function: "event".into() }
                             .to_expr(),
                     ],
@@ -658,23 +651,21 @@ impl Widget {
                 .to_expr(),
             })),
             Some("ComboBox") => {
-                let choices: Value = vec![
+                let choices = ce(vec![
                     vec![Value::U64(1), Value::from("One")],
                     vec![Value::U64(2), Value::from("Two")],
                 ]
-                .into();
+                .into());
                 widget(view::WidgetKind::ComboBox(view::ComboBox {
-                    choices: expr::ExprKind::Constant(choices).to_expr(),
+                    choices,
                     selected: expr::ExprKind::Apply {
-                        args: vec![
-                            expr::ExprKind::Constant(Value::from("/somewhere")).to_expr()
-                        ],
+                        args: vec![ce(Value::from("/somewhere"))],
                         function: "load".into(),
                     }
                     .to_expr(),
                     on_change: expr::ExprKind::Apply {
                         args: vec![
-                            expr::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
+                            ce(Value::from("/somewhere")),
                             expr::ExprKind::Apply {
                                 args: vec![],
                                 function: "event".into(),
@@ -688,19 +679,26 @@ impl Widget {
             }
             Some("Scale") => widget(view::WidgetKind::Scale(view::Scale {
                 direction: view::Direction::Horizontal,
-                draw_value: expr::ExprKind::Constant(Value::True).to_expr(),
-                marks: expr::ExprKind::Constant(Value::Null).to_expr(),
-                has_origin: expr::ExprKind::Constant(Value::True).to_expr(),
-                value: expr::ExprKind::Constant((0f64).into()).to_expr(),
-                min: expr::ExprKind::Constant((0f64).into()).to_expr(),
-                max: expr::ExprKind::Constant((1f64).into()).to_expr(),
-                on_change: expr::ExprKind::Constant(Value::Null).to_expr(),
+                draw_value: ce(Value::True),
+                marks: ce(Value::Null),
+                has_origin: ce(Value::True),
+                value: ce((0f64).into()),
+                min: ce((0f64).into()),
+                max: ce((1f64).into()),
+                on_change: ce(Value::Null),
             })),
+            Some("ProgressBar") => {
+                widget(view::WidgetKind::ProgressBar(view::ProgressBar {
+                    ellipsize: ce("none".into()),
+                    fraction: ce((0f64).into()),
+                    pulse: ce(Value::Null),
+                    text: ce(Value::Null),
+                    show_text: ce(Value::False),
+                }))
+            }
             Some("Entry") => widget(view::WidgetKind::Entry(view::Entry {
                 text: expr::ExprKind::Apply {
-                    args: vec![
-                        expr::ExprKind::Constant(Value::from("/somewhere")).to_expr()
-                    ],
+                    args: vec![ce(Value::from("/somewhere"))],
                     function: "load".into(),
                 }
                 .to_expr(),
@@ -708,14 +706,14 @@ impl Widget {
                     args: vec![
                         expr::ExprKind::Apply { args: vec![], function: "event".into() }
                             .to_expr(),
-                        expr::ExprKind::Constant(Value::True).to_expr(),
+                        ce(Value::True),
                     ],
                     function: "sample".into(),
                 }
                 .to_expr(),
                 on_activate: expr::ExprKind::Apply {
                     args: vec![
-                        expr::ExprKind::Constant(Value::from("/somewhere")).to_expr(),
+                        ce(Value::from("/somewhere")),
                         expr::ExprKind::Apply { args: vec![], function: "event".into() }
                             .to_expr(),
                     ],
@@ -740,17 +738,17 @@ impl Widget {
                     fill: Some(view::RGB { r: 1., g: 1., b: 1. }),
                     margin: 3,
                     label_area: 50,
-                    x_min: expr::ExprKind::Constant(Value::Null).to_expr(),
-                    x_max: expr::ExprKind::Constant(Value::Null).to_expr(),
-                    y_min: expr::ExprKind::Constant(Value::Null).to_expr(),
-                    y_max: expr::ExprKind::Constant(Value::Null).to_expr(),
-                    keep_points: expr::ExprKind::Constant(Value::U64(256)).to_expr(),
+                    x_min: ce(Value::Null),
+                    x_max: ce(Value::Null),
+                    y_min: ce(Value::Null),
+                    y_max: ce(Value::Null),
+                    keep_points: ce(Value::U64(256)),
                     series: Vec::new(),
                 });
                 view::Widget { kind, props }
             }
             Some("Frame") => widget(view::WidgetKind::Frame(view::Frame {
-                label: expr::ExprKind::Constant(Value::Null).to_expr(),
+                label: ce(Value::Null),
                 label_align_horizontal: 0.,
                 label_align_vertical: 0.5,
                 child: None,
@@ -800,8 +798,8 @@ impl Widget {
                 tabs_scrollable: false,
                 tabs_popup: false,
                 children: vec![],
-                page: expr::ExprKind::Constant(Value::Null).to_expr(),
-                on_switch_page: expr::ExprKind::Constant(Value::Null).to_expr(),
+                page: ce(Value::Null),
+                on_switch_page: ce(Value::Null),
             })),
             _ => unreachable!(),
         }
@@ -824,6 +822,7 @@ impl Widget {
             | WidgetKind::Switch(_)
             | WidgetKind::ComboBox(_)
             | WidgetKind::Scale(_)
+            | WidgetKind::ProgressBar(_)
             | WidgetKind::Entry(_)
             | WidgetKind::LinePlot(_)
             | WidgetKind::Frame(_)
@@ -1262,6 +1261,7 @@ impl Editor {
                 | WidgetKind::Switch(_)
                 | WidgetKind::ComboBox(_)
                 | WidgetKind::Scale(_)
+                | WidgetKind::ProgressBar(_)
                 | WidgetKind::Entry(_)
                 | WidgetKind::LinePlot(_) => scope.clone(),
             };
@@ -1379,6 +1379,7 @@ impl Editor {
             | view::WidgetKind::Switch(_)
             | view::WidgetKind::ComboBox(_)
             | view::WidgetKind::Scale(_)
+            | view::WidgetKind::ProgressBar(_)
             | view::WidgetKind::Entry(_)
             | view::WidgetKind::LinePlot(_) => (),
         }
@@ -1481,6 +1482,7 @@ impl Editor {
                     | view::WidgetKind::Switch(_)
                     | view::WidgetKind::ComboBox(_)
                     | view::WidgetKind::Scale(_)
+                    | view::WidgetKind::ProgressBar(_)
                     | view::WidgetKind::Entry(_)
                     | view::WidgetKind::LinePlot(_) => (),
                 };
@@ -1511,6 +1513,7 @@ impl Editor {
                 | WidgetKind::Switch(_)
                 | WidgetKind::ComboBox(_)
                 | WidgetKind::Scale(_)
+                | WidgetKind::ProgressBar(_)
                 | WidgetKind::Entry(_)
                 | WidgetKind::LinePlot(_) => {
                     path.insert(0, WidgetPath::Leaf);

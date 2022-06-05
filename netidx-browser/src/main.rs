@@ -340,6 +340,12 @@ impl Widget {
                 selected_path,
                 || gtk::CheckButton::new(),
             )),
+            view::WidgetKind::ProgressBar(spec) => Box::new(widgets::ProgressBar::new(
+                ctx,
+                spec,
+                scope.clone(),
+                selected_path
+            )),
             view::WidgetKind::Scale(spec) => {
                 Box::new(widgets::Scale::new(ctx, spec, scope.clone(), selected_path))
             }
