@@ -838,29 +838,30 @@ impl Widget {
     }
 }
 
-static KINDS: [&'static str; 22] = [
-    "BScript",
-    "Table",
-    "Label",
-    "Image",
-    "Button",
-    "LinkButton",
-    "ToggleButton",
-    "CheckButton",
-    "Switch",
-    "ComboBox",
-    "Scale",
-    "Entry",
-    "LinePlot",
-    "Frame",
-    "Paned",
+static KINDS: [&'static str; 23] = [
     "Box",
     "BoxChild",
+    "BScript",
+    "Button",
+    "CheckButton",
+    "ComboBox",
+    "Entry",
+    "Frame",
     "Grid",
     "GridChild",
     "GridRow",
-    "NotebookPage",
+    "Image",
+    "Label",
+    "LinePlot",
+    "LinkButton",
     "Notebook",
+    "NotebookPage",
+    "Paned",
+    "ProgressBar",
+    "Scale",
+    "Switch",
+    "Table",
+    "ToggleButton",
 ];
 
 pub(super) struct Editor {
