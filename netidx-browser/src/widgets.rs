@@ -1,4 +1,4 @@
-use super::{val_to_bool, BSCtx, BSCtxRef, BSNode, BWidget, WVal};
+use super::{val_to_bool, BSCtx, BSCtxRef, BSNode, BWidget, WVal, WidgetPath, util};
 use crate::{bscript::LocalEvent, containers, view};
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
@@ -660,6 +660,12 @@ impl BWidget for ComboBox {
     fn set_sensitive(&self, e: bool) {
         self.combo.set_sensitive(e);
     }
+
+    fn set_highlight(&self, mut path: std::slice::Iter<WidgetPath>, h: bool) {
+        if let Some(WidgetPath::Leaf) = path.next() {
+            util::set_highlight(&self.combo, h);
+        }
+    }
 }
 
 pub(super) struct Switch {
@@ -945,7 +951,18 @@ impl BWidget for Image {
     }
 
     fn set_visible(&self, v: bool) {
+        self.root.set_visible(v);
         self.image.set_visible(v);
+    }
+
+    fn set_sensitive(&self, e: bool) {
+        self.root.set_sensitive(e);
+    }
+
+    fn set_highlight(&self, mut path: std::slice::Iter<crate::WidgetPath>, h: bool) {
+        if let Some(WidgetPath::Leaf) = path.next() {
+            util::set_highlight(&self.image, h)
+        }
     }
 }
 
