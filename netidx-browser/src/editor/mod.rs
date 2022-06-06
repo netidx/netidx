@@ -656,8 +656,8 @@ impl Widget {
             })),
             Some("ComboBox") => {
                 let choices = ce(vec![
-                    vec![Value::U64(1), Value::from("One")],
-                    vec![Value::U64(2), Value::from("Two")],
+                    vec![Value::from("1"), Value::from("One")],
+                    vec![Value::from("2"), Value::from("Two")],
                 ]
                 .into());
                 widget(view::WidgetKind::ComboBox(view::ComboBox {

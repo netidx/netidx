@@ -1,4 +1,4 @@
-use super::{val_to_bool, BSCtx, BSCtxRef, BSNode, BWidget, WVal, WidgetPath, util};
+use super::{util, val_to_bool, BSCtx, BSCtxRef, BSNode, BWidget, WVal, WidgetPath};
 use crate::{bscript::LocalEvent, containers, view};
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
@@ -7,7 +7,6 @@ use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
-use log::warn;
 use netidx::{chars::Chars, path::Path, protocol::value::FromValue, subscriber::Value};
 use netidx_bscript::{expr::Expr, vm};
 use std::{
@@ -557,12 +556,8 @@ impl ComboBox {
             spec.on_change.clone(),
         )));
         let we_set = Rc::new(Cell::new(false));
-        if let Some(choices) = choices.current() {
-            Self::update_choices(&combo, &choices, &selected.borrow().current());
-        }
-        we_set.set(true);
-        Self::update_active(&combo, &selected.borrow().current());
-        we_set.set(false);
+        Self::set_choices(&combo, choices.current());
+        Self::we_set_selected(&we_set, &combo, selected.borrow().current());
         hover_path(&combo, &selected_path, "on_change", &spec.on_change);
         combo.connect_changed(clone!(
             @strong we_set,
@@ -571,18 +566,15 @@ impl ComboBox {
             @strong selected => move |combo| {
             if !we_set.get() {
                 if let Some(id) = combo.active_id() {
-                    if let Ok(idv) = serde_json::from_str::<Value>(id.as_str()) {
-                        on_change.borrow_mut().update(
-                            &mut *ctx.borrow_mut(),
-                            &vm::Event::User(LocalEvent::Event(idv))
-                        );
-                    }
+                    let idv = Value::from(Chars::from(String::from(id)));
+                    on_change.borrow_mut().update(
+                        &mut *ctx.borrow_mut(),
+                        &vm::Event::User(LocalEvent::Event(idv))
+                    );
                 }
                 idle_add_local(clone!(
                     @strong selected, @strong combo, @strong we_set => move || {
-                        we_set.set(true);
-                        Self::update_active(&combo, &selected.borrow().current());
-                        we_set.set(false);
+                        Self::we_set_selected(&we_set, &combo, selected.borrow().current());
                         Continue(false)
                     })
                 );
@@ -591,44 +583,25 @@ impl ComboBox {
         Self { root, combo, choices, selected, on_change, we_set }
     }
 
-    fn update_active(combo: &gtk::ComboBoxText, source: &Option<Value>) {
-        if let Some(source) = source {
-            if let Ok(current) = serde_json::to_string(source) {
-                combo.set_active_id(Some(current.as_str()));
-            }
+    fn set_selected(combo: &gtk::ComboBoxText, v: Option<Value>) {
+        if let Some(id) = v.and_then(|v| v.cast_to::<Chars>().ok()) {
+            combo.set_active_id(Some(&*id));
         }
     }
 
-    fn update_choices(
-        combo: &gtk::ComboBoxText,
-        choices: &Value,
-        source: &Option<Value>,
-    ) {
-        let choices = match choices {
-            Value::String(s) => {
-                match serde_json::from_str::<Vec<(Value, String)>>(&**s) {
-                    Ok(choices) => choices,
-                    Err(e) => {
-                        warn!(
-                            "failed to parse combo choices, source {:?}, {}",
-                            choices, e
-                        );
-                        vec![]
-                    }
-                }
-            }
-            v => {
-                warn!("combo choices wrong type, expected json string not {:?}", v);
-                vec![]
-            }
-        };
-        combo.remove_all();
-        for (id, val) in choices {
-            if let Ok(id) = serde_json::to_string(&id) {
-                combo.append(Some(id.as_str()), val.as_str());
+    fn we_set_selected(we_set: &Cell<bool>, combo: &gtk::ComboBoxText, v: Option<Value>) {
+        we_set.set(true);
+        Self::set_selected(&combo, v);
+        we_set.set(false);
+    }
+
+    fn set_choices(combo: &gtk::ComboBoxText, v: Option<Value>) {
+        if let Some(choices) = v.and_then(|v| v.cast_to::<Vec<(Chars, Chars)>>().ok()) {
+            combo.remove_all();
+            for (id, val) in choices {
+                combo.append(Some(&id.to_string()), &*val);
             }
         }
-        Self::update_active(combo, source)
     }
 }
 
@@ -639,13 +612,13 @@ impl BWidget for ComboBox {
         _waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        self.we_set.set(true);
         self.on_change.borrow_mut().update(ctx, event);
-        Self::update_active(&self.combo, &self.selected.borrow_mut().update(ctx, event));
-        if let Some(new) = self.choices.update(ctx, event) {
-            Self::update_choices(&self.combo, &new, &self.selected.borrow().current());
-        }
-        self.we_set.set(false);
+        Self::set_choices(&self.combo, self.choices.update(ctx, event));
+        Self::we_set_selected(
+            &self.we_set,
+            &self.combo,
+            self.selected.borrow_mut().update(ctx, event),
+        );
     }
 
     fn root(&self) -> Option<&gtk::Widget> {
@@ -658,6 +631,7 @@ impl BWidget for ComboBox {
     }
 
     fn set_sensitive(&self, e: bool) {
+        self.root.set_sensitive(e);
         self.combo.set_sensitive(e);
     }
 
