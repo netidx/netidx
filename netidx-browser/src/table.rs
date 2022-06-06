@@ -1481,6 +1481,7 @@ impl BWidget for Table {
 
     fn set_visible(&self, v: bool) {
         self.visible.set(v);
+        self.root.set_visible(v);
         match &mut *self.state.borrow_mut() {
             TableState::Raeified(t) => {
                 if v {
