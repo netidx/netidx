@@ -3,6 +3,7 @@ use super::{
     BSCtx, BSCtxRef, BSNode, BWidget, WVal,
 };
 use crate::bscript::LocalEvent;
+use anyhow::bail;
 use arcstr::ArcStr;
 use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -20,6 +21,7 @@ use gtk::{
 use indexmap::{IndexMap, IndexSet};
 use netidx::{
     chars::Chars,
+    pack::Z64,
     path::Path,
     pool::Pooled,
     protocol::value::FromValue,
@@ -29,16 +31,16 @@ use netidx::{
 };
 use netidx_bscript::vm;
 use netidx_protocols::view;
+use rand::{thread_rng, Rng};
 use regex::RegexSet;
 use std::{
     cell::{Cell, RefCell},
     cmp::{Ordering, PartialEq},
     collections::{HashMap, HashSet},
+    ops::Deref,
     rc::{Rc, Weak},
     result::{self, Result},
     str::FromStr,
-    sync::Arc,
-    ops::Deref,
 };
 
 struct Subscription {
@@ -155,34 +157,28 @@ impl PartialEq for Filter {
     }
 }
 
-impl Filter {
-    fn new(v: Value) -> Result<Self, String> {
+impl FromValue for Filter {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
         match v {
             Value::Null => Ok(Filter::Auto),
             Value::True => Ok(Filter::All),
             Value::False => Ok(Filter::None),
             Value::Array(a) if a.len() == 2 => {
-                let mode =
-                    a[0].clone().cast_to::<Chars>().map_err(|e| format!("{}", e))?;
+                let mode = a[0].clone().cast_to::<Chars>()?;
                 match &*mode {
                     "include" | "exclude" | "include_match" | "exclude_match" => {
-                        let i = a[1]
-                            .clone()
-                            .flatten()
-                            .map(|v| v.cast_to::<String>().map_err(|e| format!("{}", e)));
+                        let i = a[1].clone().flatten().map(|v| v.cast_to::<String>());
                         if &*mode == "include" {
                             Ok(Filter::Include(i.collect::<Result<IndexSet<_, _>, _>>()?))
                         } else if &*mode == "exclude" {
                             Ok(Filter::Exclude(i.collect::<Result<IndexSet<_, _>, _>>()?))
                         } else if &*mode == "include_match" {
                             let set = i.collect::<Result<IndexSet<_, _>, _>>()?;
-                            let matcher =
-                                RegexSet::new(&set).map_err(|e| format!("{}", e))?;
+                            let matcher = RegexSet::new(&set)?;
                             Ok(Filter::IncludeMatch(set, matcher))
                         } else if &*mode == "exclude_match" {
                             let set = i.collect::<Result<IndexSet<_, _>, _>>()?;
-                            let matcher =
-                                RegexSet::new(&set).map_err(|e| format!("{}", e))?;
+                            let matcher = RegexSet::new(&set)?;
                             Ok(Filter::ExcludeMatch(set, matcher))
                         } else {
                             unreachable!()
@@ -192,25 +188,11 @@ impl Filter {
                         Value::Array(a) if a.len() == 2 => {
                             let start = match &a[0] {
                                 Value::String(v) if &**v == "start" => None,
-                                v => match v.clone().cast_to::<u64>() {
-                                    Err(_) => {
-                                        return Err(
-                                            "expected start or a positive integer".into(),
-                                        )
-                                    }
-                                    Ok(i) => Some(i as usize),
-                                },
+                                v => Some(v.clone().cast_to::<u64>()? as usize),
                             };
                             let end = match &a[1] {
                                 Value::String(v) if &**v == "end" => None,
-                                v => match v.clone().cast_to::<u64>() {
-                                    Err(_) => {
-                                        return Err(
-                                            "expected end or a positive integer".into()
-                                        )
-                                    }
-                                    Ok(i) => Some(i as usize),
-                                },
+                                v => Some(v.clone().cast_to::<u64>()? as usize),
                             };
                             if &*mode == "keep" {
                                 Ok(Filter::IncludeRange(start, end))
@@ -220,15 +202,21 @@ impl Filter {
                                 unreachable!()
                             }
                         }
-                        _ => Err("keep/drop expect 2 arguments".into()),
+                        _ => bail!("keep/drop expect 2 arguments"),
                     },
-                    _ => Err("invalid filter mode".into()),
+                    _ => bail!("invalid filter mode"),
                 }
             }
-            _ => Err("expected null, true, false, or a pair".into()),
+            _ => bail!("expected null, true, false, or a pair"),
         }
     }
 
+    fn get(v: Value) -> Option<Self> {
+        FromValue::from_value(v).ok()
+    }
+}
+
+impl Filter {
     fn is_match(&self, i: usize, s: &str) -> bool {
         match self {
             Filter::All | Filter::Auto => true,
@@ -266,10 +254,9 @@ impl Filter {
 }
 
 enum TableState {
-    Empty,
     Resolving(Path),
     Raeified(RaeifiedTable),
-    Refresh { descriptor: Option<resolver_client::Table>, path: Option<Path> },
+    Refresh(Path),
 }
 
 fn get_sort_column(store: &ListStore) -> Option<u32> {
@@ -317,89 +304,249 @@ impl clone::Upgrade for RaeifiedTableWeak {
     }
 }
 
-fn apply_filters(
-    original_descriptor: &resolver_client::Table,
-    filter_errors: &mut Vec<String>,
-    row_filter: Result<Filter, String>,
-    column_filter: Result<Filter, String>,
-) -> resolver_client::Table {
-    let mut descriptor = original_descriptor.clone();
-    let row_filter = row_filter.unwrap_or_else(|e| {
-        filter_errors.push(format!("invalid row filter: {}", e));
-        Filter::All
-    });
-    let column_filter = column_filter.unwrap_or_else(|e| {
-        filter_errors.push(format!("invalid column filter {}", e));
-        Filter::Auto
-    });
-    descriptor.cols.sort_by_key(|(p, _)| p.clone());
-    descriptor.rows.sort();
-    {
-        let mut i = 0;
-        descriptor.rows.retain(|row| match Path::basename(&row) {
-            None => true,
-            Some(row) => {
-                let res = row_filter.is_match(i, row);
-                i += 1;
-                res
+const NAME_COL: &str = "name";
+
+#[derive(Clone)]
+struct IndexDescriptor {
+    rows: IndexSet<Path>,
+    cols: IndexMap<Path, Z64>,
+}
+
+impl IndexDescriptor {
+    fn from_descriptor(show_name: bool, d: &resolver_client::Table) -> Self {
+        let mut t = IndexDescriptor {
+            rows: IndexSet::from_iter(d.rows.iter().cloned()),
+            cols: IndexMap::from_iter(d.cols.iter().cloned()),
+        };
+        if show_name && t.cols.contains_key(NAME_COL) {
+            let deconf = loop {
+                let name = format!("{}_{}", NAME_COL, thread_rng().gen::<u64>());
+                if !t.cols.contains_key(&*name) {
+                    break Path::from(name);
+                }
+            };
+            if let Some(cnt) = t.cols.remove(NAME_COL) {
+                t.cols.insert(deconf, cnt);
             }
-        });
-    }
-    match &column_filter {
-        Filter::Auto => {
-            let half = descriptor.rows.len() as f32 / 2.;
-            descriptor.cols.retain(|(_, i)| i.0 as f32 >= half)
         }
-        filter => {
+        t
+    }
+}
+
+macro_rules! set_field {
+    ($self:expr, $v:expr, $typ:ty, $field:ident) => {
+        match $v.and_then(|v| v.cast_to::<$typ>().ok()) {
+            None => false,
+            Some(val) => {
+                if &*$self.$field.borrow() != &val {
+                    *$self.$field.borrow_mut() = val;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    };
+}
+
+macro_rules! set_field_cell {
+    ($self:expr, $v:expr, $typ:ty, $field:ident) => {
+        match $v.and_then(|v| v.cast_to::<$typ>().ok()) {
+            None => false,
+            Some(val) => {
+                if $self.$field.get() != val {
+                    $self.$field.set(val);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    };
+}
+
+struct SharedState {
+    column_editable: RefCell<Filter>,
+    column_filter: RefCell<Filter>,
+    columns_resizable: Cell<bool>,
+    column_widths: RefCell<FxHashMap<String, i32>>,
+    ctx: BSCtx,
+    multi_select: Cell<bool>,
+    on_activate: RefCell<BSNode>,
+    on_edit: RefCell<BSNode>,
+    on_header_click: RefCell<BSNode>,
+    on_select: RefCell<BSNode>,
+    original_descriptor: RefCell<resolver_client::Table>,
+    path: RefCell<Path>,
+    root: ScrolledWindow,
+    row_filter: RefCell<Filter>,
+    selected_path: Label,
+    selected: RefCell<FxHashMap<String, FxHashSet<String>>>,
+    show_name_column: Cell<bool>,
+    sort_mode: RefCell<SortSpec>,
+}
+
+impl SharedState {
+    fn new(
+        ctx: BSCtx,
+        selected_path: Label,
+        root: ScrolledWindow,
+        on_activate: BSNode,
+        on_edit: BSNode,
+        on_header_click: BSNode,
+        on_select: BSNode,
+    ) -> Self {
+        Self {
+            column_editable: RefCell::new(Filter::None),
+            column_filter: RefCell::new(Filter::Auto),
+            columns_resizable: Cell::new(false),
+            column_widths: RefCell::new(HashMap::default()),
+            ctx,
+            multi_select: Cell::new(false),
+            on_activate: RefCell::new(on_activate),
+            on_edit: RefCell::new(on_edit),
+            on_header_click: RefCell::new(on_header_click),
+            on_select: RefCell::new(on_select),
+            original_descriptor: RefCell::new(resolver_client::Table {
+                rows: Pooled::orphan(vec![]),
+                cols: Pooled::orphan(vec![]),
+            }),
+            path: RefCell::new(Path::root()),
+            root,
+            row_filter: RefCell::new(Filter::All),
+            selected_path,
+            selected: RefCell::new(HashMap::default()),
+            show_name_column: Cell::new(true),
+            sort_mode: RefCell::new(SortSpec::None),
+        }
+    }
+
+    fn set_path(&self, v: Option<Value>) -> bool {
+        set_field!(self, v, Path, path)
+    }
+
+    fn set_sort_mode(&self, v: Option<Value>) -> bool {
+        set_field!(self, v, SortSpec, sort_mode)
+    }
+
+    fn set_column_filter(&self, v: Option<Value>) -> bool {
+        set_field!(self, v, Filter, column_filter)
+    }
+
+    fn set_row_filter(&self, v: Option<Value>) -> bool {
+        set_field!(self, v, Filter, row_filter)
+    }
+
+    fn set_column_editable(&self, v: Option<Value>) -> bool {
+        set_field!(self, v, Filter, column_editable)
+    }
+
+    fn set_multi_select(&self, v: Option<Value>) -> bool {
+        set_field_cell!(self, v, bool, multi_select)
+    }
+
+    fn set_show_row_name(&self, v: Option<Value>) -> bool {
+        set_field_cell!(self, v, bool, show_name_column)
+    }
+
+    fn set_columns_resizable(&self, v: Option<Value>) -> bool {
+        set_field_cell!(self, v, bool, columns_resizable)
+    }
+
+    fn set_column_widths(&self, v: Option<Value>) -> bool {
+        set_field!(self, v, FxHashMap<String, i32>, column_widths)
+    }
+
+    fn apply_filters(&self) -> (bool, IndexDescriptor) {
+        let mut descriptor = IndexDescriptor::from_descriptor(
+            self.show_name_column.get(),
+            &*self.original_descriptor.borrow(),
+        );
+        descriptor.cols.sort_by(|p0, _, p1, _| p0.cmp(p1));
+        descriptor.rows.sort();
+        {
             let mut i = 0;
-            descriptor.cols.retain(|col| match Path::basename(&col.0) {
+            let row_filter = self.row_filter.borrow();
+            descriptor.rows.retain(|row| match Path::basename(&row) {
                 None => true,
-                Some(col) => {
-                    let res = filter.is_match(i, &col);
+                Some(row) => {
+                    let res = row_filter.is_match(i, row);
                     i += 1;
                     res
                 }
-            })
+            });
         }
-    }
-    fn sort<V: Send + Sync + 'static, F: Fn(&V) -> &Path>(
-        vals: &mut Pooled<Vec<V>>,
-        filter: &Filter,
-        f: F,
-    ) {
-        vals.sort_by(|v0, v1| {
-            let v0 = Path::basename(f(&v0));
-            let v1 = Path::basename(f(&v1));
-            let i0 = v0.and_then(|v| filter.sort_index(v));
-            let i1 = v1.and_then(|v| filter.sort_index(v));
-            match (i0, i1) {
-                (Some(i0), Some(i1)) => i0.cmp(&i1),
-                (_, _) => v0.cmp(&v1),
+        {
+            let column_filter = self.column_filter.borrow();
+            match &*column_filter {
+                Filter::Auto => {
+                    let half = descriptor.rows.len() as f32 / 2.;
+                    descriptor.cols.retain(|_, i| i.0 as f32 >= half)
+                }
+                filter => {
+                    let mut i = 0;
+                    descriptor.cols.retain(|col, _| match Path::basename(col) {
+                        None => true,
+                        Some(col) => {
+                            let res = filter.is_match(i, &col);
+                            i += 1;
+                            res
+                        }
+                    })
+                }
             }
-        })
+        }
+        {
+            let filter = self.column_filter.borrow();
+            descriptor.cols.sort_by(|c0, _, c1, _| {
+                let c0 = Path::basename(c0);
+                let c1 = Path::basename(c1);
+                let i0 = c0.and_then(|v| filter.sort_index(v));
+                let i1 = c1.and_then(|v| filter.sort_index(v));
+                match (i0, i1) {
+                    (Some(i0), Some(i1)) => i0.cmp(&i1),
+                    (_, _) => c0.cmp(&c1),
+                }
+            });
+        }
+        {
+            let filter = self.row_filter.borrow();
+            descriptor.rows.sort_by(|r0, r1| {
+                let r0 = Path::basename(r0);
+                let r1 = Path::basename(r1);
+                let i0 = r0.and_then(|v| filter.sort_index(v));
+                let i1 = r1.and_then(|v| filter.sort_index(v));
+                match (i0, i1) {
+                    (Some(i0), Some(i1)) => i0.cmp(&i1),
+                    (_, _) => r0.cmp(&r1),
+                }
+            });
+        }
+        let mut selection_changed = false;
+        self.selected.borrow_mut().retain(|row, cols| {
+            cols.retain(|col| {
+                let r = descriptor.cols.contains_key(&**col);
+                selection_changed |= !r;
+                r
+            });
+            let r = match Path::basename(row) {
+                Some(row) => !cols.is_empty() && descriptor.rows.contains(row),
+                None => false,
+            };
+            selection_changed |= !r;
+            r
+        });
+        (selection_changed, descriptor)
     }
-    sort(&mut descriptor.cols, &column_filter, |v| &v.0);
-    sort(&mut descriptor.rows, &row_filter, |v| &v);
-    descriptor
 }
 
 struct RaeifiedTableInner {
+    path: Path,
+    shared: Rc<SharedState>,
     by_id: RefCell<HashMap<SubId, Subscription>>,
     columns_autosizing: Rc<Cell<bool>>,
-    ctx: BSCtx,
-    descriptor: resolver_client::Table,
+    descriptor: IndexDescriptor,
     destroyed: Cell<bool>,
-    multi_select: bool,
-    on_activate: Rc<RefCell<BSNode>>,
-    on_edit: Rc<RefCell<BSNode>>,
-    on_header_click: Rc<RefCell<BSNode>>,
-    on_select: Rc<RefCell<BSNode>>,
-    original_descriptor: resolver_client::Table,
-    path: Path,
-    root: ScrolledWindow,
-    column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
-    selected_path: Label,
-    selected: RefCell<FxHashMap<String, FxHashSet<TreeViewColumn>>>,
     name_column: RefCell<Option<TreeViewColumn>>,
     sort_column: Cell<Option<u32>>,
     sort_temp_disabled: Cell<bool>,
@@ -425,23 +572,14 @@ impl Deref for RaeifiedTable {
 struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
 
 impl RaeifiedTable {
-    fn add_columns(
-        &self,
-        ncols: usize,
-        vector_mode: bool,
-        sorting_disabled: bool,
-        show_name_column: bool,
-        columns_resizable: bool,
-        column_editable: &Filter,
-        columns_autosizing: Rc<Cell<bool>>,
-    ) {
+    fn add_columns(&self, ncols: usize, vector_mode: bool, sorting_disabled: bool) {
         let t = self;
-        if show_name_column {
+        if t.shared.show_name_column.get() {
             t.view().append_column(&{
                 let column = TreeViewColumn::new();
                 let cell = CellRendererText::new();
                 column.pack_start(&cell, true);
-                column.set_title("name");
+                column.set_title(NAME_COL);
                 column.add_attribute(&cell, "text", 0);
                 if sorting_disabled {
                     column.set_clickable(true);
@@ -449,18 +587,17 @@ impl RaeifiedTable {
                     column.set_sort_column_id(0);
                 }
                 column.set_sizing(TreeViewColumnSizing::Fixed);
-                column.set_resizable(columns_resizable);
-                let column_widths = t.0.column_widths.clone();
-                if let Some(w) = column_widths.borrow().get("name") {
+                column.set_resizable(t.shared.columns_resizable.get());
+                let column_widths = &t.shared.column_widths;
+                if let Some(w) = column_widths.borrow().get(NAME_COL) {
                     column.set_fixed_width(*w);
                 }
-                column.connect_width_notify(clone!(
-                    @strong column_widths, @strong columns_autosizing => move |c| {
-                        if !columns_autosizing.get() {
-                            *column_widths.borrow_mut().entry("name".into()).or_insert(1) = c.width();
-                        }
+                let columns_autosizing = t.columns_autosizing.clone();
+                column.connect_width_notify(clone!(@strong column_widths => move |c| {
+                    if !columns_autosizing.get() {
+                        *column_widths.borrow_mut().entry(NAME_COL.into()).or_insert(1) = c.width();
                     }
-                ));
+                }));
                 *self.name_column.borrow_mut() = Some(column.clone());
                 column
             });
@@ -472,10 +609,10 @@ impl RaeifiedTable {
             let name = if vector_mode {
                 Path::from("value")
             } else {
-                t.0.descriptor.cols[col].0.clone()
+                t.0.descriptor.cols.get_index(col).unwrap().0.clone()
             };
             column.pack_start(&cell, true);
-            if column_editable.is_match(col, &*name) {
+            if t.shared.column_editable.borrow().is_match(col, &*name) {
                 cell.set_editable(true);
             }
             let f = Box::new(clone!(@weak t =>
@@ -486,16 +623,16 @@ impl RaeifiedTable {
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
             cell.connect_edited(clone!(@weak t => move |_, _, v| {
                 let ev = LocalEvent::Event(Value::String(Chars::from(String::from(v))));
-                t.0.on_edit.borrow_mut().update(
-                    &mut t.0.ctx.borrow_mut(),
+                t.shared.on_edit.borrow_mut().update(
+                    &mut t.shared.ctx.borrow_mut(),
                     &vm::Event::User(ev)
                 );
             }));
             column.connect_clicked(clone!(@weak t, @strong name => move |_| {
                 let v = Value::String(Chars::from(String::from(&*name)));
                 let ev = LocalEvent::Event(v);
-                t.0.on_header_click.borrow_mut().update(
-                    &mut t.0.ctx.borrow_mut(),
+                t.shared.on_header_click.borrow_mut().update(
+                    &mut t.shared.ctx.borrow_mut(),
                     &vm::Event::User(ev)
                 );
             }));
@@ -510,60 +647,30 @@ impl RaeifiedTable {
                 column.set_sort_column_id(id);
             }
             column.set_sizing(TreeViewColumnSizing::Fixed);
-            column.set_resizable(columns_resizable);
-            let column_widths = t.0.column_widths.clone();
+            column.set_resizable(t.shared.columns_resizable.get());
+            let column_widths = &t.shared.column_widths;
             if let Some(w) = column_widths.borrow().get(&*name) {
                 column.set_fixed_width(*w);
             }
-            column.connect_width_notify(clone!(
-                @strong column_widths, @strong name, @strong columns_autosizing => move |c| {
+            let columns_autosizing = t.columns_autosizing.clone();
+            column.connect_width_notify(
+                clone!(@strong column_widths, @strong name => move |c| {
                     if ! columns_autosizing.get() {
                         let mut saved = column_widths.borrow_mut();
                         *saved.entry((&*name).into()).or_insert(1) = c.width();
                     }
-                }
-            ));
+                }),
+            );
             t.view().append_column(&column);
         }
     }
 
-    fn new(
-        ctx: BSCtx,
-        root: ScrolledWindow,
-        path: Path,
-        column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
-        sort_mode: Result<SortSpec, String>,
-        column_filter: Result<Filter, String>,
-        multi_select: bool,
-        show_name_column: bool,
-        columns_resizable: bool,
-        row_filter: Result<Filter, String>,
-        column_editable: Result<Filter, String>,
-        on_select: Rc<RefCell<BSNode>>,
-        on_activate: Rc<RefCell<BSNode>>,
-        on_edit: Rc<RefCell<BSNode>>,
-        on_header_click: Rc<RefCell<BSNode>>,
-        original_descriptor: resolver_client::Table,
-        selected_path: Label,
-    ) -> RaeifiedTable {
-        let mut filter_errors = Vec::new();
-        let column_editable = column_editable.unwrap_or_else(|e| {
-            filter_errors.push(format!("invalid column editable {}", e));
-            Filter::None
-        });
-        let sort_mode = sort_mode.unwrap_or_else(|e| {
-            filter_errors.push(format!("invalid sort mode {}", e));
-            SortSpec::None
-        });
-        let descriptor = apply_filters(
-            &original_descriptor,
-            &mut filter_errors,
-            row_filter,
-            column_filter,
-        );
+    fn new(shared: Rc<SharedState>) -> RaeifiedTable {
+        let path = shared.path.borrow().clone();
+        let (selection_changed, descriptor) = shared.apply_filters();
         let view = TreeView::new();
         view.set_no_show_all(true);
-        root.add(&view);
+        shared.root.add(&view);
         view.selection().set_mode(SelectionMode::None);
         let vector_mode = descriptor.cols.len() == 0;
         let column_types = if vector_mode {
@@ -584,50 +691,35 @@ impl RaeifiedTable {
         let ncols = if vector_mode { 1 } else { descriptor.cols.len() };
         let t = RaeifiedTable(Rc::new(RaeifiedTableInner {
             path,
-            ctx,
-            root,
-            view,
-            selected_path,
-            store,
-            original_descriptor,
+            shared,
             descriptor,
-            vector_mode,
-            multi_select,
+            store,
             style,
-            on_select,
-            on_activate,
-            on_edit,
-            on_header_click,
-            column_widths,
+            vector_mode,
+            view,
             by_id: RefCell::new(HashMap::new()),
-            subscribed: RefCell::new(HashMap::new()),
-            selected: RefCell::new(HashMap::default()),
-            sort_column: Cell::new(None),
-            sort_temp_disabled: Cell::new(false),
-            update: RefCell::new(IndexMap::with_hasher(FxBuildHasher::default())),
+            columns_autosizing: Rc::new(Cell::new(false)),
             destroyed: Cell::new(false),
             name_column: RefCell::new(None),
-            columns_autosizing: Rc::new(Cell::new(false)),
+            sort_column: Cell::new(None),
+            sort_temp_disabled: Cell::new(false),
+            subscribed: RefCell::new(HashMap::new()),
+            update: RefCell::new(IndexMap::with_hasher(FxBuildHasher::default())),
         }));
-        t.view().connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
-        if t.0.column_widths.borrow().len() > 1000 {
+        t.view().connect_destroy(clone!(@weak t => move |_| t.destroyed.set(true)));
+        if t.shared.column_widths.borrow().len() > 1000 {
             let cols =
-                t.0.descriptor.cols.iter().map(|c| c.0.clone()).collect::<FxHashSet<_>>();
-            t.0.column_widths.borrow_mut().retain(|name, _| cols.contains(name.as_str()));
+                t.descriptor.cols.iter().map(|c| c.0.clone()).collect::<FxHashSet<_>>();
+            t.shared
+                .column_widths
+                .borrow_mut()
+                .retain(|name, _| cols.contains(name.as_str()));
         }
-        let sorting_disabled = match &sort_mode {
+        let sorting_disabled = match &*t.shared.sort_mode.borrow() {
             SortSpec::Disabled | SortSpec::External(_) => true,
             SortSpec::Column(_, _) | SortSpec::None => false,
         };
-        t.add_columns(
-            ncols,
-            vector_mode,
-            sorting_disabled,
-            show_name_column,
-            columns_resizable,
-            &column_editable,
-            t.0.columns_autosizing.clone(),
-        );
+        t.add_columns(ncols, vector_mode, sorting_disabled);
         t.store().connect_sort_column_changed(
             clone!(@weak t => move |_| t.handle_sort_column_changed()),
         );
@@ -641,13 +733,7 @@ impl RaeifiedTable {
             clone!(@weak t => move |_, p, _| t.handle_row_activated(p)),
         );
         t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
-        t.0.root.vadjustment().connect_value_changed(clone!(@weak t => move |_| {
-            idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
-                t.update_subscriptions();
-                Continue(false)
-            }));
-        }));
-        match &sort_mode {
+        match &*t.shared.sort_mode.borrow() {
             SortSpec::None => (),
             SortSpec::Disabled => (),
             SortSpec::External(spec) => {
@@ -683,18 +769,21 @@ impl RaeifiedTable {
                 }
             }
         }
+        if selection_changed {
+            t.handle_selection_changed()
+        }
         t
     }
 
     fn handle_row_activated(&self, p: &TreePath) {
         if let Some(iter) = self.store().iter(&p) {
             if let Ok(row_name) = self.store().value(&iter, 0).get::<&str>() {
-                let path = String::from(&*self.0.path.append(row_name));
+                let path = String::from(&*self.path.append(row_name));
                 let e = LocalEvent::Event(Value::String(Chars::from(path)));
-                self.0
+                self.shared
                     .on_activate
                     .borrow_mut()
-                    .update(&mut self.0.ctx.borrow_mut(), &vm::Event::User(e));
+                    .update(&mut self.shared.ctx.borrow_mut(), &vm::Event::User(e));
             }
         }
     }
@@ -726,9 +815,10 @@ impl RaeifiedTable {
             Err(ValueTypeMismatchOrNoneError::UnexpectedNone) => None,
             _ => return,
         });
-        let sel = self.0.selected.borrow();
+        let sel = self.shared.selected.borrow();
+        let title = c.title().unwrap_or_else(|| "".into());
         match self.row_of(Either::Right(i)).as_ref().map(|r| r.get::<&str>().unwrap()) {
-            Some(r) if sel.get(r).map(|t| t.contains(c)).unwrap_or(false) => {
+            Some(r) if sel.get(r).map(|t| t.contains(&*title)).unwrap_or(false) => {
                 let st = StateFlags::SELECTED;
                 let fg = self.0.style.color(st);
                 let bg = StyleContextExt::style_property_for_state(
@@ -751,12 +841,12 @@ impl RaeifiedTable {
     fn handle_key(&self, key: &EventKey) -> Inhibit {
         let clear_selection = || {
             let n = {
-                let mut paths = self.0.selected.borrow_mut();
+                let mut paths = self.shared.selected.borrow_mut();
                 let n = paths.len();
                 paths.clear();
                 n
             };
-            self.0.selected_path.set_label("");
+            self.shared.selected_path.set_label("");
             if n > 0 {
                 self.handle_selection_changed();
             }
@@ -772,7 +862,7 @@ impl RaeifiedTable {
             || kv == keys::constants::Right
         {
             if !key.state().contains(gdk::ModifierType::SHIFT_MASK)
-                || !self.0.multi_select
+                || !self.shared.multi_select.get()
             {
                 clear_selection();
             }
@@ -792,9 +882,9 @@ impl RaeifiedTable {
         match (self.view().path_at_pos(x as i32, y as i32), typ) {
             (Some((Some(_), Some(_), _, _)), gdk::EventType::ButtonPress) if n == 1 => {
                 if !ev.state().contains(gdk::ModifierType::SHIFT_MASK)
-                    || !self.0.multi_select
+                    || !self.shared.multi_select.get()
                 {
-                    self.0.selected.borrow_mut().clear();
+                    self.shared.selected.borrow_mut().clear();
                 }
             }
             (None, _) | (Some((_, _, _, _)), _) => (),
@@ -804,14 +894,20 @@ impl RaeifiedTable {
 
     fn write_dialog(&self) {
         let window = toplevel(self.view());
-        let selected = self.0.selected_path.text();
+        let selected = self.shared.selected_path.text();
         if &*selected == "" {
             err_modal(&window, "Select a cell before write");
         } else {
             let path = Path::from(ArcStr::from(&*selected));
             // we should already be subscribed, so we're just looking up the dval by path.
-            let dv =
-                self.0.ctx.borrow_mut().user.backend.subscriber.durable_subscribe(path);
+            let dv = self
+                .shared
+                .ctx
+                .borrow_mut()
+                .user
+                .backend
+                .subscriber
+                .durable_subscribe(path);
             let val = Rc::new(RefCell::new(match dv.last() {
                 Event::Unsubscribed => Some(Value::Null),
                 Event::Update(v) => Some(v),
@@ -899,18 +995,14 @@ impl RaeifiedTable {
         row_name.and_then(|v| if v.get::<&str>().is_ok() { Some(v) } else { None })
     }
 
-    fn path_from_selected(&self, row: &str, col: &TreeViewColumn) -> Path {
+    fn path_from_selected(&self, row: &str, title: &String) -> Path {
+        let path = &self.path;
         if self.0.vector_mode {
-            self.0.path.append(row)
+            path.append(row)
+        } else if self.shared.show_name_column.get() && title.as_str() == NAME_COL {
+            path.append(row)
         } else {
-            match col.title() {
-                None => self.0.path.append(row),
-                Some(title) => if Some(col) == self.name_column.borrow().as_ref() {
-                    self.0.path.append(row)
-                } else {
-                    self.0.path.append(row).append(title.as_str())
-                },
-            }
+            path.append(row).append(title)
         }
     }
 
@@ -919,14 +1011,15 @@ impl RaeifiedTable {
             if let Some(row) =
                 self.row_of(Either::Left(&p)).as_ref().map(|r| r.get::<&str>().unwrap())
             {
-                let path = self.path_from_selected(row, &c);
-                self.0.selected_path.set_label(path.as_ref());
-                self.0
+                let title = c.title().map(|t| t.to_string()).unwrap_or_else(String::new);
+                let path = self.path_from_selected(row, &title);
+                self.shared.selected_path.set_label(path.as_ref());
+                self.shared
                     .selected
                     .borrow_mut()
                     .entry(String::from(row))
                     .or_insert_with(HashSet::default)
-                    .insert(c);
+                    .insert(title);
                 self.handle_selection_changed();
             }
         }
@@ -935,7 +1028,7 @@ impl RaeifiedTable {
     fn handle_selection_changed(&self) {
         self.visible_changed();
         let v = Value::from(
-            self.0
+            self.shared
                 .selected
                 .borrow()
                 .iter()
@@ -946,7 +1039,7 @@ impl RaeifiedTable {
                 .collect::<Vec<_>>(),
         );
         let ev = vm::Event::User(LocalEvent::Event(v));
-        self.0.on_select.borrow_mut().update(&mut self.0.ctx.borrow_mut(), &ev);
+        self.shared.on_select.borrow_mut().update(&mut self.shared.ctx.borrow_mut(), &ev);
     }
 
     pub(super) fn update_subscriptions(&self) {
@@ -998,16 +1091,24 @@ impl RaeifiedTable {
             let mut subscribed = self.0.subscribed.borrow_mut();
             if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
                 subscribed.entry(row_name.into()).or_insert_with(HashSet::new).insert(id);
-                let p = self.0.path.append(row_name);
+                let p = self.path.append(row_name);
                 let p = if self.0.vector_mode {
                     p
                 } else {
-                    p.append(&self.0.descriptor.cols[(id - 1) as usize].0)
+                    p.append(
+                        &self.descriptor.cols.get_index((id - 1) as usize).unwrap().0,
+                    )
                 };
-                let user_r = &self.0.ctx.borrow_mut().user;
-                let s = user_r.backend.subscriber.durable_subscribe(p);
-                s.updates(UpdatesFlags::BEGIN_WITH_LAST, user_r.backend.updates.clone());
-                self.0.by_id.borrow_mut().insert(
+                let s = {
+                    let user_r = &self.shared.ctx.borrow_mut().user;
+                    let s = user_r.backend.subscriber.durable_subscribe(p);
+                    s.updates(
+                        UpdatesFlags::BEGIN_WITH_LAST,
+                        user_r.backend.updates.clone(),
+                    );
+                    s
+                };
+                self.by_id.borrow_mut().insert(
                     s.id(),
                     Subscription { _sub: s, row: row.clone(), col: id as u32 },
                 );
@@ -1136,32 +1237,17 @@ impl RaeifiedTable {
 }
 
 pub(super) struct Table {
-    column_editable_expr: BSNode,
-    column_editable: RefCell<Result<Filter, String>>,
-    column_filter_expr: BSNode,
-    column_filter: RefCell<Result<Filter, String>>,
-    columns_resizable: Cell<bool>,
-    columns_resizable_expr: BSNode,
-    column_widths_expr: BSNode,
-    column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
-    ctx: BSCtx,
-    multi_select: Cell<bool>,
-    multi_select_expr: BSNode,
-    on_activate: Rc<RefCell<BSNode>>,
-    on_edit: Rc<RefCell<BSNode>>,
-    on_header_click: Rc<RefCell<BSNode>>,
-    on_select: Rc<RefCell<BSNode>>,
-    path_expr: BSNode,
-    path: RefCell<Option<Path>>,
-    root: ScrolledWindow,
-    row_filter_expr: BSNode,
-    row_filter: RefCell<Result<Filter, String>>,
-    selected_path: Label,
-    show_row_name: Cell<bool>,
-    show_row_name_expr: BSNode,
-    sort_mode_expr: BSNode,
-    sort_mode: RefCell<Result<SortSpec, String>>,
-    state: RefCell<TableState>,
+    column_editable: BSNode,
+    column_filter: BSNode,
+    columns_resizable: BSNode,
+    column_widths: BSNode,
+    multi_select: BSNode,
+    path: BSNode,
+    row_filter: BSNode,
+    show_row_name: BSNode,
+    sort_mode: BSNode,
+    shared: Rc<SharedState>,
+    state: Rc<RefCell<TableState>>,
     visible: Cell<bool>,
 }
 
@@ -1172,118 +1258,74 @@ impl Table {
         scope: Path,
         selected_path: Label,
     ) -> Table {
-        let path_expr = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.path);
-        let path = RefCell::new(path_expr.current().and_then(|v| match v {
-            Value::String(path) => Some(Path::from(ArcStr::from(&*path))),
-            _ => None,
-        }));
-        let sort_mode_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.sort_mode);
-        let sort_mode = sort_mode_expr
-            .current()
-            .unwrap_or(Value::Null)
-            .cast_to()
-            .map_err(|e| e.to_string());
-        let sort_mode = RefCell::new(sort_mode);
-        let column_filter_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_filter);
-        let column_filter = RefCell::new(Filter::new(
-            column_filter_expr.current().unwrap_or(Value::Null),
-        ));
-        let row_filter_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.row_filter);
+        let path = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.path);
+        let sort_mode =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.sort_mode);
+        let column_filter =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.column_filter);
         let row_filter =
-            RefCell::new(Filter::new(row_filter_expr.current().unwrap_or(Value::Null)));
-        let column_editable_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_editable);
-        let column_editable = RefCell::new(Filter::new(
-            column_editable_expr.current().unwrap_or(Value::Null),
-        ));
-        let multi_select_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.multi_select);
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.row_filter);
+        let column_editable =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.column_editable);
         let multi_select =
-            Cell::new(match multi_select_expr.current().unwrap_or(Value::False) {
-                Value::True => true,
-                _ => false,
-            });
-        let show_row_name_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.show_row_name);
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.multi_select);
         let show_row_name =
-            Cell::new(match show_row_name_expr.current().unwrap_or(Value::True) {
-                Value::True => true,
-                _ => false,
-            });
-        let columns_resizable_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.columns_resizable);
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.show_row_name);
         let columns_resizable =
-            Cell::new(match columns_resizable_expr.current().unwrap_or(Value::True) {
-                Value::False => false,
-                _ => true,
-            });
-        let column_widths_expr =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.column_widths);
-        let column_widths = Rc::new(RefCell::new(
-            column_widths_expr
-                .current()
-                .unwrap_or(Value::Null)
-                .cast_to::<Vec<(String, i32)>>()
-                .ok()
-                .map(|v| v.into_iter().collect::<FxHashMap<_, _>>())
-                .unwrap_or_else(HashMap::default),
-        ));
-        let state = RefCell::new(match &*path.borrow() {
-            None => TableState::Empty,
-            Some(path) => {
-                ctx.borrow().user.backend.resolve_table(path.clone());
-                TableState::Resolving(path.clone())
-            }
-        });
-        let on_select = Rc::new(RefCell::new(BSNode::compile(
-            &mut ctx.borrow_mut(),
-            scope.clone(),
-            spec.on_select,
-        )));
-        let on_activate = Rc::new(RefCell::new(BSNode::compile(
-            &mut ctx.borrow_mut(),
-            scope.clone(),
-            spec.on_activate,
-        )));
-        let on_edit = Rc::new(RefCell::new(BSNode::compile(
-            &mut ctx.borrow_mut(),
-            scope.clone(),
-            spec.on_edit,
-        )));
-        let on_header_click = Rc::new(RefCell::new(BSNode::compile(
-            &mut ctx.borrow_mut(),
-            scope,
-            spec.on_header_click,
-        )));
-        Table {
-            column_editable,
-            column_editable_expr,
-            column_filter,
-            column_filter_expr,
-            columns_resizable,
-            columns_resizable_expr,
-            column_widths_expr,
-            column_widths,
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.columns_resizable);
+        let column_widths =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.column_widths);
+        let on_select =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.on_select);
+        let on_activate =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.on_activate);
+        let on_edit = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.on_edit);
+        let on_header_click =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.on_header_click);
+        let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+        let shared = Rc::new(SharedState::new(
             ctx,
-            multi_select,
-            multi_select_expr,
+            selected_path,
+            root,
             on_activate,
             on_edit,
             on_header_click,
             on_select,
+        ));
+        shared.set_path(path.current());
+        shared.set_sort_mode(sort_mode.current());
+        shared.set_column_filter(column_filter.current());
+        shared.set_row_filter(row_filter.current());
+        shared.set_column_editable(column_editable.current());
+        shared.set_multi_select(multi_select.current());
+        shared.set_show_row_name(show_row_name.current());
+        shared.set_columns_resizable(columns_resizable.current());
+        shared.set_column_widths(column_widths.current());
+        let state = Rc::new(RefCell::new({
+            let path = &*shared.path.borrow();
+            shared.ctx.borrow().user.backend.resolve_table(path.clone());
+            TableState::Resolving(path.clone())
+        }));
+        shared.root.vadjustment().connect_value_changed(clone!(@weak state => move |_| {
+            idle_add_local(clone!(@weak state => @default-return Continue(false), move || {
+                match &*state.borrow() {
+                    TableState::Raeified(t) => t.update_subscriptions(),
+                    TableState::Refresh {..} | TableState::Resolving(_) => ()
+                }
+                Continue(false)
+            }));
+        }));
+        Table {
+            shared,
+            column_editable,
+            column_filter,
+            columns_resizable,
+            column_widths,
+            multi_select,
             path,
-            path_expr,
-            root: ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>),
             row_filter,
-            row_filter_expr,
-            selected_path,
             show_row_name,
-            show_row_name_expr,
             sort_mode,
-            sort_mode_expr,
             state,
             visible: Cell::new(true),
         }
@@ -1291,72 +1333,27 @@ impl Table {
 
     fn refresh(&self, ctx: BSCtxRef) {
         let state = &mut *self.state.borrow_mut();
-        let path = &*self.path.borrow();
+        let path = &*self.shared.path.borrow();
         match state {
-            TableState::Resolving(rpath) if path.as_ref() == Some(rpath) => (),
-            TableState::Refresh { path: ref p, .. } if p.as_ref() == path.as_ref() => (),
-            TableState::Raeified(table) if Some(&table.0.path) == path.as_ref() => {
-                let descriptor = Some(table.0.original_descriptor.clone());
-                let path = Some(path.clone());
-                match path {
-                    None => {
-                        *state = TableState::Empty;
-                    }
-                    Some(path) => {
-                        *state = TableState::Refresh { descriptor, path };
-                    }
-                }
+            TableState::Refresh(rpath) if &*path == rpath => (),
+            TableState::Resolving(rpath) if &*path == rpath => (),
+            TableState::Raeified(table) if &table.path == &*path => {
+                *state = TableState::Refresh(path.clone());
             }
-            TableState::Resolving(_)
-            | TableState::Raeified(_)
-            | TableState::Refresh { .. }
-            | TableState::Empty => match path {
-                None => {
-                    *state = TableState::Empty;
-                }
-                Some(path) => {
-                    ctx.user.backend.resolve_table(path.clone());
-                    *state = TableState::Resolving(path.clone());
-                }
-            },
+            TableState::Refresh(_)
+            | TableState::Resolving(_)
+            | TableState::Raeified(_) => {
+                ctx.user.backend.resolve_table(path.clone());
+                *state = TableState::Resolving(path.clone());
+            }
         }
-        if let Some(c) = self.root.child() {
-            self.root.remove(&c);
+        if let Some(c) = self.shared.root.child() {
+            self.shared.root.remove(&c);
         }
     }
 
-    fn clear_selection(&self, ctx: BSCtxRef) {
-        let v = Value::Array(Arc::from([]));
-        let ev = vm::Event::User(LocalEvent::Event(v));
-        self.on_select.borrow_mut().update(ctx, &ev);
-    }
-
-    fn raeify(
-        &self,
-        ctx: BSCtxRef,
-        state: &mut TableState,
-        path: Path,
-        descriptor: resolver_client::Table,
-    ) {
-        let table = RaeifiedTable::new(
-            self.ctx.clone(),
-            self.root.clone(),
-            path,
-            self.column_widths.clone(),
-            self.sort_mode.borrow().clone(),
-            self.column_filter.borrow().clone(),
-            self.multi_select.get(),
-            self.show_row_name.get(),
-            self.columns_resizable.get(),
-            self.row_filter.borrow().clone(),
-            self.column_editable.borrow().clone(),
-            self.on_select.clone(),
-            self.on_activate.clone(),
-            self.on_edit.clone(),
-            self.on_header_click.clone(),
-            descriptor.clone(),
-            self.selected_path.clone(),
-        );
+    fn raeify(&self, state: &mut TableState) {
+        let table = RaeifiedTable::new(self.shared.clone());
         if self.visible.get() {
             table.view().show();
         }
@@ -1364,7 +1361,6 @@ impl Table {
             table.update_subscriptions();
             Continue(false)
         }));
-        self.clear_selection(ctx);
         *state = TableState::Raeified(table);
     }
 }
@@ -1376,101 +1372,28 @@ impl BWidget for Table {
         waits: &mut Vec<oneshot::Receiver<()>>,
         event: &vm::Event<LocalEvent>,
     ) {
-        if let Some(path) = self.path_expr.update(ctx, event) {
-            let new_path = match path {
-                Value::String(p) => Some(Path::from(ArcStr::from(&*p))),
-                _ => None,
-            };
-            if &*self.path.borrow() != &new_path {
-                *self.path.borrow_mut() = new_path;
-                self.refresh(ctx);
-            }
+        let mut re = false;
+        re |= self.shared.set_path(self.path.update(ctx, event));
+        re |= self.shared.set_sort_mode(self.sort_mode.update(ctx, event));
+        re |= self.shared.set_column_filter(self.column_filter.update(ctx, event));
+        re |= self.shared.set_row_filter(self.row_filter.update(ctx, event));
+        re |= self.shared.set_column_editable(self.column_editable.update(ctx, event));
+        re |= self.shared.set_multi_select(self.multi_select.update(ctx, event));
+        re |= self.shared.set_show_row_name(self.show_row_name.update(ctx, event));
+        re |=
+            self.shared.set_columns_resizable(self.columns_resizable.update(ctx, event));
+        re |= self.shared.set_column_widths(self.column_widths.update(ctx, event));
+        self.shared.on_activate.borrow_mut().update(ctx, event);
+        self.shared.on_select.borrow_mut().update(ctx, event);
+        self.shared.on_edit.borrow_mut().update(ctx, event);
+        self.shared.on_header_click.borrow_mut().update(ctx, event);
+        if re {
+            self.refresh(ctx);
         }
-        if let Some(col) = self.sort_mode_expr.update(ctx, event) {
-            let new = col.cast_to().map_err(|e| e.to_string());
-            if &*self.sort_mode.borrow() != &new {
-                *self.sort_mode.borrow_mut() = new;
-                self.refresh(ctx);
-            }
-        }
-        if let Some(mode) = self.column_filter_expr.update(ctx, event) {
-            let new_filter = Filter::new(mode);
-            if &*self.column_filter.borrow() != &new_filter {
-                *self.column_filter.borrow_mut() = new_filter;
-                self.refresh(ctx);
-            }
-        }
-        if let Some(row_filter) = self.row_filter_expr.update(ctx, event) {
-            let new_filter = Filter::new(row_filter);
-            if &*self.row_filter.borrow() != &new_filter {
-                *self.row_filter.borrow_mut() = new_filter;
-                self.refresh(ctx);
-            }
-        }
-        if let Some(v) = self.column_editable_expr.update(ctx, event) {
-            let new_ed = Filter::new(v);
-            if &*self.column_editable.borrow() != &new_ed {
-                *self.column_editable.borrow_mut() = new_ed;
-                self.refresh(ctx);
-            }
-        }
-        if let Some(v) = self.multi_select_expr.update(ctx, event) {
-            let new = match v {
-                Value::True => true,
-                _ => false,
-            };
-            if self.multi_select.get() != new {
-                self.multi_select.set(new);
-                self.refresh(ctx);
-            }
-        }
-        if let Some(v) = self.show_row_name_expr.update(ctx, event) {
-            let new = match v {
-                Value::False => false,
-                _ => true,
-            };
-            if self.show_row_name.get() != new {
-                self.show_row_name.set(new);
-                self.refresh(ctx);
-            }
-        }
-        if let Some(v) = self.columns_resizable_expr.update(ctx, event) {
-            let new = match v {
-                Value::False => false,
-                _ => true,
-            };
-            if self.columns_resizable.get() != new {
-                self.columns_resizable.set(new);
-                self.refresh(ctx);
-            }
-        }
-        if let Some(v) = self.column_widths_expr.update(ctx, event) {
-            let new = v
-                .cast_to::<Vec<(String, i32)>>()
-                .ok()
-                .map(|v| v.into_iter().collect::<FxHashMap<_, _>>())
-                .unwrap_or_else(HashMap::default);
-            if &*self.column_widths.borrow() != &new {
-                *self.column_widths.borrow_mut() = new;
-                self.refresh(ctx);
-            }
-        }
-        self.on_activate.borrow_mut().update(ctx, event);
-        self.on_select.borrow_mut().update(ctx, event);
-        self.on_edit.borrow_mut().update(ctx, event);
-        self.on_header_click.borrow_mut().update(ctx, event);
         let state = &mut *self.state.borrow_mut();
         match state {
-            TableState::Empty => (),
             TableState::Raeified(table) => table.update(ctx, waits, event),
-            TableState::Refresh { descriptor, path } => {
-                match (path.take(), descriptor.take()) {
-                    (Some(path), Some(descriptor)) => {
-                        self.raeify(ctx, state, path, descriptor)
-                    }
-                    (_, _) => unreachable!(),
-                }
-            }
+            TableState::Refresh(_) => self.raeify(state),
             TableState::Resolving(rpath) => match event {
                 vm::Event::Netidx(_, _)
                 | vm::Event::Rpc(_, _)
@@ -1478,7 +1401,8 @@ impl BWidget for Table {
                 | vm::Event::User(LocalEvent::Event(_)) => (),
                 vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {
                     if path == rpath {
-                        self.raeify(ctx, state, path.clone(), descriptor.clone())
+                        *self.shared.original_descriptor.borrow_mut() = descriptor.clone();
+                        self.raeify(state)
                     }
                 }
             },
@@ -1486,12 +1410,12 @@ impl BWidget for Table {
     }
 
     fn root(&self) -> Option<&gtk::Widget> {
-        Some(self.root.upcast_ref())
+        Some(self.shared.root.upcast_ref())
     }
 
     fn set_visible(&self, v: bool) {
         self.visible.set(v);
-        self.root.set_visible(v);
+        self.shared.root.set_visible(v);
         match &mut *self.state.borrow_mut() {
             TableState::Raeified(t) => {
                 if v {
@@ -1504,9 +1428,7 @@ impl BWidget for Table {
                     t.view().hide()
                 }
             }
-            TableState::Empty | TableState::Refresh { .. } | TableState::Resolving(_) => {
-                ()
-            }
+            TableState::Refresh(_) | TableState::Resolving(_) => (),
         }
     }
 }
