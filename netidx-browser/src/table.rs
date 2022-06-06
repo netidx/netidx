@@ -38,6 +38,7 @@ use std::{
     result::{self, Result},
     str::FromStr,
     sync::Arc,
+    ops::Deref,
 };
 
 struct Subscription {
@@ -399,6 +400,7 @@ struct RaeifiedTableInner {
     column_widths: Rc<RefCell<FxHashMap<String, i32>>>,
     selected_path: Label,
     selected: RefCell<FxHashMap<String, FxHashSet<TreeViewColumn>>>,
+    name_column: RefCell<Option<TreeViewColumn>>,
     sort_column: Cell<Option<u32>>,
     sort_temp_disabled: Cell<bool>,
     store: ListStore,
@@ -411,6 +413,14 @@ struct RaeifiedTableInner {
 
 #[derive(Clone)]
 struct RaeifiedTable(Rc<RaeifiedTableInner>);
+
+impl Deref for RaeifiedTable {
+    type Target = RaeifiedTableInner;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
 
 struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
 
@@ -451,6 +461,7 @@ impl RaeifiedTable {
                         }
                     }
                 ));
+                *self.name_column.borrow_mut() = Some(column.clone());
                 column
             });
         }
@@ -595,6 +606,7 @@ impl RaeifiedTable {
             sort_temp_disabled: Cell::new(false),
             update: RefCell::new(IndexMap::with_hasher(FxBuildHasher::default())),
             destroyed: Cell::new(false),
+            name_column: RefCell::new(None),
             columns_autosizing: Rc::new(Cell::new(false)),
         }));
         t.view().connect_destroy(clone!(@weak t => move |_| t.0.destroyed.set(true)));
@@ -884,13 +896,7 @@ impl RaeifiedTable {
                 Some(i) => Some(self.store().value(&i, 0)),
             },
         };
-        match row_name {
-            None => None,
-            Some(row_name) => match row_name.get::<&str>() {
-                Err(_) => None,
-                Ok(_) => Some(row_name),
-            },
-        }
+        row_name.and_then(|v| if v.get::<&str>().is_ok() { Some(v) } else { None })
     }
 
     fn path_from_selected(&self, row: &str, col: &TreeViewColumn) -> Path {
@@ -899,7 +905,11 @@ impl RaeifiedTable {
         } else {
             match col.title() {
                 None => self.0.path.append(row),
-                Some(col) => self.0.path.append(row).append(col.as_str()),
+                Some(title) => if Some(col) == self.name_column.borrow().as_ref() {
+                    self.0.path.append(row)
+                } else {
+                    self.0.path.append(row).append(title.as_str())
+                },
             }
         }
     }
