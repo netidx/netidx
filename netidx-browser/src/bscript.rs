@@ -5,6 +5,7 @@ use netidx_bscript::vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register};
 use parking_lot::Mutex;
 use std::{cell::RefCell, mem, rc::Rc, result::Result, sync::Arc};
 
+#[derive(Debug)]
 pub(crate) enum LocalEvent {
     Event(Value),
     TableResolved(Path, resolver_client::Table),

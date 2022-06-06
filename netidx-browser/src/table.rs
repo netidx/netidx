@@ -306,7 +306,7 @@ impl clone::Upgrade for RaeifiedTableWeak {
 
 const NAME_COL: &str = "name";
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct IndexDescriptor {
     rows: IndexSet<Path>,
     cols: IndexMap<Path, Z64>,
@@ -1039,7 +1039,8 @@ impl RaeifiedTable {
                 .collect::<Vec<_>>(),
         );
         let ev = vm::Event::User(LocalEvent::Event(v));
-        self.shared.on_select.borrow_mut().update(&mut self.shared.ctx.borrow_mut(), &ev);
+        let mut on_select = self.shared.on_select.borrow_mut();
+        on_select.update(&mut self.shared.ctx.borrow_mut(), &ev);
     }
 
     pub(super) fn update_subscriptions(&self) {
@@ -1271,15 +1272,19 @@ impl Table {
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.multi_select);
         let show_row_name =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.show_row_name);
-        let columns_resizable =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.columns_resizable);
+        let columns_resizable = BSNode::compile(
+            &mut *ctx.borrow_mut(),
+            scope.clone(),
+            spec.columns_resizable,
+        );
         let column_widths =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.column_widths);
         let on_select =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.on_select);
         let on_activate =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.on_activate);
-        let on_edit = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.on_edit);
+        let on_edit =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.on_edit);
         let on_header_click =
             BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.on_header_click);
         let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
@@ -1347,21 +1352,27 @@ impl Table {
                 *state = TableState::Resolving(path.clone());
             }
         }
-        if let Some(c) = self.shared.root.child() {
-            self.shared.root.remove(&c);
-        }
     }
 
-    fn raeify(&self, state: &mut TableState) {
-        let table = RaeifiedTable::new(self.shared.clone());
-        if self.visible.get() {
-            table.view().show();
-        }
-        idle_add_local(clone!(@strong table => move || {
-            table.update_subscriptions();
+    fn raeify(&self) {
+        let state = &self.state;
+        let visible = &self.visible;
+        let shared = &self.shared;
+        idle_add_local(clone!(@strong state, @strong visible, @strong shared => move || {
+            if let Some(c) = shared.root.child() {
+                shared.root.remove(&c);
+            }
+            let table = RaeifiedTable::new(shared.clone());
+            if visible.get() {
+                table.view().show();
+            }
+            idle_add_local(clone!(@strong table => move || {
+                table.update_subscriptions();
+                Continue(false)
+            }));
+            *state.borrow_mut() = TableState::Raeified(table);
             Continue(false)
         }));
-        *state = TableState::Raeified(table);
     }
 }
 
@@ -1390,10 +1401,9 @@ impl BWidget for Table {
         if re {
             self.refresh(ctx);
         }
-        let state = &mut *self.state.borrow_mut();
-        match state {
+        match &*self.state.borrow() {
             TableState::Raeified(table) => table.update(ctx, waits, event),
-            TableState::Refresh(_) => self.raeify(state),
+            TableState::Refresh(_) => self.raeify(),
             TableState::Resolving(rpath) => match event {
                 vm::Event::Netidx(_, _)
                 | vm::Event::Rpc(_, _)
@@ -1401,8 +1411,9 @@ impl BWidget for Table {
                 | vm::Event::User(LocalEvent::Event(_)) => (),
                 vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {
                     if path == rpath {
-                        *self.shared.original_descriptor.borrow_mut() = descriptor.clone();
-                        self.raeify(state)
+                        *self.shared.original_descriptor.borrow_mut() =
+                            descriptor.clone();
+                        self.raeify()
                     }
                 }
             },
