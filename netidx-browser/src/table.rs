@@ -778,15 +778,15 @@ impl RaeifiedTable {
     }
 
     fn handle_sort_column_changed(&self) {
-        if self.0.sort_temp_disabled.get() {
+        if self.sort_temp_disabled.get() {
             return;
         }
         match get_sort_column(self.store()) {
             Some(col) => {
-                self.0.sort_column.set(Some(col));
+                self.sort_column.set(Some(col));
             }
             None => {
-                self.0.sort_column.set(None);
+                self.sort_column.set(None);
                 self.store().set_unsorted();
             }
         }
@@ -808,9 +808,9 @@ impl RaeifiedTable {
         match self.row_of(Either::Right(i)).as_ref().map(|r| r.get::<&str>().unwrap()) {
             Some(r) if sel.get(r).map(|t| t.contains(name)).unwrap_or(false) => {
                 let st = StateFlags::SELECTED;
-                let fg = self.0.style.color(st);
+                let fg = self.style.color(st);
                 let bg = StyleContextExt::style_property_for_state(
-                    &self.0.style,
+                    &self.style,
                     "background-color",
                     st,
                 )
@@ -985,7 +985,7 @@ impl RaeifiedTable {
 
     fn path_from_selected(&self, row: &str, title: &String) -> Path {
         let path = &self.path;
-        if self.0.vector_mode {
+        if self.vector_mode {
             path.append(row)
         } else if self.shared.show_name_column.get() && title.as_str() == NAME_COL {
             path.append(row)
@@ -1032,14 +1032,14 @@ impl RaeifiedTable {
     }
 
     pub(super) fn update_subscriptions(&self) {
-        if self.0.destroyed.get() || !self.view().is_visible() {
+        if self.destroyed.get() || !self.view().is_visible() {
             return;
         }
-        let ncols = if self.0.vector_mode { 1 } else { self.0.descriptor.cols.len() };
+        let ncols = if self.vector_mode { 1 } else { self.descriptor.cols.len() };
         let (mut start, mut end) = match self.view().visible_range() {
             Some((s, e)) => (s, e),
             None => {
-                if self.0.descriptor.rows.len() > 0 {
+                if self.descriptor.rows.len() > 0 {
                     let t = self;
                     idle_add_local(
                         clone!(@weak t => @default-return Continue(false), move || {
@@ -1056,15 +1056,15 @@ impl RaeifiedTable {
             end.next();
         }
         // unsubscribe invisible rows
-        self.0.by_id.borrow_mut().retain(|_, v| match self.store().path(&v.row) {
+        self.by_id.borrow_mut().retain(|_, v| match self.store().path(&v.row) {
             None => false,
             Some(p) => {
                 let visible =
-                    (p >= start && p <= end) || (Some(v.col) == self.0.sort_column.get());
+                    (p >= start && p <= end) || (Some(v.col) == self.sort_column.get());
                 if !visible {
                     let row_name_v = self.store().value(&v.row, 0);
                     if let Ok(row_name) = row_name_v.get::<&str>() {
-                        let mut subscribed = self.0.subscribed.borrow_mut();
+                        let mut subscribed = self.subscribed.borrow_mut();
                         if let Some(set) = subscribed.get_mut(row_name) {
                             set.remove(&v.col);
                             if set.is_empty() {
@@ -1077,11 +1077,11 @@ impl RaeifiedTable {
             }
         });
         let maybe_subscribe_col = |row: &TreeIter, row_name: &str, id: u32| {
-            let mut subscribed = self.0.subscribed.borrow_mut();
+            let mut subscribed = self.subscribed.borrow_mut();
             if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
                 subscribed.entry(row_name.into()).or_insert_with(HashSet::new).insert(id);
                 let p = self.path.append(row_name);
-                let p = if self.0.vector_mode {
+                let p = if self.vector_mode {
                     p
                 } else {
                     p.append(
@@ -1116,7 +1116,7 @@ impl RaeifiedTable {
             start.next();
         }
         // subscribe to all rows in the sort column
-        if let Some(id) = self.0.sort_column.get() {
+        if let Some(id) = self.sort_column.get() {
             if let Some(row) = self.store().iter_first() {
                 loop {
                     let row_name_v = self.store().value(&row, 0);
@@ -1133,29 +1133,29 @@ impl RaeifiedTable {
     }
 
     fn disable_sort(&self) -> Option<(SortColumn, SortType)> {
-        self.0.sort_temp_disabled.set(true);
+        self.sort_temp_disabled.set(true);
         let col = self.store().sort_column_id();
         self.store().set_unsorted();
-        self.0.sort_temp_disabled.set(false);
+        self.sort_temp_disabled.set(false);
         col
     }
 
     fn enable_sort(&self, col: Option<(SortColumn, SortType)>) {
-        self.0.sort_temp_disabled.set(true);
+        self.sort_temp_disabled.set(true);
         if let Some((col, dir)) = col {
-            if self.0.sort_column.get().is_some() {
+            if self.sort_column.get().is_some() {
                 self.store().set_sort_column_id(col, dir);
             }
         }
-        self.0.sort_temp_disabled.set(false);
+        self.sort_temp_disabled.set(false);
     }
 
     fn view(&self) -> &TreeView {
-        &self.0.view
+        &self.view
     }
 
     fn store(&self) -> &ListStore {
-        &self.0.store
+        &self.store
     }
 
     pub(super) fn start_update_task(&self, mut tx: Option<oneshot::Sender<()>>) {
@@ -1214,8 +1214,8 @@ impl RaeifiedTable {
                 ()
             }
             vm::Event::Netidx(id, value) => {
-                self.0.update.borrow_mut().insert(*id, value.clone());
-                if self.0.update.borrow().len() == 1 {
+                self.update.borrow_mut().insert(*id, value.clone());
+                if self.update.borrow().len() == 1 {
                     let (tx, rx) = oneshot::channel();
                     waits.push(rx);
                     self.start_update_task(Some(tx));
