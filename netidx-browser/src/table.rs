@@ -314,10 +314,13 @@ struct IndexDescriptor {
 
 impl IndexDescriptor {
     fn from_descriptor(show_name: bool, d: &resolver_client::Table) -> Self {
-        let mut t = IndexDescriptor {
-            rows: IndexSet::from_iter(d.rows.iter().cloned()),
-            cols: IndexMap::from_iter(d.cols.iter().cloned()),
-        };
+        let mut t =
+            IndexDescriptor {
+                cols: IndexMap::from_iter(d.cols.iter().cloned()),
+                rows: IndexSet::from_iter(d.rows.iter().filter_map(|p| {
+                    Path::basename(p).map(|p| Path::from(ArcStr::from(p)))
+                })),
+            };
         if show_name && t.cols.contains_key(NAME_COL) {
             let deconf = loop {
                 let name = format!("{}_{}", NAME_COL, thread_rng().gen::<u64>());
@@ -467,13 +470,10 @@ impl SharedState {
         {
             let mut i = 0;
             let row_filter = self.row_filter.borrow();
-            descriptor.rows.retain(|row| match Path::basename(&row) {
-                None => true,
-                Some(row) => {
-                    let res = row_filter.is_match(i, row);
-                    i += 1;
-                    res
-                }
+            descriptor.rows.retain(|row| {
+                let res = row_filter.is_match(i, row);
+                i += 1;
+                res
             });
         }
         {
@@ -485,13 +485,10 @@ impl SharedState {
                 }
                 filter => {
                     let mut i = 0;
-                    descriptor.cols.retain(|col, _| match Path::basename(col) {
-                        None => true,
-                        Some(col) => {
-                            let res = filter.is_match(i, &col);
-                            i += 1;
-                            res
-                        }
+                    descriptor.cols.retain(|col, _| {
+                        let res = filter.is_match(i, &col);
+                        i += 1;
+                        res
                     })
                 }
             }
@@ -499,10 +496,8 @@ impl SharedState {
         {
             let filter = self.column_filter.borrow();
             descriptor.cols.sort_by(|c0, _, c1, _| {
-                let c0 = Path::basename(c0);
-                let c1 = Path::basename(c1);
-                let i0 = c0.and_then(|v| filter.sort_index(v));
-                let i1 = c1.and_then(|v| filter.sort_index(v));
+                let i0 = filter.sort_index(c0);
+                let i1 = filter.sort_index(c1);
                 match (i0, i1) {
                     (Some(i0), Some(i1)) => i0.cmp(&i1),
                     (_, _) => c0.cmp(&c1),
@@ -512,10 +507,8 @@ impl SharedState {
         {
             let filter = self.row_filter.borrow();
             descriptor.rows.sort_by(|r0, r1| {
-                let r0 = Path::basename(r0);
-                let r1 = Path::basename(r1);
-                let i0 = r0.and_then(|v| filter.sort_index(v));
-                let i1 = r1.and_then(|v| filter.sort_index(v));
+                let i0 = filter.sort_index(r0);
+                let i1 = filter.sort_index(r1);
                 match (i0, i1) {
                     (Some(i0), Some(i1)) => i0.cmp(&i1),
                     (_, _) => r0.cmp(&r1),
@@ -529,10 +522,7 @@ impl SharedState {
                 selection_changed |= !r;
                 r
             });
-            let r = match Path::basename(row) {
-                Some(row) => !cols.is_empty() && descriptor.rows.contains(row),
-                None => false,
-            };
+            let r = cols.is_empty() && descriptor.rows.contains(&**row);
             selection_changed |= !r;
             r
         });
@@ -615,11 +605,11 @@ impl RaeifiedTable {
             if t.shared.column_editable.borrow().is_match(col, &*name) {
                 cell.set_editable(true);
             }
-            let f = Box::new(clone!(@weak t =>
-                move |c: &TreeViewColumn,
+            let f = Box::new(clone!(@weak t, @strong name =>
+                move |_: &TreeViewColumn,
                       cr: &CellRenderer,
                       _: &TreeModel,
-                      i: &TreeIter| t.render_cell(id, c, cr, i)));
+                      i: &TreeIter| t.render_cell(id, &*name, cr, i)));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
             cell.connect_edited(clone!(@weak t => move |_, _, v| {
                 let ev = LocalEvent::Event(Value::String(Chars::from(String::from(v))));
@@ -683,9 +673,7 @@ impl RaeifiedTable {
         };
         let store = ListStore::new(&column_types);
         for row in descriptor.rows.iter() {
-            let row_name = Path::basename(row).unwrap_or("").to_value();
-            let row = store.append();
-            store.set_value(&row, 0, &row_name.to_value());
+            store.set_value(&store.append(), 0, &row.to_value());
         }
         let style = view.style_context();
         let ncols = if vector_mode { 1 } else { descriptor.cols.len() };
@@ -706,7 +694,6 @@ impl RaeifiedTable {
             subscribed: RefCell::new(HashMap::new()),
             update: RefCell::new(IndexMap::with_hasher(FxBuildHasher::default())),
         }));
-        t.view().connect_destroy(clone!(@weak t => move |_| t.destroyed.set(true)));
         if t.shared.column_widths.borrow().len() > 1000 {
             let cols =
                 t.descriptor.cols.iter().map(|c| c.0.clone()).collect::<FxHashSet<_>>();
@@ -720,11 +707,12 @@ impl RaeifiedTable {
             SortSpec::Column(_, _) | SortSpec::None => false,
         };
         t.add_columns(ncols, vector_mode, sorting_disabled);
+        t.view().set_model(Some(t.store()));
+        t.view().connect_destroy(clone!(@weak t => move |_| t.destroyed.set(true)));
         t.store().connect_sort_column_changed(
             clone!(@weak t => move |_| t.handle_sort_column_changed()),
         );
         t.view().set_fixed_height_mode(true);
-        t.view().set_model(Some(t.store()));
         t.view().connect_key_press_event(clone!(
             @weak t => @default-return Inhibit(false), move |_, k| t.handle_key(k)));
         t.view().connect_button_press_event(clone!(
@@ -732,7 +720,8 @@ impl RaeifiedTable {
         t.view().connect_row_activated(
             clone!(@weak t => move |_, p, _| t.handle_row_activated(p)),
         );
-        t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
+        t.view()
+            .connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         match &*t.shared.sort_mode.borrow() {
             SortSpec::None => (),
             SortSpec::Disabled => (),
@@ -808,7 +797,7 @@ impl RaeifiedTable {
         }));
     }
 
-    fn render_cell(&self, id: i32, c: &TreeViewColumn, cr: &CellRenderer, i: &TreeIter) {
+    fn render_cell(&self, id: i32, name: &str, cr: &CellRenderer, i: &TreeIter) {
         let cr = cr.clone().downcast::<CellRendererText>().unwrap();
         cr.set_text(match self.store().value(i, id).get::<&str>() {
             Ok(v) => Some(v),
@@ -816,9 +805,8 @@ impl RaeifiedTable {
             _ => return,
         });
         let sel = self.shared.selected.borrow();
-        let title = c.title().unwrap_or_else(|| "".into());
         match self.row_of(Either::Right(i)).as_ref().map(|r| r.get::<&str>().unwrap()) {
-            Some(r) if sel.get(r).map(|t| t.contains(&*title)).unwrap_or(false) => {
+            Some(r) if sel.get(r).map(|t| t.contains(name)).unwrap_or(false) => {
                 let st = StateFlags::SELECTED;
                 let fg = self.0.style.color(st);
                 let bg = StyleContextExt::style_property_for_state(
@@ -1358,21 +1346,23 @@ impl Table {
         let state = &self.state;
         let visible = &self.visible;
         let shared = &self.shared;
-        idle_add_local(clone!(@strong state, @strong visible, @strong shared => move || {
-            if let Some(c) = shared.root.child() {
-                shared.root.remove(&c);
-            }
-            let table = RaeifiedTable::new(shared.clone());
-            if visible.get() {
-                table.view().show();
-            }
-            idle_add_local(clone!(@strong table => move || {
-                table.update_subscriptions();
+        idle_add_local(
+            clone!(@strong state, @strong visible, @strong shared => move || {
+                if let Some(c) = shared.root.child() {
+                    shared.root.remove(&c);
+                }
+                let table = RaeifiedTable::new(shared.clone());
+                if visible.get() {
+                    table.view().show();
+                }
+                idle_add_local(clone!(@strong table => move || {
+                    table.update_subscriptions();
+                    Continue(false)
+                }));
+                *state.borrow_mut() = TableState::Raeified(table);
                 Continue(false)
-            }));
-            *state.borrow_mut() = TableState::Raeified(table);
-            Continue(false)
-        }));
+            }),
+        );
     }
 }
 
@@ -1411,6 +1401,7 @@ impl BWidget for Table {
                 | vm::Event::User(LocalEvent::Event(_)) => (),
                 vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {
                     if path == rpath {
+                        self.shared.selected.borrow_mut().clear();
                         *self.shared.original_descriptor.borrow_mut() =
                             descriptor.clone();
                         self.raeify()
