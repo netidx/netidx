@@ -124,7 +124,8 @@ pub(super) struct Table {
     _dbg_column_editable: DbgExpr,
     _dbg_column_widths: DbgExpr,
     _dbg_columns_resizable: DbgExpr,
-    _dbg_multi_select: DbgExpr,
+    _dbg_selection_mode: DbgExpr,
+    _dbg_selection: DbgExpr,
     _dbg_show_row_name: DbgExpr,
     _dbg_on_activate: DbgExpr,
     _dbg_on_select: DbgExpr,
@@ -166,8 +167,11 @@ impl Table {
         let (l, e, _dbg_columns_resizable) =
             expr!(ctx, "Columns Resizable:", scope, spec, on_change, columns_resizable);
         config.add((l, e));
-        let (l, e, _dbg_multi_select) =
-            expr!(ctx, "Mutli Select:", scope, spec, on_change, multi_select);
+        let (l, e, _dbg_selection_mode) =
+            expr!(ctx, "Selection Mode:", scope, spec, on_change, selection_mode);
+        config.add((l, e));
+        let (l, e, _dbg_selection) =
+            expr!(ctx, "Selection:", scope, spec, on_change, selection);
         config.add((l, e));
         let (l, e, _dbg_show_row_name) =
             expr!(ctx, "Show Row Name:", scope, spec, on_change, show_row_name);
@@ -199,7 +203,8 @@ impl Table {
             _dbg_column_editable,
             _dbg_column_widths,
             _dbg_columns_resizable,
-            _dbg_multi_select,
+            _dbg_selection_mode,
+            _dbg_selection,
             _dbg_show_row_name,
             _dbg_on_activate,
             _dbg_on_select,

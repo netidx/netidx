@@ -98,18 +98,33 @@ pub struct Table {
     /// - true: columns may be resized by the user
     /// - false: columns may not be resized by the user
     pub columns_resizable: Expr,
-    /// (true | false)
-    /// true: multi selection is enabled, multiple rows can be
-    /// selected, on_select will produce an array of selected columns
-    /// false: only a single cell can be selected at once, on_select
-    /// will produce a single string
-    pub multi_select: Expr,
+    /// ("none" | "single" | "multi")
+    /// "none": user selection is not allowed. The cursor (text focus)
+    /// can still be moved, but cells will not be highlighted and no
+    /// on_select events will be generated in response to user
+    /// inputs. The selection expression still cause cells to be
+    /// selected.
+    /// "single": one cell at a time may be selected.
+    /// "multi": multi selection is enabled, the user may select
+    /// multiple cells by shift clicking. on_select will generate an
+    /// array of selected cells every time the selection changes.
+    pub selection_mode: Expr,
+    /// (null | selection)
+    /// selection: [<path>, ...]
+    /// null: The selection is maintained internally under the control
+    /// of the user, or completely disabled if the selection_mode is
+    /// "none".
+    /// selection: A list of selected paths. on_select events are not
+    /// triggered when this expression updates unless the row or
+    /// column filters modify the selection by removing selected rows
+    /// or columns from the table.
+    pub selection: Expr,
     /// (true | false)
     /// true: show the row name column
     /// false: do not show the row name column
     pub show_row_name: Expr,
-    /// event() will yield the selected path when the user selects a
-    /// cell
+    /// event() will yield a list of selected paths when the user
+    /// changes the selection
     pub on_select: Expr,
     /// event() will yield the row path when the user activates a row,
     /// see multi_select

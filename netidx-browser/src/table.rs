@@ -15,8 +15,8 @@ use glib::{
 };
 use gtk::{
     prelude::*, Adjustment, CellRenderer, CellRendererText, Label, ListStore,
-    ScrolledWindow, SelectionMode, SortColumn, SortType, StateFlags, StyleContext,
-    TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
+    ScrolledWindow, SortColumn, SortType, StateFlags, StyleContext, TreeIter, TreeModel,
+    TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
 };
 use indexmap::{IndexMap, IndexSet};
 use netidx::{
@@ -253,6 +253,28 @@ impl Filter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionMode {
+    None,
+    Single,
+    Multi,
+}
+
+impl FromValue for SelectionMode {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
+        match v.cast_to::<Chars>()? {
+            c if &*c == "none" => Ok(SelectionMode::None),
+            c if &*c == "single" => Ok(SelectionMode::Single),
+            c if &*c == "multi" => Ok(SelectionMode::Multi),
+            _ => bail!("invalid selection mode"),
+        }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        FromValue::from_value(v).ok()
+    }
+}
+
 enum TableState {
     Resolving(Path),
     Raeified(RaeifiedTable),
@@ -337,17 +359,20 @@ impl IndexDescriptor {
 }
 
 macro_rules! set_field {
-    ($self:expr, $v:expr, $typ:ty, $field:ident) => {
+    ($self:expr, $v:expr, $typ:ty, $field:ident, $map:expr) => {
         match $v.and_then(|v| v.cast_to::<$typ>().ok()) {
             None => false,
-            Some(val) => {
-                if &*$self.$field.borrow() != &val {
-                    *$self.$field.borrow_mut() = val;
-                    true
-                } else {
-                    false
+            Some(val) => match $map(val) {
+                None => false,
+                Some(val) => {
+                    if &*$self.$field.borrow() != &val {
+                        *$self.$field.borrow_mut() = val;
+                        true
+                    } else {
+                        false
+                    }
                 }
-            }
+            },
         }
     };
 }
@@ -374,7 +399,6 @@ struct SharedState {
     columns_resizable: Cell<bool>,
     column_widths: RefCell<FxHashMap<String, i32>>,
     ctx: BSCtx,
-    multi_select: Cell<bool>,
     on_activate: RefCell<BSNode>,
     on_edit: RefCell<BSNode>,
     on_header_click: RefCell<BSNode>,
@@ -385,6 +409,7 @@ struct SharedState {
     row_filter: RefCell<Filter>,
     selected_path: Label,
     selected: RefCell<FxHashMap<String, FxHashSet<String>>>,
+    selection_mode: Cell<SelectionMode>,
     show_name_column: Cell<bool>,
     sort_mode: RefCell<SortSpec>,
 }
@@ -405,7 +430,7 @@ impl SharedState {
             columns_resizable: Cell::new(false),
             column_widths: RefCell::new(HashMap::default()),
             ctx,
-            multi_select: Cell::new(false),
+            selection_mode: Cell::new(SelectionMode::None),
             on_activate: RefCell::new(on_activate),
             on_edit: RefCell::new(on_edit),
             on_header_click: RefCell::new(on_header_click),
@@ -425,27 +450,42 @@ impl SharedState {
     }
 
     fn set_path(&self, v: Option<Value>) -> bool {
-        set_field!(self, v, Path, path)
+        set_field!(self, v, Path, path, Some)
     }
 
     fn set_sort_mode(&self, v: Option<Value>) -> bool {
-        set_field!(self, v, SortSpec, sort_mode)
+        set_field!(self, v, SortSpec, sort_mode, Some)
     }
 
     fn set_column_filter(&self, v: Option<Value>) -> bool {
-        set_field!(self, v, Filter, column_filter)
+        set_field!(self, v, Filter, column_filter, Some)
     }
 
     fn set_row_filter(&self, v: Option<Value>) -> bool {
-        set_field!(self, v, Filter, row_filter)
+        set_field!(self, v, Filter, row_filter, Some)
     }
 
     fn set_column_editable(&self, v: Option<Value>) -> bool {
-        set_field!(self, v, Filter, column_editable)
+        set_field!(self, v, Filter, column_editable, Some)
     }
 
-    fn set_multi_select(&self, v: Option<Value>) -> bool {
-        set_field_cell!(self, v, bool, multi_select)
+    fn set_selection_mode(&self, v: Option<Value>) -> bool {
+        set_field_cell!(self, v, SelectionMode, selection_mode)
+    }
+
+    fn set_selection(&self, v: Option<Value>) -> bool {
+        set_field!(self, v, Vec<Path>, selected, |paths: Vec<Path>| {
+            let iter = paths.into_iter().filter_map(|p| {
+                let col = String::from(Path::basename(&p)?);
+                let row = String::from(Path::basename(Path::dirname(&p)?)?);
+                Some((row, col))
+            });
+            let mut res = HashMap::default();
+            for (row, col) in iter {
+                res.entry(row).or_insert_with(HashSet::default).insert(col);
+            }
+            Some(res)
+        })
     }
 
     fn set_show_row_name(&self, v: Option<Value>) -> bool {
@@ -457,7 +497,7 @@ impl SharedState {
     }
 
     fn set_column_widths(&self, v: Option<Value>) -> bool {
-        set_field!(self, v, FxHashMap<String, i32>, column_widths)
+        set_field!(self, v, FxHashMap<String, i32>, column_widths, Some)
     }
 
     fn apply_filters(&self) -> (bool, IndexDescriptor) {
@@ -522,7 +562,7 @@ impl SharedState {
                 selection_changed |= !r;
                 r
             });
-            let r = cols.is_empty() && descriptor.rows.contains(&**row);
+            let r = !cols.is_empty() && descriptor.rows.contains(&**row);
             selection_changed |= !r;
             r
         });
@@ -661,7 +701,7 @@ impl RaeifiedTable {
         let view = TreeView::new();
         view.set_no_show_all(true);
         shared.root.add(&view);
-        view.selection().set_mode(SelectionMode::None);
+        view.selection().set_mode(gtk::SelectionMode::None);
         let vector_mode = descriptor.cols.len() == 0;
         let column_types = if vector_mode {
             vec![String::static_type(); 2]
@@ -720,8 +760,7 @@ impl RaeifiedTable {
         t.view().connect_row_activated(
             clone!(@weak t => move |_, p, _| t.handle_row_activated(p)),
         );
-        t.view()
-            .connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
+        t.view().connect_cursor_changed(clone!(@weak t => move |_| t.cursor_changed()));
         match &*t.shared.sort_mode.borrow() {
             SortSpec::None => (),
             SortSpec::Disabled => (),
@@ -850,7 +889,7 @@ impl RaeifiedTable {
             || kv == keys::constants::Right
         {
             if !key.state().contains(gdk::ModifierType::SHIFT_MASK)
-                || !self.shared.multi_select.get()
+                || self.shared.selection_mode.get() != SelectionMode::Multi
             {
                 clear_selection();
             }
@@ -870,7 +909,7 @@ impl RaeifiedTable {
         match (self.view().path_at_pos(x as i32, y as i32), typ) {
             (Some((Some(_), Some(_), _, _)), gdk::EventType::ButtonPress) if n == 1 => {
                 if !ev.state().contains(gdk::ModifierType::SHIFT_MASK)
-                    || !self.shared.multi_select.get()
+                    || self.shared.selection_mode.get() != SelectionMode::Multi
                 {
                     self.shared.selected.borrow_mut().clear();
                 }
@@ -1002,13 +1041,18 @@ impl RaeifiedTable {
                 let title = c.title().map(|t| t.to_string()).unwrap_or_else(String::new);
                 let path = self.path_from_selected(row, &title);
                 self.shared.selected_path.set_label(path.as_ref());
-                self.shared
-                    .selected
-                    .borrow_mut()
-                    .entry(String::from(row))
-                    .or_insert_with(HashSet::default)
-                    .insert(title);
-                self.handle_selection_changed();
+                match self.shared.selection_mode.get() {
+                    SelectionMode::None => (),
+                    SelectionMode::Single | SelectionMode::Multi => {
+                        self.shared
+                            .selected
+                            .borrow_mut()
+                            .entry(String::from(row))
+                            .or_insert_with(HashSet::default)
+                            .insert(title);
+                        self.handle_selection_changed();
+                    }
+                }
             }
         }
     }
@@ -1230,7 +1274,8 @@ pub(super) struct Table {
     column_filter: BSNode,
     columns_resizable: BSNode,
     column_widths: BSNode,
-    multi_select: BSNode,
+    selection_mode: BSNode,
+    selection: BSNode,
     path: BSNode,
     row_filter: BSNode,
     show_row_name: BSNode,
@@ -1256,8 +1301,10 @@ impl Table {
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.row_filter);
         let column_editable =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.column_editable);
-        let multi_select =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.multi_select);
+        let selection_mode =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.selection_mode);
+        let selection =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.selection);
         let show_row_name =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.show_row_name);
         let columns_resizable = BSNode::compile(
@@ -1290,7 +1337,8 @@ impl Table {
         shared.set_column_filter(column_filter.current());
         shared.set_row_filter(row_filter.current());
         shared.set_column_editable(column_editable.current());
-        shared.set_multi_select(multi_select.current());
+        shared.set_selection_mode(selection_mode.current());
+        shared.set_selection(selection.current());
         shared.set_show_row_name(show_row_name.current());
         shared.set_columns_resizable(columns_resizable.current());
         shared.set_column_widths(column_widths.current());
@@ -1314,7 +1362,8 @@ impl Table {
             column_filter,
             columns_resizable,
             column_widths,
-            multi_select,
+            selection_mode,
+            selection,
             path,
             row_filter,
             show_row_name,
@@ -1379,7 +1428,8 @@ impl BWidget for Table {
         re |= self.shared.set_column_filter(self.column_filter.update(ctx, event));
         re |= self.shared.set_row_filter(self.row_filter.update(ctx, event));
         re |= self.shared.set_column_editable(self.column_editable.update(ctx, event));
-        re |= self.shared.set_multi_select(self.multi_select.update(ctx, event));
+        re |= self.shared.set_selection_mode(self.selection_mode.update(ctx, event));
+        re |= self.shared.set_selection(self.selection.update(ctx, event));
         re |= self.shared.set_show_row_name(self.show_row_name.update(ctx, event));
         re |=
             self.shared.set_columns_resizable(self.columns_resizable.update(ctx, event));
@@ -1401,7 +1451,14 @@ impl BWidget for Table {
                 | vm::Event::User(LocalEvent::Event(_)) => (),
                 vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {
                     if path == rpath {
-                        self.shared.selected.borrow_mut().clear();
+                        match self.selection.current() {
+                            None | Some(Value::Null) => {
+                                self.shared.selected.borrow_mut().clear();
+                            }
+                            v @ Some(_) => {
+                                self.shared.set_selection(v);
+                            }
+                        }
                         *self.shared.original_descriptor.borrow_mut() =
                             descriptor.clone();
                         self.raeify()
