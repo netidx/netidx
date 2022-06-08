@@ -649,6 +649,7 @@ pub(super) struct RadioButton {
     image: BSNode,
     group: BSNode,
     current_group: Option<String>,
+    group_changing: Rc<Cell<bool>>,
 }
 
 impl RadioButton {
@@ -670,19 +671,30 @@ impl RadioButton {
         let group =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.group.clone());
         let button = gtk::RadioButton::new();
-        button.connect_toggled(clone!(@strong on_toggled, @strong ctx => move |button| {
-            let active = button.is_active();
-            let e = vm::Event::User(LocalEvent::Event(active.into()));
-            // joining and leaving groups might trigger this, which
-            // would cause a borrow error unless we do it when the
-            // main loop is idle.
-            idle_add_local(clone!(@strong on_toggled, @strong ctx => move || {
-                on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
-                Continue(false)
+        let group_changing = Rc::new(Cell::new(false));
+        button.connect_toggled(
+            clone!(@strong on_toggled, @strong ctx, @strong group_changing => move |button| {
+                let active = button.is_active();
+                let e = vm::Event::User(LocalEvent::Event(active.into()));
+                if group_changing.get() {
+                    idle_add_local(clone!(@strong on_toggled, @strong ctx => move || {
+                        on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+                        Continue(false)
+                    }));
+                } else {
+                    on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+                }
             }));
-        }));
         hover_path(&button, &selected_path, "on_toggled", &spec.on_toggled);
-        let mut t = Self { button, on_toggled, label, image, group, current_group: None };
+        let mut t = Self {
+            button,
+            on_toggled,
+            label,
+            image,
+            group,
+            group_changing,
+            current_group: None,
+        };
         t.set_label(t.label.current());
         t.set_image(t.image.current());
         t.set_group(&mut *ctx.borrow_mut(), t.group.current());
@@ -711,6 +723,7 @@ impl RadioButton {
 
     fn set_group(&mut self, ctx: BSCtxRef, v: Option<Value>) {
         if let Some(group) = v.and_then(|v| v.cast_to::<String>().ok()) {
+            self.group_changing.set(true);
             if let Some(current) = self.current_group.take() {
                 self.button.join_group(gtk::RadioButton::NONE);
                 if let Some(group) = ctx.user.radio_groups.get_mut(&current) {
@@ -725,6 +738,7 @@ impl RadioButton {
                 ctx.user.radio_groups.entry(group).or_insert_with(IndexSet::default);
             self.button.join_group(group.last());
             group.insert(self.button.clone());
+            self.group_changing.set(false);
         }
     }
 }
