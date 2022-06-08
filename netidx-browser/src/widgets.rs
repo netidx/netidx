@@ -673,7 +673,13 @@ impl RadioButton {
         button.connect_toggled(clone!(@strong on_toggled, @strong ctx => move |button| {
             let active = button.is_active();
             let e = vm::Event::User(LocalEvent::Event(active.into()));
-            on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+            // joining and leaving groups might trigger this, which
+            // would cause a borrow error unless we do it when the
+            // main loop is idle.
+            idle_add_local(clone!(@strong on_toggled, @strong ctx => move || {
+                on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+                Continue(false)
+            }));
         }));
         hover_path(&button, &selected_path, "on_toggled", &spec.on_toggled);
         let mut t = Self { button, on_toggled, label, image, group, current_group: None };
