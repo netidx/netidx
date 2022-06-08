@@ -240,12 +240,26 @@ pub struct SpinButton {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComboBox {
-    /// The set of choices. This should be a list of strings.
+    /// [choice, ...]
+    /// choice: [<id>, <long-name>]
     pub choices: Expr,
-    /// The currently selected choice
+    /// The id of the currently selected choice
     pub selected: Expr,
-    /// event() will yield the choice the user just selected
+    /// event() will yield the id of the choice the user just selected
     pub on_change: Expr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RadioButton {
+    /// The text label that will appear next to the radio button
+    pub label: Expr,
+    /// See Image::spec
+    pub image: Expr,
+    /// The name of the group that this radio button belongs to. Only
+    /// one radio button in a group may be selected at a time.
+    pub group: Expr,
+    /// event() will yield true if the radio button is selected and false if it is not
+    pub on_toggled: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -461,7 +475,7 @@ pub enum WidgetKind {
     Switch(Switch),
     ToggleButton(ToggleButton),
     CheckButton(ToggleButton),
-//    RadioButton(ComboBox),
+    RadioButton(RadioButton),
     ComboBox(ComboBox),
     Entry(Entry),
 //    SearchEntry(Entry),

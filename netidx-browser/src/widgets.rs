@@ -2,11 +2,11 @@ use super::{util, val_to_bool, BSCtx, BSCtxRef, BSNode, BWidget, WVal, WidgetPat
 use crate::{bscript::LocalEvent, containers, view};
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
-
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
 use gtk::{self, prelude::*};
+use indexmap::IndexSet;
 use netidx::{chars::Chars, path::Path, protocol::value::FromValue, subscriber::Value};
 use netidx_bscript::{expr::Expr, vm};
 use std::{
@@ -639,6 +639,108 @@ impl BWidget for ComboBox {
         if let Some(WidgetPath::Leaf) = path.next() {
             util::set_highlight(&self.combo, h);
         }
+    }
+}
+
+pub(super) struct RadioButton {
+    button: gtk::RadioButton,
+    on_toggled: Rc<RefCell<BSNode>>,
+    label: BSNode,
+    image: BSNode,
+    group: BSNode,
+    current_group: Option<String>,
+}
+
+impl RadioButton {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::RadioButton,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let on_toggled = Rc::new(RefCell::new(BSNode::compile(
+            &mut *ctx.borrow_mut(),
+            scope.clone(),
+            spec.on_toggled.clone(),
+        )));
+        let label =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.label.clone());
+        let image =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.image.clone());
+        let group =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.group.clone());
+        let button = gtk::RadioButton::new();
+        button.connect_toggled(clone!(@strong on_toggled, @strong ctx => move |button| {
+            let active = button.is_active();
+            let e = vm::Event::User(LocalEvent::Event(active.into()));
+            on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+        }));
+        hover_path(&button, &selected_path, "on_toggled", &spec.on_toggled);
+        let mut t = Self { button, on_toggled, label, image, group, current_group: None };
+        t.set_label(t.label.current());
+        t.set_image(t.image.current());
+        t.set_group(&mut *ctx.borrow_mut(), t.group.current());
+        t
+    }
+
+    fn set_label(&self, v: Option<Value>) {
+        if let Some(text) = v.and_then(|v| v.cast_to::<Chars>().ok()) {
+            self.button.set_label(&*text);
+        }
+    }
+
+    fn set_image(&self, v: Option<Value>) {
+        if let Some(spec) = v.and_then(|v| v.cast_to::<ImageSpec>().ok()) {
+            match self.button.image() {
+                Some(image) if image.is::<gtk::Image>() => {
+                    spec.apply(image.downcast_ref().unwrap());
+                }
+                Some(_) | None => {
+                    self.button.set_image(Some(&spec.get()));
+                    self.button.set_always_show_image(true);
+                }
+            }
+        }
+    }
+
+    fn set_group(&mut self, ctx: BSCtxRef, v: Option<Value>) {
+        if let Some(group) = v.and_then(|v| v.cast_to::<String>().ok()) {
+            if let Some(current) = self.current_group.take() {
+                self.button.join_group(gtk::RadioButton::NONE);
+                if let Some(group) = ctx.user.radio_groups.get_mut(&current) {
+                    group.remove(&self.button);
+                    if group.is_empty() {
+                        ctx.user.radio_groups.remove(&current);
+                    }
+                }
+            }
+            self.current_group = Some(group.clone());
+            let group =
+                ctx.user.radio_groups.entry(group).or_insert_with(IndexSet::default);
+            self.button.join_group(group.last());
+            group.insert(self.button.clone());
+        }
+    }
+}
+
+impl BWidget for RadioButton {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
+        let v = self.label.update(ctx, event);
+        self.set_label(v);
+        let v = self.image.update(ctx, event);
+        self.set_image(v);
+        let v = self.group.update(ctx, event);
+        self.set_group(ctx, v);
+        self.on_toggled.borrow_mut().update(ctx, event);
+    }
+
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.button.upcast_ref())
     }
 }
 

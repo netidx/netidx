@@ -19,10 +19,11 @@ use arcstr::ArcStr;
 use bscript::LocalEvent;
 use editor::Editor;
 use futures::channel::oneshot;
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxBuildHasher};
 use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
+use indexmap::IndexSet;
 use netidx::{
     chars::Chars,
     config::Config,
@@ -39,6 +40,7 @@ use netidx_protocols::view;
 use radix_trie::Trie;
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     fmt, mem,
     path::PathBuf,
     rc::Rc,
@@ -168,6 +170,7 @@ struct WidgetCtx {
     view_saved: Cell<bool>,
     fns: Trie<String, ()>,
     vars: Trie<String, Trie<String, ()>>,
+    radio_groups: FxHashMap<String, IndexSet<gtk::RadioButton, FxBuildHasher>>,
 }
 
 impl vm::Ctx for WidgetCtx {
@@ -349,13 +352,16 @@ impl Widget {
                 ctx,
                 spec,
                 scope.clone(),
-                selected_path
+                selected_path,
             )),
             view::WidgetKind::Scale(spec) => {
                 Box::new(widgets::Scale::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::ComboBox(spec) => {
                 Box::new(widgets::ComboBox::new(ctx, spec, scope.clone(), selected_path))
+            }
+            view::WidgetKind::RadioButton(spec) => {
+                Box::new(widgets::RadioButton::new(ctx, spec, scope.clone(), selected_path))
             }
             view::WidgetKind::Entry(spec) => {
                 Box::new(widgets::Entry::new(ctx, spec, scope.clone(), selected_path))
@@ -964,6 +970,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             if let Some(cur) = current.borrow_mut().take() {
                 ctx.borrow().user.window.remove(cur.root());
             }
+            ctx.borrow_mut().user.radio_groups.clear();
             ctx.borrow_mut().clear();
             *current_spec.borrow_mut() = spec.clone();
             let cur = View::new(&ctx, &*current_loc.borrow(), spec);
@@ -1116,6 +1123,7 @@ fn main() {
                     view_saved: Cell::new(true),
                     fns: Trie::new(),
                     vars: Trie::new(),
+                    radio_groups: HashMap::default(),
                 })));
                 run_gui(ctx, app, rx_to_gui);
             }

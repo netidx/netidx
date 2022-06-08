@@ -243,6 +243,7 @@ enum WidgetKind {
     ProgressBar(widgets::ProgressBar),
     Switch(widgets::Switch),
     ComboBox(widgets::ComboBox),
+    RadioButton(widgets::RadioButton),
     Entry(widgets::Entry),
     LinePlot(widgets::LinePlot),
     Frame(widgets::Frame),
@@ -270,6 +271,7 @@ impl WidgetKind {
             WidgetKind::Switch(w) => Some(w.root()),
             WidgetKind::ProgressBar(w) => Some(w.root()),
             WidgetKind::ComboBox(w) => Some(w.root()),
+            WidgetKind::RadioButton(w) => Some(w.root()),
             WidgetKind::Scale(w) => Some(w.root()),
             WidgetKind::Entry(w) => Some(w.root()),
             WidgetKind::LinePlot(w) => Some(w.root()),
@@ -381,6 +383,16 @@ impl Widget {
             view::Widget { props, kind: view::WidgetKind::CheckButton(s) } => (
                 "CheckButton",
                 WidgetKind::CheckButton(widgets::ToggleButton::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
+            ),
+            view::Widget { props, kind: view::WidgetKind::RadioButton(s) } => (
+                "RadioButton",
+                WidgetKind::RadioButton(widgets::RadioButton::new(
                     ctx,
                     on_change.clone(),
                     scope.clone(),
@@ -548,6 +560,7 @@ impl Widget {
             WidgetKind::LinkButton(w) => view::WidgetKind::LinkButton(w.spec()),
             WidgetKind::ToggleButton(w) => view::WidgetKind::ToggleButton(w.spec()),
             WidgetKind::CheckButton(w) => view::WidgetKind::CheckButton(w.spec()),
+            WidgetKind::RadioButton(w) => view::WidgetKind::RadioButton(w.spec()),
             WidgetKind::Switch(w) => view::WidgetKind::Switch(w.spec()),
             WidgetKind::ComboBox(w) => view::WidgetKind::ComboBox(w.spec()),
             WidgetKind::Scale(w) => view::WidgetKind::Scale(w.spec()),
@@ -606,9 +619,8 @@ impl Widget {
                 }))
             }
             Some("ToggleButton") | Some("CheckButton") => {
-                let l = Chars::from("click me!");
                 let tb = view::ToggleButton {
-                    label: ce(Value::String(l)),
+                    label: ce(Value::from("click me!")),
                     image: ce(Value::Null),
                     toggle: view::Switch {
                         value: expr::ExprKind::Apply {
@@ -637,6 +649,14 @@ impl Widget {
                 } else {
                     unreachable!()
                 }
+            }
+            Some("RadioButton") => {
+                widget(view::WidgetKind::RadioButton(view::RadioButton {
+                    label: ce(Value::from("click me!")),
+                    image: ce(Value::Null),
+                    group: ce(Value::from("group0")),
+                    on_toggled: ce(Value::Null),
+                }))
             }
             Some("Switch") => widget(view::WidgetKind::Switch(view::Switch {
                 value: expr::ExprKind::Apply {
@@ -823,6 +843,7 @@ impl Widget {
             | WidgetKind::LinkButton(_)
             | WidgetKind::ToggleButton(_)
             | WidgetKind::CheckButton(_)
+            | WidgetKind::RadioButton(_)
             | WidgetKind::Switch(_)
             | WidgetKind::ComboBox(_)
             | WidgetKind::Scale(_)
@@ -842,7 +863,7 @@ impl Widget {
     }
 }
 
-static KINDS: [&'static str; 23] = [
+static KINDS: [&'static str; 24] = [
     "Box",
     "BoxChild",
     "BScript",
@@ -862,6 +883,7 @@ static KINDS: [&'static str; 23] = [
     "NotebookPage",
     "Paned",
     "ProgressBar",
+    "RadioButton",
     "Scale",
     "Switch",
     "Table",
@@ -1263,6 +1285,7 @@ impl Editor {
                 | WidgetKind::LinkButton(_)
                 | WidgetKind::ToggleButton(_)
                 | WidgetKind::CheckButton(_)
+                | WidgetKind::RadioButton(_)
                 | WidgetKind::Switch(_)
                 | WidgetKind::ComboBox(_)
                 | WidgetKind::Scale(_)
@@ -1381,6 +1404,7 @@ impl Editor {
             | view::WidgetKind::LinkButton(_)
             | view::WidgetKind::ToggleButton(_)
             | view::WidgetKind::CheckButton(_)
+            | view::WidgetKind::RadioButton(_)
             | view::WidgetKind::Switch(_)
             | view::WidgetKind::ComboBox(_)
             | view::WidgetKind::Scale(_)
@@ -1484,6 +1508,7 @@ impl Editor {
                     | view::WidgetKind::LinkButton(_)
                     | view::WidgetKind::ToggleButton(_)
                     | view::WidgetKind::CheckButton(_)
+                    | view::WidgetKind::RadioButton(_)
                     | view::WidgetKind::Switch(_)
                     | view::WidgetKind::ComboBox(_)
                     | view::WidgetKind::Scale(_)
@@ -1515,6 +1540,7 @@ impl Editor {
                 | WidgetKind::LinkButton(_)
                 | WidgetKind::ToggleButton(_)
                 | WidgetKind::CheckButton(_)
+                | WidgetKind::RadioButton(_)
                 | WidgetKind::Switch(_)
                 | WidgetKind::ComboBox(_)
                 | WidgetKind::Scale(_)

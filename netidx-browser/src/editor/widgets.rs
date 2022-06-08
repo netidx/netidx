@@ -552,6 +552,46 @@ impl ComboBox {
 }
 
 #[derive(Clone)]
+pub(super) struct RadioButton {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::RadioButton>>,
+    _dbg_label: DbgExpr,
+    _dbg_image: DbgExpr,
+    _dbg_group: DbgExpr,
+    _dbg_on_toggled: DbgExpr,
+}
+
+impl RadioButton {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Scope,
+        spec: view::RadioButton,
+    ) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let (l, e, _dbg_label) = expr!(ctx, "Label:", scope, spec, on_change, label);
+        root.add((l, e));
+        let (l, e, _dbg_image) = expr!(ctx, "Image:", scope, spec, on_change, image);
+        root.add((l, e));
+        let (l, e, _dbg_group) = expr!(ctx, "Group:", scope, spec, on_change, group);
+        root.add((l, e));
+        let (l, e, _dbg_on_toggled) =
+            expr!(ctx, "On Toggled:", scope, spec, on_change, on_toggled);
+        root.add((l, e));
+        Self { root, spec, _dbg_label, _dbg_image, _dbg_group, _dbg_on_toggled }
+    }
+
+    pub(super) fn spec(&self) -> view::RadioButton {
+        self.spec.borrow().clone()
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct Entry {
     root: TwoColGrid,
     spec: Rc<RefCell<view::Entry>>,
