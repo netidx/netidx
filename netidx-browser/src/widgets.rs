@@ -671,6 +671,7 @@ impl RadioButton {
         let group =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.group.clone());
         let button = gtk::RadioButton::new();
+        button.set_no_show_all(true);
         let group_changing = Rc::new(Cell::new(false));
         button.connect_toggled(
             clone!(@strong on_toggled, @strong ctx, @strong group_changing => move |button| {
@@ -975,6 +976,84 @@ impl BWidget for Entry {
 
     fn root(&self) -> Option<&gtk::Widget> {
         Some(self.entry.upcast_ref())
+    }
+}
+
+pub(super) struct SearchEntry {
+    entry: gtk::SearchEntry,
+    we_changed: Rc<Cell<bool>>,
+    text: BSNode,
+    on_search_changed: Rc<RefCell<BSNode>>,
+    on_activate: Rc<RefCell<BSNode>>,
+}
+
+impl SearchEntry {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::SearchEntry,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let we_changed = Rc::new(Cell::new(false));
+        let text =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.text.clone());
+        let on_search_changed = Rc::new(RefCell::new(BSNode::compile(
+            &mut *ctx.borrow_mut(),
+            scope.clone(),
+            spec.on_search_changed.clone(),
+        )));
+        let on_activate = Rc::new(RefCell::new(BSNode::compile(
+            &mut *ctx.borrow_mut(),
+            scope.clone(),
+            spec.on_activate.clone(),
+        )));
+        let entry = gtk::SearchEntry::new();
+        hover_path(&entry, &selected_path, "on_search_changed", &spec.on_search_changed);
+        entry.set_no_show_all(true);
+        Self::set_text(&entry, text.current());
+        entry.connect_search_changed(
+            clone!(@strong on_search_changed, @strong ctx, @strong we_changed => move |entry| {
+                if !we_changed.get() {
+                    let s = Value::from(entry.text().to_string());
+                    let e = vm::Event::User(LocalEvent::Event(s));
+                    on_search_changed.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+                }
+            }));
+        entry.connect_activate(clone!(@strong on_activate, @strong ctx => move |e| {
+            let s = Value::from(e.text().to_string());
+            let e = vm::Event::User(LocalEvent::Event(s));
+            on_activate.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+        }));
+        Self { entry, we_changed, text, on_search_changed, on_activate }
+    }
+
+    fn set_text(entry: &gtk::SearchEntry, v: Option<Value>) {
+        if let Some(s) = v.and_then(|v| v.cast_to::<Chars>().ok()) {
+            entry.set_text(&*s);
+        }
+    }
+
+    fn we_set_text(we_set: &Cell<bool>, entry: &gtk::SearchEntry, v: Option<Value>) {
+        we_set.set(true);
+        Self::set_text(entry, v);
+        we_set.set(false);
+    }
+}
+
+impl BWidget for SearchEntry {
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
+        Self::we_set_text(&*self.we_changed, &self.entry, self.text.update(ctx, event));
+        self.on_search_changed.borrow_mut().update(ctx, event);
+        self.on_activate.borrow_mut().update(ctx, event);
+    }
+
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(&self.entry.upcast_ref())
     }
 }
 

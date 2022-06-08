@@ -275,6 +275,18 @@ pub struct Entry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchEntry {
+    /// The currently displayed text
+    pub text: Expr,
+    /// when the user makes a change event() will yield, after some
+    /// delay, the new text.
+    pub on_search_changed: Expr,
+    /// event() will yield the entry text when the user activates the
+    /// entry.
+    pub on_activate: Expr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scale {
     pub direction: Direction,
     /// (false | true | [position-spec, (null | <decimal-places>)])
@@ -478,7 +490,7 @@ pub enum WidgetKind {
     RadioButton(RadioButton),
     ComboBox(ComboBox),
     Entry(Entry),
-//    SearchEntry(Entry),
+    SearchEntry(SearchEntry),
     ProgressBar(ProgressBar),
     Scale(Scale),
     Image(Image),

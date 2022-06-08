@@ -630,6 +630,44 @@ impl Entry {
 }
 
 #[derive(Clone)]
+pub(super) struct SearchEntry {
+    root: TwoColGrid,
+    spec: Rc<RefCell<view::SearchEntry>>,
+    _dbg_text: DbgExpr,
+    _dbg_on_search_changed: DbgExpr,
+    _dbg_on_activate: DbgExpr,
+}
+
+impl SearchEntry {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        on_change: OnChange,
+        scope: Scope,
+        spec: view::SearchEntry,
+    ) -> Self {
+        let mut root = TwoColGrid::new();
+        let spec = Rc::new(RefCell::new(spec));
+        let (l, e, _dbg_text) = expr!(ctx, "Text:", scope, spec, on_change, text);
+        root.add((l, e));
+        let (l, e, _dbg_on_search_changed) =
+            expr!(ctx, "On Search Changed:", scope, spec, on_change, on_search_changed);
+        root.add((l, e));
+        let (l, e, _dbg_on_activate) =
+            expr!(ctx, "On Activate:", scope, spec, on_change, on_activate);
+        root.add((l, e));
+        Self { root, spec, _dbg_text, _dbg_on_search_changed, _dbg_on_activate }
+    }
+
+    pub(super) fn spec(&self) -> view::SearchEntry {
+        self.spec.borrow().clone()
+    }
+
+    pub(super) fn root(&self) -> &gtk::Widget {
+        self.root.root().upcast_ref()
+    }
+}
+
+#[derive(Clone)]
 struct Series {
     _x: DbgExpr,
     _y: DbgExpr,

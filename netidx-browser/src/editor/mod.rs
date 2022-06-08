@@ -245,6 +245,7 @@ enum WidgetKind {
     ComboBox(widgets::ComboBox),
     RadioButton(widgets::RadioButton),
     Entry(widgets::Entry),
+    SearchEntry(widgets::SearchEntry),
     LinePlot(widgets::LinePlot),
     Frame(widgets::Frame),
     Box(widgets::BoxContainer),
@@ -274,6 +275,7 @@ impl WidgetKind {
             WidgetKind::RadioButton(w) => Some(w.root()),
             WidgetKind::Scale(w) => Some(w.root()),
             WidgetKind::Entry(w) => Some(w.root()),
+            WidgetKind::SearchEntry(w) => Some(w.root()),
             WidgetKind::LinePlot(w) => Some(w.root()),
             WidgetKind::Frame(w) => Some(w.root()),
             WidgetKind::Box(w) => Some(w.root()),
@@ -450,6 +452,16 @@ impl Widget {
                 )),
                 Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
             ),
+            view::Widget { props, kind: view::WidgetKind::SearchEntry(s) } => (
+                "SearchEntry",
+                WidgetKind::SearchEntry(widgets::SearchEntry::new(
+                    ctx,
+                    on_change.clone(),
+                    scope.clone(),
+                    s,
+                )),
+                Some(WidgetProps::new(ctx, scope.clone(), on_change, props)),
+            ),
             view::Widget { props, kind: view::WidgetKind::Frame(s) } => (
                 "Frame",
                 WidgetKind::Frame(widgets::Frame::new(
@@ -566,6 +578,7 @@ impl Widget {
             WidgetKind::Scale(w) => view::WidgetKind::Scale(w.spec()),
             WidgetKind::ProgressBar(w) => view::WidgetKind::ProgressBar(w.spec()),
             WidgetKind::Entry(w) => view::WidgetKind::Entry(w.spec()),
+            WidgetKind::SearchEntry(w) => view::WidgetKind::SearchEntry(w.spec()),
             WidgetKind::LinePlot(w) => view::WidgetKind::LinePlot(w.spec()),
             WidgetKind::Frame(w) => view::WidgetKind::Frame(w.spec()),
             WidgetKind::Box(w) => view::WidgetKind::Box(w.spec()),
@@ -745,6 +758,39 @@ impl Widget {
                 }
                 .to_expr(),
             })),
+            Some("SearchEntry") => {
+                widget(view::WidgetKind::SearchEntry(view::SearchEntry {
+                    text: expr::ExprKind::Apply {
+                        args: vec![ce(Value::from("/somewhere"))],
+                        function: "load".into(),
+                    }
+                    .to_expr(),
+                    on_search_changed: expr::ExprKind::Apply {
+                        args: vec![
+                            expr::ExprKind::Apply {
+                                args: vec![],
+                                function: "event".into(),
+                            }
+                            .to_expr(),
+                            ce(Value::True),
+                        ],
+                        function: "sample".into(),
+                    }
+                    .to_expr(),
+                    on_activate: expr::ExprKind::Apply {
+                        args: vec![
+                            ce(Value::from("/somewhere")),
+                            expr::ExprKind::Apply {
+                                args: vec![],
+                                function: "event".into(),
+                            }
+                            .to_expr(),
+                        ],
+                        function: "store".into(),
+                    }
+                    .to_expr(),
+                }))
+            }
             Some("LinePlot") => {
                 let props = Some(view::WidgetProps {
                     vexpand: true,
@@ -849,6 +895,7 @@ impl Widget {
             | WidgetKind::Scale(_)
             | WidgetKind::ProgressBar(_)
             | WidgetKind::Entry(_)
+            | WidgetKind::SearchEntry(_)
             | WidgetKind::LinePlot(_)
             | WidgetKind::Frame(_)
             | WidgetKind::Box(_)
@@ -1291,6 +1338,7 @@ impl Editor {
                 | WidgetKind::Scale(_)
                 | WidgetKind::ProgressBar(_)
                 | WidgetKind::Entry(_)
+                | WidgetKind::SearchEntry(_)
                 | WidgetKind::LinePlot(_) => scope.clone(),
             };
             if let Some(iter) = store.iter_children(Some(root)) {
@@ -1410,6 +1458,7 @@ impl Editor {
             | view::WidgetKind::Scale(_)
             | view::WidgetKind::ProgressBar(_)
             | view::WidgetKind::Entry(_)
+            | view::WidgetKind::SearchEntry(_)
             | view::WidgetKind::LinePlot(_) => (),
         }
     }
@@ -1514,6 +1563,7 @@ impl Editor {
                     | view::WidgetKind::Scale(_)
                     | view::WidgetKind::ProgressBar(_)
                     | view::WidgetKind::Entry(_)
+                    | view::WidgetKind::SearchEntry(_)
                     | view::WidgetKind::LinePlot(_) => (),
                 };
                 spec
@@ -1546,6 +1596,7 @@ impl Editor {
                 | WidgetKind::Scale(_)
                 | WidgetKind::ProgressBar(_)
                 | WidgetKind::Entry(_)
+                | WidgetKind::SearchEntry(_)
                 | WidgetKind::LinePlot(_) => {
                     path.insert(0, WidgetPath::Leaf);
                     false

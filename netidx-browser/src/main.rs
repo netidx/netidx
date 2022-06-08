@@ -366,6 +366,9 @@ impl Widget {
             view::WidgetKind::Entry(spec) => {
                 Box::new(widgets::Entry::new(ctx, spec, scope.clone(), selected_path))
             }
+            view::WidgetKind::SearchEntry(spec) => {
+                Box::new(widgets::SearchEntry::new(ctx, spec, scope.clone(), selected_path))
+            }
             view::WidgetKind::Frame(spec) => {
                 Box::new(containers::Frame::new(ctx, spec, scope.clone(), selected_path))
             }
