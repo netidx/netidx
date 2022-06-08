@@ -910,7 +910,7 @@ impl Widget {
     }
 }
 
-static KINDS: [&'static str; 24] = [
+static KINDS: [&'static str; 25] = [
     "Box",
     "BoxChild",
     "BScript",
@@ -932,6 +932,7 @@ static KINDS: [&'static str; 24] = [
     "ProgressBar",
     "RadioButton",
     "Scale",
+    "SearchEntry",
     "Switch",
     "Table",
     "ToggleButton",
