@@ -98,6 +98,120 @@ pub struct Table {
     /// - true: columns may be resized by the user
     /// - false: columns may not be resized by the user
     pub columns_resizable: Expr,
+    /// (null | column_types)
+    /// column_types: [[<name>, coltype], ...]
+    /// coltype: (typename | [typename, properties])
+    /// typename: ("text" | "toggle" | "image" | "combo" | "spin" | "progress")
+    /// properties: match typename
+    ///   "text": [
+    ///     ["source", <column-name>],
+    ///       optional, the source column that contains the data for
+    ///       each row. If not specified the default is this column
+    ///       (<name>).
+    ///
+    ///     ["attributes", ([attribute, ..] | <column-name>)],
+    ///       pango attributes to apply to the text
+    ///
+    ///       attribute: [attrname, value]
+    ///
+    ///       attrname: ("foreground" | "background")
+    ///
+    ///       value: <color-string> understands anything supported by
+    ///       pango_color_parse, so hex values, and css color names.
+    ///   ]
+    ///   
+    ///   "toggle": [
+    ///     ["source": <column-name>],
+    ///
+    ///       optional, the source column that contains the toggle
+    ///       data for each row. If not specified the default is this
+    ///       column (<name>).
+    ///
+    ///     ["radio", (true | false | <column-name>)],
+    ///       whether to render the toggle as a check button or a radio button.
+    ///
+    ///       true: the entire column is radio buttons, only one row may
+    ///       be selected at any one time
+    ///
+    ///       false: the entire column is check buttons, which may be
+    ///       individually toggled.
+    ///
+    ///       <column-name>: the specified boolean column controls
+    ///       whether or not the toggle in each row is a radio or a
+    ///       check button.
+    ///   ]
+    ///
+    ///   "image": [
+    ///     ["source": <column-name>],
+    ///       optional, the source column that contains the image spec
+    ///       data for each row. If not specified the default is this
+    ///       column (<name>).
+    ///   ]
+    ///
+    ///   "combo": [
+    ///     ["source", <column-name>],
+    ///       optional, the source column that contains the selected
+    ///       id for each row. If not specified the default is this
+    ///       column (<name>).
+    ///
+    ///     ["choices", ([choice, ...] | <column-name>)],
+    ///       required attribute specifying the available choices.
+    ///
+    ///       choice: [<id>, <text>]
+    ///         id: a short text id that will be given to event() when the user makes a selection
+    ///         text: the text that will be displayed to the user
+    ///
+    ///       <column-name>: the column that contains the choices, which will be set per row. The format
+    ///       should be [choice, ...], same as if they are specified globally.
+    ///
+    ///     ["has-entry", (true | false | <column-name>)],
+    ///   ]
+    ///
+    ///   "spin": [
+    ///      ["source",  <column-name>],
+    ///        optional, the source column that contains the spin
+    ///        button values. If not specified the default is this
+    ///        column (<name>).
+    ///
+    ///      ["range", (<column-name>, [(<min> | <column-name>), (<max> | <column-name>)])],
+    ///        optional, if not specified 0 to 1 is assumed. If a
+    ///        single column name is specified then that column should
+    ///        contain a pair of floats [<min>, <max>]. Otherwise a
+    ///        pair of hard coded min/max mixed with column names
+    ///        should be specified.
+    ///
+    ///      ["climb-rate", (<rate> | <column-name>)],
+    ///        optional. How fast the value should change if the user
+    ///        holds the + or - button down.
+    ///
+    ///      ["digits", (<n> | <column-name>)],
+    ///        optional. The number of decimal places to display.
+    ///   ]
+    ///
+    ///   "progress": [
+    ///     ["pulse-mode": (true | false | <column-name>)],
+    ///     ["text": <text>],
+    ///     ["text-column": <column-name>],
+    ///     ["text-xalign": (<n>, <column-name>)],
+    ///     ["text-yalign": (<n>, <column-name>)],
+    ///     ["inverted": (true | false | <column-name>)],
+    ///  ]
+    ///  all the properties of progress are optional. If none are set
+    ///  the entire properties array may be omitted
+    ///
+    /// null: all columns are assumed to be text
+    ///
+    /// The column type specifiecation need not be total, any column
+    /// not given a type will be assumed to be a text column with no
+    /// properties assigned.
+    ///
+    /// Column type specification interacts with the column filter, in
+    /// that a column type specification may name another column as
+    /// the source of a given property and the column filter may
+    /// remove that column. If that occurrs, the column will be hidden
+    /// from the user, but will still be loaded into the model, such
+    /// that the property specification should still work.
+//    pub column_types: Expr,
     /// ("none" | "single" | "multi")
     /// "none": user selection is not allowed. The cursor (text focus)
     /// can still be moved, but cells will not be highlighted and no

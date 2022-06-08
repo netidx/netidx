@@ -275,6 +275,25 @@ impl FromValue for SelectionMode {
     }
 }
 
+enum OrLoadCol<T> {
+    Static(T),
+    LoadFromCol(String),
+}
+
+struct ColumnTypeText {
+    background: Option<pango::Color>,
+    foreground: Option<pango::Color>
+}
+
+struct ColumnTypeToggle {
+    radio: Option<OrLoadCol<bool>>
+}
+
+enum ColumnType {
+    Text(ColumnTypeText),
+    Toggle(ColumnTypeToggle),
+}
+
 enum TableState {
     Resolving(Path),
     Raeified(RaeifiedTable),
