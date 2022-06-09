@@ -8,7 +8,7 @@ use std::{
     fmt::Debug,
     hash::{BuildHasher, Hash, Hasher},
     mem,
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, IndexMut},
     sync::{Arc, Weak},
 };
 
@@ -79,6 +79,20 @@ impl<T> Poolable for VecDeque<T> {
 
     fn capacity(&self) -> usize {
         VecDeque::capacity(self)
+    }
+}
+
+impl Poolable for String {
+    fn empty() -> Self {
+        String::new()
+    }
+
+    fn reset(&mut self) {
+        self.clear()
+    }
+
+    fn capacity(&self) -> usize {
+        self.capacity()
     }
 }
 
