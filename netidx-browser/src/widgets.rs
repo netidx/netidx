@@ -1,7 +1,6 @@
-use super::{util, val_to_bool, BSCtx, BSCtxRef, BSNode, BWidget, WVal, WidgetPath};
+use super::{util, val_to_bool, BSCtx, BSCtxRef, BSNode, BWidget, WVal, WidgetPath, ImageSpec};
 use crate::{bscript::LocalEvent, containers, view};
-use anyhow::{anyhow, bail, Result};
-use bytes::Bytes;
+use anyhow::{bail, Result};
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local};
@@ -11,94 +10,9 @@ use netidx::{chars::Chars, path::Path, protocol::value::FromValue, subscriber::V
 use netidx_bscript::{expr::Expr, vm};
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
     rc::Rc,
     str::FromStr,
 };
-
-#[derive(Debug)]
-enum ImageSpec {
-    Icon { name: Chars, size: gtk::IconSize },
-    PixBuf { bytes: Bytes, width: Option<u32>, height: Option<u32>, keep_aspect: bool },
-}
-
-impl ImageSpec {
-    fn get(&self) -> gtk::Image {
-        let image = gtk::Image::new();
-        self.apply(&image);
-        image
-    }
-
-    // apply the spec to an existing image
-    fn apply(&self, image: &gtk::Image) {
-        match self {
-            Self::Icon { name, size } => image.set_from_icon_name(Some(&**name), *size),
-            Self::PixBuf { bytes, width, height, keep_aspect } => {
-                let width = width.map(|i| i as i32).unwrap_or(-1);
-                let height = height.map(|i| i as i32).unwrap_or(-1);
-                let bytes = glib::Bytes::from_owned(bytes.clone());
-                let stream = gio::MemoryInputStream::from_bytes(&bytes);
-                let pixbuf = gdk_pixbuf::Pixbuf::from_stream_at_scale(
-                    &stream,
-                    width,
-                    height,
-                    *keep_aspect,
-                    gio::Cancellable::NONE,
-                )
-                .ok();
-                image.set_from_pixbuf(pixbuf.as_ref())
-            }
-        }
-    }
-}
-
-impl FromValue for ImageSpec {
-    fn from_value(v: Value) -> Result<Self> {
-        match v {
-            Value::String(name) => {
-                Ok(Self::Icon { name, size: gtk::IconSize::SmallToolbar })
-            }
-            Value::Bytes(bytes) => {
-                Ok(Self::PixBuf { bytes, width: None, height: None, keep_aspect: true })
-            }
-            Value::Array(elts) => match &*elts {
-                [Value::String(name), Value::String(size)] => {
-                    let size = match &**size {
-                        "menu" => gtk::IconSize::Menu,
-                        "small-toolbar" => gtk::IconSize::SmallToolbar,
-                        "large-toolbar" => gtk::IconSize::LargeToolbar,
-                        "dnd" => gtk::IconSize::Dnd,
-                        "dialog" => gtk::IconSize::Dialog,
-                        _ => bail!("invalid size"),
-                    };
-                    Ok(Self::Icon { name: name.clone(), size })
-                }
-                _ => {
-                    let mut alist =
-                        Value::Array(elts).cast_to::<HashMap<Chars, Value>>()?;
-                    let bytes = alist
-                        .remove("image")
-                        .ok_or_else(|| anyhow!("missing bytes"))?
-                        .cast_to::<Bytes>()?;
-                    let width =
-                        alist.remove("width").and_then(|v| v.cast_to::<u32>().ok());
-                    let height =
-                        alist.remove("height").and_then(|v| v.cast_to::<u32>().ok());
-                    let keep_aspect = alist
-                        .remove("keep-aspect")
-                        .and_then(|v| v.cast_to::<bool>().ok())
-                        .unwrap_or(true);
-                    Ok(Self::PixBuf { bytes, width, height, keep_aspect })
-                }
-            },
-            _ => bail!("expected bytes or array"),
-        }
-    }
-
-    fn get(v: Value) -> Option<Self> {
-        <Self as FromValue>::from_value(v).ok()
-    }
-}
 
 fn parse_ellipsize(e: Value) -> pango::EllipsizeMode {
     match e.cast_to::<Chars>().ok() {

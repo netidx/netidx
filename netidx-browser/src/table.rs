@@ -1,6 +1,6 @@
 use super::{
     util::{err_modal, toplevel},
-    BSCtx, BSCtxRef, BSNode, BWidget, WVal,
+    BSCtx, BSCtxRef, BSNode, BWidget, ImageSpec, WVal,
 };
 use crate::bscript::LocalEvent;
 use anyhow::{anyhow, bail};
@@ -11,9 +11,9 @@ use gdk::{keys, EventButton, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
 use gtk::{
-    prelude::*, Adjustment, CellRenderer, CellRendererText, Label, ListStore,
-    ScrolledWindow, SortColumn, SortType, StateFlags, StyleContext, TreeIter, TreeModel,
-    TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
+    prelude::*, Adjustment, CellRenderer, CellRendererPixbuf, CellRendererText, Label,
+    ListStore, ScrolledWindow, SortColumn, SortType, StateFlags, StyleContext, TreeIter,
+    TreeModel, TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
 };
 use indexmap::{IndexMap, IndexSet};
 use netidx::{
@@ -970,12 +970,13 @@ impl RaeifiedTable {
             if t.shared.column_editable.borrow().is_match(id as usize, &**name) {
                 cell.set_editable(true);
             }
-            let f = Box::new(clone!(@weak t, @strong cell, @strong name, @strong spec =>
-            move |_: &TreeViewColumn,
+            let f = Box::new(clone!(
+            @weak t, @strong cell, @strong name =>
+                move |_: &TreeViewColumn,
             _: &CellRenderer,
             _: &TreeModel,
             i: &TreeIter| {
-                t.render_text_cell(id, &*name, &background, &foreground, &cell, i, &spec)
+                t.render_text_cell(id, &*name, &background, &foreground, &cell, i)
             }));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
             cell.connect_edited(clone!(@weak t => move |_, _, v| {
@@ -987,6 +988,32 @@ impl RaeifiedTable {
         }
         t.set_column_properties(&column, name, id, sorting_disabled);
         t.view().append_column(&column);
+    }
+
+    fn add_image_column(&self, name: &Chars, spec: &ColumnTypeImage) {
+        let t = self;
+        let column = TreeViewColumn::new();
+        let cell = CellRendererPixbuf::new();
+        column.pack_start(&cell, true);
+        let id = match &spec.source {
+            None => {
+                self.descriptor.cols.get_full(&**name).map(|(i, _, _)| (i + 1) as i32)
+            }
+            Some(src) => {
+                self.descriptor.cols.get_full(&**src).map(|(i, _, _)| (i + 1) as i32)
+            }
+        };
+        if let Some(id) = id {
+            let f = Box::new(clone!(
+            @weak t, @strong cell, @strong name =>
+                move |_: &TreeViewColumn,
+            _: &CellRenderer,
+            _: &TreeModel,
+            i: &TreeIter| {
+                t.render_image_cell(id, &*name, &cell, i)
+            }));
+            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+        }
     }
 
     fn add_columns(
@@ -1037,12 +1064,12 @@ impl RaeifiedTable {
                     ColumnType::Text(cs) => {
                         t.add_text_column(sorting_disabled, vector_mode, &name, cs)
                     }
-                    ColumnType::Hidden => (),
+                    ColumnType::Image(cs) => t.add_image_column(&name, cs),
                     ColumnType::Toggle(_)
-                    | ColumnType::Image(_)
                     | ColumnType::Combo(_)
                     | ColumnType::Spin(_)
                     | ColumnType::Progress(_) => unimplemented!(),
+                    ColumnType::Hidden => (),
                 }
             }
         }
@@ -1204,7 +1231,6 @@ impl RaeifiedTable {
         foreground: &Option<OrLoad<Color>>,
         cr: &CellRendererText,
         i: &TreeIter,
-        _spec: &ColumnTypeText,
     ) {
         let bv = self.store().value(i, id);
         cr.set_text(match bv.get::<&BVal>() {
@@ -1227,11 +1253,38 @@ impl RaeifiedTable {
                 cr.set_foreground_rgba(Some(&fg));
             }
             Some(_) | None => {
-                let bg = background.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
-                let fg = foreground.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
+                let bg = background
+                    .as_ref()
+                    .and_then(|s| s.load(i, self.store()))
+                    .map(|c| c.0);
+                let fg = foreground
+                    .as_ref()
+                    .and_then(|s| s.load(i, self.store()))
+                    .map(|c| c.0);
                 cr.set_cell_background_rgba(bg.as_ref());
                 cr.set_foreground_rgba(fg.as_ref());
             }
+        }
+    }
+
+    fn render_image_cell(
+        &self,
+        id: i32,
+        _name: &str,
+        cr: &CellRendererPixbuf,
+        i: &TreeIter,
+    ) {
+        let bv = self.store().value(i, id);
+        let spec = match bv.get::<&BVal>() {
+            Err(_) => return,
+            Ok(v) => match v.value.clone().cast_to::<ImageSpec>() {
+                Err(_) => return,
+                Ok(spec) => spec,
+            },
+        };
+        match spec {
+            ImageSpec::Icon { name, size: _ } => cr.set_icon_name(Some(&*name)),
+            ImageSpec::PixBuf { .. } => cr.set_pixbuf(spec.get_pixbuf().as_ref()),
         }
     }
 
