@@ -99,8 +99,7 @@ pub struct Table {
     /// - false: columns may not be resized by the user
     pub columns_resizable: Expr,
     /// (null | column_types)
-    /// column_types: [[<name>, coltype], ...]
-    /// coltype: (typename | [typename, properties])
+    /// column_types: [[<name>, typename, properties], ...]
     /// typename: ("text" | "toggle" | "image" | "combo" | "spin" | "progress" | "hidden")
     /// properties: match typename
     ///   common: 
@@ -135,8 +134,9 @@ pub struct Table {
     ///   "toggle": [
     ///     common,
     ///
-    ///     ["radio", (true | false | <column-name>)],
-    ///       whether to render the toggle as a check button or a radio button.
+    ///     ["radio", (true | false)],
+    ///       optional, whether to render the toggle as a check button
+    ///       or a radio button.
     ///
     ///       true: the entire column is radio buttons, only one row may
     ///       be selected at any one time
@@ -147,6 +147,10 @@ pub struct Table {
     ///       <column-name>: the specified boolean column controls
     ///       whether or not the toggle in each row is a radio or a
     ///       check button.
+    ///
+    ///     ["radio-column", <column-name>]
+    ///       optional, the column containing the "radio" property for
+    ///       each row
     ///   ]
     ///
     ///   "image": [
@@ -156,7 +160,7 @@ pub struct Table {
     ///   "combo": [
     ///     common,
     ///
-    ///     ["choices", ([choice, ...] | <column-name>)],
+    ///     ["choices", [choice, ...]],
     ///       required attribute specifying the available choices.
     ///
     ///       choice: [<id>, <text>]
@@ -166,50 +170,79 @@ pub struct Table {
     ///       <column-name>: the column that contains the choices, which will be set per row. The format
     ///       should be [choice, ...], same as if they are specified globally.
     ///
+    ///     ["choices-column", <column-name>]
+    ///       required, the column containing the "choices" attribute
+    ///       for each row. One of choices, or choices-column must be
+    ///       specified.
+    ///
     ///     ["has-entry", (true | false | <column-name>)],
     ///   ]
     ///
     ///   "spin": [
     ///      common,
     ///
-    ///      ["min", (<n> | <column-name>)],
+    ///      ["min", <n>],
     ///        optional, if not specified 0 is assumed.
     ///
-    ///      ["max", (<n> | <column-name>)],
+    ///      ["min-column", <column-name>]
+    ///        optional, the column containing the min attribute for each row
+    ///
+    ///      ["max", <n>],
     ///        optional, if not specified 1 is assumed.
     ///
-    ///      ["climb-rate", (<rate> | <column-name>)],
+    ///      ["max-column", <column-name>]
+    ///        optonal, the column containing the max attribute for each row
+    ///
+    ///      ["climb-rate", <n>],
     ///        optional. How fast the value should change if the user
     ///        holds the + or - button down.
     ///
-    ///      ["digits", (<n> | <column-name>)],
+    ///      ["climb-rate-column", <column-name>]
+    ///        optional, the column specifying the climb-rate attribute for each row
+    ///
+    ///      ["digits", <n>],
     ///        optional. The number of decimal places to display.
+    ///
+    ///      ["digits-column", <column-name>]
+    ///        optional. The column specifying the digits attribute for each row.
     ///   ]
     ///
     ///   "progress": [
     ///     common,
     ///       
-    ///     ["activity-mode": (true | false | <column-name>)],
+    ///     ["activity-mode", (true | false)],
     ///       optional, default false. Operate the progressbar in
     ///       activity mode (see the ProgressBar widget).
     ///
-    ///     ["text": <text>],
+    ///     ["activity-mode-column", <column-name>]
+    ///       optional, the column specifying the activity mode for each row.
+    ///
+    ///     ["text", <text>],
     ///       optional, display static text near the progress bar
     ///
-    ///     ["text-column": <column-name>],
+    ///     ["text-column", <column-name>],
     ///       optional, display text from <column-name> near the
     ///       progress bar.
     ///
-    ///     ["text-xalign": (<n>, <column-name>)],
+    ///     ["text-xalign", <n>],
     ///       optional, set the horizontal alignment of the displayed
     ///       text. 0 is full left, 1 is full right.
     ///
-    ///     ["text-yalign": (<n>, <column-name>)],
+    ///     ["text-xalign-column", <column-name>]
+    ///       optional, the column specifying the text-xalign property for each row
+    ///
+    ///     ["text-yalign", <n>],
     ///       optional, set the vertical alignment of the displayed
     ///       text. 0 is top, 1 is bottom.
     ///
-    ///     ["inverted": (true | false | <column-name>)],
+    ///     ["text-yalign-column", <column-name>]
+    ///       optonal, the column specifying the text-yalign property for each row
+    ///
+    ///     ["inverted", (true | false)],
     ///       optional, invert the meaning of the source data
+    ///
+    ///     ["inverted-column", <column-name>]
+    ///       optional, the column specifying the inverted property for each row
     ///  ]
     ///
     ///  "hidden":
@@ -235,7 +268,13 @@ pub struct Table {
     /// column filter takes precidence. The specified typed column
     /// will be displayed, but won't get any data if it's underlying
     /// column is filtered out.
-//    pub column_types: Expr,
+    ///
+    /// For properties that can be statically specified and loaded
+    /// from a column, if both ways are specified then the column will
+    /// override the static specifiecation. If the column data is
+    /// missing or invalid for a given row, then the static
+    /// specification will be used.
+    pub column_types: Expr,
     /// ("none" | "single" | "multi")
     /// "none": user selection is not allowed. The cursor (text focus)
     /// can still be moved, but cells will not be highlighted and no

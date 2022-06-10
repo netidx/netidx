@@ -8,7 +8,7 @@ use std::{
     fmt::Debug,
     hash::{BuildHasher, Hash, Hasher},
     mem,
-    ops::{Deref, DerefMut, IndexMut},
+    ops::{Deref, DerefMut},
     sync::{Arc, Weak},
 };
 

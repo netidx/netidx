@@ -3,7 +3,7 @@ use super::{
     BSCtx, BSCtxRef, BSNode, BWidget, WVal,
 };
 use crate::bscript::LocalEvent;
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 use arcstr::ArcStr;
 use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -88,10 +88,6 @@ impl FromValue for SortDir {
     fn from_value(v: Value) -> anyhow::Result<Self> {
         v.cast_to::<Chars>().and_then(|c| c.parse())
     }
-
-    fn get(v: Value) -> Option<Self> {
-        v.get_as::<Chars>().and_then(|c| c.parse().ok())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,10 +114,6 @@ impl FromValue for SortSpec {
             }
             _ => anyhow::bail!("expected null, false, col, or a pair of [column, mode]"),
         }
-    }
-
-    fn get(v: Value) -> Option<Self> {
-        FromValue::from_value(v).ok()
     }
 }
 
@@ -227,10 +219,6 @@ impl FromValue for Filter {
             _ => bail!("expected null, true, false, or a pair"),
         }
     }
-
-    fn get(v: Value) -> Option<Self> {
-        FromValue::from_value(v).ok()
-    }
 }
 
 impl Filter {
@@ -286,60 +274,221 @@ impl FromValue for SelectionMode {
             _ => bail!("invalid selection mode"),
         }
     }
+}
 
-    fn get(v: Value) -> Option<Self> {
-        FromValue::from_value(v).ok()
+#[derive(PartialEq)]
+enum OrLoadCol<T> {
+    Static(T),
+    Load(Chars),
+    LoadWithFallback(T, Chars),
+}
+
+struct PangoColor(pango::Color);
+
+impl PartialEq for PangoColor {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.red() == other.0.red()
+            && self.0.green() == other.0.green()
+            && self.0.blue() == other.0.blue()
     }
 }
 
-enum OrLoadCol<T> {
-    Static(T),
-    LoadFromCol(String),
+impl FromValue for PangoColor {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
+        Ok(PangoColor(pango::Color::parse(
+            &*v.cast_to::<Chars>().map_err(|_| anyhow!("unable to parse color"))?,
+        )?))
+    }
 }
 
+macro_rules! prop {
+    ($props:expr, $name:expr, $typ:ty) => {{
+        match $props.remove($name) {
+            None => None,
+            Some(v) => Some(v.cast_to::<$typ>()?),
+        }
+    }};
+}
+
+macro_rules! or_load_prop {
+    ($props:expr, $static_name:expr, $col_name:expr, $typ:ty) => {{
+        let load = match $props.remove($col_name) {
+            None => None,
+            Some(v) => Some(v.cast_to::<Chars>()?),
+        };
+        let val = match $props.remove($static_name) {
+            None => None,
+            Some(v) => Some(v.cast_to::<$typ>()?),
+        };
+        match (val, load) {
+            (Some(val), Some(col)) => Some(OrLoadCol::LoadWithFallback(val, col)),
+            (Some(val), None) => Some(OrLoadCol::Static(val)),
+            (None, Some(col)) => Some(OrLoadCol::Load(col)),
+            (None, None) => None,
+        }
+    }};
+}
+
+#[derive(PartialEq)]
 struct ColumnTypeText {
-    background: Option<OrLoadCol<pango::Color>>,
-    foreground: Option<OrLoadCol<pango::Color>>,
+    source: Option<Chars>,
+    background: Option<OrLoadCol<PangoColor>>,
+    foreground: Option<OrLoadCol<PangoColor>>,
 }
 
+impl FromValue for ColumnTypeText {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
+        let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
+        Ok(Self {
+            source: prop!(props, "source", Chars),
+            foreground: or_load_prop!(
+                props,
+                "foreground",
+                "foreground-column",
+                PangoColor
+            ),
+            background: or_load_prop!(
+                props,
+                "background",
+                "background-column",
+                PangoColor
+            ),
+        })
+    }
+}
+
+#[derive(PartialEq)]
 struct ColumnTypeToggle {
+    source: Option<Chars>,
     radio: Option<OrLoadCol<bool>>,
 }
 
+impl FromValue for ColumnTypeToggle {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
+        let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
+        Ok(Self {
+            source: prop!(props, "source", Chars),
+            radio: or_load_prop!(props, "radio", "radio-column", bool),
+        })
+    }
+}
+
+#[derive(PartialEq)]
+struct ColumnTypeImage {
+    source: Option<Chars>,
+}
+
+impl FromValue for ColumnTypeImage {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
+        let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
+        Ok(Self { source: prop!(props, "source", Chars) })
+    }
+}
+
+#[derive(PartialEq)]
 struct ColumnTypeCombo {
-    choices: OrLoadCol<Vec<(String, String)>>,
+    source: Option<Chars>,
+    choices: OrLoadCol<FxHashMap<Chars, Chars>>,
     has_entry: Option<OrLoadCol<bool>>,
 }
 
+impl FromValue for ColumnTypeCombo {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
+        let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
+        let choices =
+            or_load_prop!(props, "choices", "choices-column", FxHashMap<Chars, Chars>)
+                .ok_or_else(|| anyhow!("choices is required"))?;
+        Ok(Self {
+            source: prop!(props, "source", Chars),
+            has_entry: or_load_prop!(props, "has-entry", "has-entry-column", bool),
+            choices,
+        })
+    }
+}
+
+#[derive(PartialEq)]
 struct ColumnTypeSpin {
+    source: Option<Chars>,
     min: Option<OrLoadCol<f64>>,
     max: Option<OrLoadCol<f64>>,
     climb_rate: Option<OrLoadCol<f64>>,
     digits: Option<OrLoadCol<u32>>,
 }
 
+impl FromValue for ColumnTypeSpin {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
+        let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
+        Ok(Self {
+            source: prop!(props, "source", Chars),
+            min: or_load_prop!(props, "min", "min-column", f64),
+            max: or_load_prop!(props, "max", "max-column", f64),
+            climb_rate: or_load_prop!(props, "climb-rate", "climb-rate-column", f64),
+            digits: or_load_prop!(props, "digits", "digits-column", u32),
+        })
+    }
+}
+
+#[derive(PartialEq)]
 struct ColumnTypeProgress {
+    source: Option<Chars>,
     activity_mode: Option<OrLoadCol<bool>>,
-    text: Option<OrLoadCol<String>>,
+    text: Option<OrLoadCol<Chars>>,
     text_xalign: Option<OrLoadCol<f64>>,
     text_yalign: Option<OrLoadCol<f64>>,
     inverted: Option<OrLoadCol<bool>>,
 }
 
+impl FromValue for ColumnTypeProgress {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
+        let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
+        Ok(Self {
+            source: prop!(props, "source", Chars),
+            activity_mode: or_load_prop!(
+                props,
+                "activity-mode",
+                "activity-mode-column",
+                bool
+            ),
+            text: or_load_prop!(props, "text", "text-column", Chars),
+            text_xalign: or_load_prop!(props, "text-xalign", "text-xalign-column", f64),
+            text_yalign: or_load_prop!(props, "text-yalign", "text-yalign-column", f64),
+            inverted: or_load_prop!(props, "inverted", "inverted-column", bool),
+        })
+    }
+}
+
+#[derive(PartialEq)]
 enum ColumnType {
     Text(ColumnTypeText),
     Toggle(ColumnTypeToggle),
-    Image,
+    Image(ColumnTypeImage),
     Combo(ColumnTypeCombo),
     Spin(ColumnTypeSpin),
     Progress(ColumnTypeProgress),
     Hidden,
 }
 
+#[derive(PartialEq)]
 struct ColumnSpec {
-    name: String,
-    source: Option<String>,
+    name: Chars,
     typ: ColumnType,
+}
+
+impl FromValue for ColumnSpec {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
+        let (name, typ, props) = v.cast_to::<(Chars, Chars, Value)>()?;
+        let typ = match &*typ {
+            "text" => ColumnType::Text(props.cast_to::<ColumnTypeText>()?),
+            "toggle" => ColumnType::Toggle(props.cast_to::<ColumnTypeToggle>()?),
+            "image" => ColumnType::Image(props.cast_to::<ColumnTypeImage>()?),
+            "combo" => ColumnType::Combo(props.cast_to::<ColumnTypeCombo>()?),
+            "spin" => ColumnType::Spin(props.cast_to::<ColumnTypeSpin>()?),
+            "progress" => ColumnType::Progress(props.cast_to::<ColumnTypeProgress>()?),
+            "hidden" => ColumnType::Hidden,
+            _ => bail!("invalid column type"),
+        };
+        Ok(Self { name, typ })
+    }
 }
 
 enum TableState {
@@ -370,7 +519,7 @@ fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Orderin
         (Err(_), Err(_)) => Ordering::Equal,
         (Err(_), _) => Ordering::Greater,
         (_, Err(_)) => Ordering::Less,
-        (Ok(v0), Ok(v1)) => v0.value.partial_cmp(&v1.value).unwrap_or(Ordering::Equal)
+        (Ok(v0), Ok(v1)) => v0.value.partial_cmp(&v1.value).unwrap_or(Ordering::Equal),
     }
 }
 
@@ -461,6 +610,7 @@ struct SharedState {
     column_editable: RefCell<Filter>,
     column_filter: RefCell<Filter>,
     columns_resizable: Cell<bool>,
+    column_types: RefCell<Option<Vec<ColumnSpec>>>,
     column_widths: RefCell<FxHashMap<String, i32>>,
     ctx: BSCtx,
     on_activate: RefCell<BSNode>,
@@ -492,6 +642,7 @@ impl SharedState {
             column_editable: RefCell::new(Filter::None),
             column_filter: RefCell::new(Filter::Auto),
             columns_resizable: Cell::new(false),
+            column_types: RefCell::new(None),
             column_widths: RefCell::new(HashMap::default()),
             ctx,
             selection_mode: Cell::new(SelectionMode::None),
@@ -519,6 +670,10 @@ impl SharedState {
 
     fn set_sort_mode(&self, v: Option<Value>) -> bool {
         set_field!(self, v, SortSpec, sort_mode, Some)
+    }
+
+    fn set_column_types(&self, v: Option<Value>) -> bool {
+        set_field!(self, v, Option<Vec<ColumnSpec>>, column_types, Some)
     }
 
     fn set_column_filter(&self, v: Option<Value>) -> bool {
@@ -776,10 +931,9 @@ impl RaeifiedTable {
                 .collect::<Vec<_>>()
         };
         let store = ListStore::new(&column_types);
-        let empty = BVal {
-            value: Value::from(""),
-            formatted: Pooled::orphan(String::new()),
-        }.to_value();
+        let empty =
+            BVal { value: Value::from("#SUB"), formatted: Pooled::orphan("#SUB".into()) }
+                .to_value();
         for row in descriptor.rows.iter() {
             let iter = store.append();
             store.set_value(&iter, 0, &row.to_value());
@@ -1192,9 +1346,16 @@ impl RaeifiedTable {
                 visible
             }
         });
-        let maybe_subscribe_col = |row: &TreeIter, row_name: &str, id: u32| {
+        let empty =
+            BVal { value: Value::from("#SUB"), formatted: Pooled::orphan("#SUB".into()) }
+                .to_value();
+        let maybe_subscribe_col = |store: &ListStore,
+                                   row: &TreeIter,
+                                   row_name: &str,
+                                   id: u32| {
             let mut subscribed = self.subscribed.borrow_mut();
             if !subscribed.get(row_name).map(|s| s.contains(&id)).unwrap_or(false) {
+                store.set_value(row, id, &empty);
                 subscribed.entry(row_name.into()).or_insert_with(HashSet::new).insert(id);
                 let p = self.path.append(row_name);
                 let p = if self.vector_mode {
@@ -1225,7 +1386,12 @@ impl RaeifiedTable {
                 let row_name_v = self.store().value(&row, 0);
                 if let Ok(row_name) = row_name_v.get::<&str>() {
                     for col in 0..ncols {
-                        maybe_subscribe_col(&row, row_name, (col + 1) as u32);
+                        maybe_subscribe_col(
+                            &self.store(),
+                            &row,
+                            row_name,
+                            (col + 1) as u32,
+                        );
                     }
                 }
             }
@@ -1237,7 +1403,7 @@ impl RaeifiedTable {
                 loop {
                     let row_name_v = self.store().value(&row, 0);
                     if let Ok(row_name) = row_name_v.get::<&str>() {
-                        maybe_subscribe_col(&row, row_name, id);
+                        maybe_subscribe_col(&self.store(), &row, row_name, id);
                     }
                     if !self.store().iter_next(&row) {
                         break;
@@ -1350,6 +1516,7 @@ pub(super) struct Table {
     column_editable: BSNode,
     column_filter: BSNode,
     columns_resizable: BSNode,
+    column_types: BSNode,
     column_widths: BSNode,
     selection_mode: BSNode,
     selection: BSNode,
@@ -1389,6 +1556,8 @@ impl Table {
             scope.clone(),
             spec.columns_resizable,
         );
+        let column_types =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.column_types);
         let column_widths =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.column_widths);
         let on_select =
@@ -1418,6 +1587,7 @@ impl Table {
         shared.set_selection(selection.current());
         shared.set_show_row_name(show_row_name.current());
         shared.set_columns_resizable(columns_resizable.current());
+        shared.set_column_types(column_types.current());
         shared.set_column_widths(column_widths.current());
         let state = Rc::new(RefCell::new({
             let path = &*shared.path.borrow();
@@ -1438,6 +1608,7 @@ impl Table {
             column_editable,
             column_filter,
             columns_resizable,
+            column_types,
             column_widths,
             selection_mode,
             selection,
@@ -1510,6 +1681,7 @@ impl BWidget for Table {
         re |= self.shared.set_show_row_name(self.show_row_name.update(ctx, event));
         re |=
             self.shared.set_columns_resizable(self.columns_resizable.update(ctx, event));
+        re |= self.shared.set_column_types(self.column_types.update(ctx, event));
         re |= self.shared.set_column_widths(self.column_widths.update(ctx, event));
         self.shared.on_activate.borrow_mut().update(ctx, event);
         self.shared.on_select.borrow_mut().update(ctx, event);

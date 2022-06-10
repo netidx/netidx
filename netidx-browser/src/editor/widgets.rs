@@ -124,6 +124,7 @@ pub(super) struct Table {
     _dbg_column_editable: DbgExpr,
     _dbg_column_widths: DbgExpr,
     _dbg_columns_resizable: DbgExpr,
+    _dbg_column_types: DbgExpr,
     _dbg_selection_mode: DbgExpr,
     _dbg_selection: DbgExpr,
     _dbg_show_row_name: DbgExpr,
@@ -142,45 +143,55 @@ impl Table {
     ) -> Self {
         let spec = Rc::new(RefCell::new(spec));
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let config_exp = gtk::Expander::new(Some("Config"));
-        let mut config = TwoColGrid::new();
-        util::expander_touch_enable(&config_exp);
-        root.pack_start(&config_exp, false, false, 0);
-        config_exp.add(config.root());
+        let col_config_exp = gtk::Expander::new(Some("Column Config"));
+        let row_config_exp = gtk::Expander::new(Some("Row Config"));
+        let event_exp = gtk::Expander::new(Some("Events"));
+        let mut shared_config = TwoColGrid::new();
+        let mut col_config = TwoColGrid::new();
+        let mut row_config = TwoColGrid::new();
+        let mut event = TwoColGrid::new();
+        util::expander_touch_enable(&col_config_exp);
+        util::expander_touch_enable(&row_config_exp);
+        util::expander_touch_enable(&event_exp);
+        root.pack_start(shared_config.root(), false, false, 0);
+        root.pack_start(&col_config_exp, false, false, 0);
+        root.pack_start(&row_config_exp, false, false, 0);
+        root.pack_start(&event_exp, false, false, 0);
+        col_config_exp.add(col_config.root());
+        row_config_exp.add(row_config.root());
+        event_exp.add(event.root());
         let (l, e, _dbg_path) = expr!(ctx, "Path:", scope, spec, on_change, path);
-        config.add((l, e));
+        shared_config.add((l, e));
         let (l, e, _dbg_sort_mode) =
             expr!(ctx, "Sort Mode:", scope, spec, on_change, sort_mode);
-        config.add((l, e));
+        shared_config.add((l, e));
         let (l, e, _dbg_column_filter) =
             expr!(ctx, "Column Filter:", scope, spec, on_change, column_filter);
-        config.add((l, e));
+        col_config.add((l, e));
         let (l, e, _dbg_row_filter) =
             expr!(ctx, "Row Filter:", scope, spec, on_change, row_filter);
-        config.add((l, e));
+        row_config.add((l, e));
         let (l, e, _dbg_column_editable) =
             expr!(ctx, "Column Editable:", scope, spec, on_change, column_editable);
-        config.add((l, e));
+        col_config.add((l, e));
         let (l, e, _dbg_column_widths) =
             expr!(ctx, "Column Widths:", scope, spec, on_change, column_widths);
-        config.add((l, e));
+        col_config.add((l, e));
         let (l, e, _dbg_columns_resizable) =
             expr!(ctx, "Columns Resizable:", scope, spec, on_change, columns_resizable);
-        config.add((l, e));
+        col_config.add((l, e));
+        let (l, e, _dbg_column_types) =
+            expr!(ctx, "Column Types:", scope, spec, on_change, column_types);
+        col_config.add((l, e));
         let (l, e, _dbg_selection_mode) =
             expr!(ctx, "Selection Mode:", scope, spec, on_change, selection_mode);
-        config.add((l, e));
+        shared_config.add((l, e));
         let (l, e, _dbg_selection) =
             expr!(ctx, "Selection:", scope, spec, on_change, selection);
-        config.add((l, e));
+        shared_config.add((l, e));
         let (l, e, _dbg_show_row_name) =
             expr!(ctx, "Show Row Name:", scope, spec, on_change, show_row_name);
-        config.add((l, e));
-        let event_exp = gtk::Expander::new(Some("Events"));
-        let mut event = TwoColGrid::new();
-        util::expander_touch_enable(&event_exp);
-        root.pack_start(&event_exp, false, false, 0);
-        event_exp.add(event.root());
+        row_config.add((l, e));
         let (l, e, _dbg_on_activate) =
             expr!(ctx, "On Activate:", scope, spec, on_change, on_activate);
         event.add((l, e));
@@ -203,6 +214,7 @@ impl Table {
             _dbg_column_editable,
             _dbg_column_widths,
             _dbg_columns_resizable,
+            _dbg_column_types,
             _dbg_selection_mode,
             _dbg_selection,
             _dbg_show_row_name,

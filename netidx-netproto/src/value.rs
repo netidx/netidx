@@ -866,7 +866,10 @@ pub trait FromValue {
     /// to the type of self, otherwise return None.
     fn get(v: Value) -> Option<Self>
     where
-        Self: Sized;
+        Self: Sized,
+    {
+        FromValue::from_value(v).ok()
+    }
 }
 
 impl Value {
