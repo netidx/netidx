@@ -914,9 +914,9 @@ impl RaeifiedTable {
         } else {
             match &spec.source {
                 Some(src) => {
-                    self.descriptor.cols.get_full(&**src).map(|(i, _, _)| i as i32)
+                    self.descriptor.cols.get_full(&**src).map(|(i, _, _)| (i + 1) as i32)
                 }
-                None => self.descriptor.cols.get_full(&**name).map(|(i, _, _)| i as i32),
+                None => self.descriptor.cols.get_full(&**name).map(|(i, _, _)| (i + 1) as i32),
             }
         };
         if let Some(id) = id {
