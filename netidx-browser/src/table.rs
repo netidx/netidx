@@ -1225,6 +1225,32 @@ impl RaeifiedTable {
         }));
     }
 
+    fn render_cell_selected<T: CellRendererExt>(
+        &self,
+        cr: &T,
+        i: &TreeIter,
+        name: &str,
+    ) -> bool {
+        let sel = self.shared.selected.borrow();
+        match self.row_of(Either::Right(i)).as_ref().map(|r| r.get::<&str>().unwrap()) {
+            Some(r) if sel.get(r).map(|t| t.contains(name)).unwrap_or(false) => {
+                let bg = StyleContextExt::style_property_for_state(
+                    &self.style,
+                    "background-color",
+                    StateFlags::SELECTED,
+                )
+                .get::<RGBA>()
+                .unwrap();
+                cr.set_cell_background_rgba(Some(&bg));
+                true
+            }
+            Some(_) | None => {
+                cr.set_cell_background_rgba(None);
+                false
+            }
+        }
+    }
+
     fn render_text_cell(
         &self,
         id: i32,
@@ -1239,40 +1265,23 @@ impl RaeifiedTable {
             Ok(v) => Some(v.formatted.as_str()),
             Err(_) => None,
         });
-        let sel = self.shared.selected.borrow();
-        match self.row_of(Either::Right(i)).as_ref().map(|r| r.get::<&str>().unwrap()) {
-            Some(r) if sel.get(r).map(|t| t.contains(name)).unwrap_or(false) => {
-                let st = StateFlags::SELECTED;
-                let fg = self.style.color(st);
-                let bg = StyleContextExt::style_property_for_state(
-                    &self.style,
-                    "background-color",
-                    st,
-                )
-                .get::<RGBA>()
-                .unwrap();
-                cr.set_cell_background_rgba(Some(&bg));
-                cr.set_foreground_rgba(Some(&fg));
-            }
-            Some(_) | None => {
-                let bg = background
-                    .as_ref()
-                    .and_then(|s| s.load(i, self.store()))
-                    .map(|c| c.0);
-                let fg = foreground
-                    .as_ref()
-                    .and_then(|s| s.load(i, self.store()))
-                    .map(|c| c.0);
-                cr.set_cell_background_rgba(bg.as_ref());
-                cr.set_foreground_rgba(fg.as_ref());
-            }
+        if self.render_cell_selected(cr, i, name) {
+            let fg = self.style.color(StateFlags::SELECTED);
+            cr.set_foreground_rgba(Some(&fg));
+        } else {
+            let bg =
+                background.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
+            let fg =
+                foreground.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
+            cr.set_cell_background_rgba(bg.as_ref());
+            cr.set_foreground_rgba(fg.as_ref());
         }
     }
 
     fn render_image_cell(
         &self,
         id: i32,
-        _name: &str,
+        name: &str,
         cr: &CellRendererPixbuf,
         i: &TreeIter,
     ) {
@@ -1287,8 +1296,11 @@ impl RaeifiedTable {
                 cr.set_pixbuf(None);
             }
             Some(ImageSpec::Icon { name, size: _ }) => cr.set_icon_name(Some(&*name)),
-            Some(spec@ ImageSpec::PixBuf { .. }) => cr.set_pixbuf(spec.get_pixbuf().as_ref()),
+            Some(spec @ ImageSpec::PixBuf { .. }) => {
+                cr.set_pixbuf(spec.get_pixbuf().as_ref())
+            }
         }
+        self.render_cell_selected(cr, i, name);
     }
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {
