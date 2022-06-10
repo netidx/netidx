@@ -9,10 +9,7 @@ use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use gdk::{keys, EventButton, EventKey, RGBA};
 use gio::prelude::*;
-use glib::{
-    self, clone, idle_add_local, signal::Inhibit, source::Continue,
-    value::ValueTypeMismatchOrNoneError,
-};
+use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
 use gtk::{
     prelude::*, Adjustment, CellRenderer, CellRendererText, Label, ListStore,
     ScrolledWindow, SortColumn, SortType, StateFlags, StyleContext, TreeIter, TreeModel,
@@ -23,7 +20,7 @@ use netidx::{
     chars::Chars,
     pack::Z64,
     path::Path,
-    pool::Pooled,
+    pool::{Pool, Pooled},
     protocol::value::FromValue,
     resolver_client,
     subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
@@ -37,6 +34,7 @@ use std::{
     cell::{Cell, RefCell},
     cmp::{Ordering, PartialEq},
     collections::{HashMap, HashSet},
+    fmt::Write,
     ops::Deref,
     rc::{Rc, Weak},
     result::{self, Result},
@@ -47,6 +45,25 @@ struct Subscription {
     _sub: Dval,
     row: TreeIter,
     col: u32,
+}
+
+lazy_static! {
+    static ref FORMATTED: Pool<String> = Pool::new(50_000, 1024);
+}
+
+#[derive(Clone, Boxed)]
+#[boxed_type(name = "NetidxValue")]
+struct BVal {
+    value: Value,
+    formatted: Pooled<String>,
+}
+
+impl Deref for BVal {
+    type Target = Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,17 +298,48 @@ enum OrLoadCol<T> {
 }
 
 struct ColumnTypeText {
-    background: Option<pango::Color>,
-    foreground: Option<pango::Color>
+    background: Option<OrLoadCol<pango::Color>>,
+    foreground: Option<OrLoadCol<pango::Color>>,
 }
 
 struct ColumnTypeToggle {
-    radio: Option<OrLoadCol<bool>>
+    radio: Option<OrLoadCol<bool>>,
+}
+
+struct ColumnTypeCombo {
+    choices: OrLoadCol<Vec<(String, String)>>,
+    has_entry: Option<OrLoadCol<bool>>,
+}
+
+struct ColumnTypeSpin {
+    min: Option<OrLoadCol<f64>>,
+    max: Option<OrLoadCol<f64>>,
+    climb_rate: Option<OrLoadCol<f64>>,
+    digits: Option<OrLoadCol<u32>>,
+}
+
+struct ColumnTypeProgress {
+    activity_mode: Option<OrLoadCol<bool>>,
+    text: Option<OrLoadCol<String>>,
+    text_xalign: Option<OrLoadCol<f64>>,
+    text_yalign: Option<OrLoadCol<f64>>,
+    inverted: Option<OrLoadCol<bool>>,
 }
 
 enum ColumnType {
     Text(ColumnTypeText),
     Toggle(ColumnTypeToggle),
+    Image,
+    Combo(ColumnTypeCombo),
+    Spin(ColumnTypeSpin),
+    Progress(ColumnTypeProgress),
+    Hidden,
+}
+
+struct ColumnSpec {
+    name: String,
+    source: Option<String>,
+    typ: ColumnType,
 }
 
 enum TableState {
@@ -316,16 +364,13 @@ fn get_sort_column(store: &ListStore) -> Option<u32> {
 fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Ordering {
     let v0_v = m.value(r0, col);
     let v1_v = m.value(r1, col);
-    let v0_r = v0_v.get::<&str>();
-    let v1_r = v1_v.get::<&str>();
+    let v0_r = v0_v.get::<&BVal>();
+    let v1_r = v1_v.get::<&BVal>();
     match (v0_r, v1_r) {
         (Err(_), Err(_)) => Ordering::Equal,
         (Err(_), _) => Ordering::Greater,
         (_, Err(_)) => Ordering::Less,
-        (Ok(v0), Ok(v1)) => match (v0.parse::<f64>(), v1.parse::<f64>()) {
-            (Ok(v0f), Ok(v1f)) => v0f.partial_cmp(&v1f).unwrap_or(Ordering::Equal),
-            (_, _) => v0.cmp(v1),
-        },
+        (Ok(v0), Ok(v1)) => v0.value.partial_cmp(&v1.value).unwrap_or(Ordering::Equal)
     }
 }
 
@@ -723,16 +768,24 @@ impl RaeifiedTable {
         view.selection().set_mode(gtk::SelectionMode::None);
         let vector_mode = descriptor.cols.len() == 0;
         let column_types = if vector_mode {
-            vec![String::static_type(); 2]
+            vec![String::static_type(), BVal::static_type()]
         } else {
             (0..descriptor.cols.len() + 1)
                 .into_iter()
-                .map(|_| String::static_type())
+                .map(|i| if i == 0 { String::static_type() } else { BVal::static_type() })
                 .collect::<Vec<_>>()
         };
         let store = ListStore::new(&column_types);
+        let empty = BVal {
+            value: Value::from(""),
+            formatted: Pooled::orphan(String::new()),
+        }.to_value();
         for row in descriptor.rows.iter() {
-            store.set_value(&store.append(), 0, &row.to_value());
+            let iter = store.append();
+            store.set_value(&iter, 0, &row.to_value());
+            for col in 1..column_types.len() {
+                store.set_value(&iter, col as u32, &empty);
+            }
         }
         let style = view.style_context();
         let ncols = if vector_mode { 1 } else { descriptor.cols.len() };
@@ -857,10 +910,10 @@ impl RaeifiedTable {
 
     fn render_cell(&self, id: i32, name: &str, cr: &CellRenderer, i: &TreeIter) {
         let cr = cr.clone().downcast::<CellRendererText>().unwrap();
-        cr.set_text(match self.store().value(i, id).get::<&str>() {
-            Ok(v) => Some(v),
-            Err(ValueTypeMismatchOrNoneError::UnexpectedNone) => None,
-            _ => return,
+        let bv = self.store().value(i, id);
+        cr.set_text(match bv.get::<&BVal>() {
+            Ok(v) => Some(v.formatted.as_str()),
+            Err(_) => None,
         });
         let sel = self.shared.selected.borrow();
         match self.row_of(Either::Right(i)).as_ref().map(|r| r.get::<&str>().unwrap()) {
@@ -1232,8 +1285,13 @@ impl RaeifiedTable {
                     match t.0.update.borrow_mut().pop() {
                         None => break,
                         Some((id, v)) => if let Some(sub) = t.0.by_id.borrow().get(&id) {
-                            let s = &format!("{}", WVal(&v)).to_value();
-                            t.store().set_value(&sub.row, sub.col, s);
+                            let mut formatted = FORMATTED.take();
+                            write!(&mut *formatted, "{}", WVal(&v)).unwrap();
+                            let bval = BVal {
+                                value: v,
+                                formatted,
+                            }.to_value();
+                            t.store().set_value(&sub.row, sub.col, &bval);
                         }
                     }
                 }

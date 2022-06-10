@@ -392,6 +392,17 @@ impl CtxInner {
                 Some(rx_view) => rx_view.next().await,
             }
         }
+        async fn read_updates(
+            updates: &mut mpsc::Receiver<RawBatch>,
+            nchanged: usize,
+            refreshing: bool,
+        ) -> Option<RawBatch> {
+            if nchanged >= 100_000 && refreshing {
+                pending().await
+            } else {
+                updates.next().await
+            }
+        }
         let mut gc_rpcs = time::interval(Duration::from_secs(60));
         loop {
             select_biased! {
@@ -419,8 +430,14 @@ impl CtxInner {
                     Some(FromGui::CallRpc(path, args, id)) =>
                         break_err!(self.call_rpc(path, args, id)),
                 },
-                b = self.updates.next() => if let Some(batch) = b {
-                    break_err!(self.process_updates(batch))
+                b = read_updates(
+                    &mut self.updates,
+                    self.changed.len(),
+                    self.refreshing
+                ).fuse() => {
+                    if let Some(batch) = b {
+                        break_err!(self.process_updates(batch))
+                    }
                 },
                 m = read_view(&mut self.rx_view).fuse() => {
                     break_err!(self.load_custom_view(m))

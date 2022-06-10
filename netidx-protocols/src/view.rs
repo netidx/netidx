@@ -101,31 +101,39 @@ pub struct Table {
     /// (null | column_types)
     /// column_types: [[<name>, coltype], ...]
     /// coltype: (typename | [typename, properties])
-    /// typename: ("text" | "toggle" | "image" | "combo" | "spin" | "progress")
+    /// typename: ("text" | "toggle" | "image" | "combo" | "spin" | "progress" | "hidden")
     /// properties: match typename
-    ///   "text": [
-    ///     ["source", <column-name>],
+    ///   common: 
+    ///     ["source", <column-name>]
     ///       optional, the source column that contains the data for
     ///       each row. If not specified the default is this column
     ///       (<name>).
     ///
-    ///     ["attributes", ([attribute, ..] | <column-name>)],
-    ///       pango attributes to apply to the text
+    ///   "text": [
+    ///     common,
+    /// 
+    ///     ["foreground", <color-string>],
+    ///       optional, statically specify the foreground text
+    ///       color. Any string understood by pango_parse_color is
+    ///       understood here. That includes css color names, and hex
+    ///       strings in various formats.
     ///
-    ///       attribute: [attrname, value]
+    ///     ["foreground-column", <column-name>],
+    ///       optional, the column containing the foreground color of
+    ///       each row, same format as for the "foreground" attribute.
     ///
-    ///       attrname: ("foreground" | "background")
+    ///     ["background", <color-string>],
+    ///       optional, statically specify the background color of the
+    ///       cell. same format as the "foreground" attribute.
     ///
-    ///       value: <color-string> understands anything supported by
-    ///       pango_color_parse, so hex values, and css color names.
+    ///     ["background-column", <column-name>],
+    ///       optional, the column containing the background color of
+    ///       each row in the same format as described in the
+    ///       "foreground" attribute.
     ///   ]
     ///   
     ///   "toggle": [
-    ///     ["source": <column-name>],
-    ///
-    ///       optional, the source column that contains the toggle
-    ///       data for each row. If not specified the default is this
-    ///       column (<name>).
+    ///     common,
     ///
     ///     ["radio", (true | false | <column-name>)],
     ///       whether to render the toggle as a check button or a radio button.
@@ -142,17 +150,11 @@ pub struct Table {
     ///   ]
     ///
     ///   "image": [
-    ///     ["source": <column-name>],
-    ///       optional, the source column that contains the image spec
-    ///       data for each row. If not specified the default is this
-    ///       column (<name>).
+    ///     common,
     ///   ]
     ///
     ///   "combo": [
-    ///     ["source", <column-name>],
-    ///       optional, the source column that contains the selected
-    ///       id for each row. If not specified the default is this
-    ///       column (<name>).
+    ///     common,
     ///
     ///     ["choices", ([choice, ...] | <column-name>)],
     ///       required attribute specifying the available choices.
@@ -168,17 +170,13 @@ pub struct Table {
     ///   ]
     ///
     ///   "spin": [
-    ///      ["source",  <column-name>],
-    ///        optional, the source column that contains the spin
-    ///        button values. If not specified the default is this
-    ///        column (<name>).
+    ///      common,
     ///
-    ///      ["range", (<column-name>, [(<min> | <column-name>), (<max> | <column-name>)])],
-    ///        optional, if not specified 0 to 1 is assumed. If a
-    ///        single column name is specified then that column should
-    ///        contain a pair of floats [<min>, <max>]. Otherwise a
-    ///        pair of hard coded min/max mixed with column names
-    ///        should be specified.
+    ///      ["min", (<n> | <column-name>)],
+    ///        optional, if not specified 0 is assumed.
+    ///
+    ///      ["max", (<n> | <column-name>)],
+    ///        optional, if not specified 1 is assumed.
     ///
     ///      ["climb-rate", (<rate> | <column-name>)],
     ///        optional. How fast the value should change if the user
@@ -189,28 +187,54 @@ pub struct Table {
     ///   ]
     ///
     ///   "progress": [
-    ///     ["pulse-mode": (true | false | <column-name>)],
+    ///     common,
+    ///       
+    ///     ["activity-mode": (true | false | <column-name>)],
+    ///       optional, default false. Operate the progressbar in
+    ///       activity mode (see the ProgressBar widget).
+    ///
     ///     ["text": <text>],
+    ///       optional, display static text near the progress bar
+    ///
     ///     ["text-column": <column-name>],
+    ///       optional, display text from <column-name> near the
+    ///       progress bar.
+    ///
     ///     ["text-xalign": (<n>, <column-name>)],
+    ///       optional, set the horizontal alignment of the displayed
+    ///       text. 0 is full left, 1 is full right.
+    ///
     ///     ["text-yalign": (<n>, <column-name>)],
+    ///       optional, set the vertical alignment of the displayed
+    ///       text. 0 is top, 1 is bottom.
+    ///
     ///     ["inverted": (true | false | <column-name>)],
+    ///       optional, invert the meaning of the source data
     ///  ]
+    ///
+    ///  "hidden":
+    ///    hidden is a special column type that has no properties. It
+    ///    is used to hide data columns that other visible columns
+    ///    depend on (so they must appear in the model), but that you
+    ///    don't want to show to the user.
+    ///
     ///  all the properties of progress are optional. If none are set
     ///  the entire properties array may be omitted
     ///
-    /// null: all columns are assumed to be text
+    /// null: a default column type specification is generated that
+    /// displays all the columns in the filtered model as text.
     ///
     /// The column type specifiecation need not be total, any column
     /// not given a type will be assumed to be a text column with no
     /// properties assigned.
     ///
-    /// Column type specification interacts with the column filter, in
-    /// that a column type specification may name another column as
-    /// the source of a given property and the column filter may
-    /// remove that column. If that occurrs, the column will be hidden
-    /// from the user, but will still be loaded into the model, such
-    /// that the property specification should still work.
+    /// The column type specification interacts with the column
+    /// filter, in that a column type specification may name another
+    /// column as the source of it's data or of a given property and
+    /// the column filter may remove that column. If that occurrs the
+    /// column filter takes precidence. The specified typed column
+    /// will be displayed, but won't get any data if it's underlying
+    /// column is filtered out.
 //    pub column_types: Expr,
     /// ("none" | "single" | "multi")
     /// "none": user selection is not allowed. The cursor (text focus)
