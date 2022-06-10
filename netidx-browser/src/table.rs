@@ -932,7 +932,7 @@ impl RaeifiedTable {
         };
         let store = ListStore::new(&column_types);
         let empty =
-            BVal { value: Value::from("#SUB"), formatted: Pooled::orphan("#SUB".into()) }
+            BVal { value: Value::from(""), formatted: Pooled::orphan(String::new()) }
                 .to_value();
         for row in descriptor.rows.iter() {
             let iter = store.append();
@@ -1347,7 +1347,7 @@ impl RaeifiedTable {
             }
         });
         let empty =
-            BVal { value: Value::from("#SUB"), formatted: Pooled::orphan("#SUB".into()) }
+            BVal { value: Value::from(""), formatted: Pooled::orphan(String::new()) }
                 .to_value();
         let maybe_subscribe_col = |store: &ListStore,
                                    row: &TreeIter,
