@@ -914,7 +914,6 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             Continue(true)
         }
         ToGui::Update(mut batch) => {
-            dbg!(batch.len());
             if let Some(root) = &mut *current.borrow_mut() {
                 let mut waits = WAITS.take();
                 for (id, value) in batch.drain(..) {
