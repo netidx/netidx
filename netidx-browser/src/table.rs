@@ -1212,10 +1212,6 @@ impl RaeifiedTable {
             Err(_) => None,
         });
         let sel = self.shared.selected.borrow();
-        let bg = background.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
-        let fg = foreground.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
-        cr.set_cell_background_rgba(bg.as_ref());
-        cr.set_foreground_rgba(fg.as_ref());
         match self.row_of(Either::Right(i)).as_ref().map(|r| r.get::<&str>().unwrap()) {
             Some(r) if sel.get(r).map(|t| t.contains(name)).unwrap_or(false) => {
                 let st = StateFlags::SELECTED;
@@ -1231,8 +1227,10 @@ impl RaeifiedTable {
                 cr.set_foreground_rgba(Some(&fg));
             }
             Some(_) | None => {
-                cr.set_cell_background(None);
-                cr.set_foreground(None);
+                let bg = background.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
+                let fg = foreground.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
+                cr.set_cell_background_rgba(bg.as_ref());
+                cr.set_foreground_rgba(fg.as_ref());
             }
         }
     }
