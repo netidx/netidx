@@ -277,6 +277,36 @@ impl FromValue for SelectionMode {
     }
 }
 
+enum OrLoad<T> {
+    Static(T),
+    Load(i32),
+    LoadWithFallback(T, i32),
+}
+
+impl<T: FromValue + Clone> OrLoad<T> {
+    fn load(&self, row: &TreeIter, store: &ListStore) -> Option<T> {
+        match self {
+            Self::Static(v) => Some(v.clone()),
+            Self::Load(i) => {
+                let v = store.value(row, *i);
+                match v.get::<&BVal>() {
+                    Ok(bv) => bv.value.clone().cast_to::<T>().ok(),
+                    Err(_) => None,
+                }
+            }
+            Self::LoadWithFallback(s, i) => {
+                let v = store.value(row, *i);
+                match v.get::<&BVal>() {
+                    Err(_) => Some(s.clone()),
+                    Ok(bv) => Some(
+                        bv.value.clone().cast_to::<T>().ok().unwrap_or_else(|| s.clone()),
+                    ),
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 enum OrLoadCol<T> {
     Static(T),
@@ -284,10 +314,30 @@ enum OrLoadCol<T> {
     LoadWithFallback(T, Chars),
 }
 
-#[derive(Clone, Copy)]
-struct PangoColor(pango::Color);
+impl<T: Clone> OrLoadCol<T> {
+    fn resolve(&self, descriptor: &IndexDescriptor) -> Option<OrLoad<T>> {
+        match self {
+            Self::Static(v) => Some(OrLoad::Static(v.clone())),
+            Self::Load(col) => descriptor
+                .cols
+                .get_full(&**col)
+                .map(|(i, _, _)| OrLoad::Load((i + 1) as i32)),
+            Self::LoadWithFallback(v, col) => {
+                let t = descriptor
+                    .cols
+                    .get_full(&**col)
+                    .map(|(i, _, _)| OrLoad::LoadWithFallback(v.clone(), (i + 1) as i32))
+                    .unwrap_or_else(|| OrLoad::Static(v.clone()));
+                Some(t)
+            }
+        }
+    }
+}
 
-impl PartialEq for PangoColor {
+#[derive(Clone, Copy)]
+struct Color(RGBA);
+
+impl PartialEq for Color {
     fn eq(&self, other: &Self) -> bool {
         self.0.red() == other.0.red()
             && self.0.green() == other.0.green()
@@ -295,9 +345,9 @@ impl PartialEq for PangoColor {
     }
 }
 
-impl FromValue for PangoColor {
+impl FromValue for Color {
     fn from_value(v: Value) -> anyhow::Result<Self> {
-        Ok(PangoColor(pango::Color::parse(
+        Ok(Color(RGBA::parse(
             &*v.cast_to::<Chars>().map_err(|_| anyhow!("unable to parse color"))?,
         )?))
     }
@@ -334,8 +384,8 @@ macro_rules! or_load_prop {
 #[derive(Clone, PartialEq)]
 struct ColumnTypeText {
     source: Option<Chars>,
-    background: Option<OrLoadCol<PangoColor>>,
-    foreground: Option<OrLoadCol<PangoColor>>,
+    background: Option<OrLoadCol<Color>>,
+    foreground: Option<OrLoadCol<Color>>,
 }
 
 impl FromValue for ColumnTypeText {
@@ -343,18 +393,8 @@ impl FromValue for ColumnTypeText {
         let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
         Ok(Self {
             source: prop!(props, "source", Chars),
-            foreground: or_load_prop!(
-                props,
-                "foreground",
-                "foreground-column",
-                PangoColor
-            ),
-            background: or_load_prop!(
-                props,
-                "background",
-                "background-column",
-                PangoColor
-            ),
+            foreground: or_load_prop!(props, "foreground", "foreground-column", Color),
+            background: or_load_prop!(props, "background", "background-column", Color),
         })
     }
 }
@@ -799,10 +839,11 @@ impl SharedState {
             .borrow()
             .as_ref()
             .map(|s| {
-                s.iter()
-                    .cloned()
-                    .map(|s| (s.name.clone(), s))
-                    .collect::<IndexMap<Chars, ColumnSpec, FxBuildHasher>>()
+                s.iter().cloned().map(|s| (s.name.clone(), s)).collect::<IndexMap<
+                    Chars,
+                    ColumnSpec,
+                    FxBuildHasher,
+                >>()
             })
             .unwrap_or(IndexMap::default());
         for col in descriptor.cols.keys() {
@@ -913,13 +954,19 @@ impl RaeifiedTable {
             Some(1)
         } else {
             match &spec.source {
+                None => {
+                    self.descriptor.cols.get_full(&**name).map(|(i, _, _)| (i + 1) as i32)
+                }
                 Some(src) => {
                     self.descriptor.cols.get_full(&**src).map(|(i, _, _)| (i + 1) as i32)
                 }
-                None => self.descriptor.cols.get_full(&**name).map(|(i, _, _)| (i + 1) as i32),
             }
         };
         if let Some(id) = id {
+            let background =
+                spec.background.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            let foreground =
+                spec.foreground.as_ref().and_then(|v| v.resolve(&t.descriptor));
             if t.shared.column_editable.borrow().is_match(id as usize, &**name) {
                 cell.set_editable(true);
             }
@@ -928,7 +975,7 @@ impl RaeifiedTable {
             _: &CellRenderer,
             _: &TreeModel,
             i: &TreeIter| {
-                t.render_text_cell(id, &*name, &cell, i, &spec)
+                t.render_text_cell(id, &*name, &background, &foreground, &cell, i, &spec)
             }));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
             cell.connect_edited(clone!(@weak t => move |_, _, v| {
@@ -1153,6 +1200,8 @@ impl RaeifiedTable {
         &self,
         id: i32,
         name: &str,
+        background: &Option<OrLoad<Color>>,
+        foreground: &Option<OrLoad<Color>>,
         cr: &CellRendererText,
         i: &TreeIter,
         _spec: &ColumnTypeText,
@@ -1163,6 +1212,10 @@ impl RaeifiedTable {
             Err(_) => None,
         });
         let sel = self.shared.selected.borrow();
+        let bg = background.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
+        let fg = foreground.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
+        cr.set_cell_background_rgba(bg.as_ref());
+        cr.set_foreground_rgba(fg.as_ref());
         match self.row_of(Either::Right(i)).as_ref().map(|r| r.get::<&str>().unwrap()) {
             Some(r) if sel.get(r).map(|t| t.contains(name)).unwrap_or(false) => {
                 let st = StateFlags::SELECTED;
