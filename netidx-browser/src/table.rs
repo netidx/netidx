@@ -793,7 +793,7 @@ impl SharedState {
     fn generate_column_spec(
         &self,
         descriptor: &IndexDescriptor,
-    ) -> FxHashMap<Chars, ColumnSpec> {
+    ) -> IndexMap<Chars, ColumnSpec, FxBuildHasher> {
         let mut spec = self
             .column_types
             .borrow()
@@ -802,9 +802,9 @@ impl SharedState {
                 s.iter()
                     .cloned()
                     .map(|s| (s.name.clone(), s))
-                    .collect::<FxHashMap<Chars, ColumnSpec>>()
+                    .collect::<IndexMap<Chars, ColumnSpec, FxBuildHasher>>()
             })
-            .unwrap_or(HashMap::default());
+            .unwrap_or(IndexMap::default());
         for col in descriptor.cols.keys() {
             if !spec.contains_key(&**col) {
                 let name = Chars::from(String::from(&**col));
@@ -859,24 +859,27 @@ impl RaeifiedTable {
         &self,
         column: &TreeViewColumn,
         name: &Chars,
-        id: i32,
+        id: Option<i32>,
         sorting_disabled: bool,
     ) {
         let t = self;
-        column.connect_clicked(clone!(@weak t, @strong name => move |_| {
-            t.shared.on_header_click.borrow_mut().update(
-                &mut t.shared.ctx.borrow_mut(),
-                &vm::Event::User(LocalEvent::Event(Value::from(name.clone())))
-            );
-        }));
         column.set_title(&**name);
-        if sorting_disabled {
-            column.set_clickable(true);
-        } else {
-            t.store().set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
-                compare_row(id, m, r0, r1)
-            });
-            column.set_sort_column_id(id);
+        if let Some(id) = id {
+            column.connect_clicked(clone!(@weak t, @strong name => move |_| {
+                t.shared.on_header_click.borrow_mut().update(
+                    &mut t.shared.ctx.borrow_mut(),
+                    &vm::Event::User(LocalEvent::Event(Value::from(name.clone())))
+                );
+            }));
+            if sorting_disabled {
+                column.set_clickable(true);
+            } else {
+                t.store()
+                    .set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
+                        compare_row(id, m, r0, r1)
+                    });
+                column.set_sort_column_id(id);
+            }
         }
         column.set_sizing(TreeViewColumnSizing::Fixed);
         column.set_resizable(t.shared.columns_resizable.get());
@@ -897,8 +900,8 @@ impl RaeifiedTable {
 
     fn add_text_column(
         &self,
+        vector_mode: bool,
         sorting_disabled: bool,
-        id: i32,
         name: &Chars,
         spec: &ColumnTypeText,
     ) {
@@ -906,21 +909,35 @@ impl RaeifiedTable {
         let column = TreeViewColumn::new();
         let cell = CellRendererText::new();
         column.pack_start(&cell, true);
-        if t.shared.column_editable.borrow().is_match(id as usize, &**name) {
-            cell.set_editable(true);
+        let id = if vector_mode {
+            Some(1)
+        } else {
+            match &spec.source {
+                Some(src) => {
+                    self.descriptor.cols.get_full(&**src).map(|(i, _, _)| i as i32)
+                }
+                None => self.descriptor.cols.get_full(&**name).map(|(i, _, _)| i as i32),
+            }
+        };
+        if let Some(id) = id {
+            if t.shared.column_editable.borrow().is_match(id as usize, &**name) {
+                cell.set_editable(true);
+            }
+            let f = Box::new(clone!(@weak t, @strong cell, @strong name, @strong spec =>
+            move |_: &TreeViewColumn,
+            _: &CellRenderer,
+            _: &TreeModel,
+            i: &TreeIter| {
+                t.render_text_cell(id, &*name, &cell, i, &spec)
+            }));
+            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            cell.connect_edited(clone!(@weak t => move |_, _, v| {
+                t.shared.on_edit.borrow_mut().update(
+                    &mut t.shared.ctx.borrow_mut(),
+                    &vm::Event::User(LocalEvent::Event(Value::from(String::from(v))))
+                );
+            }));
         }
-        let f = Box::new(clone!(@weak t, @strong cell, @strong name, @strong spec =>
-                move |_: &TreeViewColumn,
-                      _: &CellRenderer,
-                      _: &TreeModel,
-                      i: &TreeIter| t.render_text_cell(id, &*name, &cell, i, &spec)));
-        TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
-        cell.connect_edited(clone!(@weak t => move |_, _, v| {
-            t.shared.on_edit.borrow_mut().update(
-                &mut t.shared.ctx.borrow_mut(),
-                &vm::Event::User(LocalEvent::Event(Value::from(String::from(v))))
-            );
-        }));
         t.set_column_properties(&column, name, id, sorting_disabled);
         t.view().append_column(&column);
     }
@@ -929,7 +946,7 @@ impl RaeifiedTable {
         &self,
         vector_mode: bool,
         sorting_disabled: bool,
-        spec: FxHashMap<Chars, ColumnSpec>,
+        spec: IndexMap<Chars, ColumnSpec, FxBuildHasher>,
     ) {
         let t = self;
         if t.shared.show_name_column.get() {
@@ -963,16 +980,15 @@ impl RaeifiedTable {
         if vector_mode {
             t.add_text_column(
                 sorting_disabled,
-                1,
+                vector_mode,
                 &Chars::from("value"),
                 &ColumnTypeText { source: None, background: None, foreground: None },
             )
         } else {
-            for (i, (name, spec)) in spec.iter().enumerate() {
-                let id = (i + 1) as i32;
+            for (name, spec) in spec.iter() {
                 match &spec.typ {
                     ColumnType::Text(cs) => {
-                        t.add_text_column(sorting_disabled, id, &name, cs)
+                        t.add_text_column(sorting_disabled, vector_mode, &name, cs)
                     }
                     ColumnType::Hidden => (),
                     ColumnType::Toggle(_)
