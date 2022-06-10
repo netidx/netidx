@@ -126,6 +126,7 @@ enum Filter {
     Exclude(IndexSet<String, FxBuildHasher>),
     IncludeMatch(IndexSet<String, FxBuildHasher>, RegexSet),
     ExcludeMatch(IndexSet<String, FxBuildHasher>, RegexSet),
+    // CR estokes: Adjust ranges for the name column
     IncludeRange(Option<usize>, Option<usize>),
     ExcludeRange(Option<usize>, Option<usize>),
 }
@@ -276,13 +277,14 @@ impl FromValue for SelectionMode {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 enum OrLoadCol<T> {
     Static(T),
     Load(Chars),
     LoadWithFallback(T, Chars),
 }
 
+#[derive(Clone, Copy)]
 struct PangoColor(pango::Color);
 
 impl PartialEq for PangoColor {
@@ -329,7 +331,7 @@ macro_rules! or_load_prop {
     }};
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct ColumnTypeText {
     source: Option<Chars>,
     background: Option<OrLoadCol<PangoColor>>,
@@ -357,7 +359,7 @@ impl FromValue for ColumnTypeText {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct ColumnTypeToggle {
     source: Option<Chars>,
     radio: Option<OrLoadCol<bool>>,
@@ -373,7 +375,7 @@ impl FromValue for ColumnTypeToggle {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct ColumnTypeImage {
     source: Option<Chars>,
 }
@@ -385,7 +387,7 @@ impl FromValue for ColumnTypeImage {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct ColumnTypeCombo {
     source: Option<Chars>,
     choices: OrLoadCol<FxHashMap<Chars, Chars>>,
@@ -406,7 +408,7 @@ impl FromValue for ColumnTypeCombo {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct ColumnTypeSpin {
     source: Option<Chars>,
     min: Option<OrLoadCol<f64>>,
@@ -428,7 +430,7 @@ impl FromValue for ColumnTypeSpin {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct ColumnTypeProgress {
     source: Option<Chars>,
     activity_mode: Option<OrLoadCol<bool>>,
@@ -457,7 +459,7 @@ impl FromValue for ColumnTypeProgress {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 enum ColumnType {
     Text(ColumnTypeText),
     Toggle(ColumnTypeToggle),
@@ -468,7 +470,7 @@ enum ColumnType {
     Hidden,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct ColumnSpec {
     name: Chars,
     typ: ColumnType,
@@ -787,6 +789,38 @@ impl SharedState {
         });
         (selection_changed, descriptor)
     }
+
+    fn generate_column_spec(
+        &self,
+        descriptor: &IndexDescriptor,
+    ) -> FxHashMap<Chars, ColumnSpec> {
+        let mut spec = self
+            .column_types
+            .borrow()
+            .as_ref()
+            .map(|s| {
+                s.iter()
+                    .cloned()
+                    .map(|s| (s.name.clone(), s))
+                    .collect::<FxHashMap<Chars, ColumnSpec>>()
+            })
+            .unwrap_or(HashMap::default());
+        for col in descriptor.cols.keys() {
+            if !spec.contains_key(&**col) {
+                let name = Chars::from(String::from(&**col));
+                let cs = ColumnSpec {
+                    name: name.clone(),
+                    typ: ColumnType::Text(ColumnTypeText {
+                        source: None,
+                        background: None,
+                        foreground: None,
+                    }),
+                };
+                spec.insert(name, cs);
+            }
+        }
+        spec
+    }
 }
 
 struct RaeifiedTableInner {
@@ -821,7 +855,82 @@ impl Deref for RaeifiedTable {
 struct RaeifiedTableWeak(Weak<RaeifiedTableInner>);
 
 impl RaeifiedTable {
-    fn add_columns(&self, ncols: usize, vector_mode: bool, sorting_disabled: bool) {
+    fn set_column_properties(
+        &self,
+        column: &TreeViewColumn,
+        name: &Chars,
+        id: i32,
+        sorting_disabled: bool,
+    ) {
+        let t = self;
+        column.connect_clicked(clone!(@weak t, @strong name => move |_| {
+            t.shared.on_header_click.borrow_mut().update(
+                &mut t.shared.ctx.borrow_mut(),
+                &vm::Event::User(LocalEvent::Event(Value::from(name.clone())))
+            );
+        }));
+        column.set_title(&**name);
+        if sorting_disabled {
+            column.set_clickable(true);
+        } else {
+            t.store().set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
+                compare_row(id, m, r0, r1)
+            });
+            column.set_sort_column_id(id);
+        }
+        column.set_sizing(TreeViewColumnSizing::Fixed);
+        column.set_resizable(t.shared.columns_resizable.get());
+        let column_widths = &t.shared.column_widths;
+        if let Some(w) = column_widths.borrow().get(&**name) {
+            column.set_fixed_width(*w);
+        }
+        let columns_autosizing = t.columns_autosizing.clone();
+        column.connect_width_notify(
+            clone!(@strong column_widths, @strong name => move |c| {
+                if ! columns_autosizing.get() {
+                    let mut saved = column_widths.borrow_mut();
+                    *saved.entry((&*name).into()).or_insert(1) = c.width();
+                }
+            }),
+        );
+    }
+
+    fn add_text_column(
+        &self,
+        sorting_disabled: bool,
+        id: i32,
+        name: &Chars,
+        spec: &ColumnTypeText,
+    ) {
+        let t = self;
+        let column = TreeViewColumn::new();
+        let cell = CellRendererText::new();
+        column.pack_start(&cell, true);
+        if t.shared.column_editable.borrow().is_match(id as usize, &**name) {
+            cell.set_editable(true);
+        }
+        let f = Box::new(clone!(@weak t, @strong cell, @strong name, @strong spec =>
+                move |_: &TreeViewColumn,
+                      _: &CellRenderer,
+                      _: &TreeModel,
+                      i: &TreeIter| t.render_text_cell(id, &*name, &cell, i, &spec)));
+        TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+        cell.connect_edited(clone!(@weak t => move |_, _, v| {
+            t.shared.on_edit.borrow_mut().update(
+                &mut t.shared.ctx.borrow_mut(),
+                &vm::Event::User(LocalEvent::Event(Value::from(String::from(v))))
+            );
+        }));
+        t.set_column_properties(&column, name, id, sorting_disabled);
+        t.view().append_column(&column);
+    }
+
+    fn add_columns(
+        &self,
+        vector_mode: bool,
+        sorting_disabled: bool,
+        spec: FxHashMap<Chars, ColumnSpec>,
+    ) {
         let t = self;
         if t.shared.show_name_column.get() {
             t.view().append_column(&{
@@ -851,72 +960,35 @@ impl RaeifiedTable {
                 column
             });
         }
-        for col in 0..ncols {
-            let id = (col + 1) as i32;
-            let column = TreeViewColumn::new();
-            let cell = CellRendererText::new();
-            let name = if vector_mode {
-                Path::from("value")
-            } else {
-                t.0.descriptor.cols.get_index(col).unwrap().0.clone()
-            };
-            column.pack_start(&cell, true);
-            if t.shared.column_editable.borrow().is_match(col, &*name) {
-                cell.set_editable(true);
-            }
-            let f = Box::new(clone!(@weak t, @strong name =>
-                move |_: &TreeViewColumn,
-                      cr: &CellRenderer,
-                      _: &TreeModel,
-                      i: &TreeIter| t.render_cell(id, &*name, cr, i)));
-            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
-            cell.connect_edited(clone!(@weak t => move |_, _, v| {
-                let ev = LocalEvent::Event(Value::String(Chars::from(String::from(v))));
-                t.shared.on_edit.borrow_mut().update(
-                    &mut t.shared.ctx.borrow_mut(),
-                    &vm::Event::User(ev)
-                );
-            }));
-            column.connect_clicked(clone!(@weak t, @strong name => move |_| {
-                let v = Value::String(Chars::from(String::from(&*name)));
-                let ev = LocalEvent::Event(v);
-                t.shared.on_header_click.borrow_mut().update(
-                    &mut t.shared.ctx.borrow_mut(),
-                    &vm::Event::User(ev)
-                );
-            }));
-            column.set_title(&name);
-            if sorting_disabled {
-                column.set_clickable(true);
-            } else {
-                t.store()
-                    .set_sort_func(SortColumn::Index(id as u32), move |m, r0, r1| {
-                        compare_row(id, m, r0, r1)
-                    });
-                column.set_sort_column_id(id);
-            }
-            column.set_sizing(TreeViewColumnSizing::Fixed);
-            column.set_resizable(t.shared.columns_resizable.get());
-            let column_widths = &t.shared.column_widths;
-            if let Some(w) = column_widths.borrow().get(&*name) {
-                column.set_fixed_width(*w);
-            }
-            let columns_autosizing = t.columns_autosizing.clone();
-            column.connect_width_notify(
-                clone!(@strong column_widths, @strong name => move |c| {
-                    if ! columns_autosizing.get() {
-                        let mut saved = column_widths.borrow_mut();
-                        *saved.entry((&*name).into()).or_insert(1) = c.width();
+        if vector_mode {
+            t.add_text_column(
+                sorting_disabled,
+                1,
+                &Chars::from("value"),
+                &ColumnTypeText { source: None, background: None, foreground: None },
+            )
+        } else {
+            for (i, (name, spec)) in spec.iter().enumerate() {
+                let id = (i + 1) as i32;
+                match &spec.typ {
+                    ColumnType::Text(cs) => {
+                        t.add_text_column(sorting_disabled, id, &name, cs)
                     }
-                }),
-            );
-            t.view().append_column(&column);
+                    ColumnType::Hidden => (),
+                    ColumnType::Toggle(_)
+                    | ColumnType::Image(_)
+                    | ColumnType::Combo(_)
+                    | ColumnType::Spin(_)
+                    | ColumnType::Progress(_) => unimplemented!(),
+                }
+            }
         }
     }
 
     fn new(shared: Rc<SharedState>) -> RaeifiedTable {
         let path = shared.path.borrow().clone();
         let (selection_changed, descriptor) = shared.apply_filters();
+        let column_spec = shared.generate_column_spec(&descriptor);
         let view = TreeView::new();
         view.set_no_show_all(true);
         shared.root.add(&view);
@@ -942,7 +1014,6 @@ impl RaeifiedTable {
             }
         }
         let style = view.style_context();
-        let ncols = if vector_mode { 1 } else { descriptor.cols.len() };
         let t = RaeifiedTable(Rc::new(RaeifiedTableInner {
             path,
             shared,
@@ -972,7 +1043,7 @@ impl RaeifiedTable {
             SortSpec::Disabled | SortSpec::External(_) => true,
             SortSpec::Column(_, _) | SortSpec::None => false,
         };
-        t.add_columns(ncols, vector_mode, sorting_disabled);
+        t.add_columns(vector_mode, sorting_disabled, column_spec);
         t.view().set_model(Some(t.store()));
         t.view().connect_destroy(clone!(@weak t => move |_| t.destroyed.set(true)));
         t.store().connect_sort_column_changed(
@@ -1062,8 +1133,14 @@ impl RaeifiedTable {
         }));
     }
 
-    fn render_cell(&self, id: i32, name: &str, cr: &CellRenderer, i: &TreeIter) {
-        let cr = cr.clone().downcast::<CellRendererText>().unwrap();
+    fn render_text_cell(
+        &self,
+        id: i32,
+        name: &str,
+        cr: &CellRendererText,
+        i: &TreeIter,
+        _spec: &ColumnTypeText,
+    ) {
         let bv = self.store().value(i, id);
         cr.set_text(match bv.get::<&BVal>() {
             Ok(v) => Some(v.formatted.as_str()),
