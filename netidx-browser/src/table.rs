@@ -1014,6 +1014,8 @@ impl RaeifiedTable {
             }));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
         }
+        t.set_column_properties(&column, name, id, true);
+        t.view().append_column(&column);
     }
 
     fn add_columns(
@@ -1275,16 +1277,17 @@ impl RaeifiedTable {
         i: &TreeIter,
     ) {
         let bv = self.store().value(i, id);
-        let spec = match bv.get::<&BVal>() {
-            Err(_) => return,
-            Ok(v) => match v.value.clone().cast_to::<ImageSpec>() {
-                Err(_) => return,
-                Ok(spec) => spec,
-            },
-        };
+        let spec = bv
+            .get::<&BVal>()
+            .ok()
+            .and_then(|v| v.value.clone().cast_to::<ImageSpec>().ok());
         match spec {
-            ImageSpec::Icon { name, size: _ } => cr.set_icon_name(Some(&*name)),
-            ImageSpec::PixBuf { .. } => cr.set_pixbuf(spec.get_pixbuf().as_ref()),
+            None => {
+                cr.set_icon_name(None);
+                cr.set_pixbuf(None);
+            }
+            Some(ImageSpec::Icon { name, size: _ }) => cr.set_icon_name(Some(&*name)),
+            Some(spec@ ImageSpec::PixBuf { .. }) => cr.set_pixbuf(spec.get_pixbuf().as_ref()),
         }
     }
 
