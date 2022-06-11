@@ -433,9 +433,9 @@ pub struct IndexEv;
 impl CachedCurEval for IndexEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
-            [Some(Value::Array(elts)), Some(Value::I64(i))] if *i > 0 => {
+            [Some(Value::Array(elts)), Some(Value::I64(i))] if *i >= 0 => {
                 let i = *i as usize;
-                if elts.len() < i {
+                if i < elts.len() {
                     Some(elts[i].clone())
                 } else {
                     Some(Value::Error(Chars::from("array index out of bounds")))
@@ -443,7 +443,7 @@ impl CachedCurEval for IndexEv {
             }
             [None, _] | [_, None] => None,
             _ => Some(Value::Error(Chars::from(
-                "index expected an array and a positive index",
+                "index(array, index): expected an array and a positive index",
             ))),
         }
     }
