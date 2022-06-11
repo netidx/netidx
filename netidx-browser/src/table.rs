@@ -1082,7 +1082,7 @@ impl RaeifiedTable {
                         .and_then(|v| v.get::<&BVal>().ok()
                                        .and_then(|v| v.value.clone().cast_to::<bool>().ok()))
                         .unwrap_or(false);
-                    let val = vec![Value::from(path), Value::from(val)];
+                    let val = vec![Value::from(path), Value::from(!val)];
                     t.shared.on_edit.borrow_mut().update(
                         &mut t.shared.ctx.borrow_mut(),
                         &vm::Event::User(LocalEvent::Event(val.into()))
