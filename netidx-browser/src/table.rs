@@ -11,9 +11,10 @@ use gdk::{keys, EventButton, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
 use gtk::{
-    prelude::*, Adjustment, CellRenderer, CellRendererPixbuf, CellRendererText, Label,
-    ListStore, ScrolledWindow, SortColumn, SortType, StateFlags, StyleContext, TreeIter,
-    TreeModel, TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
+    prelude::*, Adjustment, CellRenderer, CellRendererPixbuf, CellRendererText,
+    CellRendererToggle, Label, ListStore, ScrolledWindow, SortColumn, SortType,
+    StateFlags, StyleContext, TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn,
+    TreeViewColumnSizing,
 };
 use indexmap::{IndexMap, IndexSet};
 use netidx::{
@@ -385,6 +386,7 @@ macro_rules! or_load_prop {
 #[derive(Debug, Clone)]
 struct CTCommonResolved {
     source: i32,
+    source_column: Chars,
     background: Option<OrLoad<Color>>,
 }
 
@@ -398,21 +400,27 @@ impl ColumnTypeCommon {
     fn resolve(
         &self,
         vector_mode: bool,
-        name: &str,
+        name: &Chars,
         descriptor: &IndexDescriptor,
     ) -> Option<CTCommonResolved> {
-        let source = if vector_mode {
-            Some(1)
+        let (source, source_column) = if vector_mode {
+            (Some(1), name.clone())
         } else {
             match &self.source {
-                None => descriptor.cols.get_full(name).map(|(i, _, _)| (i + 1) as i32),
+                None => {
+                    let id =
+                        descriptor.cols.get_full(&**name).map(|(i, _, _)| (i + 1) as i32);
+                    (id, name.clone())
+                }
                 Some(src) => {
-                    descriptor.cols.get_full(&**src).map(|(i, _, _)| (i + 1) as i32)
+                    let id =
+                        descriptor.cols.get_full(&**src).map(|(i, _, _)| (i + 1) as i32);
+                    (id, src.clone())
                 }
             }
         };
         let background = self.background.as_ref().and_then(|v| v.resolve(descriptor));
-        source.map(move |source| CTCommonResolved { source, background })
+        source.map(move |source| CTCommonResolved { source, source_column, background })
     }
 
     fn from_props(
@@ -1003,11 +1011,14 @@ impl RaeifiedTable {
                     t.render_text_cell(&common, &*name, &foreground, &cell, i)
                 }));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
-            cell.connect_edited(clone!(@weak t => move |_, _, v| {
-                t.shared.on_edit.borrow_mut().update(
-                    &mut t.shared.ctx.borrow_mut(),
-                    &vm::Event::User(LocalEvent::Event(Value::from(String::from(v))))
-                );
+            cell.connect_edited(clone!(@weak t, @strong common => move |_, p, v| {
+                if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
+                    let v = vec![Value::from(path), Value::from(String::from(v))];
+                    t.shared.on_edit.borrow_mut().update(
+                        &mut t.shared.ctx.borrow_mut(),
+                        &vm::Event::User(LocalEvent::Event(v.into()))
+                    );
+                }
             }));
         }
         t.set_column_properties(&column, name, &common, sorting_disabled);
@@ -1032,6 +1043,49 @@ impl RaeifiedTable {
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
         }
         t.set_column_properties(&column, name, &common, true);
+        t.view().append_column(&column);
+    }
+
+    fn add_toggle_column(
+        &self,
+        sorting_disabled: bool,
+        name: &Chars,
+        spec: &ColumnTypeToggle,
+    ) {
+        let t = self;
+        let column = TreeViewColumn::new();
+        let cell = CellRendererToggle::new();
+        column.pack_start(&cell, true);
+        let common = spec.common.resolve(false, name, &self.descriptor);
+        if let Some(common) = common.as_ref() {
+            let radio = spec.radio.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            if t.shared.column_editable.borrow().is_match(common.source as usize, &**name)
+            {
+                cell.set_activatable(true)
+            } else {
+                cell.set_activatable(false)
+            }
+            let f =
+                Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
+                    move |_: &TreeViewColumn,
+                _: &CellRenderer,
+                _: &TreeModel,
+                i: &TreeIter| {
+                    t.render_toggle_cell(&common, &*name, &radio, &cell, i)
+                }));
+            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            cell.connect_toggled(clone!(@weak t, @strong common => move |_, p| {
+                if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
+                    let val = t.store().iter(&p)
+                        .map(|i| t.store().value(&i, common.source))
+                        .and_then(|v| v.get::<&BVal>().ok())
+                        .and_then(|v| v.clone().cast_to::<bool>().ok())
+                        .unwrap_or(false);
+                    
+                }
+            }));
+        }
+        t.set_column_properties(&column, name, &common, sorting_disabled);
         t.view().append_column(&column);
     }
 
@@ -1087,8 +1141,10 @@ impl RaeifiedTable {
                         t.add_text_column(vector_mode, &name, sorting_disabled, cs)
                     }
                     ColumnType::Image(cs) => t.add_image_column(&name, cs),
-                    ColumnType::Toggle(_)
-                    | ColumnType::Combo(_)
+                    ColumnType::Toggle(cs) => {
+                        t.add_toggle_column(sorting_disabled, &name, cs)
+                    }
+                    ColumnType::Combo(_)
                     | ColumnType::Spin(_)
                     | ColumnType::Progress(_) => unimplemented!(),
                     ColumnType::Hidden => (),
@@ -1325,6 +1381,26 @@ impl RaeifiedTable {
         self.render_cell_selected(common, cr, i, name);
     }
 
+    fn render_toggle_cell(
+        &self,
+        common: &CTCommonResolved,
+        name: &str,
+        radio: &Option<OrLoad<bool>>,
+        cr: &CellRendererToggle,
+        i: &TreeIter,
+    ) {
+        let bv = self.store().value(i, common.source);
+        let val = bv
+            .get::<&BVal>()
+            .ok()
+            .and_then(|v| v.value.clone().cast_to::<bool>().ok())
+            .unwrap_or(false);
+        let radio = radio.as_ref().and_then(|s| s.load(i, self.store())).unwrap_or(false);
+        cr.set_active(val);
+        cr.set_radio(radio);
+        self.render_cell_selected(common, cr, i, name);
+    }
+
     fn handle_key(&self, key: &EventKey) -> Inhibit {
         let clear_selection = || {
             let n = {
@@ -1482,21 +1558,28 @@ impl RaeifiedTable {
         row_name.and_then(|v| if v.get::<&str>().is_ok() { Some(v) } else { None })
     }
 
-    fn path_from_selected(&self, row: &str, title: &String) -> Path {
+    fn path_from_selected(&self, row: &str, title: &str) -> Path {
         let path = &self.path;
         if self.vector_mode {
             path.append(row)
-        } else if self.shared.show_name_column.get() && title.as_str() == NAME_COL {
+        } else if self.shared.show_name_column.get() && title == NAME_COL {
             path.append(row)
         } else {
             path.append(row).append(title)
         }
     }
 
+    fn path_from_treepath(&self, row: &gtk::TreePath, column: &str) -> Option<Path> {
+        let row = self.row_of(Either::Left(row));
+        row.as_ref()
+            .and_then(|r| r.get::<&str>().ok())
+            .map(|r| self.path_from_selected(r, column))
+    }
+
     fn cursor_changed(&self) {
         if let (Some(p), Some(c)) = self.view().cursor() {
             if let Some(row) =
-                self.row_of(Either::Left(&p)).as_ref().map(|r| r.get::<&str>().unwrap())
+                self.row_of(Either::Left(&p)).as_ref().and_then(|r| r.get::<&str>().ok())
             {
                 let title = c.title().map(|t| t.to_string()).unwrap_or_else(String::new);
                 let path = self.path_from_selected(row, &title);

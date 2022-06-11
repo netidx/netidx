@@ -306,7 +306,10 @@ pub struct Table {
     /// event() will yield the row path when the user activates a row,
     /// see multi_select
     pub on_activate: Expr,
-    /// event() will yield the new value when the user edits a cell
+    /// When the user edits a cell event() will yield an array. The
+    /// first element will be the full path to the source of the cell
+    /// that was edited. The second element will be the new value of
+    /// the cell.
     pub on_edit: Expr,
     /// event() will yield the name of the column header that was
     /// clicked
@@ -320,9 +323,26 @@ pub struct Image {
     /// icon-size: ("menu" | "small-toolbar" | "large-toolbar" | "dnd" | "dialog")
     /// image-spec: [
     ///    ["image", <image-bytes>],
-    ///    ["width": <desired-width>],
+    ///      the image bytes, one of image or image-path is required.
+    ///
+    ///    ["image-path", <path>],
+    ///      the netidx path to the image bytes, one of image or
+    ///      image-path is required.
+    ///
+    ///    ["width", <desired-width>],
+    ///      optional, if specified the image will be scaled to the
+    ///      specified width. If keep-aspect is true then the height
+    ///      will also be scaled to keep the image's aspect ratio even
+    ///      if height is not specified.
+    ///
     ///    ["height", <desired-height>],
+    ///      optional, if specifed the image will be scaled to the
+    ///      specified height. If keep-aspect is true then the width
+    ///      will also be scaled to keep the image's aspect ratio even
+    ///      if width is not specified.
+    ///
     ///    ["keep-aspect", (true | false)]
+    ///      optional, keep the aspect ratio of the image.
     /// ]
     /// - <icon-name>: A string naming the stock icon from the current
     /// theme that should be displayed. The default size is "small-toolbar".
@@ -332,15 +352,6 @@ pub struct Image {
     /// format supported by gdk_pixbuf.
     /// - image-spec: an alist containing the image bytes in any format
     /// supported by gdk_pixbuf and some metadata.
-    ///   - image: the image bytes, required.
-    ///   - width: optional, if specified the image will be scaled to
-    ///   the specified width. If keep-aspect is true then the height
-    ///   will also be scaled to keep the image's aspect ratio even if
-    ///   height is not specified.
-    ///   - height: optional, if specifed the image will be scaled to
-    ///   the specified height. If keep-aspect is true then the width
-    ///   will also be scaled to keep the image's aspect ratio even if
-    ///   width is not specified.
     pub spec: Expr,
     /// event will yield null when the image is clicked
     pub on_click: Expr,
