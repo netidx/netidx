@@ -1076,12 +1076,17 @@ impl RaeifiedTable {
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
             cell.connect_toggled(clone!(@weak t, @strong common => move |_, p| {
                 if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
-                    let val = t.store().iter(&p)
+                    let val = t.store()
+                        .iter(&p)
                         .map(|i| t.store().value(&i, common.source))
-                        .and_then(|v| v.get::<&BVal>().ok())
-                        .and_then(|v| v.clone().cast_to::<bool>().ok())
+                        .and_then(|v| v.get::<&BVal>().ok()
+                                       .and_then(|v| v.value.clone().cast_to::<bool>().ok()))
                         .unwrap_or(false);
-                    
+                    let val = vec![Value::from(path), Value::from(val)];
+                    t.shared.on_edit.borrow_mut().update(
+                        &mut t.shared.ctx.borrow_mut(),
+                        &vm::Event::User(LocalEvent::Event(val.into()))
+                    );
                 }
             }));
         }
