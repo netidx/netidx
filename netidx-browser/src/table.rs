@@ -51,7 +51,7 @@ lazy_static! {
     static ref FORMATTED: Pool<String> = Pool::new(50_000, 1024);
 }
 
-#[derive(Clone, Boxed)]
+#[derive(Debug, Clone, Boxed)]
 #[boxed_type(name = "NetidxValue")]
 struct BVal {
     value: Value,
@@ -277,6 +277,7 @@ impl FromValue for SelectionMode {
     }
 }
 
+#[derive(Debug, Clone)]
 enum OrLoad<T> {
     Static(T),
     Load(i32),
@@ -334,7 +335,7 @@ impl<T: Clone> OrLoadCol<T> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct Color(RGBA);
 
 impl PartialEq for Color {
@@ -381,10 +382,58 @@ macro_rules! or_load_prop {
     }};
 }
 
+#[derive(Debug, Clone)]
+struct CTCommonResolved {
+    source: i32,
+    background: Option<OrLoad<Color>>,
+}
+
 #[derive(Clone, PartialEq)]
-struct ColumnTypeText {
+struct ColumnTypeCommon {
     source: Option<Chars>,
     background: Option<OrLoadCol<Color>>,
+}
+
+impl ColumnTypeCommon {
+    fn resolve(
+        &self,
+        vector_mode: bool,
+        name: &str,
+        descriptor: &IndexDescriptor,
+    ) -> Option<CTCommonResolved> {
+        let source = if vector_mode {
+            Some(1)
+        } else {
+            match &self.source {
+                None => descriptor.cols.get_full(name).map(|(i, _, _)| (i + 1) as i32),
+                Some(src) => {
+                    descriptor.cols.get_full(&**src).map(|(i, _, _)| (i + 1) as i32)
+                }
+            }
+        };
+        let background = self.background.as_ref().and_then(|v| v.resolve(descriptor));
+        source.map(move |source| CTCommonResolved { source, background })
+    }
+
+    fn from_props(
+        props: &mut FxHashMap<Chars, Value>,
+    ) -> anyhow::Result<ColumnTypeCommon> {
+        Ok(Self {
+            source: prop!(props, "source", Chars),
+            background: or_load_prop!(props, "background", "background-column", Color),
+        })
+    }
+}
+
+impl FromValue for ColumnTypeCommon {
+    fn from_value(v: Value) -> anyhow::Result<Self> {
+        Self::from_props(&mut v.cast_to::<FxHashMap<Chars, Value>>()?)
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct ColumnTypeText {
+    common: ColumnTypeCommon,
     foreground: Option<OrLoadCol<Color>>,
 }
 
@@ -392,16 +441,15 @@ impl FromValue for ColumnTypeText {
     fn from_value(v: Value) -> anyhow::Result<Self> {
         let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
         Ok(Self {
-            source: prop!(props, "source", Chars),
+            common: ColumnTypeCommon::from_props(&mut props)?,
             foreground: or_load_prop!(props, "foreground", "foreground-column", Color),
-            background: or_load_prop!(props, "background", "background-column", Color),
         })
     }
 }
 
 #[derive(Clone, PartialEq)]
 struct ColumnTypeToggle {
-    source: Option<Chars>,
+    common: ColumnTypeCommon,
     radio: Option<OrLoadCol<bool>>,
 }
 
@@ -409,27 +457,15 @@ impl FromValue for ColumnTypeToggle {
     fn from_value(v: Value) -> anyhow::Result<Self> {
         let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
         Ok(Self {
-            source: prop!(props, "source", Chars),
+            common: ColumnTypeCommon::from_props(&mut props)?,
             radio: or_load_prop!(props, "radio", "radio-column", bool),
         })
     }
 }
 
 #[derive(Clone, PartialEq)]
-struct ColumnTypeImage {
-    source: Option<Chars>,
-}
-
-impl FromValue for ColumnTypeImage {
-    fn from_value(v: Value) -> anyhow::Result<Self> {
-        let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
-        Ok(Self { source: prop!(props, "source", Chars) })
-    }
-}
-
-#[derive(Clone, PartialEq)]
 struct ColumnTypeCombo {
-    source: Option<Chars>,
+    common: ColumnTypeCommon,
     choices: OrLoadCol<FxHashMap<Chars, Chars>>,
     has_entry: Option<OrLoadCol<bool>>,
 }
@@ -441,7 +477,7 @@ impl FromValue for ColumnTypeCombo {
             or_load_prop!(props, "choices", "choices-column", FxHashMap<Chars, Chars>)
                 .ok_or_else(|| anyhow!("choices is required"))?;
         Ok(Self {
-            source: prop!(props, "source", Chars),
+            common: ColumnTypeCommon::from_props(&mut props)?,
             has_entry: or_load_prop!(props, "has-entry", "has-entry-column", bool),
             choices,
         })
@@ -450,7 +486,7 @@ impl FromValue for ColumnTypeCombo {
 
 #[derive(Clone, PartialEq)]
 struct ColumnTypeSpin {
-    source: Option<Chars>,
+    common: ColumnTypeCommon,
     min: Option<OrLoadCol<f64>>,
     max: Option<OrLoadCol<f64>>,
     climb_rate: Option<OrLoadCol<f64>>,
@@ -461,7 +497,7 @@ impl FromValue for ColumnTypeSpin {
     fn from_value(v: Value) -> anyhow::Result<Self> {
         let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
         Ok(Self {
-            source: prop!(props, "source", Chars),
+            common: ColumnTypeCommon::from_props(&mut props)?,
             min: or_load_prop!(props, "min", "min-column", f64),
             max: or_load_prop!(props, "max", "max-column", f64),
             climb_rate: or_load_prop!(props, "climb-rate", "climb-rate-column", f64),
@@ -472,7 +508,7 @@ impl FromValue for ColumnTypeSpin {
 
 #[derive(Clone, PartialEq)]
 struct ColumnTypeProgress {
-    source: Option<Chars>,
+    common: ColumnTypeCommon,
     activity_mode: Option<OrLoadCol<bool>>,
     text: Option<OrLoadCol<Chars>>,
     text_xalign: Option<OrLoadCol<f64>>,
@@ -484,7 +520,7 @@ impl FromValue for ColumnTypeProgress {
     fn from_value(v: Value) -> anyhow::Result<Self> {
         let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
         Ok(Self {
-            source: prop!(props, "source", Chars),
+            common: ColumnTypeCommon::from_props(&mut props)?,
             activity_mode: or_load_prop!(
                 props,
                 "activity-mode",
@@ -503,7 +539,7 @@ impl FromValue for ColumnTypeProgress {
 enum ColumnType {
     Text(ColumnTypeText),
     Toggle(ColumnTypeToggle),
-    Image(ColumnTypeImage),
+    Image(ColumnTypeCommon),
     Combo(ColumnTypeCombo),
     Spin(ColumnTypeSpin),
     Progress(ColumnTypeProgress),
@@ -522,7 +558,7 @@ impl FromValue for ColumnSpec {
         let typ = match &*typ {
             "text" => ColumnType::Text(props.cast_to::<ColumnTypeText>()?),
             "toggle" => ColumnType::Toggle(props.cast_to::<ColumnTypeToggle>()?),
-            "image" => ColumnType::Image(props.cast_to::<ColumnTypeImage>()?),
+            "image" => ColumnType::Image(props.cast_to::<ColumnTypeCommon>()?),
             "combo" => ColumnType::Combo(props.cast_to::<ColumnTypeCombo>()?),
             "spin" => ColumnType::Spin(props.cast_to::<ColumnTypeSpin>()?),
             "progress" => ColumnType::Progress(props.cast_to::<ColumnTypeProgress>()?),
@@ -852,8 +888,7 @@ impl SharedState {
                 let cs = ColumnSpec {
                     name: name.clone(),
                     typ: ColumnType::Text(ColumnTypeText {
-                        source: None,
-                        background: None,
+                        common: ColumnTypeCommon { source: None, background: None },
                         foreground: None,
                     }),
                 };
@@ -900,12 +935,13 @@ impl RaeifiedTable {
         &self,
         column: &TreeViewColumn,
         name: &Chars,
-        id: Option<i32>,
+        common: &Option<CTCommonResolved>,
         sorting_disabled: bool,
     ) {
         let t = self;
         column.set_title(&**name);
-        if let Some(id) = id {
+        if let Some(CTCommonResolved { source: id, .. }) = common.as_ref() {
+            let id = *id;
             column.connect_clicked(clone!(@weak t, @strong name => move |_| {
                 t.shared.on_header_click.borrow_mut().update(
                     &mut t.shared.ctx.borrow_mut(),
@@ -942,42 +978,30 @@ impl RaeifiedTable {
     fn add_text_column(
         &self,
         vector_mode: bool,
-        sorting_disabled: bool,
         name: &Chars,
+        sorting_disabled: bool,
         spec: &ColumnTypeText,
     ) {
         let t = self;
         let column = TreeViewColumn::new();
         let cell = CellRendererText::new();
         column.pack_start(&cell, true);
-        let id = if vector_mode {
-            Some(1)
-        } else {
-            match &spec.source {
-                None => {
-                    self.descriptor.cols.get_full(&**name).map(|(i, _, _)| (i + 1) as i32)
-                }
-                Some(src) => {
-                    self.descriptor.cols.get_full(&**src).map(|(i, _, _)| (i + 1) as i32)
-                }
-            }
-        };
-        if let Some(id) = id {
-            let background =
-                spec.background.as_ref().and_then(|v| v.resolve(&t.descriptor));
+        let common = spec.common.resolve(vector_mode, name, &self.descriptor);
+        if let Some(common) = common.as_ref() {
             let foreground =
                 spec.foreground.as_ref().and_then(|v| v.resolve(&t.descriptor));
-            if t.shared.column_editable.borrow().is_match(id as usize, &**name) {
+            if t.shared.column_editable.borrow().is_match(common.source as usize, &**name)
+            {
                 cell.set_editable(true);
             }
-            let f = Box::new(clone!(
-            @weak t, @strong cell, @strong name =>
-                move |_: &TreeViewColumn,
-            _: &CellRenderer,
-            _: &TreeModel,
-            i: &TreeIter| {
-                t.render_text_cell(id, &*name, &background, &foreground, &cell, i)
-            }));
+            let f =
+                Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
+                    move |_: &TreeViewColumn,
+                _: &CellRenderer,
+                _: &TreeModel,
+                i: &TreeIter| {
+                    t.render_text_cell(&common, &*name, &foreground, &cell, i)
+                }));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
             cell.connect_edited(clone!(@weak t => move |_, _, v| {
                 t.shared.on_edit.borrow_mut().update(
@@ -986,43 +1010,36 @@ impl RaeifiedTable {
                 );
             }));
         }
-        t.set_column_properties(&column, name, id, sorting_disabled);
+        t.set_column_properties(&column, name, &common, sorting_disabled);
         t.view().append_column(&column);
     }
 
-    fn add_image_column(&self, name: &Chars, spec: &ColumnTypeImage) {
+    fn add_image_column(&self, name: &Chars, spec: &ColumnTypeCommon) {
         let t = self;
         let column = TreeViewColumn::new();
         let cell = CellRendererPixbuf::new();
         column.pack_start(&cell, true);
-        let id = match &spec.source {
-            None => {
-                self.descriptor.cols.get_full(&**name).map(|(i, _, _)| (i + 1) as i32)
-            }
-            Some(src) => {
-                self.descriptor.cols.get_full(&**src).map(|(i, _, _)| (i + 1) as i32)
-            }
-        };
-        if let Some(id) = id {
+        let common = spec.resolve(false, name, &self.descriptor);
+        if let Some(common) = common.as_ref() {
             let f = Box::new(clone!(
-            @weak t, @strong cell, @strong name =>
+            @weak t, @strong cell, @strong name, @strong common =>
                 move |_: &TreeViewColumn,
             _: &CellRenderer,
             _: &TreeModel,
             i: &TreeIter| {
-                t.render_image_cell(id, &*name, &cell, i)
+                t.render_image_cell(&common, &*name, &cell, i)
             }));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
         }
-        t.set_column_properties(&column, name, id, true);
+        t.set_column_properties(&column, name, &common, true);
         t.view().append_column(&column);
     }
 
     fn add_columns(
         &self,
         vector_mode: bool,
-        sorting_disabled: bool,
         spec: IndexMap<Chars, ColumnSpec, FxBuildHasher>,
+        sorting_disabled: bool,
     ) {
         let t = self;
         if t.shared.show_name_column.get() {
@@ -1055,16 +1072,19 @@ impl RaeifiedTable {
         }
         if vector_mode {
             t.add_text_column(
-                sorting_disabled,
                 vector_mode,
                 &Chars::from("value"),
-                &ColumnTypeText { source: None, background: None, foreground: None },
+                sorting_disabled,
+                &ColumnTypeText {
+                    common: ColumnTypeCommon { source: None, background: None },
+                    foreground: None,
+                },
             )
         } else {
             for (name, spec) in spec.iter() {
                 match &spec.typ {
                     ColumnType::Text(cs) => {
-                        t.add_text_column(sorting_disabled, vector_mode, &name, cs)
+                        t.add_text_column(vector_mode, &name, sorting_disabled, cs)
                     }
                     ColumnType::Image(cs) => t.add_image_column(&name, cs),
                     ColumnType::Toggle(_)
@@ -1135,7 +1155,7 @@ impl RaeifiedTable {
             SortSpec::Disabled | SortSpec::External(_) => true,
             SortSpec::Column(_, _) | SortSpec::None => false,
         };
-        t.add_columns(vector_mode, sorting_disabled, column_spec);
+        t.add_columns(vector_mode, column_spec, sorting_disabled);
         t.view().set_model(Some(t.store()));
         t.view().connect_destroy(clone!(@weak t => move |_| t.destroyed.set(true)));
         t.store().connect_sort_column_changed(
@@ -1227,6 +1247,7 @@ impl RaeifiedTable {
 
     fn render_cell_selected<T: CellRendererExt>(
         &self,
+        common: &CTCommonResolved,
         cr: &T,
         i: &TreeIter,
         name: &str,
@@ -1245,7 +1266,12 @@ impl RaeifiedTable {
                 true
             }
             Some(_) | None => {
-                cr.set_cell_background_rgba(None);
+                let bg = common
+                    .background
+                    .as_ref()
+                    .and_then(|s| s.load(i, self.store()))
+                    .map(|c| c.0);
+                cr.set_cell_background_rgba(bg.as_ref());
                 false
             }
         }
@@ -1253,39 +1279,35 @@ impl RaeifiedTable {
 
     fn render_text_cell(
         &self,
-        id: i32,
+        common: &CTCommonResolved,
         name: &str,
-        background: &Option<OrLoad<Color>>,
         foreground: &Option<OrLoad<Color>>,
         cr: &CellRendererText,
         i: &TreeIter,
     ) {
-        let bv = self.store().value(i, id);
+        let bv = self.store().value(i, common.source);
         cr.set_text(match bv.get::<&BVal>() {
             Ok(v) => Some(v.formatted.as_str()),
             Err(_) => None,
         });
-        if self.render_cell_selected(cr, i, name) {
+        if self.render_cell_selected(common, cr, i, name) {
             let fg = self.style.color(StateFlags::SELECTED);
             cr.set_foreground_rgba(Some(&fg));
         } else {
-            let bg =
-                background.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
             let fg =
                 foreground.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
-            cr.set_cell_background_rgba(bg.as_ref());
             cr.set_foreground_rgba(fg.as_ref());
         }
     }
 
     fn render_image_cell(
         &self,
-        id: i32,
+        common: &CTCommonResolved,
         name: &str,
         cr: &CellRendererPixbuf,
         i: &TreeIter,
     ) {
-        let bv = self.store().value(i, id);
+        let bv = self.store().value(i, common.source);
         let spec = bv
             .get::<&BVal>()
             .ok()
@@ -1300,7 +1322,7 @@ impl RaeifiedTable {
                 cr.set_pixbuf(spec.get_pixbuf().as_ref())
             }
         }
-        self.render_cell_selected(cr, i, name);
+        self.render_cell_selected(common, cr, i, name);
     }
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {

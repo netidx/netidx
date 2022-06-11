@@ -103,10 +103,19 @@ pub struct Table {
     /// typename: ("text" | "toggle" | "image" | "combo" | "spin" | "progress" | "hidden")
     /// properties: match typename
     ///   common: 
-    ///     ["source", <column-name>]
+    ///     ["source", <column-name>],
     ///       optional, the source column that contains the data for
     ///       each row. If not specified the default is this column
     ///       (<name>).
+
+    ///     ["background", <color-string>],
+    ///       optional, statically specify the background color of the
+    ///       cell. same format as the "foreground" attribute.
+    ///
+    ///     ["background-column", <column-name>],
+    ///       optional, the column containing the background color of
+    ///       each row in the same format as described in the
+    ///       "foreground" attribute.
     ///
     ///   "text": [
     ///     common,
@@ -120,15 +129,6 @@ pub struct Table {
     ///     ["foreground-column", <column-name>],
     ///       optional, the column containing the foreground color of
     ///       each row, same format as for the "foreground" attribute.
-    ///
-    ///     ["background", <color-string>],
-    ///       optional, statically specify the background color of the
-    ///       cell. same format as the "foreground" attribute.
-    ///
-    ///     ["background-column", <column-name>],
-    ///       optional, the column containing the background color of
-    ///       each row in the same format as described in the
-    ///       "foreground" attribute.
     ///   ]
     ///   
     ///   "toggle": [
