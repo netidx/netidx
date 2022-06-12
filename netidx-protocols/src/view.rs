@@ -323,11 +323,7 @@ pub struct Image {
     /// icon-size: ("menu" | "small-toolbar" | "large-toolbar" | "dnd" | "dialog")
     /// image-spec: [
     ///    ["image", <image-bytes>],
-    ///      the image bytes, one of image or image-path is required.
-    ///
-    ///    ["image-path", <path>],
-    ///      the netidx path to the image bytes, one of image or
-    ///      image-path is required.
+    ///      required, the image bytes.
     ///
     ///    ["width", <desired-width>],
     ///      optional, if specified the image will be scaled to the

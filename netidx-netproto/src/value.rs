@@ -11,7 +11,7 @@ use netidx_core::{
 use smallvec::SmallVec;
 use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     convert, fmt,
     hash::{BuildHasher, Hash},
     iter, mem,
@@ -1870,13 +1870,38 @@ impl<K: convert::Into<Value>, V: convert::Into<Value>, S: BuildHasher + Default>
     }
 }
 
+impl<K: FromValue + Ord, V: FromValue> FromValue for BTreeMap<K, V> {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Array(elts) => {
+                elts.iter().map(|v| v.clone().cast_to::<(K, V)>()).collect()
+            }
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(elts) => {
+                elts.iter().map(|v| v.clone().get_as::<(K, V)>()).collect()
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<K: convert::Into<Value>, V: convert::Into<Value>> convert::From<BTreeMap<K, V>>
+    for Value
+{
+    fn from(v: BTreeMap<K, V>) -> Self {
+        v.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
+    }
+}
+
 impl<K: FromValue + Eq + Hash, S: BuildHasher + Default> FromValue for HashSet<K, S> {
     fn from_value(v: Value) -> Res<Self> {
         v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) => elts
-                .iter()
-                .map(|v| v.clone().cast_to::<K>())
-                .collect::<Res<HashSet<K, S>>>(),
+            Value::Array(elts) => elts.iter().map(|v| v.clone().cast_to::<K>()).collect(),
             _ => bail!("can't cast"),
         })
     }
@@ -1894,6 +1919,28 @@ impl<K: convert::Into<Value>, S: BuildHasher + Default> convert::From<HashSet<K,
 {
     fn from(h: HashSet<K, S>) -> Value {
         h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
+    }
+}
+
+impl<K: FromValue + Ord> FromValue for BTreeSet<K> {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Array(elts) => elts.iter().map(|v| v.clone().cast_to::<K>()).collect(),
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(elts) => elts.iter().map(|v| v.clone().get_as::<K>()).collect(),
+            _ => None,
+        }
+    }
+}
+
+impl<K: convert::Into<Value>> convert::From<BTreeSet<K>> for Value {
+    fn from(s: BTreeSet<K>) -> Self {
+        s.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
     }
 }
 
