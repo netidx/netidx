@@ -34,7 +34,7 @@ use regex::RegexSet;
 use std::{
     cell::{Cell, RefCell},
     cmp::{Ordering, PartialEq},
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, BTreeMap},
     fmt::Write,
     ops::Deref,
     rc::{Rc, Weak},
@@ -474,7 +474,7 @@ impl FromValue for ColumnTypeToggle {
 #[derive(Clone, PartialEq)]
 struct ColumnTypeCombo {
     common: ColumnTypeCommon,
-    choices: OrLoadCol<FxHashMap<Chars, Chars>>,
+    choices: OrLoadCol<BTreeMap<Chars, Chars>>,
     has_entry: Option<OrLoadCol<bool>>,
 }
 
@@ -482,7 +482,7 @@ impl FromValue for ColumnTypeCombo {
     fn from_value(v: Value) -> anyhow::Result<Self> {
         let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
         let choices =
-            or_load_prop!(props, "choices", "choices-column", FxHashMap<Chars, Chars>)
+            or_load_prop!(props, "choices", "choices-column", BTreeMap<Chars, Chars>)
                 .ok_or_else(|| anyhow!("choices is required"))?;
         Ok(Self {
             common: ColumnTypeCommon::from_props(&mut props)?,
