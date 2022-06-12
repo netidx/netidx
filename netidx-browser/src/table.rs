@@ -11,10 +11,10 @@ use gdk::{keys, EventButton, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
 use gtk::{
-    prelude::*, Adjustment, CellRenderer, CellRendererPixbuf, CellRendererText,
-    CellRendererToggle, Label, ListStore, ScrolledWindow, SortColumn, SortType,
-    StateFlags, StyleContext, TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn,
-    TreeViewColumnSizing,
+    prelude::*, Adjustment, CellRenderer, CellRendererCombo, CellRendererPixbuf,
+    CellRendererText, CellRendererToggle, Label, ListStore, ScrolledWindow, SortColumn,
+    SortType, StateFlags, StyleContext, TreeIter, TreeModel, TreePath, TreeView,
+    TreeViewColumn, TreeViewColumnSizing,
 };
 use indexmap::{IndexMap, IndexSet};
 use netidx::{
@@ -34,7 +34,7 @@ use regex::RegexSet;
 use std::{
     cell::{Cell, RefCell},
     cmp::{Ordering, PartialEq},
-    collections::{HashMap, HashSet, BTreeMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Write,
     ops::Deref,
     rc::{Rc, Weak},
@@ -474,16 +474,15 @@ impl FromValue for ColumnTypeToggle {
 #[derive(Clone, PartialEq)]
 struct ColumnTypeCombo {
     common: ColumnTypeCommon,
-    choices: OrLoadCol<BTreeMap<Chars, Chars>>,
+    choices: OrLoadCol<Value>,
     has_entry: Option<OrLoadCol<bool>>,
 }
 
 impl FromValue for ColumnTypeCombo {
     fn from_value(v: Value) -> anyhow::Result<Self> {
         let mut props = v.cast_to::<FxHashMap<Chars, Value>>()?;
-        let choices =
-            or_load_prop!(props, "choices", "choices-column", BTreeMap<Chars, Chars>)
-                .ok_or_else(|| anyhow!("choices is required"))?;
+        let choices = or_load_prop!(props, "choices", "choices-column", Value)
+            .ok_or_else(|| anyhow!("choices is required"))?;
         Ok(Self {
             common: ColumnTypeCommon::from_props(&mut props)?,
             has_entry: or_load_prop!(props, "has-entry", "has-entry-column", bool),
@@ -910,7 +909,7 @@ impl SharedState {
 struct RaeifiedTableInner {
     path: Path,
     shared: Rc<SharedState>,
-    by_id: RefCell<HashMap<SubId, Subscription>>,
+    by_id: RefCell<FxHashMap<SubId, Subscription>>,
     columns_autosizing: Rc<Cell<bool>>,
     descriptor: IndexDescriptor,
     destroyed: Cell<bool>,
@@ -919,10 +918,12 @@ struct RaeifiedTableInner {
     sort_temp_disabled: Cell<bool>,
     store: ListStore,
     style: StyleContext,
-    subscribed: RefCell<HashMap<String, HashSet<u32>>>,
+    subscribed: RefCell<FxHashMap<String, HashSet<u32>>>,
     update: RefCell<IndexMap<SubId, Value, FxBuildHasher>>,
     vector_mode: bool,
     view: TreeView,
+    combo_models: RefCell<IndexMap<Value, ListStore, FxBuildHasher>>,
+    combo_models_used: Cell<usize>,
 }
 
 #[derive(Clone)]
@@ -1094,6 +1095,39 @@ impl RaeifiedTable {
         t.view().append_column(&column);
     }
 
+    fn add_combo_column(
+        &self,
+        sorting_disabled: bool,
+        name: &Chars,
+        spec: &ColumnTypeCombo,
+    ) {
+        let t = self;
+        let column = TreeViewColumn::new();
+        let cell = CellRendererCombo::new();
+        column.pack_start(&cell, true);
+        let common = spec.common.resolve(false, name, &self.descriptor);
+        if let Some(common) = common.as_ref() {
+            let choices = spec.choices.resolve(&t.descriptor);
+            let has_entry =
+                spec.has_entry.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            if t.shared.column_editable.borrow().is_match(common.source as usize, &**name)
+            {
+                cell.set_editable(true);
+            }
+            let f =
+                Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
+                    move |_: &TreeViewColumn,
+                _: &CellRenderer,
+                _: &TreeModel,
+                i: &TreeIter| {
+                    t.render_combo_cell(&common, &*name, &choices, &has_entry, &cell, i)
+                }));
+            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+        }
+        t.set_column_properties(&column, name, &common, sorting_disabled);
+        t.view().append_column(&column);
+    }
+
     fn add_columns(
         &self,
         vector_mode: bool,
@@ -1195,14 +1229,16 @@ impl RaeifiedTable {
             style,
             vector_mode,
             view,
-            by_id: RefCell::new(HashMap::new()),
+            by_id: RefCell::new(HashMap::default()),
             columns_autosizing: Rc::new(Cell::new(false)),
             destroyed: Cell::new(false),
             name_column: RefCell::new(None),
             sort_column: Cell::new(None),
             sort_temp_disabled: Cell::new(false),
-            subscribed: RefCell::new(HashMap::new()),
-            update: RefCell::new(IndexMap::with_hasher(FxBuildHasher::default())),
+            subscribed: RefCell::new(HashMap::default()),
+            update: RefCell::new(IndexMap::default()),
+            combo_models: RefCell::new(IndexMap::default()),
+            combo_models_used: Cell::new(0),
         }));
         if t.shared.column_widths.borrow().len() > 1000 {
             let cols =
@@ -1404,6 +1440,56 @@ impl RaeifiedTable {
         cr.set_active(val);
         cr.set_radio(radio);
         self.render_cell_selected(common, cr, i, name);
+    }
+
+    fn render_combo_cell(
+        &self,
+        common: &CTCommonResolved,
+        name: &str,
+        choices: &Option<OrLoad<Value>>,
+        has_entry: &Option<OrLoad<bool>>,
+        cr: &CellRendererCombo,
+        i: &TreeIter,
+    ) {
+        let bv = self.store().value(i, common.source);
+        let val = bv
+            .get::<&BVal>()
+            .ok()
+            .and_then(|v| v.value.clone().cast_to::<Chars>().ok())
+            .unwrap_or_else(|| Chars::from(""));
+        let choices = choices
+            .as_ref()
+            .and_then(|s| s.load(i, self.store()))
+            .unwrap_or_else(|| Value::from(Vec::<Value>::new()));
+        let model = {
+            let mut models = self.combo_models.borrow_mut();
+            let models = &mut *models;
+            let (i, model) = match models.get_full(&choices) {
+                Some((i, _, model)) => (i, model.clone()),
+                None => {
+                    let spec =
+                        choices.clone().cast_to::<Vec<Chars>>().ok().unwrap_or_else(Vec::new);
+                    let model = ListStore::new(&[String::static_type()]);
+                    for choice in spec {
+                        let iter = model.append();
+                        model.set_value(&iter, 0, &choice.to_value());
+                    }
+                    let (i, _) = models.insert_full(choices, model.clone());
+                    (i, model)
+                }
+            };
+            let used = self.combo_models_used.get();
+            if i >= used && used < models.len() {
+                models.swap_indices(i, used);
+                self.combo_models_used.set(used + 1);
+            }
+            if models.len() > 250 {
+                for _ in self.combo_models_used.get()..models.len() {
+                    models.pop();
+                }
+            }
+            model
+        };
     }
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {

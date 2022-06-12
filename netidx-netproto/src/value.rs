@@ -352,15 +352,110 @@ pub enum Value {
     Array(Arc<[Value]>),
 }
 
+impl Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::num::FpCategory::*;
+        match self {
+            Value::U32(v) => {
+                0u8.hash(state);
+                v.hash(state)
+            }
+            Value::V32(v) => {
+                1u8.hash(state);
+                v.hash(state)                
+            }
+            Value::I32(v) => {
+                2u8.hash(state);
+                v.hash(state)
+            }
+            Value::Z32(v) => {
+                3u8.hash(state);
+                v.hash(state)
+            }
+            Value::U64(v) => {
+                4u8.hash(state);
+                v.hash(state)
+            }
+            Value::V64(v) => {
+                5u8.hash(state);
+                v.hash(state)
+            }
+            Value::I64(v) => {
+                6u8.hash(state);
+                v.hash(state)
+            }
+            Value::Z64(v) => {
+                7u8.hash(state);
+                v.hash(state)
+            }
+            Value::F32(v) => {
+                8u8.hash(state);
+                let bits = v.to_bits();
+                match v.classify() {
+                    Nan => ((bits & 0xFF00_0000) | 0x1).hash(state), // normalize NaN
+                    _ => bits.hash(state),
+                }
+            }
+            Value::F64(v) => {
+                9u8.hash(state);
+                let bits = v.to_bits();
+                match v.classify() {
+                    Nan => ((bits & 0xFFE0_0000_0000_0000) | 0x1).hash(state), // normalize NaN
+                    _ => bits.hash(state),
+                }
+            }
+            Value::DateTime(d) => {
+                10u8.hash(state);
+                d.hash(state)
+            }
+            Value::Duration(d) => {
+                11u8.hash(state);
+                d.hash(state)
+            }
+            Value::String(c) => {
+                12u8.hash(state);
+                c.hash(state)
+            }
+            Value::Bytes(b) => {
+                13u8.hash(state);
+                b.hash(state)
+            }
+            Value::True => 14u8.hash(state),
+            Value::False => 15u8.hash(state),
+            Value::Null => 16u8.hash(state),
+            Value::Ok => 17u8.hash(state),
+            Value::Error(c) => {
+                18u8.hash(state);
+                c.hash(state)
+            }
+            Value::Array(a) => {
+                19u8.hash(state);
+                for v in a.iter() {
+                    v.hash(state)
+                }
+            }
+        }
+    }
+}
+
 impl PartialEq for Value {
     fn eq(&self, rhs: &Value) -> bool {
+        use std::num::FpCategory::*;
         match (self, rhs) {
             (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => l == r,
             (Value::I32(l) | Value::Z32(l), Value::I32(r) | Value::Z32(r)) => l == r,
             (Value::U64(l) | Value::V64(l), Value::U64(r) | Value::V64(r)) => l == r,
             (Value::I64(l) | Value::Z64(l), Value::I64(r) | Value::Z64(r)) => l == r,
-            (Value::F32(l), Value::F32(r)) => l == r,
-            (Value::F64(l), Value::F64(r)) => l == r,
+            (Value::F32(l), Value::F32(r)) => match (l.classify(), r.classify()) {
+                (Nan, Nan) => true,
+                (Zero, Zero) => true,
+                (_, _) => l == r,
+            }
+            (Value::F64(l), Value::F64(r)) => match (l.classify(), r.classify()) {
+                (Nan, Nan) => true,
+                (Zero, Zero) => true,
+                (_, _) => l == r,
+            },
             (Value::DateTime(l), Value::DateTime(r)) => l == r,
             (Value::Duration(l), Value::Duration(r)) => l == r,
             (Value::String(l), Value::String(r)) => l == r,
@@ -376,7 +471,11 @@ impl PartialEq for Value {
             (Value::Array(_), _) | (_, Value::Array(_)) => false,
             (l, r) if l.number() || r.number() => {
                 match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
-                    (Ok(l), Ok(r)) => l == r,
+                    (Ok(l), Ok(r)) => match (l.classify(), r.classify()) {
+                        (Nan, Nan) => true,
+                        (Zero, Zero) => true,
+                        (_, _) => l == r,
+                    },
                     (_, _) => false,
                 }
             }
@@ -385,8 +484,11 @@ impl PartialEq for Value {
     }
 }
 
+impl Eq for Value {}
+
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        use std::num::FpCategory::*;
         match (self, other) {
             (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => {
                 l.partial_cmp(r)
@@ -400,8 +502,18 @@ impl PartialOrd for Value {
             (Value::I64(l) | Value::Z64(l), Value::I64(r) | Value::Z64(r)) => {
                 l.partial_cmp(r)
             }
-            (Value::F32(l), Value::F32(r)) => l.partial_cmp(r),
-            (Value::F64(l), Value::F64(r)) => l.partial_cmp(r),
+            (Value::F32(l), Value::F32(r)) => match (l.classify(), r.classify()) {
+                (Nan, Nan) => Some(Ordering::Equal),
+                (Nan, _) => Some(Ordering::Less),
+                (_, Nan) => Some(Ordering::Greater),
+                (_, _) => l.partial_cmp(r),
+            },
+            (Value::F64(l), Value::F64(r)) => match (l.classify(), r.classify()) {
+                (Nan, Nan) => Some(Ordering::Equal),
+                (Nan, _) => Some(Ordering::Less),
+                (_, Nan) => Some(Ordering::Greater),
+                (_, _) => l.partial_cmp(r),
+            },
             (Value::DateTime(l), Value::DateTime(r)) => l.partial_cmp(r),
             (Value::Duration(l), Value::Duration(r)) => l.partial_cmp(r),
             (Value::String(l), Value::String(r)) => l.partial_cmp(r),
@@ -422,12 +534,23 @@ impl PartialOrd for Value {
             (_, Value::Array(_)) => Some(Ordering::Greater),
             (l, r) if l.number() || r.number() => {
                 match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
-                    (Ok(l), Ok(r)) => l.partial_cmp(&r),
+                    (Ok(l), Ok(r)) => match (l.classify(), r.classify()) {
+                        (Nan, Nan) => Some(Ordering::Equal),
+                        (Nan, _) => Some(Ordering::Less),
+                        (_, Nan) => Some(Ordering::Greater),
+                        (_, _) => l.partial_cmp(&r)
+                    },
                     (_, _) => format!("{}", l).partial_cmp(&format!("{}", r)),
                 }
             }
             (l, r) => format!("{}", l).partial_cmp(&format!("{}", r)),
         }
+    }
+}
+
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
     }
 }
 

@@ -160,22 +160,24 @@ pub struct Table {
     ///   "combo": [
     ///     common,
     ///
-    ///     ["choices", [choice, ...]],
-    ///       required attribute specifying the available choices.
-    ///
-    ///       choice: [<id>, <text>]
-    ///         id: a short text id that will be given to event() when the user makes a selection
-    ///         text: the text that will be displayed to the user
-    ///
-    ///       <column-name>: the column that contains the choices, which will be set per row. The format
-    ///       should be [choice, ...], same as if they are specified globally.
+    ///     ["choices", [<choice>, ...]],
+    ///       The available choices globally for the entire
+    ///       column. One of choices or choices-column must be
+    ///       specified
     ///
     ///     ["choices-column", <column-name>]
-    ///       required, the column containing the "choices" attribute
+    ///       The column containing the "choices" attribute
     ///       for each row. One of choices, or choices-column must be
     ///       specified.
     ///
-    ///     ["has-entry", (true | false | <column-name>)],
+    ///     ["has-entry", (true | false)],
+    ///       optional. Should the column have an entry in addition to
+    ///       the combo box menu? If true the user will be able to
+    ///       enter any text they want, even if it isn't a valid
+    ///       choice. If false only valid choices may be entered.
+    ///
+    ///     ["has-entry-column", <column-name>]
+    ///       optional, the column containing the has-entry attribute for each row.
     ///   ]
     ///
     ///   "spin": [
