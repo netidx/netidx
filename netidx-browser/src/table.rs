@@ -34,7 +34,7 @@ use regex::RegexSet;
 use std::{
     cell::{Cell, RefCell},
     cmp::{Ordering, PartialEq},
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     fmt::Write,
     ops::Deref,
     rc::{Rc, Weak},
@@ -1012,6 +1012,13 @@ impl RaeifiedTable {
                     t.render_text_cell(&common, &*name, &foreground, &cell, i)
                 }));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            cell.connect_editing_started(|_, e, _| {
+                e.start_editing(None);
+                e.set_editing_canceled(false);
+                e.connect_remove_widget(move |e| unsafe {
+                    e.destroy();
+                });
+            });
             cell.connect_edited(clone!(@weak t, @strong common => move |_, p, v| {
                 if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
                     let v = vec![Value::from(path), Value::from(String::from(v))];
@@ -1116,13 +1123,29 @@ impl RaeifiedTable {
             }
             let f =
                 Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
-                    move |_: &TreeViewColumn,
+                move |_: &TreeViewColumn,
                 _: &CellRenderer,
                 _: &TreeModel,
                 i: &TreeIter| {
                     t.render_combo_cell(&common, &*name, &choices, &has_entry, &cell, i)
                 }));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            cell.connect_editing_started(|_, e, _| {
+                e.start_editing(None);
+                e.set_editing_canceled(false);
+                e.connect_remove_widget(move |e| unsafe {
+                    e.destroy();
+                });
+            });
+            cell.connect_edited(clone!(@weak t, @strong common => move |_, p, v| {
+                if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
+                    let v = vec![Value::from(path), Value::from(String::from(v))];
+                    t.shared.on_edit.borrow_mut().update(
+                        &mut t.shared.ctx.borrow_mut(),
+                        &vm::Event::User(LocalEvent::Event(v.into()))
+                    );
+                }
+            }));
         }
         t.set_column_properties(&column, name, &common, sorting_disabled);
         t.view().append_column(&column);
@@ -1183,9 +1206,10 @@ impl RaeifiedTable {
                     ColumnType::Toggle(cs) => {
                         t.add_toggle_column(sorting_disabled, &name, cs)
                     }
-                    ColumnType::Combo(_)
-                    | ColumnType::Spin(_)
-                    | ColumnType::Progress(_) => unimplemented!(),
+                    ColumnType::Combo(cs) => {
+                        t.add_combo_column(sorting_disabled, &name, cs)
+                    }
+                    ColumnType::Spin(_) | ColumnType::Progress(_) => unimplemented!(),
                     ColumnType::Hidden => (),
                 }
             }
@@ -1452,23 +1476,25 @@ impl RaeifiedTable {
         i: &TreeIter,
     ) {
         let bv = self.store().value(i, common.source);
-        let val = bv
-            .get::<&BVal>()
-            .ok()
-            .and_then(|v| v.value.clone().cast_to::<Chars>().ok())
-            .unwrap_or_else(|| Chars::from(""));
+        let val =
+            bv.get::<&BVal>().ok().and_then(|v| v.value.clone().cast_to::<Chars>().ok());
         let choices = choices
             .as_ref()
             .and_then(|s| s.load(i, self.store()))
             .unwrap_or_else(|| Value::from(Vec::<Value>::new()));
+        let has_entry =
+            has_entry.as_ref().and_then(|s| s.load(i, self.store())).unwrap_or(false);
         let model = {
             let mut models = self.combo_models.borrow_mut();
             let models = &mut *models;
             let (i, model) = match models.get_full(&choices) {
                 Some((i, _, model)) => (i, model.clone()),
                 None => {
-                    let spec =
-                        choices.clone().cast_to::<Vec<Chars>>().ok().unwrap_or_else(Vec::new);
+                    let spec = choices
+                        .clone()
+                        .cast_to::<Vec<Chars>>()
+                        .ok()
+                        .unwrap_or_else(Vec::new);
                     let model = ListStore::new(&[String::static_type()]);
                     for choice in spec {
                         let iter = model.append();
@@ -1483,13 +1509,21 @@ impl RaeifiedTable {
                 models.swap_indices(i, used);
                 self.combo_models_used.set(used + 1);
             }
-            if models.len() > 250 {
+            if models.len() > 1000 {
                 for _ in self.combo_models_used.get()..models.len() {
                     models.pop();
                 }
+                self.combo_models_used.set(0);
             }
             model
         };
+        cr.set_has_entry(has_entry);
+        if cr.model().as_ref() != Some(model.upcast_ref()) {
+            cr.set_model(Some(&model));
+        }
+        cr.set_text_column(0);
+        cr.set_text(val.as_ref().map(|v| &**v));
+        self.render_cell_selected(common, cr, i, name);
     }
 
     fn handle_key(&self, key: &EventKey) -> Inhibit {
