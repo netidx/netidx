@@ -813,7 +813,8 @@ impl RaeifiedTable {
         cr.set_text(text.as_ref().map(|c| &**c));
         cr.set_text_xalign(text_xalign as f32);
         cr.set_text_yalign(text_yalign as f32);
-        cr.set_inverted(inverted)
+        cr.set_inverted(inverted);
+        self.render_cell_selected(common, cr, i, name);
     }
 
     fn render_toggle_cell(
