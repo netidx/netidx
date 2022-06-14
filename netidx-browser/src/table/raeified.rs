@@ -16,10 +16,10 @@ use gdk::{keys, EventButton, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
 use gtk::{
-    prelude::*, CellRenderer, CellRendererCombo, CellRendererPixbuf, CellRendererSpin,
-    CellRendererText, CellRendererToggle, ListStore, SortColumn, SortType, StateFlags,
-    StyleContext, TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn,
-    TreeViewColumnSizing,
+    prelude::*, CellRenderer, CellRendererCombo, CellRendererPixbuf,
+    CellRendererProgress, CellRendererSpin, CellRendererText, CellRendererToggle,
+    ListStore, SortColumn, SortType, StateFlags, StyleContext, TreeIter, TreeModel,
+    TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
 };
 use indexmap::IndexMap;
 use netidx::{
@@ -398,6 +398,50 @@ impl RaeifiedTable {
         t.view().append_column(&column);
     }
 
+    fn add_progress_column(
+        &self,
+        sorting_disabled: bool,
+        name: &Chars,
+        spec: &ColumnTypeProgress,
+    ) {
+        let t = self;
+        let column = TreeViewColumn::new();
+        let cell = CellRendererProgress::new();
+        column.pack_start(&cell, true);
+        let common = spec.common.resolve(false, name, &self.descriptor);
+        if let Some(common) = common.as_ref() {
+            let activity_mode =
+                spec.activity_mode.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            let text = spec.text.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            let text_xalign =
+                spec.text_xalign.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            let text_yalign =
+                spec.text_yalign.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            let inverted = spec.inverted.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            let f =
+                Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
+                move |_: &TreeViewColumn,
+                _: &CellRenderer,
+                _: &TreeModel,
+                i: &TreeIter| {
+                    t.render_progress_cell(
+                        &common,
+                        &*name,
+                        &activity_mode,
+                        &text,
+                        &text_xalign,
+                        &text_yalign,
+                        &inverted,
+                        &cell,
+                        i
+                    )
+                }));
+            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+        }
+        t.set_column_properties(&column, name, &common, sorting_disabled);
+        t.view().append_column(&column);
+    }
+
     fn add_columns(
         &self,
         vector_mode: bool,
@@ -459,7 +503,9 @@ impl RaeifiedTable {
                     ColumnType::Spin(cs) => {
                         t.add_spin_column(sorting_disabled, &name, cs)
                     }
-                    ColumnType::Progress(_) => unimplemented!(),
+                    ColumnType::Progress(cs) => {
+                        t.add_progress_column(sorting_disabled, &name, cs)
+                    }
                     ColumnType::Hidden => (),
                 }
             }
@@ -730,6 +776,44 @@ impl RaeifiedTable {
             }
         }
         self.render_cell_selected(common, cr, i, name);
+    }
+
+    fn render_progress_cell(
+        &self,
+        common: &CTCommonResolved,
+        name: &str,
+        activity_mode: &Option<OrLoad<bool>>,
+        text: &Option<OrLoad<Chars>>,
+        text_xalign: &Option<OrLoad<f64>>,
+        text_yalign: &Option<OrLoad<f64>>,
+        inverted: &Option<OrLoad<bool>>,
+        cr: &CellRendererProgress,
+        i: &TreeIter,
+    ) {
+        let bv = self.store().value(i, common.source);
+        let bv = bv
+            .get::<&BVal>()
+            .ok()
+            .and_then(|v| v.value.clone().cast_to::<i32>().ok())
+            .unwrap_or(0);
+        let activity_mode =
+            activity_mode.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(false);
+        let text = text.as_ref().and_then(|v| v.load(i, self.store()));
+        let text_xalign =
+            text_xalign.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(0.5);
+        let text_yalign =
+            text_yalign.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(1.);
+        let inverted =
+            inverted.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(false);
+        if activity_mode {
+            cr.set_pulse(bv);
+        } else {
+            cr.set_value(bv);
+        }
+        cr.set_text(text.as_ref().map(|c| &**c));
+        cr.set_text_xalign(text_xalign as f32);
+        cr.set_text_yalign(text_yalign as f32);
+        cr.set_inverted(inverted)
     }
 
     fn render_toggle_cell(
