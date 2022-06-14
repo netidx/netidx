@@ -224,6 +224,12 @@ impl Serialize for Expr {
     }
 }
 
+impl Default for Expr {
+    fn default() -> Self {
+        ExprKind::Constant(Value::Null).to_expr()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ExprVisitor;
 
