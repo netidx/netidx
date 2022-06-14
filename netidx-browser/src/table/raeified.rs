@@ -806,8 +806,10 @@ impl RaeifiedTable {
         let inverted =
             inverted.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(false);
         if activity_mode {
-            cr.set_pulse(bv);
+            cr.set_value(0);
+            cr.set_pulse(if bv < 0 { -1 * bv } else { bv });
         } else {
+            cr.set_pulse(-1);
             cr.set_value(if bv <= 100 && bv >= 0 {
                 bv
             } else if bv < 0 {
