@@ -177,6 +177,7 @@ impl RaeifiedTable {
     ) {
         let t = self;
         cell.connect_editing_started(|_, e, _| {
+            dbg!(());
             e.start_editing(None);
             e.set_editing_canceled(false);
             e.connect_remove_widget(move |e| unsafe {
@@ -184,6 +185,7 @@ impl RaeifiedTable {
             });
         });
         cell.connect_edited(clone!(@weak t, @strong common => move |_, p, v| {
+            dbg!(&v);
             if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
                 let v = vec![Value::from(path), Value::from(String::from(v))];
                 t.shared.on_edit.borrow_mut().update(
@@ -345,22 +347,37 @@ impl RaeifiedTable {
         if let Some(common) = common.as_ref() {
             let min = spec.min.as_ref().and_then(|v| v.resolve(&t.descriptor));
             let max = spec.max.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            let increment =
+                spec.increment.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            let page_increment =
+                spec.page_increment.as_ref().and_then(|v| v.resolve(&t.descriptor));
             let climb_rate =
                 spec.climb_rate.as_ref().and_then(|v| v.resolve(&t.descriptor));
             let digits = spec.digits.as_ref().and_then(|v| v.resolve(&t.descriptor));
             if t.shared.column_editable.borrow().is_match(common.source as usize, &**name)
             {
                 cell.set_editable(true);
+                cell.set_adjustment(Some(&gtk::Adjustment::default()));
             }
-            let f = Box::new(
-                clone!(@weak t, @strong cell, @strong name, @strong common =>
+            let f =
+                Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
                 move |_: &TreeViewColumn,
                 _: &CellRenderer,
                 _: &TreeModel,
                 i: &TreeIter| {
-                    t.render_spin_cell(&common, &*name, &min, &max, &climb_rate, &digits, &cell, i)
-                }),
-            );
+                    t.render_spin_cell(
+                        &common,
+                        &*name,
+                        &min,
+                        &max,
+                        &increment,
+                        &page_increment,
+                        &climb_rate,
+                        &digits,
+                        &cell,
+                        i
+                    )
+                }));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
             t.setup_editable(&cell, common);
         }
@@ -647,6 +664,8 @@ impl RaeifiedTable {
         name: &str,
         min: &Option<OrLoad<f64>>,
         max: &Option<OrLoad<f64>>,
+        increment: &Option<OrLoad<f64>>,
+        page_increment: &Option<OrLoad<f64>>,
         climb_rate: &Option<OrLoad<f64>>,
         digits: &Option<OrLoad<u32>>,
         cr: &CellRendererSpin,
@@ -656,13 +675,19 @@ impl RaeifiedTable {
         let cur = bv.get::<&BVal>().ok().map(|bv| bv.formatted.as_str());
         let min = min.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(0.);
         let max = max.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(1.);
+        let increment =
+            increment.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(0.01);
+        let page_increment =
+            page_increment.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(0.1);
         let climb_rate =
-            climb_rate.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(1.);
+            climb_rate.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(0.01);
         let digits = digits.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(2);
         cr.set_text(cur);
         cr.adjustment().map(|a| {
             a.set_lower(min);
             a.set_upper(max);
+            a.set_step_increment(increment);
+            a.set_page_increment(page_increment);
         });
         cr.set_climb_rate(climb_rate);
         cr.set_digits(digits);

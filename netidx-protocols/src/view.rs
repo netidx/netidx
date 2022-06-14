@@ -195,6 +195,18 @@ pub struct Table {
     ///      ["max-column", <column-name>]
     ///        optonal, the column containing the max attribute for each row
     ///
+    ///      ["increment", <n>],
+    ///        optional, the amount the value changes with each spin button press
+    ///
+    ///      ["increment-column", <column-name>],
+    ///        optional, the column containg the increment property
+    ///
+    ///      ["page-increment", <n>]
+    ///        optional, the amount the value changes on a page increment
+    ///
+    ///      ["page-increment-column", <column-name>],
+    ///        optional, the column containg the page-increment property
+    ///
     ///      ["climb-rate", <n>],
     ///        optional. How fast the value should change if the user
     ///        holds the + or - button down.

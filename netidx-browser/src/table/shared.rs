@@ -465,6 +465,8 @@ pub(super) struct ColumnTypeSpin {
     pub(super) common: ColumnTypeCommon,
     pub(super) min: Option<OrLoadCol<f64>>,
     pub(super) max: Option<OrLoadCol<f64>>,
+    pub(super) increment: Option<OrLoadCol<f64>>,
+    pub(super) page_increment: Option<OrLoadCol<f64>>,
     pub(super) climb_rate: Option<OrLoadCol<f64>>,
     pub(super) digits: Option<OrLoadCol<u32>>,
 }
@@ -476,6 +478,8 @@ impl FromValue for ColumnTypeSpin {
             common: ColumnTypeCommon::from_props(&mut props)?,
             min: or_load_prop!(props, "min", "min-column", f64),
             max: or_load_prop!(props, "max", "max-column", f64),
+            increment: or_load_prop!(props, "increment", "increment-column", f64),
+            page_increment: or_load_prop!(props, "page-increment", "page-increment-column", f64),
             climb_rate: or_load_prop!(props, "climb-rate", "climb-rate-column", f64),
             digits: or_load_prop!(props, "digits", "digits-column", u32),
         })
