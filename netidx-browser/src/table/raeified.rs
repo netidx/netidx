@@ -16,9 +16,10 @@ use gdk::{keys, EventButton, EventKey, RGBA};
 use gio::prelude::*;
 use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
 use gtk::{
-    prelude::*, CellRenderer, CellRendererCombo, CellRendererPixbuf, CellRendererText,
-    CellRendererToggle, ListStore, SortColumn, SortType, StateFlags, StyleContext,
-    TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
+    prelude::*, CellRenderer, CellRendererCombo, CellRendererPixbuf, CellRendererSpin,
+    CellRendererText, CellRendererToggle, ListStore, SortColumn, SortType, StateFlags,
+    StyleContext, TreeIter, TreeModel, TreePath, TreeView, TreeViewColumn,
+    TreeViewColumnSizing,
 };
 use indexmap::IndexMap;
 use netidx::{
@@ -169,6 +170,30 @@ impl RaeifiedTable {
         );
     }
 
+    fn setup_editable<T: CellRendererTextExt + CellRendererExt>(
+        &self,
+        cell: &T,
+        common: &CTCommonResolved,
+    ) {
+        let t = self;
+        cell.connect_editing_started(|_, e, _| {
+            e.start_editing(None);
+            e.set_editing_canceled(false);
+            e.connect_remove_widget(move |e| unsafe {
+                e.destroy();
+            });
+        });
+        cell.connect_edited(clone!(@weak t, @strong common => move |_, p, v| {
+            if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
+                let v = vec![Value::from(path), Value::from(String::from(v))];
+                t.shared.on_edit.borrow_mut().update(
+                    &mut t.shared.ctx.borrow_mut(),
+                    &vm::Event::User(LocalEvent::Event(v.into()))
+                );
+            }
+        }));
+    }
+
     fn add_text_column(
         &self,
         vector_mode: bool,
@@ -197,22 +222,7 @@ impl RaeifiedTable {
                     t.render_text_cell(&common, &*name, &foreground, &cell, i)
                 }));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
-            cell.connect_editing_started(|_, e, _| {
-                e.start_editing(None);
-                e.set_editing_canceled(false);
-                e.connect_remove_widget(move |e| unsafe {
-                    e.destroy();
-                });
-            });
-            cell.connect_edited(clone!(@weak t, @strong common => move |_, p, v| {
-                if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
-                    let v = vec![Value::from(path), Value::from(String::from(v))];
-                    t.shared.on_edit.borrow_mut().update(
-                        &mut t.shared.ctx.borrow_mut(),
-                        &vm::Event::User(LocalEvent::Event(v.into()))
-                    );
-                }
-            }));
+            self.setup_editable(&cell, common);
         }
         t.set_column_properties(&column, name, &common, sorting_disabled);
         t.view().append_column(&column);
@@ -315,22 +325,44 @@ impl RaeifiedTable {
                     t.render_combo_cell(&common, &*name, &choices, &has_entry, &cell, i)
                 }));
             TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
-            cell.connect_editing_started(|_, e, _| {
-                e.start_editing(None);
-                e.set_editing_canceled(false);
-                e.connect_remove_widget(move |e| unsafe {
-                    e.destroy();
-                });
-            });
-            cell.connect_edited(clone!(@weak t, @strong common => move |_, p, v| {
-                if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
-                    let v = vec![Value::from(path), Value::from(String::from(v))];
-                    t.shared.on_edit.borrow_mut().update(
-                        &mut t.shared.ctx.borrow_mut(),
-                        &vm::Event::User(LocalEvent::Event(v.into()))
-                    );
-                }
-            }));
+            self.setup_editable(&cell, common);
+        }
+        t.set_column_properties(&column, name, &common, sorting_disabled);
+        t.view().append_column(&column);
+    }
+
+    fn add_spin_column(
+        &self,
+        sorting_disabled: bool,
+        name: &Chars,
+        spec: &ColumnTypeSpin,
+    ) {
+        let t = self;
+        let column = TreeViewColumn::new();
+        let cell = CellRendererSpin::new();
+        column.pack_start(&cell, true);
+        let common = spec.common.resolve(false, name, &self.descriptor);
+        if let Some(common) = common.as_ref() {
+            let min = spec.min.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            let max = spec.max.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            let climb_rate =
+                spec.climb_rate.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            let digits = spec.digits.as_ref().and_then(|v| v.resolve(&t.descriptor));
+            if t.shared.column_editable.borrow().is_match(common.source as usize, &**name)
+            {
+                cell.set_editable(true);
+            }
+            let f = Box::new(
+                clone!(@weak t, @strong cell, @strong name, @strong common =>
+                move |_: &TreeViewColumn,
+                _: &CellRenderer,
+                _: &TreeModel,
+                i: &TreeIter| {
+                    t.render_spin_cell(&common, &*name, &min, &max, &climb_rate, &digits, &cell, i)
+                }),
+            );
+            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            t.setup_editable(&cell, common);
         }
         t.set_column_properties(&column, name, &common, sorting_disabled);
         t.view().append_column(&column);
@@ -394,7 +426,10 @@ impl RaeifiedTable {
                     ColumnType::Combo(cs) => {
                         t.add_combo_column(sorting_disabled, &name, cs)
                     }
-                    ColumnType::Spin(_) | ColumnType::Progress(_) => unimplemented!(),
+                    ColumnType::Spin(cs) => {
+                        t.add_spin_column(sorting_disabled, &name, cs)
+                    }
+                    ColumnType::Progress(_) => unimplemented!(),
                     ColumnType::Hidden => (),
                 }
             }
@@ -604,6 +639,34 @@ impl RaeifiedTable {
                 foreground.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
             cr.set_foreground_rgba(fg.as_ref());
         }
+    }
+
+    fn render_spin_cell(
+        &self,
+        common: &CTCommonResolved,
+        name: &str,
+        min: &Option<OrLoad<f64>>,
+        max: &Option<OrLoad<f64>>,
+        climb_rate: &Option<OrLoad<f64>>,
+        digits: &Option<OrLoad<u32>>,
+        cr: &CellRendererSpin,
+        i: &TreeIter,
+    ) {
+        let bv = self.store().value(i, common.source);
+        let cur = bv.get::<&BVal>().ok().map(|bv| bv.formatted.as_str());
+        let min = min.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(0.);
+        let max = max.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(1.);
+        let climb_rate =
+            climb_rate.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(1.);
+        let digits = digits.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(2);
+        cr.set_text(cur);
+        cr.adjustment().map(|a| {
+            a.set_lower(min);
+            a.set_upper(max);
+        });
+        cr.set_climb_rate(climb_rate);
+        cr.set_digits(digits);
+        self.render_cell_selected(common, cr, i, name);
     }
 
     fn render_image_cell(
