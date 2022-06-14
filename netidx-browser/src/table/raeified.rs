@@ -176,23 +176,34 @@ impl RaeifiedTable {
         common: &CTCommonResolved,
     ) {
         let t = self;
-        cell.connect_editing_started(|_, e, _| {
-            dbg!(());
-            e.start_editing(None);
-            e.set_editing_canceled(false);
-            e.connect_remove_widget(move |e| unsafe {
-                e.destroy();
+        let editable: Rc<RefCell<Option<gtk::CellEditable>>> =
+            Rc::new(RefCell::new(None));
+        cell.connect_edited(
+            clone!(@weak t, @strong common, @strong editable => move |_, p, v| {
+                if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
+                    let v = vec![Value::from(path), Value::from(String::from(v))];
+                    t.shared.on_edit.borrow_mut().update(
+                        &mut t.shared.ctx.borrow_mut(),
+                        &vm::Event::User(LocalEvent::Event(v.into()))
+                    );
+                }
+                let e = editable.borrow_mut().take();
+                if let Some(e) = e {
+                    unsafe { e.destroy(); }
+                }
+            }),
+        );
+        cell.connect_editing_started(clone!(@strong editable => move |_, e, _| {
+            *editable.borrow_mut() = Some(e.clone());
+            e.connect_editing_done(|e| {
+                e.event(&gdk::Event::new(gdk::EventType::FocusChange));
             });
-        });
-        cell.connect_edited(clone!(@weak t, @strong common => move |_, p, v| {
-            dbg!(&v);
-            if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
-                let v = vec![Value::from(path), Value::from(String::from(v))];
-                t.shared.on_edit.borrow_mut().update(
-                    &mut t.shared.ctx.borrow_mut(),
-                    &vm::Event::User(LocalEvent::Event(v.into()))
-                );
-            }
+            e.connect_remove_widget(clone!(@strong editable => move |e| {
+                if e.is_editing_canceled() {
+                    editable.borrow_mut().take();
+                    unsafe { e.destroy() }
+                }
+            }));
         }));
     }
 
@@ -357,7 +368,9 @@ impl RaeifiedTable {
             if t.shared.column_editable.borrow().is_match(common.source as usize, &**name)
             {
                 cell.set_editable(true);
-                cell.set_adjustment(Some(&gtk::Adjustment::default()));
+                cell.set_adjustment(Some(&gtk::Adjustment::new(
+                    0., 0., 1., 0.01, 0.1, 0.,
+                )));
             }
             let f =
                 Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
