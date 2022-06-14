@@ -802,13 +802,19 @@ impl RaeifiedTable {
         let text_xalign =
             text_xalign.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(0.5);
         let text_yalign =
-            text_yalign.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(1.);
+            text_yalign.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(0.5);
         let inverted =
             inverted.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(false);
         if activity_mode {
             cr.set_pulse(bv);
         } else {
-            cr.set_value(bv);
+            cr.set_value(if bv <= 100 && bv >= 0 {
+                bv
+            } else if bv < 0 {
+                0
+            } else {
+                100
+            });
         }
         cr.set_text(text.as_ref().map(|c| &**c));
         cr.set_text_xalign(text_xalign as f32);
