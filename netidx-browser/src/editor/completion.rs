@@ -65,7 +65,7 @@ pub(crate) mod imp {
             &self,
             _provider: &super::BScriptCompletionProvider,
         ) -> CompletionActivation {
-            CompletionActivation::USER_REQUESTED
+            CompletionActivation::INTERACTIVE
         }
 
         fn interactive_delay(&self, _provider: &super::BScriptCompletionProvider) -> i32 {

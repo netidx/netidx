@@ -52,6 +52,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     time::Duration,
+    path::PathBuf,
 };
 use structopt::StructOpt;
 use tokio::{
@@ -87,6 +88,17 @@ pub struct Params {
     pub cache_size: Option<u64>,
     #[structopt(long = "sparse", help = "don't even advertise the contents of the db")]
     pub sparse: bool,
+}
+
+impl Params {
+    pub fn default_db_path() -> Option<PathBuf> {
+        dirs::data_dir().map(|mut p| {
+            p.push("netidx");
+            p.push("container");
+            p.push("db");
+            p
+        })
+    }
 }
 
 lazy_static! {
@@ -1670,7 +1682,7 @@ impl ContainerInner {
             }
         }
     }
-    
+
     async fn run(mut self, mut cmd: mpsc::UnboundedReceiver<ToInner>) -> Result<()> {
         let mut gc_rpcs = time::interval(Duration::from_secs(60));
         let mut rpcbatch = Vec::new();

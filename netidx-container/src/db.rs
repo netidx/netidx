@@ -1471,14 +1471,7 @@ impl Db {
             .db
             .as_ref()
             .map(PathBuf::from)
-            .or_else(|| {
-                dirs::data_dir().map(|mut p| {
-                    p.push("netidx");
-                    p.push("container");
-                    p.push("db");
-                    p
-                })
-            })
+            .or_else(Params::default_db_path)
             .ok_or_else(|| {
                 anyhow!("db dir not specified and no default could be determined")
             })?;
