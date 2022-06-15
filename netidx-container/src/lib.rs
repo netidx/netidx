@@ -66,7 +66,8 @@ pub struct Params {
     #[structopt(
         short = "b",
         long = "bind",
-        help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
+        help = "configure the bind address e.g. local, 192.168.0.0/16, 127.0.0.1:5000",
+        default_value = "local"
     )]
     pub bind: BindCfg,
     #[structopt(
