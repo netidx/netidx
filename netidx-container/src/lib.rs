@@ -77,7 +77,7 @@ pub struct Params {
     #[structopt(long = "api-path", help = "the netidx path of the container api")]
     pub api_path: Option<Path>,
     #[structopt(long = "db", help = "the db file")]
-    pub db: String,
+    pub db: Option<String>,
     #[structopt(long = "compress", help = "use zstd compression")]
     pub compress: bool,
     #[structopt(long = "compress-level", help = "zstd compression level")]

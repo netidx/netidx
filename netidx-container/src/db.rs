@@ -24,6 +24,7 @@ use std::{
     cmp::{max, min},
     collections::{HashMap, HashSet},
     fmt::Write,
+    path::PathBuf,
     str,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1464,13 +1465,28 @@ impl Db {
     ) -> Result<(Self, UnboundedReceiver<Update>)> {
         let stats = match base_path {
             None => None,
-            Some(p) => Some(Stats::new(publisher, p)?)
+            Some(p) => Some(Stats::new(publisher, p)?),
         };
+        let path = cfg
+            .db
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| {
+                dirs::data_dir().map(|mut p| {
+                    p.push("netidx");
+                    p.push("container");
+                    p.push("db");
+                    p
+                })
+            })
+            .ok_or_else(|| {
+                anyhow!("db dir not specified and no default could be determined")
+            })?;
         let db = sled::Config::default()
             .use_compression(cfg.compress)
             .compression_factor(cfg.compress_level.unwrap_or(5) as i32)
             .cache_capacity(cfg.cache_size.unwrap_or(16 * 1024 * 1024))
-            .path(&cfg.db)
+            .path(&path)
             .open()?;
         let data = db.open_tree("data")?;
         let locked = db.open_tree("locked")?;
@@ -1644,10 +1660,10 @@ impl Db {
     pub fn lookup_value<P: AsRef<[u8]>>(&self, path: P) -> Option<Value> {
         self.lookup(path).ok().flatten().and_then(|d| match d {
             Datum::Deleted | Datum::Formula(_, _) => None,
-            Datum::Data(v) => Some(v)
+            Datum::Data(v) => Some(v),
         })
     }
-    
+
     fn decode_iter(
         iter: sled::Iter,
     ) -> impl Iterator<Item = Result<(Path, DatumKind, sled::IVec)>> + 'static {
