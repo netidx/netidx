@@ -11,6 +11,7 @@ pub use db::{Datum, DatumKind, Db, Reply, Sendable, Txn};
 use futures::{
     self,
     channel::{mpsc, oneshot},
+    future::{self, FusedFuture},
     prelude::*,
     select_biased,
     stream::FusedStream,
@@ -33,7 +34,7 @@ use netidx::{
 };
 use netidx_bscript::{
     expr::{Expr, ExprId},
-    vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register, RpcCallId},
+    vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register, RpcCallId, TimerId},
 };
 use netidx_protocols::rpc;
 use parking_lot::Mutex;
@@ -49,10 +50,10 @@ use std::{
     hash::Hash,
     mem,
     ops::{Deref, DerefMut},
+    path::PathBuf,
     pin::Pin,
     sync::Arc,
     time::Duration,
-    path::PathBuf,
 };
 use structopt::StructOpt;
 use tokio::{
@@ -129,15 +130,17 @@ struct Refs {
     rpcs: FxHashSet<Path>,
     subs: FxHashSet<SubId>,
     vars: FxHashSet<Chars>,
+    timers: FxHashSet<TimerId>,
 }
 
 impl Refs {
     fn new() -> Self {
         Refs {
-            refs: HashSet::with_hasher(FxBuildHasher::default()),
-            rpcs: HashSet::with_hasher(FxBuildHasher::default()),
-            subs: HashSet::with_hasher(FxBuildHasher::default()),
-            vars: HashSet::with_hasher(FxBuildHasher::default()),
+            refs: HashSet::default(),
+            rpcs: HashSet::default(),
+            subs: HashSet::default(),
+            vars: HashSet::default(),
+            timers: HashSet::default(),
         }
     }
 }
@@ -191,6 +194,7 @@ enum LcEvent {
     Refs,
     RpcCall { name: Path, args: Vec<(Chars, Value)>, id: RpcCallId },
     RpcReply { name: Path, id: RpcCallId, result: Value },
+    Timer(TimerId, Duration),
 }
 
 struct Lc {
@@ -199,6 +203,7 @@ struct Lc {
     var: FxHashMap<Chars, FxHashMap<ExprId, usize>>,
     sub: FxHashMap<SubId, FxHashMap<ExprId, usize>>,
     rpc: FxHashMap<Path, FxHashSet<ExprId>>,
+    timer: FxHashMap<TimerId, FxHashMap<ExprId, usize>>,
     refs: FxHashMap<Path, FxHashMap<ExprId, usize>>,
     rels: FxHashMap<Path, FxHashSet<ExprId>>,
     forward_refs: FxHashMap<ExprId, Refs>,
@@ -250,19 +255,20 @@ impl Lc {
     ) -> Self {
         Self {
             current_path: Path::from("/"),
-            var: HashMap::with_hasher(FxBuildHasher::default()),
-            sub: HashMap::with_hasher(FxBuildHasher::default()),
-            rpc: HashMap::with_hasher(FxBuildHasher::default()),
-            refs: HashMap::with_hasher(FxBuildHasher::default()),
-            rels: HashMap::with_hasher(FxBuildHasher::default()),
-            forward_refs: HashMap::with_hasher(FxBuildHasher::default()),
+            var: HashMap::default(),
+            sub: HashMap::default(),
+            rpc: HashMap::default(),
+            timer: HashMap::default(),
+            refs: HashMap::default(),
+            rels: HashMap::default(),
+            forward_refs: HashMap::default(),
             db,
             subscriber,
             publisher,
             sub_updates,
             var_updates: VARS.take(),
             ref_updates: REFS.take(),
-            by_id: HashMap::with_hasher(FxBuildHasher::default()),
+            by_id: HashMap::default(),
             by_path: HashMap::new(),
             events,
         }
@@ -281,6 +287,9 @@ impl Lc {
             }
             for name in refs.vars {
                 remove_eid_from_map(&mut self.var, name, &expr_id);
+            }
+            for id in refs.timers {
+                remove_eid_from_map(&mut self.timer, id, &expr_id);
             }
         }
     }
@@ -315,7 +324,7 @@ impl Ctx for Lc {
         *self
             .sub
             .entry(dv.id())
-            .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
+            .or_insert_with(|| HashMap::default())
             .entry(ref_id)
             .or_insert(0) += 1;
         self.forward_refs.entry(ref_id).or_insert_with(Refs::new).subs.insert(dv.id());
@@ -348,7 +357,7 @@ impl Ctx for Lc {
         *self
             .var
             .entry(name.clone())
-            .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
+            .or_insert_with(|| HashMap::default())
             .entry(ref_id)
             .or_insert(0) += 1;
         self.forward_refs.entry(ref_id).or_insert_with(Refs::new).vars.insert(name);
@@ -392,10 +401,7 @@ impl Ctx for Lc {
         ref_id: ExprId,
         id: RpcCallId,
     ) {
-        self.rpc
-            .entry(name.clone())
-            .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
-            .insert(ref_id);
+        self.rpc.entry(name.clone()).or_insert_with(|| HashSet::default()).insert(ref_id);
         self.forward_refs
             .entry(ref_id)
             .or_insert_with(Refs::new)
@@ -403,6 +409,17 @@ impl Ctx for Lc {
             .insert(name.clone());
         let _: Result<_, _> =
             self.events.unbounded_send(LcEvent::RpcCall { name, args, id });
+    }
+
+    fn set_timer(&mut self, id: TimerId, timeout: Duration, ref_by: ExprId) {
+        *self
+            .timer
+            .entry(id)
+            .or_insert_with(|| HashMap::default())
+            .entry(ref_by)
+            .or_insert(0) += 1;
+        self.forward_refs.entry(ref_by).or_insert_with(Refs::new).timers.insert(id);
+        let _: Result<_, _> = self.events.unbounded_send(LcEvent::Timer(id, timeout));
     }
 }
 
@@ -471,6 +488,7 @@ impl Ref {
             | vm::Event::User(UserEv::Rel)
             | vm::Event::Netidx(_, _)
             | vm::Event::Rpc(_, _)
+            | vm::Event::Timer(_)
             | vm::Event::Variable(_, _, _) => None,
         }
     }
@@ -687,6 +705,7 @@ impl Apply<Lc, UserEv> for OnWriteEvent {
             vm::Event::Variable(_, _, _)
             | vm::Event::Netidx(_, _)
             | vm::Event::Rpc(_, _)
+            | vm::Event::Timer(_)
             | vm::Event::User(UserEv::Ref(_, _))
             | vm::Event::User(UserEv::Rel) => None,
             vm::Event::User(UserEv::OnWriteEvent(value)) => {
@@ -753,6 +772,33 @@ enum Compiled {
     OnWrite(Node<Lc, UserEv>),
 }
 
+struct OptTimer {
+    timer: Option<Pin<Box<time::Sleep>>>,
+}
+
+impl Future for OptTimer {
+    type Output = ();
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match self.timer.as_mut() {
+            None => std::task::Poll::Pending,
+            Some(timer) => timer.as_mut().poll(cx),
+        }
+    }
+}
+
+impl FusedFuture for OptTimer {
+    fn is_terminated(&self) -> bool {
+        match self.timer.as_ref() {
+            None => true,
+            Some(timer) => timer.is_elapsed(),
+        }
+    }
+}
+
 struct ContainerInner {
     params: Params,
     api_path: Option<Path>,
@@ -772,6 +818,8 @@ struct ContainerInner {
         Path,
         (Instant, mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)>),
     >,
+    timer: OptTimer,
+    timers: BTreeMap<time::Instant, TimerId>,
 }
 
 impl ContainerInner {
@@ -818,6 +866,8 @@ impl ContainerInner {
             bscript_event: bs_rx,
             rpcs: HashMap::with_hasher(FxBuildHasher::default()),
             compiled: HashMap::with_hasher(FxBuildHasher::default()),
+            timer: OptTimer { timer: None },
+            timers: BTreeMap::new(),
         })
     }
 
@@ -1297,6 +1347,42 @@ impl ContainerInner {
         self.rpcs.retain(|_, (last, _)| now - *last < MAX_RPC_AGE);
     }
 
+    fn reschedule_timer(&mut self) {
+        match self.timers.iter().next() {
+            None => {
+                self.timer.timer = None;
+            }
+            Some((deadline, _)) => match &mut self.timer.timer {
+                None => {
+                    self.timer.timer = Some(Box::pin(time::sleep_until(*deadline)));
+                }
+                Some(timer) => {
+                    timer.as_mut().reset(*deadline);
+                }
+            },
+        }
+    }
+
+    fn set_timer(&mut self, id: TimerId, duration: Duration) {
+        let deadline = time::Instant::now() + duration;
+        self.timers.insert(deadline, id);
+        self.reschedule_timer()
+    }
+
+    fn process_timer_tick(&mut self, batch: &mut UpdateBatch) {
+        if let Some((k, _)) = self.timers.iter().next() {
+            let k = *k;
+            let id = self.timers.remove(&k).unwrap();
+            let mut refs = REFIDS.take();
+            if let Some(expr_ids) = self.ctx.user.timer.get(&id) {
+                refs.extend(expr_ids.keys().copied());
+            }
+            self.update_expr_ids(batch, &mut refs, &vm::Event::Timer(id));
+            self.update_refs(batch);
+        }
+        self.reschedule_timer()
+    }
+
     fn process_bscript_event(&mut self, batch: &mut UpdateBatch, event: LcEvent) {
         match event {
             LcEvent::Refs => self.update_refs(batch),
@@ -1325,6 +1411,9 @@ impl ContainerInner {
                     .user
                     .events
                     .unbounded_send(LcEvent::RpcReply { id, name, result });
+            }
+            LcEvent::Timer(id, duration) => {
+                self.set_timer(id, duration);
             }
         }
     }
@@ -1698,33 +1787,36 @@ impl ContainerInner {
             select_biased! {
                 r = self.publish_events.select_next_some() => {
                     self.process_publish_event(r);
-                }
+                },
                 r = self.roots.select_next_some() => {
                     self.process_publish_request(r.0, r.1)
-                }
+                },
                 r = self.sub_updates.select_next_some() => {
                     self.process_subscriptions(&mut batch, r);
-                }
+                },
                 r = self.write_updates_rx.select_next_some() => {
                     self.process_writes(&mut batch, &mut txn, r)
-                }
+                },
                 r = api_rx(&mut self.api).fuse() => match r {
                     BatchItem::InBatch(v) => rpcbatch.push(v),
                     BatchItem::EndBatch => self.process_rpc_requests(&mut txn, &mut rpcbatch)
                 },
                 r = self.bscript_event.select_next_some() => {
                     self.process_bscript_event(&mut batch, r)
-                }
+                },
                 _ = gc_rpcs.tick().fuse() => {
                     self.gc_rpcs();
-                }
+                },
                 u = self.db_updates.select_next_some() => {
                     self.process_update(&mut batch, u);
-                }
+                },
                 c = cmd.select_next_some() => {
                     self.process_command(&mut txn, c);
-                }
-                complete => break
+                },
+                () = &mut self.timer => {
+                    self.process_timer_tick(&mut batch);
+                },
+                complete => break,
             }
             if txn.dirty() {
                 self.ctx.user.db.commit(mem::replace(&mut txn, Txn::new()));

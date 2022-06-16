@@ -14,9 +14,10 @@ mod table;
 mod util;
 mod widgets;
 
-use anyhow::{Result, bail, anyhow};
+use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use bscript::LocalEvent;
+use bytes::Bytes;
 use editor::Editor;
 use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap};
@@ -24,19 +25,18 @@ use gdk::{self, prelude::*};
 use glib::{clone, idle_add_local, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexSet;
-use bytes::Bytes;
 use netidx::{
     chars::Chars,
     config::Config,
     path::Path,
     pool::{Pool, Pooled},
+    protocol::value::FromValue,
     resolver_client,
     subscriber::{DesiredAuth, Dval, Event, SubId, UpdatesFlags, Value},
-    protocol::value::FromValue,
 };
 use netidx_bscript::{
     expr::{ExprId, ExprKind},
-    vm::{self, ExecCtx, Node, RpcCallId},
+    vm::{self, ExecCtx, Node, RpcCallId, TimerId},
 };
 use netidx_protocols::view;
 use radix_trie::Trie;
@@ -51,6 +51,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
 use util::{ask_modal, err_modal};
 
@@ -147,6 +148,7 @@ enum ToGui {
     Update(Batch),
     UpdateVar(Path, Chars, Value),
     UpdateRpc(RpcCallId, Value),
+    UpdateTimer(TimerId),
     TableResolved(Path, resolver_client::Table),
     ShowError(String),
     SaveError(String),
@@ -160,6 +162,7 @@ enum FromGui {
     ResolveTable(Path),
     Save(ViewLoc, view::Widget, oneshot::Sender<Result<()>>),
     CallRpc(Path, Vec<(Chars, Value)>, RpcCallId),
+    SetTimer(TimerId, Duration),
     Updated,
     Terminate,
 }
@@ -233,6 +236,10 @@ impl vm::Ctx for WidgetCtx {
         id: RpcCallId,
     ) {
         self.backend.call_rpc(name, args, id)
+    }
+
+    fn set_timer(&mut self, id: TimerId, timeout: Duration, _ref_id: ExprId) {
+        self.backend.set_timer(id, timeout);
     }
 }
 
@@ -1010,6 +1017,10 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         }
         ToGui::UpdateRpc(id, value) => {
             update_single(&current, &mut ctx.borrow_mut(), &vm::Event::Rpc(id, value));
+            Continue(true)
+        }
+        ToGui::UpdateTimer(id) => {
+            update_single(&current, &mut ctx.borrow_mut(), &vm::Event::Timer(id));
             Continue(true)
         }
         ToGui::Update(mut batch) => {

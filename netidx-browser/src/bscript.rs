@@ -46,6 +46,7 @@ impl Apply<WidgetCtx, LocalEvent> for Event {
             vm::Event::Variable(_, _, _)
             | vm::Event::Netidx(_, _)
             | vm::Event::Rpc(_, _)
+            | vm::Event::Timer(_)
             | vm::Event::User(LocalEvent::TableResolved(_, _)) => None,
             vm::Event::User(LocalEvent::Event(value)) => {
                 self.cur = Some(value.clone());

@@ -207,6 +207,7 @@ impl BWidget for Table {
             TableState::Resolving(rpath) => match event {
                 vm::Event::Netidx(_, _)
                 | vm::Event::Rpc(_, _)
+                | vm::Event::Timer(_)
                 | vm::Event::Variable(_, _, _)
                 | vm::Event::User(LocalEvent::Event(_)) => (),
                 vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {

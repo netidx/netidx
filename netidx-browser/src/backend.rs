@@ -18,7 +18,7 @@ use netidx::{
     resolver_client::{DesiredAuth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
-use netidx_bscript::vm::RpcCallId;
+use netidx_bscript::vm::{RpcCallId, TimerId};
 use netidx_protocols::{rpc::client as rpc, view};
 use std::{
     collections::HashMap,
@@ -78,6 +78,11 @@ impl Ctx {
 
     pub(crate) fn render(&self, spec: view::Widget) {
         let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Render(spec));
+    }
+
+    pub(crate) fn set_timer(&self, id: TimerId, timeout: Duration) {
+        let _: result::Result<_, _> =
+            self.from_gui.unbounded_send(FromGui::SetTimer(id, timeout));
     }
 
     pub(crate) fn resolve_table(&self, path: Path) {
@@ -368,6 +373,14 @@ impl CtxInner {
         Ok(())
     }
 
+    fn set_timer(&self, id: TimerId, timeout: Duration) {
+        let to_gui = self.to_gui.clone();
+        task::spawn(async move {
+            time::sleep(timeout).await;
+            let _: result::Result<_, _> = to_gui.send(ToGui::UpdateTimer(id));
+        });
+    }
+
     fn gc_rpcs(&mut self) {
         static MAX_RPC_AGE: Duration = Duration::from_secs(120);
         let now = Instant::now();
@@ -429,6 +442,7 @@ impl CtxInner {
                         break_err!(self.navigate_file(file).await),
                     Some(FromGui::CallRpc(path, args, id)) =>
                         break_err!(self.call_rpc(path, args, id)),
+                    Some(FromGui::SetTimer(id, timeout)) => self.set_timer(id, timeout),
                 },
                 b = read_updates(
                     &mut self.updates,

@@ -1,4 +1,4 @@
-pub use crate::stdfn::RpcCallId;
+pub use crate::stdfn::{RpcCallId, TimerId};
 use crate::{
     expr::{Expr, ExprId, ExprKind},
     stdfn,
@@ -14,6 +14,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fmt,
     sync::{Arc, Weak},
+    time::Duration,
 };
 
 pub struct DbgCtx {
@@ -83,6 +84,7 @@ pub enum Event<E> {
     Variable(Path, Chars, Value),
     Netidx(SubId, Value),
     Rpc(RpcCallId, Value),
+    Timer(TimerId),
     User(E),
 }
 
@@ -142,6 +144,9 @@ pub trait Ctx {
         ref_by: ExprId,
         id: RpcCallId,
     );
+
+    /// arrange to have a Timer event delivered after timeout
+    fn set_timer(&mut self, id: TimerId, timeout: Duration, ref_by: ExprId);
 }
 
 pub fn store_var(
@@ -220,10 +225,11 @@ impl<C: Ctx, E> ExecCtx<C, E> {
 
     pub fn new(user: C) -> Self {
         let mut t = ExecCtx::no_std(user);
+        stdfn::AfterIdle::register(&mut t);
         stdfn::All::register(&mut t);
-        stdfn::Array::register(&mut t);
         stdfn::And::register(&mut t);
         stdfn::Any::register(&mut t);
+        stdfn::Array::register(&mut t);
         stdfn::Basename::register(&mut t);
         stdfn::Cast::register(&mut t);
         stdfn::Cmp::register(&mut t);
@@ -258,6 +264,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::StripPrefix::register(&mut t);
         stdfn::StripSuffix::register(&mut t);
         stdfn::Sum::register(&mut t);
+        stdfn::Timer::register(&mut t);
         stdfn::TrimEnd::register(&mut t);
         stdfn::Trim::register(&mut t);
         stdfn::TrimStart::register(&mut t);

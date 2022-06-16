@@ -1547,9 +1547,10 @@ impl<C: Ctx, E> Apply<C, E> for Load {
                     }
                 } else {
                     self.cur.as_ref().and_then(|dv| match event {
-                        Event::Variable(_, _, _) | Event::Rpc(_, _) | Event::User(_) => {
-                            None
-                        }
+                        Event::Variable(_, _, _)
+                        | Event::Rpc(_, _)
+                        | Event::Timer(_)
+                        | Event::User(_) => None,
                         Event::Netidx(id, value) if dv.id() == *id => Some(value.clone()),
                         Event::Netidx(_, _) => None,
                     })
@@ -1677,6 +1678,7 @@ impl<C: Ctx, E> Apply<C, E> for Get {
                         | (Some(_), _, Event::Netidx(_, _))
                         | (Some(_), _, Event::User(_))
                         | (Some(_), _, Event::Rpc(_, _))
+                        | (Some(_), _, Event::Timer(_))
                         | (Some(_), _, Event::Variable(_, _, _)) => None,
                     }
                 }
@@ -1854,6 +1856,283 @@ impl RpcCall {
             let id = RpcCallId::new();
             self.pending.insert(id);
             ctx.user.call_rpc(Path::from(name), args, self.top_id, id);
+        }
+    }
+}
+
+atomic_id!(TimerId);
+
+pub(crate) struct AfterIdle {
+    timeout: Option<Value>,
+    cur: Option<Value>,
+    updated: bool,
+    timer_set: bool,
+    id: TimerId,
+    eid: ExprId,
+    invalid: bool,
+}
+
+impl<C: Ctx, E> Register<C, E> for AfterIdle {
+    fn register(ctx: &mut ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Arc::new(|ctx, from, _, eid| match from {
+            [timeout, cur] => {
+                let mut t = AfterIdle {
+                    timeout: timeout.current(),
+                    cur: cur.current(),
+                    updated: false,
+                    timer_set: false,
+                    id: TimerId::new(),
+                    eid,
+                    invalid: false,
+                };
+                t.maybe_set_timer(ctx);
+                Box::new(t)
+            }
+            _ => Box::new(AfterIdle {
+                timeout: None,
+                cur: None,
+                updated: false,
+                timer_set: false,
+                id: TimerId::new(),
+                eid,
+                invalid: true,
+            }),
+        });
+        ctx.functions.insert("after_idle".into(), f);
+        ctx.user.register_fn("after_idle".into(), Path::root());
+    }
+}
+
+impl<C: Ctx, E> Apply<C, E> for AfterIdle {
+    fn current(&self) -> Option<Value> {
+        self.usage()
+    }
+
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        match from {
+            [timeout, cur] => {
+                if let Some(timeout) = timeout.update(ctx, event) {
+                    self.timeout = Some(timeout);
+                    self.maybe_set_timer(ctx);
+                }
+                if let Some(cur) = cur.update(ctx, event) {
+                    self.updated = true;
+                    self.cur = Some(cur);
+                    self.maybe_set_timer(ctx);
+                }
+                match event {
+                    Event::Variable(_, _, _)
+                    | Event::Netidx(_, _)
+                    | Event::Rpc(_, _)
+                    | Event::User(_) => self.usage(),
+                    Event::Timer(id) => {
+                        if id != &self.id {
+                            self.usage()
+                        } else {
+                            self.timer_set = false;
+                            if self.updated {
+                                self.maybe_set_timer(ctx);
+                                self.usage()
+                            } else {
+                                self.cur.clone()
+                            }
+                        }
+                    }
+                }
+            }
+            exprs => {
+                let mut up = false;
+                self.invalid = true;
+                for expr in exprs {
+                    up |= expr.update(ctx, event).is_some();
+                }
+                if up {
+                    self.usage()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl AfterIdle {
+    fn maybe_set_timer<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>) {
+        use std::time::Duration;
+        if !self.invalid && !self.timer_set {
+            match (&self.timeout, &self.cur) {
+                (Some(timeout), Some(_)) => match timeout.clone().cast_to::<f64>() {
+                    Err(_) => {
+                        self.invalid = true;
+                    }
+                    Ok(timeout) => {
+                        self.invalid = false;
+                        self.updated = false;
+                        self.timer_set = true;
+                        ctx.user.set_timer(self.id, Duration::from_secs_f64(timeout), self.eid);
+                    }
+                },
+                (_, _) => (),
+            }
+        }
+    }
+
+    fn usage(&self) -> Option<Value> {
+        if self.invalid {
+            Some(Value::Error(Chars::from(
+                "after_idle(timeout: f64, v: any): expected two arguments",
+            )))
+        } else {
+            None
+        }
+    }
+}
+
+pub(crate) struct Timer {
+    id: TimerId,
+    eid: ExprId,
+    timeout: Option<Value>,
+    repeat: Option<Value>,
+    timer_set: bool,
+    invalid: bool,
+}
+
+impl<C: Ctx, E> Register<C, E> for Timer {
+    fn register(ctx: &mut ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Arc::new(|ctx, from, _, eid| match from {
+            [timeout, repeat] => {
+                let mut t = Self {
+                    id: TimerId::new(),
+                    eid,
+                    timeout: timeout.current(),
+                    repeat: repeat.current(),
+                    timer_set: false,
+                    invalid: false,
+                };
+                t.maybe_set_timer(ctx);
+                Box::new(t)
+            }
+            _ => Box::new(Self {
+                id: TimerId::new(),
+                eid,
+                timeout: None,
+                repeat: None,
+                timer_set: false,
+                invalid: true
+            })
+        });
+        ctx.functions.insert("timer".into(), f);
+        ctx.user.register_fn("timer".into(), Path::root());
+    }
+}
+
+impl<C: Ctx, E> Apply<C, E> for Timer {
+    fn current(&self) -> Option<Value> {
+        self.usage()
+    }
+
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        match from {
+            [timeout, repeat] => {
+                if let Some(timeout) = timeout.update(ctx, event) {
+                    self.timeout = Some(timeout);
+                    self.maybe_set_timer(ctx);
+                }
+                if let Some(repeat) = repeat.update(ctx, event) {
+                    self.repeat = Some(repeat);
+                    self.maybe_set_timer(ctx);
+                }
+                match event {
+                    Event::Variable(_, _, _)
+                        | Event::Netidx(_, _)
+                        | Event::Rpc(_, _)
+                        | Event::User(_) => self.usage(),
+                    Event::Timer(id) => {
+                        if id != &self.id {
+                            self.usage()
+                        } else {
+                            self.timer_set = false;
+                            self.maybe_set_timer(ctx);
+                            Some(Value::Null)
+                        }
+                    }
+                }
+            }
+            exprs => {
+                let mut up = false;
+                self.invalid = true;
+                for expr in exprs {
+                    up |= expr.update(ctx, event).is_some();
+                }
+                if up {
+                    self.usage()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Timer {
+    fn maybe_set_timer<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>) {
+        use std::time::Duration;
+        if !self.invalid && !self.timer_set {
+            match (&self.timeout, &self.repeat) {
+                (None, _) | (_, None) => (),
+                (Some(timeout), Some(repeat)) => {
+                    let timeout = timeout.clone().cast_to::<f64>();
+                    let repeat = match repeat {
+                        Value::Null => Ok(None),
+                        Value::True => Ok(None),
+                        Value::False => Ok(Some(1)),
+                        v => v.clone().cast_to::<u64>().map(|v| Some(v)),
+                    };
+                    match (timeout, repeat) {
+                        (Ok(timeout), Ok(repeat)) => {
+                            let go = match repeat {
+                                None => true,
+                                Some(n) => {
+                                    if n == 0 {
+                                        false
+                                    } else {
+                                        self.repeat = Some((n - 1).into());
+                                        true
+                                    }
+                                }
+                            };
+                            if go {
+                                self.timer_set = true;
+                                let d = Duration::from_secs_f64(timeout);
+                                ctx.user.set_timer(self.id, d, self.eid);
+                            }
+                        }
+                        (_, _) => {
+                            self.invalid = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn usage(&self) -> Option<Value> {
+        if self.invalid {
+            Some(Value::Error(Chars::from(
+                "timer(timeout: f64, repeat): expected two arguments"
+            )))
+        } else {
+            None
         }
     }
 }
