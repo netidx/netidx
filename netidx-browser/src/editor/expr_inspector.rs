@@ -1,9 +1,11 @@
 use super::super::{util::ask_modal, BSCtx};
 use super::{completion::BScriptCompletionProvider, Scope};
+use gdk::keys;
 use glib::{clone, prelude::*, subclass::prelude::*, thread_guard::ThreadGuard};
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
+use parking_lot::Mutex;
 use sourceview4::{self as sv, prelude::*};
 use std::{
     cell::{Cell, RefCell},
@@ -11,7 +13,6 @@ use std::{
     sync::Arc,
 };
 use sv::traits::ViewExt;
-use parking_lot::Mutex;
 
 #[derive(Clone, Boxed)]
 #[boxed_type(name = "NetidxExprInspectorWrap")]
@@ -240,7 +241,21 @@ impl ExprEditor {
             let provider = BScriptCompletionProvider::new();
             provider.imp().init(ctx, scope);
             completion.add_provider(&provider).expect("bscript completion");
-            completion.add_provider(&sv::CompletionWords::default()).expect("words completion");
+            completion
+                .add_provider(&sv::CompletionWords::default())
+                .expect("words completion");
+            view.connect_key_press_event(|view, key| {
+                let kv = key.keyval();
+                if (kv == keys::constants::space
+                    && key.state().contains(gdk::ModifierType::CONTROL_MASK))
+                    || kv == keys::constants::Tab
+                {
+                    view.emit_show_completion();
+                    Inhibit(true)
+                } else {
+                    Inhibit(false)
+                }
+            });
         }
         root.add(&view);
         if let Some(buf) = view.buffer() {
