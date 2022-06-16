@@ -2010,7 +2010,10 @@ impl<C: Ctx, E> Register<C, E> for Timer {
                     id: TimerId::new(),
                     eid,
                     timeout: timeout.current(),
-                    repeat: repeat.current(),
+                    repeat: match repeat.current() {
+                        Some(Value::False) => Some(1.into()),
+                        v => v
+                    },
                     timer_set: false,
                     invalid: false,
                 };
@@ -2095,7 +2098,7 @@ impl Timer {
                     let repeat = match repeat {
                         Value::Null => Ok(None),
                         Value::True => Ok(None),
-                        Value::False => Ok(Some(1)),
+                        Value::False => Ok(Some(0)),
                         v => v.clone().cast_to::<u64>().map(|v| Some(v)),
                     };
                     match (timeout, repeat) {
