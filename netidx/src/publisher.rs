@@ -27,7 +27,7 @@ use futures::{
     },
     prelude::*,
     select_biased,
-    stream::SelectAll,
+    stream::{FusedStream, SelectAll},
 };
 use fxhash::{FxHashMap, FxHashSet};
 use get_if_addrs::get_if_addrs;
@@ -43,7 +43,7 @@ use std::{
     iter::{self, FromIterator},
     mem,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
-    ops::{Deref, DerefMut},
+    pin::Pin,
     str::FromStr,
     sync::{Arc, Weak},
     time::{Duration, SystemTime},
@@ -399,9 +399,26 @@ impl Val {
 /// A handle to the channel that will receive notifications about
 /// subscriptions to paths in a subtree with a default publisher.
 pub struct DefaultHandle {
-    chan: UnboundedReceiver<(Path, oneshot::Sender<()>)>,
+    chan: Pin<Box<UnboundedReceiver<(Path, oneshot::Sender<()>)>>>,
     path: Path,
     publisher: PublisherWeak,
+}
+
+impl Stream for DefaultHandle {
+    type Item = (Path, oneshot::Sender<()>);
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.chan.as_mut().poll_next(cx)
+    }
+}
+
+impl FusedStream for DefaultHandle {
+    fn is_terminated(&self) -> bool {
+        self.chan.is_terminated()
+    }
 }
 
 impl DefaultHandle {
@@ -490,20 +507,6 @@ impl DefaultHandle {
                 pbl.trigger_publish()
             }
         }
-    }
-}
-
-impl Deref for DefaultHandle {
-    type Target = UnboundedReceiver<(Path, oneshot::Sender<()>)>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.chan
-    }
-}
-
-impl DerefMut for DefaultHandle {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.chan
     }
 }
 
@@ -984,7 +987,7 @@ impl Publisher {
             .insert(base.clone(), if flags.is_empty() { None } else { Some(flags.bits) });
         pb.default.insert(base.clone(), tx);
         pb.trigger_publish();
-        Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })
+        Ok(DefaultHandle { chan: Box::pin(rx), path: base, publisher: self.downgrade() })
     }
 
     /// Install a default publisher rooted at `base` with no

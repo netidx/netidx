@@ -44,6 +44,7 @@ netidx-container = { path = "../netidx-container", version = "^0.10.5", default_
 parking_lot = "0.12"
 serde = "1"
 serde_derive = "1"
+serde_json = "1"
 structopt = "0.3"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "0.8", features = ["v4", "serde"] }

@@ -12,6 +12,8 @@ mod container;
 mod recorder;
 #[cfg(unix)]
 mod resolver_server;
+#[cfg(unix)]
+mod activation;
 
 #[cfg(unix)]
 #[macro_use]
@@ -73,6 +75,14 @@ enum Opt {
         #[structopt(flatten)]
         params: recorder::Params,
     },
+    #[cfg(unix)]
+    #[structopt(name = "activation", about = "manage netidx processes")]
+    Activation {
+        #[structopt(flatten)]
+        common: ClientParams,
+        #[structopt(flatten)]
+        params: activation::Params,
+    },
     #[structopt(name = "stress", about = "stress test")]
     Stress {
         #[structopt(flatten)]
@@ -108,6 +118,10 @@ fn main() {
         Opt::Record { common, params } => {
             let (cfg, auth) = common.load();
             recorder::run(cfg, auth, params)
+        }
+        Opt::Activation { common, params } => {
+            let (cfg, auth) = common.load();
+            activation::run(cfg, auth, params)
         }
         Opt::Stress { common, cmd } => {
             let (cfg, auth) = common.load();
