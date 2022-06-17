@@ -1,6 +1,6 @@
 use anyhow::Result;
 use daemonize::Daemonize;
-use futures::{future::join_all, prelude::*, select_biased};
+use futures::{future::join_all, prelude::*, select_biased, stream::SelectAll};
 use log::{error, warn};
 use netidx::{
     config::Config,
@@ -9,7 +9,7 @@ use netidx::{
 };
 use serde_derive::Deserialize;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs::{self, read_to_string},
     os::unix::fs::PermissionsExt,
     path::PathBuf,
@@ -52,13 +52,24 @@ enum Restart {
     RateLimited(f64),
 }
 
+impl Default for Restart {
+    fn default() -> Self {
+        Self::RateLimited(1.)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct PublisherCfg {
     exe: String,
+    #[serde(default)]
     args: Vec<String>,
+    #[serde(default)]
     working_directory: Option<String>,
+    #[serde(default)]
     uid: Option<u32>,
+    #[serde(default)]
     gid: Option<u32>,
+    #[serde(default)]
     restart: Restart,
 }
 
@@ -75,14 +86,27 @@ impl PublisherCfg {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct CfgPair {
+    paths: Vec<Path>,
+    cfg: PublisherCfg,
+}
+
 enum ProcStatus {
     NotStarted,
     Died(Instant, ExitStatus),
     Running(Child),
 }
 
-async fn run_process(publisher: Publisher, base: Path, cfg: PublisherCfg) -> Result<()> {
-    let mut default = publisher.publish_default(base.clone())?;
+async fn run_process(
+    publisher: Publisher,
+    base: BTreeSet<Path>,
+    cfg: PublisherCfg,
+) -> Result<()> {
+    let mut default = base
+        .iter()
+        .map(|path| publisher.publish_default(path.clone()))
+        .collect::<Result<SelectAll<_>>>()?;
     let mut proc: ProcStatus = ProcStatus::NotStarted;
     async fn wait(proc: &mut ProcStatus) -> Result<ExitStatus> {
         match proc {
@@ -113,11 +137,11 @@ async fn run_process(publisher: Publisher, base: Path, cfg: PublisherCfg) -> Res
         select_biased! {
             e = wait(&mut proc).fuse() => match e {
                 Err(e) => {
-                    error!("failed to wait for base {}, failed with {}", base, e);
+                    error!("failed to wait for base {:?}, failed with {}", base, e);
                     sleep(Duration::from_secs(1)).await;
                 }
                 Ok(e) => {
-                    warn!("process for base {} shutdown with {:?}", base, e);
+                    warn!("process for base {:?} shutdown with {:?}", base, e);
                     proc = ProcStatus::Died(Instant::now(), e);
                 }
             },
@@ -147,14 +171,14 @@ async fn run_server(
     cfg: Config,
     auth: DesiredAuth,
     params: Params,
-    spec: HashMap<Path, PublisherCfg>,
+    spec: HashMap<BTreeSet<Path>, PublisherCfg>,
 ) -> Result<()> {
     let publisher = Publisher::new(cfg, auth, params.bind).await?;
     join_all(spec.into_iter().map(|(path, cfg)| {
         let publisher = publisher.clone();
         task::spawn(async move {
             if let Err(e) = run_process(publisher, path.clone(), cfg).await {
-                error!("handler for base {} died with {}", path, e)
+                error!("handler for base {:?} died with {}", path, e)
             }
         })
     }))
@@ -166,14 +190,23 @@ async fn run_server(
 
 pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) {
     let spec = read_to_string(&params.publisher).expect("failed to read publishers spec");
-    let spec: Vec<(Path, PublisherCfg)> =
+    let spec: Vec<CfgPair> =
         serde_json::from_str(&spec).expect("invalid publishers spec");
     let spec = {
         let mut tbl = HashMap::new();
-        for (path, cfg) in spec.into_iter() {
-            cfg.validate().expect("invalid publisher specification");
-            if tbl.insert(path, cfg).is_some() {
-                panic!("publisher paths must be unique")
+        for cfg in spec.into_iter() {
+            let mut pset = BTreeSet::new();
+            cfg.cfg.validate().expect("invalid publisher specification");
+            for path in cfg.paths {
+                if !Path::is_absolute(&path) {
+                    panic!("absolute paths are required")
+                }
+                if !pset.insert(path) {
+                    panic!("paths within a group must be unique")
+                }
+            }
+            if tbl.insert(pset, cfg.cfg).is_some() {
+                panic!("publisher path sets must be unique")
             }
         }
         tbl

@@ -1,0 +1,27 @@
+[
+  {
+    "paths": [
+      "/local/music"
+    ],
+    "cfg": {
+      "exe": "/home/eric/.cargo/bin/demoscene",
+      "args": [
+        "--library",
+        "/home/eric/mus"
+      ]
+    }
+  },
+  {
+    "paths": [
+      "/local/container",
+      "/local/container-api"
+    ],
+    "cfg": {
+      "exe": "/home/eric/.cargo/bin/netidx",
+      "args": [
+        "--api-path",
+        "/local/container-api"
+      ]
+    }
+  }
+]
