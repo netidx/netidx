@@ -240,6 +240,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::Do::register(&mut t);
         stdfn::EndsWith::register(&mut t);
         stdfn::Eval::register(&mut t);
+        stdfn::FilterErr::register(&mut t);
         stdfn::Filter::register(&mut t);
         stdfn::Get::register(&mut t);
         stdfn::If::register(&mut t);
@@ -251,6 +252,7 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::Mean::register(&mut t);
         stdfn::Min::register(&mut t);
         stdfn::Not::register(&mut t);
+        stdfn::Once::register(&mut t);
         stdfn::Or::register(&mut t);
         stdfn::Product::register(&mut t);
         stdfn::Replace::register(&mut t);

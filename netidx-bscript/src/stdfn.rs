@@ -78,6 +78,69 @@ impl<C: Ctx, E> Apply<C, E> for Any {
     }
 }
 
+pub struct Once {
+    val: Option<Value>,
+    invalid: bool,
+}
+
+impl<C: Ctx, E> Register<C, E> for Once {
+    fn register(ctx: &mut ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Arc::new(|_ctx, from, _, _| match from {
+            [s] => Box::new(Once { val: s.current(), invalid: false }),
+            _ => Box::new(Once { val: None, invalid: true }),
+        });
+        ctx.functions.insert("once".into(), f);
+        ctx.user.register_fn("once".into(), Path::root());
+    }
+}
+
+impl<C: Ctx, E> Apply<C, E> for Once {
+    fn current(&self) -> Option<Value> {
+        self.usage()
+    }
+
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        match from {
+            [s] => s.update(ctx, event).and_then(|v| match self.val {
+                Some(_) => None,
+                None => {
+                    self.invalid = false;
+                    self.val = Some(v);
+                    self.usage()
+                }
+            }),
+            exprs => {
+                self.invalid = true;
+                let mut up = false;
+                for e in exprs {
+                    up |= e.update(ctx, event).is_some();
+                }
+                if up {
+                    self.usage()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Once {
+    fn usage(&self) -> Option<Value> {
+        if self.invalid {
+            let e = Chars::from("once(v): expected one argument");
+            Some(Value::Error(e))
+        } else {
+            self.val.clone()
+        }
+    }
+}
+
 pub struct Do(Option<Value>);
 
 impl<C: Ctx, E> Register<C, E> for Do {
@@ -796,6 +859,28 @@ impl CachedCurEval for FilterEv {
 }
 
 pub type Filter = CachedCur<FilterEv>;
+
+pub struct FilterErrEv;
+
+impl CachedCurEval for FilterErrEv {
+    fn name() -> &'static str {
+        "filter_err"
+    }
+
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match &*from.0 {
+            [s] => match s {
+                None | Some(Value::Error(_)) => None,
+                Some(_) => s.clone(),
+            },
+            _ => {
+                Some(Value::Error(Chars::from("filter_err(source): expected 1 argument")))
+            }
+        }
+    }
+}
+
+pub type FilterErr = CachedCur<FilterErrEv>;
 
 pub struct CastEv;
 
@@ -1974,7 +2059,11 @@ impl AfterIdle {
                         self.invalid = false;
                         self.updated = false;
                         self.timer_set = true;
-                        ctx.user.set_timer(self.id, Duration::from_secs_f64(timeout), self.eid);
+                        ctx.user.set_timer(
+                            self.id,
+                            Duration::from_secs_f64(timeout),
+                            self.eid,
+                        );
                     }
                 },
                 (_, _) => (),
@@ -2012,7 +2101,7 @@ impl<C: Ctx, E> Register<C, E> for Timer {
                     timeout: timeout.current(),
                     repeat: match repeat.current() {
                         Some(Value::False) => Some(1.into()),
-                        v => v
+                        v => v,
                     },
                     timer_set: false,
                     invalid: false,
@@ -2026,8 +2115,8 @@ impl<C: Ctx, E> Register<C, E> for Timer {
                 timeout: None,
                 repeat: None,
                 timer_set: false,
-                invalid: true
-            })
+                invalid: true,
+            }),
         });
         ctx.functions.insert("timer".into(), f);
         ctx.user.register_fn("timer".into(), Path::root());
@@ -2057,9 +2146,9 @@ impl<C: Ctx, E> Apply<C, E> for Timer {
                 }
                 match event {
                     Event::Variable(_, _, _)
-                        | Event::Netidx(_, _)
-                        | Event::Rpc(_, _)
-                        | Event::User(_) => self.usage(),
+                    | Event::Netidx(_, _)
+                    | Event::Rpc(_, _)
+                    | Event::User(_) => self.usage(),
                     Event::Timer(id) => {
                         if id != &self.id {
                             self.usage()
@@ -2132,7 +2221,7 @@ impl Timer {
     fn usage(&self) -> Option<Value> {
         if self.invalid {
             Some(Value::Error(Chars::from(
-                "timer(timeout: f64, repeat): expected two arguments"
+                "timer(timeout: f64, repeat): expected two arguments",
             )))
         } else {
             None
