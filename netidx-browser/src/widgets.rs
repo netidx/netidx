@@ -861,7 +861,9 @@ impl Entry {
 
     fn set_text(entry: &gtk::Entry, v: Option<Value>) {
         if let Some(s) = v.and_then(|v| v.cast_to::<Chars>().ok()) {
-            entry.set_text(&*s);
+            if &*entry.text() != &*s {
+                entry.set_text(&*s);
+            }
         }
     }
 
@@ -943,7 +945,9 @@ impl SearchEntry {
 
     fn set_text(entry: &gtk::SearchEntry, v: Option<Value>) {
         if let Some(s) = v.and_then(|v| v.cast_to::<Chars>().ok()) {
-            entry.set_text(&*s);
+            if &*entry.text() != &*s {
+                entry.set_text(&*s);
+            }
         }
     }
 
