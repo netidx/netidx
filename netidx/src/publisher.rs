@@ -399,7 +399,7 @@ impl Val {
 /// A handle to the channel that will receive notifications about
 /// subscriptions to paths in a subtree with a default publisher.
 pub struct DefaultHandle {
-    chan: Pin<Box<UnboundedReceiver<(Path, oneshot::Sender<()>)>>>,
+    chan: UnboundedReceiver<(Path, oneshot::Sender<()>)>,
     path: Path,
     publisher: PublisherWeak,
 }
@@ -411,7 +411,7 @@ impl Stream for DefaultHandle {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.chan.as_mut().poll_next(cx)
+        Pin::new(&mut self.chan).poll_next(cx)
     }
 }
 
@@ -987,7 +987,7 @@ impl Publisher {
             .insert(base.clone(), if flags.is_empty() { None } else { Some(flags.bits) });
         pb.default.insert(base.clone(), tx);
         pb.trigger_publish();
-        Ok(DefaultHandle { chan: Box::pin(rx), path: base, publisher: self.downgrade() })
+        Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })
     }
 
     /// Install a default publisher rooted at `base` with no

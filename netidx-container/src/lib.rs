@@ -752,7 +752,7 @@ impl<'a> Stream for Roots {
     ) -> std::task::Poll<Option<Self::Item>> {
         use std::task::Poll;
         for dh in self.values_mut() {
-            match Pin::new(&mut **dh).poll_next(cx) {
+            match Pin::new(&mut *dh).poll_next(cx) {
                 Poll::Pending => (),
                 r @ Poll::Ready(_) => return r,
             }
