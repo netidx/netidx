@@ -5,7 +5,7 @@ use log::{error, warn};
 use netidx::{
     config::Config,
     path::Path,
-    publisher::{BindCfg, DesiredAuth, Publisher},
+    publisher::{BindCfg, DefaultHandle, DesiredAuth, Publisher},
 };
 use serde_derive::Deserialize;
 use std::{
@@ -94,7 +94,7 @@ struct CfgPair {
 
 enum ProcStatus {
     NotStarted,
-    Died(Instant, ExitStatus),
+    Died(Instant),
     Running(Child),
 }
 
@@ -103,18 +103,36 @@ async fn run_process(
     base: BTreeSet<Path>,
     cfg: PublisherCfg,
 ) -> Result<()> {
-    let mut default = base
-        .iter()
-        .map(|path| publisher.publish_default(path.clone()))
-        .collect::<Result<SelectAll<_>>>()?;
     let mut proc: ProcStatus = ProcStatus::NotStarted;
-    async fn wait(proc: &mut ProcStatus) -> Result<ExitStatus> {
+    let mut default: Option<SelectAll<DefaultHandle>> = Some(publish(&publisher, &base)?);
+    fn publish(
+        publisher: &Publisher,
+        base: &BTreeSet<Path>,
+    ) -> Result<SelectAll<DefaultHandle>> {
+        Ok(base
+            .iter()
+            .map(|path| publisher.publish_default(path.clone()))
+            .collect::<Result<SelectAll<_>>>()?)
+    }
+    async fn wait_proc(proc: &mut ProcStatus) -> Result<ExitStatus> {
         match proc {
             ProcStatus::Running(proc) => Ok(proc.wait().await?),
-            ProcStatus::Died(_, _) | ProcStatus::NotStarted => future::pending().await,
+            ProcStatus::Died(_) | ProcStatus::NotStarted => future::pending().await,
         }
     }
-    fn start(proc: &mut ProcStatus, cfg: &PublisherCfg) {
+    async fn wait_default(default: &mut Option<SelectAll<DefaultHandle>>) {
+        match default {
+            Some(default) => {
+                let _ = default.select_next_some().await;
+            }
+            None => future::pending().await,
+        }
+    }
+    fn start(
+        proc: &mut ProcStatus,
+        default: &mut Option<SelectAll<DefaultHandle>>,
+        cfg: &PublisherCfg,
+    ) {
         let mut c = Command::new(&cfg.exe);
         c.args(cfg.args.iter());
         if let Some(dir) = cfg.working_directory.as_ref() {
@@ -130,34 +148,36 @@ async fn run_process(
             Err(e) => error!("failed to spawn process {} failed with {}", cfg.exe, e),
             Ok(child) => {
                 *proc = ProcStatus::Running(child);
+                *default = None;
             }
         }
     }
     loop {
         select_biased! {
-            e = wait(&mut proc).fuse() => match e {
+            e = wait_proc(&mut proc).fuse() => match e {
                 Err(e) => {
                     error!("failed to wait for base {:?}, failed with {}", base, e);
                     sleep(Duration::from_secs(1)).await;
                 }
                 Ok(e) => {
                     warn!("process for base {:?} shutdown with {:?}", base, e);
-                    proc = ProcStatus::Died(Instant::now(), e);
+                    proc = ProcStatus::Died(Instant::now());
+                    default = Some(publish(&publisher, &base)?);
                 }
             },
-            (_, _) = default.select_next_some() => match &proc {
+            () = wait_default(&mut default).fuse() => match &proc {
                 ProcStatus::Running(_) => (),
-                ProcStatus::NotStarted => start(&mut proc, &cfg),
-                ProcStatus::Died(when, _) => match cfg.restart {
+                ProcStatus::NotStarted => start(&mut proc, &mut default, &cfg),
+                ProcStatus::Died(when) => match cfg.restart {
                     Restart::No => (),
-                    Restart::Yes => start(&mut proc, &cfg),
+                    Restart::Yes => start(&mut proc, &mut default, &cfg),
                     Restart::RateLimited(secs) => {
                         let elapsed = when.elapsed();
                         if elapsed.as_secs_f64() > secs {
-                            start(&mut proc, &cfg)
+                            start(&mut proc, &mut default, &cfg)
                         } else {
                             sleep(Duration::from_secs_f64(secs) - elapsed).await;
-                            start(&mut proc, &cfg)
+                            start(&mut proc, &mut default, &cfg)
                         }
                     }
                 }
