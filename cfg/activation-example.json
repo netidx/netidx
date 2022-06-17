@@ -19,6 +19,7 @@
     "cfg": {
       "exe": "/home/eric/.cargo/bin/netidx",
       "args": [
+        "container",
         "--api-path",
         "/local/container-api"
       ]
