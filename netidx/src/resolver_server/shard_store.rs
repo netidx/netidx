@@ -332,13 +332,23 @@ impl Shard {
             ToWrite::PublishDefaultWithFlags(path, flags) => {
                 (id, publish(store, path, true, Some(flags)))
             }
-            ToWrite::Unpublish(path) | ToWrite::UnpublishDefault(path) => {
+            ToWrite::Unpublish(path) => {
                 if !Path::is_absolute(&*path) {
                     (id, FromWrite::Error("absolute paths required".into()))
                 } else if let Some(r) = store.check_referral(&path) {
                     (id, FromWrite::Referral(r))
                 } else {
-                    store.unpublish(&publisher, path);
+                    store.unpublish(&publisher, false, path);
+                    (id, FromWrite::Unpublished)
+                }
+            }
+            ToWrite::UnpublishDefault(path) => {
+                if !Path::is_absolute(&*path) {
+                    (id, FromWrite::Error("absolute paths required".into()))
+                } else if let Some(r) = store.check_referral(&path) {
+                    (id, FromWrite::Referral(r))
+                } else {
+                    store.unpublish(&publisher, true, path);
                     (id, FromWrite::Unpublished)
                 }
             }

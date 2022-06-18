@@ -17,7 +17,7 @@ use std::{
     clone::Clone,
     collections::{
         hash_map::Entry,
-        BTreeMap, BTreeSet, Bound,
+        BTreeMap, Bound,
         Bound::{Excluded, Included, Unbounded},
         HashMap, HashSet,
     },
@@ -127,7 +127,8 @@ pub(super) struct Store {
     published_by_id: FxHashMap<PublisherId, HashSet<Path>>,
     published_by_level: FxHashMap<usize, BTreeMap<Path, Z64>>,
     columns: HashMap<Path, HashMap<Path, Z64>>,
-    defaults: BTreeSet<Path>,
+    defaults: BTreeMap<Path, Set<PublisherId>>,
+    defaults_by_id: FxHashMap<PublisherId, HashSet<Path>>,
     parent: Option<Referral>,
     children: BTreeMap<Path, Referral>,
     sets: HCSet<PublisherId>,
@@ -146,7 +147,8 @@ impl Store {
             published_by_id: HashMap::default(),
             published_by_level: HashMap::default(),
             columns: HashMap::new(),
-            defaults: BTreeSet::new(),
+            defaults: BTreeMap::new(),
+            defaults_by_id: HashMap::default(),
             parent,
             children,
             sets: HCSet::new(),
@@ -170,6 +172,7 @@ impl Store {
             if !save {
                 save = p == "/"
                     || self.published_by_path.contains_key(p)
+                    || self.defaults.contains_key(p)
                     || self.children.contains_key(p)
                     || with_trailing(p, |tmp| {
                         self.published_by_level
@@ -331,21 +334,34 @@ impl Store {
             self.publishers_by_addr.insert(publisher.addr, publisher.id);
             p
         });
-        self.published_by_id
-            .entry(publisher.id)
-            .or_insert_with(HashSet::new)
-            .insert(path.clone());
-        let pubs = self.published_by_path.entry(path.clone()).or_insert_with(Set::new);
-        let len = pubs.len();
-        *pubs = self.sets.add(pubs, publisher.id);
+        let up = if default {
+            let pubs = self.defaults.entry(path.clone()).or_insert_with(Set::new);
+            let len = pubs.len();
+            *pubs = self.sets.add(pubs, publisher.id);
+            self.defaults_by_id
+                .entry(publisher.id)
+                .or_insert_with(HashSet::new)
+                .insert(path.clone());
+            pubs.len() > len
+        } else {
+            let pubs =
+                self.published_by_path.entry(path.clone()).or_insert_with(Set::new);
+            let len = pubs.len();
+            *pubs = self.sets.add(pubs, publisher.id);
+            self.published_by_id
+                .entry(publisher.id)
+                .or_insert_with(HashSet::new)
+                .insert(path.clone());
+            let up = pubs.len() > len;
+            if up {
+                self.add_column(&path);
+            }
+            up
+        };
         if let Some(flags) = flags {
             self.flags_by_path.insert(path.clone(), flags);
         }
-        if default {
-            self.defaults.insert(path.clone());
-        }
-        if pubs.len() > len {
-            self.add_column(&path);
+        if up {
             self.add_parents(path.as_ref());
             let n = Path::levels(path.as_ref());
             let cn = self
@@ -358,51 +374,97 @@ impl Store {
         }
     }
 
-    pub(super) fn unpublish(&mut self, publisher: &Arc<Publisher>, path: Path) {
-        let client_gone = self
-            .published_by_id
-            .get_mut(&publisher.id)
-            .map(|s| {
-                s.remove(&path);
-                s.is_empty()
-            })
-            .unwrap_or(true);
-        if client_gone {
-            self.published_by_id.remove(&publisher.id);
-            self.publishers_by_id.remove(&publisher.id);
-            self.publishers_by_addr.remove(&publisher.addr);
-        }
-        match self.published_by_path.get_mut(&path) {
-            None => (),
-            Some(pubs) => {
-                let len = pubs.len();
-                let n = Path::levels(path.as_ref());
-                match self.sets.remove(pubs, &publisher.id) {
-                    Some(new_pubs) => {
-                        *pubs = new_pubs;
-                        if pubs.len() < len {
-                            self.remove_column(&path);
-                            self.remove_parents(path.as_ref());
-                            let cn = self
-                                .published_by_level
-                                .entry(n)
-                                .or_insert_with(BTreeMap::new)
-                                .entry(path.clone())
-                                .or_insert(Z64(0));
-                            **cn += 1;
+    pub(super) fn unpublish(
+        &mut self,
+        publisher: &Arc<Publisher>,
+        default: bool,
+        path: Path,
+    ) {
+        let up = if default {
+            let gone = self
+                .defaults_by_id
+                .get_mut(&publisher.id)
+                .map(|s| {
+                    s.remove(&path);
+                    s.is_empty()
+                })
+                .unwrap_or(true);
+            if gone {
+                self.defaults_by_id.remove(&publisher.id);
+            }
+            match self.defaults.get_mut(&path) {
+                None => false,
+                Some(pubs) => {
+                    let len = pubs.len();
+                    match self.sets.remove(pubs, &publisher.id) {
+                        Some(new_pubs) => {
+                            *pubs = new_pubs;
+                            pubs.len() < len
+                        }
+                        None => {
+                            self.defaults.remove(&path);
+                            true
                         }
                     }
-                    None => {
-                        self.published_by_path.remove(&path);
-                        self.flags_by_path.remove(&path);
-                        self.defaults.remove(&path);
-                        self.remove_column(&path);
-                        if let Some(s) = self.published_by_level.get_mut(&n) {
-                            s.remove(&path);
-                        };
-                        self.remove_parents(path.as_ref());
+                }
+            }
+        } else {
+            let gone = self
+                .published_by_id
+                .get_mut(&publisher.id)
+                .map(|s| {
+                    s.remove(&path);
+                    s.is_empty()
+                })
+                .unwrap_or(true);
+            if gone {
+                self.published_by_id.remove(&publisher.id);
+            }
+            match self.published_by_path.get_mut(&path) {
+                None => false,
+                Some(pubs) => {
+                    let len = pubs.len();
+                    match self.sets.remove(pubs, &publisher.id) {
+                        Some(new_pubs) => {
+                            *pubs = new_pubs;
+                            let up = pubs.len() < len;
+                            if up {
+                                self.remove_column(&path);
+                            }
+                            up
+                        }
+                        None => {
+                            self.published_by_path.remove(&path);
+                            self.remove_column(&path);
+                            true
+                        }
                     }
                 }
+            }
+        };
+        if up {
+            self.remove_parents(path.as_ref());
+            let n = Path::levels(path.as_ref());
+            let cn = self
+                .published_by_level
+                .entry(n)
+                .or_insert_with(BTreeMap::new)
+                .entry(path.clone())
+                .or_insert(Z64(0));
+            **cn += 1;
+            if !self.published_by_path.contains_key(&path)
+                && !self.defaults.contains_key(&path)
+            {
+                self.flags_by_path.remove(&path);
+                if let Some(s) = self.published_by_level.get_mut(&n) {
+                    s.remove(&path);
+                };
+            }
+            if !self.defaults_by_id.contains_key(&publisher.id)
+                && !self.published_by_id.contains_key(&publisher.id)
+            {
+                self.publishers_by_id.remove(&publisher.id);
+                self.publishers_by_addr.remove(&publisher.addr);
             }
         }
     }
@@ -411,9 +473,16 @@ impl Store {
         self.published_by_id.get(id).map(|s| s.clone()).unwrap_or_else(HashSet::new)
     }
 
+    fn defaults_for_id(&self, id: &PublisherId) -> HashSet<Path> {
+        self.defaults_by_id.get(id).map(|s| s.clone()).unwrap_or_else(HashSet::new)
+    }
+    
     pub(super) fn clear(&mut self, publisher: &Arc<Publisher>) {
         for path in self.published_for_id(&publisher.id).drain() {
-            self.unpublish(publisher, path);
+            self.unpublish(publisher, false, path);
+        }
+        for path in self.defaults_for_id(&publisher.id).drain() {
+            self.unpublish(publisher, true, path)
         }
     }
 
@@ -443,19 +512,14 @@ impl Store {
             .next_back();
         match default {
             None => (0, SIGNED_PUBS_POOL.take()),
-            Some(p) if Path::is_parent(p, path) => {
-                match self.published_by_path.get(p.as_ref()) {
-                    None => (0, SIGNED_PUBS_POOL.take()),
-                    Some(ids) => {
-                        let mut pubs = SIGNED_PUBS_POOL.take();
-                        let refs = ids.into_iter().map(|id| {
-                            self.record_publisher(publishers, id);
-                            PublisherRef { id: *id, token: Bytes::new() }
-                        });
-                        pubs.extend(refs);
-                        (self.get_flags(p.as_ref()), pubs)
-                    }
-                }
+            Some((p, ids)) if Path::is_parent(p, path) => {
+                let mut pubs = SIGNED_PUBS_POOL.take();
+                let refs = ids.into_iter().map(|id| {
+                    self.record_publisher(publishers, id);
+                    PublisherRef { id: *id, token: Bytes::new() }
+                });
+                pubs.extend(refs);
+                (self.get_flags(p.as_ref()), pubs)
             }
             Some(_) => (0, SIGNED_PUBS_POOL.take()),
         }
