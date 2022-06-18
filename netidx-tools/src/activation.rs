@@ -20,8 +20,10 @@ use structopt::StructOpt;
 use tokio::{
     process::{Child, Command},
     runtime::Runtime,
+    signal::unix::{signal, SignalKind},
+    sync::broadcast,
     task,
-    time::{sleep, Instant},
+    time::{sleep, timeout, Instant},
 };
 
 #[derive(StructOpt, Debug)]
@@ -102,6 +104,7 @@ async fn run_process(
     publisher: Publisher,
     base: BTreeSet<Path>,
     cfg: PublisherCfg,
+    mut shutdown: broadcast::Receiver<()>,
 ) -> Result<()> {
     let mut proc: ProcStatus = ProcStatus::NotStarted;
     let mut default: Option<SelectAll<DefaultHandle>> = Some(publish(&publisher, &base)?);
@@ -154,6 +157,24 @@ async fn run_process(
     }
     loop {
         select_biased! {
+            _ = shutdown.recv().fuse() => match &mut proc {
+                ProcStatus::NotStarted | ProcStatus::Died(_) => break Ok(()),
+                ProcStatus::Running(child) => {
+                    match child.id() {
+                        None => {
+                            let _ = child.kill().await;
+                        }
+                        Some(pid) => {
+                            let pid = nix::unistd::Pid::from_raw(pid as i32);
+                            let term = nix::sys::signal::Signal::SIGTERM;
+                            let _ = nix::sys::signal::kill(pid, Some(term));
+                            let _ = timeout(Duration::from_secs(30), child.wait()).await;
+                            let _ = child.kill().await;
+                        }
+                    }
+                    break Ok(())
+                }
+            },
             e = wait_proc(&mut proc).fuse() => match e {
                 Err(e) => {
                     error!("failed to wait for base {:?}, failed with {}", base, e);
@@ -194,18 +215,35 @@ async fn run_server(
     spec: HashMap<BTreeSet<Path>, PublisherCfg>,
 ) -> Result<()> {
     let publisher = Publisher::new(cfg, auth, params.bind).await?;
-    join_all(spec.into_iter().map(|(path, cfg)| {
-        let publisher = publisher.clone();
-        task::spawn(async move {
-            if let Err(e) = run_process(publisher, path.clone(), cfg).await {
-                error!("handler for base {:?} died with {}", path, e)
-            }
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigquit = signal(SignalKind::quit())?;
+    let (tx, _rx) = broadcast::channel(10);
+    let tasks = spec
+        .into_iter()
+        .map(|(path, cfg)| {
+            let publisher = publisher.clone();
+            let rx = tx.subscribe();
+            task::spawn(async move {
+                if let Err(e) = run_process(publisher, path.clone(), cfg, rx).await {
+                    error!("handler for base {:?} died with {}", path, e)
+                }
+            })
         })
-    }))
-    .await
-    .into_iter()
-    .collect::<std::result::Result<(), _>>()?;
-    Ok(())
+        .collect::<Vec<_>>();
+    let shutdown = || async move {
+        let _ = tx.send(());
+        let _ = join_all(tasks).await;
+        Ok(())
+    };
+    loop {
+        select_biased! {
+            _ = sigint.recv().fuse() => break shutdown().await,
+            _ = sigterm.recv().fuse() => break shutdown().await,
+            _ = sigquit.recv().fuse() => break shutdown().await,
+            complete => break shutdown().await,
+        }
+    }
 }
 
 pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) {

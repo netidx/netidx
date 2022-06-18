@@ -22,6 +22,7 @@ path = "src/lib.rs"
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.4"
+nix = "0.24"
 
 [features]
 default = ["krb5_iov"]
