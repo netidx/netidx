@@ -16,11 +16,12 @@ use std::{
     marker::PhantomData,
 };
 use tokio::time;
-use uuid::{adapter::SimpleRef, Uuid};
+use uuid::Uuid;
 
 pub fn uuid_string(id: Uuid) -> String {
-    let mut buf = [0u8; SimpleRef::LENGTH];
-    id.to_simple_ref().encode_lower(&mut buf).into()
+    use uuid::fmt::Simple;
+    let mut buf = [0u8; Simple::LENGTH];
+    Simple::from_uuid(id).encode_lower(&mut buf).into()
 }
 
 /// Simple clustering based on netidx. Each member publishes a uuid to
