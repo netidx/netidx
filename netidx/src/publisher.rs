@@ -452,7 +452,7 @@ impl DefaultHandle {
         mut flags: PublishFlags,
         path: Path,
     ) -> Result<()> {
-        if !path.starts_with(&*self.path) {
+        if !Path::is_parent(&*self.path, &path) {
             bail!("advertisements must be under the default publisher path")
         }
         if let Some(pb) = self.publisher.upgrade() {
@@ -516,6 +516,15 @@ impl Drop for DefaultHandle {
             let mut pb = t.0.lock();
             pb.default.remove(self.path.as_ref());
             pb.to_unpublish_default.insert(self.path.clone());
+            if let Some(paths) = pb.advertised.remove(&self.path) {
+                for path in paths {
+                    if !pb.by_path.contains_key(&path) {
+                        pb.to_publish.remove(&path);
+                        pb.to_unpublish.insert(path);
+                    }
+                }
+            }
+            pb.trigger_publish()
         }
     }
 }
