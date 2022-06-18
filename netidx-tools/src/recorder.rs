@@ -44,7 +44,7 @@ use std::{
 };
 use structopt::StructOpt;
 use tokio::{runtime::Runtime, sync::broadcast, task, time};
-use uuid::{adapter::SimpleRef, Uuid};
+use uuid::Uuid;
 
 #[derive(StructOpt, Debug)]
 pub(super) struct Params {
@@ -122,8 +122,9 @@ mod publish {
         "Start playing after waiting the specified timeout";
 
     fn session_base(publish_base: &Path, id: Uuid) -> Path {
-        let mut buf = [0u8; SimpleRef::LENGTH];
-        publish_base.append(id.to_simple_ref().encode_lower(&mut buf))
+        use uuid::fmt::Simple;
+        let mut buf = [0u8; Simple::LENGTH];
+        publish_base.append(Simple::from_uuid(id).encode_lower(&mut buf))
     }
 
     fn parse_speed(v: Value) -> Result<Option<f64>> {
