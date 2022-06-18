@@ -109,12 +109,12 @@ fn test_resolver_store() {
     let parsed = paths.iter().map(|p| Path::from(*p)).collect::<Vec<_>>();
     for (path, publisher) in &default {
         if parsed.iter().any(|p| Path::is_parent(&path, p)) {
-            store.unpublish(publisher, true, dbg!(path.clone()));
+            store.unpublish(publisher, true, path.clone());
         }
     }
     for path in parsed.clone() {
         let publisher = &publishers[&addr];
-        store.unpublish(publisher, false, dbg!(path.clone()));
+        store.unpublish(publisher, false, path.clone());
         if store
             .resolve(&mut HashMap::default(), &path)
             .1
@@ -138,7 +138,7 @@ fn test_resolver_store() {
     let cols = store.columns(&Path::from("/app"));
     assert_eq!(cols.len(), 0);
     let paths = store.list(&Path::from("/app/test"));
-    assert_eq!(dbg!(&paths).len(), 1);
+    assert_eq!(&paths.len(), 1);
     assert_eq!(paths[0].as_ref(), "/app/test/app0");
     let mut cols = store.columns(&Path::from("/app/test"));
     cols.sort();
