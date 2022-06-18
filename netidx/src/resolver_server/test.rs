@@ -138,7 +138,7 @@ fn test_resolver_store() {
     let cols = store.columns(&Path::from("/app"));
     assert_eq!(cols.len(), 0);
     let paths = store.list(&Path::from("/app/test"));
-    assert_eq!(&paths.len(), 1);
+    assert_eq!(paths.len(), 1);
     assert_eq!(paths[0].as_ref(), "/app/test/app0");
     let mut cols = store.columns(&Path::from("/app/test"));
     cols.sort();
