@@ -1,7 +1,7 @@
 use anyhow::Result;
 use daemonize::Daemonize;
 use futures::{future::join_all, prelude::*, select_biased, stream::SelectAll};
-use log::{error, warn};
+use log::{error, info, warn};
 use netidx::{
     config::Config,
     path::Path,
@@ -9,8 +9,7 @@ use netidx::{
 };
 use serde_derive::Deserialize;
 use std::{
-    collections::{BTreeSet, HashMap},
-    fs::{self, read_to_string},
+    collections::{BTreeSet, HashMap, HashSet},
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::ExitStatus,
@@ -18,10 +17,11 @@ use std::{
 };
 use structopt::StructOpt;
 use tokio::{
+    fs,
     process::{Child, Command},
     runtime::Runtime,
     signal::unix::{signal, SignalKind},
-    sync::broadcast,
+    sync::mpsc,
     task,
     time::{sleep, timeout, Instant},
 };
@@ -36,18 +36,18 @@ pub(super) struct Params {
     )]
     bind: BindCfg,
     #[structopt(
-        short = "p",
-        long = "publishers",
-        help = "path to the publishers definition file"
+        short = "u",
+        long = "units",
+        help = "path to directory containing the unit files to manage"
     )]
-    publisher: PathBuf,
+    units: PathBuf,
     #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
     foreground: bool,
     #[structopt(long = "pid-file", help = "write the pid to file")]
     pid_file: Option<PathBuf>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 enum Restart {
     No,
     Yes,
@@ -60,8 +60,8 @@ impl Default for Restart {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct PublisherCfg {
+#[derive(Debug, Clone, Deserialize)]
+struct ProcessCfg {
     exe: String,
     #[serde(default)]
     args: Vec<String>,
@@ -75,9 +75,9 @@ struct PublisherCfg {
     restart: Restart,
 }
 
-impl PublisherCfg {
-    fn validate(&self) -> Result<()> {
-        let md = fs::metadata(&self.exe)?;
+impl ProcessCfg {
+    async fn validate(&self) -> Result<()> {
+        let md = fs::metadata(&self.exe).await?;
         if !md.is_file() {
             bail!("exe must be a file")
         }
@@ -88,10 +88,65 @@ impl PublisherCfg {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct CfgPair {
-    paths: Vec<Path>,
-    cfg: PublisherCfg,
+#[derive(Debug, Clone, Deserialize)]
+enum Trigger {
+    OnStart,
+    OnAccess(BTreeSet<Path>),
+}
+
+impl Default for Trigger {
+    fn default() -> Self {
+        Self::OnStart
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Unit {
+    #[serde(default)]
+    trigger: Trigger,
+    process: ProcessCfg,
+}
+
+impl Unit {
+    async fn load(path: &PathBuf) -> Result<HashMap<String, Unit>> {
+        let units = {
+            let mut hm: HashMap<String, Unit> = HashMap::new();
+            let mut dirs = fs::read_dir(path).await?;
+            while let Some(ent) = dirs.next_entry().await? {
+                let typ = ent.file_type().await?;
+                if typ.is_file() || typ.is_symlink() {
+                    match serde_json::from_str(&fs::read_to_string(ent.path()).await?) {
+                        Ok(u) => {
+                            hm.insert(ent.file_name().to_string_lossy().into_owned(), u);
+                        }
+                        Err(e) => {
+                            error!(
+                                "invalid unit definition {}: {}",
+                                ent.path().to_string_lossy(),
+                                e
+                            )
+                        }
+                    }
+                }
+            }
+            hm
+        };
+        let mut triggers = HashSet::new();
+        for unit in units.values() {
+            unit.process.validate().await?;
+            match &unit.trigger {
+                Trigger::OnStart => (),
+                Trigger::OnAccess(paths) => {
+                    for path in paths {
+                        if !triggers.insert(path.clone()) {
+                            bail!("conflicting unit trigger {}", path)
+                        }
+                    }
+                }
+            }
+        }
+        Ok(units)
+    }
 }
 
 enum ProcStatus {
@@ -100,175 +155,255 @@ enum ProcStatus {
     Running(Child),
 }
 
-async fn run_process(
-    publisher: Publisher,
-    base: BTreeSet<Path>,
-    cfg: PublisherCfg,
-    mut shutdown: broadcast::Receiver<()>,
-) -> Result<()> {
-    let mut proc: ProcStatus = ProcStatus::NotStarted;
-    let mut default: Option<SelectAll<DefaultHandle>> = Some(publish(&publisher, &base)?);
-    fn publish(
-        publisher: &Publisher,
-        base: &BTreeSet<Path>,
-    ) -> Result<SelectAll<DefaultHandle>> {
-        Ok(base
-            .iter()
-            .map(|path| publisher.publish_default(path.clone()))
-            .collect::<Result<SelectAll<_>>>()?)
-    }
-    async fn wait_proc(proc: &mut ProcStatus) -> Result<ExitStatus> {
-        match proc {
-            ProcStatus::Running(proc) => Ok(proc.wait().await?),
-            ProcStatus::Died(_) | ProcStatus::NotStarted => future::pending().await,
-        }
-    }
-    async fn wait_default(default: &mut Option<SelectAll<DefaultHandle>>) {
-        match default {
-            Some(default) => {
-                let _ = default.select_next_some().await;
-            }
-            None => future::pending().await,
-        }
-    }
-    fn start(
-        proc: &mut ProcStatus,
-        default: &mut Option<SelectAll<DefaultHandle>>,
-        cfg: &PublisherCfg,
-    ) {
-        let mut c = Command::new(&cfg.exe);
-        c.args(cfg.args.iter());
-        if let Some(dir) = cfg.working_directory.as_ref() {
-            c.current_dir(dir);
-        }
-        if let Some(uid) = cfg.uid {
-            c.uid(uid);
-        }
-        if let Some(gid) = cfg.gid {
-            c.gid(gid);
-        }
-        match c.spawn() {
-            Err(e) => error!("failed to spawn process {} failed with {}", cfg.exe, e),
-            Ok(child) => {
-                *proc = ProcStatus::Running(child);
-                *default = None;
+enum ToProcess {
+    Shutdown,
+    Reconfigure(Unit),
+}
+
+struct Process {
+    join_handle: task::JoinHandle<()>,
+    tx: mpsc::UnboundedSender<ToProcess>,
+}
+
+impl Process {
+    async fn run(
+        publisher: Publisher,
+        name: String,
+        mut unit: Unit,
+        mut rx: mpsc::UnboundedReceiver<ToProcess>,
+    ) -> Result<()> {
+        let mut proc: ProcStatus = ProcStatus::NotStarted;
+        let mut default: Option<SelectAll<DefaultHandle>> =
+            publish(&publisher, &unit.trigger)?;
+        fn publish(
+            publisher: &Publisher,
+            trigger: &Trigger,
+        ) -> Result<Option<SelectAll<DefaultHandle>>> {
+            match trigger {
+                Trigger::OnStart => Ok(None),
+                Trigger::OnAccess(paths) => {
+                    let handles = paths
+                        .iter()
+                        .map(|path| publisher.publish_default(path.clone()))
+                        .collect::<Result<SelectAll<_>>>()?;
+                    Ok(Some(handles))
+                }
             }
         }
-    }
-    loop {
-        select_biased! {
-            _ = shutdown.recv().fuse() => match &mut proc {
-                ProcStatus::NotStarted | ProcStatus::Died(_) => break Ok(()),
-                ProcStatus::Running(child) => {
-                    match child.id() {
-                        None => {
-                            let _ = child.kill().await;
-                        }
-                        Some(pid) => {
-                            let pid = nix::unistd::Pid::from_raw(pid as i32);
-                            let term = nix::sys::signal::Signal::SIGTERM;
-                            let _ = nix::sys::signal::kill(pid, Some(term));
-                            let _ = timeout(Duration::from_secs(30), child.wait()).await;
-                            let _ = child.kill().await;
-                        }
+        async fn wait_proc(proc: &mut ProcStatus) -> Result<ExitStatus> {
+            match proc {
+                ProcStatus::Running(proc) => Ok(proc.wait().await?),
+                ProcStatus::Died(_) | ProcStatus::NotStarted => future::pending().await,
+            }
+        }
+        async fn wait_default(default: &mut Option<SelectAll<DefaultHandle>>) {
+            match default {
+                Some(default) => {
+                    let _ = default.select_next_some().await;
+                }
+                None => future::pending().await,
+            }
+        }
+        fn start(
+            proc: &mut ProcStatus,
+            default: &mut Option<SelectAll<DefaultHandle>>,
+            cfg: &ProcessCfg,
+        ) {
+            let mut c = Command::new(&cfg.exe);
+            c.args(cfg.args.iter());
+            if let Some(dir) = cfg.working_directory.as_ref() {
+                c.current_dir(dir);
+            }
+            if let Some(uid) = cfg.uid {
+                c.uid(uid);
+            }
+            if let Some(gid) = cfg.gid {
+                c.gid(gid);
+            }
+            match c.spawn() {
+                Err(e) => error!("failed to spawn process {} failed with {}", cfg.exe, e),
+                Ok(child) => {
+                    *proc = ProcStatus::Running(child);
+                    *default = None;
+                }
+            }
+        }
+        async fn restart(
+            proc: &mut ProcStatus,
+            default: &mut Option<SelectAll<DefaultHandle>>,
+            unit: &Unit,
+            when: Instant,
+        ) {
+            match &unit.process.restart {
+                Restart::No => (),
+                Restart::Yes => start(proc, default, &unit.process),
+                Restart::RateLimited(secs) => {
+                    let elapsed = when.elapsed();
+                    if elapsed.as_secs_f64() > *secs {
+                        start(proc, default, &unit.process)
+                    } else {
+                        sleep(Duration::from_secs_f64(*secs) - elapsed).await;
+                        start(proc, default, &unit.process)
                     }
-                    break Ok(())
                 }
-            },
-            e = wait_proc(&mut proc).fuse() => match e {
-                Err(e) => {
-                    error!("failed to wait for base {:?}, failed with {}", base, e);
-                    sleep(Duration::from_secs(1)).await;
-                }
-                Ok(e) => {
-                    warn!("process for base {:?} shutdown with {:?}", base, e);
-                    proc = ProcStatus::Died(Instant::now());
-                    default = Some(publish(&publisher, &base)?);
-                }
-            },
-            () = wait_default(&mut default).fuse() => match &proc {
+            }
+        }
+        async fn maybe_restart(
+            proc: &mut ProcStatus,
+            default: &mut Option<SelectAll<DefaultHandle>>,
+            unit: &Unit,
+        ) {
+            match proc {
                 ProcStatus::Running(_) => (),
-                ProcStatus::NotStarted => start(&mut proc, &mut default, &cfg),
-                ProcStatus::Died(when) => match cfg.restart {
-                    Restart::No => (),
-                    Restart::Yes => start(&mut proc, &mut default, &cfg),
-                    Restart::RateLimited(secs) => {
-                        let elapsed = when.elapsed();
-                        if elapsed.as_secs_f64() > secs {
-                            start(&mut proc, &mut default, &cfg)
-                        } else {
-                            sleep(Duration::from_secs_f64(secs) - elapsed).await;
-                            start(&mut proc, &mut default, &cfg)
+                ProcStatus::NotStarted => match &unit.trigger {
+                    Trigger::OnStart => start(proc, default, &unit.process),
+                    Trigger::OnAccess(_) => (),
+                },
+                ProcStatus::Died(when) => {
+                    let when = *when;
+                    restart(proc, default, unit, when).await
+                },
+            }
+        }
+        maybe_restart(&mut proc, &mut default, &unit).await;
+        loop {
+            select_biased! {
+                m = rx.recv().fuse() => match m {
+                    Some(ToProcess::Reconfigure(new_unit)) => {
+                        unit = new_unit;
+                        match proc {
+                            ProcStatus::Running(_) => (),
+                            ProcStatus::NotStarted | ProcStatus::Died(_) => {
+                                default = publish(&publisher, &unit.trigger)?;
+                                maybe_restart(&mut proc, &mut default, &unit).await
+                            }
                         }
                     }
-                }
-            },
-            complete => bail!("default handle finished"),
+                    None | Some(ToProcess::Shutdown) =>  match &mut proc {
+                        ProcStatus::NotStarted | ProcStatus::Died(_) => break Ok(()),
+                        ProcStatus::Running(child) => {
+                            match child.id() {
+                                None => {
+                                    let _ = child.kill().await;
+                                }
+                                Some(pid) => {
+                                    let pid = nix::unistd::Pid::from_raw(pid as i32);
+                                    let term = nix::sys::signal::Signal::SIGTERM;
+                                    let _ = nix::sys::signal::kill(pid, Some(term));
+                                    let _ = timeout(Duration::from_secs(30), child.wait()).await;
+                                    let _ = child.kill().await;
+                                }
+                            }
+                            break Ok(())
+                        }
+                    }
+                },
+                e = wait_proc(&mut proc).fuse() => match e {
+                    Err(e) => {
+                        error!("failed to wait for unit {}, failed with {}", name, e);
+                        sleep(Duration::from_secs(1)).await;
+                    }
+                    Ok(e) => {
+                        warn!("process for unit {} shutdown with {:?}", name, e);
+                        proc = ProcStatus::Died(Instant::now());
+                        default = publish(&publisher, &unit.trigger)?;
+                        maybe_restart(&mut proc, &mut default, &unit).await
+                    }
+                },
+                () = wait_default(&mut default).fuse() => match &proc {
+                    ProcStatus::Running(_) => (),
+                    ProcStatus::NotStarted => start(&mut proc, &mut default, &unit.process),
+                    ProcStatus::Died(when) => {
+                        let when = *when;
+                        restart(&mut proc, &mut default, &unit, when).await
+                    },
+                },
+                complete => bail!("default handle finished"),
+            }
+        }
+    }
+
+    fn new(publisher: Publisher, name: String, unit: Unit) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let join_handle = task::spawn(async move {
+            match Self::run(publisher, name.clone(), unit, rx).await {
+                Err(e) => error!("unit {} failed with {}", name, e),
+                Ok(()) => info!("unit {} shutdown", name),
+            }
+        });
+        Self { join_handle, tx }
+    }
+
+    fn reconfigure(&self, unit: Unit) {
+        let _ = self.tx.send(ToProcess::Reconfigure(unit));
+    }
+
+    async fn shutdown(self) {
+        let _ = self.tx.send(ToProcess::Shutdown);
+        let _ = self.join_handle.await;
+    }
+}
+
+async fn start_processes(
+    publisher: &Publisher,
+    units: &HashMap<String, Unit>,
+    processes: &mut HashMap<String, Process>,
+) {
+    let to_kill = processes
+        .keys()
+        .filter(|k| !units.contains_key(k.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    join_all(
+        to_kill.into_iter().filter_map(|k| processes.remove(&k)).map(|p| p.shutdown()),
+    )
+    .await;
+    for (name, unit) in units {
+        match processes.get_mut(name) {
+            Some(proc) => proc.reconfigure(unit.clone()),
+            None => {
+                processes.insert(
+                    name.clone(),
+                    Process::new(publisher.clone(), name.clone(), unit.clone()),
+                );
+            }
         }
     }
 }
 
-async fn run_server(
-    cfg: Config,
-    auth: DesiredAuth,
-    params: Params,
-    spec: HashMap<BTreeSet<Path>, PublisherCfg>,
-) -> Result<()> {
+async fn run_server(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
     let publisher = Publisher::new(cfg, auth, params.bind).await?;
+    let mut units = Unit::load(&params.units).await?;
+    let mut processes: HashMap<String, Process> = HashMap::new();
+    let mut sighup = signal(SignalKind::hangup())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigquit = signal(SignalKind::quit())?;
-    let (tx, _rx) = broadcast::channel(10);
-    let tasks = spec
-        .into_iter()
-        .map(|(path, cfg)| {
-            let publisher = publisher.clone();
-            let rx = tx.subscribe();
-            task::spawn(async move {
-                if let Err(e) = run_process(publisher, path.clone(), cfg, rx).await {
-                    error!("handler for base {:?} died with {}", path, e)
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let shutdown = || async move {
-        let _ = tx.send(());
-        let _ = join_all(tasks).await;
-        Ok(())
-    };
+    let shutdown =
+        |p| async { start_processes(&publisher, &HashMap::default(), p).await };
+    start_processes(&publisher, &units, &mut processes).await;
     loop {
         select_biased! {
-            _ = sigint.recv().fuse() => break shutdown().await,
-            _ = sigterm.recv().fuse() => break shutdown().await,
-            _ = sigquit.recv().fuse() => break shutdown().await,
-            complete => break shutdown().await,
+            _ = sigint.recv().fuse() => break shutdown(&mut processes).await,
+            _ = sigterm.recv().fuse() => break shutdown(&mut processes).await,
+            _ = sigquit.recv().fuse() => break shutdown(&mut processes).await,
+            _ = sighup.recv().fuse() => {
+                match Unit::load(&params.units).await {
+                    Err(e) => error!("could not reconfigure, could not load units {}", e),
+                    Ok(u) => {
+                        units = u;
+                        start_processes(&publisher, &units, &mut processes).await;
+                        info!("units reloaded successfully")
+                    }
+                }
+            }
+            complete => break shutdown(&mut processes).await,
         }
     }
+    Ok(())
 }
 
 pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) {
-    let spec = read_to_string(&params.publisher).expect("failed to read publishers spec");
-    let spec: Vec<CfgPair> =
-        serde_json::from_str(&spec).expect("invalid publishers spec");
-    let spec = {
-        let mut tbl = HashMap::new();
-        for cfg in spec.into_iter() {
-            let mut pset = BTreeSet::new();
-            cfg.cfg.validate().expect("invalid publisher specification");
-            for path in cfg.paths {
-                if !Path::is_absolute(&path) {
-                    panic!("absolute paths are required")
-                }
-                if !pset.insert(path) {
-                    panic!("paths within a group must be unique")
-                }
-            }
-            if tbl.insert(pset, cfg.cfg).is_some() {
-                panic!("publisher path sets must be unique")
-            }
-        }
-        tbl
-    };
     if !params.foreground {
         let mut d = Daemonize::new();
         if let Some(pid_file) = params.pid_file.as_ref() {
@@ -277,7 +412,7 @@ pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) {
         d.start().expect("failed to daemonize")
     }
     Runtime::new().expect("failed to init runtime").block_on(async move {
-        if let Err(e) = run_server(cfg, auth, params, spec).await {
+        if let Err(e) = run_server(cfg, auth, params).await {
             error!("server task shutdown: {}", e)
         }
     });
