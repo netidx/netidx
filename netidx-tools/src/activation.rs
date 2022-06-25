@@ -61,18 +61,38 @@ impl Default for Restart {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+enum Environment {
+    Inherit(HashMap<String, String>),
+    Replace(HashMap<String, String>),
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self::Inherit(HashMap::default())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct ProcessCfg {
     exe: String,
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
-    working_directory: Option<String>,
+    working_directory: Option<PathBuf>,
     #[serde(default)]
     uid: Option<u32>,
     #[serde(default)]
     gid: Option<u32>,
     #[serde(default)]
     restart: Restart,
+    #[serde(default)]
+    stdin: Option<PathBuf>,
+    #[serde(default)]
+    stdout: Option<PathBuf>,
+    #[serde(default)]
+    stderr: Option<PathBuf>,
+    #[serde(default)]
+    environment: Environment,
 }
 
 impl ProcessCfg {
@@ -85,6 +105,40 @@ impl ProcessCfg {
             bail!("exe must be executable")
         }
         Ok(())
+    }
+
+    fn command(&self) -> Result<Command> {
+        use std::fs;
+        let mut c = Command::new(&self.exe);
+        c.args(self.args.iter());
+        if let Some(dir) = self.working_directory.as_ref() {
+            c.current_dir(dir);
+        }
+        if let Some(uid) = self.uid {
+            c.uid(uid);
+        }
+        if let Some(gid) = self.gid {
+            c.gid(gid);
+        }
+        if let Some(stdin) = &self.stdin {
+            c.stdin(fs::File::open(stdin)?);
+        }
+        if let Some(stdout) = &self.stdout {
+            c.stdout(fs::OpenOptions::new().write(true).append(true).open(stdout)?);
+        }
+        if let Some(stderr) = &self.stderr {
+            c.stderr(fs::OpenOptions::new().write(true).append(true).open(stderr)?);
+        }
+        match &self.environment {
+            Environment::Inherit(overrides) => {
+                c.envs(overrides.iter());
+            }
+            Environment::Replace(vars) => {
+                c.env_clear();
+                c.envs(vars.iter());
+            }
+        }
+        Ok(c)
     }
 }
 
@@ -204,28 +258,22 @@ impl Process {
                 None => future::pending().await,
             }
         }
-        fn start(
+        async fn start(
             proc: &mut ProcStatus,
             default: &mut Option<SelectAll<DefaultHandle>>,
             cfg: &ProcessCfg,
         ) {
-            let mut c = Command::new(&cfg.exe);
-            c.args(cfg.args.iter());
-            if let Some(dir) = cfg.working_directory.as_ref() {
-                c.current_dir(dir);
-            }
-            if let Some(uid) = cfg.uid {
-                c.uid(uid);
-            }
-            if let Some(gid) = cfg.gid {
-                c.gid(gid);
-            }
-            match c.spawn() {
-                Err(e) => error!("failed to spawn process {} failed with {}", cfg.exe, e),
-                Ok(child) => {
-                    *proc = ProcStatus::Running(child);
-                    *default = None;
-                }
+            match task::block_in_place(|| cfg.command()) {
+                Err(e) => error!("failed to setup process {} failed with {}", cfg.exe, e),
+                Ok(c) => match c.spawn() {
+                    Err(e) => {
+                        error!("failed to spawn process {} failed with {}", cfg.exe, e)
+                    }
+                    Ok(child) => {
+                        *proc = ProcStatus::Running(child);
+                        *default = None;
+                    }
+                },
             }
         }
         async fn restart(
@@ -256,12 +304,15 @@ impl Process {
             match proc {
                 ProcStatus::Running(_) => (),
                 ProcStatus::NotStarted => match &unit.trigger {
-                    Trigger::OnStart => start(proc, default, &unit.process),
                     Trigger::OnAccess(_) => (),
+                    Trigger::OnStart => start(proc, default, &unit.process),
                 },
-                ProcStatus::Died(when) => {
-                    let when = *when;
-                    restart(proc, default, unit, when).await
+                ProcStatus::Died(when) => match &unit.trigger {
+                    Trigger::OnAccess(_) => (),
+                    Trigger::OnStart => {
+                        let when = *when;
+                        restart(proc, default, unit, when).await
+                    }
                 },
             }
         }
