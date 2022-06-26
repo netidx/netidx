@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Netidx Browser
+Comment=Browse netidx graphically
+Path=/home/eric
+Exec=/home/eric/.cargo/bin/netidx-browser
+Icon=document-page-setup-symbolic
+Terminal=false
+Categories=Office
