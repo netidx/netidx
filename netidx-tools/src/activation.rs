@@ -167,8 +167,9 @@ impl Unit {
             let mut hm: HashMap<String, Unit> = HashMap::new();
             let mut dirs = fs::read_dir(path).await?;
             while let Some(ent) = dirs.next_entry().await? {
+                let name = ent.file_name().to_string_lossy().into_owned();
                 let typ = ent.file_type().await?;
-                if typ.is_file() || typ.is_symlink() {
+                if (typ.is_file() || typ.is_symlink()) && name.ends_with(".unit") {
                     match serde_json::from_str(&fs::read_to_string(ent.path()).await?) {
                         Ok(u) => {
                             hm.insert(ent.file_name().to_string_lossy().into_owned(), u);
