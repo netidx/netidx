@@ -1,0 +1,35 @@
+{
+  "parent": {
+    "path": "/local",
+    "ttl": 3600,
+    "addrs": [
+      [
+        "192.168.0.1:4564",
+        {
+          "Krb5": "netidx/washu-chan.ryu-oh.org@RYU-OH.ORG"
+        }
+      ]
+    ]
+  },
+  "children": [],
+  "member_servers": [
+    {
+      "pid_file": "",
+      "addr": "127.0.0.1:4564",
+      "max_connections": 768,
+      "hello_timeout": 10,
+      "reader_ttl": 60,
+      "writer_ttl": 120,
+      "auth": {
+        "Local": "/home/eric/var/netidx-auth"
+      }
+    }
+  ],
+  "perms": {
+    "/local": {
+      "wheel": "swlpd",
+      "adm": "swlpd",
+      "domain users": "sl"
+    }
+  }
+}

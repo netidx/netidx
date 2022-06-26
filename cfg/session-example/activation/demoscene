@@ -1,0 +1,16 @@
+{
+  "trigger": {
+    "OnAccess": [
+      "/local/music"
+    ]
+  },
+  "process": {
+    "exe": "/home/eric/.cargo/bin/demoscene",
+    "args": [
+      "--base",
+      "/local/music",
+      "--library",
+      "/home/eric/mus"
+    ]
+  }
+}

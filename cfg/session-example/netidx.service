@@ -1,0 +1,8 @@
+[Unit]
+Description=Netidx Activation
+
+[Service]
+ExecStart=/home/eric/.cargo/bin/netidx activation -u /home/eric/etc/activation -f
+
+[Install]
+WantedBy=default.target

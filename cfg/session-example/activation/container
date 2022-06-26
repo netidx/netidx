@@ -1,0 +1,17 @@
+{
+  "trigger": {
+    "OnAccess": [
+      "/local/container",
+      "/local/container-api"
+    ]
+  },
+  "process": {
+    "exe": "/home/eric/.cargo/bin/netidx",
+    "args": [
+      "container",
+      "--compress",
+      "--compress-level",
+      "9"
+    ]
+  }
+}

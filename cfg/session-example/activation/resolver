@@ -1,0 +1,12 @@
+{
+  "trigger": "OnStart",
+  "process": {
+    "exe": "/home/eric/.cargo/bin/netidx",
+    "args": [
+      "resolver-server",
+      "-f",
+      "-c",
+      "/home/eric/etc/netidx-local.json"
+    ]
+  }
+}
