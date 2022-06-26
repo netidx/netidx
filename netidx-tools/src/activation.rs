@@ -258,14 +258,14 @@ impl Process {
                 None => future::pending().await,
             }
         }
-        async fn start(
+        fn start(
             proc: &mut ProcStatus,
             default: &mut Option<SelectAll<DefaultHandle>>,
             cfg: &ProcessCfg,
         ) {
             match task::block_in_place(|| cfg.command()) {
                 Err(e) => error!("failed to setup process {} failed with {}", cfg.exe, e),
-                Ok(c) => match c.spawn() {
+                Ok(mut c) => match c.spawn() {
                     Err(e) => {
                         error!("failed to spawn process {} failed with {}", cfg.exe, e)
                     }
