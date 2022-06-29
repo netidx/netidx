@@ -63,8 +63,15 @@ pub(super) fn run(config: Config, auth: DesiredAuth, cmd: ResolverCmd) {
                     for pb in publishers.values() {
                         println!("publisher: {:?}", pb);
                     }
-                    for pref in resolved[0].publishers.iter() {
-                        println!("{:?}", pref.id);
+                    for res in resolved.iter() {
+                        for i in 0 .. res.publishers.len() {
+                            if i < res.publishers.len() - 1 {
+                                print!("{:?}, ", res.publishers[i].id);
+                            } else {
+                                print!("{:?}", res.publishers[i].id);
+                            }
+                        }
+                        println!("");
                     }
                 }
             }
