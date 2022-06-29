@@ -13,7 +13,7 @@ use structopt::StructOpt;
 #[derive(StructOpt, Debug)]
 pub(super) enum ResolverCmd {
     #[structopt(name = "resolve", about = "resolve an in the resolver server")]
-    Resolve { path: Path },
+    Resolve { path: Vec<Path> },
     #[structopt(name = "list", about = "list entries in the resolver server")]
     List {
         #[structopt(
@@ -58,7 +58,7 @@ pub(super) fn run(config: Config, auth: DesiredAuth, cmd: ResolverCmd) {
         match cmd {
             ResolverCmd::Resolve { path } => {
                 let resolver = ResolverRead::new(config, auth);
-                let (publishers, resolved) = resolver.resolve(vec![path]).await.unwrap();
+                let (publishers, resolved) = resolver.resolve(path).await.unwrap();
                 if publishers.len() > 0 {
                     for pb in publishers.values() {
                         println!("publisher: {:?}", pb);
