@@ -14,7 +14,7 @@ use std::{
     env,
     fs::read_to_string,
     net::SocketAddr,
-    path::Path as FsPath,
+    path::{Path as FsPath, PathBuf},
 };
 
 /// The on disk format, encoded as JSON
@@ -79,29 +79,46 @@ impl Config {
     /// This will try in order,
     ///
     /// * $NETIDX_CFG
-    /// * ${dirs::config_dir}/netidx.json
-    /// * ${dirs::home_dir}/.netidx.json
+    /// * ${dirs::config_dir}/netidx/client.json
+    /// * ${dirs::home_dir}/.config/netidx/client.json
+    /// * C:\netidx\client.json on windows
+    /// * /etc/netidx/client.json on unix
     ///
     /// It will load the first file that exists, if that file fails to
     /// load then Err will be returned.
     pub fn load_default() -> Result<Config> {
         if let Some(cfg) = env::var_os("NETIDX_CFG") {
-            debug!("loading {}", cfg.to_string_lossy());
-            return Config::load(cfg);
+            let cfg = PathBuf::from(cfg);
+            if cfg.is_file() {
+                debug!("loading {}", cfg.to_string_lossy());
+                return Config::load(cfg);
+            }
         }
         if let Some(mut cfg) = dirs::config_dir() {
-            cfg.push("netidx.json");
-            debug!("loading {}", cfg.to_string_lossy());
+            cfg.push("netidx");
+            cfg.push("client.json");
             if cfg.is_file() {
+                debug!("loading {}", cfg.to_string_lossy());
                 return Config::load(cfg);
             }
         }
         if let Some(mut home) = dirs::home_dir() {
-            home.push(".netidx.json");
-            debug!("loading {}", home.to_string_lossy());
+            home.push(".config");
+            home.push("netidx");
+            home.push("client.json");
             if home.is_file() {
+                debug!("loading {}", home.to_string_lossy());
                 return Config::load(home);
             }
+        }
+        let dir = if cfg!(windows) {
+            PathBuf::from("C:\\netidx\\client.json")
+        } else {
+            PathBuf::from("/etc/netidx/client.json")
+        };
+        if dir.is_file() {
+            debug!("loading {}", dir.to_string_lossy());
+            return Config::load(dir);
         }
         bail!("no default config file was found")
     }
