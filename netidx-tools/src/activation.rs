@@ -40,7 +40,7 @@ pub(super) struct Params {
         long = "units",
         help = "path to directory containing the unit files to manage"
     )]
-    units: PathBuf,
+    units: Option<PathBuf>,
     #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
     foreground: bool,
     #[structopt(long = "pid-file", help = "write the pid to file")]
@@ -162,7 +162,19 @@ struct Unit {
 }
 
 impl Unit {
-    async fn load(path: &PathBuf) -> Result<HashMap<String, Unit>> {
+    async fn load(path: Option<&PathBuf>) -> Result<HashMap<String, Unit>> {
+        let path = path
+            .cloned()
+            .or_else(|| {
+                dirs::config_dir().map(|mut p| {
+                    p.push("netidx");
+                    p.push("activation");
+                    p
+                })
+            })
+            .ok_or_else(|| {
+                anyhow!("no unit directory specified and no default could be determined")
+            })?;
         let units = {
             let mut hm: HashMap<String, Unit> = HashMap::new();
             let mut dirs = fs::read_dir(path).await?;
@@ -425,7 +437,7 @@ async fn start_processes(
 
 async fn run_server(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
     let publisher = Publisher::new(cfg, auth, params.bind).await?;
-    let mut units = Unit::load(&params.units).await?;
+    let mut units = Unit::load(params.units.as_ref()).await?;
     let mut processes: HashMap<String, Process> = HashMap::new();
     let mut sighup = signal(SignalKind::hangup())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -440,7 +452,7 @@ async fn run_server(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()
             _ = sigterm.recv().fuse() => break shutdown(&mut processes).await,
             _ = sigquit.recv().fuse() => break shutdown(&mut processes).await,
             _ = sighup.recv().fuse() => {
-                match Unit::load(&params.units).await {
+                match Unit::load(params.units.as_ref()).await {
                     Err(e) => error!("could not reconfigure, could not load units {}", e),
                     Ok(u) => {
                         units = u;
