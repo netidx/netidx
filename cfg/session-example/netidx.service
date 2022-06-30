@@ -2,7 +2,7 @@
 Description=Netidx Activation
 
 [Service]
-ExecStart=/home/eric/.cargo/bin/netidx activation -u /home/eric/etc/activation -f
+ExecStart=/home/eric/.cargo/bin/netidx activation -f
 
 [Install]
 WantedBy=default.target
