@@ -166,14 +166,26 @@ impl Unit {
         let path = path
             .cloned()
             .or_else(|| {
-                dirs::config_dir().map(|mut p| {
+                dirs::config_dir().and_then(|mut p| {
                     p.push("netidx");
                     p.push("activation");
-                    p
+                    if task::block_in_place(|| std::path::Path::is_dir(&p)) {
+                        Some(p)
+                    } else {
+                        None
+                    }
                 })
             })
+            .or_else(|| {
+                let p = PathBuf::from("/etc/netidx/activation");
+                if task::block_in_place(|| std::path::Path::is_dir(&p)) {
+                    Some(p)
+                } else {
+                    None
+                }
+            })
             .ok_or_else(|| {
-                anyhow!("no unit directory specified and no default could be determined")
+                anyhow!("no unit directory specified and no default was found")
             })?;
         let units = {
             let mut hm: HashMap<String, Unit> = HashMap::new();
