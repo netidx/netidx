@@ -1822,11 +1822,16 @@ pub(crate) struct RpcCall {
     top_id: ExprId,
     pending: FxHashSet<RpcCallId>,
     current: Option<Value>,
+    triggered: bool,
 }
 
 impl<C: Ctx, E> Register<C, E> for RpcCall {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
+            let triggered = match from {
+                [trigger, ..] => trigger.current().is_some(),
+                _ => false
+            };
             let mut t = RpcCall {
                 args: CachedVals::new(match from {
                     [_, rest @ ..] => rest,
@@ -1835,11 +1840,9 @@ impl<C: Ctx, E> Register<C, E> for RpcCall {
                 current: None,
                 top_id,
                 pending: HashSet::with_hasher(FxBuildHasher::default()),
+                triggered,
             };
-            match from {
-                [trigger, ..] if trigger.current().is_some() => t.maybe_call(ctx),
-                _ => (),
-            }
+            t.maybe_call(ctx);
             Box::new(t)
         });
         ctx.functions.insert("call".into(), f);
@@ -1847,6 +1850,8 @@ impl<C: Ctx, E> Register<C, E> for RpcCall {
     }
 }
 
+// CR: estokes. if the trigger is a constant the rpc should be called
+// once all the args are resolved.
 impl<C: Ctx, E> Apply<C, E> for RpcCall {
     fn current(&self) -> Option<Value> {
         self.current.clone()
@@ -1864,8 +1869,9 @@ impl<C: Ctx, E> Apply<C, E> for RpcCall {
                 [trigger, args @ ..] => {
                     self.args.update(ctx, args, event);
                     if trigger.update(ctx, event).is_some() {
-                        self.maybe_call(ctx);
+                        self.triggered = true;
                     }
+                    self.maybe_call(ctx);
                     Apply::<C, E>::current(self)
                 }
                 [] => {
@@ -1937,10 +1943,13 @@ impl RpcCall {
     }
 
     fn maybe_call<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>) {
-        if let Some((name, args)) = self.get_args() {
-            let id = RpcCallId::new();
-            self.pending.insert(id);
-            ctx.user.call_rpc(Path::from(name), args, self.top_id, id);
+        if self.triggered {
+            if let Some((name, args)) = self.get_args() {
+                self.triggered = false;
+                let id = RpcCallId::new();
+                self.pending.insert(id);
+                ctx.user.call_rpc(Path::from(name), args, self.top_id, id);
+            }
         }
     }
 }
