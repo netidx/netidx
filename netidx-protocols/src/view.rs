@@ -38,7 +38,7 @@ pub struct Table {
     #[serde(default)]
     pub path: Expr,
     /// (null | false | external | <column> | spec)
-    /// external: [false, spec]
+    /// external: [false, [spec, ...]]
     /// spec: [<column>, ("ascending" | "descending")]
     /// - null: no default sort. Sorting is processed within the
     /// browser and is under the control of the user. Click events will
