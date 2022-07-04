@@ -1117,6 +1117,7 @@ impl Paned {
         let dirlbl = gtk::Label::new(Some("Direction:"));
         root.add((dirlbl, dircb));
         let wide = gtk::CheckButton::with_label("Wide Handle:");
+        wide.set_active(spec.borrow().wide_handle);
         root.attach(&wide, 0, 2, 1);
         wide.connect_toggled(clone!(@strong on_change, @strong spec => move |b| {
             spec.borrow_mut().wide_handle = b.is_active();
