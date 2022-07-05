@@ -623,28 +623,14 @@ impl RadioButton {
                         @strong we_changed,
                         @strong value => move || {
                             on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
-                            Self::we_set_value_(
-                                &button,
-                                &we_changed,
-                                &mut *ctx.borrow_mut(),
-                                value.borrow().current()
-                            );
+                            Self::we_set_value_(&button, &we_changed, value.borrow().current());
                             Continue(false)
                     }));
                 } else {
                     on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
-                    idle_add_local(clone!(
-                        @strong ctx,
-                        @strong button,
-                        @strong we_changed,
-                        @strong value => move || {
-                            Self::we_set_value_(
-                                &button,
-                                &we_changed,
-                                &mut *ctx.borrow_mut(),
-                                value.borrow().current()
-                            );
-                            Continue(false)
+                    idle_add_local(clone!(@strong button, @strong we_changed, @strong value => move || {
+                        Self::we_set_value_(&button, &we_changed, value.borrow().current());
+                        Continue(false)
                     }));
                 }
             }
@@ -664,7 +650,8 @@ impl RadioButton {
         t.set_label(t.label.current());
         t.set_image(t.image.current());
         t.set_group(&mut *ctx.borrow_mut(), t.group.current());
-        t.we_set_value(&mut *ctx.borrow_mut(), t.value.borrow().current());
+        let v = t.value.borrow().current();
+        t.we_set_value(v);
         t
     }
 
@@ -709,29 +696,20 @@ impl RadioButton {
         }
     }
 
-    fn set_value_(button: &gtk::RadioButton, ctx: BSCtxRef, v: Option<Value>) {
-        if let Some(value) = v.and_then(|v| v.cast_to::<bool>().ok()) {
-            button.set_active(value);
-        }
-    }
-
-    fn set_value(&mut self, ctx: BSCtxRef, v: Option<Value>) {
-        Self::set_value_(&self.button, ctx, v)
-    }
-
     fn we_set_value_(
         button: &gtk::RadioButton,
         we_changed: &Rc<Cell<bool>>,
-        ctx: BSCtxRef,
         v: Option<Value>,
     ) {
         we_changed.set(true);
-        Self::set_value_(button, ctx, v);
+        if let Some(value) = v.and_then(|v| v.cast_to::<bool>().ok()) {
+            button.set_active(value);
+        }
         we_changed.set(false);
     }
 
-    fn we_set_value(&mut self, ctx: BSCtxRef, v: Option<Value>) {
-        Self::we_set_value_(&self.button, &self.we_changed, ctx, v)
+    fn we_set_value(&mut self, v: Option<Value>) {
+        Self::we_set_value_(&self.button, &self.we_changed, v)
     }
 }
 
@@ -749,7 +727,7 @@ impl BWidget for RadioButton {
         let v = self.group.update(ctx, event);
         self.set_group(ctx, v);
         let v = self.value.borrow_mut().update(ctx, event);
-        self.we_set_value(ctx, v);
+        self.we_set_value(v);
         self.on_toggled.borrow_mut().update(ctx, event);
     }
 

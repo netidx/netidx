@@ -668,6 +668,7 @@ impl Widget {
                     label: ce(Value::from("click me!")),
                     image: ce(Value::Null),
                     group: ce(Value::from("group0")),
+                    value: ce(Value::True),
                     on_toggled: ce(Value::Null),
                 }))
             }
