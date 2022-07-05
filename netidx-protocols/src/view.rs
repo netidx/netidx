@@ -79,7 +79,7 @@ pub struct Table {
 
     /// - range: Specify columns to keep or drop by numeric
     /// ranges. Range patterns apply to the positions of columns
-    /// sorted set.
+    /// in the sorted set.
     ///     - "keep": keep the columns specified by the range, drop
     ///     any others. If the range specifies more columns than exist
     ///     all columns will be kept. Matched items will be >= start
@@ -529,6 +529,9 @@ pub struct RadioButton {
     /// one radio button in a group may be selected at a time.
     #[serde(default)]
     pub group: Expr,
+    /// Whether this radio button is toggled or not.
+    #[serde(default)]
+    pub value: Expr,
     /// event() will yield true if the radio button is selected and false if it is not
     #[serde(default)]
     pub on_toggled: Expr,

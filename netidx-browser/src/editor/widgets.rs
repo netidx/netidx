@@ -349,7 +349,7 @@ impl Label {
         let spec = Rc::new(RefCell::new(spec));
         let (l, e, _dbg_text) = expr!(ctx, "Text:", scope, spec, on_change, text);
         root.add((l, e));
-        let (l, e, _dbg_width) = expr!(ctx, "Max Width:", scope, spec, on_change, width);
+        let (l, e, _dbg_width) = expr!(ctx, "Min Width:", scope, spec, on_change, width);
         root.add((l, e));
         let (l, e, _dbg_ellipsize) =
             expr!(ctx, "Ellipsize Mode:", scope, spec, on_change, ellipsize);
@@ -570,6 +570,7 @@ pub(super) struct RadioButton {
     _dbg_label: DbgExpr,
     _dbg_image: DbgExpr,
     _dbg_group: DbgExpr,
+    _dbg_value: DbgExpr,
     _dbg_on_toggled: DbgExpr,
 }
 
@@ -588,10 +589,20 @@ impl RadioButton {
         root.add((l, e));
         let (l, e, _dbg_group) = expr!(ctx, "Group:", scope, spec, on_change, group);
         root.add((l, e));
+        let (l, e, _dbg_value) = expr!(ctx, "Value:", scope, spec, on_change, value);
+        root.add((l, e));
         let (l, e, _dbg_on_toggled) =
             expr!(ctx, "On Toggled:", scope, spec, on_change, on_toggled);
         root.add((l, e));
-        Self { root, spec, _dbg_label, _dbg_image, _dbg_group, _dbg_on_toggled }
+        Self {
+            root,
+            spec,
+            _dbg_label,
+            _dbg_image,
+            _dbg_group,
+            _dbg_value,
+            _dbg_on_toggled,
+        }
     }
 
     pub(super) fn spec(&self) -> view::RadioButton {

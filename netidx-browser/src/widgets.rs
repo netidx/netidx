@@ -1,4 +1,6 @@
-use super::{util, val_to_bool, BSCtx, BSCtxRef, BSNode, BWidget, WVal, WidgetPath, ImageSpec};
+use super::{
+    util, val_to_bool, BSCtx, BSCtxRef, BSNode, BWidget, ImageSpec, WVal, WidgetPath,
+};
 use crate::{bscript::LocalEvent, containers, view};
 use anyhow::{bail, Result};
 use futures::channel::oneshot;
@@ -146,11 +148,20 @@ impl LinkButton {
         Self::set_label(&button, label.current());
         hover_path(&button, &selected_path, "on_activate_link", &spec.on_activate_link);
         button.connect_activate_link(
-            clone!(@strong ctx, @strong on_activate_link => move |_| {
-                let ev = vm::Event::User(LocalEvent::Event(Value::Null));
-                match on_activate_link.borrow_mut().update(&mut *ctx.borrow_mut(), &ev) {
-                    Some(Value::True) => Inhibit(true),
-                    _ => Inhibit(false),
+            clone!(@strong ctx, @strong on_activate_link => move |button| {
+                match button.uri().map(|s| s.to_string()) {
+                    None => {
+                        let ev = vm::Event::User(LocalEvent::Event(Value::Null));
+                        on_activate_link.borrow_mut().update(&mut *ctx.borrow_mut(), &ev);
+                        Inhibit(true)
+                    },
+                    Some(uri) => {
+                        let ev = vm::Event::User(LocalEvent::Event(uri.into()));
+                        match on_activate_link.borrow_mut().update(&mut *ctx.borrow_mut(), &ev) {
+                            Some(Value::True) => Inhibit(true),
+                            _ => Inhibit(false),
+                        }
+                    }
                 }
             }),
         );
@@ -562,6 +573,8 @@ pub(super) struct RadioButton {
     label: BSNode,
     image: BSNode,
     group: BSNode,
+    value: Rc<RefCell<BSNode>>,
+    we_changed: Rc<Cell<bool>>,
     current_group: Option<String>,
     group_changing: Rc<Cell<bool>>,
 }
@@ -573,6 +586,8 @@ impl RadioButton {
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
+        let we_changed = Rc::new(Cell::new(false));
+        let group_changing = Rc::new(Cell::new(false));
         let on_toggled = Rc::new(RefCell::new(BSNode::compile(
             &mut *ctx.borrow_mut(),
             scope.clone(),
@@ -584,35 +599,72 @@ impl RadioButton {
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.image.clone());
         let group =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.group.clone());
+        let value = Rc::new(RefCell::new(BSNode::compile(
+            &mut *ctx.borrow_mut(),
+            scope.clone(),
+            spec.value.clone(),
+        )));
         let button = gtk::RadioButton::new();
         button.set_no_show_all(true);
-        let group_changing = Rc::new(Cell::new(false));
-        button.connect_toggled(
-            clone!(@strong on_toggled, @strong ctx, @strong group_changing => move |button| {
+        button.connect_toggled(clone!(
+        @strong on_toggled,
+        @strong ctx,
+        @strong group_changing,
+        @strong we_changed,
+        @strong value => move |button| {
+            if !we_changed.get() {
                 let active = button.is_active();
                 let e = vm::Event::User(LocalEvent::Event(active.into()));
                 if group_changing.get() {
-                    idle_add_local(clone!(@strong on_toggled, @strong ctx => move || {
-                        on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
-                        Continue(false)
+                    idle_add_local(clone!(
+                        @strong on_toggled,
+                        @strong ctx,
+                        @strong button,
+                        @strong we_changed,
+                        @strong value => move || {
+                            on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+                            Self::we_set_value_(
+                                &button,
+                                &we_changed,
+                                &mut *ctx.borrow_mut(),
+                                value.borrow().current()
+                            );
+                            Continue(false)
                     }));
                 } else {
                     on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+                    idle_add_local(clone!(
+                        @strong ctx,
+                        @strong button,
+                        @strong we_changed,
+                        @strong value => move || {
+                            Self::we_set_value_(
+                                &button,
+                                &we_changed,
+                                &mut *ctx.borrow_mut(),
+                                value.borrow().current()
+                            );
+                            Continue(false)
+                    }));
                 }
-            }));
+            }
+        }));
         hover_path(&button, &selected_path, "on_toggled", &spec.on_toggled);
         let mut t = Self {
             button,
             on_toggled,
             label,
             image,
+            value,
             group,
             group_changing,
+            we_changed,
             current_group: None,
         };
         t.set_label(t.label.current());
         t.set_image(t.image.current());
         t.set_group(&mut *ctx.borrow_mut(), t.group.current());
+        t.we_set_value(&mut *ctx.borrow_mut(), t.value.borrow().current());
         t
     }
 
@@ -656,6 +708,31 @@ impl RadioButton {
             self.group_changing.set(false);
         }
     }
+
+    fn set_value_(button: &gtk::RadioButton, ctx: BSCtxRef, v: Option<Value>) {
+        if let Some(value) = v.and_then(|v| v.cast_to::<bool>().ok()) {
+            button.set_active(value);
+        }
+    }
+
+    fn set_value(&mut self, ctx: BSCtxRef, v: Option<Value>) {
+        Self::set_value_(&self.button, ctx, v)
+    }
+
+    fn we_set_value_(
+        button: &gtk::RadioButton,
+        we_changed: &Rc<Cell<bool>>,
+        ctx: BSCtxRef,
+        v: Option<Value>,
+    ) {
+        we_changed.set(true);
+        Self::set_value_(button, ctx, v);
+        we_changed.set(false);
+    }
+
+    fn we_set_value(&mut self, ctx: BSCtxRef, v: Option<Value>) {
+        Self::we_set_value_(&self.button, &self.we_changed, ctx, v)
+    }
 }
 
 impl BWidget for RadioButton {
@@ -671,6 +748,8 @@ impl BWidget for RadioButton {
         self.set_image(v);
         let v = self.group.update(ctx, event);
         self.set_group(ctx, v);
+        let v = self.value.borrow_mut().update(ctx, event);
+        self.we_set_value(ctx, v);
         self.on_toggled.borrow_mut().update(ctx, event);
     }
 
