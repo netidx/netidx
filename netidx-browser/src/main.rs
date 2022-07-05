@@ -177,7 +177,8 @@ struct WidgetCtx {
     view_saved: Cell<bool>,
     fns: Trie<String, ()>,
     vars: Trie<String, Trie<String, ()>>,
-    radio_groups: FxHashMap<String, IndexSet<gtk::RadioButton, FxBuildHasher>>,
+    radio_groups:
+        FxHashMap<String, (Rc<Cell<bool>>, IndexSet<gtk::RadioButton, FxBuildHasher>)>,
 }
 
 impl vm::Ctx for WidgetCtx {

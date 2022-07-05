@@ -680,7 +680,7 @@ impl RadioButton {
             self.group_changing.set(true);
             if let Some(current) = self.current_group.take() {
                 self.button.join_group(gtk::RadioButton::NONE);
-                if let Some(group) = ctx.user.radio_groups.get_mut(&current) {
+                if let Some((_, group)) = ctx.user.radio_groups.get_mut(&current) {
                     group.remove(&self.button);
                     if group.is_empty() {
                         ctx.user.radio_groups.remove(&current);
@@ -688,8 +688,12 @@ impl RadioButton {
                 }
             }
             self.current_group = Some(group.clone());
-            let group =
-                ctx.user.radio_groups.entry(group).or_insert_with(IndexSet::default);
+            let (we_changed, group) = ctx
+                .user
+                .radio_groups
+                .entry(group)
+                .or_insert_with(|| (self.we_changed.clone(), IndexSet::default()));
+            self.we_changed = we_changed.clone();
             self.button.join_group(group.last());
             group.insert(self.button.clone());
             self.group_changing.set(false);
