@@ -1248,6 +1248,7 @@ impl RaeifiedTable {
         if let Some((col, dir)) = col {
             if self.sort_column.get().is_some() {
                 self.store().set_sort_column_id(col, dir);
+                self.update_subscriptions()
             }
         }
         self.sort_temp_disabled.set(false);
