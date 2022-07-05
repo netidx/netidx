@@ -143,6 +143,7 @@ impl fmt::Display for ViewLoc {
 #[derive(Debug, Clone)]
 enum ToGui {
     View { loc: Option<ViewLoc>, spec: view::Widget, generated: bool },
+    Navigate(ViewLoc),
     NavigateInWindow(ViewLoc),
     Highlight(Vec<WidgetPath>),
     Update(Batch),
@@ -1050,6 +1051,15 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         ToGui::TableResolved(path, table) => {
             let e = vm::Event::User(LocalEvent::TableResolved(path, table));
             update_single(&current, &mut ctx.borrow_mut(), &e);
+            Continue(true)
+        }
+        ToGui::Navigate(loc) => {
+            let ctx = ctx.borrow();
+            if ctx.user.view_saved.get()
+                || ask_modal(&ctx.user.window, "Unsaved view will be lost")
+            {
+                ctx.user.backend.navigate(loc)
+            }
             Continue(true)
         }
         ToGui::NavigateInWindow(loc) => {

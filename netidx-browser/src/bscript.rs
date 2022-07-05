@@ -287,20 +287,11 @@ impl Navigate {
                     Err(()) => *self = Navigate::Invalid,
                     Ok(loc) => {
                         if new_window {
-                            let _: Result<_, _> = ctx
-                                .user
-                                .backend
-                                .to_gui
-                                .send(ToGui::NavigateInWindow(loc));
+                            let m = ToGui::NavigateInWindow(loc);
+                            let _: Result<_, _> = ctx.user.backend.to_gui.send(m);
                         } else {
-                            if ctx.user.view_saved.get()
-                                || ask_modal(
-                                    &ctx.user.window,
-                                    "Unsaved view will be lost.",
-                                )
-                            {
-                                ctx.user.backend.navigate(loc);
-                            }
+                            let _: Result<_, _> =
+                                ctx.user.backend.to_gui.send(ToGui::Navigate(loc));
                         }
                     }
                 },
