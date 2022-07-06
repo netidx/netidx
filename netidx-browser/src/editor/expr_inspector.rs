@@ -6,13 +6,12 @@ use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
 use parking_lot::Mutex;
-use sourceview4::{self as sv, prelude::*};
+use sourceview4_sc::{self as sv, prelude::*, traits::ViewExt};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
     sync::Arc,
 };
-use sv::traits::ViewExt;
 
 #[derive(Clone, Boxed)]
 #[boxed_type(name = "NetidxExprInspectorWrap")]
