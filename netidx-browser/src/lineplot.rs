@@ -65,6 +65,7 @@ struct Series {
 
 pub(super) struct LinePlot {
     root: gtk::Box,
+    canvas: gtk::DrawingArea,
     x_min: Rc<RefCell<BSNode>>,
     x_max: Rc<RefCell<BSNode>>,
     y_min: Rc<RefCell<BSNode>>,
@@ -82,6 +83,8 @@ impl LinePlot {
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let canvas = gtk::DrawingArea::new();
+        root.set_no_show_all(true);
+        canvas.set_no_show_all(true);
         root.pack_start(&canvas, true, true, 0);
         let mut ctx_r = ctx.borrow_mut();
         let ctx_r = &mut ctx_r;
@@ -160,7 +163,7 @@ impl LinePlot {
             allocated_width.set(i32::abs(a.width()) as u32);
             allocated_height.set(i32::abs(a.height()) as u32);
         }));
-        LinePlot { root, x_min, x_max, y_min, y_max, keep_points, series }
+        LinePlot { root, canvas, x_min, x_max, y_min, y_max, keep_points, series }
     }
 
     fn draw(
@@ -443,5 +446,10 @@ impl BWidget for LinePlot {
 
     fn root(&self) -> Option<&gtk::Widget> {
         Some(self.root.upcast_ref())
+    }
+
+    fn set_visible(&self, v: bool) {
+        self.canvas.set_visible(v);
+        self.root.set_visible(v);
     }
 }
