@@ -1,6 +1,6 @@
 [package]
 name = "netidx-netproto"
-version = "0.10.1"
+version = "0.11.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 homepage = "https://estokes.github.io/netidx-book/"
@@ -12,7 +12,7 @@ license = "MIT"
 
 [dependencies]
 combine = "4"
-netidx-core = { version = "0.10", path = "../netidx-core" }
+netidx-core = { version = "0.11", path = "../netidx-core" }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"

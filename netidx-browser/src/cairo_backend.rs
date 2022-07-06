@@ -290,6 +290,7 @@ impl<'a> DrawingBackend for CairoBackend<'a> {
             FontTransform::Rotate90 => 90.0,
             FontTransform::Rotate180 => 180.0,
             FontTransform::Rotate270 => 270.0,
+            FontTransform::RotateAngle(a) => a as f64,
         } / 180.0
             * std::f64::consts::PI;
 

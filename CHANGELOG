@@ -1,3 +1,41 @@
+* 0.11.0 all components now go to 11
+
+  - introduce protocol version 2, not backwards compatible with
+    version 1. Sorry
+
+    - vastly compressed resolves, resolving a lot of things should use
+      much less bandwidth now
+
+    - fix GSSAPI negotiation. This is why v2 is incompatible with v1,
+      the change was just too large to work around
+
+    - Add local authentication mechanism, and make authentication
+      mechanisms extensible so we can add more in the future without
+      another protocol version
+
+  - local machine resolver servers with local authentication
+    mechanism. For dev workstations. For desktop apps using the
+    browser
+
+  - container server is now a library (as well as a server), it's a
+    good basis for some kinds of applications
+
+  - various long standing resolver server bugs fixed (removing default
+    publishers, and a list bug)
+
+  - major browser improvements, new widgets, bug fixes, new bscript
+    builtins
+
+  - resolver server and client configuration files separated
+
+  - updated book
+
+    - all browser widgets documented
+
+    - updated administration and quick start sections for 0.11
+
+    - reorganized examples
+
 * 0.10.5 browser, netidx, netidx-tools, bscript, protocols
 
   - bump dependencies for all modules

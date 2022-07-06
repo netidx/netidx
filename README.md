@@ -1,22 +1,54 @@
-What is netidx?
+# What is Netidx
 
-- It's a directory service; like LDAP or X.500
-  - It keeps track of a hierarchical directory of things
-  - It's browsable and queryable
-  - It's distributed, lightweight, and scalable
+Netidx is middleware that enables publishing a value, like 42, in one
+program and consuming it in another program, either on the same
+machine or across the network.
 
-- It's a tuple space; like JavaSpaces, zookeeper, or memcached
-  - Except it's distributed. The directory server keeps track of where
-    things are, publishers keep the data.
-  - Each tuple is identified by a unique path in the directory server,
-    and holds a flexible set of primitive data types
+Values are given globally unique names in a hierarchical
+namespace. For example our published 42 might be named
+/the-ultimate-answer (normally we wouldn't put values directly under
+the root, but in this case it's appropriate). Any other program on the
+network can refer to 42 by that name, and will receive updates in the
+(unlikely) event that /the-ultimate-answer changes.
 
-- It's a publish/subscribe messaging system; like MQTT
-  - Except there is no centralized broker. Communication happens
-    directly between publishers and subscribers
-  - Message archiving and other services provided by MQTT brokers can
-    be provided by normal publishers, or omitted if they aren't needed
-  - Decentralization allows it to scale to huge message rates
+## Comparison With Other Systems
+
+- Like LDAP
+  - Netidx keeps track of a hierarchical directory of values
+  - Netidx is browsable and queryable to some extent
+  - Netidx supports authentication, authorization, and encryption
+  - Netidx values can be written as well as read.
+  - Larger Netidx systems can be constructed by adding referrals
+    between smaller systems. Resolver server clusters may have parents
+    and children.
+
+- Unlike LDAP
+  - In Netidx the resolver server (like slapd) only keeps the location
+    of the publisher that has the data, not the data iself.
+  - There are no 'entries', 'attributes', 'ldif records', etc. Every
+    name in the system is either structural, or a single value. Entry
+    like structure is created using hierarchy. As a result there is
+    also no schema checking.
+  - One can subscribe to a value, and will then be notified immediatly
+    if it changes.
+  - There are no global filters on data, e.g. you can't query for
+    (&(cn=bob)(uid=foo)), because netidx isn't a database. Whether and
+    what query mechanisms exist are up to the publishers. You can,
+    however, query the structure, e.g. /foo/**/bar would return any
+    path under foo that ends in bar.
+
+- Like MQTT
+  - Netidx values are publish/subscribe
+  - A single Netidx value may have multiple subscribers
+  - All Netidx subscribers receive an update when a value they are
+    subscribed to changes.
+  - Netidx Message delivery is reliable and ordered.
+
+- Unlike MQTT
+  - In Netidx there is no centralized message broker. Messages flow
+    directly over TCP from the publishers to the subscribers. The
+    resolver server only stores the address of the publisher/s
+    publishing a value.
 
 For more details see the [netidx book](https://estokes.github.io/netidx-book/)
 
