@@ -118,7 +118,7 @@ fn main() {
             let (cfg, auth) = common.load();
             recorder::run(cfg, auth, params)
         }
-        #[cfg(unit)]
+        #[cfg(unix)]
         Opt::Activation { common, params } => {
             let (cfg, auth) = common.load();
             activation::run(cfg, auth, params)
