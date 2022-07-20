@@ -733,7 +733,7 @@ impl PublisherInner {
             let is_advertised = self
                 .advertised
                 .iter()
-                .any(|(b, set)| path.starts_with(&**b) && set.contains(&path));
+                .any(|(b, set)| Path::is_parent(&**b, &*path) && set.contains(&path));
             if !is_advertised {
                 self.to_publish.remove(&path);
                 self.to_unpublish.insert(path);
