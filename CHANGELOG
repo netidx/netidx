@@ -1,3 +1,7 @@
+* 0.11.1 tools
+
+  - fix building the tools on windows
+
 * 0.11.0 all components now go to 11
 
   - introduce protocol version 2, not backwards compatible with

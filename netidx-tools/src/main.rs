@@ -15,7 +15,6 @@ mod resolver_server;
 #[cfg(unix)]
 mod activation;
 
-#[cfg(unix)]
 #[macro_use]
 extern crate anyhow;
 #[cfg(unix)]
@@ -119,6 +118,7 @@ fn main() {
             let (cfg, auth) = common.load();
             recorder::run(cfg, auth, params)
         }
+        #[cfg(unit)]
         Opt::Activation { common, params } => {
             let (cfg, auth) = common.load();
             activation::run(cfg, auth, params)
