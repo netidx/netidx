@@ -654,7 +654,7 @@ pub struct Published {
     current: Value,
     subscribed: Subscribed,
     path: Path,
-    aliases: Option<Box<Vec<Path>>>,
+    aliases: Option<Box<FxHashSet<Path>>>,
 }
 
 impl Published {
@@ -715,16 +715,39 @@ impl PublisherInner {
             .any(|(b, set)| Path::is_parent(&**b, &**path) && set.contains(path))
     }
 
+    pub fn publish(&mut self, id: Id, flags: PublishFlags, path: Path) -> Result<()> {
+        if !Path::is_absolute(&path) {
+            bail!("can't publish a relative path")
+        }
+        if self.stop.is_none() {
+            bail!("publisher is dead")
+        }
+        if self.by_path.contains_key(&path) {
+            bail!("already published")
+        }
+        self.by_path.insert(path.clone(), id);
+        self.to_unpublish.remove(&path);
+        self.to_publish
+            .insert(path.clone(), if flags.is_empty() { None } else { Some(flags.bits) });
+        self.trigger_publish();
+        Ok(())
+    }
+
+    fn unpublish(&mut self, path: &Path) {
+        self.by_path.remove(path);
+        if !self.is_advertised(path) {
+            self.to_publish.remove(path);
+            self.to_unpublish.insert(path.clone());
+            self.trigger_publish();
+        }
+    }
+
     fn destroy_val(&mut self, id: Id) {
         if let Some(pbl) = self.by_id.remove(&id) {
             let path = pbl.path;
             for path in iter::once(&path).chain(pbl.aliases.iter().flat_map(|v| v.iter()))
             {
-                self.by_path.remove(path);
-                if !self.is_advertised(path) {
-                    self.to_publish.remove(path);
-                    self.to_unpublish.insert(path.clone());
-                }
+                self.unpublish(path)
             }
             self.wait_clients.remove(&id);
             if let Some(chans) = self.on_write.remove(&id) {
@@ -744,7 +767,6 @@ impl PublisherInner {
             if pbl.subscribed.len() > 0 {
                 self.to_unsubscribe.insert(id, pbl.subscribed);
             }
-            self.trigger_publish();
         }
     }
 
@@ -920,17 +942,11 @@ impl Publisher {
         path: Path,
         init: Value,
     ) -> Result<Val> {
-        if !Path::is_absolute(&path) {
-            bail!("can't publish to relative path")
-        }
         let id = Id::new();
+        let destroy_on_idle = flags.contains(PublishFlags::DESTROY_ON_IDLE);
+        flags.remove(PublishFlags::DESTROY_ON_IDLE);
         let mut pb = self.0.lock();
-        if pb.stop.is_none() {
-            bail!("publisher is dead")
-        }
-        if pb.by_path.contains_key(&path) {
-            bail!("already published")
-        }
+        pb.publish(id, flags, path.clone())?;
         let subscribed = pb
             .hc_subscribed
             .entry(BTreeSet::new())
@@ -940,49 +956,44 @@ impl Publisher {
             id,
             Published { current: init, subscribed, path: path.clone(), aliases: None },
         );
-        pb.to_unpublish.remove(&path);
-        if flags.contains(PublishFlags::DESTROY_ON_IDLE) {
-            flags.remove(PublishFlags::DESTROY_ON_IDLE);
+        if destroy_on_idle {
             pb.destroy_on_idle.insert(id);
         }
-        pb.to_publish
-            .insert(path.clone(), if flags.is_empty() { None } else { Some(flags.bits) });
-        pb.by_path.insert(path, id);
-        pb.trigger_publish();
         Ok(Val(id))
     }
 
     /// Create an alias to an already published value at `path`. This
     /// takes much less memory than publishing the same value twice at
     /// different paths. Just as with publishing `path` cannot already
-    /// be published, and you must still have permission to publish at
-    /// `path` in the resolver. When the val is dropped all aliases
-    /// will be cleaned up. All flags are supported except
-    /// `DESTROY_ON_IDLE`, it will be ignored. If you wish the val to
-    /// be destroyed on idle you must set `DESTROY_ON_IDLE` as part of
-    /// the initial publish operation.
+    /// be published by this publisher, and you must still have
+    /// permission to publish at `path` in the resolver. When the val
+    /// is dropped all aliases for it will be cleaned up. All flags
+    /// are supported except `DESTROY_ON_IDLE`, it will be ignored. If
+    /// you wish the val to be destroyed on idle you must set
+    /// `DESTROY_ON_IDLE` as part of the initial publish operation.
     pub fn alias_with_flags(
         &self,
         val: &Val,
         mut flags: PublishFlags,
         path: Path,
     ) -> Result<()> {
-        if !Path::is_absolute(&path) {
-            bail!("can't alias with a relative path")
-        }
+        flags.remove(PublishFlags::DESTROY_ON_IDLE);
         let mut pb = self.0.lock();
-        if pb.stop.is_none() {
-            bail!("publisher is dead")
+        if !pb.by_id.contains_key(&val.0) {
+            bail!("no such value published by this publisher")
         }
-        if pb.by_path.contains_key(&path) {
-            bail!("already published")
+        pb.publish(val.0, flags, path.clone())?;
+        let v = pb.by_id.get_mut(&val.0).unwrap();
+        match &mut v.aliases {
+            Some(a) => {
+                a.insert(path);
+            }
+            None => {
+                let mut set = HashSet::default();
+                set.insert(path);
+                v.aliases = Some(Box::new(set))
+            }
         }
-
-        pb.by_path.insert(path.clone(), val.0);
-        pb.to_unpublish.remove(&path);
-        pb.to_publish
-            .insert(path.clone(), if flags.is_empty() { None } else { Some(flags.bits) });
-        pb.trigger_publish();
         Ok(())
     }
 
@@ -996,6 +1007,35 @@ impl Publisher {
         self.publish_with_flags(PublishFlags::empty(), path, init)
     }
 
+    /// Create an alias for an already published path
+    pub fn alias(&self, val: &Val, path: Path) -> Result<()> {
+        self.alias_with_flags(val, PublishFlags::empty(), path)
+    }
+
+    /// remove the specified alias for `val` if it exists
+    pub fn remove_alias(&self, val: &Val, path: &Path) {
+        let mut pb = self.0.lock();
+        if let Some(pbv) = pb.by_id.get_mut(&val.0) {
+            if let Some(al) = &mut pbv.aliases {
+                if al.remove(path) {
+                    pb.unpublish(path)
+                }
+            }
+        }
+    }
+
+    /// remove all aliases (if any) for the specified value
+    pub fn remove_all_aliases(&self, val: &Val) {
+        let mut pb = self.0.lock();
+        if let Some(pbv) = pb.by_id.get_mut(&val.0) {
+            if let Some(mut al) = pbv.aliases.take() {
+                for path in al.drain() {
+                    pb.unpublish(&path)
+                }
+            }
+        }
+    }
+    
     /// Install a default publisher rooted at `base` with flags
     /// `flags`. Once installed, any subscription request for a child
     /// of `base`, regardless if it doesn't exist in the resolver,
@@ -1148,6 +1188,18 @@ impl Publisher {
         self.0.lock().by_id.get(&id).map(|pbl| pbl.path.clone())
     }
 
+    /// Return all the aliases for the specified `id`
+    pub fn aliases(&self, id: Id) -> Vec<Path> {
+        let pb = self.0.lock();
+        match pb.by_id.get(&id) {
+            None => vec![],
+            Some(pbv) => match &pbv.aliases {
+                None => vec![],
+                Some(al) => al.iter().cloned().collect(),
+            }
+        }
+    }
+    
     /// Get a copy of the current value of a published `Val`
     pub fn current(&self, id: &Id) -> Option<Value> {
         self.0.lock().by_id.get(&id).map(|p| p.current.clone())
