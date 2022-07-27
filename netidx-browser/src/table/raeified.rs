@@ -1291,6 +1291,11 @@ impl RaeifiedTable {
                     }
                     t.enable_sort(sctx);
                     t.visible_changed();
+                    // this should not be necessary, however under
+                    // some themes (e.g. breeze gtk) it seems it is,
+                    // otherwise updated values might not be drawn
+                    // until the user causes damage to the widget.
+                    t.view.queue_draw();
                     Continue(false)
                 }
             }

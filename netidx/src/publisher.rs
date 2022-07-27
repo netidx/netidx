@@ -973,17 +973,17 @@ impl Publisher {
     /// `DESTROY_ON_IDLE` as part of the initial publish operation.
     pub fn alias_with_flags(
         &self,
-        val: &Val,
+        id: Id,
         mut flags: PublishFlags,
         path: Path,
     ) -> Result<()> {
         flags.remove(PublishFlags::DESTROY_ON_IDLE);
         let mut pb = self.0.lock();
-        if !pb.by_id.contains_key(&val.0) {
+        if !pb.by_id.contains_key(&id) {
             bail!("no such value published by this publisher")
         }
-        pb.publish(val.0, flags, path.clone())?;
-        let v = pb.by_id.get_mut(&val.0).unwrap();
+        pb.publish(id, flags, path.clone())?;
+        let v = pb.by_id.get_mut(&id).unwrap();
         match &mut v.aliases {
             Some(a) => {
                 a.insert(path);
@@ -1008,14 +1008,14 @@ impl Publisher {
     }
 
     /// Create an alias for an already published path
-    pub fn alias(&self, val: &Val, path: Path) -> Result<()> {
-        self.alias_with_flags(val, PublishFlags::empty(), path)
+    pub fn alias(&self, id: Id, path: Path) -> Result<()> {
+        self.alias_with_flags(id, PublishFlags::empty(), path)
     }
 
     /// remove the specified alias for `val` if it exists
-    pub fn remove_alias(&self, val: &Val, path: &Path) {
+    pub fn remove_alias(&self, id: Id, path: &Path) {
         let mut pb = self.0.lock();
-        if let Some(pbv) = pb.by_id.get_mut(&val.0) {
+        if let Some(pbv) = pb.by_id.get_mut(&id) {
             if let Some(al) = &mut pbv.aliases {
                 if al.remove(path) {
                     pb.unpublish(path)
@@ -1025,9 +1025,9 @@ impl Publisher {
     }
 
     /// remove all aliases (if any) for the specified value
-    pub fn remove_all_aliases(&self, val: &Val) {
+    pub fn remove_all_aliases(&self, id: Id) {
         let mut pb = self.0.lock();
-        if let Some(pbv) = pb.by_id.get_mut(&val.0) {
+        if let Some(pbv) = pb.by_id.get_mut(&id) {
             if let Some(mut al) = pbv.aliases.take() {
                 for path in al.drain() {
                     pb.unpublish(&path)
