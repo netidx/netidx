@@ -248,6 +248,7 @@ impl Connection {
                     Ok(()) => break,
                     Err(e) => {
                         self.security_context = None;
+                        self.secrets.write().remove(&self.resolver_addr);
                         warn!("write connection {:?} failed {}", self.resolver_addr, e);
                         let wait = thread_rng().gen_range(1..12);
                         time::sleep(Duration::from_secs(wait)).await;
@@ -276,6 +277,7 @@ impl Connection {
                     Ok(()) => self.con.as_mut().unwrap(),
                     Err(e) => {
                         self.security_context = None;
+                        self.secrets.write().remove(&self.resolver_addr);
                         warn!("connect to resolver {:?} {}", self.resolver_addr, e);
                         continue 'batch;
                     }
