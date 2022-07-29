@@ -162,7 +162,7 @@ impl Connection {
                 wt!(con.send_one(&hello(AuthWrite::Anonymous)))??;
                 (wt!(con.receive::<ServerHelloWrite>())??, false)
             }
-            (DesiredAuth::Krb5 {..} | DesiredAuth::Local, Auth::Anonymous) => {
+            (DesiredAuth::Krb5 { .. } | DesiredAuth::Local, Auth::Anonymous) => {
                 bail!("authentication not supported")
             }
             (DesiredAuth::Krb5 { .. } | DesiredAuth::Local, Auth::Local { path }) => {
@@ -181,7 +181,7 @@ impl Connection {
                     }
                 }
             }
-            (DesiredAuth::Local, Auth::Krb5 {..}) => bail!("local auth not supported"),
+            (DesiredAuth::Local, Auth::Krb5 { .. }) => bail!("local auth not supported"),
             (DesiredAuth::Krb5 { upn, spn }, Auth::Krb5 { spn: target_spn }) => {
                 let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
                 match (&self.security_context, secret) {
@@ -234,6 +234,12 @@ impl Connection {
         }
     }
 
+    fn handle_failed_connect(&mut self) {
+        self.security_context = None;
+        self.secrets.write().remove(&self.resolver_addr);
+        warn!("write connection {:?} failed {}", self.resolver_addr, e);
+    }
+
     async fn send_heartbeat(&mut self) {
         for _ in 0..3 {
             match self.con {
@@ -247,9 +253,7 @@ impl Connection {
                 None => match self.connect().await {
                     Ok(()) => break,
                     Err(e) => {
-                        self.security_context = None;
-                        self.secrets.write().remove(&self.resolver_addr);
-                        warn!("write connection {:?} failed {}", self.resolver_addr, e);
+                        self.handle_failed_connect();
                         let wait = thread_rng().gen_range(1..12);
                         time::sleep(Duration::from_secs(wait)).await;
                     }
@@ -276,9 +280,7 @@ impl Connection {
                 None => match self.connect().await {
                     Ok(()) => self.con.as_mut().unwrap(),
                     Err(e) => {
-                        self.security_context = None;
-                        self.secrets.write().remove(&self.resolver_addr);
-                        warn!("connect to resolver {:?} {}", self.resolver_addr, e);
+                        self.handle_failed_connect();
                         continue 'batch;
                     }
                 },
