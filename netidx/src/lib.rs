@@ -1,23 +1,6 @@
-//! What is netidx?
-//!
-//! - It's a directory service; like LDAP or X.500
-//!   - It keeps track of a hierarchical directory of things
-//!   - It's browsable and queryable
-//!   - It's distributed, lightweight, and scalable
-//!
-//! - It's a tuple space; like JavaSpaces, zookeeper, or memcached
-//!   - Except it's distributed. The directory server keeps track of
-//!   where things are, publishers keep the data.
-//!   - Each tuple is identified by a unique path in the directory
-//!   server, and holds a flexible set of primitive data types
-//!
-//! - It's a publish/subscribe messaging system; like MQTT
-//!   - Except there is no centralized broker. Communication happens
-//!   directly between publishers and subscribers
-//!   - Message archiving and other services provided by MQTT brokers
-//!   can be provided by normal publishers, or omitted if they aren't
-//!   needed
-//!  - Decentralization allows it to scale to huge message rates
+//! Netidx is middleware that enables publishing a value, like 42, in
+//! one program and consuming it in another program, either on the
+//! same machine or across the network.
 //!
 //! For more details see the [netidx book](https://estokes.github.io/netidx-book/)
 //!

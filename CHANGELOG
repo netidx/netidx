@@ -1,3 +1,20 @@
+* 0.12.0 all components
+
+  - fix a resolver client bug that prevented local publishers from
+    republishing after the local resolver was restarted.
+
+  - work around some gtk themes (breeze) causing data not to update in
+    the browser unless the user forces events to happen. Breeze still
+    does strange things to gtk treeview, but at least it displays
+    updates properly now. I guess libadwaita can't come soon enough.
+
+  - add the ability to publish aliases. Aliases are very lightweight
+    as they do not duplicate any of the internal data structures in
+    either the publisher or the subscriber. Subscribers older than
+    0.12.0 may behave strangely if they subscribe to the same value
+    twice through an alias, therefore if you plan to deploy aliases
+    you should upgrade all subscribers to 0.12 or later first.
+
 * 0.11.1 tools
 
   - fix building the tools on windows
