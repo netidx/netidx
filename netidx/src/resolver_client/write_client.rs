@@ -234,7 +234,7 @@ impl Connection {
         }
     }
 
-    fn handle_failed_connect(&mut self) {
+    fn handle_failed_connect(&mut self, e: anyhow::Error) {
         self.security_context = None;
         self.secrets.write().remove(&self.resolver_addr);
         warn!("write connection {:?} failed {}", self.resolver_addr, e);
@@ -253,7 +253,7 @@ impl Connection {
                 None => match self.connect().await {
                     Ok(()) => break,
                     Err(e) => {
-                        self.handle_failed_connect();
+                        self.handle_failed_connect(e);
                         let wait = thread_rng().gen_range(1..12);
                         time::sleep(Duration::from_secs(wait)).await;
                     }
@@ -280,7 +280,7 @@ impl Connection {
                 None => match self.connect().await {
                     Ok(()) => self.con.as_mut().unwrap(),
                     Err(e) => {
-                        self.handle_failed_connect();
+                        self.handle_failed_connect(e);
                         continue 'batch;
                     }
                 },
