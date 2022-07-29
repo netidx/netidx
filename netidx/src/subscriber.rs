@@ -923,10 +923,10 @@ impl Subscriber {
     /// achieved with larger batches.
     ///
     /// In case you are already subscribed to one or more of the paths
-    /// in the batch, you will receive a reference to the existing
-    /// subscription and no additional messages will be sent. However
-    /// subscriber does not retain strong references to subscribed
-    /// values, so if you drop all of them it will be unsubscribed.
+    /// or aliases of the paths in the batch, you will receive a
+    /// reference to the existing subscription. However subscriber
+    /// does not retain strong references to subscribed values, so if
+    /// you drop all of them it will be unsubscribed.
     ///
     /// It is safe to call this function concurrently with the same or
     /// overlapping sets of paths in the batch, only one subscription
@@ -939,7 +939,7 @@ impl Subscriber {
     /// error, but that error will not effect other subscriptions in
     /// the batch, which may complete successfully. If you need all or
     /// nothing behavior, specify None for timeout and wrap the
-    /// `subscribe` future in a `time::timeout`.
+    /// `subscribe` future in a `tokio::time::timeout`.
     pub async fn subscribe(
         &self,
         batch: impl IntoIterator<Item = Path>,
@@ -1230,6 +1230,7 @@ struct Sub {
     sub_id: SubId,
     streams: Streams,
     last: Option<TArc<Mutex<Event>>>,
+    val: ValWeak,
 }
 
 type ByChan = FxHashMap<
@@ -1424,30 +1425,43 @@ async fn process_batch(
             }
             From::Subscribed(p, id, m) => match pending.remove(&p) {
                 None => con.queue_send(&To::Unsubscribe(id))?,
-                Some(req) => {
-                    let last = TArc::new(Mutex::new(Event::Update(m)));
-                    let s = Ok(Val(Arc::new(ValInner {
-                        sub_id: req.sub_id,
-                        id,
-                        conid,
-                        connection: req.con,
-                        last: last.clone(),
-                    })));
-                    match req.finished.send(s) {
-                        Err(_) => con.queue_send(&To::Unsubscribe(id))?,
-                        Ok(()) => {
-                            subscriptions.insert(
-                                id,
-                                Sub {
-                                    path: req.path,
-                                    sub_id: req.sub_id,
-                                    last: Some(last),
-                                    streams: Streams::new(),
-                                },
-                            );
+                Some(req) => match subscriptions.get_mut(&id) {
+                    Some(sub) => match sub.val.upgrade() {
+                        Some(val) => {
+                            let _ = req.finished.send(Ok(val));
+                        }
+                        None => {
+                            let _ = req.finished.send(Err(anyhow!(
+                                "subscribe alias while unsubscribing"
+                            )));
+                        }
+                    },
+                    None => {
+                        let last = TArc::new(Mutex::new(Event::Update(m)));
+                        let s = Val(Arc::new(ValInner {
+                            sub_id: req.sub_id,
+                            id,
+                            conid,
+                            connection: req.con,
+                            last: last.clone(),
+                        }));
+                        match req.finished.send(Ok(s.clone())) {
+                            Err(_) => con.queue_send(&To::Unsubscribe(id))?,
+                            Ok(()) => {
+                                subscriptions.insert(
+                                    id,
+                                    Sub {
+                                        path: req.path,
+                                        sub_id: req.sub_id,
+                                        last: Some(last),
+                                        streams: Streams::new(),
+                                        val: s.downgrade(),
+                                    },
+                                );
+                            }
                         }
                     }
-                }
+                },
             },
         }
     }
