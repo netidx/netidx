@@ -15,7 +15,7 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver,
-    resolver_client::{DesiredAuth, ResolverRead},
+    resolver_client::{ChangeTracker, DesiredAuth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
 };
 use netidx_bscript::vm::{RpcCallId, TimerId};
@@ -85,6 +85,10 @@ impl Ctx {
             self.from_gui.unbounded_send(FromGui::SetTimer(id, timeout));
     }
 
+    pub(crate) fn poll(&self, path: Path) {
+        let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Poll(path));
+    }
+
     pub(crate) fn resolve_table(&self, path: Path) {
         let _: result::Result<_, _> =
             self.from_gui.unbounded_send(FromGui::ResolveTable(path));
@@ -113,6 +117,7 @@ struct CtxInner {
     dv_view: Option<Dval>,
     rpcs:
         HashMap<Path, (Instant, mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)>)>,
+    polls: HashMap<Path, (Instant, mpsc::UnboundedSender<()>)>,
     changed: Pooled<Vec<(SubId, Value)>>,
     refreshing: bool,
 }
@@ -136,6 +141,7 @@ impl CtxInner {
             rx_view: None,
             dv_view: None,
             rpcs: HashMap::new(),
+            polls: HashMap::new(),
             changed: UPDATES.take(),
             refreshing: false,
         };
@@ -373,6 +379,39 @@ impl CtxInner {
         Ok(())
     }
 
+    fn poll(&mut self, path: Path) {
+        async fn poll_task(
+            to_gui: glib::Sender<ToGui>,
+            path: Path,
+            resolver: ResolverRead,
+            mut rx: mpsc::UnboundedReceiver<()>,
+        ) {
+            let mut ct = ChangeTracker::new(path.clone());
+            while let Some(()) = rx.next().await {
+                match resolver.check_changed(&mut ct).await {
+                    Err(e) => warn!("failed to poll {} for changes {}", path, e),
+                    Ok(r) if r => {
+                        if let Err(_) = to_gui.send(ToGui::UpdatePoll(path.clone())) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let r = self.polls.entry(path.clone()).or_insert_with(|| {
+            let (tx, rx) = mpsc::unbounded();
+            task::spawn(poll_task(
+                self.to_gui.clone(),
+                path.clone(),
+                self.resolver.clone(),
+                rx,
+            ));
+            (Instant::now(), tx)
+        });
+        r.0 = Instant::now();
+        r.1.unbounded_send(());
+    }
+
     fn set_timer(&self, id: TimerId, timeout: Duration) {
         let to_gui = self.to_gui.clone();
         task::spawn(async move {
@@ -381,10 +420,11 @@ impl CtxInner {
         });
     }
 
-    fn gc_rpcs(&mut self) {
-        static MAX_RPC_AGE: Duration = Duration::from_secs(120);
+    fn gc(&mut self) {
+        static MAX_AGE: Duration = Duration::from_secs(600);
         let now = Instant::now();
-        self.rpcs.retain(|_, (last, _)| now - *last < MAX_RPC_AGE);
+        self.rpcs.retain(|_, (last, _)| now - *last < MAX_AGE);
+        self.polls.retain(|_, (last, _)| now - *last < MAX_AGE);
     }
 
     fn refresh(&mut self) -> Result<()> {
@@ -416,7 +456,7 @@ impl CtxInner {
                 updates.next().await
             }
         }
-        let mut gc_rpcs = time::interval(Duration::from_secs(60));
+        let mut gc = time::interval(Duration::from_secs(60));
         loop {
             select_biased! {
                 m = self.from_gui.next() => match m {
@@ -442,6 +482,7 @@ impl CtxInner {
                         break_err!(self.navigate_file(file).await),
                     Some(FromGui::CallRpc(path, args, id)) =>
                         break_err!(self.call_rpc(path, args, id)),
+                    Some(FromGui::Poll(path)) => self.poll(path),
                     Some(FromGui::SetTimer(id, timeout)) => self.set_timer(id, timeout),
                 },
                 b = read_updates(
@@ -456,7 +497,7 @@ impl CtxInner {
                 m = read_view(&mut self.rx_view).fuse() => {
                     break_err!(self.load_custom_view(m))
                 },
-                _ = gc_rpcs.tick().fuse() => self.gc_rpcs(),
+                _ = gc.tick().fuse() => self.gc(),
             }
         }
         let _: result::Result<_, _> = self.to_gui.send(ToGui::Terminate);

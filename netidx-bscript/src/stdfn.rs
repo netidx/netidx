@@ -1635,6 +1635,7 @@ impl<C: Ctx, E> Apply<C, E> for Load {
                         Event::Variable(_, _, _)
                         | Event::Rpc(_, _)
                         | Event::Timer(_)
+                        | Event::Poll(_)
                         | Event::User(_) => None,
                         Event::Netidx(id, value) if dv.id() == *id => Some(value.clone()),
                         Event::Netidx(_, _) => None,
@@ -1761,6 +1762,7 @@ impl<C: Ctx, E> Apply<C, E> for Get {
                         }
                         (None, _, _)
                         | (Some(_), _, Event::Netidx(_, _))
+                        | (Some(_), _, Event::Poll(_))
                         | (Some(_), _, Event::User(_))
                         | (Some(_), _, Event::Rpc(_, _))
                         | (Some(_), _, Event::Timer(_))
@@ -1830,7 +1832,7 @@ impl<C: Ctx, E> Register<C, E> for RpcCall {
         let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
             let triggered = match from {
                 [trigger, ..] => trigger.current().is_some(),
-                _ => false
+                _ => false,
             };
             let mut t = RpcCall {
                 args: CachedVals::new(match from {
@@ -2022,6 +2024,7 @@ impl<C: Ctx, E> Apply<C, E> for AfterIdle {
                 match event {
                     Event::Variable(_, _, _)
                     | Event::Netidx(_, _)
+                    | Event::Poll(_)
                     | Event::Rpc(_, _)
                     | Event::User(_) => self.usage(),
                     Event::Timer(id) => {
@@ -2156,6 +2159,7 @@ impl<C: Ctx, E> Apply<C, E> for Timer {
                 match event {
                     Event::Variable(_, _, _)
                     | Event::Netidx(_, _)
+                    | Event::Poll(_)
                     | Event::Rpc(_, _)
                     | Event::User(_) => self.usage(),
                     Event::Timer(id) => {
@@ -2234,6 +2238,94 @@ impl Timer {
             )))
         } else {
             None
+        }
+    }
+}
+
+pub(crate) struct Poll {
+    path: Option<Path>,
+    eid: ExprId,
+    invalid: bool,
+}
+
+impl<C: Ctx, E> Register<C, E> for Poll {
+    fn register(ctx: &mut ExecCtx<C, E>) {
+        let f: InitFn<C, E> = Arc::new(|ctx, from, _, eid| match from {
+            [path] => {
+                let mut t = Self {
+                    path: path.current().and_then(|p| p.cast_to::<Path>().ok()),
+                    eid,
+                    invalid: false,
+                };
+                t.maybe_poll(ctx);
+                Box::new(t)
+            }
+            _ => Box::new(Self { path: None, eid, invalid: true }),
+        });
+        ctx.functions.insert("poll".into(), f);
+        ctx.user.register_fn("poll".into(), Path::root());
+    }
+}
+
+impl<C: Ctx, E> Apply<C, E> for Poll {
+    fn current(&self) -> Option<Value> {
+        self.usage()
+    }
+
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        match from {
+            [path] => {
+                if let Some(path) =
+                    path.update(ctx, event).and_then(|p| p.cast_to::<Path>().ok())
+                {
+                    self.path = Some(path);
+                    self.maybe_poll(ctx);
+                }
+                match event {
+                    Event::Poll(path) if Some(path) == self.path.as_ref() => {
+                        Some(Value::from(path.clone()))
+                    }
+                    Event::Poll(_)
+                    | Event::Variable(_, _, _)
+                    | Event::Netidx(_, _)
+                    | Event::Rpc(_, _)
+                    | Event::Timer(_)
+                    | Event::User(_) => None,
+                }
+            }
+            exprs => {
+                let mut up = false;
+                self.invalid = true;
+                for expr in exprs {
+                    up |= expr.update(ctx, event).is_some()
+                }
+                if up {
+                    self.usage()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Poll {
+    fn usage(&self) -> Option<Value> {
+        if self.invalid {
+            Some(Value::from("poll(path): expected 1 argument"))
+        } else {
+            None
+        }
+    }
+
+    fn maybe_poll<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Some(path) = &self.path {
+            ctx.user.poll(path.clone(), self.eid)
         }
     }
 }

@@ -150,6 +150,7 @@ enum ToGui {
     UpdateVar(Path, Chars, Value),
     UpdateRpc(RpcCallId, Value),
     UpdateTimer(TimerId),
+    UpdatePoll(Path),
     TableResolved(Path, resolver_client::Table),
     ShowError(String),
     SaveError(String),
@@ -164,6 +165,7 @@ enum FromGui {
     Save(ViewLoc, view::Widget, oneshot::Sender<Result<()>>),
     CallRpc(Path, Vec<(Chars, Value)>, RpcCallId),
     SetTimer(TimerId, Duration),
+    Poll(Path),
     Updated,
     Terminate,
 }
@@ -242,6 +244,10 @@ impl vm::Ctx for WidgetCtx {
 
     fn set_timer(&mut self, id: TimerId, timeout: Duration, _ref_id: ExprId) {
         self.backend.set_timer(id, timeout);
+    }
+
+    fn poll(&mut self, path: Path, _ref_id: ExprId) {
+        self.backend.poll(path);
     }
 }
 
@@ -1023,6 +1029,10 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         }
         ToGui::UpdateTimer(id) => {
             update_single(&current, &mut ctx.borrow_mut(), &vm::Event::Timer(id));
+            Continue(true)
+        }
+        ToGui::UpdatePoll(path) => {
+            update_single(&current, &mut ctx.borrow_mut(), &vm::Event::Poll(path));
             Continue(true)
         }
         ToGui::Update(mut batch) => {
