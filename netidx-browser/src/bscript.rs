@@ -313,15 +313,11 @@ pub(crate) struct Poll {
 
 impl Register<WidgetCtx, LocalEvent> for Poll {
     fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
-        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from, _, _| match from {
-            [path] => {
-                let mut t = Self {
-                    path: path.current().and_then(|p| p.cast_to::<Path>().ok()),
-                    invalid: false,
-                };
-                t.maybe_poll(ctx);
-                Box::new(t)
-            }
+        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|_, from, _, _| match from {
+            [path] => Box::new(Self {
+                path: path.current().and_then(|p| p.cast_to::<Path>().ok()),
+                invalid: false,
+            }),
             _ => Box::new(Self { path: None, invalid: true }),
         });
         ctx.functions.insert("poll".into(), f);
@@ -331,7 +327,11 @@ impl Register<WidgetCtx, LocalEvent> for Poll {
 
 impl Apply<WidgetCtx, LocalEvent> for Poll {
     fn current(&self) -> Option<Value> {
-        self.usage()
+        if self.invalid {
+            Some(Value::from("poll(path): expected 1 argument"))
+        } else {
+            self.path.clone().map(Value::from)
+        }
     }
 
     fn update(
@@ -370,7 +370,7 @@ impl Apply<WidgetCtx, LocalEvent> for Poll {
                     up |= expr.update(ctx, event).is_some()
                 }
                 if up {
-                    self.usage()
+                    self.current()
                 } else {
                     None
                 }
@@ -380,14 +380,6 @@ impl Apply<WidgetCtx, LocalEvent> for Poll {
 }
 
 impl Poll {
-    fn usage(&self) -> Option<Value> {
-        if self.invalid {
-            Some(Value::from("poll(path): expected 1 argument"))
-        } else {
-            None
-        }
-    }
-
     fn maybe_poll(&mut self, ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
         if let Some(path) = &self.path {
             ctx.user.backend.poll(path.clone())
@@ -401,5 +393,6 @@ pub(crate) fn create_ctx(ctx: WidgetCtx) -> ExecCtx<WidgetCtx, LocalEvent> {
     CurrentPath::register(&mut t);
     Confirm::register(&mut t);
     Navigate::register(&mut t);
+    Poll::register(&mut t);
     t
 }
