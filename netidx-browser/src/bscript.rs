@@ -314,7 +314,7 @@ pub(crate) struct Poll {
 impl Register<WidgetCtx, LocalEvent> for Poll {
     fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
         let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|_, from, _, _| match from {
-            [path] => Box::new(Self {
+            [path, _] => Box::new(Self {
                 path: path.current().and_then(|p| p.cast_to::<Path>().ok()),
                 invalid: false,
             }),
@@ -328,7 +328,7 @@ impl Register<WidgetCtx, LocalEvent> for Poll {
 impl Apply<WidgetCtx, LocalEvent> for Poll {
     fn current(&self) -> Option<Value> {
         if self.invalid {
-            Some(Value::from("poll(path): expected 1 argument"))
+            Some(Value::from("poll(path, trigger): expected 2 arguments"))
         } else {
             self.path.clone().map(Value::from)
         }
@@ -341,11 +341,16 @@ impl Apply<WidgetCtx, LocalEvent> for Poll {
         event: &vm::Event<LocalEvent>,
     ) -> Option<Value> {
         match from {
-            [path] => {
+            [path, trigger] => {
+                let mut poll = false;
                 if let Some(path) =
                     path.update(ctx, event).and_then(|p| p.cast_to::<Path>().ok())
                 {
                     self.path = Some(path);
+                    poll = true;
+                }
+                poll |= trigger.update(ctx, event).is_some();
+                if poll {
                     self.maybe_poll(ctx);
                 }
                 match event {

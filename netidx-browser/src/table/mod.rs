@@ -32,6 +32,7 @@ pub(super) struct Table {
     selection_mode: BSNode,
     selection: BSNode,
     path: BSNode,
+    refresh: BSNode,
     row_filter: BSNode,
     show_row_name: BSNode,
     sort_mode: BSNode,
@@ -71,6 +72,8 @@ impl Table {
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.column_types);
         let column_widths =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.column_widths);
+        let refresh =
+            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.refresh);
         let on_select =
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.on_select);
         let on_activate =
@@ -124,6 +127,7 @@ impl Table {
             selection_mode,
             selection,
             path,
+            refresh,
             row_filter,
             show_row_name,
             sort_mode,
@@ -132,13 +136,13 @@ impl Table {
         }
     }
 
-    fn refresh(&self, ctx: BSCtxRef) {
+    fn refresh(&self, ctx: BSCtxRef, force: bool) {
         let state = &mut *self.state.borrow_mut();
         let path = &*self.shared.path.borrow();
         match state {
             TableState::Refresh(rpath) if &*path == rpath => (),
             TableState::Resolving(rpath) if &*path == rpath => (),
-            TableState::Raeified(table) if &table.path == &*path => {
+            TableState::Raeified(table) if !force && &table.path == &*path => {
                 *state = TableState::Refresh(path.clone());
             }
             TableState::Refresh(_)
@@ -194,12 +198,13 @@ impl BWidget for Table {
             self.shared.set_columns_resizable(self.columns_resizable.update(ctx, event));
         re |= self.shared.set_column_types(self.column_types.update(ctx, event));
         re |= self.shared.set_column_widths(self.column_widths.update(ctx, event));
+        let force_refresh = self.refresh.update(ctx, event).is_some();
         self.shared.on_activate.borrow_mut().update(ctx, event);
         self.shared.on_select.borrow_mut().update(ctx, event);
         self.shared.on_edit.borrow_mut().update(ctx, event);
         self.shared.on_header_click.borrow_mut().update(ctx, event);
-        if re {
-            self.refresh(ctx);
+        if re || force_refresh {
+            self.refresh(ctx, force_refresh);
         }
         match &*self.state.borrow() {
             TableState::Raeified(table) => table.update(ctx, waits, event),

@@ -128,6 +128,7 @@ pub(super) struct Table {
     _dbg_selection_mode: DbgExpr,
     _dbg_selection: DbgExpr,
     _dbg_show_row_name: DbgExpr,
+    _dbg_refresh: DbgExpr,
     _dbg_on_activate: DbgExpr,
     _dbg_on_select: DbgExpr,
     _dbg_on_edit: DbgExpr,
@@ -161,6 +162,8 @@ impl Table {
         row_config_exp.add(row_config.root());
         event_exp.add(event.root());
         let (l, e, _dbg_path) = expr!(ctx, "Path:", scope, spec, on_change, path);
+        shared_config.add((l, e));
+        let (l, e, _dbg_refresh) = expr!(ctx, "Refresh:", scope, spec, on_change, refresh);
         shared_config.add((l, e));
         let (l, e, _dbg_sort_mode) =
             expr!(ctx, "Sort Mode:", scope, spec, on_change, sort_mode);
@@ -208,6 +211,7 @@ impl Table {
             root,
             spec,
             _dbg_path,
+            _dbg_refresh,
             _dbg_sort_mode,
             _dbg_column_filter,
             _dbg_row_filter,

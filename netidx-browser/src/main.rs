@@ -85,6 +85,7 @@ fn default_view(path: Path) -> view::Widget {
             selection_mode: ExprKind::Constant(Value::from("single")).to_expr(),
             selection: ExprKind::Constant(Value::Null).to_expr(),
             show_row_name: ExprKind::Constant(Value::True).to_expr(),
+            refresh: ExprKind::Constant(Value::Null).to_expr(),
             on_select: ExprKind::Constant(Value::Null).to_expr(),
             on_edit: ExprKind::Constant(Value::Null).to_expr(),
             on_activate: ExprKind::Apply {

@@ -333,6 +333,11 @@ pub struct Table {
     /// false: do not show the row name column
     #[serde(default)]
     pub show_row_name: Expr,
+    /// <any>
+    /// when this updates the table structure will be reloaded from
+    /// netidx
+    #[serde(default)]
+    pub refresh: Expr,
     /// event() will yield a list of selected paths when the user
     /// changes the selection
     #[serde(default)]
@@ -367,6 +372,7 @@ impl Default for Table {
             selection_mode: ExprKind::Constant(Value::from("single")).to_expr(),
             selection: Expr::default(),
             show_row_name: ExprKind::Constant(Value::True).to_expr(),
+            refresh: Expr::default(),
             on_select: Expr::default(),
             on_edit: Expr::default(),
             on_activate: Expr::default(),
