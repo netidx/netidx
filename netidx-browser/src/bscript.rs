@@ -9,6 +9,7 @@ use std::{cell::RefCell, mem, rc::Rc, result::Result, sync::Arc};
 pub(crate) enum LocalEvent {
     Event(Value),
     TableResolved(Path, resolver_client::Table),
+    Poll(Path),
 }
 
 pub(crate) struct Event {
@@ -47,7 +48,8 @@ impl Apply<WidgetCtx, LocalEvent> for Event {
             | vm::Event::Netidx(_, _)
             | vm::Event::Rpc(_, _)
             | vm::Event::Timer(_)
-            | vm::Event::User(LocalEvent::TableResolved(_, _)) => None,
+            | vm::Event::User(LocalEvent::TableResolved(_, _))
+            | vm::Event::User(LocalEvent::Poll(_)) => None,
             vm::Event::User(LocalEvent::Event(value)) => {
                 self.cur = Some(value.clone());
                 self.current()
@@ -301,6 +303,95 @@ impl Navigate {
 
     fn usage() -> Option<Value> {
         Some(Value::from("navigate([new_window], to): expected 1 or two arguments where to is e.g. /foo/bar, or netidx:/foo/bar, or, file:/path/to/view"))
+    }
+}
+
+pub(crate) struct Poll {
+    path: Option<Path>,
+    invalid: bool,
+}
+
+impl Register<WidgetCtx, LocalEvent> for Poll {
+    fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
+        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from, _, _| match from {
+            [path] => {
+                let mut t = Self {
+                    path: path.current().and_then(|p| p.cast_to::<Path>().ok()),
+                    invalid: false,
+                };
+                t.maybe_poll(ctx);
+                Box::new(t)
+            }
+            _ => Box::new(Self { path: None, invalid: true }),
+        });
+        ctx.functions.insert("poll".into(), f);
+        ctx.user.register_fn("poll".into(), Path::root());
+    }
+}
+
+impl Apply<WidgetCtx, LocalEvent> for Poll {
+    fn current(&self) -> Option<Value> {
+        self.usage()
+    }
+
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<WidgetCtx, LocalEvent>,
+        from: &mut [Node<WidgetCtx, LocalEvent>],
+        event: &vm::Event<LocalEvent>,
+    ) -> Option<Value> {
+        match from {
+            [path] => {
+                if let Some(path) =
+                    path.update(ctx, event).and_then(|p| p.cast_to::<Path>().ok())
+                {
+                    self.path = Some(path);
+                    self.maybe_poll(ctx);
+                }
+                match event {
+                    vm::Event::User(LocalEvent::Poll(path))
+                        if Some(path) == self.path.as_ref() =>
+                    {
+                        Some(Value::from(path.clone()))
+                    }
+                    vm::Event::User(LocalEvent::Poll(_))
+                    | vm::Event::User(LocalEvent::Event(_))
+                    | vm::Event::User(LocalEvent::TableResolved(_, _))
+                    | vm::Event::Variable(_, _, _)
+                    | vm::Event::Netidx(_, _)
+                    | vm::Event::Rpc(_, _)
+                    | vm::Event::Timer(_) => None,
+                }
+            }
+            exprs => {
+                let mut up = false;
+                self.invalid = true;
+                for expr in exprs {
+                    up |= expr.update(ctx, event).is_some()
+                }
+                if up {
+                    self.usage()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Poll {
+    fn usage(&self) -> Option<Value> {
+        if self.invalid {
+            Some(Value::from("poll(path): expected 1 argument"))
+        } else {
+            None
+        }
+    }
+
+    fn maybe_poll(&mut self, ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
+        if let Some(path) = &self.path {
+            ctx.user.backend.poll(path.clone())
+        }
     }
 }
 

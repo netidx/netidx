@@ -245,10 +245,6 @@ impl vm::Ctx for WidgetCtx {
     fn set_timer(&mut self, id: TimerId, timeout: Duration, _ref_id: ExprId) {
         self.backend.set_timer(id, timeout);
     }
-
-    fn poll(&mut self, path: Path, _ref_id: ExprId) {
-        self.backend.poll(path);
-    }
 }
 
 #[derive(Debug)]
@@ -1032,7 +1028,11 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             Continue(true)
         }
         ToGui::UpdatePoll(path) => {
-            update_single(&current, &mut ctx.borrow_mut(), &vm::Event::Poll(path));
+            update_single(
+                &current,
+                &mut ctx.borrow_mut(),
+                &vm::Event::User(LocalEvent::Poll(path)),
+            );
             Continue(true)
         }
         ToGui::Update(mut batch) => {

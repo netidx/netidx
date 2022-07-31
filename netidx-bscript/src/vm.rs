@@ -83,7 +83,6 @@ impl DbgCtx {
 pub enum Event<E> {
     Variable(Path, Chars, Value),
     Netidx(SubId, Value),
-    Poll(Path),
     Rpc(RpcCallId, Value),
     Timer(TimerId),
     User(E),
@@ -148,11 +147,6 @@ pub trait Ctx {
 
     /// arrange to have a Timer event delivered after timeout
     fn set_timer(&mut self, id: TimerId, timeout: Duration, ref_by: ExprId);
-
-    /// arrange to check if the structure under path has changed since
-    /// the last time this method was called for path, and if it has
-    /// deliver a Poll event.
-    fn poll(&mut self, path: Path, ref_by: ExprId);
 }
 
 pub fn store_var(
@@ -260,7 +254,6 @@ impl<C: Ctx, E> ExecCtx<C, E> {
         stdfn::Not::register(&mut t);
         stdfn::Once::register(&mut t);
         stdfn::Or::register(&mut t);
-        stdfn::Poll::register(&mut t);
         stdfn::Product::register(&mut t);
         stdfn::Replace::register(&mut t);
         stdfn::RpcCall::register(&mut t);

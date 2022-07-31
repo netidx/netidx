@@ -209,7 +209,8 @@ impl BWidget for Table {
                 | vm::Event::Rpc(_, _)
                 | vm::Event::Timer(_)
                 | vm::Event::Variable(_, _, _)
-                | vm::Event::User(LocalEvent::Event(_)) => (),
+                | vm::Event::User(LocalEvent::Event(_))
+                | vm::Event::User(LocalEvent::Poll(_)) => (),
                 vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {
                     if path == rpath {
                         match self.selection.current() {

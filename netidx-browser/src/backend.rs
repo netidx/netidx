@@ -395,6 +395,7 @@ impl CtxInner {
                             break;
                         }
                     }
+                    Ok(_) => ()
                 }
             }
         }
@@ -409,7 +410,7 @@ impl CtxInner {
             (Instant::now(), tx)
         });
         r.0 = Instant::now();
-        r.1.unbounded_send(());
+        let _ = r.1.unbounded_send(());
     }
 
     fn set_timer(&self, id: TimerId, timeout: Duration) {
