@@ -273,6 +273,17 @@ impl Path {
             && Path::dirname(other) == parent
     }
 
+    /// strips prefix from path at the separator boundry. Returns None
+    /// if prefix is not a parent of path (even if it happens to be a
+    /// prefix).
+    pub fn strip_prefix<'a, T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(prefix: &T, path: &'a U) -> Option<&'a str> {
+        if Path::is_parent(prefix, path) {
+            path.as_ref().strip_prefix(prefix.as_ref())
+        } else {
+            None
+        }
+    }
+    
     /// finds the longest common parent of the two specified paths, /
     /// in the case they are completely disjoint.
     pub fn lcp<'a, T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(

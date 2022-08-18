@@ -508,7 +508,8 @@ mod publish {
                     State::Play | State::Pause => Ok(()),
                     State::Tail => {
                         let dt = ts.datetime();
-                        let pos = self.cursor.current().unwrap_or(chrono::MIN_DATETIME);
+                        let pos =
+                            self.cursor.current().unwrap_or(DateTime::<Utc>::MIN_UTC);
                         if self.cursor.contains(&dt) && pos < dt {
                             let mut batch = (*batch).clone();
                             self.process_batch((dt, &mut batch)).await?;
@@ -1467,7 +1468,8 @@ pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
     if params.spec.is_empty() && publish_args.is_none() {
         panic!("you must specify a publish config, some paths to log, or both")
     }
-    let spec = params.spec
+    let spec = params
+        .spec
         .into_iter()
         .map(Chars::from)
         .map(Glob::new)

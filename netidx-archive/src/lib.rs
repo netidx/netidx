@@ -710,7 +710,7 @@ impl ArchiveWriter {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
             warn!("archive file size is limited to 4 GiB on this platform")
         }
-        let mut time_basis = chrono::MIN_DATETIME;
+        let mut time_basis = DateTime::<Utc>::MIN_UTC;
         if FilePath::is_file(path.as_ref()) {
             let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
             file.try_lock_exclusive()?;
@@ -951,7 +951,7 @@ impl ArchiveIndex {
             id_by_path: HashMap::new(),
             imagemap: BTreeMap::new(),
             deltamap: BTreeMap::new(),
-            time_basis: chrono::MIN_DATETIME,
+            time_basis: DateTime::<Utc>::MIN_UTC,
             end: <FileHeader as Pack>::const_encoded_len().unwrap(),
         }
     }
