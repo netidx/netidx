@@ -218,6 +218,15 @@ impl<'a> DoubleEndedIterator for DirNames<'a> {
 }
 
 impl Path {
+    /// create a path from a non static str by copying the contents of the str
+    pub fn from_str(s: &str) -> Self {
+        if is_canonical(s) {
+            Path(ArcStr::from(s))
+        } else {
+            Path(ArcStr::from(canonize(s)))
+        }
+    }
+
     /// returns /
     pub fn root() -> Path {
         // CR estokes: need a good solution for using SEP here

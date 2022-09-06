@@ -996,6 +996,16 @@ pub trait FromValue {
 }
 
 impl Value {
+    pub fn to_string_naked(&self) -> String {
+        struct WVal<'a>(&'a Value);
+        impl<'a> fmt::Display for WVal<'a> {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                self.0.fmt_naked(f)
+            }
+        }
+        format!("{}", WVal(self))
+    }
+    
     pub fn fmt_naked(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::U32(v) | Value::V32(v) => write!(f, "{}", v),
