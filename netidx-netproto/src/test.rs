@@ -73,7 +73,7 @@ mod resolver {
         let _: Result<ToRead> = Pack::decode(&mut &*b);
         let _: Result<ToWrite> = Pack::decode(&mut &*b);
     }
-    
+
     fn auth_challenge() -> impl Strategy<Value = AuthChallenge> {
         (hash_method(), any::<u128>())
             .prop_map(|(hash_method, challenge)| AuthChallenge { hash_method, challenge })
@@ -134,8 +134,9 @@ mod resolver {
     fn globset() -> impl Strategy<Value = GlobSet> {
         let published_only = any::<bool>();
         let globs = collection::vec(glob(), (0, 100));
-        (published_only, globs)
-            .prop_map(|(published_only, globs)| GlobSet::new(published_only, globs).unwrap())
+        (published_only, globs).prop_map(|(published_only, globs)| {
+            GlobSet::new(published_only, globs).unwrap()
+        })
     }
 
     fn to_read() -> impl Strategy<Value = ToRead> {
@@ -204,7 +205,11 @@ mod resolver {
     }
 
     fn referral() -> impl Strategy<Value = Referral> {
-        (path(), any::<Option<u16>>(), collection::vec((any::<SocketAddr>(), auth()), (0, 10)))
+        (
+            path(),
+            any::<Option<u16>>(),
+            collection::vec((any::<SocketAddr>(), auth()), (0, 10)),
+        )
             .prop_map(|(path, ttl, addrs)| Referral {
                 path,
                 ttl,
@@ -300,7 +305,7 @@ mod resolver {
         fn test_fuzz(b in bytes()) {
             fuzz(b)
         }
-        
+
         #[test]
         fn test_auth_challenge(a in auth_challenge()) {
             check(a)
@@ -354,7 +359,7 @@ mod publisher {
         publisher::{From, Hello, Id, To},
         value::Value,
     };
-    use chrono::{prelude::*, MAX_DATETIME, MIN_DATETIME};
+    use chrono::prelude::*;
     use netidx_core::pack::PackError;
     use proptest::collection;
     use std::{net::SocketAddr, time::Duration};
@@ -367,7 +372,7 @@ mod publisher {
         let _: Result<Id> = Pack::decode(&mut &*b);
         let _: Result<Value> = Pack::decode(&mut &*b);
     }
-    
+
     fn hello() -> impl Strategy<Value = Hello> {
         prop_oneof![
             Just(Hello::Anonymous),
@@ -398,7 +403,7 @@ mod publisher {
     }
 
     fn datetime() -> impl Strategy<Value = DateTime<Utc>> {
-        (MIN_DATETIME.timestamp()..MAX_DATETIME.timestamp(), 0..1_000_000_000u32)
+        (DateTime::<Utc>::MIN_UTC.timestamp()..DateTime::<Utc>::MAX_UTC.timestamp(), 0..1_000_000_000u32)
             .prop_map(|(s, ns)| Utc.timestamp(s, ns))
     }
 

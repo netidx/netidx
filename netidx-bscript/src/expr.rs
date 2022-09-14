@@ -306,13 +306,16 @@ impl FromStr for Expr {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use chrono::{prelude::*, MAX_DATETIME, MIN_DATETIME};
+    use chrono::prelude::*;
     use netidx_core::chars::Chars;
     use proptest::{collection, prelude::*};
     use std::time::Duration;
 
     fn datetime() -> impl Strategy<Value = DateTime<Utc>> {
-        (MIN_DATETIME.timestamp()..MAX_DATETIME.timestamp(), 0..1_000_000_000u32)
+        (
+            DateTime::<Utc>::MIN_UTC.timestamp()..DateTime::<Utc>::MAX_UTC.timestamp(),
+            0..1_000_000_000u32,
+        )
             .prop_map(|(s, ns)| Utc.timestamp(s, ns))
     }
 
