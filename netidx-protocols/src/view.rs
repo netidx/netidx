@@ -291,6 +291,7 @@ pub struct Table {
     ///
     ///  all the properties of progress are optional. If none are set
     ///  the entire properties array may be omitted
+    /// ```
     ///
     /// - null: a default column type specification is generated that
     /// displays all the columns in the filtered model as text.
