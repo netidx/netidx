@@ -37,9 +37,11 @@ pub struct Table {
     /// updated path.
     #[serde(default)]
     pub path: Expr,
+    /// ```ignore
     /// (null | false | external | <column> | spec)
     /// external: [false, [spec, ...]]
     /// spec: [<column>, ("ascending" | "descending")]
+    /// ```
     /// - null: no default sort. Sorting is processed within the
     /// browser and is under the control of the user. Click events will
     /// also be generated when the user clicks on the header button,
@@ -49,11 +51,11 @@ pub struct Table {
     /// the header buttons. These events could be used to trigger
     /// publisher side sorting, or any other desired action. See,
     /// on_header_click.
-    /// - external: just like `false`, however sort indicators will be
+    /// - external: just like 'false', however sort indicators will be
     /// shown as specified by the indicator spec. Use this if you
     /// implement sorting in the publisher, but want to give the user
     /// feedback about what is sorted.
-    /// - <column>: by default sort by <column> in descending
+    /// - column: by default sort by <column> in descending
     /// order. Sorting is processed within the browser and is under
     /// the user's control. Click events will also be generated when
     /// the user clicks on the header button, see on_header_click.
@@ -61,11 +63,13 @@ pub struct Table {
     /// explicitly specified.
     #[serde(default)]
     pub sort_mode: Expr,
+    /// ```ignore
     /// (null | true | false | list | range)
     /// list: [list-mode, (<col> | [<col>, ...])]
     /// range: [range-mode, ([(<n> | "start"), (<m> | "end")])]
     /// list-mode: ("include" | "exclude" | "include_match" | "exclude_match")
     /// range-mode: ("keep" | "drop")
+    /// ```
     /// - null: all columns are included
     /// - true: all columns are included
     /// - false: no columns are included
@@ -101,18 +105,23 @@ pub struct Table {
     /// except it decides whether the column is editable or not.
     #[serde(default)]
     pub column_editable: Expr,
+    /// ```ignore
     /// (null | widths)
     /// widths: [[<name>, <w>], ...]
+    /// ```
     /// - null: initial column widths are automatically determined
     /// - widths: The list of numeric values specify the initial width of the
     /// corresponding column.
     #[serde(default)]
     pub column_widths: Expr,
+    /// ```ignore
     /// (true | false)
+    /// ```
     /// - true: columns may be resized by the user
     /// - false: columns may not be resized by the user
     #[serde(default)]
     pub columns_resizable: Expr,
+    /// ```ignore
     /// (null | column_types)
     /// column_types: [[<name>, typename, properties], ...]
     /// typename: ("text" | "toggle" | "image" | "combo" | "spin" | "progress" | "hidden")
@@ -283,10 +292,12 @@ pub struct Table {
     ///  all the properties of progress are optional. If none are set
     ///  the entire properties array may be omitted
     ///
-    /// null: a default column type specification is generated that
+    /// - null: a default column type specification is generated that
     /// displays all the columns in the filtered model as text.
     ///
-    /// The column type specifiecation need not be total, any column
+    /// ## Notes
+    ///
+    /// The column type specification need not be total, any column
     /// not given a type will be assumed to be a text column with no
     /// properties assigned.
     ///
@@ -305,32 +316,39 @@ pub struct Table {
     /// specification will be used.
     #[serde(default)]
     pub column_types: Expr,
+    /// ```ignore
     /// ("none" | "single" | "multi")
-    /// "none": user selection is not allowed. The cursor (text focus)
+    /// ```
+    /// - "none": user selection is not allowed. The cursor (text focus)
     /// can still be moved, but cells will not be highlighted and no
     /// on_select events will be generated in response to user
     /// inputs. The selection expression still cause cells to be
     /// selected.
-    /// "single": one cell at a time may be selected.
-    /// "multi": multi selection is enabled, the user may select
+    /// - "single": one cell at a time may be selected.
+    /// - "multi": multi selection is enabled, the user may select
     /// multiple cells by shift clicking. on_select will generate an
     /// array of selected cells every time the selection changes.
     #[serde(default)]
     pub selection_mode: Expr,
+    /// ```ignore
     /// (null | selection)
     /// selection: [<path>, ...]
-    /// null: The selection is maintained internally under the control
+    /// ```
+    /// - null: The selection is maintained internally under the control
     /// of the user, or completely disabled if the selection_mode is
     /// "none".
-    /// selection: A list of selected paths. on_select events are not
+    /// - selection: A list of selected paths. on_select events are not
     /// triggered when this expression updates unless the row or
     /// column filters modify the selection by removing selected rows
     /// or columns from the table.
+    ///
     #[serde(default)]
     pub selection: Expr,
+    /// ```ignore
     /// (true | false)
     /// true: show the row name column
     /// false: do not show the row name column
+    /// ```
     #[serde(default)]
     pub show_row_name: Expr,
     /// <any>
