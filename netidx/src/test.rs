@@ -412,6 +412,7 @@ mod publisher {
                 .await
                 .unwrap();
         let vp = publisher.publish("/app/v0".into(), Value::U64(0)).unwrap();
+        publisher.alias(vp.id(), "/app/v1".into()).unwrap();
         let mut dfp: Option<Val> = None;
         let mut _adv: Option<Val> = None;
         let mut df = publisher.publish_default("/app/q".into()).unwrap();
@@ -461,6 +462,10 @@ mod publisher {
     async fn run_subscriber(cfg: ClientConfig, default_destroyed: Arc<Mutex<bool>>) {
         let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
         let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
+        // we should be able to subscribe to an alias and it should
+        // behave as if we just cloned the existing
+        // subscription. E.G. no extra values in the channel.
+        let va = subscriber.subscribe_one("/app/v1".into(), None).await.unwrap();
         let q = subscriber.subscribe_one("/app/q/foo".into(), None).await.unwrap();
         assert_eq!(q.last(), Event::Update(Value::True));
         let (_, res) =
@@ -472,7 +477,9 @@ mod publisher {
         drop(a);
         let mut c: u64 = 0;
         let (tx, mut rx) = mpsc::channel(10);
-        vs.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
+        let flags = UpdatesFlags::BEGIN_WITH_LAST | UpdatesFlags::NO_SPURIOUS;
+        vs.updates(flags, tx.clone());
+        va.updates(flags, tx);
         loop {
             match rx.next().await {
                 None => panic!("publisher died"),
