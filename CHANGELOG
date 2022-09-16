@@ -1,3 +1,16 @@
+* 0.12.1 netidx
+
+  - add support for aliases in publisher and subscriber. Aliases allow
+    publisher to publish the same data under multiple names without
+    the overhead of publishing the data twice. The only overhead is an
+    extra name in the resolver, and the publisher. Subscriber needed
+    to be aware of this, so if you plan to use aliases you must
+    upgrade your subscribers first.
+
+    Subscribing to an alias pointing to an existing subscription is
+    functionally the same as subscribing to the same path twice, you
+    just get a clone of the existing subscription.
+
 * 0.12.0 all components
 
   - fix a resolver client bug that prevented local publishers from
