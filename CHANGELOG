@@ -1,3 +1,9 @@
+* 0.12.2 tools
+
+  - separate the tools lib from tools so external users don't need to
+    pull in all of tools deps in order to use the common command line
+    arguments
+
 * 0.12.1 netidx
 
   - add support for aliases in publisher and subscriber. Aliases allow
