@@ -18,6 +18,7 @@ members = [
     "netidx-bscript",
     "netidx-protocols",
     "netidx-tools",
+    "netidx-tools-core",
     "netidx-browser",
     "netidx-container"
 ]

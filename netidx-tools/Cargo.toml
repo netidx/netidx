@@ -16,10 +16,6 @@ categories = ["network-programming"]
 name = "netidx"
 path = "src/main.rs"
 
-[lib]
-name = "netidx_tools"
-path = "src/lib.rs"
-
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.4"
 nix = "0.24"
@@ -37,6 +33,7 @@ env_logger = "0.9"
 futures = "0.3"
 fxhash = "0.2"
 log = "0.4"
+netidx-tools-core = { path = "../netidx-tools-core", version = "^0.12.1", default_features = false }
 netidx-archive = { path = "../netidx-archive", version = "^0.12.1", default_features = false }
 netidx = { path = "../netidx", version = "^0.12.1" , default_features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "^0.12.1", default_features = false }

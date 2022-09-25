@@ -1,0 +1,21 @@
+[package]
+name = "netidx-tools-core"
+version = "0.12.1"
+authors = ["Eric Stokes <letaris@gmail.com>"]
+edition = "2021"
+license = "MIT"
+description = "netidx command line tools core library"
+homepage = "https://estokes.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
+readme = "../README.md"
+documentation = "https://docs.rs/netidx"
+keywords = ["networking", "distributed", "kerberos", "tool"]
+categories = ["network-programming"]
+
+[features]
+default = ["krb5_iov"]
+krb5_iov = ["netidx/krb5_iov"]
+
+[dependencies]
+netidx = { path = "../netidx", version = "^0.12.1" , default_features = false }
+structopt = "0.3"

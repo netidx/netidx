@@ -1,5 +1,4 @@
 #![recursion_limit = "2048"]
-mod lib;
 mod publisher;
 mod resolver;
 mod stress_publisher;
@@ -20,7 +19,7 @@ extern crate anyhow;
 #[cfg(unix)]
 #[macro_use]
 extern crate serde_derive;
-use crate::lib::ClientParams;
+use netidx_tools_core::ClientParams;
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug)]
