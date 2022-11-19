@@ -36,6 +36,10 @@ impl Chars {
     pub fn bytes(&self) -> &[u8] {
         &*self.0
     }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
 }
 
 impl PartialEq for Chars {

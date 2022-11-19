@@ -362,7 +362,7 @@ impl Hash for Value {
             }
             Value::V32(v) => {
                 1u8.hash(state);
-                v.hash(state)                
+                v.hash(state)
             }
             Value::I32(v) => {
                 2u8.hash(state);
@@ -450,7 +450,7 @@ impl PartialEq for Value {
                 (Nan, Nan) => true,
                 (Zero, Zero) => true,
                 (_, _) => l == r,
-            }
+            },
             (Value::F64(l), Value::F64(r)) => match (l.classify(), r.classify()) {
                 (Nan, Nan) => true,
                 (Zero, Zero) => true,
@@ -538,7 +538,7 @@ impl PartialOrd for Value {
                         (Nan, Nan) => Some(Ordering::Equal),
                         (Nan, _) => Some(Ordering::Less),
                         (_, Nan) => Some(Ordering::Greater),
-                        (_, _) => l.partial_cmp(&r)
+                        (_, _) => l.partial_cmp(&r),
                     },
                     (_, _) => format!("{}", l).partial_cmp(&format!("{}", r)),
                 }
@@ -1005,7 +1005,7 @@ impl Value {
         }
         format!("{}", WVal(self))
     }
-    
+
     pub fn fmt_naked(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::U32(v) | Value::V32(v) => write!(f, "{}", v),
@@ -1871,6 +1871,38 @@ impl convert::From<Arc<[Value]>> for Value {
         Value::Array(v)
     }
 }
+
+/* specialization someday
+
+impl FromValue for Vec<u8> {
+    fn from_value(v: Value) -> Res<Self> {
+        match v {
+            Value::Bytes(b) => Ok(b.to_vec()),
+            Value::String(s) => Ok(Vec::from(s.as_bytes())),
+            Value::Array(elts) => {
+                Ok(elts.iter().map(|v| v.cast_to::<u8>()).collect::<Result<Vec<u8>>>()?)
+            }
+            v => {
+                let s: String = v.cast_to::<String>()?;
+                Ok(s.into_bytes())
+            }
+        }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Bytes(b) => Ok(b.to_vec()),
+            Value::String(s) => Ok(Vec::from(s.as_bytes())),
+            Value::Array(elts) => Some(
+                elts.iter()
+                    .map(|v| FromValue::get(v.clone()))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            _ => None,
+        }
+    }
+}
+*/
 
 impl<T: FromValue> FromValue for Vec<T> {
     fn from_value(v: Value) -> Res<Self> {
