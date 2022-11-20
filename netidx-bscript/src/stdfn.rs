@@ -263,7 +263,8 @@ pub type Array = CachedCur<ArrayEv>;
 
 fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     match (lhs, rhs) {
-        (None, None) | (None, Some(_)) | (Some(_), None) => None,
+        (None, None) | (Some(_), None) => None,
+        (None, r @ Some(_)) => r,
         (Some(l), Some(r)) => Some(l + r),
     }
 }
@@ -289,7 +290,8 @@ pub struct ProductEv;
 
 fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     match (lhs, rhs) {
-        (None, None) | (None, Some(_)) | (Some(_), None) => None,
+        (None, None) | (Some(_), None) => None,
+        (None, r @ Some(_)) => r,
         (Some(l), Some(r)) => Some(l * r),
     }
 }
@@ -313,7 +315,8 @@ pub struct DivideEv;
 
 fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     match (lhs, rhs) {
-        (None, None) | (None, Some(_)) | (Some(_), None) => None,
+        (None, None) | (Some(_), None) => None,
+        (None, r @ Some(_)) => r,
         (Some(l), Some(r)) => Some(l / r),
     }
 }
