@@ -1943,13 +1943,12 @@ impl RpcCall {
     }
 
     fn maybe_call<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>) {
-        if dbg!(self.triggered) {
-            if let Some((name, args)) = dbg!(self.get_args()) {
+        if self.triggered {
+            if let Some((name, args)) = self.get_args() {
                 self.triggered = false;
                 let id = RpcCallId::new();
                 self.pending.insert(id);
                 ctx.user.call_rpc(Path::from(name), args, self.top_id, id);
-                dbg!(());
             }
         }
     }

@@ -330,8 +330,8 @@ impl CtxInner {
             mut rx: mpsc::UnboundedReceiver<(Vec<(Chars, Value)>, RpcCallId)>,
         ) -> Result<()> {
             let proc = rpc::Proc::new(&subscriber, name.clone()).await?;
-            while let Some((args, id)) = dbg!(rx.next().await) {
-                let res = match dbg!(proc.call(args).await) {
+            while let Some((args, id)) = rx.next().await {
+                let res = match proc.call(args).await {
                     Ok(v) => v,
                     Err(e) => Value::Error(Chars::from(e.to_string())),
                 };
@@ -398,7 +398,7 @@ impl CtxInner {
                             break;
                         }
                     }
-                    Ok(_) => ()
+                    Ok(_) => (),
                 }
             }
         }
