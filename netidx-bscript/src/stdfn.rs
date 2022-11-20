@@ -1864,7 +1864,10 @@ impl<C: Ctx, E> Apply<C, E> for RpcCall {
         event: &Event<E>,
     ) -> Option<Value> {
         match event {
-            Event::Rpc(id, v) if self.pending.remove(&id) => Some(v.clone()),
+            Event::Rpc(id, v) if self.pending.remove(&id) => {
+                self.current = Some(v.clone());
+                Apply::<C, E>::current(self)
+            }
             event => match from {
                 [trigger, args @ ..] => {
                     self.args.update(ctx, args, event);
