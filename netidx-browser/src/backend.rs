@@ -331,7 +331,7 @@ impl CtxInner {
         ) -> Result<()> {
             let proc = rpc::Proc::new(&subscriber, name.clone()).await?;
             while let Some((args, id)) = dbg!(rx.next().await) {
-                let res = match proc.call(args).await {
+                let res = match dbg!(proc.call(args).await) {
                     Ok(v) => v,
                     Err(e) => Value::Error(Chars::from(e.to_string())),
                 };
