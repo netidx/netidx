@@ -195,72 +195,80 @@ impl CtxInner {
         Ok(())
     }
 
-    async fn resolve_table(&self, path: Path) {
-        let table = match self.resolver.table(path.clone()).await {
-            Ok(table) => table,
-            Err(e) => {
-                warn!("failed to resolve table {},  {}", path, e);
-                resolver::Table {
-                    rows: Pooled::orphan(vec![]),
-                    cols: Pooled::orphan(vec![]),
+    fn resolve_table(&self, path: Path) {
+        let resolver = self.resolver.clone();
+        let to_gui = self.to_gui.clone();
+        task::spawn(async move {
+            let table = match resolver.table(path.clone()).await {
+                Ok(table) => table,
+                Err(e) => {
+                    warn!("failed to resolve table {},  {}", path, e);
+                    resolver::Table {
+                        rows: Pooled::orphan(vec![]),
+                        cols: Pooled::orphan(vec![]),
+                    }
                 }
-            }
-        };
-        let _: result::Result<_, _> = self.to_gui.send(ToGui::TableResolved(path, table));
+            };
+            let _: result::Result<_, _> = to_gui.send(ToGui::TableResolved(path, table));
+        });
     }
 
-    async fn save_view_netidx(
+    fn save_view_netidx(
         &self,
         path: Path,
         spec: view::Widget,
         fin: oneshot::Sender<Result<()>>,
     ) {
-        let to = Some(Duration::from_secs(10));
-        match self.subscriber.subscribe_one(path, to).await {
-            Err(e) => {
-                let _ = fin.send(Err(e));
-            }
-            Ok(val) => match serde_json::to_string(&spec) {
+        let subscriber = self.subscriber.clone();
+        task::spawn(async move {
+            let to = Some(Duration::from_secs(10));
+            match subscriber.subscribe_one(path, to).await {
                 Err(e) => {
-                    let _ = fin.send(Err(Error::from(e)));
+                    let _ = fin.send(Err(e));
                 }
-                Ok(s) => {
-                    let v = Value::String(Chars::from(s));
-                    match val.write_with_recipt(v).await {
-                        Err(e) => {
-                            let _ = fin.send(Err(Error::from(e)));
-                        }
-                        Ok(v) => {
-                            let _ = fin.send(match v {
-                                Value::Error(s) => Err(anyhow!(String::from(&*s))),
-                                _ => Ok(()),
-                            });
+                Ok(val) => match serde_json::to_string(&spec) {
+                    Err(e) => {
+                        let _ = fin.send(Err(Error::from(e)));
+                    }
+                    Ok(s) => {
+                        let v = Value::String(Chars::from(s));
+                        match val.write_with_recipt(v).await {
+                            Err(e) => {
+                                let _ = fin.send(Err(Error::from(e)));
+                            }
+                            Ok(v) => {
+                                let _ = fin.send(match v {
+                                    Value::Error(s) => Err(anyhow!(String::from(&*s))),
+                                    _ => Ok(()),
+                                });
+                            }
                         }
                     }
-                }
-            },
-        }
+                },
+            }
+        });
     }
 
     fn save_view_file(
-        &self,
         file: PathBuf,
         spec: view::Widget,
         fin: oneshot::Sender<Result<()>>,
     ) {
-        match serde_json::to_string(&spec) {
-            Err(e) => {
-                let _ = fin.send(Err(Error::from(e)));
-            }
-            Ok(s) => match fs::write(file, s) {
+        task::spawn(async move {
+            match serde_json::to_string(&spec) {
                 Err(e) => {
                     let _ = fin.send(Err(Error::from(e)));
                 }
-                Ok(()) => {
-                    let _ = fin.send(Ok(()));
-                }
-            },
-        }
+                Ok(s) => match task::block_in_place(|| fs::write(file, s)) {
+                    Err(e) => {
+                        let _ = fin.send(Err(Error::from(e)));
+                    }
+                    Ok(()) => {
+                        let _ = fin.send(Ok(()));
+                    }
+                },
+            }
+        });
     }
 
     fn load_custom_view(&mut self, view: Option<RawBatch>) -> Result<()> {
@@ -474,11 +482,11 @@ impl CtxInner {
                         break_err!(self.render_view(view))
                     },
                     Some(FromGui::ResolveTable(path)) =>
-                        self.resolve_table(path).await,
+                        self.resolve_table(path),
                     Some(FromGui::Save(ViewLoc::Netidx(path), view, fin)) =>
-                        self.save_view_netidx(path, view, fin).await,
+                        self.save_view_netidx(path, view, fin),
                     Some(FromGui::Save(ViewLoc::File(file), view, fin)) => {
-                        self.save_view_file(file, view, fin)
+                        Self::save_view_file(file, view, fin)
                     },
                     Some(FromGui::Navigate(ViewLoc::Netidx(path))) =>
                         break_err!(self.navigate_path(path).await),
