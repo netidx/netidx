@@ -973,11 +973,15 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let go_act = gio::SimpleAction::new("go", None);
     ctx.borrow().user.window.add_action(&go_act);
     go_act.connect_activate(clone!(@weak ctx => move |_, _| {
-        let u = &ctx.borrow().user;
-        if u.view_saved.get()
-            || ask_modal(&u.window, "Unsaved view will be lost.") {
-            if let Some(loc) = choose_location(&u.window, false) {
-                u.backend.navigate(loc);
+        let (saved, window) = {
+            let ctx = ctx.borrow();
+            let saved = ctx.user.view_saved.get();
+            let window = ctx.user.window.clone();
+            (saved, window)
+        };
+        if saved || ask_modal(&window, "Unsaved view will be lost.") {
+            if let Some(loc) = choose_location(&window, false) {
+                ctx.borrow().user.backend.navigate(loc);
             }
         }
     }));
@@ -999,11 +1003,16 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         if let Some(v) = a.state() {
             let new_v = !v.get::<bool>().expect("invalid state");
             let m = "Unsaved view will be lost.";
-            let u = &ctx.borrow().user;
-            if !new_v || u.view_saved.get() || ask_modal(&u.window, m) {
-                u.raw_view.store(new_v, Ordering::Relaxed);
+            let (saved, window) = {
+                let ctx = ctx.borrow();
+                let saved = ctx.user.view_saved.get();
+                let window = ctx.user.window.clone();
+                (saved, window)
+            };
+            if !new_v || saved || ask_modal(&window, m) {
+                ctx.borrow().user.raw_view.store(new_v, Ordering::Relaxed);
                 a.change_state(&new_v.to_variant());
-                u.backend.navigate(current_loc.borrow().clone());
+                ctx.borrow().user.backend.navigate(current_loc.borrow().clone());
             }
         }
     }));
@@ -1065,11 +1074,14 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             Continue(true)
         }
         ToGui::Navigate(loc) => {
-            let ctx = ctx.borrow();
-            if ctx.user.view_saved.get()
-                || ask_modal(&ctx.user.window, "Unsaved view will be lost")
-            {
-                ctx.user.backend.navigate(loc)
+            let (saved, window) = {
+                let ctx = ctx.borrow();
+                let saved = ctx.user.view_saved.get();
+                let window = ctx.user.window.clone();
+                (saved, window)
+            };
+            if saved || ask_modal(&window, "Unsaved view will be lost") {
+                ctx.borrow().user.backend.navigate(loc)
             }
             Continue(true)
         }
