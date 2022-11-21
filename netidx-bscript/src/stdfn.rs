@@ -340,16 +340,19 @@ pub struct MinEv;
 
 impl CachedCurEval for MinEv {
     fn eval(from: &CachedVals) -> Option<Value> {
-        from.flat_iter().filter_map(|v| v).fold(None, |res, v| match res {
-            None => Some(v),
-            Some(v0) => {
-                if v < v0 {
-                    Some(v)
-                } else {
-                    Some(v0)
+        let mut res = None;
+        for v in from.flat_iter() {
+            match (res, v) {
+                (None, None) | (Some(_), None) => return None,
+                (None, Some(v)) => {
+                    res = Some(v);
+                }
+                (Some(v0), Some(v)) => {
+                    res = if v < v0 { Some(v) } else { Some(v0) };
                 }
             }
-        })
+        }
+        res
     }
 
     fn name() -> &'static str {
@@ -363,16 +366,19 @@ pub struct MaxEv;
 
 impl CachedCurEval for MaxEv {
     fn eval(from: &CachedVals) -> Option<Value> {
-        from.flat_iter().filter_map(|v| v).fold(None, |res, v| match res {
-            None => Some(v),
-            Some(v0) => {
-                if v > v0 {
-                    Some(v)
-                } else {
-                    Some(v0)
+        let mut res = None;
+        for v in from.flat_iter() {
+            match (res, v) {
+                (None, None) | (Some(_), None) => return None,
+                (None, Some(v)) => {
+                    res = Some(v);
+                }
+                (Some(v0), Some(v)) => {
+                    res = if v > v0 { Some(v) } else { Some(v0) };
                 }
             }
-        })
+        }
+        res
     }
 
     fn name() -> &'static str {
@@ -386,15 +392,17 @@ pub struct AndEv;
 
 impl CachedCurEval for AndEv {
     fn eval(from: &CachedVals) -> Option<Value> {
-        let res = from.flat_iter().all(|v| match v {
-            Some(Value::True) => true,
-            _ => false,
-        });
-        if res {
-            Some(Value::True)
-        } else {
-            Some(Value::False)
+        let mut res = Some(Value::True);
+        for v in from.flat_iter() {
+            match v {
+                None => return None,
+                Some(Value::True) => (),
+                Some(_) => {
+                    res = Some(Value::False);
+                }
+            }
         }
+        res
     }
 
     fn name() -> &'static str {
@@ -408,15 +416,17 @@ pub struct OrEv;
 
 impl CachedCurEval for OrEv {
     fn eval(from: &CachedVals) -> Option<Value> {
-        let res = from.flat_iter().any(|v| match v {
-            Some(Value::True) => true,
-            _ => false,
-        });
-        if res {
-            Some(Value::True)
-        } else {
-            Some(Value::False)
+        let mut res = Some(Value::False);
+        for v in from.flat_iter() {
+            match v {
+                None => return None,
+                Some(Value::True) => {
+                    res = Some(Value::True);
+                }
+                Some(_) => (),
+            }
         }
+        res
     }
 
     fn name() -> &'static str {
@@ -741,9 +751,7 @@ impl CachedCurEval for CmpEv {
             [op, v0, v1] => match op {
                 None => None,
                 Some(Value::String(op)) => match (v0, v1) {
-                    (None, None) => Some(Value::False),
-                    (_, None) => Some(Value::False),
-                    (None, _) => Some(Value::False),
+                    (_, None) | (None, _) => None,
                     (Some(v0), Some(v1)) => Some(match &**op {
                         "eq" => {
                             if v0 == v1 {
@@ -911,9 +919,8 @@ impl CachedCurEval for CastEv {
     }
 
     fn eval(from: &CachedVals) -> Option<Value> {
-        with_typ_prefix(from, "cast(typ, src)", |typ, v| match v {
-            None => None,
-            Some(v) => v.clone().cast(typ),
+        with_typ_prefix(from, "cast(typ, src)", |typ, v| {
+            v.as_ref().and_then(|v| v.clone().cast(typ))
         })
     }
 }
@@ -931,22 +938,43 @@ impl CachedCurEval for IsaEv {
         with_typ_prefix(from, "isa(typ, src)", |typ, v| match (typ, v) {
             (_, None) => None,
             (Typ::U32, Some(Value::U32(_))) => Some(Value::True),
+            (Typ::U32, Some(_)) => Some(Value::False),
             (Typ::V32, Some(Value::V32(_))) => Some(Value::True),
+            (Typ::V32, Some(_)) => Some(Value::False),
             (Typ::I32, Some(Value::I32(_))) => Some(Value::True),
+            (Typ::I32, Some(_)) => Some(Value::False),
             (Typ::Z32, Some(Value::Z32(_))) => Some(Value::True),
+            (Typ::Z32, Some(_)) => Some(Value::False),
             (Typ::U64, Some(Value::U64(_))) => Some(Value::True),
+            (Typ::U64, Some(_)) => Some(Value::False),
             (Typ::V64, Some(Value::V64(_))) => Some(Value::True),
+            (Typ::V64, Some(_)) => Some(Value::False),
             (Typ::I64, Some(Value::I64(_))) => Some(Value::True),
+            (Typ::I64, Some(_)) => Some(Value::False),
             (Typ::Z64, Some(Value::Z64(_))) => Some(Value::True),
+            (Typ::Z64, Some(_)) => Some(Value::False),
             (Typ::F32, Some(Value::F32(_))) => Some(Value::True),
+            (Typ::F32, Some(_)) => Some(Value::False),
             (Typ::F64, Some(Value::F64(_))) => Some(Value::True),
+            (Typ::F64, Some(_)) => Some(Value::False),
             (Typ::Bool, Some(Value::True)) => Some(Value::True),
             (Typ::Bool, Some(Value::False)) => Some(Value::True),
+            (Typ::Bool, Some(_)) => Some(Value::False),
             (Typ::String, Some(Value::String(_))) => Some(Value::True),
+            (Typ::String, Some(_)) => Some(Value::False),
             (Typ::Bytes, Some(Value::Bytes(_))) => Some(Value::True),
+            (Typ::Bytes, Some(_)) => Some(Value::False),
             (Typ::Result, Some(Value::Ok)) => Some(Value::True),
             (Typ::Result, Some(Value::Error(_))) => Some(Value::True),
-            (_, Some(_)) => Some(Value::False),
+            (Typ::Result, Some(_)) => Some(Value::False),
+            (Typ::Array, Some(Value::Array(_))) => Some(Value::True),
+            (Typ::Array, Some(_)) => Some(Value::False),
+            (Typ::DateTime, Some(Value::DateTime(_))) => Some(Value::True),
+            (Typ::DateTime, Some(_)) => Some(Value::False),
+            (Typ::Duration, Some(Value::Duration(_))) => Some(Value::True),
+            (Typ::Duration, Some(_)) => Some(Value::False),
+            (Typ::Null, Some(Value::Null)) => Some(Value::True),
+            (Typ::Null, Some(_)) => Some(Value::False),
         })
     }
 }
@@ -962,23 +990,50 @@ impl CachedCurEval for StringJoinEv {
 
     fn eval(from: &CachedVals) -> Option<Value> {
         use bytes::BytesMut;
-        let mut parts = from
-            .0
-            .iter()
-            .filter_map(|v| v.as_ref().cloned().and_then(|v| v.cast_to::<Chars>().ok()));
-        match parts.next() {
-            None => None,
-            Some(sep) => {
-                let mut res = BytesMut::new();
+        match &from.0[..] {
+            [_] | [] => Some(Value::Error(Chars::from(
+                "string_join(sep, s0, s1, ...): expected at least 2 arguments",
+            ))),
+            [None, ..] => None,
+            [Some(sep), parts @ ..] => {
+                // this is fairly common, so we check it before doing any real work
                 for p in parts {
-                    if res.is_empty() {
-                        res.extend_from_slice(p.bytes());
-                    } else {
-                        res.extend_from_slice(sep.bytes());
-                        res.extend_from_slice(p.bytes());
+                    if p.is_none() {
+                        return None;
                     }
                 }
-                Some(Value::String(unsafe { Chars::from_bytes_unchecked(res.freeze()) }))
+                let sep = match sep {
+                    Value::String(c) => c.clone(),
+                    sep => match sep.clone().cast_to::<Chars>().ok() {
+                        Some(c) => c,
+                        None => {
+                            return Some(Value::Error(Chars::from(
+                                "string_join, separator must be a string",
+                            )))
+                        }
+                    },
+                };
+                let mut res = BytesMut::new();
+                for p in parts {
+                    let c = match p.as_ref().unwrap() {
+                        Value::String(c) => c.clone(),
+                        v => match v.clone().cast_to::<Chars>().ok() {
+                            Some(c) => c,
+                            None => {
+                                return Some(Value::Error(Chars::from(
+                                    "string_join, components must be strings",
+                                )))
+                            }
+                        },
+                    };
+                    if res.is_empty() {
+                        res.extend_from_slice(c.bytes());
+                    } else {
+                        res.extend_from_slice(sep.bytes());
+                        res.extend_from_slice(c.bytes());
+                    }
+                }
+                Some(Value::String(Chars::from_bytes(res.freeze()).unwrap()))
             }
         }
     }
@@ -995,15 +1050,28 @@ impl CachedCurEval for StringConcatEv {
 
     fn eval(from: &CachedVals) -> Option<Value> {
         use bytes::BytesMut;
-        let parts = from
-            .0
-            .iter()
-            .filter_map(|v| v.as_ref().cloned().and_then(|v| v.cast_to::<Chars>().ok()));
-        let mut res = BytesMut::new();
-        for p in parts {
-            res.extend_from_slice(p.bytes());
+        match &from.0[..] {
+            [] => Some(Value::Error(Chars::from("string_concat: expected at least 1 argument"))),
+            parts => {
+                // this is a fairly common case, so we check it before doing any real work
+                for p in parts {
+                    if p.is_none() {
+                        return None;
+                    }
+                }
+                let mut res = BytesMut::new();
+                for p in parts {
+                    match p.as_ref().unwrap() {
+                        Value::String(c) => res.extend_from_slice(c.bytes()),
+                        v => match v.clone().cast_to::<Chars>().ok() {
+                            Some(c) => res.extend_from_slice(c.bytes()),
+                            None => return Some(Value::Error(Chars::from("string_concat: arguments must be strings")))
+                        }
+                    }
+                }
+                Some(Value::String(Chars::from_bytes(res.freeze()).unwrap()))
+            }
         }
-        Some(Value::String(unsafe { Chars::from_bytes_unchecked(res.freeze()) }))
     }
 }
 
@@ -1054,6 +1122,7 @@ impl<C: Ctx, E> Apply<C, E> for Eval<C, E> {
     fn current(&self) -> Option<Value> {
         match &self.current {
             Ok(s) => s.current(),
+            Err(Value::Null) => None,
             Err(v) => Some(v.clone()),
         }
     }
@@ -1069,6 +1138,7 @@ impl<C: Ctx, E> Apply<C, E> for Eval<C, E> {
         }
         match &mut self.current {
             Ok(s) => s.update(ctx, event),
+            Err(Value::Null) => None,
             Err(v) => Some(v.clone()),
         }
     }
@@ -1849,8 +1919,6 @@ impl<C: Ctx, E> Register<C, E> for RpcCall {
     }
 }
 
-// CR: estokes. if the trigger is a constant the rpc should be called
-// once all the args are resolved.
 impl<C: Ctx, E> Apply<C, E> for RpcCall {
     fn current(&self) -> Option<Value> {
         self.current.clone()
