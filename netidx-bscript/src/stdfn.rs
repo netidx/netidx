@@ -1820,6 +1820,7 @@ pub(crate) struct RpcCall {
     pending: FxHashSet<RpcCallId>,
     current: Option<Value>,
     triggered: bool,
+    invalid: bool,
 }
 
 impl<C: Ctx, E> Register<C, E> for RpcCall {
@@ -1838,6 +1839,7 @@ impl<C: Ctx, E> Register<C, E> for RpcCall {
                 top_id,
                 pending: HashSet::with_hasher(FxBuildHasher::default()),
                 triggered,
+                invalid: false,
             };
             t.maybe_call(ctx);
             Box::new(t)
@@ -1871,8 +1873,13 @@ impl<C: Ctx, E> Apply<C, E> for RpcCall {
                     if trigger.update(ctx, event).is_some() {
                         self.triggered = true;
                     }
+                    let triggered = self.triggered;
                     self.maybe_call(ctx);
-                    None
+                    if triggered && self.invalid {
+                        Apply::<C, E>::current(self)
+                    } else {
+                        None
+                    }
                 }
                 [] => {
                     self.invalid();
@@ -1886,11 +1893,13 @@ impl<C: Ctx, E> Apply<C, E> for RpcCall {
 impl RpcCall {
     fn invalid(&mut self) {
         let m = "call(trigger, rpc, kwargs): expected at least 2 arguments, and an even number of kwargs";
-        self.current = Some(Value::Error(Chars::from(m)))
+        self.current = Some(Value::Error(Chars::from(m)));
+        self.invalid = true;
     }
 
     fn get_args(&mut self) -> Option<(Path, Vec<(Chars, Value)>)> {
         self.current = None;
+        self.invalid = false;
         let len = self.args.0.len();
         if len == 0 || (len > 1 && len.is_power_of_two()) {
             self.invalid();
@@ -1943,13 +1952,12 @@ impl RpcCall {
     }
 
     fn maybe_call<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>) {
-        if dbg!(self.triggered) {
-            if let Some((name, args)) = dbg!(self.get_args()) {
+        if self.triggered {
+            if let Some((name, args)) = self.get_args() {
                 self.triggered = false;
                 let id = RpcCallId::new();
                 self.pending.insert(id);
                 ctx.user.call_rpc(Path::from(name), args, self.top_id, id);
-                dbg!(())
             }
         }
     }
