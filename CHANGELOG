@@ -17,6 +17,9 @@
     divide, etc. With the exception of any, all bscript primitives
     should now function this way.
 
+  - Eliminate all the unsafe code in bscript stdfn. It was safe IMHO,
+    but the minor performance win was just not worth the risk.
+
   - minor improvement to the error messages produced by subscriber
     when it fails to subscribe because the connection to the publisher
     died.
