@@ -1187,12 +1187,13 @@ impl RaeifiedTable {
                     )
                 };
                 let s = {
-                    let user_r = &self.shared.ctx.borrow_mut().user;
-                    let s = user_r.backend.subscriber.durable_subscribe(p);
-                    s.updates(
-                        UpdatesFlags::BEGIN_WITH_LAST,
-                        user_r.backend.updates.clone(),
-                    );
+                    let (s, u) = {
+                        let r = &self.shared.ctx.borrow().user;
+                        let s = r.backend.subscriber.durable_subscribe(p);
+                        let u = r.backend.updates.clone();
+                        (s, u)
+                    };
+                    s.updates(UpdatesFlags::BEGIN_WITH_LAST, u);
                     s
                 };
                 self.by_id.borrow_mut().insert(
