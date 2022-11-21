@@ -1109,13 +1109,13 @@ impl Subscriber {
                     (path, Err(e))
                 }
                 St::WaitingOther(w) => match w.await {
-                    Err(_) => (path, Err(anyhow!("other side died"))),
+                    Err(e) => (path, Err(anyhow!("other side died {}", e))),
                     Ok(Err(e)) => (path, Err(e)),
                     Ok(Ok(raw)) => (path, Ok(raw)),
                 },
                 St::Subscribing(w) => {
                     let res = match w.await {
-                        Err(_) => Err(anyhow!("connection died")),
+                        Err(e) => Err(anyhow!("connection died {}", e)),
                         Ok(Err(e)) => Err(e),
                         Ok(Ok(raw)) => Ok(raw),
                     };
