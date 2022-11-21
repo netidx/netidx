@@ -799,17 +799,16 @@ fn save_view(
             let save_loc = save_loc.clone();
             let spec = current_spec.borrow().clone();
             let ctx = ctx.clone();
+            let backend = ctx.borrow().user.backend.clone();
             async move {
-                match ctx.borrow().user.backend.save(loc.clone(), spec).await {
+                match backend.save(loc.clone(), spec).await {
                     Err(e) => {
                         let _: result::Result<_, _> =
-                            ctx.borrow().user.backend.to_gui.send(ToGui::SaveError(
-                                format!(
-                                    "error saving to: {:?}, {}",
-                                    &*save_loc.borrow(),
-                                    e
-                                ),
-                            ));
+                            backend.to_gui.send(ToGui::SaveError(format!(
+                                "error saving to: {:?}, {}",
+                                &*save_loc.borrow(),
+                                e
+                            )));
                         *save_loc.borrow_mut() = None;
                     }
                     Ok(()) => {
@@ -818,7 +817,7 @@ fn save_view(
                         let mut sl = save_loc.borrow_mut();
                         if sl.as_ref() != Some(&loc) {
                             *sl = Some(loc.clone());
-                            ctx.borrow().user.backend.navigate(loc.clone());
+                            backend.navigate(loc.clone());
                         }
                     }
                 }
