@@ -1871,13 +1871,8 @@ impl<C: Ctx, E> Apply<C, E> for RpcCall {
                     if trigger.update(ctx, event).is_some() {
                         self.triggered = true;
                     }
-                    let triggered = self.triggered;
                     self.maybe_call(ctx);
-                    if triggered {
-                        Apply::<C, E>::current(self)
-                    } else {
-                        None
-                    }
+                    None
                 }
                 [] => {
                     self.invalid();
