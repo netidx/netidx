@@ -343,7 +343,10 @@ impl CtxInner {
                     Ok(v) => v,
                     Err(e) => Value::Error(Chars::from(e.to_string())),
                 };
-                to_gui.send(ToGui::UpdateRpc(id, res))?
+                let to_gui = to_gui.clone();
+                glib::idle_add_once(move || {
+                    let _ = to_gui.send(ToGui::UpdateRpc(id, res));
+                });
             }
             Ok(())
         }
@@ -386,7 +389,10 @@ impl CtxInner {
             }
         }
         let e = Value::Error(Chars::from("failed to call rpc"));
-        self.to_gui.send(ToGui::UpdateRpc(id, e))?;
+        let to_gui = self.to_gui.clone();
+        glib::idle_add_once(move || {
+            let _ = to_gui.send(ToGui::UpdateRpc(id, e));
+        });
         Ok(())
     }
 
@@ -402,9 +408,11 @@ impl CtxInner {
                 match resolver.check_changed(&mut ct).await {
                     Err(e) => warn!("failed to poll {} for changes {}", path, e),
                     Ok(r) if r => {
-                        if let Err(_) = to_gui.send(ToGui::UpdatePoll(path.clone())) {
-                            break;
-                        }
+                        let to_gui = to_gui.clone();
+                        let path = path.clone();
+                        glib::idle_add_once(move || {
+                            let _ = to_gui.send(ToGui::UpdatePoll(path));
+                        });
                     }
                     Ok(_) => (),
                 }
@@ -428,7 +436,10 @@ impl CtxInner {
         let to_gui = self.to_gui.clone();
         task::spawn(async move {
             time::sleep(timeout).await;
-            let _: result::Result<_, _> = to_gui.send(ToGui::UpdateTimer(id));
+            let to_gui = to_gui.clone();
+            glib::idle_add_once(move || {
+                let _ = to_gui.send(ToGui::UpdateTimer(id));
+            });
         });
     }
 
