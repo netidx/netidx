@@ -22,7 +22,7 @@ use editor::Editor;
 use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap};
 use gdk::{self, prelude::*};
-use glib::{clone, idle_add_local, source::PRIORITY_LOW};
+use glib::{clone, idle_add_local, idle_add_local_once, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexSet;
 use netidx::{
@@ -229,8 +229,10 @@ impl vm::Ctx for WidgetCtx {
                 }
             }
         }
-        let _: Result<_, _> =
-            self.backend.to_gui.send(ToGui::UpdateVar(scope, name, value));
+        let to_gui = self.backend.to_gui.clone();
+        idle_add_local_once(move || {
+            let _: Result<_, _> = to_gui.send(ToGui::UpdateVar(scope, name, value));
+        });
     }
 
     fn call_rpc(
