@@ -303,8 +303,7 @@ impl<C: Ctx, E> Node<C, E> {
         top_id: ExprId,
     ) -> Self {
         match &spec {
-            Expr { kind: ExprKind::Constant(v), id } => {
-                ctx.dbg_ctx.add_event(*id, v.clone());
+            Expr { kind: ExprKind::Constant(v), id: _ } => {
                 Node::Constant(spec.clone(), v.clone())
             }
             Expr { kind: ExprKind::Apply { args, function }, id } => {
@@ -325,14 +324,10 @@ impl<C: Ctx, E> Node<C, E> {
                             "unknown function {}",
                             function
                         )));
-                        ctx.dbg_ctx.add_event(spec.id, e.clone());
                         Node::Error(spec.clone(), e)
                     }
                     Some(init) => {
                         let function = init(ctx, &args, scope, top_id);
-                        if let Some(v) = function.current() {
-                            ctx.dbg_ctx.add_event(spec.id, v)
-                        }
                         Node::Apply { spec, args, function }
                     }
                 }

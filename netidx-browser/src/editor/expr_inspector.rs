@@ -18,10 +18,16 @@ use std::{
 struct ExprWrap(Arc<dyn Fn(&Value)>);
 
 fn log_expr_val(log: &gtk::ListStore, expr: &expr::Expr, v: &Value) {
+    const MAX: usize = 1000;
     let i = log.append();
     log.set_value(&i, 0, &format!("{}", chrono::Local::now()).to_value());
     log.set_value(&i, 1, &format!("{}", expr).to_value());
     log.set_value(&i, 2, &format!("{}", v).to_value());
+    if log.iter_n_children(None) as usize > MAX {
+        if let Some(iter) = log.iter_first() {
+            log.remove(&iter);
+        }
+    }
 }
 
 fn add_watch(
