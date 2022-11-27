@@ -1,3 +1,16 @@
+* 0.12.3 browser
+
+  - Greatly increase the utility of the event log window in the
+    expression inspector. It now shows only actual events. It shows
+    the event that happend, the expression the received the event, and
+    the value emitted by the expression.
+
+  - Fix some cases where degenerate bscript code could hang the
+    browser. It's still possible, but it's much harder now.
+
+  - Improve the performance of normal bscript execution by only
+    recording debug events when the editor window is open.
+
 * 0.12.2 browser netidx
 
   - Fix some borrow error crashes that could occurr when a publisher
