@@ -17,42 +17,30 @@ use std::{
     time::Duration,
 };
 
-pub struct DbgCtx {
-    events: VecDeque<(ExprId, Value)>,
-    watch: HashMap<ExprId, Vec<Weak<dyn Fn(&Value) + Send + Sync>>, FxBuildHasher>,
-    current: HashMap<ExprId, Value, FxBuildHasher>,
+pub struct DbgCtx<E> {
+    pub trace: bool,
+    events: VecDeque<(ExprId, (Event<E>, Value))>,
+    watch: HashMap<ExprId, Vec<Weak<dyn Fn(&Event<E>, &Value) + Send + Sync>>, FxBuildHasher>,
+    current: HashMap<ExprId, (Event<E>, Value), FxBuildHasher>,
 }
 
-impl DbgCtx {
+impl<E: Clone> DbgCtx<E> {
     fn new() -> Self {
         DbgCtx {
+            trace: false,
             events: VecDeque::new(),
             watch: HashMap::with_hasher(FxBuildHasher::default()),
             current: HashMap::with_hasher(FxBuildHasher::default()),
         }
     }
 
-    pub fn add_watch(&mut self, id: ExprId, watch: &Arc<dyn Fn(&Value) + Send + Sync>) {
+    pub fn add_watch(&mut self, id: ExprId, watch: &Arc<dyn Fn(&Event<E>, &Value) + Send + Sync>) {
         let watches = self.watch.entry(id).or_insert_with(Vec::new);
-        if let Some(v) = self.current.get(&id) {
-            watch(v);
-        }
         watches.push(Arc::downgrade(watch));
     }
 
-    pub fn add_event(&mut self, id: ExprId, value: Value) {
+    pub fn add_event(&mut self, id: ExprId, event: Event<E>, value: Value) {
         const MAX: usize = 1000;
-        self.events.push_back((id, value.clone()));
-        self.current.insert(id, value.clone());
-        if self.events.len() > MAX {
-            self.events.pop_front();
-            if self.watch.len() > MAX {
-                self.watch.retain(|_, vs| {
-                    vs.retain(|v| Weak::upgrade(v).is_some());
-                    !vs.is_empty()
-                });
-            }
-        }
         if let Some(watch) = self.watch.get_mut(&id) {
             let mut i = 0;
             while i < watch.len() {
@@ -61,10 +49,21 @@ impl DbgCtx {
                         watch.remove(i);
                     }
                     Some(f) => {
-                        f(&value);
+                        f(&event, &value);
                         i += 1;
                     }
                 }
+            }
+        }
+        self.events.push_back((id, (event.clone(), value.clone())));
+        self.current.insert(id, (event, value));
+        if self.events.len() > MAX {
+            self.events.pop_front();
+            if self.watch.len() > MAX {
+                self.watch.retain(|_, vs| {
+                    vs.retain(|v| Weak::upgrade(v).is_some());
+                    !vs.is_empty()
+                });
             }
         }
     }
@@ -79,7 +78,7 @@ impl DbgCtx {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Event<E> {
     Variable(Path, Chars, Value),
     Netidx(SubId, Value),
@@ -187,11 +186,11 @@ pub fn store_var(
 pub struct ExecCtx<C: Ctx + 'static, E: 'static> {
     pub functions: FxHashMap<String, InitFn<C, E>>,
     pub variables: FxHashMap<Path, FxHashMap<Chars, Value>>,
-    pub dbg_ctx: DbgCtx,
+    pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }
 
-impl<C: Ctx, E> ExecCtx<C, E> {
+impl<C: Ctx, E: Clone> ExecCtx<C, E> {
     pub fn lookup_var(&self, scope: &Path, name: &Chars) -> Option<(&Path, &Value)> {
         let mut iter = Path::dirnames(scope);
         loop {
@@ -295,7 +294,7 @@ impl<C: Ctx, E> fmt::Display for Node<C, E> {
     }
 }
 
-impl<C: Ctx, E> Node<C, E> {
+impl<C: Ctx, E: Clone> Node<C, E> {
     pub fn compile_int(
         ctx: &mut ExecCtx<C, E>,
         spec: Expr,
@@ -353,8 +352,10 @@ impl<C: Ctx, E> Node<C, E> {
             Node::Error(_, _) | Node::Constant(_, _) => None,
             Node::Apply { spec, args, function } => {
                 let res = function.update(ctx, args, event);
-                if let Some(v) = &res {
-                    ctx.dbg_ctx.add_event(spec.id, v.clone());
+                if ctx.dbg_ctx.trace {
+                    if let Some(v) = &res {
+                        ctx.dbg_ctx.add_event(spec.id, event.clone(), v.clone());
+                    }
                 }
                 res
             }

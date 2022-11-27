@@ -1071,7 +1071,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             Continue(true)
         }
         ToGui::TableResolved(path, table) => {
-            let e = vm::Event::User(LocalEvent::TableResolved(path, table));
+            let e = vm::Event::User(LocalEvent::TableResolved(path, Rc::new(table)));
             update_single(&current, &mut ctx.borrow_mut(), &e);
             Continue(true)
         }

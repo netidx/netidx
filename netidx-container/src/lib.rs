@@ -183,7 +183,7 @@ impl Published {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum UserEv {
     OnWriteEvent(Value),
     Ref(Path, Value),

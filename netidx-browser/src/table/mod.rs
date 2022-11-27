@@ -227,7 +227,7 @@ impl BWidget for Table {
                             }
                         }
                         *self.shared.original_descriptor.borrow_mut() =
-                            descriptor.clone();
+                            Rc::clone(descriptor);
                         self.raeify()
                     }
                 }

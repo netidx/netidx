@@ -14,11 +14,11 @@ use std::{collections::HashSet, iter, marker::PhantomData, sync::Arc};
 pub struct CachedVals(pub Vec<Option<Value>>);
 
 impl CachedVals {
-    pub fn new<C: Ctx, E>(from: &[Node<C, E>]) -> CachedVals {
+    pub fn new<C: Ctx, E: Clone>(from: &[Node<C, E>]) -> CachedVals {
         CachedVals(from.into_iter().map(|s| s.current()).collect())
     }
 
-    pub fn update<C: Ctx, E>(
+    pub fn update<C: Ctx, E: Clone>(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
@@ -45,7 +45,7 @@ impl CachedVals {
 
 pub struct Any(Option<Value>);
 
-impl<C: Ctx, E> Register<C, E> for Any {
+impl<C: Ctx, E: Clone> Register<C, E> for Any {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_ctx, from, _, _| {
             Box::new(Any(from.iter().find_map(|s| s.current())))
@@ -55,7 +55,7 @@ impl<C: Ctx, E> Register<C, E> for Any {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Any {
+impl<C: Ctx, E: Clone> Apply<C, E> for Any {
     fn current(&self) -> Option<Value> {
         self.0.clone()
     }
@@ -83,7 +83,7 @@ pub struct Once {
     invalid: bool,
 }
 
-impl<C: Ctx, E> Register<C, E> for Once {
+impl<C: Ctx, E: Clone> Register<C, E> for Once {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_ctx, from, _, _| match from {
             [s] => Box::new(Once { val: s.current(), invalid: false }),
@@ -94,7 +94,7 @@ impl<C: Ctx, E> Register<C, E> for Once {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Once {
+impl<C: Ctx, E: Clone> Apply<C, E> for Once {
     fn current(&self) -> Option<Value> {
         self.usage()
     }
@@ -143,7 +143,7 @@ impl Once {
 
 pub struct Do(Option<Value>);
 
-impl<C: Ctx, E> Register<C, E> for Do {
+impl<C: Ctx, E: Clone> Register<C, E> for Do {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_ctx, from, _, _| {
             Box::new(Do(from.iter().fold(None, |_, s| s.current())))
@@ -153,7 +153,7 @@ impl<C: Ctx, E> Register<C, E> for Do {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Do {
+impl<C: Ctx, E: Clone> Apply<C, E> for Do {
     fn current(&self) -> Option<Value> {
         self.0.clone()
     }
@@ -180,7 +180,7 @@ pub struct CachedCur<T: CachedCurEval + Send + Sync> {
     t: PhantomData<T>,
 }
 
-impl<C: Ctx, E, T: CachedCurEval + Send + Sync + 'static> Register<C, E>
+impl<C: Ctx, E: Clone, T: CachedCurEval + Send + Sync + 'static> Register<C, E>
     for CachedCur<T>
 {
     fn register(ctx: &mut ExecCtx<C, E>) {
@@ -194,7 +194,7 @@ impl<C: Ctx, E, T: CachedCurEval + Send + Sync + 'static> Register<C, E>
     }
 }
 
-impl<C: Ctx, E, T: CachedCurEval + Send + Sync + 'static> Apply<C, E> for CachedCur<T> {
+impl<C: Ctx, E: Clone, T: CachedCurEval + Send + Sync + 'static> Apply<C, E> for CachedCur<T> {
     fn current(&self) -> Option<Value> {
         self.current.clone()
     }
@@ -1083,7 +1083,7 @@ pub struct Eval<C: Ctx, E> {
     scope: Path,
 }
 
-impl<C: Ctx, E> Eval<C, E> {
+impl<C: Ctx, E: Clone> Eval<C, E> {
     fn compile(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.current = match &*self.cached.0 {
             [None] => Err(Value::Null),
@@ -1105,7 +1105,7 @@ impl<C: Ctx, E> Eval<C, E> {
     }
 }
 
-impl<C: Ctx, E> Register<C, E> for Eval<C, E> {
+impl<C: Ctx, E: Clone> Register<C, E> for Eval<C, E> {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, scope, _| {
             let mut t =
@@ -1118,7 +1118,7 @@ impl<C: Ctx, E> Register<C, E> for Eval<C, E> {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Eval<C, E> {
+impl<C: Ctx, E: Clone> Apply<C, E> for Eval<C, E> {
     fn current(&self) -> Option<Value> {
         match &self.current {
             Ok(s) => s.current(),
@@ -1149,7 +1149,7 @@ pub struct Count {
     count: u64,
 }
 
-impl<C: Ctx, E> Register<C, E> for Count {
+impl<C: Ctx, E: Clone> Register<C, E> for Count {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_, from, _, _| {
             Box::new(Count { from: CachedVals::new(from), count: 0 })
@@ -1159,7 +1159,7 @@ impl<C: Ctx, E> Register<C, E> for Count {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Count {
+impl<C: Ctx, E: Clone> Apply<C, E> for Count {
     fn current(&self) -> Option<Value> {
         match &*self.from.0 {
             [] => Some(Value::Error(Chars::from("count(s): requires 1 argument"))),
@@ -1187,7 +1187,7 @@ pub struct Sample {
     current: Option<Value>,
 }
 
-impl<C: Ctx, E> Register<C, E> for Sample {
+impl<C: Ctx, E: Clone> Register<C, E> for Sample {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_, from, _, _| {
             let current = match from {
@@ -1206,7 +1206,7 @@ impl<C: Ctx, E> Register<C, E> for Sample {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Sample {
+impl<C: Ctx, E: Clone> Apply<C, E> for Sample {
     fn current(&self) -> Option<Value> {
         self.current.clone()
     }
@@ -1245,7 +1245,7 @@ pub struct Mean {
     samples: usize,
 }
 
-impl<C: Ctx, E> Register<C, E> for Mean {
+impl<C: Ctx, E: Clone> Register<C, E> for Mean {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_, from, _, _| {
             Box::new(Mean { from: CachedVals::new(from), total: 0., samples: 0 })
@@ -1255,7 +1255,7 @@ impl<C: Ctx, E> Register<C, E> for Mean {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Mean {
+impl<C: Ctx, E: Clone> Apply<C, E> for Mean {
     fn current(&self) -> Option<Value> {
         match &*self.from.0 {
             [] => Some(Value::Error(Chars::from("mean(s): requires 1 argument"))),
@@ -1294,7 +1294,7 @@ impl<C: Ctx, E> Apply<C, E> for Mean {
 
 pub(crate) struct Uniq(Option<Value>);
 
-impl<C: Ctx, E> Register<C, E> for Uniq {
+impl<C: Ctx, E: Clone> Register<C, E> for Uniq {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_, from, _, _| {
             let mut t = Uniq(None);
@@ -1309,7 +1309,7 @@ impl<C: Ctx, E> Register<C, E> for Uniq {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Uniq {
+impl<C: Ctx, E: Clone> Apply<C, E> for Uniq {
     fn current(&self) -> Option<Value> {
         self.0.as_ref().cloned()
     }
@@ -1377,7 +1377,7 @@ pub struct Store {
     invalid: bool,
 }
 
-impl<C: Ctx, E> Register<C, E> for Store {
+impl<C: Ctx, E: Clone> Register<C, E> for Store {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
             let mut t = Store { queued: Vec::new(), dv: None, invalid: false, top_id };
@@ -1392,7 +1392,7 @@ impl<C: Ctx, E> Register<C, E> for Store {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Store {
+impl<C: Ctx, E: Clone> Apply<C, E> for Store {
     fn current(&self) -> Option<Value> {
         if self.invalid {
             Some(Value::Error(Chars::from(
@@ -1525,7 +1525,7 @@ pub struct Set {
     invalid: bool,
 }
 
-impl<C: Ctx, E> Register<C, E> for Set {
+impl<C: Ctx, E: Clone> Register<C, E> for Set {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f = |local| -> InitFn<C, E> {
             Arc::new(move |ctx, from, scope, _| {
@@ -1545,7 +1545,7 @@ impl<C: Ctx, E> Register<C, E> for Set {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Set {
+impl<C: Ctx, E: Clone> Apply<C, E> for Set {
     fn current(&self) -> Option<Value> {
         if self.invalid {
             Some(Value::Error(Chars::from(
@@ -1647,7 +1647,7 @@ pub(crate) struct Load {
     invalid: bool,
 }
 
-impl<C: Ctx, E> Register<C, E> for Load {
+impl<C: Ctx, E: Clone> Register<C, E> for Load {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
             let mut t = Load { path: None, cur: None, invalid: false, top_id };
@@ -1662,7 +1662,7 @@ impl<C: Ctx, E> Register<C, E> for Load {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Load {
+impl<C: Ctx, E: Clone> Apply<C, E> for Load {
     fn current(&self) -> Option<Value> {
         if self.invalid {
             Load::err()
@@ -1761,7 +1761,7 @@ pub struct Get {
     invalid: bool,
 }
 
-impl<C: Ctx, E> Register<C, E> for Get {
+impl<C: Ctx, E: Clone> Register<C, E> for Get {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, scope, top_id| {
             let mut t = Get { scope, name: None, var: None, invalid: false, top_id };
@@ -1776,7 +1776,7 @@ impl<C: Ctx, E> Register<C, E> for Get {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Get {
+impl<C: Ctx, E: Clone> Apply<C, E> for Get {
     fn current(&self) -> Option<Value> {
         if self.invalid {
             Get::err()
@@ -1858,7 +1858,7 @@ impl Get {
         )))
     }
 
-    fn subscribe<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>, name: Option<Value>) {
+    fn subscribe<C: Ctx, E: Clone>(&mut self, ctx: &mut ExecCtx<C, E>, name: Option<Value>) {
         match varname(&mut self.invalid, name) {
             None => {
                 self.var = None;
@@ -1893,7 +1893,7 @@ pub(crate) struct RpcCall {
     invalid: bool,
 }
 
-impl<C: Ctx, E> Register<C, E> for RpcCall {
+impl<C: Ctx, E: Clone> Register<C, E> for RpcCall {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
             let triggered = match from {
@@ -1919,7 +1919,7 @@ impl<C: Ctx, E> Register<C, E> for RpcCall {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for RpcCall {
+impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
     fn current(&self) -> Option<Value> {
         self.current.clone()
     }
@@ -2043,7 +2043,7 @@ pub(crate) struct AfterIdle {
     invalid: bool,
 }
 
-impl<C: Ctx, E> Register<C, E> for AfterIdle {
+impl<C: Ctx, E: Clone> Register<C, E> for AfterIdle {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, _, eid| match from {
             [timeout, cur] => {
@@ -2074,7 +2074,7 @@ impl<C: Ctx, E> Register<C, E> for AfterIdle {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for AfterIdle {
+impl<C: Ctx, E: Clone> Apply<C, E> for AfterIdle {
     fn current(&self) -> Option<Value> {
         self.usage()
     }
@@ -2177,7 +2177,7 @@ pub(crate) struct Timer {
     invalid: bool,
 }
 
-impl<C: Ctx, E> Register<C, E> for Timer {
+impl<C: Ctx, E: Clone> Register<C, E> for Timer {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|ctx, from, _, eid| match from {
             [timeout, repeat] => {
@@ -2209,7 +2209,7 @@ impl<C: Ctx, E> Register<C, E> for Timer {
     }
 }
 
-impl<C: Ctx, E> Apply<C, E> for Timer {
+impl<C: Ctx, E: Clone> Apply<C, E> for Timer {
     fn current(&self) -> Option<Value> {
         self.usage()
     }

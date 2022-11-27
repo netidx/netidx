@@ -17,6 +17,7 @@ use std::{
     cmp::PartialEq,
     collections::{HashMap, HashSet},
     ops::Deref,
+    rc::Rc,
     result::Result,
     str::FromStr,
 };
@@ -479,7 +480,12 @@ impl FromValue for ColumnTypeSpin {
             min: or_load_prop!(props, "min", "min-column", f64),
             max: or_load_prop!(props, "max", "max-column", f64),
             increment: or_load_prop!(props, "increment", "increment-column", f64),
-            page_increment: or_load_prop!(props, "page-increment", "page-increment-column", f64),
+            page_increment: or_load_prop!(
+                props,
+                "page-increment",
+                "page-increment-column",
+                f64
+            ),
             climb_rate: or_load_prop!(props, "climb-rate", "climb-rate-column", f64),
             digits: or_load_prop!(props, "digits", "digits-column", u32),
         })
@@ -627,7 +633,7 @@ pub(super) struct SharedState {
     pub(super) on_edit: RefCell<BSNode>,
     pub(super) on_header_click: RefCell<BSNode>,
     pub(super) on_select: RefCell<BSNode>,
-    pub(super) original_descriptor: RefCell<resolver_client::Table>,
+    pub(super) original_descriptor: RefCell<Rc<resolver_client::Table>>,
     pub(super) path: RefCell<Path>,
     pub(super) root: ScrolledWindow,
     pub(super) row_filter: RefCell<Filter>,
@@ -660,10 +666,10 @@ impl SharedState {
             on_edit: RefCell::new(on_edit),
             on_header_click: RefCell::new(on_header_click),
             on_select: RefCell::new(on_select),
-            original_descriptor: RefCell::new(resolver_client::Table {
+            original_descriptor: RefCell::new(Rc::new(resolver_client::Table {
                 rows: Pooled::orphan(vec![]),
                 cols: Pooled::orphan(vec![]),
-            }),
+            })),
             path: RefCell::new(Path::root()),
             root,
             row_filter: RefCell::new(Filter::All),

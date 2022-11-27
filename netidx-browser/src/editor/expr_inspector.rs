@@ -1,10 +1,10 @@
-use super::super::{util::ask_modal, BSCtx};
+use super::super::{bscript::LocalEvent, util::ask_modal, BSCtx};
 use super::{completion::BScriptCompletionProvider, Scope};
 use gdk::keys;
 use glib::{clone, prelude::*, subclass::prelude::*, thread_guard::ThreadGuard};
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
-use netidx_bscript::expr;
+use netidx_bscript::{expr, vm};
 use parking_lot::Mutex;
 use sourceview4_sc::{self as sv, prelude::*, traits::ViewExt};
 use std::{
@@ -15,14 +15,15 @@ use std::{
 
 #[derive(Clone, Boxed)]
 #[boxed_type(name = "NetidxExprInspectorWrap")]
-struct ExprWrap(Arc<dyn Fn(&Value)>);
+struct ExprWrap(Arc<dyn Fn(&vm::Event<LocalEvent>, &Value)>);
 
-fn log_expr_val(log: &gtk::ListStore, expr: &expr::Expr, v: &Value) {
+fn log_expr_val(log: &gtk::ListStore, expr: &expr::Expr, e: &vm::Event<LocalEvent>, v: &Value) {
     const MAX: usize = 1000;
     let i = log.append();
     log.set_value(&i, 0, &format!("{}", chrono::Local::now()).to_value());
     log.set_value(&i, 1, &format!("{}", expr).to_value());
-    log.set_value(&i, 2, &format!("{}", v).to_value());
+    log.set_value(&i, 2, &format!("{:?}", e).to_value());
+    log.set_value(&i, 3, &format!("{}", v).to_value());
     if log.iter_n_children(None) as usize > MAX {
         if let Some(iter) = log.iter_first() {
             log.remove(&iter);
@@ -38,7 +39,7 @@ fn add_watch(
     expr: expr::Expr,
 ) {
     let id = expr.id;
-    let watch: Arc<dyn Fn(&Value) + Send + Sync> = {
+    let watch: Arc<dyn Fn(&vm::Event<LocalEvent>, &Value) + Send + Sync> = {
         struct CtxInner {
             store: gtk::TreeStore,
             iter: gtk::TreeIter,
@@ -50,11 +51,11 @@ fn add_watch(
             iter: iter.clone(),
             log: log.clone(),
         })));
-        Arc::new(move |v: &Value| {
+        Arc::new(move |e: &vm::Event<LocalEvent>, v: &Value| {
             let inner = ctx.0.lock();
             let inner = inner.get_ref();
             inner.store.set_value(&inner.iter, 1, &format!("{}", v).to_value());
-            log_expr_val(&inner.log, &expr, v)
+            log_expr_val(&inner.log, &expr, e, v)
         })
     };
     ctx.borrow_mut().dbg_ctx.add_watch(id, &watch);
@@ -88,6 +89,7 @@ impl DataFlow {
             String::static_type(),
             String::static_type(),
             String::static_type(),
+            String::static_type(),
         ]);
         let call_view = gtk::TreeView::new();
         let event_view = gtk::TreeView::new();
@@ -98,16 +100,18 @@ impl DataFlow {
                 let column = gtk::TreeViewColumn::new();
                 let cell = gtk::CellRendererText::new();
                 column.pack_start(&cell, true);
+                column.set_resizable(true);
                 column.set_title(name);
                 column.add_attribute(&cell, "text", i as i32);
                 column
             });
         }
-        for (i, name) in ["timestamp", "expr", "value"].iter().enumerate() {
+        for (i, name) in ["timestamp", "expr", "event", "result"].iter().enumerate() {
             event_view.append_column(&{
                 let column = gtk::TreeViewColumn::new();
                 let cell = gtk::CellRendererText::new();
                 column.pack_start(&cell, true);
+                column.set_resizable(true);
                 column.set_title(name);
                 column.add_attribute(&cell, "text", i as i32);
                 column
@@ -132,7 +136,6 @@ impl DataFlow {
             expr::Expr { kind: expr::ExprKind::Constant(v), .. } => {
                 self.call_store.set_value(&iter, 0, &"constant".to_value());
                 self.call_store.set_value(&iter, 1, &format!("{}", v).to_value());
-                log_expr_val(&self.event_store, s, v);
             }
             expr::Expr { kind: expr::ExprKind::Apply { args, function }, .. } => {
                 self.call_store.set_value(&iter, 0, &function.to_value());
