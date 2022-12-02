@@ -1,3 +1,7 @@
+* 0.12.3 netidx
+
+  - add a helper to publisher required by netidx-dbus
+
 * 0.12.3 browser
 
   - Greatly increase the utility of the event log window in the

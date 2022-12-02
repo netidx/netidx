@@ -1215,6 +1215,14 @@ impl Publisher {
             .unwrap_or_else(Vec::new)
     }
 
+    /// Put the list of clients subscribed to a published `Val` into
+    /// the specified collection.
+    pub fn put_subscribed(&self, id: &Id, into: &mut impl Extend<ClId>) {
+        if let Some(p) = self.0.lock().by_id.get(&id) {
+            into.extend(p.subscribed.iter().copied())
+        }
+    }
+
     /// Get the number of clients subscribed to a published `Val`
     pub fn subscribed_len(&self, id: &Id) -> usize {
         self.0.lock().by_id.get(&id).map(|p| p.subscribed.len()).unwrap_or(0)
