@@ -582,12 +582,14 @@ impl BWidget for Widget {
     }
 }
 
-fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::Box {
-    let root = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
+    let root = gtk::ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+    let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    root.add(&hbox);
     let ask_saved =
-        Rc::new(clone!(@weak ctx, @weak root => @default-return true, move || {
+        Rc::new(clone!(@weak ctx, @weak hbox => @default-return true, move || {
             if !ctx.borrow().user.view_saved.get() {
-                ask_modal(&root, "Unsaved view will be lost.")
+                ask_modal(&hbox, "Unsaved view will be lost.")
             } else {
                 true
             }
@@ -598,13 +600,13 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::Box {
                 let lbl = gtk::Label::new(None);
                 let name = match Path::basename(target) {
                     None => {
-                        root.add(&lbl);
+                        hbox.add(&lbl);
                         lbl.set_margin_start(10);
                         " / "
                     }
                     Some(name) => {
-                        root.add(&gtk::Label::new(Some(" > ")));
-                        root.add(&lbl);
+                        hbox.add(&gtk::Label::new(Some(" > ")));
+                        hbox.add(&lbl);
                         name
                     }
                 };
@@ -625,7 +627,7 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::Box {
         }
         ViewLoc::File(name) => {
             let rl = gtk::Label::new(None);
-            root.add(&rl);
+            hbox.add(&rl);
             rl.set_margin_start(10);
             rl.set_markup(r#"<a href=""> / </a>"#);
             rl.connect_activate_link(clone!(
@@ -638,9 +640,9 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::Box {
                     Inhibit(false)
             }));
             let sep = gtk::Label::new(Some(" > "));
-            root.add(&sep);
+            hbox.add(&sep);
             let fl = gtk::Label::new(None);
-            root.add(&fl);
+            hbox.add(&fl);
             fl.set_margin_start(10);
             fl.set_markup(&format!(r#"<a href="">file:{:?}</a>"#, name));
             fl.connect_activate_link(clone!(
