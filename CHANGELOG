@@ -1,3 +1,9 @@
+* 0.12.4 browser
+
+  - put the breadcrumbs in a scrolled window so that they don't force
+    the browser window size to increase when viewing a deeply nested
+    path.
+
 * 0.12.3 netidx
 
   - add a helper to publisher required by netidx-dbus
