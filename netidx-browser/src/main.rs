@@ -657,6 +657,10 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
             }));
         }
     }
+    idle_add_local_once(clone!(@strong root => move || {
+        let a = root.hadjustment();
+        a.set_value(a.upper());
+    }));
     root
 }
 
