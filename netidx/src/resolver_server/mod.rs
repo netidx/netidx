@@ -170,11 +170,6 @@ impl Clinfos {
                                     (AuthWrite::Anonymous, TargetAuth::Anonymous) => (),
                                     (AuthWrite::Anonymous, _) => bail!("not permitted"),
                                     (AuthWrite::Reuse, _) => (),
-                                    (
-                                        AuthWrite::Krb5 { spn: cspn },
-                                        TargetAuth::Krb5 { spn },
-                                    ) if cspn == spn => (),
-                                    (AuthWrite::Local, TargetAuth::Local) => (),
                                     (AuthWrite::Krb5 { .. } | AuthWrite::Local, _) => {
                                         let publisher = publisher.clone();
                                         *ifo = ClientInfo::CleaningUp(Vec::new());
@@ -465,7 +460,6 @@ async fn hello_client_write(
                     "hello_write initiating new krb5 context for {:?}",
                     hello.write_addr
                 );
-                let secret = thread_rng().gen::<u128>();
                 let k5ctx =
                     krb5_authentication(ctx.cfg.hello_timeout, Some(&*a.0), &mut con)
                         .await?;
@@ -480,6 +474,7 @@ async fn hello_client_write(
                 };
                 debug!("hello_write sending {:?}", h);
                 send(ctx.cfg.hello_timeout, &mut con, &h).await?;
+                let secret = thread_rng().gen::<u128>();
                 ownership_check(&ctx, &mut con, hello.write_addr, secret).await?;
                 let client = task::block_in_place(|| k5ctx.lock().client())?;
                 let uifo = a.1.write().users.ifo(Some(&client))?;
