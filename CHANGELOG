@@ -1,3 +1,8 @@
+* 0.12.5 browser
+
+  - Fix crash that could occurr due to trying to get the adjustment of
+    a destroyed scrolled window.
+
 * 0.12.4 browser
 
   - put the breadcrumbs in a scrolled window so that they don't force
