@@ -584,6 +584,7 @@ impl BWidget for Widget {
 
 fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
     let root = gtk::ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+    root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     root.add(&hbox);
     let ask_saved =

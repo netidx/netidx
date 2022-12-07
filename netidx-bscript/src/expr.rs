@@ -316,7 +316,7 @@ mod tests {
             DateTime::<Utc>::MIN_UTC.timestamp()..DateTime::<Utc>::MAX_UTC.timestamp(),
             0..1_000_000_000u32,
         )
-            .prop_map(|(s, ns)| Utc.timestamp(s, ns))
+            .prop_map(|(s, ns)| Utc.timestamp_opt(s, ns).unwrap())
     }
 
     fn duration() -> impl Strategy<Value = Duration> {

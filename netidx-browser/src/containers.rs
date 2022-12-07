@@ -2,6 +2,7 @@ use super::{util, BSCtx, BSCtxRef, BSNode, BWidget, Widget, WidgetPath, DEFAULT_
 use crate::{bscript::LocalEvent, view};
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
+use glib::idle_add_local_once;
 use gtk::{self, prelude::*, Orientation};
 use netidx::{chars::Chars, path::Path};
 use netidx_bscript::vm;
@@ -46,6 +47,9 @@ impl Paned {
             }
             w
         });
+        idle_add_local_once(clone!(@weak root => move || {
+            root.set_position_set(true);
+        }));
         Paned { root, first_child, second_child }
     }
 }
