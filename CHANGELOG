@@ -1,3 +1,10 @@
+* 0.12.5 tools
+
+  - Fix a bug in the archiver that would cause it to hang on to idle
+    sessions if any client was using any session. Now it will drop
+    sessions that no client is using after 1 minute, as was the
+    original intention.
+
 * 0.12.6 browser
 
   - Fix paned widget is jumpy when moving the mouse until manually
