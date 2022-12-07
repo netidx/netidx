@@ -1,3 +1,14 @@
+* 0.12.6 browser
+
+  - Fix paned widget is jumpy when moving the mouse until manually
+    moving the boundry under some gtk themes
+
+* 0.12.4 netidx
+
+  - Fix an issue with the resolver server that could result in
+    leftover paths from a dead publisher being associated with a new
+    publisher when using local authentication.
+
 * 0.12.5 browser
 
   - Fix crash that could occurr due to trying to get the adjustment of
