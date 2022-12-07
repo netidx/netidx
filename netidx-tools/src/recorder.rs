@@ -7,7 +7,7 @@ use futures::{
     prelude::*,
     select_biased,
 };
-use fxhash::FxBuildHasher;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{error, info, warn};
 use netidx::{
     chars::Chars,
@@ -19,7 +19,8 @@ use netidx::{
         value::FromValue,
     },
     publisher::{
-        BindCfg, ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest,
+        self, BindCfg, ClId, PublishFlags, Publisher, UpdateBatch, Val, Value,
+        WriteRequest,
     },
     resolver_client::{ChangeTracker, DesiredAuth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
@@ -35,7 +36,7 @@ use netidx_protocols::{
 };
 use parking_lot::Mutex;
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     mem,
     ops::Bound,
     str::FromStr,
@@ -359,7 +360,8 @@ mod publish {
     struct T {
         controls: Controls,
         publisher: Publisher,
-        published: HashMap<Id, Val, FxBuildHasher>,
+        published: FxHashMap<Id, Val>,
+        published_ids: FxHashSet<publisher::Id>,
         cursor: Cursor,
         speed: Speed,
         state: State,
@@ -378,7 +380,8 @@ mod publish {
             Ok(T {
                 controls,
                 publisher,
-                published: HashMap::with_hasher(FxBuildHasher::default()),
+                published: HashMap::default(),
+                published_ids: HashSet::default(),
                 cursor: Cursor::new(),
                 speed: Speed::Limited {
                     rate: 1.,
@@ -473,6 +476,7 @@ mod publish {
                         let path = self.archive.path_for_id(&id).unwrap();
                         let path = self.data_base.append(&path);
                         let val = self.publisher.publish(path, v)?;
+                        self.published_ids.insert(val.id());
                         self.published.insert(id, val);
                     }
                 }
@@ -795,6 +799,8 @@ mod publish {
         cfg: Option<NewSessionConfig>,
     ) -> Result<()> {
         let (control_tx, control_rx) = mpsc::channel(3);
+        let (events_tx, mut events_rx) = mpsc::unbounded();
+        publisher.events(events_tx);
         let session_base = session_base(&publish_base, session_id);
         let mut cluster =
             Cluster::new(&publisher, subscriber, session_base.append("cluster"), shards)
@@ -810,10 +816,20 @@ mod publish {
         let mut control_rx = control_rx.fuse();
         let mut idle_check = time::interval(std::time::Duration::from_secs(30));
         let mut idle = false;
+        let mut used = 0;
         loop {
             select_biased! {
+                e = events_rx.select_next_some() => match e {
+                    publisher::Event::Subscribe(id, _) => if t.published_ids.contains(&id) {
+                        used += 1;
+                    },
+                    publisher::Event::Unsubscribe(id, _) => if t.published_ids.contains(&id) {
+                        used -= 1;
+                    },
+                    publisher::Event::Destroyed(_) => (),
+                },
                 _ = idle_check.tick().fuse() => {
-                    let has_clients = publisher.clients() > cluster.others();
+                    let has_clients = used > 0;
                     if !has_clients && idle {
                         break Ok(())
                     } else if has_clients {
@@ -853,7 +869,7 @@ mod publish {
         max_total: usize,
         max_by_client: usize,
         total: usize,
-        by_client: HashMap<ClId, usize, FxBuildHasher>,
+        by_client: FxHashMap<ClId, usize>,
     }
 
     #[derive(Clone)]
@@ -865,7 +881,7 @@ mod publish {
                 max_total,
                 max_by_client,
                 total: 0,
-                by_client: HashMap::with_hasher(FxBuildHasher::default()),
+                by_client: HashMap::default(),
             })))
         }
 
@@ -1202,10 +1218,8 @@ mod record {
         let (tx_batch, rx_batch) = mpsc::channel(10);
         let (tx_list, rx_list) = mpsc::unbounded();
         let mut rx_batch = utils::Batched::new(rx_batch.fuse(), 10);
-        let mut by_subid: HashMap<SubId, Id, FxBuildHasher> =
-            HashMap::with_hasher(FxBuildHasher::default());
-        let mut image: HashMap<SubId, Event, FxBuildHasher> =
-            HashMap::with_hasher(FxBuildHasher::default());
+        let mut by_subid: FxHashMap<SubId, Id> = HashMap::default();
+        let mut image: FxHashMap<SubId, Event> = HashMap::default();
         let mut subscribed: HashMap<Path, Dval> = HashMap::new();
         let subscriber = Subscriber::new(resolver, desired_auth)?;
         let flush_frequency = flush_frequency.map(|f| archive.block_size() * f);
