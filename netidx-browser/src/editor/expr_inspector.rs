@@ -1,5 +1,7 @@
 use super::super::{bscript::LocalEvent, util::ask_modal, BSCtx};
 use super::{completion::BScriptCompletionProvider, Scope};
+use chrono::prelude::*;
+use fxhash::FxHashMap;
 use gdk::keys;
 use glib::idle_add_local_once;
 use glib::{clone, prelude::*, subclass::prelude::*, thread_guard::ThreadGuard};
@@ -10,23 +12,25 @@ use parking_lot::Mutex;
 use sourceview4_sc::{self as sv, prelude::*, traits::ViewExt};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     rc::Rc,
     sync::Arc,
 };
 
 #[derive(Clone, Boxed)]
 #[boxed_type(name = "NetidxExprInspectorWrap")]
-struct ExprWrap(Arc<dyn Fn(&vm::Event<LocalEvent>, &Value)>);
+struct ExprWrap(Arc<dyn Fn(&DateTime<Local>, &vm::Event<LocalEvent>, &Value)>);
 
 fn log_expr_val(
     log: &gtk::ListStore,
     expr: &expr::Expr,
+    ts: &DateTime<Local>,
     e: &vm::Event<LocalEvent>,
     v: &Value,
 ) {
     const MAX: usize = 1000;
     let i = log.append();
-    log.set_value(&i, 0, &format!("{}", chrono::Local::now()).to_value());
+    log.set_value(&i, 0, &format!("{}", ts).to_value());
     log.set_value(&i, 1, &format!("{}", expr).to_value());
     log.set_value(&i, 2, &format!("{:?}", e).to_value());
     log.set_value(&i, 3, &format!("{}", v).to_value());
@@ -45,7 +49,7 @@ fn add_watch(
     expr: expr::Expr,
 ) {
     let id = expr.id;
-    let watch: Arc<dyn Fn(&vm::Event<LocalEvent>, &Value) + Send + Sync> = {
+    let watch: Arc<dyn Fn(&DateTime<Local>, &vm::Event<LocalEvent>, &Value) + Send + Sync> = {
         struct CtxInner {
             store: gtk::TreeStore,
             iter: gtk::TreeIter,
@@ -57,11 +61,11 @@ fn add_watch(
             iter: iter.clone(),
             log: log.clone(),
         })));
-        Arc::new(move |e: &vm::Event<LocalEvent>, v: &Value| {
+        Arc::new(move |ts: &DateTime<Local>, e: &vm::Event<LocalEvent>, v: &Value| {
             let inner = ctx.0.lock();
             let inner = inner.get_ref();
             inner.store.set_value(&inner.iter, 1, &format!("{}", v).to_value());
-            log_expr_val(&inner.log, &expr, e, v)
+            log_expr_val(&inner.log, &expr, ts, e, v)
         })
     };
     ctx.borrow_mut().dbg_ctx.add_watch(id, &watch);
@@ -136,15 +140,25 @@ impl DataFlow {
         self.event_store.clear();
     }
 
-    fn display_expr(&self, parent: Option<&gtk::TreeIter>, s: &expr::Expr) {
+    fn display_expr(
+        &self,
+        exprs: &mut FxHashMap<expr::ExprId, expr::Expr>,
+        parent: Option<&gtk::TreeIter>,
+        s: &expr::Expr,
+    ) {
         let iter = self.call_store.insert_before(parent, None);
         match s {
-            expr::Expr { kind: expr::ExprKind::Constant(v), .. } => {
+            expr::Expr { kind: expr::ExprKind::Constant(v), id } => {
+                exprs.insert(*id, s.clone());
                 self.call_store.set_value(&iter, 0, &"constant".to_value());
                 self.call_store.set_value(&iter, 1, &format!("{}", v).to_value());
             }
-            expr::Expr { kind: expr::ExprKind::Apply { args, function }, .. } => {
+            expr::Expr { kind: expr::ExprKind::Apply { args, function }, id } => {
+                exprs.insert(*id, s.clone());
                 self.call_store.set_value(&iter, 0, &function.to_value());
+                if let Some((_, v)) = self.ctx.borrow().dbg_ctx.get_current(&id) {
+                    self.call_store.set_value(&iter, 1, &format!("{}", v).to_value());
+                }
                 add_watch(
                     &self.ctx,
                     &self.call_store,
@@ -153,15 +167,25 @@ impl DataFlow {
                     s.clone(),
                 );
                 for s in args {
-                    self.display_expr(Some(&iter), s)
+                    self.display_expr(exprs, Some(&iter), s)
                 }
+            }
+        }
+    }
+
+    fn populate_log(&self, exprs: FxHashMap<expr::ExprId, expr::Expr>) {
+        for (id, (ts, ev, v)) in self.ctx.borrow().dbg_ctx.iter_events() {
+            if let Some(expr) = exprs.get(id) {
+                log_expr_val(&self.event_store, expr, ts, ev, v);
             }
         }
     }
 
     fn display(&self, e: &expr::Expr) {
         self.clear();
-        self.display_expr(None, e)
+        let mut exprs = HashMap::default();
+        self.display_expr(&mut exprs, None, e);
+        self.populate_log(exprs);
     }
 }
 

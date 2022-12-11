@@ -4,6 +4,7 @@ use crate::{
     stdfn,
 };
 use arcstr::ArcStr;
+use chrono::prelude::*;
 use fxhash::{FxBuildHasher, FxHashMap};
 use netidx::{
     chars::Chars,
@@ -19,8 +20,12 @@ use std::{
 
 pub struct DbgCtx<E> {
     pub trace: bool,
-    events: VecDeque<(ExprId, (Event<E>, Value))>,
-    watch: HashMap<ExprId, Vec<Weak<dyn Fn(&Event<E>, &Value) + Send + Sync>>, FxBuildHasher>,
+    events: VecDeque<(ExprId, (DateTime<Local>, Event<E>, Value))>,
+    watch: HashMap<
+        ExprId,
+        Vec<Weak<dyn Fn(&DateTime<Local>, &Event<E>, &Value) + Send + Sync>>,
+        FxBuildHasher,
+    >,
     current: HashMap<ExprId, (Event<E>, Value), FxBuildHasher>,
 }
 
@@ -34,13 +39,28 @@ impl<E: Clone> DbgCtx<E> {
         }
     }
 
-    pub fn add_watch(&mut self, id: ExprId, watch: &Arc<dyn Fn(&Event<E>, &Value) + Send + Sync>) {
+    pub fn iter_events(
+        &self,
+    ) -> impl Iterator<Item = &(ExprId, (DateTime<Local>, Event<E>, Value))> {
+        self.events.iter()
+    }
+
+    pub fn get_current(&self, id: &ExprId) -> Option<&(Event<E>, Value)> {
+        self.current.get(id)
+    }
+
+    pub fn add_watch(
+        &mut self,
+        id: ExprId,
+        watch: &Arc<dyn Fn(&DateTime<Local>, &Event<E>, &Value) + Send + Sync>,
+    ) {
         let watches = self.watch.entry(id).or_insert_with(Vec::new);
         watches.push(Arc::downgrade(watch));
     }
 
     pub fn add_event(&mut self, id: ExprId, event: Event<E>, value: Value) {
         const MAX: usize = 1000;
+        let now = Local::now();
         if let Some(watch) = self.watch.get_mut(&id) {
             let mut i = 0;
             while i < watch.len() {
@@ -49,13 +69,13 @@ impl<E: Clone> DbgCtx<E> {
                         watch.remove(i);
                     }
                     Some(f) => {
-                        f(&event, &value);
+                        f(&now, &event, &value);
                         i += 1;
                     }
                 }
             }
         }
-        self.events.push_back((id, (event.clone(), value.clone())));
+        self.events.push_back((id, (now, event.clone(), value.clone())));
         self.current.insert(id, (event, value));
         if self.events.len() > MAX {
             self.events.pop_front();
