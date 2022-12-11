@@ -1,6 +1,7 @@
 use super::super::{bscript::LocalEvent, util::ask_modal, BSCtx};
 use super::{completion::BScriptCompletionProvider, Scope};
 use gdk::keys;
+use glib::idle_add_local_once;
 use glib::{clone, prelude::*, subclass::prelude::*, thread_guard::ThreadGuard};
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
@@ -17,7 +18,12 @@ use std::{
 #[boxed_type(name = "NetidxExprInspectorWrap")]
 struct ExprWrap(Arc<dyn Fn(&vm::Event<LocalEvent>, &Value)>);
 
-fn log_expr_val(log: &gtk::ListStore, expr: &expr::Expr, e: &vm::Event<LocalEvent>, v: &Value) {
+fn log_expr_val(
+    log: &gtk::ListStore,
+    expr: &expr::Expr,
+    e: &vm::Event<LocalEvent>,
+    v: &Value,
+) {
     const MAX: usize = 1000;
     let i = log.append();
     log.set_value(&i, 0, &format!("{}", chrono::Local::now()).to_value());
@@ -342,6 +348,9 @@ impl ExprInspector {
         root.pack1(&editor.root, true, false);
         root.pack2(&tools.root, true, true);
         tools.display(&*expr.borrow());
+        idle_add_local_once(clone!(@weak root => move || {
+            root.set_position_set(true);
+        }));
         ExprInspector { root, _tools: tools, _editor: editor }
     }
 

@@ -897,6 +897,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     main_menu.append(Some("Go"), Some("win.go"));
     main_menu.append(Some("Save View As"), Some("win.save_as"));
     main_menu.append(Some("Raw View"), Some("win.raw_view"));
+    main_menu.append(Some("Bscript Tracing"), Some("win.bscript_tracing"));
     main_menu.append(Some("New Window"), Some("win.new_window"));
     prefs_button.set_use_popover(true);
     prefs_button.set_menu_model(Some(&main_menu));
@@ -1023,6 +1024,17 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 a.change_state(&new_v.to_variant());
                 ctx.borrow().user.backend.navigate(current_loc.borrow().clone());
             }
+        }
+    }));
+    let bscript_tracing_act =
+        gio::SimpleAction::new_stateful("bscript_tracing", None, &true.to_variant());
+    ctx.borrow().user.window.add_action(&bscript_tracing_act);
+    ctx.borrow_mut().dbg_ctx.trace = true;
+    bscript_tracing_act.connect_activate(clone!(@weak ctx => move |a, _| {
+        if let Some(v) = a.state() {
+            let new_v = !v.get::<bool>().expect("invalid state");
+            ctx.borrow_mut().dbg_ctx.trace = new_v;
+            a.change_state(&new_v.to_variant());
         }
     }));
     let new_window_act = gio::SimpleAction::new("new_window", None);

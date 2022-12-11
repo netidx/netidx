@@ -12,7 +12,6 @@ use std::{
     boxed,
     cell::{Cell, RefCell},
     rc::Rc,
-    ops::Drop,
 };
 use util::{parse_entry, TwoColGrid};
 
@@ -941,19 +940,11 @@ static KINDS: [&'static str; 25] = [
 ];
 
 pub(super) struct Editor {
-    ctx: BSCtx,
     root: gtk::Paned,
-}
-
-impl Drop for Editor {
-    fn drop(&mut self) {
-        self.ctx.borrow_mut().dbg_ctx.trace = false;
-    }
 }
 
 impl Editor {
     pub(super) fn new(ctx: BSCtx, scope: Path, spec: view::Widget) -> Editor {
-        ctx.borrow_mut().dbg_ctx.trace = true;
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         idle_add_local(
             clone!(@weak root => @default-return glib::Continue(false), move || {
@@ -1319,7 +1310,7 @@ impl Editor {
                 }));
                 on_change();
         }));
-        Editor { ctx: ctx.clone(), root }
+        Editor { root }
     }
 
     fn update_scope(store: &gtk::TreeStore, scope: Path, root: &gtk::TreeIter) {
