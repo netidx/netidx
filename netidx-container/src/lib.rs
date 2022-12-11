@@ -430,9 +430,12 @@ struct Ref {
 }
 
 impl Ref {
-    fn get_path(from: &[Node<Lc, UserEv>]) -> Option<Chars> {
+    fn get_path(
+        from: &[Node<Lc, UserEv>],
+        ctx: &mut ExecCtx<Lc, UserEv>,
+    ) -> Option<Chars> {
         match from {
-            [path] => path.current().and_then(|v| v.get_as::<Chars>()),
+            [path] => path.current(ctx).and_then(|v| v.get_as::<Chars>()),
             _ => None,
         }
     }
@@ -535,7 +538,7 @@ impl Ref {
 impl Register<Lc, UserEv> for Ref {
     fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
         let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, _, id| {
-            let path = Ref::get_path(from);
+            let path = Ref::get_path(from, ctx);
             let current = Ref::get_current(ctx, &path);
             let mut t = Box::new(Ref { id, path: None, current });
             t.set_ref(ctx, path);
@@ -546,7 +549,7 @@ impl Register<Lc, UserEv> for Ref {
 }
 
 impl Apply<Lc, UserEv> for Ref {
-    fn current(&self) -> Option<Value> {
+    fn current(&self, _ctx: &mut ExecCtx<Lc, UserEv>) -> Option<Value> {
         Some(self.current.clone())
     }
 
@@ -590,13 +593,13 @@ struct Rel {
 }
 
 impl Rel {
-    fn eval(&self, ctx: &ExecCtx<Lc, UserEv>, from: &[Node<Lc, UserEv>]) -> Value {
+    fn eval(&self, ctx: &mut ExecCtx<Lc, UserEv>, from: &[Node<Lc, UserEv>]) -> Value {
         let (row, col, invalid) = match from {
             [] => (None, None, false),
-            [v] => (None, v.current().and_then(|v| v.cast_to::<i32>().ok()), false),
+            [v] => (None, v.current(ctx).and_then(|v| v.cast_to::<i32>().ok()), false),
             [v0, v1] => {
-                let row = v0.current().and_then(|v| v.cast_to::<i32>().ok());
-                let col = v1.current().and_then(|v| v.cast_to::<i32>().ok());
+                let row = v0.current(ctx).and_then(|v| v.cast_to::<i32>().ok());
+                let col = v1.current(ctx).and_then(|v| v.cast_to::<i32>().ok());
                 (row, col, false)
             }
             _ => (None, None, true),
@@ -648,7 +651,7 @@ impl Register<Lc, UserEv> for Rel {
 }
 
 impl Apply<Lc, UserEv> for Rel {
-    fn current(&self) -> Option<Value> {
+    fn current(&self, _ctx: &mut ExecCtx<Lc, UserEv>) -> Option<Value> {
         Some(self.current.clone())
     }
 
@@ -686,7 +689,7 @@ impl Register<Lc, UserEv> for OnWriteEvent {
 }
 
 impl Apply<Lc, UserEv> for OnWriteEvent {
-    fn current(&self) -> Option<Value> {
+    fn current(&self, _ctx: &mut ExecCtx<Lc, UserEv>) -> Option<Value> {
         if self.invalid {
             OnWriteEvent::err()
         } else {
@@ -696,7 +699,7 @@ impl Apply<Lc, UserEv> for OnWriteEvent {
 
     fn update(
         &mut self,
-        _ctx: &mut ExecCtx<Lc, UserEv>,
+        ctx: &mut ExecCtx<Lc, UserEv>,
         from: &mut [Node<Lc, UserEv>],
         event: &vm::Event<UserEv>,
     ) -> Option<Value> {
@@ -710,7 +713,7 @@ impl Apply<Lc, UserEv> for OnWriteEvent {
             | vm::Event::User(UserEv::Rel) => None,
             vm::Event::User(UserEv::OnWriteEvent(value)) => {
                 self.cur = Some(value.clone());
-                self.current()
+                self.current(ctx)
             }
         }
     }
@@ -927,7 +930,7 @@ impl ContainerInner {
         let on_write_node =
             on_write_expr.map(|e| Node::compile(&mut self.ctx, scope.clone(), e));
         let value =
-            formula_node.as_ref().ok().and_then(|n| n.current()).unwrap_or(Value::Null);
+            formula_node.as_ref().ok().and_then(|n| n.current(&mut self.ctx)).unwrap_or(Value::Null);
         let src_path = path.append(".formula");
         let on_write_path = path.append(".on-write");
         let data = self.ctx.user.publisher.publish(path.clone(), value.clone())?;
@@ -1145,7 +1148,7 @@ impl ContainerInner {
                     .map(|s| Path::from(String::from(s)))
                     .unwrap_or_else(Path::root);
                 let node = Node::compile(&mut self.ctx, scope, expr);
-                let dv = node.current().unwrap_or(Value::Null);
+                let dv = node.current(&mut self.ctx).unwrap_or(Value::Null);
                 let c = Compiled::Formula { node, data_id: fifo.data.id() };
                 self.compiled.insert(*expr_id, c);
                 dv
