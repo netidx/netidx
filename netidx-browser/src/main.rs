@@ -535,10 +535,15 @@ impl Widget {
         );
         let visible =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), props.visible.clone());
-        if let Some(b) = sensitive.current().and_then(|v| v.cast_to::<bool>().ok()) {
+        if let Some(b) = sensitive
+            .current(&mut ctx.borrow_mut())
+            .and_then(|v| v.cast_to::<bool>().ok())
+        {
             widget.set_sensitive(b);
         }
-        if let Some(b) = visible.current().and_then(|v| v.cast_to::<bool>().ok()) {
+        if let Some(b) =
+            visible.current(&mut ctx.borrow_mut()).and_then(|v| v.cast_to::<bool>().ok())
+        {
             widget.set_visible(b);
         }
         Self { sensitive, visible, widget }

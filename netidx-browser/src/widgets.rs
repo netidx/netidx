@@ -61,20 +61,23 @@ impl Button {
         let button = gtk::Button::new();
         button.set_no_show_all(true);
         let (label, image, on_click) = {
-            let mut ctx = ctx.borrow_mut();
-            let ctx = &mut ctx;
-            let label = BSNode::compile(ctx, scope.clone(), spec.label.clone());
-            let image = BSNode::compile(ctx, scope.clone(), spec.image.clone());
-            let on_click =
-                Rc::new(RefCell::new(BSNode::compile(ctx, scope, spec.on_click.clone())));
+            let label =
+                BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.label.clone());
+            let image =
+                BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.image.clone());
+            let on_click = Rc::new(RefCell::new(BSNode::compile(
+                &mut ctx.borrow_mut(),
+                scope,
+                spec.on_click.clone(),
+            )));
             (label, image, on_click)
         };
-        Self::set_label(&button, label.current());
-        Self::set_image(&button, image.current());
+        Self::set_label(&button, label.current(&mut ctx.borrow_mut()));
+        Self::set_image(&button, image.current(&mut ctx.borrow_mut()));
         hover_path(&button, &selected_path, "on_click", &spec.on_click);
         button.connect_clicked(clone!(@strong ctx, @strong on_click => move |_| {
             on_click.borrow_mut().update(
-                &mut *ctx.borrow_mut(),
+                &mut ctx.borrow_mut(),
                 &vm::Event::User(LocalEvent::Event(Value::Null))
             );
         }));
@@ -133,31 +136,30 @@ impl LinkButton {
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
-        let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut ctx_r;
-        let uri = BSNode::compile(ctx_r, scope.clone(), spec.uri.clone());
-        let label = BSNode::compile(ctx_r, scope.clone(), spec.label.clone());
+        let uri = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.uri.clone());
+        let label =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.label.clone());
         let on_activate_link = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
+            &mut ctx.borrow_mut(),
             scope,
             spec.on_activate_link.clone(),
         )));
         let button = gtk::LinkButton::new("file:///");
         button.set_no_show_all(true);
-        Self::set_uri(&button, uri.current());
-        Self::set_label(&button, label.current());
+        Self::set_uri(&button, uri.current(&mut ctx.borrow_mut()));
+        Self::set_label(&button, label.current(&mut ctx.borrow_mut()));
         hover_path(&button, &selected_path, "on_activate_link", &spec.on_activate_link);
         button.connect_activate_link(
             clone!(@strong ctx, @strong on_activate_link => move |button| {
                 match button.uri().map(|s| s.to_string()) {
                     None => {
                         let ev = vm::Event::User(LocalEvent::Event(Value::Null));
-                        on_activate_link.borrow_mut().update(&mut *ctx.borrow_mut(), &ev);
+                        on_activate_link.borrow_mut().update(&mut ctx.borrow_mut(), &ev);
                         Inhibit(true)
                     },
                     Some(uri) => {
                         let ev = vm::Event::User(LocalEvent::Event(uri.into()));
-                        match on_activate_link.borrow_mut().update(&mut *ctx.borrow_mut(), &ev) {
+                        match on_activate_link.borrow_mut().update(&mut ctx.borrow_mut(), &ev) {
                             Some(Value::True) => Inhibit(true),
                             _ => Inhibit(false),
                         }
@@ -215,28 +217,25 @@ impl Label {
         selected_path: gtk::Label,
     ) -> Label {
         let text =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.text.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.text.clone());
         let width =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.width.clone());
-        let ellipsize = BSNode::compile(
-            &mut *ctx.borrow_mut(),
-            scope.clone(),
-            spec.ellipsize.clone(),
-        );
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.width.clone());
+        let ellipsize =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.ellipsize.clone());
         let single_line = BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.single_line.clone(),
         );
         let selectable =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.selectable.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope, spec.selectable.clone());
         let label = gtk::Label::new(None);
         label.set_no_show_all(true);
-        Self::set_text(&label, text.current());
-        Self::set_single_line(&label, single_line.current());
-        Self::set_selectable(&label, selectable.current());
-        Self::set_width(&label, width.current());
-        Self::set_ellipsize(&label, ellipsize.current());
+        Self::set_text(&label, text.current(&mut ctx.borrow_mut()));
+        Self::set_single_line(&label, single_line.current(&mut ctx.borrow_mut()));
+        Self::set_selectable(&label, selectable.current(&mut ctx.borrow_mut()));
+        Self::set_width(&label, width.current(&mut ctx.borrow_mut()));
+        Self::set_ellipsize(&label, ellipsize.current(&mut ctx.borrow_mut()));
         hover_path(&label, &selected_path, "text", &spec.text);
         Label { text, label, width, ellipsize, single_line, selectable }
     }
@@ -297,10 +296,11 @@ pub(super) struct BScript {
 
 impl BScript {
     pub(super) fn new(ctx: &BSCtx, scope: Path, spec: Expr) -> Self {
-        let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut ctx_r;
-        let mut expr = BSNode::compile(ctx_r, scope, spec.clone());
-        expr.update(ctx_r, &vm::Event::User(LocalEvent::Event(Value::Null)));
+        let mut expr = BSNode::compile(&mut ctx.borrow_mut(), scope, spec.clone());
+        expr.update(
+            &mut ctx.borrow_mut(),
+            &vm::Event::User(LocalEvent::Event(Value::Null)),
+        );
         Self { expr }
     }
 }
@@ -349,30 +349,34 @@ where
         button.set_no_show_all(true);
         let we_set = Rc::new(Cell::new(false));
         let value = Rc::new(RefCell::new(BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.toggle.value.clone(),
         )));
         let on_change = Rc::new(RefCell::new(BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.toggle.on_change.clone(),
         )));
         let label =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.label.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.label.clone());
         let image =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.image.clone());
-        Self::set_label(&button, label.current());
-        Self::set_image(&button, image.current());
-        Self::we_set_value(&we_set, &button, value.borrow().current());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.image.clone());
+        Self::set_label(&button, label.current(&mut ctx.borrow_mut()));
+        Self::set_image(&button, image.current(&mut ctx.borrow_mut()));
+        Self::we_set_value(
+            &we_set,
+            &button,
+            value.borrow().current(&mut ctx.borrow_mut()),
+        );
         hover_path(&button, &selected_path, "on_change", &spec.toggle.on_change);
         button.connect_toggled(clone!(
             @strong value, @strong on_change, @strong ctx, @strong we_set => move |button| {
                 if !we_set.get() {
                     let e = vm::Event::User(LocalEvent::Event(button.is_active().into()));
-                    on_change.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
-                    idle_add_local(clone!(@strong we_set, @strong value, @strong button => move || {
-                        Self::we_set_value(&we_set, &button, value.borrow().current());
+                    on_change.borrow_mut().update(&mut ctx.borrow_mut(), &e);
+                    idle_add_local(clone!(@strong ctx, @strong we_set, @strong value, @strong button => move || {
+                        Self::we_set_value(&we_set, &button, value.borrow().current(&mut ctx.borrow_mut()));
                         Continue(false)
                     }));
                 }
@@ -469,20 +473,24 @@ impl ComboBox {
         let root = gtk::EventBox::new();
         root.add(&combo);
         let choices =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.choices.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.choices.clone());
         let selected = Rc::new(RefCell::new(BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.selected.clone(),
         )));
         let on_change = Rc::new(RefCell::new(BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope,
             spec.on_change.clone(),
         )));
         let we_set = Rc::new(Cell::new(false));
-        Self::set_choices(&combo, choices.current());
-        Self::we_set_selected(&we_set, &combo, selected.borrow().current());
+        Self::set_choices(&combo, choices.current(&mut ctx.borrow_mut()));
+        Self::we_set_selected(
+            &we_set,
+            &combo,
+            selected.borrow().current(&mut ctx.borrow_mut()),
+        );
         hover_path(&combo, &selected_path, "on_change", &spec.on_change);
         combo.connect_changed(clone!(
             @strong we_set,
@@ -493,13 +501,13 @@ impl ComboBox {
                 if let Some(id) = combo.active_id() {
                     let idv = Value::from(Chars::from(String::from(id)));
                     on_change.borrow_mut().update(
-                        &mut *ctx.borrow_mut(),
+                        &mut ctx.borrow_mut(),
                         &vm::Event::User(LocalEvent::Event(idv))
                     );
                 }
                 idle_add_local(clone!(
-                    @strong selected, @strong combo, @strong we_set => move || {
-                        Self::we_set_selected(&we_set, &combo, selected.borrow().current());
+                    @strong ctx, @strong selected, @strong combo, @strong we_set => move || {
+                        Self::we_set_selected(&we_set, &combo, selected.borrow().current(&mut ctx.borrow_mut()));
                         Continue(false)
                     })
                 );
@@ -589,18 +597,18 @@ impl RadioButton {
         let we_changed = Rc::new(Cell::new(false));
         let group_changing = Rc::new(Cell::new(false));
         let on_toggled = Rc::new(RefCell::new(BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.on_toggled.clone(),
         )));
         let label =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.label.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.label.clone());
         let image =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.image.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.image.clone());
         let group =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.group.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.group.clone());
         let value =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.value.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.value.clone());
         let button = gtk::RadioButton::new();
         button.set_no_show_all(true);
         button.connect_toggled(clone!(
@@ -613,11 +621,11 @@ impl RadioButton {
                 let e = vm::Event::User(LocalEvent::Event(active.into()));
                 if group_changing.get() {
                     idle_add_local(clone!(@strong on_toggled, @strong ctx  => move || {
-                        on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+                        on_toggled.borrow_mut().update(&mut ctx.borrow_mut(), &e);
                         Continue(false)
                     }));
                 } else {
-                    on_toggled.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+                    on_toggled.borrow_mut().update(&mut ctx.borrow_mut(), &e);
                 }
             }
         }));
@@ -633,10 +641,11 @@ impl RadioButton {
             we_changed,
             current_group: None,
         };
-        t.set_label(t.label.current());
-        t.set_image(t.image.current());
-        t.set_group(&mut *ctx.borrow_mut(), t.group.current());
-        t.we_set_value(t.value.current());
+        t.set_label(t.label.current(&mut ctx.borrow_mut()));
+        t.set_image(t.image.current(&mut ctx.borrow_mut()));
+        let group_current = t.group.current(&mut ctx.borrow_mut());
+        t.set_group(&mut ctx.borrow_mut(), group_current);
+        t.we_set_value(t.value.current(&mut ctx.borrow_mut()));
         t
     }
 
@@ -741,30 +750,35 @@ impl Switch {
     ) -> Self {
         let switch = gtk::Switch::new();
         switch.set_no_show_all(true);
-        let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut ctx_r;
         let value = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.value.clone(),
         )));
-        let on_change =
-            Rc::new(RefCell::new(BSNode::compile(ctx_r, scope, spec.on_change.clone())));
+        let on_change = Rc::new(RefCell::new(BSNode::compile(
+            &mut ctx.borrow_mut(),
+            scope,
+            spec.on_change.clone(),
+        )));
         let we_set = Rc::new(Cell::new(false));
-        Self::we_set_value(&we_set, &switch, value.borrow().current());
+        Self::we_set_value(
+            &we_set,
+            &switch,
+            value.borrow().current(&mut ctx.borrow_mut()),
+        );
         switch.connect_state_set(clone!(
         @strong ctx, @strong on_change, @strong we_set, @strong value =>
         move |switch, state| {
             if !we_set.get() {
                 on_change.borrow_mut().update(
-                    &mut *ctx.borrow_mut(),
+                    &mut ctx.borrow_mut(),
                     &vm::Event::User(
                         LocalEvent::Event(state.into())
                     ),
                 );
                 idle_add_local(
-                    clone!(@strong value, @strong switch, @strong we_set => move || {
-                        Self::we_set_value(&we_set, &switch, value.borrow().current());
+                    clone!(@strong ctx, @strong value, @strong switch, @strong we_set => move || {
+                        Self::we_set_value(&we_set, &switch, value.borrow().current(&mut ctx.borrow_mut()));
                         Continue(false)
                 }));
             }
@@ -857,7 +871,7 @@ impl Entry {
         )));
         let entry = gtk::Entry::new();
         entry.set_no_show_all(true);
-        Self::set_text(&entry, text.borrow().current());
+        Self::set_text(&entry, text.borrow().current(&mut ctx.borrow_mut()));
         entry.set_icon_activatable(gtk::EntryIconPosition::Secondary, true);
         entry.connect_activate(clone!(
         @strong ctx,
@@ -866,14 +880,14 @@ impl Entry {
         @strong on_activate => move |entry| {
             entry.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, None);
             on_activate.borrow_mut().update(
-                &mut *ctx.borrow_mut(),
+                &mut ctx.borrow_mut(),
                 &vm::Event::User(
                     LocalEvent::Event(Value::String(Chars::from(String::from(entry.text()))))
                 ),
             );
             idle_add_local(clone!(
-                @strong we_changed, @strong text, @strong entry => move || {
-                    Self::we_set_text(&we_changed, &entry, text.borrow().current());
+                @strong ctx, @strong we_changed, @strong text, @strong entry => move || {
+                    Self::we_set_text(&we_changed, &entry, text.borrow().current(&mut ctx.borrow_mut()));
                     Continue(false)
                 }));
         }));
@@ -883,7 +897,7 @@ impl Entry {
         @strong on_change => move |e| {
             if !we_changed.get() {
                 let v = on_change.borrow_mut().update(
-                    &mut *ctx.borrow_mut(),
+                    &mut ctx.borrow_mut(),
                     &vm::Event::User(LocalEvent::Event(
                         Value::String(Chars::from(String::from(e.text())))
                     )),
@@ -958,33 +972,33 @@ impl SearchEntry {
     ) -> Self {
         let we_changed = Rc::new(Cell::new(false));
         let text =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.text.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.text.clone());
         let on_search_changed = Rc::new(RefCell::new(BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.on_search_changed.clone(),
         )));
         let on_activate = Rc::new(RefCell::new(BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.on_activate.clone(),
         )));
         let entry = gtk::SearchEntry::new();
         hover_path(&entry, &selected_path, "on_search_changed", &spec.on_search_changed);
         entry.set_no_show_all(true);
-        Self::set_text(&entry, text.current());
+        Self::set_text(&entry, text.current(&mut ctx.borrow_mut()));
         entry.connect_search_changed(
             clone!(@strong on_search_changed, @strong ctx, @strong we_changed => move |entry| {
                 if !we_changed.get() {
                     let s = Value::from(entry.text().to_string());
                     let e = vm::Event::User(LocalEvent::Event(s));
-                    on_search_changed.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+                    on_search_changed.borrow_mut().update(&mut ctx.borrow_mut(), &e);
                 }
             }));
         entry.connect_activate(clone!(@strong on_activate, @strong ctx => move |e| {
             let s = Value::from(e.text().to_string());
             let e = vm::Event::User(LocalEvent::Event(s));
-            on_activate.borrow_mut().update(&mut *ctx.borrow_mut(), &e);
+            on_activate.borrow_mut().update(&mut ctx.borrow_mut(), &e);
         }));
         Self { entry, we_changed, text, on_search_changed, on_activate }
     }
@@ -1045,7 +1059,7 @@ impl Image {
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.on_click.clone());
         let on_click = Rc::new(RefCell::new(on_click));
         let button_pressed = Rc::new(Cell::new(false));
-        Self::set_spec(&image, image_spec.current());
+        Self::set_spec(&image, image_spec.current(&mut ctx.borrow_mut()));
         root.connect_button_press_event(clone!(@strong button_pressed => move |_, e| {
             if e.button() == 1 {
                 button_pressed.set(true);
@@ -1057,7 +1071,7 @@ impl Image {
             if e.button() == 1 && button_pressed.get() {
                 button_pressed.set(false);
                 on_click.borrow_mut().update(
-                    &mut *ctx.borrow_mut(),
+                    &mut ctx.borrow_mut(),
                     &vm::Event::User(LocalEvent::Event(Value::Null))
                 );
             }
@@ -1157,40 +1171,40 @@ impl Scale {
         );
         scale.set_no_show_all(true);
         let draw_value = BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.draw_value.clone(),
         );
         let marks =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.marks.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.marks.clone());
         let has_origin = BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.has_origin.clone(),
         );
         let value =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.value.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.value.clone());
         let min =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.min.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.min.clone());
         let max =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.max.clone());
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.max.clone());
         let on_change = Rc::new(RefCell::new(BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.on_change.clone(),
         )));
         let we_set = Rc::new(Cell::new(false));
-        Self::set_min(&scale, min.current());
-        Self::set_max(&scale, max.current());
-        Self::set_value(&scale, value.current());
-        Self::set_draw_value(&scale, draw_value.current());
-        Self::set_marks(&scale, marks.current());
-        Self::set_has_origin(&scale, has_origin.current());
+        Self::set_min(&scale, min.current(&mut ctx.borrow_mut()));
+        Self::set_max(&scale, max.current(&mut ctx.borrow_mut()));
+        Self::set_value(&scale, value.current(&mut ctx.borrow_mut()));
+        Self::set_draw_value(&scale, draw_value.current(&mut ctx.borrow_mut()));
+        Self::set_marks(&scale, marks.current(&mut ctx.borrow_mut()));
+        Self::set_has_origin(&scale, has_origin.current(&mut ctx.borrow_mut()));
         scale.connect_value_changed(
             clone!(@strong on_change, @strong ctx, @strong we_set => move |scale| {
                 if !we_set.get() {
                     on_change.borrow_mut().update(
-                        &mut *ctx.borrow_mut(),
+                        &mut ctx.borrow_mut(),
                         &vm::Event::User(LocalEvent::Event(scale.value().into()))
                     );
                 }
@@ -1298,22 +1312,22 @@ impl ProgressBar {
         progress.set_no_show_all(true);
         hover_path(&progress, &selected_path, "fraction", &spec.fraction);
         let ellipsize =
-            BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.ellipsize);
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.ellipsize);
         let fraction = Rc::new(RefCell::new(BSNode::compile(
-            &mut *ctx.borrow_mut(),
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.fraction,
         )));
-        let pulse = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.pulse);
-        let text = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.text);
-        let show_text = BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.show_text);
-        Self::set_ellipsize(&progress, ellipsize.current());
-        Self::set_fraction(&progress, fraction.borrow().current());
-        Self::set_pulse(&progress, pulse.current());
-        Self::set_text(&progress, text.current());
-        Self::set_show_text(&progress, show_text.current());
-        progress.connect_show(clone!(@strong fraction => move |progress| {
-            Self::set_fraction(&progress, fraction.borrow().current());
+        let pulse = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.pulse);
+        let text = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.text);
+        let show_text = BSNode::compile(&mut ctx.borrow_mut(), scope, spec.show_text);
+        Self::set_ellipsize(&progress, ellipsize.current(&mut ctx.borrow_mut()));
+        Self::set_fraction(&progress, fraction.borrow().current(&mut ctx.borrow_mut()));
+        Self::set_pulse(&progress, pulse.current(&mut ctx.borrow_mut()));
+        Self::set_text(&progress, text.current(&mut ctx.borrow_mut()));
+        Self::set_show_text(&progress, show_text.current(&mut ctx.borrow_mut()));
+        progress.connect_show(clone!(@strong ctx, @strong fraction => move |progress| {
+            Self::set_fraction(&progress, fraction.borrow().current(&mut ctx.borrow_mut()));
         }));
         Self { progress, ellipsize, fraction, pulse, text, show_text }
     }

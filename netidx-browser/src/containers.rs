@@ -107,7 +107,7 @@ impl Frame {
         selected_path: gtk::Label,
     ) -> Self {
         let label = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.label);
-        let label_val = label.current().and_then(|v| v.get_as::<Chars>());
+        let label_val = label.current(&mut ctx.borrow_mut()).and_then(|v| v.get_as::<Chars>());
         let label_val = label_val.as_ref().map(|s| s.as_ref());
         let root = gtk::Frame::new(label_val);
         root.set_no_show_all(true);
@@ -220,7 +220,7 @@ impl Notebook {
                 }
             }
         }
-        root.set_current_page(page.current().and_then(|v| v.get_as::<u32>()));
+        root.set_current_page(page.current(&mut ctx.borrow_mut()).and_then(|v| v.get_as::<u32>()));
         root.connect_switch_page(clone!(
         @strong ctx, @strong on_switch_page => move |_, _, page| {
             let ev = vm::Event::User(LocalEvent::Event(page.into()));

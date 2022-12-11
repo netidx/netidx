@@ -84,7 +84,7 @@ impl Table {
             BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.on_header_click);
         let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
         let shared = Rc::new(SharedState::new(
-            ctx,
+            ctx.clone(),
             selected_path,
             root,
             on_activate,
@@ -92,17 +92,17 @@ impl Table {
             on_header_click,
             on_select,
         ));
-        shared.set_path(path.current());
-        shared.set_sort_mode(sort_mode.current());
-        shared.set_column_filter(column_filter.current());
-        shared.set_row_filter(row_filter.current());
-        shared.set_column_editable(column_editable.current());
-        shared.set_selection_mode(selection_mode.current());
-        shared.set_selection(selection.current());
-        shared.set_show_row_name(show_row_name.current());
-        shared.set_columns_resizable(columns_resizable.current());
-        shared.set_column_types(column_types.current());
-        shared.set_column_widths(column_widths.current());
+        shared.set_path(path.current(&mut ctx.borrow_mut()));
+        shared.set_sort_mode(sort_mode.current(&mut ctx.borrow_mut()));
+        shared.set_column_filter(column_filter.current(&mut ctx.borrow_mut()));
+        shared.set_row_filter(row_filter.current(&mut ctx.borrow_mut()));
+        shared.set_column_editable(column_editable.current(&mut ctx.borrow_mut()));
+        shared.set_selection_mode(selection_mode.current(&mut ctx.borrow_mut()));
+        shared.set_selection(selection.current(&mut ctx.borrow_mut()));
+        shared.set_show_row_name(show_row_name.current(&mut ctx.borrow_mut()));
+        shared.set_columns_resizable(columns_resizable.current(&mut ctx.borrow_mut()));
+        shared.set_column_types(column_types.current(&mut ctx.borrow_mut()));
+        shared.set_column_widths(column_widths.current(&mut ctx.borrow_mut()));
         let state = Rc::new(RefCell::new({
             let path = &*shared.path.borrow();
             shared.ctx.borrow().user.backend.resolve_table(path.clone());
@@ -218,7 +218,7 @@ impl BWidget for Table {
                 | vm::Event::User(LocalEvent::Poll(_)) => (),
                 vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {
                     if path == rpath {
-                        match self.selection.current() {
+                        match self.selection.current(ctx) {
                             None | Some(Value::Null) => {
                                 self.shared.selected.borrow_mut().clear();
                             }

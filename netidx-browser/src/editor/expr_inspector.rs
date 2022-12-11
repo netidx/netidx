@@ -19,20 +19,23 @@ use std::{
 
 #[derive(Clone, Boxed)]
 #[boxed_type(name = "NetidxExprInspectorWrap")]
-struct ExprWrap(Arc<dyn Fn(&DateTime<Local>, &vm::Event<LocalEvent>, &Value)>);
+struct ExprWrap(Arc<dyn Fn(&DateTime<Local>, &Option<vm::Event<LocalEvent>>, &Value)>);
 
 fn log_expr_val(
     log: &gtk::ListStore,
     expr: &expr::Expr,
     ts: &DateTime<Local>,
-    e: &vm::Event<LocalEvent>,
+    e: &Option<vm::Event<LocalEvent>>,
     v: &Value,
 ) {
     const MAX: usize = 1000;
     let i = log.append();
     log.set_value(&i, 0, &format!("{}", ts).to_value());
     log.set_value(&i, 1, &format!("{}", expr).to_value());
-    log.set_value(&i, 2, &format!("{:?}", e).to_value());
+    match e {
+        Some(e) => log.set_value(&i, 2, &format!("{:?}", e).to_value()),
+        None => log.set_value(&i, 2, &"initialization".to_value()),
+    }
     log.set_value(&i, 3, &format!("{}", v).to_value());
     if log.iter_n_children(None) as usize > MAX {
         if let Some(iter) = log.iter_first() {
@@ -49,7 +52,7 @@ fn add_watch(
     expr: expr::Expr,
 ) {
     let id = expr.id;
-    let watch: Arc<dyn Fn(&DateTime<Local>, &vm::Event<LocalEvent>, &Value) + Send + Sync> = {
+    let watch: Arc<dyn Fn(&DateTime<Local>, &Option<vm::Event<LocalEvent>>, &Value) + Send + Sync> = {
         struct CtxInner {
             store: gtk::TreeStore,
             iter: gtk::TreeIter,
@@ -61,7 +64,7 @@ fn add_watch(
             iter: iter.clone(),
             log: log.clone(),
         })));
-        Arc::new(move |ts: &DateTime<Local>, e: &vm::Event<LocalEvent>, v: &Value| {
+        Arc::new(move |ts: &DateTime<Local>, e: &Option<vm::Event<LocalEvent>>, v: &Value| {
             let inner = ctx.0.lock();
             let inner = inner.get_ref();
             inner.store.set_value(&inner.iter, 1, &format!("{}", v).to_value());

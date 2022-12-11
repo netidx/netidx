@@ -20,13 +20,13 @@ use std::{
 
 pub struct DbgCtx<E> {
     pub trace: bool,
-    events: VecDeque<(ExprId, (DateTime<Local>, Event<E>, Value))>,
+    events: VecDeque<(ExprId, (DateTime<Local>, Option<Event<E>>, Value))>,
     watch: HashMap<
         ExprId,
-        Vec<Weak<dyn Fn(&DateTime<Local>, &Event<E>, &Value) + Send + Sync>>,
+        Vec<Weak<dyn Fn(&DateTime<Local>, &Option<Event<E>>, &Value) + Send + Sync>>,
         FxBuildHasher,
     >,
-    current: HashMap<ExprId, (Event<E>, Value), FxBuildHasher>,
+    current: HashMap<ExprId, (Option<Event<E>>, Value), FxBuildHasher>,
 }
 
 impl<E: Clone> DbgCtx<E> {
@@ -41,24 +41,24 @@ impl<E: Clone> DbgCtx<E> {
 
     pub fn iter_events(
         &self,
-    ) -> impl Iterator<Item = &(ExprId, (DateTime<Local>, Event<E>, Value))> {
+    ) -> impl Iterator<Item = &(ExprId, (DateTime<Local>, Option<Event<E>>, Value))> {
         self.events.iter()
     }
 
-    pub fn get_current(&self, id: &ExprId) -> Option<&(Event<E>, Value)> {
+    pub fn get_current(&self, id: &ExprId) -> Option<&(Option<Event<E>>, Value)> {
         self.current.get(id)
     }
 
     pub fn add_watch(
         &mut self,
         id: ExprId,
-        watch: &Arc<dyn Fn(&DateTime<Local>, &Event<E>, &Value) + Send + Sync>,
+        watch: &Arc<dyn Fn(&DateTime<Local>, &Option<Event<E>>, &Value) + Send + Sync>,
     ) {
         let watches = self.watch.entry(id).or_insert_with(Vec::new);
         watches.push(Arc::downgrade(watch));
     }
 
-    pub fn add_event(&mut self, id: ExprId, event: Event<E>, value: Value) {
+    pub fn add_event(&mut self, id: ExprId, event: Option<Event<E>>, value: Value) {
         const MAX: usize = 1000;
         let now = Local::now();
         if let Some(watch) = self.watch.get_mut(&id) {
@@ -123,7 +123,7 @@ pub trait Register<C: Ctx, E> {
 }
 
 pub trait Apply<C: Ctx, E> {
-    fn current(&self) -> Option<Value>;
+    fn current(&self, ctx: &mut ExecCtx<C, E>) -> Option<Value>;
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -359,12 +359,18 @@ impl<C: Ctx, E: Clone> Node<C, E> {
         Self::compile_int(ctx, spec, scope, top_id)
     }
 
-    pub fn current(&self) -> Option<Value> {
-        match self {
-            Node::Error(_, v) => Some(v.clone()),
-            Node::Constant(_, v) => Some(v.clone()),
-            Node::Apply { function, .. } => function.current(),
+    pub fn current(&self, ctx: &mut ExecCtx<C, E>) -> Option<Value> {
+        let (id, res) = match self {
+            Node::Error(spec, v) => (spec.id, Some(v.clone())),
+            Node::Constant(spec, v) => (spec.id, Some(v.clone())),
+            Node::Apply { spec, function, .. } => (spec.id, function.current(ctx)),
+        };
+        if ctx.dbg_ctx.trace {
+            if let Some(v) = &res {
+                ctx.dbg_ctx.add_event(id, None, v.clone());
+            }
         }
+        res
     }
 
     pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
@@ -374,7 +380,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 let res = function.update(ctx, args, event);
                 if ctx.dbg_ctx.trace {
                     if let Some(v) = &res {
-                        ctx.dbg_ctx.add_event(spec.id, event.clone(), v.clone());
+                        ctx.dbg_ctx.add_event(spec.id, Some(event.clone()), v.clone());
                     }
                 }
                 res

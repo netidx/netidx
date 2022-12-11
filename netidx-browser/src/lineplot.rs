@@ -86,48 +86,59 @@ impl LinePlot {
         root.set_no_show_all(true);
         canvas.set_no_show_all(true);
         root.pack_start(&canvas, true, true, 0);
-        let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut ctx_r;
         let x_min = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.x_min.clone(),
         )));
         let x_max = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.x_max.clone(),
         )));
         let y_min = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.y_min.clone(),
         )));
         let y_max = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.y_max.clone(),
         )));
         let keep_points = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.keep_points.clone(),
         )));
         let series = Rc::new(RefCell::new(
             spec.series
                 .iter()
-                .map(|series| Series {
-                    line_color: series.line_color,
-                    x: BSNode::compile(ctx_r, scope.clone(), series.x.clone()),
-                    y: BSNode::compile(ctx_r, scope.clone(), series.y.clone()),
-                    x_data: VecDeque::new(),
-                    y_data: VecDeque::new(),
+                .map(|series| {
+                    let x = BSNode::compile(
+                        &mut ctx.borrow_mut(),
+                        scope.clone(),
+                        series.x.clone(),
+                    );
+                    let y = BSNode::compile(
+                        &mut ctx.borrow_mut(),
+                        scope.clone(),
+                        series.y.clone(),
+                    );
+                    Series {
+                        line_color: series.line_color,
+                        x,
+                        y,
+                        x_data: VecDeque::new(),
+                        y_data: VecDeque::new(),
+                    }
                 })
                 .collect::<Vec<_>>(),
         ));
         let allocated_width = Rc::new(Cell::new(0));
         let allocated_height = Rc::new(Cell::new(0));
         canvas.connect_draw(clone!(
+            @strong ctx,
             @strong allocated_width,
             @strong allocated_height,
             @strong x_min,
@@ -140,6 +151,7 @@ impl LinePlot {
                 // strictly unwind safe, but whatever happens it's a
                 // lot better than crashing the entire browser.
             let res = catch_unwind(AssertUnwindSafe(|| LinePlot::draw(
+                &ctx,
                 &spec,
                 &allocated_width,
                 &allocated_height,
@@ -167,6 +179,7 @@ impl LinePlot {
     }
 
     fn draw(
+        ctx: &BSCtx,
         spec: &view::LinePlot,
         width: &Rc<Cell<u32>>,
         height: &Rc<Cell<u32>>,
@@ -216,12 +229,10 @@ impl LinePlot {
             mesh.draw().map_err(|e| anyhow!("{}", e))
         }
         if width.get() > 0 && height.get() > 0 {
-            let (x_min, x_max, y_min, y_max) = (
-                x_min.borrow().current(),
-                x_max.borrow().current(),
-                y_min.borrow().current(),
-                y_max.borrow().current(),
-            );
+            let x_min = x_min.borrow().current(&mut ctx.borrow_mut());
+            let x_max = x_max.borrow().current(&mut ctx.borrow_mut());
+            let y_min = y_min.borrow().current(&mut ctx.borrow_mut());
+            let y_max = y_max.borrow().current(&mut ctx.borrow_mut());
             let mut computed_x_min = series
                 .borrow()
                 .last()
@@ -429,7 +440,7 @@ impl BWidget for LinePlot {
             let keep = self
                 .keep_points
                 .borrow()
-                .current()
+                .current(ctx)
                 .and_then(|v| v.cast_to::<u64>().ok())
                 .unwrap_or(0);
             while s.x_data.len() > keep as usize {

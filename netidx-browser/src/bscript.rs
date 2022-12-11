@@ -28,7 +28,7 @@ impl Register<WidgetCtx, LocalEvent> for Event {
 }
 
 impl Apply<WidgetCtx, LocalEvent> for Event {
-    fn current(&self) -> Option<Value> {
+    fn current(&self, _ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) -> Option<Value> {
         if self.invalid {
             Event::err()
         } else {
@@ -38,7 +38,7 @@ impl Apply<WidgetCtx, LocalEvent> for Event {
 
     fn update(
         &mut self,
-        _ctx: &mut ExecCtx<WidgetCtx, LocalEvent>,
+        ctx: &mut ExecCtx<WidgetCtx, LocalEvent>,
         from: &mut [Node<WidgetCtx, LocalEvent>],
         event: &vm::Event<LocalEvent>,
     ) -> Option<Value> {
@@ -52,7 +52,7 @@ impl Apply<WidgetCtx, LocalEvent> for Event {
             | vm::Event::User(LocalEvent::Poll(_)) => None,
             vm::Event::User(LocalEvent::Event(value)) => {
                 self.cur = Some(value.clone());
-                self.current()
+                self.current(ctx)
             }
         }
     }
@@ -79,7 +79,7 @@ impl Register<WidgetCtx, LocalEvent> for CurrentPath {
 }
 
 impl Apply<WidgetCtx, LocalEvent> for CurrentPath {
-    fn current(&self) -> Option<Value> {
+    fn current(&self, _ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) -> Option<Value> {
         let inner = self.0.lock();
         let inner = inner.get_ref();
         let inner = inner.borrow();
@@ -120,12 +120,12 @@ impl Register<WidgetCtx, LocalEvent> for Confirm {
             let mut state = ConfirmState::Empty;
             match from {
                 [msg, val] => {
-                    if let Some(value) = val.current() {
-                        state = ConfirmState::Ready { message: msg.current(), value };
+                    if let Some(value) = val.current(ctx) {
+                        state = ConfirmState::Ready { message: msg.current(ctx), value };
                     }
                 }
                 [val] => {
-                    if let Some(value) = val.current() {
+                    if let Some(value) = val.current(ctx) {
                         state = ConfirmState::Ready { message: None, value };
                     }
                 }
@@ -144,7 +144,7 @@ impl Register<WidgetCtx, LocalEvent> for Confirm {
 }
 
 impl Apply<WidgetCtx, LocalEvent> for Confirm {
-    fn current(&self) -> Option<Value> {
+    fn current(&self, _ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) -> Option<Value> {
         let inner = self.0.lock();
         let inner = inner.get_ref();
         let c = mem::replace(&mut *inner.state.borrow_mut(), ConfirmState::Empty);
@@ -169,7 +169,7 @@ impl Apply<WidgetCtx, LocalEvent> for Confirm {
     ) -> Option<Value> {
         match from {
             [msg, val] => {
-                let m = msg.update(ctx, event).or_else(|| msg.current());
+                let m = msg.update(ctx, event).or_else(|| msg.current(ctx));
                 let v = val.update(ctx, event);
                 v.and_then(|v| if self.ask(m.as_ref(), &v) { Some(v) } else { None })
             }
@@ -216,8 +216,15 @@ impl Register<WidgetCtx, LocalEvent> for Navigate {
         let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from, _, _| {
             let mut t = Navigate::Normal;
             match from {
-                [new_window, to] => t.navigate(ctx, new_window.current(), to.current()),
-                [to] => t.navigate(ctx, None, to.current()),
+                [new_window, to] => {
+                    let new_window = new_window.current(ctx);
+                    let to = to.current(ctx);
+                    t.navigate(ctx, new_window, to)
+                }
+                [to] => {
+                    let to = to.current(ctx);
+                    t.navigate(ctx, None, to)
+                }
                 _ => t = Navigate::Invalid,
             }
             Box::new(t)
@@ -228,7 +235,7 @@ impl Register<WidgetCtx, LocalEvent> for Navigate {
 }
 
 impl Apply<WidgetCtx, LocalEvent> for Navigate {
-    fn current(&self) -> Option<Value> {
+    fn current(&self, _ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) -> Option<Value> {
         match self {
             Navigate::Normal => None,
             Navigate::Invalid => Navigate::usage(),
@@ -243,11 +250,11 @@ impl Apply<WidgetCtx, LocalEvent> for Navigate {
     ) -> Option<Value> {
         let up = match from {
             [new_window, to] => {
-                let new_window =
-                    new_window.update(ctx, event).or_else(|| new_window.current());
+                let new = new_window.update(ctx, event);
+                let new = new.or_else(|| new_window.current(ctx));
                 let target = to.update(ctx, event);
                 let up = target.is_some();
-                self.navigate(ctx, new_window, target);
+                self.navigate(ctx, new, target);
                 up
             }
             [to] => {
@@ -266,7 +273,7 @@ impl Apply<WidgetCtx, LocalEvent> for Navigate {
             }
         };
         if up {
-            self.current()
+            self.current(ctx)
         } else {
             None
         }
@@ -313,9 +320,9 @@ pub(crate) struct Poll {
 
 impl Register<WidgetCtx, LocalEvent> for Poll {
     fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
-        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|_, from, _, _| match from {
+        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from, _, _| match from {
             [path, _] => Box::new(Self {
-                path: path.current().and_then(|p| p.cast_to::<Path>().ok()),
+                path: path.current(ctx).and_then(|p| p.cast_to::<Path>().ok()),
                 invalid: false,
             }),
             _ => Box::new(Self { path: None, invalid: true }),
@@ -326,7 +333,7 @@ impl Register<WidgetCtx, LocalEvent> for Poll {
 }
 
 impl Apply<WidgetCtx, LocalEvent> for Poll {
-    fn current(&self) -> Option<Value> {
+    fn current(&self, _ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) -> Option<Value> {
         if self.invalid {
             Some(Value::from("poll(path, trigger): expected 2 arguments"))
         } else {
@@ -375,7 +382,7 @@ impl Apply<WidgetCtx, LocalEvent> for Poll {
                     up |= expr.update(ctx, event).is_some()
                 }
                 if up {
-                    self.current()
+                    self.current(ctx)
                 } else {
                     None
                 }
