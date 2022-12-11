@@ -1,6 +1,6 @@
 [package]
 name = "netidx-bscript"
-version = "0.13.0"
+version = "0.14.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 homepage = "https://estokes.github.io/netidx-book/"

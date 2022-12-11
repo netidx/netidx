@@ -1,3 +1,24 @@
+* 0.12.7 browser
+
+  - Use the new bscript functionality to greatly improve tracing. Load
+    existing traces when opening the expression inspector. Use the
+    bscript vm's timestamps.
+
+  - Make tracing a menu toggle per window, which is on by
+    default. Tracing is fairly light weight, but if you have a
+    debugged view that you want to run a little bit faster you can
+    turn it off.
+
+* 0.14.0 bscript
+
+  - record initialization events
+
+  - add a bunch of new functions to the debug context api
+
+  - change the types given to watches
+
+  - timestamp events when they happen
+
 * 0.12.5 tools
 
   - Fix a bug in the archiver that would cause it to hang on to idle
