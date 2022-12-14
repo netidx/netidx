@@ -16,8 +16,7 @@ use log::info;
 use parking_lot::Mutex;
 use std::{clone::Clone, fmt::Debug, mem, ops::Deref, sync::Arc, time::Duration};
 use tokio::{
-    io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
-    net::TcpStream,
+    io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
     task, time,
 };
 
@@ -55,8 +54,8 @@ enum ToFlush<C: K5Ctx + Debug + Send + Sync + 'static> {
     SetCtx(K5CtxWrap<C>),
 }
 
-async fn flush_buf<B: Buf>(
-    soc: &mut WriteHalf<TcpStream>,
+async fn flush_buf<B: Buf, S: AsyncWrite + Send + 'static>(
+    soc: &mut WriteHalf<S>,
     buf: B,
     encrypted: bool,
 ) -> Result<()> {
@@ -73,8 +72,8 @@ async fn flush_buf<B: Buf>(
     Ok(())
 }
 
-fn flush_task<C: K5Ctx + Debug + Send + Sync + 'static>(
-    mut soc: WriteHalf<TcpStream>,
+fn flush_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncWrite + Send + 'static>(
+    mut soc: WriteHalf<S>,
 ) -> Sender<ToFlush<C>> {
     let (tx, mut rx): (Sender<ToFlush<C>>, Receiver<ToFlush<C>>) = mpsc::channel(3);
     task::spawn(async move {
@@ -110,7 +109,7 @@ pub(crate) struct WriteChannel<C: K5Ctx + Debug + Send + Sync + 'static> {
 }
 
 impl<C: K5Ctx + Debug + Send + Sync + 'static> WriteChannel<C> {
-    pub(crate) fn new(socket: WriteHalf<TcpStream>) -> WriteChannel<C> {
+    pub(crate) fn new<S: AsyncWrite + Send + 'static>(socket: WriteHalf<S>) -> WriteChannel<C> {
         WriteChannel {
             to_flush: flush_task(socket),
             buf: BytesMut::with_capacity(BUF),
@@ -212,9 +211,9 @@ impl<C: K5Ctx + Debug + Send + Sync + 'static> WriteChannel<C> {
     }
 }
 
-fn read_task<C: K5Ctx + Debug + Send + Sync + 'static>(
+fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'static>(
     stop: oneshot::Receiver<()>,
-    mut soc: ReadHalf<TcpStream>,
+    mut soc: ReadHalf<S>,
     mut set_ctx: oneshot::Receiver<K5CtxWrap<C>>,
 ) -> Receiver<BytesMut> {
     let (mut tx, rx) = mpsc::channel(3);
@@ -281,7 +280,7 @@ pub(crate) struct ReadChannel<C: K5Ctx + Debug + Send + Sync + 'static> {
 }
 
 impl<C: K5Ctx + Debug + Send + Sync + 'static> ReadChannel<C> {
-    pub(crate) fn new(socket: ReadHalf<TcpStream>) -> ReadChannel<C> {
+    pub(crate) fn new<S: AsyncRead + Send + 'static>(socket: ReadHalf<S>) -> ReadChannel<C> {
         let (set_ctx, read_ctx) = oneshot::channel();
         let (stop_tx, stop_rx) = oneshot::channel();
         ReadChannel {
@@ -345,7 +344,7 @@ pub(crate) struct Channel<C: K5Ctx + Debug + Send + Sync + 'static> {
 }
 
 impl<C: K5Ctx + Debug + Send + Sync + 'static> Channel<C> {
-    pub(crate) fn new(socket: TcpStream) -> Channel<C> {
+    pub(crate) fn new<S: AsyncRead + AsyncWrite + Send + 'static>(socket: S) -> Channel<C> {
         let (rh, wh) = io::split(socket);
         Channel { read: ReadChannel::new(rh), write: WriteChannel::new(wh) }
     }
@@ -355,7 +354,6 @@ impl<C: K5Ctx + Debug + Send + Sync + 'static> Channel<C> {
         let _ = self.write.set_ctx(ctx).await;
     }
 
-    #[allow(dead_code)]
     pub(crate) fn split(self) -> (ReadChannel<C>, WriteChannel<C>) {
         (self.read, self.write)
     }
