@@ -37,6 +37,10 @@ pub enum Hello {
     /// Authenticate using a local unix socket, only valid for
     /// publishers on the same machine as the subscriber.
     Local,
+    /// Authenticate using transport layer security. In this case both
+    /// the server AND the client must have certificates that are
+    /// signed by a CA they mutually trust.
+    Tls,
     /// In order to prevent denial of service, spoofing, etc,
     /// authenticated publishers must prove that they are actually
     /// listening on the socket they claim to be listening on. To
@@ -56,7 +60,7 @@ pub enum Hello {
 impl Pack for Hello {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            Hello::Anonymous | Hello::Krb5 | Hello::Local => 0,
+            Hello::Anonymous | Hello::Krb5 | Hello::Local | Hello::Tls => 0,
             Hello::ResolverAuthenticate(addr) => Pack::encoded_len(addr),
         }
     }
@@ -70,6 +74,7 @@ impl Pack for Hello {
                 buf.put_u8(3);
                 Pack::encode(id, buf)
             }
+            Hello::Tls => Ok(buf.put_u8(4)),
         }
     }
 
@@ -79,6 +84,7 @@ impl Pack for Hello {
             1 => Ok(Hello::Krb5),
             2 => Ok(Hello::Local),
             3 => Ok(Hello::ResolverAuthenticate(Pack::decode(buf)?)),
+            4 => Ok(Hello::Tls),
             _ => Err(PackError::UnknownTag),
         }
     }

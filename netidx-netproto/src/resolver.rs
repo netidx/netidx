@@ -68,6 +68,7 @@ pub enum AuthRead {
     Anonymous,
     Krb5,
     Local,
+    Tls,
 }
 
 impl Pack for AuthRead {
@@ -80,6 +81,7 @@ impl Pack for AuthRead {
             Self::Anonymous => Ok(buf.put_u8(0)),
             Self::Krb5 => Ok(buf.put_u8(1)),
             Self::Local => Ok(buf.put_u8(2)),
+            Self::Tls => Ok(buf.put_u8(3)),
         }
     }
 
@@ -88,6 +90,7 @@ impl Pack for AuthRead {
             0 => Ok(Self::Anonymous),
             1 => Ok(Self::Krb5),
             2 => Ok(Self::Local),
+            3 => Ok(Self::Tls),
             _ => return Err(Error::UnknownTag),
         }
     }
@@ -99,12 +102,13 @@ pub enum AuthWrite {
     Reuse,
     Krb5 { spn: Chars },
     Local,
+    Tls,
 }
 
 impl Pack for AuthWrite {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            Self::Anonymous | Self::Reuse | Self::Local => 0,
+            Self::Anonymous | Self::Reuse | Self::Local | Self::Tls => 0,
             Self::Krb5 { spn } => Pack::encoded_len(spn),
         }
     }
@@ -118,6 +122,7 @@ impl Pack for AuthWrite {
                 Pack::encode(spn, buf)
             }
             Self::Local => Ok(buf.put_u8(3)),
+            Self::Tls => Ok(buf.put_u8(4)),
         }
     }
 
@@ -127,6 +132,7 @@ impl Pack for AuthWrite {
             1 => Ok(Self::Reuse),
             2 => Ok(Self::Krb5 { spn: Pack::decode(buf)? }),
             3 => Ok(Self::Local),
+            4 => Ok(Self::Tls),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -341,12 +347,13 @@ pub enum Auth {
     Anonymous,
     Local { path: Chars },
     Krb5 { spn: Chars },
+    Tls,
 }
 
 impl Pack for Auth {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            Self::Anonymous => 0,
+            Self::Anonymous | Self::Tls => 0,
             Self::Local { path } => Pack::encoded_len(path),
             Self::Krb5 { spn } => Pack::encoded_len(spn),
         }
@@ -363,6 +370,7 @@ impl Pack for Auth {
                 buf.put_u8(2);
                 Pack::encode(spn, buf)
             }
+            Self::Tls => Ok(buf.put_u8(3)),
         }
     }
 
@@ -371,6 +379,7 @@ impl Pack for Auth {
             0 => Ok(Self::Anonymous),
             1 => Ok(Self::Local { path: Pack::decode(buf)? }),
             2 => Ok(Self::Krb5 { spn: Pack::decode(buf)? }),
+            3 => Ok(Self::Tls),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -397,6 +406,7 @@ pub enum TargetAuth {
     Anonymous,
     Local,
     Krb5 { spn: Chars },
+    Tls,
 }
 
 impl TryFrom<AuthWrite> for TargetAuth {
@@ -408,6 +418,7 @@ impl TryFrom<AuthWrite> for TargetAuth {
             AuthWrite::Local => Ok(Self::Local),
             AuthWrite::Krb5 { spn } => Ok(Self::Krb5 { spn }),
             AuthWrite::Reuse => bail!("no session to reuse"),
+            AuthWrite::Tls => Ok(Self::Tls),
         }
     }
 }
@@ -415,7 +426,7 @@ impl TryFrom<AuthWrite> for TargetAuth {
 impl Pack for TargetAuth {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            Self::Anonymous | Self::Local => 0,
+            Self::Anonymous | Self::Local | Self::Tls => 0,
             Self::Krb5 { spn } => Pack::encoded_len(spn),
         }
     }
@@ -428,6 +439,7 @@ impl Pack for TargetAuth {
                 buf.put_u8(2);
                 Pack::encode(spn, buf)
             }
+            Self::Tls => Ok(buf.put_u8(3)),
         }
     }
 
@@ -436,6 +448,7 @@ impl Pack for TargetAuth {
             0 => Ok(Self::Anonymous),
             1 => Ok(Self::Local),
             2 => Ok(Self::Krb5 { spn: Pack::decode(buf)? }),
+            3 => Ok(Self::Tls),
             _ => Err(PackError::UnknownTag),
         }
     }
@@ -447,7 +460,7 @@ pub struct Publisher {
     pub id: PublisherId,
     pub addr: SocketAddr,
     pub hash_method: HashMethod,
-    pub target_auth: TargetAuth,
+    pub target_auth: Pooled<Vec<TargetAuth>>,
 }
 
 impl Pack for Publisher {
@@ -540,7 +553,7 @@ impl Pack for Resolved {
 pub struct Referral {
     pub path: Path,
     pub ttl: Option<u16>,
-    pub addrs: Pooled<Vec<(SocketAddr, Auth)>>,
+    pub addrs: Pooled<Vec<(SocketAddr, Pooled<Vec<Auth>>)>>,
 }
 
 impl Hash for Referral {

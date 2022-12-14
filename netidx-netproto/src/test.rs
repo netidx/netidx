@@ -84,6 +84,7 @@ mod resolver {
             Just(AuthRead::Anonymous),
             Just(AuthRead::Krb5),
             Just(AuthRead::Local),
+            Just(AuthRead::Tls),
         ]
     }
 
@@ -92,6 +93,7 @@ mod resolver {
             Just(AuthWrite::Anonymous),
             Just(AuthWrite::Reuse),
             Just(AuthWrite::Local),
+            Just(AuthWrite::Tls),
             chars().prop_map(|spn| AuthWrite::Krb5 { spn })
         ]
     }
@@ -100,6 +102,7 @@ mod resolver {
         prop_oneof![
             Just(TargetAuth::Anonymous),
             Just(TargetAuth::Local),
+            Just(TargetAuth::Tls),
             chars().prop_map(|spn| TargetAuth::Krb5 { spn }),
         ]
     }
@@ -162,7 +165,7 @@ mod resolver {
         let id = publisher_id();
         let addr = any::<SocketAddr>();
         let hash_method = hash_method();
-        let target_auth = target_auth();
+        let target_auth = collection::vec(target_auth(), 1..3).prop_map(Pooled::orphan);
         (resolver, id, addr, hash_method, target_auth).prop_map(
             |(resolver, id, addr, hash_method, target_auth)| Publisher {
                 resolver,
@@ -205,10 +208,11 @@ mod resolver {
     }
 
     fn referral() -> impl Strategy<Value = Referral> {
+        let auth = collection::vec(auth(), 1..3).prop_map(Pooled::orphan);
         (
             path(),
             any::<Option<u16>>(),
-            collection::vec((any::<SocketAddr>(), auth()), (0, 10)),
+            collection::vec((any::<SocketAddr>(), auth), (0, 10)),
         )
             .prop_map(|(path, ttl, addrs)| Referral {
                 path,
@@ -403,7 +407,10 @@ mod publisher {
     }
 
     fn datetime() -> impl Strategy<Value = DateTime<Utc>> {
-        (DateTime::<Utc>::MIN_UTC.timestamp()..DateTime::<Utc>::MAX_UTC.timestamp(), 0..1_000_000_000u32)
+        (
+            DateTime::<Utc>::MIN_UTC.timestamp()..DateTime::<Utc>::MAX_UTC.timestamp(),
+            0..1_000_000_000u32,
+        )
             .prop_map(|(s, ns)| Utc.timestamp_opt(s, ns).unwrap())
     }
 
