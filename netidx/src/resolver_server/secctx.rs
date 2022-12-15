@@ -1,6 +1,6 @@
 use super::{
     auth::{PMap, UserDb},
-    config::{Config, MemberServer},
+    config::{Auth, Config, MemberServer},
 };
 use crate::{
     channel::K5CtxWrap,
@@ -9,7 +9,7 @@ use crate::{
         local_auth::{AuthServer, Credential},
         Mapper,
     },
-    protocol::resolver::{Auth, PublisherId},
+    protocol::resolver::PublisherId,
 };
 use anyhow::{bail, Result};
 use cross_krb5::{K5Ctx, ServerCtx};
@@ -35,6 +35,54 @@ impl LocalAuth {
             bail!("invalid token")
         }
         Ok(cred)
+    }
+}
+
+fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
+    use std::{fs, io::BufReader};
+    Ok(rustls_pemfile::certs(&mut BufReader::new(fs::File::open(path)?))?
+        .into_iter()
+        .map(|v| rustls::Certificate(v))
+        .collect())
+}
+
+fn load_private_key(path: &str) -> Result<rustls::PrivateKey> {
+    use std::{fs, io::BufReader};
+    let mut reader = BufReader::new(fs::File::open(path)?);
+    while let Some(key) = rustls_pemfile::read_one(&mut reader)? {
+        match key {
+            rustls_pemfile::Item::RSAKey(key) => return Ok(rustls::PrivateKey(key)),
+            rustls_pemfile::Item::PKCS8Key(key) => return Ok(rustls::PrivateKey(key)),
+            rustls_pemfile::Item::ECKey(key) => return Ok(rustls::PrivateKey(key)),
+            _ => (),
+        }
+    }
+    // CR estokes: probably need to support encrypted keys.
+    bail!("no keys found, encrypted keys not supported")
+}
+
+pub(super) struct TlsAuth(pub(super) Arc<rustls::ServerConfig>);
+
+impl TlsAuth {
+    pub(super) async fn new(
+        root_certificates: &Chars,
+        certificate: &Chars,
+        private_key: &Chars,
+    ) -> Result<TlsAuth> {
+        let client_auth = {
+            let mut root_store = rustls::RootCertStore::empty();
+            for cert in task::block_in_place(|| load_certs(root_certificates))? {
+                root_store.add(&cert)?;
+            }
+            rustls::server::AllowAnyAnonymousOrAuthenticatedClient::new(root_store)
+        };
+        let certs = task::block_in_place(|| load_certs(certificate))?;
+        let private_key = task::block_in_place(|| load_private_key(private_key))?;
+        let config = rustls::ServerConfig::builder()
+            .with_safe_defaults()
+            .with_client_cert_verifier(client_auth)
+            .with_single_cert(certs, private_key)?;
+        Ok(TlsAuth(Arc::new(config)))
     }
 }
 
@@ -131,6 +179,7 @@ pub(super) enum SecCtx {
     Anonymous,
     Krb5(Arc<(Chars, RwLock<SecCtxData<K5SecData>>)>),
     Local(Arc<(LocalAuth, RwLock<SecCtxData<LocalSecData>>)>),
+    Tls(Arc<(TlsAuth, RwLock<SecCtxData<u128>>)>),
 }
 
 impl SecCtx {

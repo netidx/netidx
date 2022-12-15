@@ -29,7 +29,7 @@ pub enum Auth {
     Anonymous,
     Local { path: Chars },
     Krb5 { spn: Chars },
-    Tls { ca_certificates: Chars, private_key: Chars, public_key: Chars },
+    Tls { root_certificates: Chars, certificate: Chars, private_key: Chars },
 }
 
 impl Into<resolver::Auth> for Auth {
@@ -49,37 +49,37 @@ impl From<file::Auth> for Auth {
             file::Auth::Anonymous => Self::Anonymous,
             file::Auth::Krb5(spn) => Self::Krb5 { spn: Chars::from(spn) },
             file::Auth::Local(path) => Self::Local { path: Chars::from(path) },
-            file::Auth::Tls { ca_certificates, public_key, private_key } => Self::Tls {
-                ca_certificates: Chars::from(ca_certificates),
-                private_key: Chars::from(private_key),
-                public_key: Chars::from(public_key),
-            },
+            file::Auth::Tls { root_certificates, certificate, private_key } => {
+                Self::Tls {
+                    root_certificates: Chars::from(root_certificates),
+                    certificate: Chars::from(certificate),
+                    private_key: Chars::from(private_key),
+                }
+            }
         }
     }
 }
 
-pub(crate) fn check_addrs(a: &Vec<(SocketAddr, Vec<file::Auth>)>) -> Result<()> {
+pub(crate) fn check_addrs(a: &Vec<(SocketAddr, file::Auth)>) -> Result<()> {
     use file::Auth;
     if a.is_empty() {
         bail!("empty addrs")
     }
-    for (addr, auths) in a {
+    for (addr, auth) in a {
         utils::check_addr::<()>(addr.ip(), &[])?;
-        for auth in auths {
-            match auth {
-                Auth::Anonymous => (),
-                Auth::Local(_) if !addr.ip().is_loopback() => {
-                    bail!("local auth is not allowed for a network server")
-                }
-                Auth::Local(_) => (),
-                Auth::Krb5(spn) => {
-                    if spn.is_empty() {
-                        bail!("spn is required in krb5 mode")
-                    }
-                }
-                // CR estokes: verify the certificates
-                Auth::Tls { ca_certificates: _, public_key: _, private_key: _ } => (),
+        match auth {
+            Auth::Anonymous => (),
+            Auth::Local(_) if !addr.ip().is_loopback() => {
+                bail!("local auth is not allowed for a network server")
             }
+            Auth::Local(_) => (),
+            Auth::Krb5(spn) => {
+                if spn.is_empty() {
+                    bail!("spn is required in krb5 mode")
+                }
+            }
+            // CR estokes: verify the certificates
+            Auth::Tls { root_certificates: _, certificate: _, private_key: _ } => (),
         }
     }
     if !a.iter().all(|(a, _)| a.ip().is_loopback())
@@ -113,20 +113,20 @@ pub(crate) mod file {
         Anonymous,
         Krb5(String),
         Local(String),
-        Tls { ca_certificates: String, public_key: String, private_key: String },
+        Tls { root_certificates: String, certificate: String, private_key: String },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) struct Referral {
         path: String,
         ttl: Option<u16>,
-        addrs: Vec<(SocketAddr, Vec<Auth>)>,
+        addrs: Vec<(SocketAddr, Auth)>,
     }
 
     impl Referral {
         pub(super) fn check(
             self,
-            us: Option<&Vec<(SocketAddr, Vec<Auth>)>>,
+            us: Option<&Vec<(SocketAddr, Auth)>>,
         ) -> Result<super::Referral> {
             let path = Path::from(self.path);
             if !Path::is_absolute(&path) {
@@ -151,13 +151,7 @@ pub(crate) mod file {
                 addrs: Pooled::orphan(
                     self.addrs
                         .into_iter()
-                        .map(|(s, a)| {
-                            let auth = a
-                                .into_iter()
-                                .map(|a| super::Auth::from(a).into())
-                                .collect();
-                            (s, Pooled::orphan(auth))
-                        })
+                        .map(|(s, a)| (s, super::Auth::from(a).into()))
                         .collect(),
                 ),
             })
@@ -167,7 +161,7 @@ pub(crate) mod file {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) struct MemberServer {
         pub(super) addr: SocketAddr,
-        pub(super) auth: Vec<Auth>,
+        pub(super) auth: Auth,
         pub(super) hello_timeout: u64,
         pub(super) max_connections: usize,
         pub(super) pid_file: String,
@@ -188,7 +182,7 @@ pub(crate) mod file {
 #[derive(Debug, Clone)]
 pub struct MemberServer {
     pub(super) addr: SocketAddr,
-    pub(super) auth: Vec<Auth>,
+    pub(super) auth: Auth,
     pub(super) hello_timeout: Duration,
     pub(super) max_connections: usize,
     pub pid_file: String,

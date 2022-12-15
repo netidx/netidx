@@ -166,10 +166,7 @@ impl Clinfos {
                         let ifo = e.get_mut();
                         match ifo {
                             ClientInfo::Running { publisher, stop } => {
-                                let anon = publisher
-                                    .target_auth
-                                    .iter()
-                                    .any(|a| a.is_anonymous());
+                                let anon = publisher.target_auth.is_anonymous();
                                 match &hello.auth {
                                     AuthWrite::Anonymous if anon => (),
                                     AuthWrite::Anonymous => bail!("not permitted"),

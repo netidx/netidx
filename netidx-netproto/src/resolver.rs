@@ -469,7 +469,7 @@ pub struct Publisher {
     pub id: PublisherId,
     pub addr: SocketAddr,
     pub hash_method: HashMethod,
-    pub target_auth: Pooled<Vec<TargetAuth>>,
+    pub target_auth: TargetAuth,
 }
 
 impl Pack for Publisher {
@@ -562,7 +562,7 @@ impl Pack for Resolved {
 pub struct Referral {
     pub path: Path,
     pub ttl: Option<u16>,
-    pub addrs: Pooled<Vec<(SocketAddr, Pooled<Vec<Auth>>)>>,
+    pub addrs: Pooled<Vec<(SocketAddr, Auth)>>,
 }
 
 impl Hash for Referral {

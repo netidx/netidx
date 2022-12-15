@@ -41,3 +41,6 @@ dirs = "4"
 num_cpus = "1"
 triomphe = "0.1"
 arcstr = { version = "1", features = ["serde"] }
+rustls-pemfile = "1"
+rustls = "0.20"
+tokio-rustls = "0.23"
