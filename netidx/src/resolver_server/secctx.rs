@@ -64,7 +64,7 @@ fn load_private_key(path: &str) -> Result<rustls::PrivateKey> {
 pub(super) struct TlsAuth(pub(super) Arc<rustls::ServerConfig>);
 
 impl TlsAuth {
-    pub(super) async fn new(
+    pub(super) fn new(
         root_certificates: &Chars,
         certificate: &Chars,
         private_key: &Chars,
@@ -78,10 +78,11 @@ impl TlsAuth {
         };
         let certs = task::block_in_place(|| load_certs(certificate))?;
         let private_key = task::block_in_place(|| load_private_key(private_key))?;
-        let config = rustls::ServerConfig::builder()
+        let mut config = rustls::ServerConfig::builder()
             .with_safe_defaults()
             .with_client_cert_verifier(client_auth)
             .with_single_cert(certs, private_key)?;
+        config.session_storage = rustls::server::ServerSessionMemoryCache::new(1024);
         Ok(TlsAuth(Arc::new(config)))
     }
 }
@@ -158,10 +159,26 @@ impl SecCtxData<LocalSecData> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TlsSecData(pub(super) u128);
+
+impl SecDataCommon for TlsSecData {
+    fn secret(&self) -> u128 {
+        self.0
+    }
+}
+
+impl SecCtxData<TlsSecData> {
+    pub(super) fn get(&self, id: &PublisherId) -> Option<&TlsSecData> {
+        self.data.get(id)
+    }
+}
+
 pub(super) enum SecCtxDataReadGuard<'a> {
     Anonymous,
     Krb5(RwLockReadGuard<'a, SecCtxData<K5SecData>>),
     Local(RwLockReadGuard<'a, SecCtxData<LocalSecData>>),
+    Tls(RwLockReadGuard<'a, SecCtxData<TlsSecData>>),
 }
 
 impl<'a> SecCtxDataReadGuard<'a> {
@@ -170,6 +187,7 @@ impl<'a> SecCtxDataReadGuard<'a> {
             SecCtxDataReadGuard::Anonymous => None,
             SecCtxDataReadGuard::Krb5(r) => Some(&r.pmap),
             SecCtxDataReadGuard::Local(r) => Some(&r.pmap),
+            SecCtxDataReadGuard::Tls(r) => Some(&r.pmap),
         }
     }
 }
@@ -179,7 +197,7 @@ pub(super) enum SecCtx {
     Anonymous,
     Krb5(Arc<(Chars, RwLock<SecCtxData<K5SecData>>)>),
     Local(Arc<(LocalAuth, RwLock<SecCtxData<LocalSecData>>)>),
-    Tls(Arc<(TlsAuth, RwLock<SecCtxData<u128>>)>),
+    Tls(Arc<(TlsAuth, RwLock<SecCtxData<TlsSecData>>)>),
 }
 
 impl SecCtx {
@@ -195,6 +213,11 @@ impl SecCtx {
                 let store = RwLock::new(SecCtxData::new(cfg)?);
                 SecCtx::Krb5(Arc::new((spn.clone(), store)))
             }
+            Auth::Tls { root_certificates, certificate, private_key } => {
+                let auth = TlsAuth::new(root_certificates, certificate, private_key)?;
+                let store = RwLock::new(SecCtxData::new(cfg)?);
+                SecCtx::Tls(Arc::new((auth, store)))
+            }
         };
         Ok(t)
     }
@@ -204,6 +227,7 @@ impl SecCtx {
             SecCtx::Anonymous => SecCtxDataReadGuard::Anonymous,
             SecCtx::Krb5(a) => SecCtxDataReadGuard::Krb5(a.1.read()),
             SecCtx::Local(a) => SecCtxDataReadGuard::Local(a.1.read()),
+            SecCtx::Tls(a) => SecCtxDataReadGuard::Tls(a.1.read()),
         }
     }
 
@@ -211,6 +235,7 @@ impl SecCtx {
         match self {
             SecCtx::Krb5(a) => a.1.write().remove(id),
             SecCtx::Local(a) => a.1.write().remove(id),
+            SecCtx::Tls(a) => a.1.write().remove(id),
             SecCtx::Anonymous => (),
         }
     }
