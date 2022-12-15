@@ -1,6 +1,7 @@
 use crate::{
+    chars::Chars,
     path::Path,
-    protocol::resolver::{Auth, Referral},
+    protocol::resolver::{self, Referral},
     utils,
 };
 use anyhow::Result;
@@ -23,23 +24,61 @@ use std::{
 type Permissions = String;
 type Entity = String;
 
-pub(crate) fn check_addrs(a: &Vec<(SocketAddr, file::Auth)>) -> Result<()> {
+#[derive(Debug, Clone)]
+pub enum Auth {
+    Anonymous,
+    Local { path: Chars },
+    Krb5 { spn: Chars },
+    Tls { ca_certificates: Chars, private_key: Chars, public_key: Chars },
+}
+
+impl Into<resolver::Auth> for Auth {
+    fn into(self) -> resolver::Auth {
+        match self {
+            Self::Anonymous => resolver::Auth::Anonymous,
+            Self::Local { path } => resolver::Auth::Local { path },
+            Self::Krb5 { spn } => resolver::Auth::Krb5 { spn },
+            Self::Tls { .. } => resolver::Auth::Tls,
+        }
+    }
+}
+
+impl From<file::Auth> for Auth {
+    fn from(f: file::Auth) -> Self {
+        match f {
+            file::Auth::Anonymous => Self::Anonymous,
+            file::Auth::Krb5(spn) => Self::Krb5 { spn: Chars::from(spn) },
+            file::Auth::Local(path) => Self::Local { path: Chars::from(path) },
+            file::Auth::Tls { ca_certificates, public_key, private_key } => Self::Tls {
+                ca_certificates: Chars::from(ca_certificates),
+                private_key: Chars::from(private_key),
+                public_key: Chars::from(public_key),
+            },
+        }
+    }
+}
+
+pub(crate) fn check_addrs(a: &Vec<(SocketAddr, Vec<file::Auth>)>) -> Result<()> {
     use file::Auth;
     if a.is_empty() {
         bail!("empty addrs")
     }
-    for (addr, auth) in a {
+    for (addr, auths) in a {
         utils::check_addr::<()>(addr.ip(), &[])?;
-        match auth {
-            Auth::Anonymous => (),
-            Auth::Local(_) if !addr.ip().is_loopback() => {
-                bail!("local auth is not allowed for a network server")
-            }
-            Auth::Local(_) => (),
-            Auth::Krb5(spn) => {
-                if spn.is_empty() {
-                    bail!("spn is required in krb5 mode")
+        for auth in auths {
+            match auth {
+                Auth::Anonymous => (),
+                Auth::Local(_) if !addr.ip().is_loopback() => {
+                    bail!("local auth is not allowed for a network server")
                 }
+                Auth::Local(_) => (),
+                Auth::Krb5(spn) => {
+                    if spn.is_empty() {
+                        bail!("spn is required in krb5 mode")
+                    }
+                }
+                // CR estokes: verify the certificates
+                Auth::Tls { ca_certificates: _, public_key: _, private_key: _ } => (),
             }
         }
     }
@@ -65,7 +104,7 @@ impl Default for PMap {
 pub(crate) mod file {
     use super::super::config::check_addrs;
     use super::PMap;
-    use crate::{chars::Chars, path::Path, pool::Pooled};
+    use crate::{path::Path, pool::Pooled};
     use anyhow::Result;
     use std::net::SocketAddr;
 
@@ -74,29 +113,20 @@ pub(crate) mod file {
         Anonymous,
         Krb5(String),
         Local(String),
-    }
-
-    impl Into<super::Auth> for Auth {
-        fn into(self) -> super::Auth {
-            match self {
-                Self::Anonymous => super::Auth::Anonymous,
-                Self::Local(path) => super::Auth::Local { path: Chars::from(path) },
-                Self::Krb5(spn) => super::Auth::Krb5 { spn: Chars::from(spn) },
-            }
-        }
+        Tls { ca_certificates: String, public_key: String, private_key: String },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) struct Referral {
         path: String,
         ttl: Option<u16>,
-        addrs: Vec<(SocketAddr, Auth)>,
+        addrs: Vec<(SocketAddr, Vec<Auth>)>,
     }
 
     impl Referral {
         pub(super) fn check(
             self,
-            us: Option<&Vec<(SocketAddr, Auth)>>,
+            us: Option<&Vec<(SocketAddr, Vec<Auth>)>>,
         ) -> Result<super::Referral> {
             let path = Path::from(self.path);
             if !Path::is_absolute(&path) {
@@ -119,7 +149,16 @@ pub(crate) mod file {
                 path,
                 ttl: self.ttl,
                 addrs: Pooled::orphan(
-                    self.addrs.into_iter().map(|(s, a)| (s, a.into())).collect(),
+                    self.addrs
+                        .into_iter()
+                        .map(|(s, a)| {
+                            let auth = a
+                                .into_iter()
+                                .map(|a| super::Auth::from(a).into())
+                                .collect();
+                            (s, Pooled::orphan(auth))
+                        })
+                        .collect(),
                 ),
             })
         }
@@ -128,12 +167,13 @@ pub(crate) mod file {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) struct MemberServer {
         pub(super) addr: SocketAddr,
-        pub(super) auth: Auth,
+        pub(super) auth: Vec<Auth>,
         pub(super) hello_timeout: u64,
         pub(super) max_connections: usize,
         pub(super) pid_file: String,
         pub(super) reader_ttl: u64,
         pub(super) writer_ttl: u64,
+        pub(super) id_map: String,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,12 +188,13 @@ pub(crate) mod file {
 #[derive(Debug, Clone)]
 pub struct MemberServer {
     pub(super) addr: SocketAddr,
-    pub(super) auth: Auth,
+    pub(super) auth: Vec<Auth>,
     pub(super) hello_timeout: Duration,
     pub(super) max_connections: usize,
     pub pid_file: String,
     pub(super) reader_ttl: Duration,
     pub(super) writer_ttl: Duration,
+    pub(super) id_map: String,
 }
 
 #[derive(Debug, Clone)]
@@ -225,11 +266,12 @@ impl Config {
                 Ok(MemberServer {
                     pid_file: m.pid_file,
                     addr: m.addr,
-                    auth: m.auth.into(),
+                    auth: m.auth.into_iter().map(|a| a.into()).collect(),
                     hello_timeout: Duration::from_secs(m.hello_timeout),
                     max_connections: m.max_connections,
                     reader_ttl: Duration::from_secs(m.reader_ttl),
                     writer_ttl: Duration::from_secs(m.writer_ttl),
+                    id_map: m.id_map,
                 })
             })
             .collect::<Result<Vec<_>>>()?;

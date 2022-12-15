@@ -409,6 +409,15 @@ pub enum TargetAuth {
     Tls,
 }
 
+impl TargetAuth {
+    pub fn is_anonymous(&self) -> bool {
+        match self {
+            Self::Anonymous => true,
+            Self::Krb5 { spn: _ } | Self::Local | Self::Tls => false,
+        }
+    }
+}
+
 impl TryFrom<AuthWrite> for TargetAuth {
     type Error = anyhow::Error;
 

@@ -166,11 +166,17 @@ impl Clinfos {
                         let ifo = e.get_mut();
                         match ifo {
                             ClientInfo::Running { publisher, stop } => {
-                                match (&hello.auth, &publisher.target_auth) {
-                                    (AuthWrite::Anonymous, TargetAuth::Anonymous) => (),
-                                    (AuthWrite::Anonymous, _) => bail!("not permitted"),
-                                    (AuthWrite::Reuse, _) => (),
-                                    (AuthWrite::Krb5 { .. } | AuthWrite::Local, _) => {
+                                let anon = publisher
+                                    .target_auth
+                                    .iter()
+                                    .any(|a| a.is_anonymous());
+                                match &hello.auth {
+                                    AuthWrite::Anonymous if anon => (),
+                                    AuthWrite::Anonymous => bail!("not permitted"),
+                                    AuthWrite::Reuse => (),
+                                    AuthWrite::Krb5 { .. }
+                                    | AuthWrite::Local
+                                    | AuthWrite::Tls => {
                                         let publisher = publisher.clone();
                                         *ifo = ClientInfo::CleaningUp(Vec::new());
                                         ctx.secctx.remove(&publisher.id);
