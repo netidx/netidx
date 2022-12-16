@@ -6,11 +6,6 @@ mod store;
 #[cfg(test)]
 mod test;
 
-use auth::{UserInfo, ANONYMOUS};
-use config::{Config, MemberServer};
-use secctx::{K5SecData, LocalSecData, SecCtx};
-use shard_store::Store;
-
 use crate::{
     channel::{Channel, K5CtxWrap},
     chars::Chars,
@@ -27,13 +22,17 @@ use crate::{
     utils,
 };
 use anyhow::Result;
+use auth::{UserInfo, ANONYMOUS};
+use config::{Config, MemberServer};
 use cross_krb5::{AcceptFlags, K5ServerCtx, ServerCtx, Step};
 use futures::{channel::oneshot, prelude::*, select_biased};
 use fxhash::FxHashMap;
 use log::{debug, info, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use rand::{thread_rng, Rng};
+use secctx::{K5SecData, LocalSecData, SecCtx};
+use shard_store::Store;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
     fmt::Debug,
@@ -359,185 +358,219 @@ pub(crate) async fn krb5_authentication(
     }
 }
 
+async fn challenge_auth(
+    cfg: &MemberServer,
+    con: &mut Channel<ServerCtx>,
+    secret: u128,
+) -> Result<()> {
+    let n = thread_rng().gen::<u128>();
+    let answer = make_sha3_token(&[&n.to_be_bytes(), &secret.to_be_bytes()]);
+    let challenge = AuthChallenge { hash_method: HashMethod::Sha3_512, challenge: n };
+    send(cfg.hello_timeout, con, &challenge).await?;
+    let token: BoundedBytes<TOKEN_MAX> = recv(cfg.hello_timeout, con).await?;
+    if &*token != &*answer {
+        bail!("denied")
+    }
+    Ok(())
+}
+async fn ownership_check(
+    ctx: &Ctx,
+    con: &mut Channel<ServerCtx>,
+    write_addr: SocketAddr,
+    secret: u128,
+) -> Result<()> {
+    let timeout = ctx.cfg.hello_timeout;
+    send(timeout, con, &Secret(secret)).await?;
+    let _: ReadyForOwnershipCheck = time::timeout(timeout, con.receive()).await??;
+    info!("hello_write connecting to {:?} for listener ownership check", write_addr);
+    let mut con: Channel<ServerCtx> =
+        Channel::new(time::timeout(timeout, TcpStream::connect(write_addr)).await??);
+    time::timeout(timeout, con.send_one(&2u64)).await??;
+    if time::timeout(timeout, con.receive::<u64>()).await?? != 2 {
+        bail!("incompatible protocol version")
+    }
+    use publisher::Hello as PHello;
+    let n = thread_rng().gen::<u128>();
+    let answer = utils::make_sha3_token(&[&n.to_be_bytes(), &secret.to_be_bytes()]);
+    send(timeout, &mut con, &PHello::ResolverAuthenticate(ctx.id)).await?;
+    let m = AuthChallenge { hash_method: HashMethod::Sha3_512, challenge: n };
+    send(timeout, &mut con, &m).await?;
+    let token: BoundedBytes<TOKEN_MAX> = recv(timeout, &mut con).await?;
+    if &*token != &*answer {
+        bail!("listener ownership check failed");
+    }
+    Ok(())
+}
+
+type AuthResult =
+    Result<(Channel<ServerCtx>, Arc<UserInfo>, Arc<Publisher>, oneshot::Receiver<()>)>;
+
+async fn write_client_anonymous_auth(
+    ctx: &Arc<Ctx>,
+    mut con: Channel<ServerCtx>,
+    hello: &ClientHelloWrite,
+) -> AuthResult {
+    let uifo = &*ANONYMOUS;
+    let (publisher, ttl_expired, rx_stop) =
+        ctx.clinfos.insert(&ctx, uifo, &hello).await?;
+    let h = ServerHelloWrite {
+        ttl: ctx.cfg.writer_ttl.as_secs(),
+        ttl_expired,
+        resolver_id: ctx.id,
+        auth: AuthWrite::Anonymous,
+    };
+    info!("hello_write accepting Anonymous authentication");
+    debug!("hello_write sending hello {:?}", h);
+    if let Err(e) = send(ctx.cfg.hello_timeout, &mut con, &h).await {
+        ctx.clinfos.remove(&ctx, &publisher, uifo).await?;
+        Err(e)?;
+    }
+    Ok((con, ANONYMOUS.clone(), publisher, rx_stop))
+}
+
+async fn write_client_local_auth(
+    ctx: &Arc<Ctx>,
+    mut con: Channel<ServerCtx>,
+    a: &Arc<(secctx::LocalAuth, RwLock<secctx::SecCtxData<secctx::LocalSecData>>)>,
+    hello: &ClientHelloWrite,
+) -> AuthResult {
+    let tok: BoundedBytes<TOKEN_MAX> = recv(ctx.cfg.hello_timeout, &mut con).await?;
+    let cred = a.0.authenticate(&*tok)?;
+    let uifo = a.1.write().users.ifo(Some(&cred.user))?;
+    info!("hello_write local auth succeeded");
+    let h = ServerHelloWrite {
+        ttl: ctx.cfg.writer_ttl.as_secs(),
+        ttl_expired: true, // re auth always clears
+        resolver_id: ctx.id,
+        auth: AuthWrite::Local,
+    };
+    debug!("hello_write sending {:?}", h);
+    send(ctx.cfg.hello_timeout, &mut con, &h).await?;
+    let secret = thread_rng().gen::<u128>();
+    ownership_check(&ctx, &mut con, hello.write_addr, secret).await?;
+    let (publisher, _, rx_stop) = ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
+    let d = LocalSecData { user: cred.user, secret };
+    a.1.write().insert(publisher.id, d);
+    Ok((con, uifo, publisher, rx_stop))
+}
+
+async fn write_client_reuse_local(
+    ctx: &Arc<Ctx>,
+    mut con: Channel<ServerCtx>,
+    a: &Arc<(secctx::LocalAuth, RwLock<secctx::SecCtxData<secctx::LocalSecData>>)>,
+    hello: &ClientHelloWrite,
+) -> AuthResult {
+    let wa = &hello.write_addr;
+    let id = ctx.clinfos.id(wa).ok_or_else(|| anyhow!("missing"))?;
+    let d = a.1.read().get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
+    let uifo = a.1.write().users.ifo(Some(&*d.user))?;
+    challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
+    let (publisher, ttl_expired, rx_stop) =
+        ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
+    let h = ServerHelloWrite {
+        ttl: ctx.cfg.writer_ttl.as_secs(),
+        ttl_expired,
+        resolver_id: ctx.id,
+        auth: AuthWrite::Reuse,
+    };
+    if let Err(e) = send(ctx.cfg.hello_timeout, &mut con, &h).await {
+        ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
+        Err(e)?
+    }
+    Ok((con, uifo, publisher, rx_stop))
+}
+
+async fn write_client_krb5_auth(
+    ctx: &Arc<Ctx>,
+    mut con: Channel<ServerCtx>,
+    a: &Arc<(Chars, RwLock<secctx::SecCtxData<secctx::K5SecData>>)>,
+    hello: &ClientHelloWrite,
+) -> AuthResult {
+    info!("hello_write initiating new krb5 context for {:?}", hello.write_addr);
+    let k5ctx = krb5_authentication(ctx.cfg.hello_timeout, Some(&*a.0), &mut con).await?;
+    let k5ctx = K5CtxWrap::new(k5ctx);
+    con.set_ctx(k5ctx.clone()).await;
+    info!("hello_write all traffic now encrypted");
+    let h = ServerHelloWrite {
+        ttl: ctx.cfg.writer_ttl.as_secs(),
+        ttl_expired: true, // re auth always clears
+        resolver_id: ctx.id,
+        auth: AuthWrite::Krb5 { spn: Chars::from("") },
+    };
+    debug!("hello_write sending {:?}", h);
+    send(ctx.cfg.hello_timeout, &mut con, &h).await?;
+    let secret = thread_rng().gen::<u128>();
+    ownership_check(&ctx, &mut con, hello.write_addr, secret).await?;
+    let client = task::block_in_place(|| k5ctx.lock().client())?;
+    let uifo = a.1.write().users.ifo(Some(&client))?;
+    info!("hello_write listener ownership check succeeded");
+    let (publisher, _, rx_stop) = ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
+    let d = K5SecData { ctx: k5ctx, secret };
+    a.1.write().insert(publisher.id, d);
+    Ok((con, uifo, publisher, rx_stop))
+}
+
+async fn write_client_reuse_krb5(
+    ctx: &Arc<Ctx>,
+    mut con: Channel<ServerCtx>,
+    a: &Arc<(Chars, RwLock<secctx::SecCtxData<secctx::K5SecData>>)>,
+    hello: &ClientHelloWrite,
+) -> AuthResult {
+    let wa = &hello.write_addr;
+    let id = ctx.clinfos.id(wa).ok_or_else(|| anyhow!("missing"))?;
+    let d = a.1.read().get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
+    let uifo =
+        a.1.write().users.ifo(Some(&task::block_in_place(|| d.ctx.lock().client())?))?;
+    con.set_ctx(d.ctx).await;
+    info!("hello_write all traffic now encrypted");
+    challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
+    let (publisher, ttl_expired, rx_stop) =
+        ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
+    let h = ServerHelloWrite {
+        ttl: ctx.cfg.writer_ttl.as_secs(),
+        ttl_expired,
+        resolver_id: ctx.id,
+        auth: AuthWrite::Reuse,
+    };
+    info!("hello_write reusing krb5 context");
+    debug!("hello_write sending {:?}", h);
+    if let Err(e) = send(ctx.cfg.hello_timeout, &mut con, &h).await {
+        ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
+        Err(e)?
+    }
+    Ok((con, uifo, publisher, rx_stop))
+}
+
 async fn hello_client_write(
     ctx: Arc<Ctx>,
     connection_id: CId,
-    mut con: Channel<ServerCtx>,
+    con: Channel<ServerCtx>,
     server_stop: oneshot::Receiver<()>,
     hello: ClientHelloWrite,
 ) -> Result<()> {
     info!("hello_write starting negotiation");
     debug!("hello_write client_hello: {:?}", hello);
-    async fn challenge_auth(
-        cfg: &MemberServer,
-        con: &mut Channel<ServerCtx>,
-        secret: u128,
-    ) -> Result<()> {
-        let n = thread_rng().gen::<u128>();
-        let answer = make_sha3_token(&[&n.to_be_bytes(), &secret.to_be_bytes()]);
-        let challenge = AuthChallenge { hash_method: HashMethod::Sha3_512, challenge: n };
-        send(cfg.hello_timeout, con, &challenge).await?;
-        let token: BoundedBytes<TOKEN_MAX> = recv(cfg.hello_timeout, con).await?;
-        if &*token != &*answer {
-            bail!("denied")
-        }
-        Ok(())
-    }
-    async fn ownership_check(
-        ctx: &Ctx,
-        con: &mut Channel<ServerCtx>,
-        write_addr: SocketAddr,
-        secret: u128,
-    ) -> Result<()> {
-        let timeout = ctx.cfg.hello_timeout;
-        send(timeout, con, &Secret(secret)).await?;
-        let _: ReadyForOwnershipCheck = time::timeout(timeout, con.receive()).await??;
-        info!("hello_write connecting to {:?} for listener ownership check", write_addr);
-        let mut con: Channel<ServerCtx> =
-            Channel::new(time::timeout(timeout, TcpStream::connect(write_addr)).await??);
-        time::timeout(timeout, con.send_one(&2u64)).await??;
-        if time::timeout(timeout, con.receive::<u64>()).await?? != 2 {
-            bail!("incompatible protocol version")
-        }
-        use publisher::Hello as PHello;
-        let n = thread_rng().gen::<u128>();
-        let answer = utils::make_sha3_token(&[&n.to_be_bytes(), &secret.to_be_bytes()]);
-        send(timeout, &mut con, &PHello::ResolverAuthenticate(ctx.id)).await?;
-        let m = AuthChallenge { hash_method: HashMethod::Sha3_512, challenge: n };
-        send(timeout, &mut con, &m).await?;
-        let token: BoundedBytes<TOKEN_MAX> = recv(timeout, &mut con).await?;
-        if &*token != &*answer {
-            bail!("listener ownership check failed");
-        }
-        Ok(())
-    }
     utils::check_addr(hello.write_addr.ip(), &[(ctx.listen_addr, ())])?;
-    let (uifo, publisher, rx_stop) = match hello.auth {
-        AuthWrite::Anonymous => {
-            let uifo = &*ANONYMOUS;
-            let (publisher, ttl_expired, rx_stop) =
-                ctx.clinfos.insert(&ctx, uifo, &hello).await?;
-            let h = ServerHelloWrite {
-                ttl: ctx.cfg.writer_ttl.as_secs(),
-                ttl_expired,
-                resolver_id: ctx.id,
-                auth: AuthWrite::Anonymous,
-            };
-            info!("hello_write accepting Anonymous authentication");
-            debug!("hello_write sending hello {:?}", h);
-            if let Err(e) = send(ctx.cfg.hello_timeout, &mut con, &h).await {
-                ctx.clinfos.remove(&ctx, &publisher, uifo).await?;
-                Err(e)?;
-            }
-            (ANONYMOUS.clone(), publisher, rx_stop)
-        }
+    let (con, uifo, publisher, rx_stop) = match hello.auth {
+        AuthWrite::Anonymous => write_client_anonymous_auth(&ctx, con, &hello).await?,
         AuthWrite::Local => match ctx.secctx {
-            SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("authentication not supported"),
-            SecCtx::Local(ref a) => {
-                let tok: BoundedBytes<TOKEN_MAX> =
-                    recv(ctx.cfg.hello_timeout, &mut con).await?;
-                let cred = a.0.authenticate(&*tok)?;
-                let uifo = a.1.write().users.ifo(Some(&cred.user))?;
-                info!("hello_write local auth succeeded");
-                let h = ServerHelloWrite {
-                    ttl: ctx.cfg.writer_ttl.as_secs(),
-                    ttl_expired: true, // re auth always clears
-                    resolver_id: ctx.id,
-                    auth: AuthWrite::Local,
-                };
-                debug!("hello_write sending {:?}", h);
-                send(ctx.cfg.hello_timeout, &mut con, &h).await?;
-                let secret = thread_rng().gen::<u128>();
-                ownership_check(&ctx, &mut con, hello.write_addr, secret).await?;
-                let (publisher, _, rx_stop) =
-                    ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
-                let d = LocalSecData { user: cred.user, secret };
-                a.1.write().insert(publisher.id, d);
-                (uifo, publisher, rx_stop)
+            SecCtx::Local(ref a) => write_client_local_auth(&ctx, con, a, &hello).await?,
+            SecCtx::Anonymous | SecCtx::Krb5(_) | SecCtx::Tls(_) => {
+                bail!("authentication mechanism not supported")
             }
         },
         AuthWrite::Krb5 { .. } => match ctx.secctx {
-            SecCtx::Anonymous | SecCtx::Local(_) => bail!("authentication not supported"),
-            SecCtx::Krb5(ref a) => {
-                info!(
-                    "hello_write initiating new krb5 context for {:?}",
-                    hello.write_addr
-                );
-                let k5ctx =
-                    krb5_authentication(ctx.cfg.hello_timeout, Some(&*a.0), &mut con)
-                        .await?;
-                let k5ctx = K5CtxWrap::new(k5ctx);
-                con.set_ctx(k5ctx.clone()).await;
-                info!("hello_write all traffic now encrypted");
-                let h = ServerHelloWrite {
-                    ttl: ctx.cfg.writer_ttl.as_secs(),
-                    ttl_expired: true, // re auth always clears
-                    resolver_id: ctx.id,
-                    auth: AuthWrite::Krb5 { spn: Chars::from("") },
-                };
-                debug!("hello_write sending {:?}", h);
-                send(ctx.cfg.hello_timeout, &mut con, &h).await?;
-                let secret = thread_rng().gen::<u128>();
-                ownership_check(&ctx, &mut con, hello.write_addr, secret).await?;
-                let client = task::block_in_place(|| k5ctx.lock().client())?;
-                let uifo = a.1.write().users.ifo(Some(&client))?;
-                info!("hello_write listener ownership check succeeded");
-                let (publisher, _, rx_stop) =
-                    ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
-                let d = K5SecData { ctx: k5ctx, secret };
-                a.1.write().insert(publisher.id, d);
-                (uifo, publisher, rx_stop)
+            SecCtx::Krb5(ref a) => write_client_krb5_auth(&ctx, con, a, &hello).await?,
+            SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Tls(_) => {
+                bail!("authentication mechanism not supported")
             }
         },
         AuthWrite::Reuse => match ctx.secctx {
-            SecCtx::Anonymous => bail!("authentication not supported"),
+            SecCtx::Anonymous => bail!("authentication mechanism not supported"),
             SecCtx::Local(ref a) => {
-                let wa = &hello.write_addr;
-                let id = ctx.clinfos.id(wa).ok_or_else(|| anyhow!("missing"))?;
-                let d = a.1.read().get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
-                let uifo = a.1.write().users.ifo(Some(&*d.user))?;
-                challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
-                let (publisher, ttl_expired, rx_stop) =
-                    ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
-                let h = ServerHelloWrite {
-                    ttl: ctx.cfg.writer_ttl.as_secs(),
-                    ttl_expired,
-                    resolver_id: ctx.id,
-                    auth: AuthWrite::Reuse,
-                };
-                if let Err(e) = send(ctx.cfg.hello_timeout, &mut con, &h).await {
-                    ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
-                    Err(e)?
-                }
-                (uifo, publisher, rx_stop)
+                write_client_reuse_local(&ctx, con, a, &hello).await?
             }
-            SecCtx::Krb5(ref a) => {
-                let wa = &hello.write_addr;
-                let id = ctx.clinfos.id(wa).ok_or_else(|| anyhow!("missing"))?;
-                let d = a.1.read().get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
-                let uifo =
-                    a.1.write()
-                        .users
-                        .ifo(Some(&task::block_in_place(|| d.ctx.lock().client())?))?;
-                con.set_ctx(d.ctx).await;
-                info!("hello_write all traffic now encrypted");
-                challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
-                let (publisher, ttl_expired, rx_stop) =
-                    ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
-                let h = ServerHelloWrite {
-                    ttl: ctx.cfg.writer_ttl.as_secs(),
-                    ttl_expired,
-                    resolver_id: ctx.id,
-                    auth: AuthWrite::Reuse,
-                };
-                info!("hello_write reusing krb5 context");
-                debug!("hello_write sending {:?}", h);
-                if let Err(e) = send(ctx.cfg.hello_timeout, &mut con, &h).await {
-                    ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
-                    Err(e)?
-                }
-                (uifo, publisher, rx_stop)
-            }
+            SecCtx::Krb5(ref a) => write_client_reuse_krb5(&ctx, con, a, &hello).await?,
         },
     };
     Ok(client_loop_write(ctx, connection_id, con, server_stop, rx_stop, uifo, publisher)
