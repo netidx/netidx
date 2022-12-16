@@ -541,6 +541,24 @@ async fn write_client_reuse_krb5(
     Ok((con, uifo, publisher, rx_stop))
 }
 
+async fn write_client_tls_auth(
+    ctx: &Arc<Ctx>,
+    mut con: Channel<ServerCtx>,
+    a: &Arc<(secctx::TlsAuth, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
+    hello: &ClientHelloWrite,
+) -> AuthResult {
+    unimplemented!()
+}
+
+async fn write_client_reuse_tls(
+    ctx: &Arc<Ctx>,
+    mut con: Channel<ServerCtx>,
+    a: &Arc<(secctx::TlsAuth, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
+    hello: &ClientHelloWrite,
+) -> AuthResult {
+    unimplemented!()
+}
+
 async fn hello_client_write(
     ctx: Arc<Ctx>,
     connection_id: CId,
@@ -548,29 +566,29 @@ async fn hello_client_write(
     server_stop: oneshot::Receiver<()>,
     hello: ClientHelloWrite,
 ) -> Result<()> {
+    static NO: &str = "authentication mechanism not supported";
     info!("hello_write starting negotiation");
     debug!("hello_write client_hello: {:?}", hello);
     utils::check_addr(hello.write_addr.ip(), &[(ctx.listen_addr, ())])?;
     let (con, uifo, publisher, rx_stop) = match hello.auth {
         AuthWrite::Anonymous => write_client_anonymous_auth(&ctx, con, &hello).await?,
-        AuthWrite::Local => match ctx.secctx {
-            SecCtx::Local(ref a) => write_client_local_auth(&ctx, con, a, &hello).await?,
-            SecCtx::Anonymous | SecCtx::Krb5(_) | SecCtx::Tls(_) => {
-                bail!("authentication mechanism not supported")
-            }
+        AuthWrite::Local => match &ctx.secctx {
+            SecCtx::Local(a) => write_client_local_auth(&ctx, con, a, &hello).await?,
+            SecCtx::Anonymous | SecCtx::Krb5(_) | SecCtx::Tls(_) => bail!(NO),
         },
-        AuthWrite::Krb5 { .. } => match ctx.secctx {
-            SecCtx::Krb5(ref a) => write_client_krb5_auth(&ctx, con, a, &hello).await?,
-            SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Tls(_) => {
-                bail!("authentication mechanism not supported")
-            }
+        AuthWrite::Krb5 { .. } => match &ctx.secctx {
+            SecCtx::Krb5(a) => write_client_krb5_auth(&ctx, con, a, &hello).await?,
+            SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Tls(_) => bail!(NO),
         },
-        AuthWrite::Reuse => match ctx.secctx {
-            SecCtx::Anonymous => bail!("authentication mechanism not supported"),
-            SecCtx::Local(ref a) => {
-                write_client_reuse_local(&ctx, con, a, &hello).await?
-            }
-            SecCtx::Krb5(ref a) => write_client_reuse_krb5(&ctx, con, a, &hello).await?,
+        AuthWrite::Tls => match &ctx.secctx {
+            SecCtx::Tls(a) => write_client_tls_auth(&ctx, con, a, &hello).await?,
+            SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Krb5(_) => bail!(NO),
+        },
+        AuthWrite::Reuse => match &ctx.secctx {
+            SecCtx::Local(a) => write_client_reuse_local(&ctx, con, a, &hello).await?,
+            SecCtx::Krb5(a) => write_client_reuse_krb5(&ctx, con, a, &hello).await?,
+            SecCtx::Tls(a) => write_client_reuse_tls(&ctx, con, a, &hello).await?,
+            SecCtx::Anonymous => bail!(NO),
         },
     };
     Ok(client_loop_write(ctx, connection_id, con, server_stop, rx_stop, uifo, publisher)
