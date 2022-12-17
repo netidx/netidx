@@ -31,7 +31,7 @@ use log::{debug, info, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use parking_lot::{Mutex, RwLock};
 use rand::{thread_rng, Rng};
-use secctx::{K5SecData, LocalSecData, SecCtx};
+use secctx::{K5SecData, LocalSecData, SecCtx, TlsSecData};
 use shard_store::Store;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
@@ -367,12 +367,13 @@ async fn challenge_auth(
     }
     Ok(())
 }
+
 async fn ownership_check(
     ctx: &Ctx,
     con: &mut Channel,
     write_addr: SocketAddr,
-    secret: u128,
-) -> Result<()> {
+) -> Result<u128> {
+    let secret = thread_rng().gen::<u128>();
     let timeout = ctx.cfg.hello_timeout;
     time::timeout(timeout, con.send_one(&Secret(secret))).await??;
     let _: ReadyForOwnershipCheck = time::timeout(timeout, con.receive()).await??;
@@ -395,7 +396,7 @@ async fn ownership_check(
     if &*token != &*answer {
         bail!("listener ownership check failed");
     }
-    Ok(())
+    Ok(secret)
 }
 
 type AuthResult = Result<(Channel, Arc<UserInfo>, Arc<Publisher>, oneshot::Receiver<()>)>;
@@ -441,9 +442,8 @@ async fn write_client_local_auth(
     };
     debug!("hello_write sending {:?}", h);
     send(ctx.cfg.hello_timeout, &mut con, &h).await?;
-    let secret = thread_rng().gen::<u128>();
     let mut con = Channel::new(None, con);
-    ownership_check(&ctx, &mut con, hello.write_addr, secret).await?;
+    let secret = ownership_check(&ctx, &mut con, hello.write_addr).await?;
     let (publisher, _, rx_stop) = ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
     let d = LocalSecData { user: cred.user, secret };
     a.1.write().insert(publisher.id, d);
@@ -503,8 +503,7 @@ async fn write_client_krb5_auth(
     };
     debug!("hello_write sending {:?}", h);
     time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await??;
-    let secret = thread_rng().gen::<u128>();
-    ownership_check(&ctx, &mut con, hello.write_addr, secret).await?;
+    let secret = ownership_check(&ctx, &mut con, hello.write_addr).await?;
     let client = task::block_in_place(|| k5ctx.lock().client())?;
     let uifo = a.1.write().users.ifo(Some(&client))?;
     info!("hello_write listener ownership check succeeded");
@@ -552,13 +551,46 @@ async fn write_client_reuse_krb5(
     Ok((con, uifo, publisher, rx_stop))
 }
 
+fn get_tls_uifo(
+    ctx: &Arc<Ctx>,
+    tls: &tokio_rustls::TlsStream<TcpStream>,
+    a: Arc<(secctx::TlsAuth, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
+) -> Result<Arc<UserInfo>> {
+    let (_, server_con) = tls.get_ref();
+    match server_con.peer_certificates() {
+        Some([cert, ..]) => {
+            let anchor = webpki::TrustAnchor::try_from_cert_der(&cert.0)?;
+            let user = std::str::from_utf8(anchor.subject)?;
+            Ok(a.1.write().users.ifo(Some(user)))
+        }
+        Some(_) | None => bail!("tls handshake should be complete by now"),
+    }
+}
+
 async fn write_client_tls_auth(
     ctx: &Arc<Ctx>,
     mut con: TcpStream,
     a: &Arc<(secctx::TlsAuth, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
-    unimplemented!()
+    let tls = a.0.accept(con).await?;
+    let uifo = get_tls_uifo(ctx, &tls, a)?;
+    let mut con = Channel::new(None, tls);
+    info!("hello_write all traffic now encrypted");
+    let h = ServerHelloWrite {
+        ttl: ctx.cfg.writer_ttl.as_secs(),
+        ttl_expired: true,
+        resolver_id: ctx.id,
+        auth: AuthWrite::Tls,
+    };
+    debug!("hello_write sending {:?}", h);
+    time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await??;
+    let secret = ownership_check(&ctx, &mut con, hello.write_addr).await?;
+    info!("hello_write listener ownership check succeeded");
+    let (publisher, _, rx_stop) = ctx.clinfos.insert(&ctx, &uifo, hello).await?;
+    let d = TlsSecData(secret);
+    a.1.write().insert(publisher.id, d);
+    Ok((con, uifo, publisher, rx_stop))
 }
 
 async fn write_client_reuse_tls(
@@ -567,7 +599,36 @@ async fn write_client_reuse_tls(
     a: &Arc<(secctx::TlsAuth, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
-    unimplemented!()
+    let tls = a.0.accept(con).await?;
+    let wa = &hello.write_addr;
+    let id = ctx.clinfos.id(wa).ok_or_else(|| anyhow!("missing"))?;
+    let d = a.1.read().get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
+    let uifo = get_tls_uifo(ctx, &tls, a)?;
+    let mut con = Channel::new(None, con);
+    info!("hello_write all traffic now encrypted");
+    challenge_auth(&ctx.cfg, &mut con, d.0).await?;
+    let (publisher, ttl_expired, rx_stop) =
+        ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
+    let h = ServerHelloWrite {
+        ttl: ctx.cfg.writer_ttl.as_secs(),
+        ttl_expired,
+        resolver_id: ctx.id,
+        auth: AuthWrite::Reuse,
+    };
+    info!("hello_write reusing tls context");
+    debug!("hello_write sending {:?}", h);
+    match time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await {
+        Ok(Ok(())) => (),
+        Err(e) => {
+            ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
+            Err(e)?
+        }
+        Ok(Err(e)) => {
+            ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
+            Err(e)?
+        }
+    }
+    Ok((con, uifo, publisher, rx_stop))
 }
 
 async fn hello_client_write(

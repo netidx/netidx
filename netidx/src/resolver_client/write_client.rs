@@ -54,7 +54,7 @@ const HB: Duration = Duration::from_secs(TTL / 2);
 const LINGER: Duration = Duration::from_secs(TTL / 10);
 
 struct Connection {
-    con: Option<Channel<ClientCtx>>,
+    con: Option<Channel>,
     resolver_addr: SocketAddr,
     resolver_auth: Auth,
     write_addr: SocketAddr,
@@ -77,11 +77,7 @@ impl Connection {
         self.disconnect = time::interval_at(now + linger, linger);
     }
 
-    async fn republish(
-        &mut self,
-        con: &mut Channel<ClientCtx>,
-        ttl_expired: bool,
-    ) -> Result<()> {
+    async fn republish(&mut self, con: &mut Channel, ttl_expired: bool) -> Result<()> {
         let names = self.published.read().values().cloned().collect::<Vec<ToWrite>>();
         let len = names.len();
         if len == 0 {
@@ -126,10 +122,7 @@ impl Connection {
     }
 
     async fn connect(&mut self) -> Result<()> {
-        async fn auth_challenge(
-            con: &mut Channel<ClientCtx>,
-            secret: u128,
-        ) -> Result<()> {
+        async fn auth_challenge(con: &mut Channel, secret: u128) -> Result<()> {
             let c: AuthChallenge = con.receive().await?;
             if c.hash_method != HashMethod::Sha3_512 {
                 bail!("hash method not supported")

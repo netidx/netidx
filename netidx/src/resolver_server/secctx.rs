@@ -61,7 +61,7 @@ fn load_private_key(path: &str) -> Result<rustls::PrivateKey> {
     bail!("no keys found, encrypted keys not supported")
 }
 
-pub(super) struct TlsAuth(pub(super) Arc<rustls::ServerConfig>);
+pub(super) struct TlsAuth(pub(super) tokio_rustls::TlsAcceptor);
 
 impl TlsAuth {
     pub(super) fn new(
@@ -83,7 +83,7 @@ impl TlsAuth {
             .with_client_cert_verifier(client_auth)
             .with_single_cert(certs, private_key)?;
         config.session_storage = rustls::server::ServerSessionMemoryCache::new(1024);
-        Ok(TlsAuth(Arc::new(config)))
+        Ok(TlsAuth(tokio_rustls::TlsAcceptor::from(Arc::new(config))))
     }
 }
 
