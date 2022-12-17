@@ -707,14 +707,14 @@ async fn hello_client_read(
     server_stop: oneshot::Receiver<()>,
     hello: AuthRead,
 ) -> Result<()> {
+    static NO: &str = "authentication mechanism not supported";
     let (con, uifo) = match hello {
         AuthRead::Anonymous => {
             send(ctx.cfg.hello_timeout, &mut con, &AuthRead::Anonymous).await?;
             (Channel::new(None, con), ANONYMOUS.clone())
         }
-        AuthRead::Local => match ctx.secctx {
-            SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("auth mech not supported"),
-            SecCtx::Local(ref a) => {
+        AuthRead::Local => match &ctx.secctx {
+            SecCtx::Local(a) => {
                 let tok: BoundedBytes<TOKEN_MAX> =
                     recv(ctx.cfg.hello_timeout, &mut con).await?;
                 let cred = a.0.authenticate(&*tok)?;
@@ -722,12 +722,10 @@ async fn hello_client_read(
                 send(ctx.cfg.hello_timeout, &mut con, &AuthRead::Local).await?;
                 (Channel::new(None, con), uifo)
             }
+            SecCtx::Anonymous | SecCtx::Krb5(_) | SecCtx::Tls(_) => bail!(NO),
         },
-        AuthRead::Krb5 => match ctx.secctx {
-            SecCtx::Anonymous | SecCtx::Local(_) => {
-                bail!("authentication mechanism krb5 not supported")
-            }
-            SecCtx::Krb5(ref a) => {
+        AuthRead::Krb5 => match &ctx.secctx {
+            SecCtx::Krb5(a) => {
                 let k5ctx =
                     krb5_authentication(ctx.cfg.hello_timeout, Some(&*a.0), &mut con)
                         .await?;
@@ -740,6 +738,17 @@ async fn hello_client_read(
                         .ifo(Some(&task::block_in_place(|| k5ctx.lock().client())?))?;
                 (con, uifo)
             }
+            SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Tls(_) => bail!(NO),
+        },
+        AuthRead::Tls => match &ctx.secctx {
+            SecCtx::Tls(a) => {
+                let tls = a.0.accept(con).await?;
+                let uifo = get_tls_uifo(&ctx, &tls, a)?;
+                let mut con = Channel::new(None, tls);
+                time::timeout(ctx.cfg.hello_timeout, con.send_one(&AuthRead::Tls))??;
+                (con, uifo)
+            }
+            SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Krb5(_) => bail!(NO),
         },
     };
     Ok(client_loop_read(ctx, con, server_stop, uifo).await?)
