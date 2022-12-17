@@ -1,4 +1,4 @@
-use crate::pack::Pack;
+use crate::{pack::Pack, utils};
 use anyhow::{anyhow, Error, Result};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, BytesMut};
@@ -48,6 +48,51 @@ impl<C: K5Ctx + Debug + Send + Sync + 'static> Deref for K5CtxWrap<C> {
     }
 }
 
+/// Send a single unencrypted message directly to the specified
+/// socket. This is intended to be used to do some initialization
+/// before the proper channel can be created.
+pub(crate) async fn write_raw<T: Pack, S: AsyncWrite + Unpin>(
+    socket: &mut S,
+    msg: &T,
+) -> Result<()> {
+    let len = msg.encoded_len();
+    if len > MAX_BATCH as usize {
+        bail!("message length {} exceeds max size {}", len, MAX_BATCH)
+    }
+    let buf = utils::pack(msg)?;
+    let len = buf.remaining() as u32;
+    let lenb = len.to_be_bytes();
+    let mut buf = Buf::chain(&lenb[..], buf);
+    while buf.has_remaining() {
+        socket.write_buf(&mut buf).await?;
+    }
+    Ok(())
+}
+
+/// Read a single, small, unencrypted message from the specified
+/// socket. This is intended to be used to do some initialization
+/// before the proper channel can be created.
+pub(crate) async fn read_raw<T: Pack, S: AsyncRead + Unpin>(socket: &mut S) -> Result<T> {
+    const MAX: usize = 1024;
+    let mut buf = [0u8; MAX];
+    socket.read_exact(&mut buf[0..3]).await?;
+    let len = BigEndian::read_u32(&buf[0..3]);
+    if len > LEN_MASK {
+        bail!("message is encrypted")
+    }
+    let len = len as usize;
+    if len > MAX - 4 {
+        bail!("message is too large")
+    }
+    socket.read_exact(&mut buf[4..len]).await?;
+    let mut buf = &buf[4..len];
+    let res = T::decode(&mut buf)?;
+    if buf.has_remaining() {
+        bail!("batch contained more than one message")
+    }
+    Ok(res)
+}
+
 #[derive(Debug)]
 enum ToFlush<C: K5Ctx + Debug + Send + Sync + 'static> {
     Flush(BytesMut),
@@ -72,7 +117,10 @@ async fn flush_buf<B: Buf, S: AsyncWrite + Send + 'static>(
     Ok(())
 }
 
-fn flush_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncWrite + Send + 'static>(
+fn flush_task<
+    C: K5Ctx + Debug + Send + Sync + 'static,
+    S: AsyncWrite + Send + 'static,
+>(
     mut soc: WriteHalf<S>,
 ) -> Sender<ToFlush<C>> {
     let (tx, mut rx): (Sender<ToFlush<C>>, Receiver<ToFlush<C>>) = mpsc::channel(3);
@@ -109,7 +157,9 @@ pub(crate) struct WriteChannel<C: K5Ctx + Debug + Send + Sync + 'static> {
 }
 
 impl<C: K5Ctx + Debug + Send + Sync + 'static> WriteChannel<C> {
-    pub(crate) fn new<S: AsyncWrite + Send + 'static>(socket: WriteHalf<S>) -> WriteChannel<C> {
+    pub(crate) fn new<S: AsyncWrite + Send + 'static>(
+        socket: WriteHalf<S>,
+    ) -> WriteChannel<C> {
         WriteChannel {
             to_flush: flush_task(socket),
             buf: BytesMut::with_capacity(BUF),
@@ -280,7 +330,9 @@ pub(crate) struct ReadChannel<C: K5Ctx + Debug + Send + Sync + 'static> {
 }
 
 impl<C: K5Ctx + Debug + Send + Sync + 'static> ReadChannel<C> {
-    pub(crate) fn new<S: AsyncRead + Send + 'static>(socket: ReadHalf<S>) -> ReadChannel<C> {
+    pub(crate) fn new<S: AsyncRead + Send + 'static>(
+        socket: ReadHalf<S>,
+    ) -> ReadChannel<C> {
         let (set_ctx, read_ctx) = oneshot::channel();
         let (stop_tx, stop_rx) = oneshot::channel();
         ReadChannel {
@@ -344,7 +396,9 @@ pub(crate) struct Channel<C: K5Ctx + Debug + Send + Sync + 'static> {
 }
 
 impl<C: K5Ctx + Debug + Send + Sync + 'static> Channel<C> {
-    pub(crate) fn new<S: AsyncRead + AsyncWrite + Send + 'static>(socket: S) -> Channel<C> {
+    pub(crate) fn new<S: AsyncRead + AsyncWrite + Send + 'static>(
+        socket: S,
+    ) -> Channel<C> {
         let (rh, wh) = io::split(socket);
         Channel { read: ReadChannel::new(rh), write: WriteChannel::new(wh) }
     }

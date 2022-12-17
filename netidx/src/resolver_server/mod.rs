@@ -7,7 +7,7 @@ mod store;
 mod test;
 
 use crate::{
-    channel::{Channel, K5CtxWrap},
+    channel::{self, Channel, K5CtxWrap},
     chars::Chars,
     pack::Pack,
     pool::{Pool, Pooled},
@@ -317,24 +317,17 @@ async fn client_loop_write(
 
 const TOKEN_MAX: usize = 4096;
 
-async fn recv<T: Pack + Debug>(
-    timeout: Duration,
-    con: &mut Channel<ServerCtx>,
-) -> Result<T> {
-    Ok(time::timeout(timeout, con.receive()).await??)
+async fn recv<T: Pack + Debug>(timeout: Duration, con: &mut TcpStream) -> Result<T> {
+    Ok(time::timeout(timeout, channel::read_raw(con)).await??)
 }
-async fn send(
-    timeout: Duration,
-    con: &mut Channel<ServerCtx>,
-    msg: &impl Pack,
-) -> Result<()> {
-    Ok(time::timeout(timeout, con.send_one(msg)).await??)
+async fn send(timeout: Duration, con: &mut TcpStream, msg: &impl Pack) -> Result<()> {
+    Ok(time::timeout(timeout, channel::write_raw(con, msg)).await??)
 }
 
 pub(crate) async fn krb5_authentication(
     timeout: Duration,
     spn: Option<&str>,
-    con: &mut Channel<ServerCtx>,
+    con: &mut TcpStream,
 ) -> Result<ServerCtx> {
     // the GSS token shouldn't ever be bigger than 1 MB
     const L: usize = 1 * 1024 * 1024;
@@ -366,8 +359,9 @@ async fn challenge_auth(
     let n = thread_rng().gen::<u128>();
     let answer = make_sha3_token(&[&n.to_be_bytes(), &secret.to_be_bytes()]);
     let challenge = AuthChallenge { hash_method: HashMethod::Sha3_512, challenge: n };
-    send(cfg.hello_timeout, con, &challenge).await?;
-    let token: BoundedBytes<TOKEN_MAX> = recv(cfg.hello_timeout, con).await?;
+    time::timeout(cfg.hello_timeout, con.send_one(&challenge)).await??;
+    let token: BoundedBytes<TOKEN_MAX> =
+        time::timeout(cfg.hello_timeout, con.receive()).await??;
     if &*token != &*answer {
         bail!("denied")
     }
@@ -380,7 +374,7 @@ async fn ownership_check(
     secret: u128,
 ) -> Result<()> {
     let timeout = ctx.cfg.hello_timeout;
-    send(timeout, con, &Secret(secret)).await?;
+    time::timeout(timeout, con.send_one(&Secret(secret))).await??;
     let _: ReadyForOwnershipCheck = time::timeout(timeout, con.receive()).await??;
     info!("hello_write connecting to {:?} for listener ownership check", write_addr);
     let mut con: Channel<ServerCtx> =
@@ -392,10 +386,10 @@ async fn ownership_check(
     use publisher::Hello as PHello;
     let n = thread_rng().gen::<u128>();
     let answer = utils::make_sha3_token(&[&n.to_be_bytes(), &secret.to_be_bytes()]);
-    send(timeout, &mut con, &PHello::ResolverAuthenticate(ctx.id)).await?;
+    time::timeout(timeout, con.send_one(&PHello::ResolverAuthenticate(ctx.id))).await??;
     let m = AuthChallenge { hash_method: HashMethod::Sha3_512, challenge: n };
-    send(timeout, &mut con, &m).await?;
-    let token: BoundedBytes<TOKEN_MAX> = recv(timeout, &mut con).await?;
+    time::timeout(timeout, con.send_one(&m)).await??;
+    let token: BoundedBytes<TOKEN_MAX> = time::timeout(timeout, con.receive()).await??;
     if &*token != &*answer {
         bail!("listener ownership check failed");
     }
@@ -407,7 +401,7 @@ type AuthResult =
 
 async fn write_client_anonymous_auth(
     ctx: &Arc<Ctx>,
-    mut con: Channel<ServerCtx>,
+    mut con: TcpStream,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
     let uifo = &*ANONYMOUS;
@@ -425,12 +419,12 @@ async fn write_client_anonymous_auth(
         ctx.clinfos.remove(&ctx, &publisher, uifo).await?;
         Err(e)?;
     }
-    Ok((con, ANONYMOUS.clone(), publisher, rx_stop))
+    Ok((Channel::new(con), ANONYMOUS.clone(), publisher, rx_stop))
 }
 
 async fn write_client_local_auth(
     ctx: &Arc<Ctx>,
-    mut con: Channel<ServerCtx>,
+    mut con: TcpStream,
     a: &Arc<(secctx::LocalAuth, RwLock<secctx::SecCtxData<secctx::LocalSecData>>)>,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
@@ -447,6 +441,7 @@ async fn write_client_local_auth(
     debug!("hello_write sending {:?}", h);
     send(ctx.cfg.hello_timeout, &mut con, &h).await?;
     let secret = thread_rng().gen::<u128>();
+    let mut con = Channel::new(con);
     ownership_check(&ctx, &mut con, hello.write_addr, secret).await?;
     let (publisher, _, rx_stop) = ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
     let d = LocalSecData { user: cred.user, secret };
