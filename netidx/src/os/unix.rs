@@ -1,3 +1,4 @@
+use crate::resolver_server::config::{Config, MemberServer};
 use anyhow::{anyhow, Result};
 use arcstr::ArcStr;
 use netidx_core::chars::Chars;
@@ -13,14 +14,19 @@ use tokio::task;
 pub(crate) struct Mapper(ArcStr);
 
 impl Mapper {
-    pub(crate) fn new() -> Result<Mapper> {
-        task::block_in_place(|| {
-            let out = Command::new("sh").arg("-c").arg("which id").output()?;
-            let buf = String::from_utf8_lossy(&out.stdout);
-            let path =
-                buf.lines().next().ok_or_else(|| anyhow!("can't find the id command"))?;
-            Ok(Mapper(ArcStr::from(path)))
-        })
+    pub(crate) fn new(cfg: &Config, member: &MemberServer) -> Result<Mapper> {
+        match &member.id_map {
+            Some(cmd) => Ok(Mapper(ArcStr::from(cmd))),
+            None => task::block_in_place(|| {
+                let out = Command::new("sh").arg("-c").arg("which id").output()?;
+                let buf = String::from_utf8_lossy(&out.stdout);
+                let path = buf
+                    .lines()
+                    .next()
+                    .ok_or_else(|| anyhow!("can't find the id command"))?;
+                Ok(Mapper(ArcStr::from(path)))
+            }),
+        }
     }
 
     pub(crate) fn groups(&self, user: &str) -> Result<Vec<String>> {
@@ -70,7 +76,10 @@ impl Mapper {
 
 pub(crate) mod local_auth {
     use super::Mapper;
-    use crate::os::local_auth::Credential;
+    use crate::{
+        os::local_auth::Credential,
+        resolver_server::config::{Config, MemberServer},
+    };
     use anyhow::Result;
     use bytes::{Bytes, BytesMut};
     use futures::{channel::oneshot, prelude::*, select_biased};
@@ -185,11 +194,15 @@ pub(crate) mod local_auth {
             }
         }
 
-        pub(crate) async fn start(socket_path: &str) -> Result<AuthServer> {
+        pub(crate) async fn start(
+            socket_path: &str,
+            cfg: &Config,
+            member: &MemberServer,
+        ) -> Result<AuthServer> {
             let _ = fs::remove_file(socket_path).await;
             let listener = UnixListener::bind(socket_path)?;
             fs::set_permissions(socket_path, Permissions::from_mode(0o777)).await?;
-            let mapper = Mapper::new()?;
+            let mapper = Mapper::new(cfg, member)?;
             let issued =
                 Arc::new(Mutex::new(HashMap::with_hasher(FxBuildHasher::default())));
             let secret = thread_rng().gen::<u128>();

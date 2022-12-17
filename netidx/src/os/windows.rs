@@ -1,9 +1,10 @@
+use crate::resolver_server::config::{Config, MemberServer};
 use anyhow::{bail, Result};
 
 pub(crate) struct Mapper;
 
 impl Mapper {
-    pub(crate) fn new() -> Result<Mapper> {
+    pub(crate) fn new(cfg: &Config, member: &MemberServer) -> Result<Mapper> {
         Ok(Mapper)
     }
 
@@ -14,6 +15,7 @@ impl Mapper {
 
 pub(crate) mod local_auth {
     use super::super::local_auth::Credential;
+    use crate::resolver_server::config::{Config, MemberServer};
     use anyhow::Result;
     use bytes::Bytes;
 
@@ -21,7 +23,11 @@ pub(crate) mod local_auth {
     pub(crate) struct AuthServer;
 
     impl AuthServer {
-        pub(crate) async fn start(_socket_path: &str) -> Result<AuthServer> {
+        pub(crate) async fn start(
+            _socket_path: &str,
+            _cfg: &Config,
+            _member: &MemberServer,
+        ) -> Result<AuthServer> {
             bail!("local auth not implemented on windows")
         }
 

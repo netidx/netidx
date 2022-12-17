@@ -22,8 +22,12 @@ use tokio::task;
 pub(super) struct LocalAuth(AuthServer);
 
 impl LocalAuth {
-    pub(super) async fn new(socket_path: &str) -> Result<Self> {
-        Ok(Self(AuthServer::start(socket_path).await?))
+    pub(super) async fn new(
+        socket_path: &str,
+        cfg: &Config,
+        member: &MemberServer,
+    ) -> Result<Self> {
+        Ok(Self(AuthServer::start(socket_path, cfg, member).await?))
     }
 
     pub(super) fn authenticate(&self, mut token: &[u8]) -> Result<Credential> {
@@ -98,8 +102,8 @@ pub(super) struct SecCtxData<S: 'static> {
 }
 
 impl<S: 'static + SecDataCommon> SecCtxData<S> {
-    pub(super) fn new(cfg: &Config) -> Result<Self> {
-        let mut users = UserDb::new(Mapper::new()?);
+    pub(super) fn new(cfg: &Config, member: &MemberServer) -> Result<Self> {
+        let mut users = UserDb::new(Mapper::new(cfg, member)?);
         let pmap = PMap::from_file(&cfg.perms, &mut users, cfg.root(), &cfg.children)?;
         Ok(Self { users, pmap, data: HashMap::default() })
     }
@@ -205,17 +209,17 @@ impl SecCtx {
         let t = match &member.auth {
             Auth::Anonymous => SecCtx::Anonymous,
             Auth::Local { path } => {
-                let auth = LocalAuth::new(&path).await?;
-                let store = RwLock::new(SecCtxData::new(cfg)?);
+                let auth = LocalAuth::new(&path, cfg, member).await?;
+                let store = RwLock::new(SecCtxData::new(cfg, member)?);
                 SecCtx::Local(Arc::new((auth, store)))
             }
             Auth::Krb5 { spn } => {
-                let store = RwLock::new(SecCtxData::new(cfg)?);
+                let store = RwLock::new(SecCtxData::new(cfg, member)?);
                 SecCtx::Krb5(Arc::new((spn.clone(), store)))
             }
             Auth::Tls { root_certificates, certificate, private_key } => {
                 let auth = TlsAuth::new(root_certificates, certificate, private_key)?;
-                let store = RwLock::new(SecCtxData::new(cfg)?);
+                let store = RwLock::new(SecCtxData::new(cfg, member)?);
                 SecCtx::Tls(Arc::new((auth, store)))
             }
         };

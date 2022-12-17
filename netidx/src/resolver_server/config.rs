@@ -167,7 +167,7 @@ pub(crate) mod file {
         pub(super) pid_file: String,
         pub(super) reader_ttl: u64,
         pub(super) writer_ttl: u64,
-        pub(super) id_map: String,
+        pub(super) id_map: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,7 +188,7 @@ pub struct MemberServer {
     pub pid_file: String,
     pub(super) reader_ttl: Duration,
     pub(super) writer_ttl: Duration,
-    pub(super) id_map: String,
+    pub(super) id_map: Option<String>, // default /usr/bin/id
 }
 
 #[derive(Debug, Clone)]
