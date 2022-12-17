@@ -93,12 +93,6 @@ pub(crate) async fn read_raw<T: Pack, S: AsyncRead + Unpin>(socket: &mut S) -> R
     Ok(res)
 }
 
-#[derive(Debug)]
-enum ToFlush<C: K5Ctx + Debug + Send + Sync + 'static> {
-    Flush(BytesMut),
-    SetCtx(K5CtxWrap<C>),
-}
-
 async fn flush_buf<B: Buf, S: AsyncWrite + Send + 'static>(
     soc: &mut WriteHalf<S>,
     buf: B,
@@ -121,27 +115,22 @@ fn flush_task<
     C: K5Ctx + Debug + Send + Sync + 'static,
     S: AsyncWrite + Send + 'static,
 >(
+    ctx: Option<K5CtxWrap<C>>,
     mut soc: WriteHalf<S>,
-) -> Sender<ToFlush<C>> {
-    let (tx, mut rx): (Sender<ToFlush<C>>, Receiver<ToFlush<C>>) = mpsc::channel(3);
+) -> Sender<BytesMut> {
+    let (tx, mut rx): (Sender<BytesMut>, Receiver<BytesMut>) = mpsc::channel(3);
     task::spawn(async move {
-        let mut ctx: Option<K5CtxWrap<C>> = None;
         let res = loop {
             match rx.next().await {
                 None => break Ok(()),
-                Some(m) => match m {
-                    ToFlush::SetCtx(c) => {
-                        ctx = Some(c);
+                Some(data) => match ctx {
+                    None => try_cf!(flush_buf(&mut soc, data, false).await),
+                    Some(ref ctx) => {
+                        let msg = try_cf!(task::block_in_place(|| ctx
+                            .lock()
+                            .wrap_iov(true, data)));
+                        try_cf!(flush_buf(&mut soc, msg, true).await);
                     }
-                    ToFlush::Flush(data) => match ctx {
-                        None => try_cf!(flush_buf(&mut soc, data, false).await),
-                        Some(ref ctx) => {
-                            let msg = try_cf!(task::block_in_place(|| ctx
-                                .lock()
-                                .wrap_iov(true, data)));
-                            try_cf!(flush_buf(&mut soc, msg, true).await);
-                        }
-                    },
                 },
             }
         };
@@ -150,25 +139,25 @@ fn flush_task<
     tx
 }
 
-pub(crate) struct WriteChannel<C: K5Ctx + Debug + Send + Sync + 'static> {
-    to_flush: Sender<ToFlush<C>>,
+pub(crate) struct WriteChannel {
+    to_flush: Sender<BytesMut>,
     buf: BytesMut,
     boundries: Vec<usize>,
 }
 
-impl<C: K5Ctx + Debug + Send + Sync + 'static> WriteChannel<C> {
-    pub(crate) fn new<S: AsyncWrite + Send + 'static>(
+impl WriteChannel {
+    pub(crate) fn new<
+        C: K5Ctx + Debug + Send + Sync + 'static,
+        S: AsyncWrite + Send + 'static,
+    >(
+        ctx: Option<K5CtxWrap<C>>,
         socket: WriteHalf<S>,
-    ) -> WriteChannel<C> {
+    ) -> WriteChannel {
         WriteChannel {
-            to_flush: flush_task(socket),
+            to_flush: flush_task(ctx, socket),
             buf: BytesMut::with_capacity(BUF),
             boundries: Vec::new(),
         }
-    }
-
-    pub(crate) async fn set_ctx(&mut self, ctx: K5CtxWrap<C>) -> Result<()> {
-        Ok(self.to_flush.send(ToFlush::SetCtx(ctx)).await?)
     }
 
     /// Queue a message for sending. This only encodes the message and
@@ -233,20 +222,18 @@ impl<C: K5Ctx + Debug + Send + Sync + 'static> WriteChannel<C> {
         while self.buf.has_remaining() {
             let boundry = self.boundries.first().copied().unwrap_or(self.buf.len());
             let chunk = self.buf.split_to(boundry);
-            match self.to_flush.try_send(ToFlush::Flush(chunk)) {
+            match self.to_flush.try_send(chunk) {
                 Ok(()) => {
                     if self.boundries.len() > 0 {
                         self.boundries.remove(0);
                     }
                 }
-                Err(e) if e.is_full() => match e.into_inner() {
-                    ToFlush::Flush(mut chunk) => {
-                        chunk.unsplit(self.buf.split());
-                        self.buf = chunk;
-                        return Ok(false);
-                    }
-                    ToFlush::SetCtx(_) => unreachable!(),
-                },
+                Err(e) if e.is_full() => {
+                    let mut chunk = e.into_inner();
+                    chunk.unsplit(self.buf.split());
+                    self.buf = chunk;
+                    return Ok(false);
+                }
                 Err(_) => bail!("can't flush to closed connection"),
             }
         }
@@ -264,12 +251,11 @@ impl<C: K5Ctx + Debug + Send + Sync + 'static> WriteChannel<C> {
 fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'static>(
     stop: oneshot::Receiver<()>,
     mut soc: ReadHalf<S>,
-    mut set_ctx: oneshot::Receiver<K5CtxWrap<C>>,
+    ctx: Option<K5CtxWrap<C>>,
 ) -> Receiver<BytesMut> {
     let (mut tx, rx) = mpsc::channel(3);
     task::spawn(async move {
         let mut stop = stop.fuse();
-        let mut ctx: Option<K5CtxWrap<C>> = None;
         let mut buf = BytesMut::with_capacity(BUF);
         let res: Result<()> = 'main: loop {
             while buf.remaining() >= mem::size_of::<u32>() {
@@ -292,11 +278,7 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
                 } else {
                     let ctx = match ctx {
                         Some(ref ctx) => ctx,
-                        None => {
-                            ctx = Some(try_cf!(break, 'main, set_ctx.await));
-                            set_ctx = oneshot::channel().1;
-                            ctx.as_ref().unwrap()
-                        }
+                        None => break 'main Err(anyhow!("encryption is not supported")),
                     };
                     buf.advance(mem::size_of::<u32>());
                     let decrypted = try_cf!(break, 'main, task::block_in_place(|| {
@@ -322,31 +304,26 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
     rx
 }
 
-pub(crate) struct ReadChannel<C: K5Ctx + Debug + Send + Sync + 'static> {
+pub(crate) struct ReadChannel {
     buf: BytesMut,
     _stop: oneshot::Sender<()>,
-    set_ctx: Option<oneshot::Sender<K5CtxWrap<C>>>,
     incoming: stream::Fuse<Receiver<BytesMut>>,
 }
 
-impl<C: K5Ctx + Debug + Send + Sync + 'static> ReadChannel<C> {
-    pub(crate) fn new<S: AsyncRead + Send + 'static>(
+impl ReadChannel {
+    pub(crate) fn new<
+        C: K5Ctx + Debug + Send + Sync + 'static,
+        S: AsyncRead + Send + 'static,
+    >(
+        k5ctx: Option<K5CtxWrap<C>>,
         socket: ReadHalf<S>,
-    ) -> ReadChannel<C> {
-        let (set_ctx, read_ctx) = oneshot::channel();
+    ) -> ReadChannel {
         let (stop_tx, stop_rx) = oneshot::channel();
         ReadChannel {
             buf: BytesMut::new(),
             _stop: stop_tx,
-            set_ctx: Some(set_ctx),
-            incoming: read_task(stop_rx, socket, read_ctx).fuse(),
+            incoming: read_task(stop_rx, socket, k5ctx).fuse(),
         }
-    }
-
-    /// Read context may only be set once. This method will panic if
-    /// you try to set it twice.
-    pub(crate) fn set_ctx(&mut self, ctx: K5CtxWrap<C>) {
-        let _ = mem::replace(&mut self.set_ctx, None).unwrap().send(ctx);
     }
 
     /// Read a load of bytes from the socket into the read buffer
@@ -390,25 +367,27 @@ impl<C: K5Ctx + Debug + Send + Sync + 'static> ReadChannel<C> {
     }
 }
 
-pub(crate) struct Channel<C: K5Ctx + Debug + Send + Sync + 'static> {
-    read: ReadChannel<C>,
-    write: WriteChannel<C>,
+pub(crate) struct Channel {
+    read: ReadChannel,
+    write: WriteChannel,
 }
 
-impl<C: K5Ctx + Debug + Send + Sync + 'static> Channel<C> {
-    pub(crate) fn new<S: AsyncRead + AsyncWrite + Send + 'static>(
+impl Channel {
+    pub(crate) fn new<
+        C: K5Ctx + Debug + Send + Sync + 'static,
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    >(
+        k5ctx: Option<K5CtxWrap<C>>,
         socket: S,
-    ) -> Channel<C> {
+    ) -> Channel {
         let (rh, wh) = io::split(socket);
-        Channel { read: ReadChannel::new(rh), write: WriteChannel::new(wh) }
+        Channel {
+            read: ReadChannel::new(k5ctx, rh),
+            write: WriteChannel::new(k5ctx.clone(), wh),
+        }
     }
 
-    pub(crate) async fn set_ctx(&mut self, ctx: K5CtxWrap<C>) {
-        self.read.set_ctx(ctx.clone());
-        let _ = self.write.set_ctx(ctx).await;
-    }
-
-    pub(crate) fn split(self) -> (ReadChannel<C>, WriteChannel<C>) {
+    pub(crate) fn split(self) -> (ReadChannel, WriteChannel) {
         (self.read, self.write)
     }
 
