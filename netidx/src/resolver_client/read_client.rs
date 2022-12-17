@@ -70,13 +70,13 @@ async fn connect(
                 con
             }
             (
-                DesiredAuth::Krb5 { .. } | DesiredAuth::Local | DesiredAuth::Tls(_),
+                DesiredAuth::Krb5 { .. } | DesiredAuth::Local | DesiredAuth::Tls {..},
                 Auth::Anonymous,
             ) => {
                 bail!("requested authentication mechanism not supported")
             }
             (
-                DesiredAuth::Local | DesiredAuth::Krb5 { .. } | DesiredAuth::Tls(_),
+                DesiredAuth::Local | DesiredAuth::Krb5 { .. } | DesiredAuth::Tls {..},
                 Auth::Local { path },
             ) => {
                 let mut con = Channel::new(None, con);
@@ -91,7 +91,7 @@ async fn connect(
                 }
                 con
             }
-            (DesiredAuth::Local, Auth::Krb5 { .. } | Auth::Tls) => {
+            (DesiredAuth::Local, Auth::Krb5 { .. } | Auth::Tls { .. }) => {
                 bail!("local auth not supported")
             }
             (DesiredAuth::Krb5 { upn, .. }, Auth::Krb5 { spn }) => {
@@ -106,10 +106,18 @@ async fn connect(
                     }
                 }
             }
-            (DesiredAuth::Tls(connector), Auth::Tls) => {
+            (DesiredAuth::Tls {ctx, name: _}, Auth::Tls { name }) => {
                 let hello = ClientHello::ReadOnly(AuthRead::Tls);
                 cwt!("hello", channel::write_raw(&mut con, &hello));
-                
+                let name = rustls::ServerName::try_from(name)?;
+                let tls = ctx.connect(con, name).await?;
+                let mut con = Channel::new(None, tls);
+                match cwt!("reply", channel::read_raw::<AuthRead>(&mut con)) {
+                    AuthRead::Tls => con,
+                    AuthRead::Local | AuthRead::Anonymous | AuthRead::Krb5 {..} => {
+                        bail!("protocol error")
+                    }
+                }
             }
         };
         break Ok(con);

@@ -41,7 +41,7 @@ pub enum DesiredAuth {
     Anonymous,
     Krb5 { upn: Option<String>, spn: Option<String> },
     Local,
-    Tls(tokio_rustls::TlsConnector),
+    Tls { ctx: tokio_rustls::TlsConnector, name: Option<String> },
 }
 
 impl FromStr for DesiredAuth {

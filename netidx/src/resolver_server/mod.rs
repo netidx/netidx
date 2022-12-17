@@ -172,7 +172,7 @@ impl Clinfos {
                                     AuthWrite::Reuse => (),
                                     AuthWrite::Krb5 { .. }
                                     | AuthWrite::Local
-                                    | AuthWrite::Tls => {
+                                    | AuthWrite::Tls { .. } => {
                                         let publisher = publisher.clone();
                                         *ifo = ClientInfo::CleaningUp(Vec::new());
                                         ctx.secctx.remove(&publisher.id);
@@ -581,7 +581,7 @@ async fn write_client_tls_auth(
         ttl: ctx.cfg.writer_ttl.as_secs(),
         ttl_expired: true,
         resolver_id: ctx.id,
-        auth: AuthWrite::Tls,
+        auth: AuthWrite::Tls { name: Chars::from("") },
     };
     debug!("hello_write sending {:?}", h);
     time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await??;
@@ -652,7 +652,7 @@ async fn hello_client_write(
             SecCtx::Krb5(a) => write_client_krb5_auth(&ctx, con, a, &hello).await?,
             SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Tls(_) => bail!(NO),
         },
-        AuthWrite::Tls => match &ctx.secctx {
+        AuthWrite::Tls { .. } => match &ctx.secctx {
             SecCtx::Tls(a) => write_client_tls_auth(&ctx, con, a, &hello).await?,
             SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Krb5(_) => bail!(NO),
         },

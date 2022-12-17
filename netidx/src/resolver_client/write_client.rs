@@ -4,8 +4,7 @@ use super::common::{
 };
 
 use crate::{
-    channel::Channel,
-    channel::K5CtxWrap,
+    channel::{self, Channel, K5CtxWrap},
     chars::Chars,
     os::local_auth::AuthClient,
     path::Path,
@@ -134,11 +133,10 @@ impl Connection {
             Ok(con.send_one(&answer).await?)
         }
         info!("write_con connecting to resolver {:?}", self.resolver_addr);
-        let con = wt!(TcpStream::connect(&self.resolver_addr))??;
+        let mut con = wt!(TcpStream::connect(&self.resolver_addr))??;
         con.set_nodelay(true)?;
-        let mut con = Channel::new(con);
-        wt!(con.send_one(&2u64))??;
-        if wt!(con.receive::<u64>())?? != 2 {
+        wt!(channel::write_raw(&mut con, &2u64))??;
+        if wt!(channel::read_raw::<u64>(&mut con))?? != 2 {
             bail!("incompatible protocol version")
         }
         let sec = Duration::from_secs(1);
@@ -150,62 +148,107 @@ impl Connection {
             debug!("write_con connection established hello {:?}", h);
             h
         };
-        let (r, ownership_check) = match (&self.desired_auth, &self.resolver_auth) {
-            (DesiredAuth::Anonymous, _) => {
-                wt!(con.send_one(&hello(AuthWrite::Anonymous)))??;
-                (wt!(con.receive::<ServerHelloWrite>())??, false)
-            }
-            (DesiredAuth::Krb5 { .. } | DesiredAuth::Local, Auth::Anonymous) => {
-                bail!("authentication not supported")
-            }
-            (DesiredAuth::Krb5 { .. } | DesiredAuth::Local, Auth::Local { path }) => {
-                let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
-                match secret {
-                    Some(secret) => {
-                        wt!(con.send_one(&hello(AuthWrite::Reuse)))??;
-                        wt!(auth_challenge(&mut con, secret))??;
-                        (wt!(con.receive::<ServerHelloWrite>())??, false)
-                    }
-                    None => {
-                        let tok = wt!(AuthClient::token(&*path))??;
-                        wt!(con.send_one(&hello(AuthWrite::Local)))??;
-                        wt!(con.send_one(&tok))??;
-                        (wt!(con.receive::<ServerHelloWrite>())??, true)
+        let (mut con, r, ownership_check) =
+            match (&self.desired_auth, &self.resolver_auth) {
+                (DesiredAuth::Anonymous, _) => {
+                    wt!(channel::write_raw(&mut con, &hello(AuthWrite::Anonymous)))??;
+                    let r = wt!(channel::read_raw::<ServerHelloWrite>(&mut con))??;
+                    (Channel::new(None, con), r, false)
+                }
+                (
+                    DesiredAuth::Krb5 { .. }
+                    | DesiredAuth::Tls { .. }
+                    | DesiredAuth::Local,
+                    Auth::Anonymous,
+                ) => {
+                    bail!("authentication not supported")
+                }
+                (
+                    DesiredAuth::Krb5 { .. } | DesiredAuth::Tls { .. },
+                    Auth::Local { path },
+                ) => {
+                    let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
+                    let mut con = Channel::new(None, con);
+                    match secret {
+                        Some(secret) => {
+                            wt!(con.send_one(&hello(AuthWrite::Reuse)))??;
+                            wt!(auth_challenge(&mut con, secret))??;
+                            let r = wt!(con.receive::<ServerHelloWrite>())??;
+                            (con, r, false)
+                        }
+                        None => {
+                            let tok = wt!(AuthClient::token(&*path))??;
+                            wt!(con.send_one(&hello(AuthWrite::Local)))??;
+                            wt!(con.send_one(&tok))??;
+                            let r = wt!(con.receive::<ServerHelloWrite>())??;
+                            (con, r, true)
+                        }
                     }
                 }
-            }
-            (DesiredAuth::Local, Auth::Krb5 { .. }) => bail!("local auth not supported"),
-            (DesiredAuth::Krb5 { upn, spn }, Auth::Krb5 { spn: target_spn }) => {
-                let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
-                match (&self.security_context, secret) {
-                    (Some(ctx), Some(secret))
-                        if task::block_in_place(|| ctx.lock().ttl()).unwrap_or(sec)
-                            > sec =>
-                    {
-                        wt!(con.send_one(&hello(AuthWrite::Reuse)))??;
-                        con.set_ctx(ctx.clone()).await;
-                        wt!(auth_challenge(&mut con, secret))??;
-                        let r: ServerHelloWrite = wt!(con.receive())??;
-                        (r, false)
-                    }
-                    (None | Some(_), _) => {
-                        let upn = upn.as_ref().map(|s| s.as_str());
-                        let spn = Chars::from(
-                            spn.clone()
-                                .ok_or_else(|| anyhow!("spn is required for writers"))?,
-                        );
-                        wt!(con.send_one(&hello(AuthWrite::Krb5 { spn })))??;
-                        let ctx =
-                            krb5_authentication(upn, &*target_spn, &mut con).await?;
-                        let ctx = K5CtxWrap::new(ctx);
-                        con.set_ctx(ctx.clone()).await;
-                        let r: ServerHelloWrite = wt!(con.receive())??;
-                        self.security_context = Some(ctx);
-                        (r, true)
+                (DesiredAuth::Local, Auth::Krb5 { .. } | Auth::Tls { .. }) => {
+                    bail!("local auth not supported")
+                }
+                (DesiredAuth::Krb5 { upn, spn }, Auth::Krb5 { spn: target_spn }) => {
+                    let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
+                    match (&self.security_context, secret) {
+                        (Some(ctx), Some(secret))
+                            if task::block_in_place(|| ctx.lock().ttl())
+                                .unwrap_or(sec)
+                                > sec =>
+                        {
+                            wt!(channel::write_raw(&mut con, &hello(AuthWrite::Reuse)))??;
+                            let mut con = Channel::new(Some(ctx.clone()), con);
+                            wt!(auth_challenge(&mut con, secret))??;
+                            let r: ServerHelloWrite = wt!(con.receive())??;
+                            (con, r, false)
+                        }
+                        (None | Some(_), _) => {
+                            let upn = upn.as_ref().map(|s| s.as_str());
+                            let spn =
+                                Chars::from(spn.clone().ok_or_else(|| {
+                                    anyhow!("spn is required for writers")
+                                })?);
+                            wt!(channel::write_raw(
+                                &mut con,
+                                &hello(AuthWrite::Krb5 { spn })
+                            ))??;
+                            let ctx =
+                                krb5_authentication(upn, &*target_spn, &mut con).await?;
+                            let ctx = K5CtxWrap::new(ctx);
+                            let mut con = Channel::new(Some(ctx.clone()), con);
+                            let r: ServerHelloWrite = wt!(con.receive())??;
+                            self.security_context = Some(ctx);
+                            (con, r, true)
+                        }
                     }
                 }
-            }
-        };
+                (DesiredAuth::Tls { ctx, name: publisher_name }, Auth::Tls { name }) => {
+                    let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
+                    let name = rustls::ServerName::try_from(name)?;
+                    match secret {
+                        Some(secret) => {
+                            wt!(channel::write_raw(&mut con, &hello(AuthWrite::Reuse)))??;
+                            let tls = ctx.connect(name, con).await?;
+                            let mut con = Channel::new(None, con);
+                            wt!(auth_challenge(&mut con, secret))??;
+                            let r: ServerHelloWrite = wt!(con.receive())??;
+                            (con, r, false)
+                        }
+                        None => {
+                            let publisher_name =
+                                Chars::from(publisher_name.ok_or_else(|| {
+                                    anyhow!("name is required for writers")
+                                })?);
+                            let h = hello(AuthWrite::Tls { name: publisher_name });
+                            wt!(channel::write_raw(&mut con, &h))??;
+                            let tls = ctx.connect(name, con).await?;
+                            let mut con = Channel::new(None, tls);
+                            let r: ServerHelloWrite = wt!(con.receive())??;
+                            (con, r, true)
+                        }
+                    }
+                }
+            };
         debug!("write_con resolver hello {:?}", r);
         if ownership_check {
             let secret: Secret = wt!(con.receive())??;
