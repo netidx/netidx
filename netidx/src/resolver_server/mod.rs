@@ -1,6 +1,6 @@
 pub(crate) mod auth;
 pub mod config;
-mod secctx;
+pub(crate) mod secctx;
 mod shard_store;
 mod store;
 #[cfg(test)]

@@ -42,7 +42,7 @@ impl LocalAuth {
     }
 }
 
-fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
+pub(crate) fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
     use std::{fs, io::BufReader};
     Ok(rustls_pemfile::certs(&mut BufReader::new(fs::File::open(path)?))?
         .into_iter()
@@ -50,7 +50,7 @@ fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
         .collect())
 }
 
-fn load_private_key(path: &str) -> Result<rustls::PrivateKey> {
+pub(crate) fn load_private_key(path: &str) -> Result<rustls::PrivateKey> {
     use std::{fs, io::BufReader};
     let mut reader = BufReader::new(fs::File::open(path)?);
     while let Some(key) = rustls_pemfile::read_one(&mut reader)? {

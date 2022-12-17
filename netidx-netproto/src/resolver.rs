@@ -102,14 +102,15 @@ pub enum AuthWrite {
     Reuse,
     Krb5 { spn: Chars },
     Local,
-    Tls,
+    Tls { name: Chars },
 }
 
 impl Pack for AuthWrite {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            Self::Anonymous | Self::Reuse | Self::Local | Self::Tls => 0,
+            Self::Anonymous | Self::Reuse | Self::Local => 0,
             Self::Krb5 { spn } => Pack::encoded_len(spn),
+            Self::Tls { name } => Pack::encoded_len(name),
         }
     }
 
@@ -122,7 +123,10 @@ impl Pack for AuthWrite {
                 Pack::encode(spn, buf)
             }
             Self::Local => Ok(buf.put_u8(3)),
-            Self::Tls => Ok(buf.put_u8(4)),
+            Self::Tls { name } => {
+                buf.put_u8(4);
+                Pack::encode(name, buf)
+            }
         }
     }
 
@@ -132,7 +136,7 @@ impl Pack for AuthWrite {
             1 => Ok(Self::Reuse),
             2 => Ok(Self::Krb5 { spn: Pack::decode(buf)? }),
             3 => Ok(Self::Local),
-            4 => Ok(Self::Tls),
+            4 => Ok(Self::Tls { name: Pack::decode(buf)? }),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -347,15 +351,16 @@ pub enum Auth {
     Anonymous,
     Local { path: Chars },
     Krb5 { spn: Chars },
-    Tls,
+    Tls { name: Chars },
 }
 
 impl Pack for Auth {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            Self::Anonymous | Self::Tls => 0,
+            Self::Anonymous => 0,
             Self::Local { path } => Pack::encoded_len(path),
             Self::Krb5 { spn } => Pack::encoded_len(spn),
+            Self::Tls { name } => Pack::encoded_len(name),
         }
     }
 
@@ -370,7 +375,10 @@ impl Pack for Auth {
                 buf.put_u8(2);
                 Pack::encode(spn, buf)
             }
-            Self::Tls => Ok(buf.put_u8(3)),
+            Self::Tls { name } => {
+                buf.put_u8(3);
+                Pack::encode(name, buf)
+            }
         }
     }
 
@@ -379,7 +387,7 @@ impl Pack for Auth {
             0 => Ok(Self::Anonymous),
             1 => Ok(Self::Local { path: Pack::decode(buf)? }),
             2 => Ok(Self::Krb5 { spn: Pack::decode(buf)? }),
-            3 => Ok(Self::Tls),
+            3 => Ok(Self::Tls { name: Pack::decode(buf)? }),
             _ => Err(Error::UnknownTag),
         }
     }
@@ -406,14 +414,14 @@ pub enum TargetAuth {
     Anonymous,
     Local,
     Krb5 { spn: Chars },
-    Tls,
+    Tls { name: Chars },
 }
 
 impl TargetAuth {
     pub fn is_anonymous(&self) -> bool {
         match self {
             Self::Anonymous => true,
-            Self::Krb5 { spn: _ } | Self::Local | Self::Tls => false,
+            Self::Krb5 { .. } | Self::Local | Self::Tls { .. } => false,
         }
     }
 }
@@ -427,7 +435,7 @@ impl TryFrom<AuthWrite> for TargetAuth {
             AuthWrite::Local => Ok(Self::Local),
             AuthWrite::Krb5 { spn } => Ok(Self::Krb5 { spn }),
             AuthWrite::Reuse => bail!("no session to reuse"),
-            AuthWrite::Tls => Ok(Self::Tls),
+            AuthWrite::Tls { name } => Ok(Self::Tls { name }),
         }
     }
 }
@@ -435,8 +443,9 @@ impl TryFrom<AuthWrite> for TargetAuth {
 impl Pack for TargetAuth {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            Self::Anonymous | Self::Local | Self::Tls => 0,
+            Self::Anonymous | Self::Local => 0,
             Self::Krb5 { spn } => Pack::encoded_len(spn),
+            Self::Tls { name } => Pack::encoded_len(name),
         }
     }
 
@@ -448,7 +457,10 @@ impl Pack for TargetAuth {
                 buf.put_u8(2);
                 Pack::encode(spn, buf)
             }
-            Self::Tls => Ok(buf.put_u8(3)),
+            Self::Tls { name } => {
+                buf.put_u8(3);
+                Pack::encode(name, buf)
+            }
         }
     }
 
@@ -457,7 +469,7 @@ impl Pack for TargetAuth {
             0 => Ok(Self::Anonymous),
             1 => Ok(Self::Local),
             2 => Ok(Self::Krb5 { spn: Pack::decode(buf)? }),
-            3 => Ok(Self::Tls),
+            3 => Ok(Self::Tls { name: Pack::decode(buf)? }),
             _ => Err(PackError::UnknownTag),
         }
     }

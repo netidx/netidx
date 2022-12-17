@@ -3,8 +3,7 @@ use super::common::{
     PUBLISHERPOOL, RAWFROMREADPOOL,
 };
 use crate::{
-    channel::Channel,
-    channel::K5CtxWrap,
+    channel::{self, Channel, K5CtxWrap},
     os::local_auth::AuthClient,
     pool::Pooled,
     protocol::resolver::{
@@ -52,42 +51,65 @@ async fn connect(
             time::sleep(Duration::from_secs(wait)).await;
         }
         n += 1;
-        let con = cwt!("connect", TcpStream::connect(&addr));
+        let mut con = cwt!("connect", TcpStream::connect(&addr));
         try_cf!("no delay", con.set_nodelay(true));
-        let mut con = Channel::new(con);
-        cwt!("send version", con.send_one(&2u64));
-        if cwt!("recv version", con.receive::<u64>()) != 2 {
-            continue
+        cwt!("send version", channel::write_raw(&mut con, &2u64));
+        if cwt!("recv version", channel::read_raw::<u64>(&mut con)) != 2 {
+            continue;
         }
-        match (desired_auth, auth) {
+        let con = match (desired_auth, auth) {
             (DesiredAuth::Anonymous, _) => {
+                let mut con = Channel::new(None, con);
                 cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Anonymous)));
                 match cwt!("reply", con.receive::<AuthRead>()) {
                     AuthRead::Anonymous => (),
-                    AuthRead::Local | AuthRead::Krb5 => bail!("protocol error"),
+                    AuthRead::Local | AuthRead::Krb5 | AuthRead::Tls => {
+                        bail!("protocol error")
+                    }
                 }
+                con
             }
-            (DesiredAuth::Krb5 {..} | DesiredAuth::Local, Auth::Anonymous) => {
-                bail!("authentication not supported")
+            (
+                DesiredAuth::Krb5 { .. } | DesiredAuth::Local | DesiredAuth::Tls(_),
+                Auth::Anonymous,
+            ) => {
+                bail!("requested authentication mechanism not supported")
             }
-            (DesiredAuth::Local | DesiredAuth::Krb5 { .. }, Auth::Local { path }) => {
+            (
+                DesiredAuth::Local | DesiredAuth::Krb5 { .. } | DesiredAuth::Tls(_),
+                Auth::Local { path },
+            ) => {
+                let mut con = Channel::new(None, con);
                 let tok = cwt!("local token", AuthClient::token(&*path));
                 cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Local)));
                 cwt!("token", con.send_one(&tok));
                 match cwt!("reply", con.receive::<AuthRead>()) {
                     AuthRead::Local => (),
-                    AuthRead::Krb5 | AuthRead::Anonymous => bail!("protocol error"),
+                    AuthRead::Krb5 | AuthRead::Anonymous | AuthRead::Tls => {
+                        bail!("protocol error")
+                    }
                 }
+                con
             }
-            (DesiredAuth::Local, Auth::Krb5 {..}) => bail!("local auth not supported"),
+            (DesiredAuth::Local, Auth::Krb5 { .. } | Auth::Tls) => {
+                bail!("local auth not supported")
+            }
             (DesiredAuth::Krb5 { upn, .. }, Auth::Krb5 { spn }) => {
                 let upn = upn.as_ref().map(|s| s.as_str());
-                cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Krb5)));
+                let hello = ClientHello::ReadOnly(AuthRead::Krb5);
+                cwt!("hello", channel::write_raw(&mut con, &hello));
                 let ctx = cwt!("k5auth", krb5_authentication(upn, &*spn, &mut con));
-                match cwt!("reply", con.receive::<AuthRead>()) {
-                    AuthRead::Krb5 => con.set_ctx(K5CtxWrap::new(ctx)).await,
-                    AuthRead::Local | AuthRead::Anonymous => bail!("protocol error"),
+                match cwt!("reply", channel::read_raw::<AuthRead>(&mut con)) {
+                    AuthRead::Krb5 => Channel::new(Some(K5CtxWrap::new(ctx)), con),
+                    AuthRead::Local | AuthRead::Anonymous | AuthRead::Tls => {
+                        bail!("protocol error")
+                    }
                 }
+            }
+            (DesiredAuth::Tls(connector), Auth::Tls) => {
+                let hello = ClientHello::ReadOnly(AuthRead::Tls);
+                cwt!("hello", channel::write_raw(&mut con, &hello));
+                
             }
         };
         break Ok(con);

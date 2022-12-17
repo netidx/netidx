@@ -167,7 +167,7 @@ pub(crate) mod file {
         pub(super) pid_file: String,
         pub(super) reader_ttl: u64,
         pub(super) writer_ttl: u64,
-        pub(super) id_map: Option<String>,
+        pub(super) id_map_command: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,7 +188,7 @@ pub struct MemberServer {
     pub pid_file: String,
     pub(super) reader_ttl: Duration,
     pub(super) writer_ttl: Duration,
-    pub(super) id_map: Option<String>, // default /usr/bin/id
+    pub(super) id_map_command: Option<String>, // default /usr/bin/id
 }
 
 #[derive(Debug, Clone)]
@@ -265,7 +265,7 @@ impl Config {
                     max_connections: m.max_connections,
                     reader_ttl: Duration::from_secs(m.reader_ttl),
                     writer_ttl: Duration::from_secs(m.writer_ttl),
-                    id_map: m.id_map,
+                    id_map_command: m.id_map_command,
                 })
             })
             .collect::<Result<Vec<_>>>()?;

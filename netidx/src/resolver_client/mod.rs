@@ -724,3 +724,25 @@ impl ResolverWrite {
         self.0.secrets()
     }
 }
+
+/// If your desired auth is going to be TLS then you can use this to
+/// build the TlsConnector in a way that's usable for netidx.
+pub fn create_tls_connector(
+    root_certificates: &str,
+    certificate: &str,
+    private_key: &str,
+) -> Result<tokio_rustls::TlsConnector> {
+    use crate::resolver_server::secctx::{load_certs, load_private_key};
+    let mut root_store = rustls::RootCertStore::empty();
+    for cert in load_certs(root_certificates)? {
+        root_store.add(&cert)?;
+    }
+    let certs = load_certs(certificate)?;
+    let private_key = load_private_key(private_key)?;
+    let mut config = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_root_certificates(root_store)
+        .with_single_cert(certs, private_key)?;
+    config.session_storage = rustls::client::ClientSessionMemoryCache::new(256);
+    Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
+}

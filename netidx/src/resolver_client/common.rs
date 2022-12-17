@@ -1,5 +1,5 @@
 use crate::{
-    channel::Channel,
+    channel::{self, Channel},
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::{
@@ -7,13 +7,13 @@ use crate::{
     },
     utils,
 };
-use futures::channel::oneshot;
 use anyhow::Result;
 use cross_krb5::{ClientCtx, InitiateFlags, Step};
+use futures::channel::oneshot;
 use fxhash::FxHashMap;
 use netidx_core::pack::BoundedBytes;
 use std::{fmt::Debug, str::FromStr, time::Duration};
-use tokio::{task, time};
+use tokio::{net::TcpStream, task, time};
 
 pub(super) const HELLO_TO: Duration = Duration::from_secs(15);
 
@@ -41,6 +41,7 @@ pub enum DesiredAuth {
     Anonymous,
     Krb5 { upn: Option<String>, spn: Option<String> },
     Local,
+    Tls(tokio_rustls::TlsConnector),
 }
 
 impl FromStr for DesiredAuth {
@@ -64,11 +65,11 @@ pub(super) type ResponseChan<F> = oneshot::Receiver<Response<F>>;
 pub(crate) async fn krb5_authentication(
     principal: Option<&str>,
     target_principal: &str,
-    con: &mut Channel<ClientCtx>,
+    con: &mut TcpStream,
 ) -> Result<ClientCtx> {
-    async fn send(con: &mut Channel<ClientCtx>, token: &[u8]) -> Result<()> {
+    async fn send(con: &mut TcpStream, token: &[u8]) -> Result<()> {
         let token = BoundedBytes::<L>(utils::bytes(&*token));
-        Ok(time::timeout(HELLO_TO, con.send_one(&token)).await??)
+        Ok(time::timeout(HELLO_TO, channel::write_raw(&mut con, &token)).await??)
     }
     const L: usize = 1 * 1024 * 1024;
     let (mut ctx, token) = task::block_in_place(|| {
@@ -76,7 +77,8 @@ pub(crate) async fn krb5_authentication(
     })?;
     send(con, &*token).await?;
     loop {
-        let token: BoundedBytes<L> = time::timeout(HELLO_TO, con.receive()).await??;
+        let token: BoundedBytes<L> =
+            time::timeout(HELLO_TO, channel::read_raw(&mut con)).await??;
         match task::block_in_place(|| ctx.step(&*token))? {
             Step::Continue((nctx, token)) => {
                 ctx = nctx;
