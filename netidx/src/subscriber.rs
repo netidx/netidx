@@ -1290,7 +1290,7 @@ fn unsubscribe(
 }
 
 async fn hello_publisher(
-    con: &mut Channel<ClientCtx>,
+    con: &mut Channel,
     desired_auth: &DesiredAuth,
     target_auth: &TargetAuth,
 ) -> Result<()> {

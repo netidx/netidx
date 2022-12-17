@@ -220,7 +220,7 @@ struct Ctx {
 async fn client_loop_write(
     ctx: Arc<Ctx>,
     connection_id: CId,
-    con: Channel<ServerCtx>,
+    con: Channel,
     server_stop: oneshot::Receiver<()>,
     rx_stop: oneshot::Receiver<()>,
     uifo: Arc<UserInfo>,
@@ -234,7 +234,7 @@ async fn client_loop_write(
     let mut timeout =
         time::interval_at(Instant::now() + ctx.cfg.writer_ttl, ctx.cfg.writer_ttl);
     async fn receive_batch(
-        con: &mut Option<Channel<ServerCtx>>,
+        con: &mut Option<Channel>,
         batch: &mut Vec<ToWrite>,
     ) -> Result<()> {
         match con {
@@ -353,7 +353,7 @@ pub(crate) async fn krb5_authentication(
 
 async fn challenge_auth(
     cfg: &MemberServer,
-    con: &mut Channel<ServerCtx>,
+    con: &mut Channel,
     secret: u128,
 ) -> Result<()> {
     let n = thread_rng().gen::<u128>();
@@ -369,7 +369,7 @@ async fn challenge_auth(
 }
 async fn ownership_check(
     ctx: &Ctx,
-    con: &mut Channel<ServerCtx>,
+    con: &mut Channel,
     write_addr: SocketAddr,
     secret: u128,
 ) -> Result<()> {
@@ -377,8 +377,10 @@ async fn ownership_check(
     time::timeout(timeout, con.send_one(&Secret(secret))).await??;
     let _: ReadyForOwnershipCheck = time::timeout(timeout, con.receive()).await??;
     info!("hello_write connecting to {:?} for listener ownership check", write_addr);
-    let mut con: Channel<ServerCtx> =
-        Channel::new(time::timeout(timeout, TcpStream::connect(write_addr)).await??);
+    let mut con: Channel = Channel::new(
+        None,
+        time::timeout(timeout, TcpStream::connect(write_addr)).await??,
+    );
     time::timeout(timeout, con.send_one(&2u64)).await??;
     if time::timeout(timeout, con.receive::<u64>()).await?? != 2 {
         bail!("incompatible protocol version")
@@ -396,8 +398,7 @@ async fn ownership_check(
     Ok(())
 }
 
-type AuthResult =
-    Result<(Channel<ServerCtx>, Arc<UserInfo>, Arc<Publisher>, oneshot::Receiver<()>)>;
+type AuthResult = Result<(Channel, Arc<UserInfo>, Arc<Publisher>, oneshot::Receiver<()>)>;
 
 async fn write_client_anonymous_auth(
     ctx: &Arc<Ctx>,
@@ -419,7 +420,7 @@ async fn write_client_anonymous_auth(
         ctx.clinfos.remove(&ctx, &publisher, uifo).await?;
         Err(e)?;
     }
-    Ok((Channel::new(con), ANONYMOUS.clone(), publisher, rx_stop))
+    Ok((Channel::new(None, con), ANONYMOUS.clone(), publisher, rx_stop))
 }
 
 async fn write_client_local_auth(
@@ -441,7 +442,7 @@ async fn write_client_local_auth(
     debug!("hello_write sending {:?}", h);
     send(ctx.cfg.hello_timeout, &mut con, &h).await?;
     let secret = thread_rng().gen::<u128>();
-    let mut con = Channel::new(con);
+    let mut con = Channel::new(None, con);
     ownership_check(&ctx, &mut con, hello.write_addr, secret).await?;
     let (publisher, _, rx_stop) = ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
     let d = LocalSecData { user: cred.user, secret };
@@ -459,7 +460,7 @@ async fn write_client_reuse_local(
     let id = ctx.clinfos.id(wa).ok_or_else(|| anyhow!("missing"))?;
     let d = a.1.read().get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
     let uifo = a.1.write().users.ifo(Some(&*d.user))?;
-    let mut con = Channel::new(con);
+    let mut con = Channel::new(None, con);
     challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
     let (publisher, ttl_expired, rx_stop) =
         ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
@@ -492,8 +493,7 @@ async fn write_client_krb5_auth(
     info!("hello_write initiating new krb5 context for {:?}", hello.write_addr);
     let k5ctx = krb5_authentication(ctx.cfg.hello_timeout, Some(&*a.0), &mut con).await?;
     let k5ctx = K5CtxWrap::new(k5ctx);
-    let mut con = Channel::new(con);
-    con.set_ctx(k5ctx.clone()).await;
+    let mut con = Channel::new(Some(k5ctx.clone()), con);
     info!("hello_write all traffic now encrypted");
     let h = ServerHelloWrite {
         ttl: ctx.cfg.writer_ttl.as_secs(),
@@ -525,8 +525,7 @@ async fn write_client_reuse_krb5(
     let d = a.1.read().get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
     let uifo =
         a.1.write().users.ifo(Some(&task::block_in_place(|| d.ctx.lock().client())?))?;
-    let mut con = Channel::new(con);
-    con.set_ctx(d.ctx).await;
+    let mut con = Channel::new(Some(d.ctx), con);
     info!("hello_write all traffic now encrypted");
     challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
     let (publisher, ttl_expired, rx_stop) =
@@ -609,7 +608,7 @@ async fn hello_client_write(
 
 async fn client_loop_read(
     ctx: Arc<Ctx>,
-    mut con: Channel<ServerCtx>,
+    mut con: Channel,
     server_stop: oneshot::Receiver<()>,
     uifo: Arc<UserInfo>,
 ) -> Result<()> {
@@ -650,7 +649,7 @@ async fn hello_client_read(
     let (con, uifo) = match hello {
         AuthRead::Anonymous => {
             send(ctx.cfg.hello_timeout, &mut con, &AuthRead::Anonymous).await?;
-            (Channel::new(con), ANONYMOUS.clone())
+            (Channel::new(None, con), ANONYMOUS.clone())
         }
         AuthRead::Local => match ctx.secctx {
             SecCtx::Anonymous | SecCtx::Krb5(_) => bail!("auth mech not supported"),
@@ -660,7 +659,7 @@ async fn hello_client_read(
                 let cred = a.0.authenticate(&*tok)?;
                 let uifo = a.1.write().users.ifo(Some(&cred.user))?;
                 send(ctx.cfg.hello_timeout, &mut con, &AuthRead::Local).await?;
-                (Channel::new(con), uifo)
+                (Channel::new(None, con), uifo)
             }
         },
         AuthRead::Krb5 => match ctx.secctx {
@@ -671,13 +670,13 @@ async fn hello_client_read(
                 let k5ctx =
                     krb5_authentication(ctx.cfg.hello_timeout, Some(&*a.0), &mut con)
                         .await?;
-                let k5ctx = K5CtxWrap::new(k5ctx);
                 send(ctx.cfg.hello_timeout, &mut con, &AuthRead::Krb5).await?;
-                let mut con = Channel::new(con);
-                con.set_ctx(k5ctx.clone()).await;
-                let uifo = a.1.write()
-                    .users
-                    .ifo(Some(&task::block_in_place(|| k5ctx.lock().client())?))?;
+                let k5ctx = K5CtxWrap::new(k5ctx);
+                let mut con = Channel::new(Some(k5ctx.clone()), con);
+                let uifo =
+                    a.1.write()
+                        .users
+                        .ifo(Some(&task::block_in_place(|| k5ctx.lock().client())?))?;
                 (con, uifo)
             }
         },

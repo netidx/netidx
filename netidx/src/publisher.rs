@@ -1291,7 +1291,7 @@ type DeferredSubs =
 
 fn subscribe(
     t: &mut PublisherInner,
-    con: &mut Channel<ServerCtx>,
+    con: &mut Channel,
     client: ClId,
     path: Path,
     permissions: Permissions,
@@ -1386,7 +1386,7 @@ fn unsubscribe(t: &mut PublisherInner, client: ClId, id: Id) {
 
 fn write(
     t: &mut PublisherInner,
-    con: &mut Channel<ServerCtx>,
+    con: &mut Channel,
     client: ClId,
     gc_on_write: &mut Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
     wait_write_res: &mut Vec<(Id, oneshot::Receiver<Value>)>,
@@ -1490,7 +1490,7 @@ const HB: Duration = Duration::from_secs(5);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct ClientCtx {
-    con: Channel<ServerCtx>,
+    con: Channel,
     desired_auth: DesiredAuth,
     client: ClId,
     publisher: PublisherWeak,
