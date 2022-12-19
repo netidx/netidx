@@ -5,14 +5,15 @@ use crate::{
     protocol::resolver::{
         FromRead, FromWrite, Publisher, PublisherId, Resolved, ToRead, ToWrite,
     },
-    utils,
+    tls, utils,
 };
 use anyhow::Result;
 use cross_krb5::{ClientCtx, InitiateFlags, Step};
 use futures::channel::oneshot;
 use fxhash::FxHashMap;
 use netidx_core::pack::BoundedBytes;
-use std::{fmt::Debug, str::FromStr, sync::Arc, time::Duration};
+use parking_lot::Mutex;
+use std::{collections::HashMap, fmt::Debug, str::FromStr, time::Duration};
 use tokio::{net::TcpStream, task, time};
 
 pub(super) const HELLO_TO: Duration = Duration::from_secs(15);

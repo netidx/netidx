@@ -1,6 +1,6 @@
 use anyhow::Result;
+use parking_lot::Mutex;
 use std::sync::Arc;
-use tokio::task;
 
 fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
     use std::{fs, io::BufReader};
@@ -30,7 +30,6 @@ pub(crate) fn create_tls_connector(
     certificate: &str,
     private_key: &str,
 ) -> Result<tokio_rustls::TlsConnector> {
-    use crate::resolver_server::secctx::{load_certs, load_private_key};
     let mut root_store = rustls::RootCertStore::empty();
     for cert in load_certs(root_certificates)? {
         root_store.add(&cert)?;
@@ -52,17 +51,77 @@ pub(crate) fn create_tls_acceptor(
 ) -> Result<tokio_rustls::TlsAcceptor> {
     let client_auth = {
         let mut root_store = rustls::RootCertStore::empty();
-        for cert in task::block_in_place(|| load_certs(root_certificates))? {
+        for cert in load_certs(root_certificates)? {
             root_store.add(&cert)?;
         }
         rustls::server::AllowAnyAnonymousOrAuthenticatedClient::new(root_store)
     };
-    let certs = task::block_in_place(|| load_certs(certificate))?;
-    let private_key = task::block_in_place(|| load_private_key(private_key))?;
+    let certs = load_certs(certificate)?;
+    let private_key = load_private_key(private_key)?;
     let mut config = rustls::ServerConfig::builder()
         .with_safe_defaults()
         .with_client_cert_verifier(client_auth)
         .with_single_cert(certs, private_key)?;
     config.session_storage = rustls::server::ServerSessionMemoryCache::new(1024);
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
+
+#[derive(Clone)]
+struct Cached<T>(Arc<Mutex<Option<T>>>);
+
+impl<T: 'static> Cached<T> {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
+
+    fn load(
+        &self,
+        root_certificates: &str,
+        certificate: &str,
+        private_key: &str,
+        f: fn(&str, &str, &str) -> Result<T>,
+    ) -> Result<T> {
+        if let Some(con) = self.lock().as_ref() {
+            return Ok(con.clone());
+        }
+        let con = f(root_certificates, certificate, private_key)?;
+        *self.lock() = Some(con.clone());
+        Ok(con)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CachedConnector(Cached<tokio_rustls::TlsConnector>);
+
+impl CachedConnector {
+    pub(crate) fn new() -> Self {
+        Self(Cached::new())
+    }
+
+    pub(crate) fn load(
+        &self,
+        root_certificates: &str,
+        certificate: &str,
+        private_key: &str,
+    ) -> Result<tokio_rustls::TlsConnector> {
+        self.0.load(root_certificates, certificate, private_key, create_tls_connector)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CachedAcceptor(Cached<tokio_rustls::TlsAcceptor>);
+
+impl CachedAcceptor {
+    pub(crate) fn new() -> Self {
+        Self(Cached::new())
+    }
+
+    pub(crate) fn load(
+        &self,
+        root_certificates: &str,
+        certificate: &str,
+        private_key: &str,
+    ) -> Result<tokio_rustls::TlsAcceptor> {
+        self.0.load(root_certificates, certificate, private_key, create_tls_acceptor)
+    }
 }

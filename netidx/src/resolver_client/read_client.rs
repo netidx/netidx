@@ -9,6 +9,7 @@ use crate::{
     protocol::resolver::{
         Auth, AuthRead, ClientHello, FromRead, Publisher, Referral, ToRead,
     },
+    tls,
     utils::Either,
 };
 use anyhow::{Error, Result};
@@ -18,6 +19,7 @@ use futures::{
     prelude::*,
 };
 use log::{info, warn};
+use parking_lot::Mutex;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{cmp::max, fmt::Debug, sync::Arc, time::Duration};
 use tokio::{net::TcpStream, task, time};
@@ -36,6 +38,7 @@ macro_rules! cwt {
 async fn connect(
     resolver: &Referral,
     desired_auth: &DesiredAuth,
+    tls: &tls::CachedConnector,
 ) -> Result<Channel<ClientCtx>> {
     let mut addrs = resolver.addrs.clone();
     addrs.as_mut_slice().shuffle(&mut thread_rng());
@@ -70,13 +73,13 @@ async fn connect(
                 con
             }
             (
-                DesiredAuth::Krb5 { .. } | DesiredAuth::Local | DesiredAuth::Tls {..},
+                DesiredAuth::Krb5 { .. } | DesiredAuth::Local | DesiredAuth::Tls { .. },
                 Auth::Anonymous,
             ) => {
                 bail!("requested authentication mechanism not supported")
             }
             (
-                DesiredAuth::Local | DesiredAuth::Krb5 { .. } | DesiredAuth::Tls {..},
+                DesiredAuth::Local | DesiredAuth::Krb5 { .. } | DesiredAuth::Tls { .. },
                 Auth::Local { path },
             ) => {
                 let mut con = Channel::new(None, con);
@@ -106,7 +109,13 @@ async fn connect(
                     }
                 }
             }
-            (DesiredAuth::Tls {ctx, name: _}, Auth::Tls { name }) => {
+            (
+                DesiredAuth::Tls { name: _, root_certificates, certificate, private_key },
+                Auth::Tls { name },
+            ) => {
+                let ctx = task::block_in_place(|| {
+                    tls.load(&root_certificates, &certificate, &private_key)
+                })?;
                 let hello = ClientHello::ReadOnly(AuthRead::Tls);
                 cwt!("hello", channel::write_raw(&mut con, &hello));
                 let name = rustls::ServerName::try_from(name)?;
@@ -114,7 +123,7 @@ async fn connect(
                 let mut con = Channel::new(None, tls);
                 match cwt!("reply", channel::read_raw::<AuthRead>(&mut con)) {
                     AuthRead::Tls => con,
-                    AuthRead::Local | AuthRead::Anonymous | AuthRead::Krb5 {..} => {
+                    AuthRead::Local | AuthRead::Anonymous | AuthRead::Krb5 { .. } => {
                         bail!("protocol error")
                     }
                 }
@@ -144,6 +153,7 @@ async fn connection(
     mut receiver: mpsc::UnboundedReceiver<Batch>,
     resolver: Arc<Referral>,
     desired_auth: DesiredAuth,
+    tls: Arc<Mutex<Option<tokio_rustls::TlsConnector>>>,
 ) {
     let mut con: Option<Channel<ClientCtx>> = None;
     'main: loop {
@@ -162,7 +172,7 @@ async fn connection(
                     tries += 1;
                     let c = match con {
                         Some(ref mut c) => c,
-                        None => match connect(&resolver, &desired_auth).await {
+                        None => match connect(&resolver, &desired_auth, &tls).await {
                             Ok(c) => {
                                 con = Some(c);
                                 con.as_mut().unwrap()
@@ -245,10 +255,14 @@ async fn connection(
 pub(super) struct ReadClient(mpsc::UnboundedSender<Batch>);
 
 impl ReadClient {
-    pub(super) fn new(resolver: Arc<Referral>, desired_auth: DesiredAuth) -> Self {
+    pub(super) fn new(
+        resolver: Arc<Referral>,
+        desired_auth: DesiredAuth,
+        tls: tls::CachedConnector,
+    ) -> Self {
         let (to_tx, to_rx) = mpsc::unbounded();
         task::spawn(async move {
-            connection(to_rx, resolver, desired_auth).await;
+            connection(to_rx, resolver, desired_auth, tls).await;
             info!("read task shutting down")
         });
         Self(to_tx)

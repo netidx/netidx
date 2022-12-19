@@ -13,7 +13,7 @@ use crate::{
     pool::{Pool, Pooled},
     protocol::resolver::{
         FromRead, FromWrite, Publisher, PublisherId, Referral, ToRead, ToWrite,
-    },
+    }, tls,
 };
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -187,6 +187,7 @@ where
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+        tls: Arc<Mutex<Option<tokio_rustls::TlsConnector>>>,
     ) -> Self;
     fn send(&mut self, batch: Pooled<Vec<(usize, T)>>) -> ResponseChan<F>;
 }
@@ -197,8 +198,9 @@ impl Connection<ToRead, FromRead> for ReadClient {
         desired_auth: DesiredAuth,
         _writer_addr: SocketAddr,
         _secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+        tls: tls::CachedConnector,
     ) -> Self {
-        ReadClient::new(resolver, desired_auth)
+        ReadClient::new(resolver, desired_auth, tls)
     }
 
     fn send(&mut self, batch: Pooled<Vec<(usize, ToRead)>>) -> ResponseChan<FromRead> {
@@ -212,8 +214,9 @@ impl Connection<ToWrite, FromWrite> for WriteClient {
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+        tls: tls::CachedConnector,
     ) -> Self {
-        WriteClient::new(resolver, desired_auth, writer_addr, secrets)
+        WriteClient::new(resolver, desired_auth, writer_addr, secrets, tls)
     }
 
     fn send(&mut self, batch: Pooled<Vec<(usize, ToWrite)>>) -> ResponseChan<FromWrite> {
@@ -233,6 +236,7 @@ where
     by_server: HashMap<Arc<Referral>, C>,
     writer_addr: SocketAddr,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+    tls: tls::CachedConnector,
     phantom: PhantomData<(T, F)>,
     f_pool: Pool<Vec<F>>,
     fi_pool: Pool<Vec<(usize, F)>>,
@@ -259,6 +263,7 @@ where
                     self.desired_auth.clone(),
                     self.writer_addr,
                     self.secrets.clone(),
+                    self.tls.clone(),
                 );
                 self.by_server.insert(r, con.clone());
                 con.send(batch)
@@ -298,6 +303,7 @@ where
             by_server: HashMap::new(),
             writer_addr,
             secrets,
+            tls: Mutex::new(None),
             f_pool,
             fi_pool,
             ti_pool,
@@ -723,26 +729,4 @@ impl ResolverWrite {
     pub(crate) fn secrets(&self) -> Arc<RwLock<FxHashMap<SocketAddr, u128>>> {
         self.0.secrets()
     }
-}
-
-/// If your desired auth is going to be TLS then you can use this to
-/// build the TlsConnector in a way that's usable for netidx.
-pub fn create_tls_connector(
-    root_certificates: &str,
-    certificate: &str,
-    private_key: &str,
-) -> Result<tokio_rustls::TlsConnector> {
-    use crate::resolver_server::secctx::{load_certs, load_private_key};
-    let mut root_store = rustls::RootCertStore::empty();
-    for cert in load_certs(root_certificates)? {
-        root_store.add(&cert)?;
-    }
-    let certs = load_certs(certificate)?;
-    let private_key = load_private_key(private_key)?;
-    let mut config = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(root_store)
-        .with_single_cert(certs, private_key)?;
-    config.session_storage = rustls::client::ClientSessionMemoryCache::new(256);
-    Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
 }

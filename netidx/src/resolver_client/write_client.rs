@@ -13,7 +13,7 @@ use crate::{
         Auth, AuthChallenge, AuthWrite, ClientHello, ClientHelloWrite, FromWrite,
         HashMethod, ReadyForOwnershipCheck, Referral, Secret, ServerHelloWrite, ToWrite,
     },
-    utils,
+    tls, utils,
 };
 use anyhow::{anyhow, Result};
 use cross_krb5::{ClientCtx, K5Ctx};
@@ -60,6 +60,7 @@ struct Connection {
     published: Arc<RwLock<HashMap<Path, ToWrite>>>,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     security_context: Option<K5CtxWrap<ClientCtx>>,
+    tls: tls::CachedConnector,
     desired_auth: DesiredAuth,
     degraded: bool,
     active: bool,
@@ -222,7 +223,18 @@ impl Connection {
                         }
                     }
                 }
-                (DesiredAuth::Tls { ctx, name: publisher_name }, Auth::Tls { name }) => {
+                (
+                    DesiredAuth::Tls {
+                        name: publisher_name,
+                        root_certificates,
+                        certificate,
+                        private_key,
+                    },
+                    Auth::Tls { name },
+                ) => {
+                    let ctx = task::block_in_place(|| {
+                        self.tls.load(root_certificates, certificate, private_key)
+                    })?;
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
                     let name = rustls::ServerName::try_from(name)?;
                     match secret {
@@ -382,6 +394,7 @@ impl Connection {
         published: Arc<RwLock<HashMap<Path, ToWrite>>>,
         desired_auth: DesiredAuth,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+        tls: tls::CachedConnector,
     ) {
         let now = Instant::now();
         let mut t = Self {
@@ -392,6 +405,7 @@ impl Connection {
             secrets,
             desired_auth,
             security_context: None,
+            tls,
             con: None,
             degraded: false,
             active: false,
@@ -434,6 +448,7 @@ async fn write_mgr(
     desired_auth: DesiredAuth,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     write_addr: SocketAddr,
+    tls: tls::CachedConnector,
 ) -> Result<()> {
     let published: Arc<RwLock<HashMap<Path, ToWrite>>> =
         Arc::new(RwLock::new(HashMap::new()));
@@ -446,6 +461,7 @@ async fn write_mgr(
             let published = published.clone();
             let desired_auth = desired_auth.clone();
             let secrets = secrets.clone();
+            let tls = tls.clone();
             senders.push(sender);
             task::spawn(async move {
                 Connection::start(
@@ -456,6 +472,7 @@ async fn write_mgr(
                     published,
                     desired_auth,
                     secrets,
+                    tls,
                 )
                 .await;
                 info!("write task for {:?} exited", addr);
@@ -507,10 +524,12 @@ impl WriteClient {
         desired_auth: DesiredAuth,
         write_addr: SocketAddr,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
+        tls: tls::CachedConnector,
     ) -> Self {
         let (to_tx, to_rx) = mpsc::unbounded();
         task::spawn(async move {
-            let r = write_mgr(to_rx, resolver, desired_auth, secrets, write_addr).await;
+            let r =
+                write_mgr(to_rx, resolver, desired_auth, secrets, write_addr, tls).await;
             info!("write manager exited {:?}", r);
         });
         Self(to_tx)
