@@ -13,6 +13,7 @@ use crate::{
     protocol::{self, publisher},
     resolver_client::ResolverWrite,
     resolver_server::{auth::Permissions, krb5_authentication},
+    tls,
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
@@ -1501,6 +1502,7 @@ struct ClientCtx {
     wait_write_res: Vec<(Id, oneshot::Receiver<Value>)>,
     gc_on_write: Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
     msg_sent: bool,
+    tls_ctx: tls::CachedAcceptor,
 }
 
 impl ClientCtx {
@@ -1509,6 +1511,7 @@ impl ClientCtx {
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
         publisher: PublisherWeak,
         desired_auth: DesiredAuth,
+        tls_ctx: tls::CachedAcceptor,
     ) -> ClientCtx {
         let mut deferred_subs: DeferredSubs =
             Batched::new(SelectAll::new(), MAX_DEFERRED);
@@ -1525,6 +1528,7 @@ impl ClientCtx {
             wait_write_res: Vec::new(),
             gc_on_write: Vec::new(),
             msg_sent: false,
+            tls_ctx,
         }
     }
 
@@ -1538,7 +1542,7 @@ impl ClientCtx {
     }
 
     // CR estokes: Implement periodic rekeying to improve security
-    async fn hello(&mut self, con: &mut TcpStream) -> Result<()> {
+    async fn hello(&mut self, con: &mut TcpStream) -> Result<Channel> {
         use protocol::publisher::Hello;
         static NO: &str = "authentication mechanism not supported";
         debug!("hello_client");
@@ -1550,47 +1554,64 @@ impl ClientCtx {
         debug!("hello_client received {:?}", hello);
         match hello {
             Hello::Anonymous => {
-                self.con.send_one(&Hello::Anonymous).await?;
+                channel::write_raw(&mut con, &Hello::Anonymous).await?;
                 self.client_arrived();
+                Ok(Channel::new(None, con))
             }
             Hello::Local => {
-                self.con.send_one(&Hello::Local).await?;
+                channel::write_raw(&mut con, &Hello::Local).await?;
                 self.client_arrived();
+                Ok(Channel::new(None, con))
             }
             Hello::Krb5 => match &self.desired_auth {
                 DesiredAuth::Anonymous | DesiredAuth::Tls { .. } => bail!(NO),
                 DesiredAuth::Local => {
-                    self.con.send_one(&Hello::Local).await?;
+                    channel::write_raw(&mut con, &Hello::Local).await?;
                     self.client_arrived();
+                    Ok(Channel::new(None, con))
                 }
                 DesiredAuth::Krb5 { upn: _, spn } => {
                     let spn = spn.as_ref().map(|s| s.as_str());
-                    let ctx =
-                        krb5_authentication(HELLO_TIMEOUT, spn, &mut self.con).await?;
-                    self.con.set_ctx(K5CtxWrap::new(ctx)).await;
-                    self.con.send_one(&Hello::Krb5).await?;
+                    let ctx = krb5_authentication(HELLO_TIMEOUT, spn, &mut con).await?;
+                    let mut con = Channel::new(Some(ctx), con);
+                    con.send_one(&Hello::Krb5).await?;
                     self.client_arrived();
+                    Ok(con)
                 }
             },
             Hello::Tls => match &self.desired_auth {
                 DesiredAuth::Anonymous | DesiredAuth::Krb5 { .. } => bail!(NO),
                 DesiredAuth::Local => {
-                    self.con.send_one(&Hello::Local).await?;
+                    channel::write_raw(&mut con, &Hello::Local).await?;
                     self.client_arrived();
+                    Ok(Channel::new(None, con))
                 }
-                DesiredAuth::Tls { ctx, name } => {
-                    let mut tls = time::timeout(HELLO_TIMEOUT, ctx.accept)
+                DesiredAuth::Tls {
+                    name,
+                    root_certificates,
+                    certificate,
+                    private_key,
+                } => {
+                    let ctx = task::block_in_place(|| {
+                        self.tls_ctx.load(&root_certificates, &certificate, &private_key)
+                    })?;
+                    let mut tls = time::timeout(HELLO_TIMEOUT, ctx.accept(con))?;
+                    let mut con = Channel::new(None, tls);
+                    con.send_one(&Hello::Tls).await?;
+                    self.client_arrived();
+                    Ok(con)
                 }
             },
             Hello::ResolverAuthenticate(id) => {
                 info!("hello_client processing listener ownership check from resolver");
+                let mut con = Channel::new(None, con);
                 let secret = self
                     .secrets
                     .read()
                     .get(&id)
                     .copied()
                     .ok_or_else(|| anyhow!("no secret"))?;
-                let challenge: AuthChallenge = self.con.receive().await?;
+                let challenge: AuthChallenge = con.receive().await?;
                 if challenge.hash_method != HashMethod::Sha3_512 {
                     bail!("requested hash method not supported")
                 }
@@ -1598,17 +1619,17 @@ impl ClientCtx {
                     &challenge.challenge.to_be_bytes(),
                     &secret.to_be_bytes(),
                 ]);
-                self.con.send_one(&BoundedBytes::<4096>(reply)).await?;
+                con.send_one(&BoundedBytes::<4096>(reply)).await?;
                 // prevent fishing for the key
                 time::sleep(Duration::from_secs(1)).await;
                 bail!("resolver authentication complete");
             }
         }
-        Ok(())
     }
 
     async fn handle_deferred_sub(
         &mut self,
+        con: &mut Channel,
         s: Option<BatchItem<(Path, Permissions)>>,
     ) -> Result<()> {
         match s {
@@ -1626,11 +1647,11 @@ impl ClientCtx {
                         for (path, perms) in self.deferred_subs_batch.drain(..) {
                             if !pb.by_path.contains_key(path.as_ref()) {
                                 let m = publisher::From::NoSuchValue(path);
-                                self.con.queue_send(&m)?
+                                con.queue_send(&m)?
                             } else {
                                 subscribe(
                                     &mut *pb,
-                                    &mut self.con,
+                                    con,
                                     self.client,
                                     path,
                                     perms,
@@ -1639,14 +1660,14 @@ impl ClientCtx {
                             }
                         }
                     }
-                    self.con.flush().await?
+                    con.flush().await?
                 }
             },
         }
         Ok(())
     }
 
-    fn handle_batch_inner(&mut self) -> Result<()> {
+    fn handle_batch_inner(&mut self, con: &mut Channel) -> Result<()> {
         use protocol::publisher::{From, To::*};
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
         let t_st = self.publisher.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
@@ -1660,48 +1681,48 @@ impl ClientCtx {
                     match self.desired_auth {
                         DesiredAuth::Anonymous => subscribe(
                             &mut *pb,
-                            &mut self.con,
+                            con,
                             self.client,
                             path,
                             Permissions::all(),
                             &mut self.deferred_subs,
                         )?,
-                        DesiredAuth::Krb5 { .. } | DesiredAuth::Local => {
-                            match secrets.get(&resolver) {
-                                None => {
-                                    debug!("denied, no stored secret for {}", resolver);
-                                    self.con.queue_send(&From::Denied(path))?
-                                }
-                                Some(secret) => {
-                                    let (valid, permissions) = check_token(
-                                        token,
-                                        now,
-                                        *secret,
-                                        timestamp,
+                        DesiredAuth::Krb5 { .. }
+                        | DesiredAuth::Local
+                        | DesiredAuth::Tls { .. } => match secrets.get(&resolver) {
+                            None => {
+                                debug!("denied, no stored secret for {}", resolver);
+                                con.queue_send(&From::Denied(path))?
+                            }
+                            Some(secret) => {
+                                let (valid, permissions) = check_token(
+                                    token,
+                                    now,
+                                    *secret,
+                                    timestamp,
+                                    permissions,
+                                    &path,
+                                )?;
+                                if !valid {
+                                    debug!("subscribe permission denied");
+                                    con.queue_send(&From::Denied(path))?
+                                } else {
+                                    subscribe(
+                                        &mut *pb,
+                                        con,
+                                        self.client,
+                                        path,
                                         permissions,
-                                        &path,
-                                    )?;
-                                    if !valid {
-                                        debug!("subscribe permission denied");
-                                        self.con.queue_send(&From::Denied(path))?
-                                    } else {
-                                        subscribe(
-                                            &mut *pb,
-                                            &mut self.con,
-                                            self.client,
-                                            path,
-                                            permissions,
-                                            &mut self.deferred_subs,
-                                        )?
-                                    }
+                                        &mut self.deferred_subs,
+                                    )?
                                 }
                             }
-                        }
+                        },
                     }
                 }
                 Write(id, v, r) => write(
                     &mut *pb,
-                    &mut self.con,
+                    con,
                     self.client,
                     &mut self.gc_on_write,
                     &mut self.wait_write_res,
@@ -1713,7 +1734,7 @@ impl ClientCtx {
                 Unsubscribe(id) => {
                     gc = true;
                     unsubscribe(&mut *pb, self.client, id);
-                    self.con.queue_send(&From::Unsubscribed(id))?;
+                    con.queue_send(&From::Unsubscribed(id))?;
                 }
             }
         }
@@ -1726,24 +1747,28 @@ impl ClientCtx {
         Ok(())
     }
 
-    async fn handle_batch(&mut self) -> Result<()> {
+    async fn handle_batch(&mut self, con: &mut Channel) -> Result<()> {
         use protocol::publisher::From;
-        self.handle_batch_inner()?;
+        self.handle_batch_inner(con)?;
         for (_, (batch, mut sender)) in self.write_batches.drain() {
             let _ = sender.send(batch).await;
         }
         for (id, rx) in self.wait_write_res.drain(..) {
             match rx.await {
-                Ok(v) => self.con.queue_send(&From::WriteResult(id, v))?,
-                Err(_) => self.con.queue_send(&From::WriteResult(id, Value::Ok))?,
+                Ok(v) => con.queue_send(&From::WriteResult(id, v))?,
+                Err(_) => con.queue_send(&From::WriteResult(id, Value::Ok))?,
             }
         }
-        Ok(self.con.flush().await?)
+        Ok(con.flush().await?)
     }
 
-    async fn flush_with_timeout(&mut self, timeout: Option<Duration>) -> Result<()> {
+    async fn flush_with_timeout(
+        &mut self,
+        con: &mut Channel,
+        timeout: Option<Duration>,
+    ) -> Result<()> {
         self.msg_sent = true;
-        let f = self.con.flush();
+        let f = con.flush();
         match timeout {
             None => f.await?,
             Some(d) => time::timeout(d, f).await??,
@@ -1753,14 +1778,15 @@ impl ClientCtx {
 
     async fn handle_updates(
         &mut self,
+        con: &mut Channel,
         (timeout, mut up): (Option<Duration>, Update),
     ) -> Result<()> {
         use publisher::To;
         for m in up.updates.drain(..) {
-            if let Err(e) = self.con.queue_send(&m) {
-                if self.con.bytes_queued() > 0 {
-                    self.flush_with_timeout(timeout).await?;
-                    self.con.queue_send(&m)?;
+            if let Err(e) = con.queue_send(&m) {
+                if con.bytes_queued() > 0 {
+                    self.flush_with_timeout(timeout, con).await?;
+                    con.queue_send(&m)?;
                 } else {
                     return Err(e);
                 }
@@ -1772,10 +1798,10 @@ impl ClientCtx {
             }
         }
         if self.batch.len() > 0 {
-            self.handle_batch().await?;
+            self.handle_batch(con).await?;
         }
-        if self.con.bytes_queued() > 0 {
-            self.flush_with_timeout(timeout).await?
+        if con.bytes_queued() > 0 {
+            self.flush_with_timeout(timeout, con).await?
         }
         Ok(())
     }
@@ -1788,24 +1814,24 @@ impl ClientCtx {
         let mut updates = updates.fuse();
         let mut hb = time::interval(HB);
         // make sure the deferred subs stream never ends
-        time::timeout(HELLO_TIMEOUT, self.hello(&mut con)).await??;
+        let mut con = time::timeout(HELLO_TIMEOUT, self.hello(&mut con)).await??;
         loop {
             select_biased! {
                 _ = hb.tick().fuse() => {
                     if !self.msg_sent {
-                        self.con.queue_send(&publisher::From::Heartbeat)?;
-                        self.con.flush().await?;
+                        con.queue_send(&publisher::From::Heartbeat)?;
+                        con.flush().await?;
                     }
                     self.msg_sent = false;
                 },
-                s = self.deferred_subs.next() => self.handle_deferred_sub(s).await?,
-                r = self.con.receive_batch(&mut self.batch).fuse() => match r {
+                s = self.deferred_subs.next() => self.handle_deferred_sub(&mut con, s).await?,
+                r = con.receive_batch(&mut self.batch).fuse() => match r {
                     Err(e) => return Err(Error::from(e)),
-                    Ok(()) => self.handle_batch().await?
+                    Ok(()) => self.handle_batch(&mut con).await?
                 },
                 u = updates.next() => match u {
                     None => break Ok(()),
-                    Some(u) => self.handle_updates(u).await?,
+                    Some(u) => self.handle_updates(&mut con, u).await?,
                 },
             }
         }
@@ -1819,6 +1845,7 @@ async fn accept_loop(
     desired_auth: DesiredAuth,
 ) {
     let mut stop = stop.fuse();
+    let tls_ctx = tls::CachedAcceptor::new();
     loop {
         select_biased! {
             _ = stop => break,
@@ -1842,12 +1869,14 @@ async fn accept_loop(
                             subscribed: HashMap::default(),
                         });
                         let desired_auth = desired_auth.clone();
+                        let tls_ctx = tls_ctx.clone();
                         task::spawn(async move {
                             let ctx = ClientCtx::new(
                                 clid,
                                 secrets,
                                 t_weak.clone(),
-                                desired_auth
+                                desired_auth,
+                                tls_ctx,
                             );
                             let r = ctx.run(rx, s).await;
                             info!("accept_loop client shutdown {:?}", r);
