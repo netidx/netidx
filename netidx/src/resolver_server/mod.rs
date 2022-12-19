@@ -555,7 +555,6 @@ async fn write_client_reuse_krb5(
 }
 
 fn get_tls_uifo(
-    ctx: &Arc<Ctx>,
     tls: &tokio_rustls::server::TlsStream<TcpStream>,
     a: &Arc<(tokio_rustls::TlsAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
 ) -> Result<Arc<UserInfo>> {
@@ -577,7 +576,7 @@ async fn write_client_tls_auth(
     hello: &ClientHelloWrite,
 ) -> AuthResult {
     let tls = a.0.accept(con).await?;
-    let uifo = get_tls_uifo(ctx, &tls, a)?;
+    let uifo = get_tls_uifo(&tls, a)?;
     let mut con =
         Channel::new::<ServerCtx, tokio_rustls::server::TlsStream<TcpStream>>(None, tls);
     info!("hello_write all traffic now encrypted");
@@ -607,7 +606,7 @@ async fn write_client_reuse_tls(
     let wa = &hello.write_addr;
     let id = ctx.clinfos.id(wa).ok_or_else(|| anyhow!("missing"))?;
     let d = a.1.read().get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
-    let uifo = get_tls_uifo(ctx, &tls, a)?;
+    let uifo = get_tls_uifo(&tls, a)?;
     let mut con =
         Channel::new::<ServerCtx, tokio_rustls::server::TlsStream<TcpStream>>(None, tls);
     info!("hello_write all traffic now encrypted");
@@ -748,7 +747,7 @@ async fn hello_client_read(
         AuthRead::Tls => match &ctx.secctx {
             SecCtx::Tls(a) => {
                 let tls = a.0.accept(con).await?;
-                let uifo = get_tls_uifo(&ctx, &tls, a)?;
+                let uifo = get_tls_uifo(&tls, a)?;
                 let mut con = Channel::new::<
                     ServerCtx,
                     tokio_rustls::server::TlsStream<TcpStream>,

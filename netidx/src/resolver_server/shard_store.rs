@@ -17,7 +17,6 @@ use crate::{
     },
 };
 use anyhow::Result;
-use cross_krb5::ServerCtx;
 use futures::{
     channel::{
         mpsc::{unbounded, UnboundedSender},

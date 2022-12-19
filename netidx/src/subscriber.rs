@@ -1350,6 +1350,9 @@ async fn hello_publisher(
             }
             Ok(con)
         }
+        (DesiredAuth::Krb5 { .. }, TargetAuth::Tls { .. }) => {
+            bail!("desired authentication mechanism not supported")
+        }
         (
             DesiredAuth::Tls { name: _, root_certificates, certificate, private_key },
             TargetAuth::Tls { name },
@@ -1368,6 +1371,9 @@ async fn hello_publisher(
                 bail!("protocol error")
             }
             Ok(con)
+        }
+        (DesiredAuth::Tls { .. }, TargetAuth::Krb5 { .. }) => {
+            bail!("desired authentication mechanism not supported")
         }
     }
 }

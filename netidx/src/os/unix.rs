@@ -14,7 +14,7 @@ use tokio::task;
 pub(crate) struct Mapper(ArcStr);
 
 impl Mapper {
-    pub(crate) fn new(cfg: &Config, member: &MemberServer) -> Result<Mapper> {
+    pub(crate) fn new(_cfg: &Config, member: &MemberServer) -> Result<Mapper> {
         match &member.id_map_command {
             Some(cmd) => Ok(Mapper(ArcStr::from(cmd))),
             None => task::block_in_place(|| {

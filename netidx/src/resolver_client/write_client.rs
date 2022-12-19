@@ -165,7 +165,7 @@ impl Connection {
                     bail!("authentication not supported")
                 }
                 (
-                    DesiredAuth::Krb5 { .. } | DesiredAuth::Tls { .. },
+                    DesiredAuth::Local | DesiredAuth::Krb5 { .. } | DesiredAuth::Tls { .. },
                     Auth::Local { path },
                 ) => {
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
@@ -188,6 +188,9 @@ impl Connection {
                 }
                 (DesiredAuth::Local, Auth::Krb5 { .. } | Auth::Tls { .. }) => {
                     bail!("local auth not supported")
+                }
+                (DesiredAuth::Krb5 { .. }, Auth::Tls { .. }) => {
+                    bail!("krb5 auth is not supported")
                 }
                 (DesiredAuth::Krb5 { upn, spn }, Auth::Krb5 { spn: target_spn }) => {
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
@@ -222,6 +225,9 @@ impl Connection {
                             (con, r, true)
                         }
                     }
+                }
+                (DesiredAuth::Tls { .. }, Auth::Krb5 { .. }) => {
+                    bail!("tls auth not supported")
                 }
                 (
                     DesiredAuth::Tls {

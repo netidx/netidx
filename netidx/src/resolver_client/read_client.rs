@@ -96,6 +96,9 @@ async fn connect(
             (DesiredAuth::Local, Auth::Krb5 { .. } | Auth::Tls { .. }) => {
                 bail!("local auth not supported")
             }
+            (DesiredAuth::Krb5 { .. }, Auth::Tls { .. }) => {
+                bail!("krb5 authentication is not supported")
+            }
             (DesiredAuth::Krb5 { upn, .. }, Auth::Krb5 { spn }) => {
                 let upn = upn.as_ref().map(|s| s.as_str());
                 let hello = ClientHello::ReadOnly(AuthRead::Krb5);
@@ -107,6 +110,9 @@ async fn connect(
                         bail!("protocol error")
                     }
                 }
+            }
+            (DesiredAuth::Tls { .. }, Auth::Krb5 { .. }) => {
+                bail!("tls authentication is not supported")
             }
             (
                 DesiredAuth::Tls { name: _, root_certificates, certificate, private_key },

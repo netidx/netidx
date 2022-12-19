@@ -568,6 +568,7 @@ impl Store {
                 SecCtxDataReadGuard::Anonymous => None,
                 SecCtxDataReadGuard::Local(sec) => sec.secret(&id),
                 SecCtxDataReadGuard::Krb5(sec) => sec.secret(&id),
+                SecCtxDataReadGuard::Tls(sec) => sec.secret(&id),
             };
             match secret {
                 None => PublisherRef { id, token: Bytes::new() },
