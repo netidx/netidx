@@ -43,18 +43,6 @@ impl LocalAuth {
     }
 }
 
-pub(super) struct TlsAuth(pub(super) tokio_rustls::TlsAcceptor);
-
-impl TlsAuth {
-    pub(super) fn new(
-        root_certificates: &Chars,
-        certificate: &Chars,
-        private_key: &Chars,
-    ) -> Result<TlsAuth> {
-        Ok(TlsAuth(tls::create_tls_acceptor(root_certificates, certificate, private_key)))
-    }
-}
-
 pub(super) trait SecDataCommon {
     fn secret(&self) -> u128;
 }
@@ -165,7 +153,7 @@ pub(super) enum SecCtx {
     Anonymous,
     Krb5(Arc<(Chars, RwLock<SecCtxData<K5SecData>>)>),
     Local(Arc<(LocalAuth, RwLock<SecCtxData<LocalSecData>>)>),
-    Tls(Arc<(TlsAuth, RwLock<SecCtxData<TlsSecData>>)>),
+    Tls(Arc<(tokio_rustls::TlsAcceptor, RwLock<SecCtxData<TlsSecData>>)>),
 }
 
 impl SecCtx {
@@ -181,8 +169,12 @@ impl SecCtx {
                 let store = RwLock::new(SecCtxData::new(cfg, member)?);
                 SecCtx::Krb5(Arc::new((spn.clone(), store)))
             }
-            Auth::Tls { root_certificates, certificate, private_key } => {
-                let auth = TlsAuth::new(root_certificates, certificate, private_key)?;
+            Auth::Tls { name: _, root_certificates, certificate, private_key } => {
+                let auth = tls::create_tls_acceptor(
+                    root_certificates,
+                    certificate,
+                    private_key,
+                )?;
                 let store = RwLock::new(SecCtxData::new(cfg, member)?);
                 SecCtx::Tls(Arc::new((auth, store)))
             }
