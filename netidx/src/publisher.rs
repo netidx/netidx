@@ -4,7 +4,7 @@ pub use crate::protocol::{
 };
 pub use crate::resolver_client::DesiredAuth;
 use crate::{
-    channel::{Channel, K5CtxWrap},
+    channel::{self, Channel, K5CtxWrap},
     chars::Chars,
     config::Config,
     pack::BoundedBytes,
@@ -17,7 +17,6 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
-use cross_krb5::ServerCtx;
 use futures::{
     channel::{
         mpsc::{
@@ -1035,7 +1034,7 @@ impl Publisher {
             }
         }
     }
-    
+
     /// Install a default publisher rooted at `base` with flags
     /// `flags`. Once installed, any subscription request for a child
     /// of `base`, regardless if it doesn't exist in the resolver,
@@ -1196,10 +1195,10 @@ impl Publisher {
             Some(pbv) => match &pbv.aliases {
                 None => vec![],
                 Some(al) => al.iter().cloned().collect(),
-            }
+            },
         }
     }
-    
+
     /// Get a copy of the current value of a published `Val`
     pub fn current(&self, id: &Id) -> Option<Value> {
         self.0.lock().by_id.get(&id).map(|p| p.current.clone())
@@ -1490,7 +1489,6 @@ const HB: Duration = Duration::from_secs(5);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct ClientCtx {
-    con: Channel,
     desired_auth: DesiredAuth,
     client: ClId,
     publisher: PublisherWeak,
@@ -1507,7 +1505,6 @@ struct ClientCtx {
 
 impl ClientCtx {
     fn new(
-        socket: TcpStream,
         client: ClId,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
         publisher: PublisherWeak,
@@ -1517,7 +1514,6 @@ impl ClientCtx {
             Batched::new(SelectAll::new(), MAX_DEFERRED);
         deferred_subs.inner_mut().push(Box::new(stream::pending()));
         ClientCtx {
-            con: Channel::new(socket),
             desired_auth,
             client,
             publisher,
@@ -1542,14 +1538,15 @@ impl ClientCtx {
     }
 
     // CR estokes: Implement periodic rekeying to improve security
-    async fn hello(&mut self) -> Result<()> {
+    async fn hello(&mut self, con: &mut TcpStream) -> Result<()> {
         use protocol::publisher::Hello;
+        static NO: &str = "authentication mechanism not supported";
         debug!("hello_client");
-        self.con.send_one(&2u64).await?;
-        if self.con.receive::<u64>().await? != 2 {
+        channel::write_raw(con, &2u64).await?;
+        if channel::read_raw::<u64>(con).await? != 2 {
             bail!("incompatible protocol version")
         }
-        let hello: Hello = self.con.receive().await?;
+        let hello: Hello = channel::read_raw(con).await?;
         debug!("hello_client received {:?}", hello);
         match hello {
             Hello::Anonymous => {
@@ -1561,7 +1558,7 @@ impl ClientCtx {
                 self.client_arrived();
             }
             Hello::Krb5 => match &self.desired_auth {
-                DesiredAuth::Anonymous => bail!("authentication not supported"),
+                DesiredAuth::Anonymous | DesiredAuth::Tls { .. } => bail!(NO),
                 DesiredAuth::Local => {
                     self.con.send_one(&Hello::Local).await?;
                     self.client_arrived();
@@ -1573,6 +1570,16 @@ impl ClientCtx {
                     self.con.set_ctx(K5CtxWrap::new(ctx)).await;
                     self.con.send_one(&Hello::Krb5).await?;
                     self.client_arrived();
+                }
+            },
+            Hello::Tls => match &self.desired_auth {
+                DesiredAuth::Anonymous | DesiredAuth::Krb5 { .. } => bail!(NO),
+                DesiredAuth::Local => {
+                    self.con.send_one(&Hello::Local).await?;
+                    self.client_arrived();
+                }
+                DesiredAuth::Tls { ctx, name } => {
+                    let mut tls = time::timeout(HELLO_TIMEOUT, ctx.accept)
                 }
             },
             Hello::ResolverAuthenticate(id) => {
@@ -1773,11 +1780,15 @@ impl ClientCtx {
         Ok(())
     }
 
-    async fn run(mut self, updates: Receiver<(Option<Duration>, Update)>) -> Result<()> {
+    async fn run(
+        mut self,
+        mut con: TcpStream,
+        updates: Receiver<(Option<Duration>, Update)>,
+    ) -> Result<()> {
         let mut updates = updates.fuse();
         let mut hb = time::interval(HB);
         // make sure the deferred subs stream never ends
-        time::timeout(HELLO_TIMEOUT, self.hello()).await??;
+        time::timeout(HELLO_TIMEOUT, self.hello(&mut con)).await??;
         loop {
             select_biased! {
                 _ = hb.tick().fuse() => {
@@ -1833,13 +1844,12 @@ async fn accept_loop(
                         let desired_auth = desired_auth.clone();
                         task::spawn(async move {
                             let ctx = ClientCtx::new(
-                                s,
                                 clid,
                                 secrets,
                                 t_weak.clone(),
                                 desired_auth
                             );
-                            let r = ctx.run(rx).await;
+                            let r = ctx.run(rx, s).await;
                             info!("accept_loop client shutdown {:?}", r);
                             if let Some(t) = t_weak.upgrade() {
                                 let mut pb = t.0.lock();

@@ -12,7 +12,7 @@ use cross_krb5::{ClientCtx, InitiateFlags, Step};
 use futures::channel::oneshot;
 use fxhash::FxHashMap;
 use netidx_core::pack::BoundedBytes;
-use std::{fmt::Debug, str::FromStr, time::Duration};
+use std::{fmt::Debug, str::FromStr, sync::Arc, time::Duration};
 use tokio::{net::TcpStream, task, time};
 
 pub(super) const HELLO_TO: Duration = Duration::from_secs(15);
@@ -39,9 +39,17 @@ lazy_static! {
 #[derive(Debug, Clone)]
 pub enum DesiredAuth {
     Anonymous,
-    Krb5 { upn: Option<String>, spn: Option<String> },
+    Krb5 {
+        upn: Option<String>,
+        spn: Option<String>,
+    },
     Local,
-    Tls { ctx: tokio_rustls::TlsConnector, name: Option<String> },
+    Tls {
+        name: Option<String>,
+        root_certificates: String,
+        certificate: String,
+        private_key: String,
+    },
 }
 
 impl FromStr for DesiredAuth {
