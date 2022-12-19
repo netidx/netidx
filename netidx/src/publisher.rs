@@ -1573,7 +1573,7 @@ impl ClientCtx {
                 DesiredAuth::Krb5 { upn: _, spn } => {
                     let spn = spn.as_ref().map(|s| s.as_str());
                     let ctx = krb5_authentication(HELLO_TIMEOUT, spn, &mut con).await?;
-                    let mut con = Channel::new(Some(ctx), con);
+                    let mut con = Channel::new(Some(K5CtxWrap::new(ctx)), con);
                     con.send_one(&Hello::Krb5).await?;
                     self.client_arrived();
                     Ok(con)

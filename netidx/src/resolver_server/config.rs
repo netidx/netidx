@@ -29,7 +29,7 @@ pub enum Auth {
     Anonymous,
     Local { path: Chars },
     Krb5 { spn: Chars },
-    Tls { root_certificates: Chars, certificate: Chars, private_key: Chars },
+    Tls { name: Chars, root_certificates: Chars, certificate: Chars, private_key: Chars },
 }
 
 impl Into<resolver::Auth> for Auth {
@@ -38,7 +38,7 @@ impl Into<resolver::Auth> for Auth {
             Self::Anonymous => resolver::Auth::Anonymous,
             Self::Local { path } => resolver::Auth::Local { path },
             Self::Krb5 { spn } => resolver::Auth::Krb5 { spn },
-            Self::Tls { .. } => resolver::Auth::Tls,
+            Self::Tls { name, .. } => resolver::Auth::Tls { name },
         }
     }
 }
@@ -49,8 +49,9 @@ impl From<file::Auth> for Auth {
             file::Auth::Anonymous => Self::Anonymous,
             file::Auth::Krb5(spn) => Self::Krb5 { spn: Chars::from(spn) },
             file::Auth::Local(path) => Self::Local { path: Chars::from(path) },
-            file::Auth::Tls { root_certificates, certificate, private_key } => {
+            file::Auth::Tls { name, root_certificates, certificate, private_key } => {
                 Self::Tls {
+                    name: Chars::from(name),
                     root_certificates: Chars::from(root_certificates),
                     certificate: Chars::from(certificate),
                     private_key: Chars::from(private_key),
@@ -79,7 +80,7 @@ pub(crate) fn check_addrs(a: &Vec<(SocketAddr, file::Auth)>) -> Result<()> {
                 }
             }
             // CR estokes: verify the certificates
-            Auth::Tls { root_certificates: _, certificate: _, private_key: _ } => (),
+            Auth::Tls { .. } => (),
         }
     }
     if !a.iter().all(|(a, _)| a.ip().is_loopback())
@@ -113,7 +114,12 @@ pub(crate) mod file {
         Anonymous,
         Krb5(String),
         Local(String),
-        Tls { root_certificates: String, certificate: String, private_key: String },
+        Tls {
+            name: String,
+            root_certificates: String,
+            certificate: String,
+            private_key: String,
+        },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
