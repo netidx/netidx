@@ -2,7 +2,7 @@ use crate::{
     path::Path,
     pool::Pooled,
     protocol::resolver::{Auth, Referral},
-    resolver_server::config::file::Auth as FAuth,
+    resolver_server::{self, config::file::Auth as FAuth},
     utils,
 };
 use anyhow::Result;
@@ -44,7 +44,7 @@ impl Config {
         for (addr, auth) in &cfg.addrs {
             utils::check_addr::<()>(addr.ip(), &[])?;
             match auth {
-                FAuth::Anonymous | FAuth::Krb5(_) => (),
+                FAuth::Anonymous | FAuth::Krb5(_) | FAuth::Tls { .. } => (),
                 FAuth::Local(_) => {
                     if !addr.ip().is_loopback() {
                         bail!("local auth is not allowed for remote servers")
@@ -59,7 +59,11 @@ impl Config {
         }
         Ok(Config {
             base: Path::from(cfg.base),
-            addrs: cfg.addrs.into_iter().map(|(s, a)| (s, a.into())).collect(),
+            addrs: cfg
+                .addrs
+                .into_iter()
+                .map(|(s, a)| (s, resolver_server::config::Auth::from(a).into()))
+                .collect(),
         })
     }
 
@@ -69,11 +73,7 @@ impl Config {
     }
 
     pub fn to_referral(self) -> Referral {
-        Referral {
-            path: self.base,
-            ttl: None,
-            addrs: Pooled::orphan(self.addrs),
-        }
+        Referral { path: self.base, ttl: None, addrs: Pooled::orphan(self.addrs) }
     }
 
     /// This will try in order,

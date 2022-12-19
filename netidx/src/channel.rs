@@ -382,8 +382,8 @@ impl Channel {
     ) -> Channel {
         let (rh, wh) = io::split(socket);
         Channel {
-            read: ReadChannel::new(k5ctx, rh),
-            write: WriteChannel::new(k5ctx.clone(), wh),
+            read: ReadChannel::new(k5ctx.clone(), rh),
+            write: WriteChannel::new(k5ctx, wh),
         }
     }
 

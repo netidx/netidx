@@ -194,7 +194,7 @@ pub struct MemberServer {
     pub pid_file: String,
     pub(super) reader_ttl: Duration,
     pub(super) writer_ttl: Duration,
-    pub(super) id_map_command: Option<String>, // default /usr/bin/id
+    pub(crate) id_map_command: Option<String>, // default /usr/bin/id
 }
 
 #[derive(Debug, Clone)]

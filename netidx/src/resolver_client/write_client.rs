@@ -137,7 +137,7 @@ impl Connection {
         let mut con = wt!(TcpStream::connect(&self.resolver_addr))??;
         con.set_nodelay(true)?;
         wt!(channel::write_raw(&mut con, &2u64))??;
-        if wt!(channel::read_raw::<u64>(&mut con))?? != 2 {
+        if wt!(channel::read_raw::<u64, _>(&mut con))?? != 2 {
             bail!("incompatible protocol version")
         }
         let sec = Duration::from_secs(1);
@@ -153,8 +153,8 @@ impl Connection {
             match (&self.desired_auth, &self.resolver_auth) {
                 (DesiredAuth::Anonymous, _) => {
                     wt!(channel::write_raw(&mut con, &hello(AuthWrite::Anonymous)))??;
-                    let r = wt!(channel::read_raw::<ServerHelloWrite>(&mut con))??;
-                    (Channel::new(None, con), r, false)
+                    let r = wt!(channel::read_raw::<ServerHelloWrite, _>(&mut con))??;
+                    (Channel::new::<ClientCtx, TcpStream>(None, con), r, false)
                 }
                 (
                     DesiredAuth::Krb5 { .. }
@@ -169,7 +169,7 @@ impl Connection {
                     Auth::Local { path },
                 ) => {
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
-                    let mut con = Channel::new(None, con);
+                    let mut con = Channel::new::<ClientCtx, TcpStream>(None, con);
                     match secret {
                         Some(secret) => {
                             wt!(con.send_one(&hello(AuthWrite::Reuse)))??;
@@ -236,25 +236,35 @@ impl Connection {
                         self.tls.load(root_certificates, certificate, private_key)
                     })?;
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
-                    let name = rustls::ServerName::try_from(name)?;
+                    let name = rustls::ServerName::try_from(&**name)?;
                     match secret {
                         Some(secret) => {
                             wt!(channel::write_raw(&mut con, &hello(AuthWrite::Reuse)))??;
                             let tls = ctx.connect(name, con).await?;
-                            let mut con = Channel::new(None, con);
+                            let mut con = Channel::new::<
+                                ClientCtx,
+                                tokio_rustls::client::TlsStream<TcpStream>,
+                            >(None, tls);
                             wt!(auth_challenge(&mut con, secret))??;
                             let r: ServerHelloWrite = wt!(con.receive())??;
                             (con, r, false)
                         }
                         None => {
-                            let publisher_name =
-                                Chars::from(publisher_name.ok_or_else(|| {
-                                    anyhow!("name is required for writers")
-                                })?);
+                            let publisher_name = Chars::from(
+                                publisher_name
+                                    .as_ref()
+                                    .ok_or_else(|| {
+                                        anyhow!("name is required for writers")
+                                    })?
+                                    .clone(),
+                            );
                             let h = hello(AuthWrite::Tls { name: publisher_name });
                             wt!(channel::write_raw(&mut con, &h))??;
                             let tls = ctx.connect(name, con).await?;
-                            let mut con = Channel::new(None, tls);
+                            let mut con = Channel::new::<
+                                ClientCtx,
+                                tokio_rustls::client::TlsStream<TcpStream>,
+                            >(None, tls);
                             let r: ServerHelloWrite = wt!(con.receive())??;
                             (con, r, true)
                         }

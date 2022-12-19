@@ -19,7 +19,6 @@ use futures::{
     prelude::*,
 };
 use log::{info, warn};
-use parking_lot::Mutex;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{cmp::max, fmt::Debug, sync::Arc, time::Duration};
 use tokio::{net::TcpStream, task, time};

@@ -18,6 +18,7 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
+use cross_krb5::ServerCtx;
 use futures::{
     channel::{
         mpsc::{
@@ -1542,33 +1543,33 @@ impl ClientCtx {
     }
 
     // CR estokes: Implement periodic rekeying to improve security
-    async fn hello(&mut self, con: &mut TcpStream) -> Result<Channel> {
+    async fn hello(&mut self, mut con: TcpStream) -> Result<Channel> {
         use protocol::publisher::Hello;
         static NO: &str = "authentication mechanism not supported";
         debug!("hello_client");
-        channel::write_raw(con, &2u64).await?;
-        if channel::read_raw::<u64>(con).await? != 2 {
+        channel::write_raw(&mut con, &2u64).await?;
+        if channel::read_raw::<u64, _>(&mut con).await? != 2 {
             bail!("incompatible protocol version")
         }
-        let hello: Hello = channel::read_raw(con).await?;
+        let hello: Hello = channel::read_raw(&mut con).await?;
         debug!("hello_client received {:?}", hello);
         match hello {
             Hello::Anonymous => {
                 channel::write_raw(&mut con, &Hello::Anonymous).await?;
                 self.client_arrived();
-                Ok(Channel::new(None, con))
+                Ok(Channel::new::<ServerCtx, TcpStream>(None, con))
             }
             Hello::Local => {
                 channel::write_raw(&mut con, &Hello::Local).await?;
                 self.client_arrived();
-                Ok(Channel::new(None, con))
+                Ok(Channel::new::<ServerCtx, TcpStream>(None, con))
             }
             Hello::Krb5 => match &self.desired_auth {
                 DesiredAuth::Anonymous | DesiredAuth::Tls { .. } => bail!(NO),
                 DesiredAuth::Local => {
                     channel::write_raw(&mut con, &Hello::Local).await?;
                     self.client_arrived();
-                    Ok(Channel::new(None, con))
+                    Ok(Channel::new::<ServerCtx, TcpStream>(None, con))
                 }
                 DesiredAuth::Krb5 { upn: _, spn } => {
                     let spn = spn.as_ref().map(|s| s.as_str());
@@ -1584,10 +1585,10 @@ impl ClientCtx {
                 DesiredAuth::Local => {
                     channel::write_raw(&mut con, &Hello::Local).await?;
                     self.client_arrived();
-                    Ok(Channel::new(None, con))
+                    Ok(Channel::new::<ServerCtx, TcpStream>(None, con))
                 }
                 DesiredAuth::Tls {
-                    name,
+                    name: _,
                     root_certificates,
                     certificate,
                     private_key,
@@ -1595,8 +1596,11 @@ impl ClientCtx {
                     let ctx = task::block_in_place(|| {
                         self.tls_ctx.load(&root_certificates, &certificate, &private_key)
                     })?;
-                    let mut tls = time::timeout(HELLO_TIMEOUT, ctx.accept(con))?;
-                    let mut con = Channel::new(None, tls);
+                    let tls = time::timeout(HELLO_TIMEOUT, ctx.accept(con)).await??;
+                    let mut con = Channel::new::<
+                        ServerCtx,
+                        tokio_rustls::server::TlsStream<TcpStream>,
+                    >(None, tls);
                     con.send_one(&Hello::Tls).await?;
                     self.client_arrived();
                     Ok(con)
@@ -1604,7 +1608,7 @@ impl ClientCtx {
             },
             Hello::ResolverAuthenticate(id) => {
                 info!("hello_client processing listener ownership check from resolver");
-                let mut con = Channel::new(None, con);
+                let mut con = Channel::new::<ServerCtx, TcpStream>(None, con);
                 let secret = self
                     .secrets
                     .read()
@@ -1785,7 +1789,7 @@ impl ClientCtx {
         for m in up.updates.drain(..) {
             if let Err(e) = con.queue_send(&m) {
                 if con.bytes_queued() > 0 {
-                    self.flush_with_timeout(timeout, con).await?;
+                    self.flush_with_timeout(con, timeout).await?;
                     con.queue_send(&m)?;
                 } else {
                     return Err(e);
@@ -1801,20 +1805,20 @@ impl ClientCtx {
             self.handle_batch(con).await?;
         }
         if con.bytes_queued() > 0 {
-            self.flush_with_timeout(timeout, con).await?
+            self.flush_with_timeout(con, timeout).await?
         }
         Ok(())
     }
 
     async fn run(
         mut self,
-        mut con: TcpStream,
+        con: TcpStream,
         updates: Receiver<(Option<Duration>, Update)>,
     ) -> Result<()> {
         let mut updates = updates.fuse();
         let mut hb = time::interval(HB);
         // make sure the deferred subs stream never ends
-        let mut con = time::timeout(HELLO_TIMEOUT, self.hello(&mut con)).await??;
+        let mut con = time::timeout(HELLO_TIMEOUT, self.hello(con)).await??;
         loop {
             select_biased! {
                 _ = hb.tick().fuse() => {
@@ -1878,7 +1882,7 @@ async fn accept_loop(
                                 desired_auth,
                                 tls_ctx,
                             );
-                            let r = ctx.run(rx, s).await;
+                            let r = ctx.run(s, rx).await;
                             info!("accept_loop client shutdown {:?}", r);
                             if let Some(t) = t_weak.upgrade() {
                                 let mut pb = t.0.lock();

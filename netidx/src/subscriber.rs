@@ -19,6 +19,7 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::{Buf, BufMut, Bytes};
+use cross_krb5::ClientCtx;
 use futures::{
     channel::{
         mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
@@ -1026,11 +1027,11 @@ impl Subscriber {
                             t.choose_addr(&publishers, &resolved)
                         {
                             let sub_id = t.durable_id(&p).unwrap_or_else(SubId::new);
+                            let tls_ctx = t.tls_ctx.clone();
                             let con = t.connections.entry(addr).or_insert_with(|| {
                                 let (tx, rx) = batch_channel::channel();
                                 let subscriber = self.downgrade();
                                 let desired_auth = desired_auth.clone();
-                                let tls_ctx = t.tls_ctx.clone();
                                 task::spawn(async move {
                                     let res = connection(
                                         subscriber.clone(),
@@ -1301,7 +1302,7 @@ async fn hello_publisher(
 ) -> Result<Channel> {
     use protocol::publisher::Hello;
     channel::write_raw(&mut con, &2u64).await?;
-    if channel::read_raw::<u64>(&mut con).await? != 2 {
+    if channel::read_raw::<u64, _>(&mut con).await? != 2 {
         bail!("incompatible protocol version")
     }
     match (desired_auth, target_auth) {
@@ -1311,7 +1312,7 @@ async fn hello_publisher(
                 Hello::Anonymous => (),
                 _ => bail!("unexpected response from publisher"),
             }
-            Ok(Channel::new(None, con))
+            Ok(Channel::new::<ClientCtx, TcpStream>(None, con))
         }
         (
             DesiredAuth::Anonymous,
@@ -1334,7 +1335,7 @@ async fn hello_publisher(
                 Hello::Local => (),
                 _ => bail!("unexpected response from publisher"),
             }
-            Ok(Channel::new(None, con))
+            Ok(Channel::new::<ClientCtx, TcpStream>(None, con))
         }
         (DesiredAuth::Local, TargetAuth::Krb5 { .. } | TargetAuth::Tls { .. }) => {
             bail!("local auth not supported")
@@ -1356,10 +1357,13 @@ async fn hello_publisher(
             let ctx = task::block_in_place(|| {
                 tls_ctx.load(&root_certificates, &certificate, &private_key)
             })?;
-            let name = rustls::ServerName::try_from(name)?;
+            let name = rustls::ServerName::try_from(&**name)?;
             channel::write_raw(&mut con, &Hello::Tls).await?;
-            let tls = ctx.connect(&name, con).await?;
-            let mut con = Channel::new(None, tls);
+            let tls = ctx.connect(name, con).await?;
+            let mut con = Channel::new::<
+                ClientCtx,
+                tokio_rustls::client::TlsStream<TcpStream>,
+            >(None, tls);
             if con.receive::<Hello>().await? != Hello::Tls {
                 bail!("protocol error")
             }
@@ -1546,11 +1550,11 @@ fn decode_task(
 
 async fn connection(
     subscriber: SubscriberWeak,
-    tls_ctx: tls::CachedConnector,
     addr: SocketAddr,
     target_auth: TargetAuth,
     from_sub: BatchReceiver<ToCon>,
     auth: DesiredAuth,
+    tls_ctx: tls::CachedConnector,
 ) -> Result<()> {
     let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
     let mut subscriptions: FxHashMap<Id, Sub> = HashMap::default();
@@ -1559,7 +1563,7 @@ async fn connection(
     let conid = ConId::new();
     soc.set_nodelay(true)?;
     const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
-    let mut con =
+    let con =
         time::timeout(HELLO_TIMEOUT, hello_publisher(soc, tls_ctx, &auth, &target_auth))
             .await??;
     let (read_con, mut write_con) = con.split();
