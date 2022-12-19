@@ -266,7 +266,7 @@ impl Config {
                 Ok(MemberServer {
                     pid_file: m.pid_file,
                     addr: m.addr,
-                    auth: m.auth.into_iter().map(|a| a.into()).collect(),
+                    auth: m.auth.into(),
                     hello_timeout: Duration::from_secs(m.hello_timeout),
                     max_connections: m.max_connections,
                     reader_ttl: Duration::from_secs(m.reader_ttl),

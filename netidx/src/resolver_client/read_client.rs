@@ -39,7 +39,7 @@ async fn connect(
     resolver: &Referral,
     desired_auth: &DesiredAuth,
     tls: &tls::CachedConnector,
-) -> Result<Channel<ClientCtx>> {
+) -> Result<Channel> {
     let mut addrs = resolver.addrs.clone();
     addrs.as_mut_slice().shuffle(&mut thread_rng());
     let mut n = 0;
@@ -57,12 +57,12 @@ async fn connect(
         let mut con = cwt!("connect", TcpStream::connect(&addr));
         try_cf!("no delay", con.set_nodelay(true));
         cwt!("send version", channel::write_raw(&mut con, &2u64));
-        if cwt!("recv version", channel::read_raw::<u64>(&mut con)) != 2 {
+        if cwt!("recv version", channel::read_raw::<u64, _>(&mut con)) != 2 {
             continue;
         }
         let con = match (desired_auth, auth) {
             (DesiredAuth::Anonymous, _) => {
-                let mut con = Channel::new(None, con);
+                let mut con = Channel::new::<ClientCtx, TcpStream>(None, con);
                 cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Anonymous)));
                 match cwt!("reply", con.receive::<AuthRead>()) {
                     AuthRead::Anonymous => (),
@@ -82,7 +82,7 @@ async fn connect(
                 DesiredAuth::Local | DesiredAuth::Krb5 { .. } | DesiredAuth::Tls { .. },
                 Auth::Local { path },
             ) => {
-                let mut con = Channel::new(None, con);
+                let mut con = Channel::new::<ClientCtx, TcpStream>(None, con);
                 let tok = cwt!("local token", AuthClient::token(&*path));
                 cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Local)));
                 cwt!("token", con.send_one(&tok));
@@ -102,7 +102,7 @@ async fn connect(
                 let hello = ClientHello::ReadOnly(AuthRead::Krb5);
                 cwt!("hello", channel::write_raw(&mut con, &hello));
                 let ctx = cwt!("k5auth", krb5_authentication(upn, &*spn, &mut con));
-                match cwt!("reply", channel::read_raw::<AuthRead>(&mut con)) {
+                match cwt!("reply", channel::read_raw::<AuthRead, _>(&mut con)) {
                     AuthRead::Krb5 => Channel::new(Some(K5CtxWrap::new(ctx)), con),
                     AuthRead::Local | AuthRead::Anonymous | AuthRead::Tls => {
                         bail!("protocol error")
@@ -118,10 +118,13 @@ async fn connect(
                 })?;
                 let hello = ClientHello::ReadOnly(AuthRead::Tls);
                 cwt!("hello", channel::write_raw(&mut con, &hello));
-                let name = rustls::ServerName::try_from(name)?;
-                let tls = ctx.connect(con, name).await?;
-                let mut con = Channel::new(None, tls);
-                match cwt!("reply", channel::read_raw::<AuthRead>(&mut con)) {
+                let name = rustls::ServerName::try_from(&**name)?;
+                let tls = ctx.connect(name, con).await?;
+                let mut con = Channel::new::<
+                    ClientCtx,
+                    tokio_rustls::client::TlsStream<TcpStream>,
+                >(None, tls);
+                match cwt!("reply", con.receive::<AuthRead>()) {
                     AuthRead::Tls => con,
                     AuthRead::Local | AuthRead::Anonymous | AuthRead::Krb5 { .. } => {
                         bail!("protocol error")
@@ -153,9 +156,9 @@ async fn connection(
     mut receiver: mpsc::UnboundedReceiver<Batch>,
     resolver: Arc<Referral>,
     desired_auth: DesiredAuth,
-    tls: Arc<Mutex<Option<tokio_rustls::TlsConnector>>>,
+    tls: tls::CachedConnector,
 ) {
-    let mut con: Option<Channel<ClientCtx>> = None;
+    let mut con: Option<Channel> = None;
     'main: loop {
         match receiver.next().await {
             None => break,

@@ -187,7 +187,7 @@ where
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
-        tls: Arc<Mutex<Option<tokio_rustls::TlsConnector>>>,
+        tls: tls::CachedConnector,
     ) -> Self;
     fn send(&mut self, batch: Pooled<Vec<(usize, T)>>) -> ResponseChan<F>;
 }
@@ -303,7 +303,7 @@ where
             by_server: HashMap::new(),
             writer_addr,
             secrets,
-            tls: Mutex::new(None),
+            tls: tls::CachedConnector::new(),
             f_pool,
             fi_pool,
             ti_pool,
