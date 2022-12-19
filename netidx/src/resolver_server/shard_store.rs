@@ -1,9 +1,7 @@
 use super::{
     auth::{Permissions, UserInfo},
-    store::{
-        self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL,
-    },
     secctx::SecCtx,
+    store::{self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL},
 };
 use crate::{
     channel::Channel,
@@ -413,7 +411,7 @@ impl Store {
 
     pub(super) async fn handle_batch_read(
         &self,
-        con: &mut Channel<ServerCtx>,
+        con: &mut Channel,
         uifo: Arc<UserInfo>,
         mut msgs: impl Iterator<Item = ToRead>,
     ) -> Result<()> {
@@ -610,7 +608,7 @@ impl Store {
 
     pub(super) async fn handle_batch_write(
         &self,
-        mut con: Option<&mut Channel<ServerCtx>>,
+        mut con: Option<&mut Channel>,
         uifo: Arc<UserInfo>,
         publisher: Arc<Publisher>,
         mut msgs: impl Iterator<Item = ToWrite>,
