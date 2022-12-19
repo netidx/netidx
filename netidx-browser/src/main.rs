@@ -23,7 +23,7 @@ use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap};
 use gdk::{self, prelude::*};
 use glib::{
-    clone, idle_add_local, idle_add_local_once, source::PRIORITY_LOW, VariantDict,
+    clone, idle_add_local, idle_add_local_once, source::PRIORITY_LOW,
 };
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexSet;
