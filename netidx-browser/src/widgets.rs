@@ -1184,10 +1184,8 @@ impl Scale {
         );
         let value =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.value.clone());
-        let min =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.min.clone());
-        let max =
-            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.max.clone());
+        let min = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.min.clone());
+        let max = BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.max.clone());
         let on_change = Rc::new(RefCell::new(BSNode::compile(
             &mut ctx.borrow_mut(),
             scope.clone(),

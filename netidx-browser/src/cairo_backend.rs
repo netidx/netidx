@@ -6,8 +6,8 @@
 use gtk::cairo::{Context as CairoContext, Error as CairoError, FontSlant, FontWeight};
 use plotters_backend::text_anchor::{HPos, VPos};
 use plotters_backend::{
-    BackendColor, BackendCoord, BackendStyle, BackendTextStyle, DrawingBackend, DrawingErrorKind,
-    FontStyle, FontTransform,
+    BackendColor, BackendCoord, BackendStyle, BackendTextStyle, DrawingBackend,
+    DrawingErrorKind, FontStyle, FontTransform,
 };
 
 /// The drawing backend that is backed with a Cairo context
@@ -37,7 +37,10 @@ impl<'a> CairoBackend<'a> {
         f(self.context).map_err(DrawingErrorKind::DrawingError)
     }
 
-    fn set_color(&self, color: &BackendColor) -> Result<(), DrawingErrorKind<CairoError>> {
+    fn set_color(
+        &self,
+        color: &BackendColor,
+    ) -> Result<(), DrawingErrorKind<CairoError>> {
         self.call_cairo(|c| {
             c.set_source_rgba(
                 f64::from(color.rgb.0) / 255.0,
@@ -56,7 +59,10 @@ impl<'a> CairoBackend<'a> {
         })
     }
 
-    fn set_font<S: BackendTextStyle>(&self, font: &S) -> Result<(), DrawingErrorKind<CairoError>> {
+    fn set_font<S: BackendTextStyle>(
+        &self,
+        font: &S,
+    ) -> Result<(), DrawingErrorKind<CairoError>> {
         let actual_size = font.size();
         self.call_cairo(|c| {
             match font.style() {
@@ -65,9 +71,11 @@ impl<'a> CairoBackend<'a> {
                     FontSlant::Normal,
                     FontWeight::Normal,
                 ),
-                FontStyle::Bold => {
-                    c.select_font_face(font.family().as_str(), FontSlant::Normal, FontWeight::Bold)
-                }
+                FontStyle::Bold => c.select_font_face(
+                    font.family().as_str(),
+                    FontSlant::Normal,
+                    FontWeight::Bold,
+                ),
                 FontStyle::Oblique => c.select_font_face(
                     font.family().as_str(),
                     FontSlant::Oblique,
@@ -84,13 +92,11 @@ impl<'a> CairoBackend<'a> {
         })
     }
 
-    pub fn new(context: &'a CairoContext, (w, h): (u32, u32)) -> Result<Self, CairoError> {
-        let ret = Self {
-            context,
-            width: w,
-            height: h,
-            init_flag: false,
-        };
+    pub fn new(
+        context: &'a CairoContext,
+        (w, h): (u32, u32),
+    ) -> Result<Self, CairoError> {
+        let ret = Self { context, width: w, height: h, init_flag: false };
         Ok(ret)
     }
 }
@@ -272,7 +278,8 @@ impl<'a> DrawingBackend for CairoBackend<'a> {
     ) -> Result<(u32, u32), DrawingErrorKind<Self::ErrorType>> {
         self.set_font(font)?;
         self.call_cairo(|c| {
-            c.text_extents(text).map(|extents| (extents.width as u32, extents.height as u32))
+            c.text_extents(text)
+                .map(|extents| (extents.width as u32, extents.height as u32))
         })
     }
 

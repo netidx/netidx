@@ -163,7 +163,8 @@ impl Table {
         event_exp.add(event.root());
         let (l, e, _dbg_path) = expr!(ctx, "Path:", scope, spec, on_change, path);
         shared_config.add((l, e));
-        let (l, e, _dbg_refresh) = expr!(ctx, "Refresh:", scope, spec, on_change, refresh);
+        let (l, e, _dbg_refresh) =
+            expr!(ctx, "Refresh:", scope, spec, on_change, refresh);
         shared_config.add((l, e));
         let (l, e, _dbg_sort_mode) =
             expr!(ctx, "Sort Mode:", scope, spec, on_change, sort_mode);

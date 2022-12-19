@@ -52,7 +52,9 @@ fn add_watch(
     expr: expr::Expr,
 ) {
     let id = expr.id;
-    let watch: Arc<dyn Fn(&DateTime<Local>, &Option<vm::Event<LocalEvent>>, &Value) + Send + Sync> = {
+    let watch: Arc<
+        dyn Fn(&DateTime<Local>, &Option<vm::Event<LocalEvent>>, &Value) + Send + Sync,
+    > = {
         struct CtxInner {
             store: gtk::TreeStore,
             iter: gtk::TreeIter,
@@ -64,12 +66,14 @@ fn add_watch(
             iter: iter.clone(),
             log: log.clone(),
         })));
-        Arc::new(move |ts: &DateTime<Local>, e: &Option<vm::Event<LocalEvent>>, v: &Value| {
-            let inner = ctx.0.lock();
-            let inner = inner.get_ref();
-            inner.store.set_value(&inner.iter, 1, &format!("{}", v).to_value());
-            log_expr_val(&inner.log, &expr, ts, e, v)
-        })
+        Arc::new(
+            move |ts: &DateTime<Local>, e: &Option<vm::Event<LocalEvent>>, v: &Value| {
+                let inner = ctx.0.lock();
+                let inner = inner.get_ref();
+                inner.store.set_value(&inner.iter, 1, &format!("{}", v).to_value());
+                log_expr_val(&inner.log, &expr, ts, e, v)
+            },
+        )
     };
     ctx.borrow_mut().dbg_ctx.add_watch(id, &watch);
     store.set_value(&iter, 2, &ExprWrap(watch).to_value());

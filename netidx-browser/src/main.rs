@@ -22,7 +22,9 @@ use editor::Editor;
 use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap};
 use gdk::{self, prelude::*};
-use glib::{clone, idle_add_local, idle_add_local_once, source::PRIORITY_LOW};
+use glib::{
+    clone, idle_add_local, idle_add_local_once, source::PRIORITY_LOW, VariantDict,
+};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexSet;
 use netidx::{
@@ -1257,6 +1259,45 @@ fn add_local_options(application: &gtk::Application) {
     );
 }
 
+fn parse_auth(opts: &glib::VariantDict) -> DesiredAuth {
+    match opts.lookup_value("auth", Some(&glib::VariantTy::STRING)) {
+        None => DesiredAuth::Krb5 { upn: None, spn: None },
+        Some(auth) => match auth
+            .get::<String>()
+            .unwrap()
+            .parse::<DesiredAuth>()
+            .expect("invalid auth mechanism")
+        {
+            auth @ (DesiredAuth::Local | DesiredAuth::Anonymous) => auth,
+            DesiredAuth::Krb5 { .. } => {
+                match opts.lookup_value("upn", Some(&glib::VariantTy::STRING)) {
+                    None => DesiredAuth::Krb5 { upn: None, spn: None },
+                    Some(upn) => {
+                        DesiredAuth::Krb5 { upn: upn.get::<String>(), spn: None }
+                    }
+                }
+            }
+            DesiredAuth::Tls { .. } => {
+                let root_certificates = opts
+                    .lookup_value("root-certificates", Some(&glib::VariantTy::STRING))
+                    .and_then(|v| v.get::<String>());
+                let certificate = opts
+                    .lookup_value("certificate", Some(&glib::VariantTy::STRING))
+                    .and_then(|v| v.get::<String>());
+                let private_key = opts
+                    .lookup_value("private-key", Some(&glib::VariantTy::STRING))
+                    .and_then(|v| v.get::<String>());
+                match (root_certificates, certificate, private_key) {
+                        (Some(root_certificates), Some(certificate), Some(private_key)) => {
+                            DesiredAuth::Tls { name: None, root_certificates, certificate, private_key }
+                        }
+                        (_, _, _) => panic!("in tls mode root-certificates, certificates, and private-key are required arguments")
+                    }
+            }
+        },
+    }
+}
+
 fn main() {
     env_logger::init();
     let application = Application::new(
@@ -1269,36 +1310,7 @@ fn main() {
             None => Config::load_default().unwrap(),
             Some(path) => Config::load(path.get::<String>().unwrap()).unwrap(),
         };
-        let auth = match opts.lookup_value("auth", Some(&glib::VariantTy::STRING)) {
-            None => DesiredAuth::Krb5 { upn: None, spn: None },
-            Some(auth) => match auth
-                .get::<String>()
-                .unwrap()
-                .parse::<DesiredAuth>()
-                .expect("invalid auth mechanism")
-            {
-                auth @ (DesiredAuth::Local | DesiredAuth::Anonymous) => auth,
-                DesiredAuth::Krb5 { .. } => {
-                    match opts.lookup_value("upn", Some(&glib::VariantTy::STRING)) {
-                        None => DesiredAuth::Krb5 { upn: None, spn: None },
-                        Some(upn) => {
-                            DesiredAuth::Krb5 { upn: upn.get::<String>(), spn: None }
-                        }
-                    }
-                }
-                DesiredAuth::Tls { .. } => {
-                    let root_certificates = opts.lookup_value("root-certificates", Some(&glib::VariantTy::STRING)).and_then(|v| v.get::<String>());
-                    let certificate = opts.lookup_value("certificate", Some(&glib::VariantTy::STRING)).and_then(|v| v.get::<String>());
-                    let private_key = opts.lookup_value("private-key", Some(&glib::VariantTy::STRING)).and_then(|v| v.get::<String>());
-                    match (root_certificates, certificate, private_key) {
-                        (Some(root_certificates), Some(certificate), Some(private_key)) => {
-                            DesiredAuth::Tls { name: None, root_certificates, certificate, private_key }
-                        }
-                        (_, _, _) => panic!("in tls mode root-certificates, certificates, and private-key are required arguments")
-                    }
-                }
-            },
-        };
+        let auth = parse_auth(opts);
         let default_loc = match opts.lookup_value("path", Some(&glib::VariantTy::STRING))
         {
             Some(path) => ViewLoc::Netidx(Path::from(path.get::<String>().unwrap())),
