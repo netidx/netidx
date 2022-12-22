@@ -39,16 +39,9 @@ lazy_static! {
 #[derive(Debug, Clone)]
 pub enum DesiredAuth {
     Anonymous,
-    Krb5 {
-        upn: Option<String>,
-        spn: Option<String>,
-    },
+    Krb5 { upn: Option<String>, spn: Option<String> },
     Local,
-    Tls {
-        name: Option<String>,
-        certificate: String,
-        private_key: String,
-    },
+    Tls { name: Option<String>, certificate: String, private_key: String },
 }
 
 impl FromStr for DesiredAuth {
@@ -59,7 +52,12 @@ impl FromStr for DesiredAuth {
             "anonymous" => Ok(DesiredAuth::Anonymous),
             "local" => Ok(DesiredAuth::Local),
             "krb5" => Ok(DesiredAuth::Krb5 { upn: None, spn: None }),
-            _ => bail!("expected, anonymous, local, or krb5"),
+            "tls" => Ok(DesiredAuth::Tls {
+                name: None,
+                certificate: String::new(),
+                private_key: String::new(),
+            }),
+            _ => bail!("expected, anonymous, local, krb5, or tls"),
         }
     }
 }
