@@ -135,8 +135,11 @@ impl Connection {
         }
         info!("write_con connecting to resolver {:?}", self.resolver_addr);
         let mut con = wt!(TcpStream::connect(&self.resolver_addr))??;
+        debug!("setting no delay = true");
         con.set_nodelay(true)?;
+        debug!("writing protocol version 2");
         wt!(channel::write_raw(&mut con, &2u64))??;
+        debug!("reading protocol version");
         if wt!(channel::read_raw::<u64, _>(&mut con))?? != 2 {
             bail!("incompatible protocol version")
         }
@@ -152,6 +155,7 @@ impl Connection {
         let (mut con, r, ownership_check) =
             match (&self.desired_auth, &self.resolver_auth) {
                 (DesiredAuth::Anonymous, _) => {
+                    debug!("sending anymous auth hello");
                     wt!(channel::write_raw(&mut con, &hello(AuthWrite::Anonymous)))??;
                     let r = wt!(channel::read_raw::<ServerHelloWrite, _>(&mut con))??;
                     (Channel::new::<ClientCtx, TcpStream>(None, con), r, false)
@@ -170,16 +174,19 @@ impl Connection {
                     | DesiredAuth::Tls { .. },
                     Auth::Local { path },
                 ) => {
+                    debug!("local authentication selected");
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
                     let mut con = Channel::new::<ClientCtx, TcpStream>(None, con);
                     match secret {
                         Some(secret) => {
+                            debug!("reusing existing session");
                             wt!(con.send_one(&hello(AuthWrite::Reuse)))??;
                             wt!(auth_challenge(&mut con, secret))??;
                             let r = wt!(con.receive::<ServerHelloWrite>())??;
                             (con, r, false)
                         }
                         None => {
+                            debug!("starting a new local auth session");
                             let tok = wt!(AuthClient::token(&*path))??;
                             wt!(con.send_one(&hello(AuthWrite::Local)))??;
                             wt!(con.send_one(&tok))??;
@@ -195,6 +202,7 @@ impl Connection {
                     bail!("krb5 auth is not supported")
                 }
                 (DesiredAuth::Krb5 { upn, spn }, Auth::Krb5 { spn: target_spn }) => {
+                    debug!("krb5 auth selected");
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
                     match (&self.security_context, secret) {
                         (Some(ctx), Some(secret))
@@ -202,6 +210,7 @@ impl Connection {
                                 .unwrap_or(sec)
                                 > sec =>
                         {
+                            debug!("reusing existing session");
                             wt!(channel::write_raw(&mut con, &hello(AuthWrite::Reuse)))??;
                             let mut con = Channel::new(Some(ctx.clone()), con);
                             wt!(auth_challenge(&mut con, secret))??;
@@ -209,6 +218,7 @@ impl Connection {
                             (con, r, false)
                         }
                         (None | Some(_), _) => {
+                            debug!("starting a new krb5 session");
                             let upn = upn.as_ref().map(|s| s.as_str());
                             let spn =
                                 Chars::from(spn.clone().ok_or_else(|| {
@@ -235,6 +245,7 @@ impl Connection {
                     DesiredAuth::Tls { name: publisher_name, certificate, private_key },
                     Auth::Tls { name },
                 ) => {
+                    debug!("tls auth selected");
                     let tls = self.tls.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
                     let ctx =
                         task::block_in_place(|| tls.load(certificate, private_key))?;
@@ -242,6 +253,7 @@ impl Connection {
                     let name = rustls::ServerName::try_from(&**name)?;
                     match secret {
                         Some(secret) => {
+                            debug!("reusing existing tls session");
                             wt!(channel::write_raw(&mut con, &hello(AuthWrite::Reuse)))??;
                             let tls = ctx.connect(name, con).await?;
                             let mut con = Channel::new::<
@@ -253,6 +265,7 @@ impl Connection {
                             (con, r, false)
                         }
                         None => {
+                            debug!("starting a new tls session");
                             let publisher_name = Chars::from(
                                 publisher_name
                                     .as_ref()

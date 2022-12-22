@@ -75,17 +75,17 @@ pub(crate) async fn write_raw<T: Pack, S: AsyncWrite + Unpin>(
 pub(crate) async fn read_raw<T: Pack, S: AsyncRead + Unpin>(socket: &mut S) -> Result<T> {
     const MAX: usize = 1024;
     let mut buf = [0u8; MAX];
-    socket.read_exact(&mut buf[0..3]).await?;
-    let len = BigEndian::read_u32(&buf[0..3]);
+    socket.read_exact(&mut buf[0..4]).await?;
+    let len = BigEndian::read_u32(&buf[0..4]);
     if len > LEN_MASK {
         bail!("message is encrypted")
     }
     let len = len as usize;
-    if len > MAX - 4 {
+    if len > MAX {
         bail!("message is too large")
     }
-    socket.read_exact(&mut buf[4..len]).await?;
-    let mut buf = &buf[4..len];
+    socket.read_exact(&mut buf[0..len]).await?;
+    let mut buf = &buf[0..len];
     let res = T::decode(&mut buf)?;
     if buf.has_remaining() {
         bail!("batch contained more than one message")
