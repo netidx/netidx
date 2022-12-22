@@ -17,25 +17,21 @@ pub struct ClientParams {
     #[structopt(long = "spn", help = "kerberos spn, only if auth = krb5")]
     pub spn: Option<String>,
     #[structopt(
-        short = "r",
         long = "root-certificates",
         help = "path to the tls root certificates in pem format"
     )]
     pub root_certificates: Option<String>,
     #[structopt(
-        short = "c",
         long = "certificate",
         help = "path to the tls certificate in pem format"
     )]
     pub certificate: Option<String>,
     #[structopt(
-        short = "p",
         long = "private-key",
         help = "path to the tls private key in pem format"
     )]
     pub private_key: Option<String>,
     #[structopt(
-        short = "n",
         long = "server-name",
         help = "the domain name in the tls certificate, only required for server"
     )]
