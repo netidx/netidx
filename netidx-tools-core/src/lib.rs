@@ -17,11 +17,6 @@ pub struct ClientParams {
     #[structopt(long = "spn", help = "kerberos spn, only if auth = krb5")]
     pub spn: Option<String>,
     #[structopt(
-        long = "root-certificates",
-        help = "path to the tls root certificates in pem format"
-    )]
-    pub root_certificates: Option<String>,
-    #[structopt(
         long = "certificate",
         help = "path to the tls certificate in pem format"
     )]
@@ -54,12 +49,14 @@ impl ClientParams {
             DesiredAuth::Krb5 { .. } => {
                 DesiredAuth::Krb5 { upn: self.upn, spn: self.spn }
             }
-            DesiredAuth::Tls { .. } => match (self.root_certificates, self.certificate, self.private_key) {
-                (Some(root_certificates), Some(certificate), Some(private_key)) => {
-                    DesiredAuth::Tls {root_certificates, certificate, private_key, name: self.name }
+            DesiredAuth::Tls { .. } => match (self.certificate, self.private_key) {
+                (Some(certificate), Some(private_key)) => {
+                    DesiredAuth::Tls { certificate, private_key, name: self.name }
                 }
-                (_, _, _) => panic!("root-certificates, certificate, and private-key are required arguments for tls")
-            }
+                (_, _) => {
+                    panic!("certificate, and private-key are required arguments for tls")
+                }
+            },
         };
         (cfg, auth)
     }

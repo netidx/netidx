@@ -60,7 +60,7 @@ struct Connection {
     published: Arc<RwLock<HashMap<Path, ToWrite>>>,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     security_context: Option<K5CtxWrap<ClientCtx>>,
-    tls: tls::CachedConnector,
+    tls: Option<tls::CachedConnector>,
     desired_auth: DesiredAuth,
     degraded: bool,
     active: bool,
@@ -165,7 +165,9 @@ impl Connection {
                     bail!("authentication not supported")
                 }
                 (
-                    DesiredAuth::Local | DesiredAuth::Krb5 { .. } | DesiredAuth::Tls { .. },
+                    DesiredAuth::Local
+                    | DesiredAuth::Krb5 { .. }
+                    | DesiredAuth::Tls { .. },
                     Auth::Local { path },
                 ) => {
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
@@ -230,17 +232,12 @@ impl Connection {
                     bail!("tls auth not supported")
                 }
                 (
-                    DesiredAuth::Tls {
-                        name: publisher_name,
-                        root_certificates,
-                        certificate,
-                        private_key,
-                    },
+                    DesiredAuth::Tls { name: publisher_name, certificate, private_key },
                     Auth::Tls { name },
                 ) => {
-                    let ctx = task::block_in_place(|| {
-                        self.tls.load(root_certificates, certificate, private_key)
-                    })?;
+                    let tls = self.tls.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
+                    let ctx =
+                        task::block_in_place(|| tls.load(certificate, private_key))?;
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
                     let name = rustls::ServerName::try_from(&**name)?;
                     match secret {
@@ -410,7 +407,7 @@ impl Connection {
         published: Arc<RwLock<HashMap<Path, ToWrite>>>,
         desired_auth: DesiredAuth,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
-        tls: tls::CachedConnector,
+        tls: Option<tls::CachedConnector>,
     ) {
         let now = Instant::now();
         let mut t = Self {
@@ -464,7 +461,7 @@ async fn write_mgr(
     desired_auth: DesiredAuth,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     write_addr: SocketAddr,
-    tls: tls::CachedConnector,
+    tls: Option<tls::CachedConnector>,
 ) -> Result<()> {
     let published: Arc<RwLock<HashMap<Path, ToWrite>>> =
         Arc::new(RwLock::new(HashMap::new()));
@@ -540,7 +537,7 @@ impl WriteClient {
         desired_auth: DesiredAuth,
         write_addr: SocketAddr,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
-        tls: tls::CachedConnector,
+        tls: Option<tls::CachedConnector>,
     ) -> Self {
         let (to_tx, to_rx) = mpsc::unbounded();
         task::spawn(async move {

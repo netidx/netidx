@@ -1,7 +1,7 @@
 use anyhow::Result;
-use parking_lot::Mutex;
-use std::{sync::Arc, fmt};
 use log::debug;
+use parking_lot::Mutex;
+use std::{fmt, sync::Arc};
 
 fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
     use std::{fs, io::BufReader};
@@ -72,8 +72,13 @@ pub(crate) fn create_tls_acceptor(
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
+struct CachedInner<T> {
+    root_certificates: String,
+    t: Mutex<Option<T>>,
+}
+
 #[derive(Clone)]
-struct Cached<T>(Arc<Mutex<Option<T>>>);
+struct Cached<T>(Arc<CachedInner<T>>);
 
 impl<T> fmt::Debug for Cached<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -82,22 +87,21 @@ impl<T> fmt::Debug for Cached<T> {
 }
 
 impl<T: Clone + 'static> Cached<T> {
-    fn new() -> Self {
-        Self(Arc::new(Mutex::new(None)))
+    fn new(root_certificates: String) -> Self {
+        Self(Arc::new(CachedInner { root_certificates, t: Mutex::new(None) }))
     }
 
     fn load(
         &self,
-        root_certificates: &str,
         certificate: &str,
         private_key: &str,
         f: fn(&str, &str, &str) -> Result<T>,
     ) -> Result<T> {
-        if let Some(con) = self.0.lock().as_ref() {
+        if let Some(con) = self.0.t.lock().as_ref() {
             return Ok(con.clone());
         }
-        let con = f(root_certificates, certificate, private_key)?;
-        *self.0.lock() = Some(con.clone());
+        let con = f(&self.0.root_certificates, certificate, private_key)?;
+        *self.0.t.lock() = Some(con.clone());
         Ok(con)
     }
 }
@@ -106,17 +110,16 @@ impl<T: Clone + 'static> Cached<T> {
 pub(crate) struct CachedConnector(Cached<tokio_rustls::TlsConnector>);
 
 impl CachedConnector {
-    pub(crate) fn new() -> Self {
-        Self(Cached::new())
+    pub(crate) fn new(root_certificates: String) -> Self {
+        Self(Cached::new(root_certificates))
     }
 
     pub(crate) fn load(
         &self,
-        root_certificates: &str,
         certificate: &str,
         private_key: &str,
     ) -> Result<tokio_rustls::TlsConnector> {
-        self.0.load(root_certificates, certificate, private_key, create_tls_connector)
+        self.0.load(certificate, private_key, create_tls_connector)
     }
 }
 
@@ -124,16 +127,15 @@ impl CachedConnector {
 pub(crate) struct CachedAcceptor(Cached<tokio_rustls::TlsAcceptor>);
 
 impl CachedAcceptor {
-    pub(crate) fn new() -> Self {
-        Self(Cached::new())
+    pub(crate) fn new(root_certificates: String) -> Self {
+        Self(Cached::new(root_certificates))
     }
 
     pub(crate) fn load(
         &self,
-        root_certificates: &str,
         certificate: &str,
         private_key: &str,
     ) -> Result<tokio_rustls::TlsAcceptor> {
-        self.0.load(root_certificates, certificate, private_key, create_tls_acceptor)
+        self.0.load(certificate, private_key, create_tls_acceptor)
     }
 }

@@ -859,6 +859,7 @@ impl Publisher {
                 }
             }
         };
+        let tls_ctx = resolver.tls_ca_certs.clone().map(tls::CachedAcceptor::new);
         let resolver = ResolverWrite::new(resolver, desired_auth.clone(), addr);
         let (stop, receive_stop) = oneshot::channel();
         let (tx_trigger, rx_trigger) = unbounded();
@@ -889,7 +890,14 @@ impl Publisher {
         task::spawn({
             let pb_weak = pb.downgrade();
             async move {
-                accept_loop(pb_weak.clone(), listener, receive_stop, desired_auth).await;
+                accept_loop(
+                    pb_weak.clone(),
+                    listener,
+                    receive_stop,
+                    desired_auth,
+                    tls_ctx,
+                )
+                .await;
                 info!("accept loop shutdown");
             }
         });
@@ -1503,7 +1511,7 @@ struct ClientCtx {
     wait_write_res: Vec<(Id, oneshot::Receiver<Value>)>,
     gc_on_write: Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
     msg_sent: bool,
-    tls_ctx: tls::CachedAcceptor,
+    tls_ctx: Option<tls::CachedAcceptor>,
 }
 
 impl ClientCtx {
@@ -1512,7 +1520,7 @@ impl ClientCtx {
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
         publisher: PublisherWeak,
         desired_auth: DesiredAuth,
-        tls_ctx: tls::CachedAcceptor,
+        tls_ctx: Option<tls::CachedAcceptor>,
     ) -> ClientCtx {
         let mut deferred_subs: DeferredSubs =
             Batched::new(SelectAll::new(), MAX_DEFERRED);
@@ -1587,15 +1595,11 @@ impl ClientCtx {
                     self.client_arrived();
                     Ok(Channel::new::<ServerCtx, TcpStream>(None, con))
                 }
-                DesiredAuth::Tls {
-                    name: _,
-                    root_certificates,
-                    certificate,
-                    private_key,
-                } => {
-                    let ctx = task::block_in_place(|| {
-                        self.tls_ctx.load(&root_certificates, &certificate, &private_key)
-                    })?;
+                DesiredAuth::Tls { name: _, certificate, private_key } => {
+                    let tls =
+                        self.tls_ctx.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
+                    let ctx =
+                        task::block_in_place(|| tls.load(&certificate, &private_key))?;
                     let tls = time::timeout(HELLO_TIMEOUT, ctx.accept(con)).await??;
                     let mut con = Channel::new::<
                         ServerCtx,
@@ -1847,9 +1851,9 @@ async fn accept_loop(
     serv: TcpListener,
     stop: oneshot::Receiver<()>,
     desired_auth: DesiredAuth,
+    tls_ctx: Option<tls::CachedAcceptor>,
 ) {
     let mut stop = stop.fuse();
-    let tls_ctx = tls::CachedAcceptor::new();
     loop {
         select_biased! {
             _ = stop => break,

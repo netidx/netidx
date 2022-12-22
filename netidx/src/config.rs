@@ -2,7 +2,6 @@ use crate::{
     path::Path,
     pool::Pooled,
     protocol::resolver::{Auth, Referral},
-    resolver_server::{self, config::file::Auth as FAuth},
     utils,
 };
 use anyhow::Result;
@@ -19,13 +18,35 @@ use std::{
 
 /// The on disk format, encoded as JSON
 mod file {
-    use super::*;
+    use crate::chars::Chars;
     use std::net::SocketAddr;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub(super) enum Auth {
+        Anonymous,
+        Krb5(String),
+        Local(String),
+        Tls(String),
+    }
+
+    impl Into<crate::protocol::resolver::Auth> for Auth {
+        fn into(self) -> crate::protocol::resolver::Auth {
+            use crate::protocol::resolver::Auth as A;
+            match self {
+                Self::Anonymous => A::Anonymous,
+                Self::Krb5(spn) => A::Krb5 { spn: Chars::from(spn) },
+                Self::Local(path) => A::Local { path: Chars::from(path) },
+                Self::Tls(name) => A::Tls { name: Chars::from(name) },
+            }
+        }
+    }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) struct Config {
         pub(super) base: String,
-        pub(super) addrs: Vec<(SocketAddr, FAuth)>,
+        pub(super) addrs: Vec<(SocketAddr, Auth)>,
+        #[serde(default)]
+        pub(super) tls_ca_certs: Option<String>,
     }
 }
 
@@ -33,6 +54,7 @@ mod file {
 pub struct Config {
     pub base: Path,
     pub addrs: Vec<(SocketAddr, Auth)>,
+    pub tls_ca_certs: Option<String>,
 }
 
 impl Config {
@@ -42,9 +64,13 @@ impl Config {
             bail!("you must specify at least one address");
         }
         for (addr, auth) in &cfg.addrs {
+            use file::Auth as FAuth;
             utils::check_addr::<()>(addr.ip(), &[])?;
             match auth {
-                FAuth::Anonymous | FAuth::Krb5(_) | FAuth::Tls { .. } => (),
+                FAuth::Anonymous | FAuth::Krb5(_) => (),
+                FAuth::Tls { .. } => if cfg.tls_ca_certs.is_none() {
+                    bail!("tls auth requires tls_ca_certs path to be set")
+                }
                 FAuth::Local(_) => {
                     if !addr.ip().is_loopback() {
                         bail!("local auth is not allowed for remote servers")
@@ -59,11 +85,8 @@ impl Config {
         }
         Ok(Config {
             base: Path::from(cfg.base),
-            addrs: cfg
-                .addrs
-                .into_iter()
-                .map(|(s, a)| (s, resolver_server::config::Auth::from(a).into()))
-                .collect(),
+            addrs: cfg.addrs.into_iter().map(|(s, a)| (s, a.into())).collect(),
+            tls_ca_certs: cfg.tls_ca_certs,
         })
     }
 

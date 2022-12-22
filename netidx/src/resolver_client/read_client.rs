@@ -37,7 +37,7 @@ macro_rules! cwt {
 async fn connect(
     resolver: &Referral,
     desired_auth: &DesiredAuth,
-    tls: &tls::CachedConnector,
+    tls: &Option<tls::CachedConnector>,
 ) -> Result<Channel> {
     let mut addrs = resolver.addrs.clone();
     addrs.as_mut_slice().shuffle(&mut thread_rng());
@@ -115,12 +115,11 @@ async fn connect(
                 bail!("tls authentication is not supported")
             }
             (
-                DesiredAuth::Tls { name: _, root_certificates, certificate, private_key },
+                DesiredAuth::Tls { name: _, certificate, private_key },
                 Auth::Tls { name },
             ) => {
-                let ctx = task::block_in_place(|| {
-                    tls.load(&root_certificates, &certificate, &private_key)
-                })?;
+                let tls = tls.as_ref().ok_or_else(|| anyhow!("no tls cache"))?;
+                let ctx = task::block_in_place(|| tls.load(&certificate, &private_key))?;
                 let hello = ClientHello::ReadOnly(AuthRead::Tls);
                 cwt!("hello", channel::write_raw(&mut con, &hello));
                 let name = rustls::ServerName::try_from(&**name)?;
@@ -161,7 +160,7 @@ async fn connection(
     mut receiver: mpsc::UnboundedReceiver<Batch>,
     resolver: Arc<Referral>,
     desired_auth: DesiredAuth,
-    tls: tls::CachedConnector,
+    tls: Option<tls::CachedConnector>,
 ) {
     let mut con: Option<Channel> = None;
     'main: loop {
@@ -266,7 +265,7 @@ impl ReadClient {
     pub(super) fn new(
         resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
-        tls: tls::CachedConnector,
+        tls: Option<tls::CachedConnector>,
     ) -> Self {
         let (to_tx, to_rx) = mpsc::unbounded();
         task::spawn(async move {

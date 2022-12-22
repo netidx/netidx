@@ -569,7 +569,7 @@ struct SubscriberInner {
     durable_alive: HashMap<Path, DvalWeak>,
     trigger_resub: UnboundedSender<()>,
     desired_auth: DesiredAuth,
-    tls_ctx: tls::CachedConnector,
+    tls_ctx: Option<tls::CachedConnector>,
 }
 
 impl SubscriberInner {
@@ -655,6 +655,7 @@ impl Subscriber {
     /// create a new subscriber with the specified config and desired auth
     pub fn new(resolver: Config, desired_auth: DesiredAuth) -> Result<Subscriber> {
         let (tx, rx) = mpsc::unbounded();
+        let tls_ctx = resolver.tls_ca_certs.clone().map(tls::CachedConnector::new);
         let resolver = ResolverRead::new(resolver, desired_auth.clone());
         let t = Subscriber(Arc::new(Mutex::new(SubscriberInner {
             id: SubscriberId::new(),
@@ -667,7 +668,7 @@ impl Subscriber {
             durable_pending: HashMap::default(),
             durable_alive: HashMap::default(),
             trigger_resub: tx,
-            tls_ctx: tls::CachedConnector::new(),
+            tls_ctx,
         })));
         t.start_resub_task(rx);
         Ok(t)
@@ -1296,7 +1297,7 @@ fn unsubscribe(
 
 async fn hello_publisher(
     mut con: TcpStream,
-    tls_ctx: tls::CachedConnector,
+    tls_ctx: Option<tls::CachedConnector>,
     desired_auth: &DesiredAuth,
     target_auth: &TargetAuth,
 ) -> Result<Channel> {
@@ -1354,12 +1355,11 @@ async fn hello_publisher(
             bail!("desired authentication mechanism not supported")
         }
         (
-            DesiredAuth::Tls { name: _, root_certificates, certificate, private_key },
+            DesiredAuth::Tls { name: _, certificate, private_key },
             TargetAuth::Tls { name },
         ) => {
-            let ctx = task::block_in_place(|| {
-                tls_ctx.load(&root_certificates, &certificate, &private_key)
-            })?;
+            let tls = tls_ctx.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
+            let ctx = task::block_in_place(|| tls.load(&certificate, &private_key))?;
             let name = rustls::ServerName::try_from(&**name)?;
             channel::write_raw(&mut con, &Hello::Tls).await?;
             let tls = ctx.connect(name, con).await?;
@@ -1560,7 +1560,7 @@ async fn connection(
     target_auth: TargetAuth,
     from_sub: BatchReceiver<ToCon>,
     auth: DesiredAuth,
-    tls_ctx: tls::CachedConnector,
+    tls_ctx: Option<tls::CachedConnector>,
 ) -> Result<()> {
     let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
     let mut subscriptions: FxHashMap<Id, Sub> = HashMap::default();

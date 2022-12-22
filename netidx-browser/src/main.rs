@@ -22,9 +22,7 @@ use editor::Editor;
 use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap};
 use gdk::{self, prelude::*};
-use glib::{
-    clone, idle_add_local, idle_add_local_once, source::PRIORITY_LOW,
-};
+use glib::{clone, idle_add_local, idle_add_local_once, source::PRIORITY_LOW};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexSet;
 use netidx::{
@@ -1218,14 +1216,6 @@ fn add_local_options(application: &gtk::Application) {
         Some("the name"),
     );
     application.add_main_option(
-        "root-certificates",
-        glib::Char::from(b'r'),
-        glib::OptionFlags::empty(),
-        glib::OptionArg::String,
-        "path to the tls root certificates in pem format",
-        Some("the path"),
-    );
-    application.add_main_option(
         "certificate",
         glib::Char::from(b'k'),
         glib::OptionFlags::empty(),
@@ -1278,21 +1268,18 @@ fn parse_auth(opts: &glib::VariantDict) -> DesiredAuth {
                 }
             }
             DesiredAuth::Tls { .. } => {
-                let root_certificates = opts
-                    .lookup_value("root-certificates", Some(&glib::VariantTy::STRING))
-                    .and_then(|v| v.get::<String>());
                 let certificate = opts
                     .lookup_value("certificate", Some(&glib::VariantTy::STRING))
                     .and_then(|v| v.get::<String>());
                 let private_key = opts
                     .lookup_value("private-key", Some(&glib::VariantTy::STRING))
                     .and_then(|v| v.get::<String>());
-                match (root_certificates, certificate, private_key) {
-                        (Some(root_certificates), Some(certificate), Some(private_key)) => {
-                            DesiredAuth::Tls { name: None, root_certificates, certificate, private_key }
-                        }
-                        (_, _, _) => panic!("in tls mode root-certificates, certificates, and private-key are required arguments")
+                match (certificate, private_key) {
+                    (Some(certificate), Some(private_key)) => {
+                        DesiredAuth::Tls { name: None, certificate, private_key }
                     }
+                    (_, _) => panic!("in tls mode certificates, and private-key are required arguments")
+                }
             }
         },
     }

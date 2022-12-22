@@ -46,7 +46,6 @@ pub enum DesiredAuth {
     Local,
     Tls {
         name: Option<String>,
-        root_certificates: String,
         certificate: String,
         private_key: String,
     },

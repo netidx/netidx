@@ -13,7 +13,8 @@ use crate::{
     pool::{Pool, Pooled},
     protocol::resolver::{
         FromRead, FromWrite, Publisher, PublisherId, Referral, ToRead, ToWrite,
-    }, tls,
+    },
+    tls,
 };
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -187,7 +188,7 @@ where
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
-        tls: tls::CachedConnector,
+        tls: Option<tls::CachedConnector>,
     ) -> Self;
     fn send(&mut self, batch: Pooled<Vec<(usize, T)>>) -> ResponseChan<F>;
 }
@@ -198,7 +199,7 @@ impl Connection<ToRead, FromRead> for ReadClient {
         desired_auth: DesiredAuth,
         _writer_addr: SocketAddr,
         _secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
-        tls: tls::CachedConnector,
+        tls: Option<tls::CachedConnector>,
     ) -> Self {
         ReadClient::new(resolver, desired_auth, tls)
     }
@@ -214,7 +215,7 @@ impl Connection<ToWrite, FromWrite> for WriteClient {
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
-        tls: tls::CachedConnector,
+        tls: Option<tls::CachedConnector>,
     ) -> Self {
         WriteClient::new(resolver, desired_auth, writer_addr, secrets, tls)
     }
@@ -236,7 +237,7 @@ where
     by_server: HashMap<Arc<Referral>, C>,
     writer_addr: SocketAddr,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
-    tls: tls::CachedConnector,
+    tls: Option<tls::CachedConnector>,
     phantom: PhantomData<(T, F)>,
     f_pool: Pool<Vec<F>>,
     fi_pool: Pool<Vec<(usize, F)>>,
@@ -293,6 +294,7 @@ where
         ti_pool: Pool<Vec<(usize, T)>>,
     ) -> ResolverWrap<C, T, F> {
         let secrets = Arc::new(RwLock::new(HashMap::default()));
+        let tls = default.tls_ca_certs.clone().map(tls::CachedConnector::new);
         let mut router = Router::new();
         let default: Arc<Referral> = Arc::new(default.to_referral());
         router.add_referral(default.clone());
@@ -303,7 +305,7 @@ where
             by_server: HashMap::new(),
             writer_addr,
             secrets,
-            tls: tls::CachedConnector::new(),
+            tls,
             f_pool,
             fi_pool,
             ti_pool,
