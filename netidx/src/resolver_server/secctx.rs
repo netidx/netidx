@@ -12,6 +12,7 @@ use crate::{
     protocol::resolver::PublisherId,
     tls,
 };
+use log::debug;
 use anyhow::{bail, Result};
 use cross_krb5::{K5Ctx, ServerCtx};
 use fxhash::FxHashMap;
@@ -161,15 +162,18 @@ impl SecCtx {
         let t = match &member.auth {
             Auth::Anonymous => SecCtx::Anonymous,
             Auth::Local { path } => {
+                debug!("starting local authenticator process");
                 let auth = LocalAuth::new(&path, cfg, member).await?;
                 let store = RwLock::new(SecCtxData::new(cfg, member)?);
                 SecCtx::Local(Arc::new((auth, store)))
             }
             Auth::Krb5 { spn } => {
+                debug!("creating kerberos context with spn {}", spn);
                 let store = RwLock::new(SecCtxData::new(cfg, member)?);
                 SecCtx::Krb5(Arc::new((spn.clone(), store)))
             }
             Auth::Tls { name: _, root_certificates, certificate, private_key } => {
+                debug!("creating tls acceptor");
                 let auth = tls::create_tls_acceptor(
                     root_certificates,
                     certificate,

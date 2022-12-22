@@ -1,6 +1,7 @@
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::{sync::Arc, fmt};
+use log::debug;
 
 fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
     use std::{fs, io::BufReader};
@@ -50,14 +51,19 @@ pub(crate) fn create_tls_acceptor(
     private_key: &str,
 ) -> Result<tokio_rustls::TlsAcceptor> {
     let client_auth = {
+        debug!("creating tls client auth trust store");
         let mut root_store = rustls::RootCertStore::empty();
+        debug!("loading CA certificates");
         for cert in load_certs(root_certificates)? {
             root_store.add(&cert)?;
         }
         rustls::server::AllowAnyAnonymousOrAuthenticatedClient::new(root_store)
     };
+    debug!("loading server certificate");
     let certs = load_certs(certificate)?;
+    debug!("loading server private key");
     let private_key = load_private_key(private_key)?;
+    debug!("creating tls acceptor");
     let mut config = rustls::ServerConfig::builder()
         .with_safe_defaults()
         .with_client_cert_verifier(client_auth)

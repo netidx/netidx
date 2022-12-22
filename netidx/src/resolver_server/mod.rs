@@ -27,7 +27,7 @@ use config::{Config, MemberServer};
 use cross_krb5::{AcceptFlags, K5ServerCtx, ServerCtx, Step};
 use futures::{channel::oneshot, prelude::*, select_biased};
 use fxhash::FxHashMap;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use parking_lot::{Mutex, RwLock};
 use rand::{thread_rng, Rng};
@@ -796,20 +796,26 @@ async fn server_loop(
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
     id: usize,
-) -> Result<SocketAddr> {
+) -> Result<()> {
+    debug!("server task start I am id: {}", id);
     let member = cfg.member_servers[id].clone();
+    debug!("my member config {:?}", member);
     let delay_reads =
         if delay_reads { Some(Instant::now() + member.writer_ttl) } else { None };
     let id = member.addr;
+    debug!("creating security context");
     let secctx = SecCtx::new(&cfg, &member).await?;
+    debug!("creating resolver store");
     let store = Store::new(
         cfg.parent.clone().map(|s| s.into()),
         cfg.children.iter().map(|(p, s)| (p.clone(), s.clone().into())).collect(),
         secctx.clone(),
         id,
     );
+    debug!("creating tcp listener on {:?}", id);
     let listener = TcpListener::bind(id).await?;
     let listen_addr = listener.local_addr()?;
+    debug!("my listen addr is {:?}", listen_addr);
     let ctx = Arc::new(Ctx {
         cfg: member,
         secctx,
@@ -823,6 +829,7 @@ async fn server_loop(
     let mut stop = stop.fuse();
     let mut client_stops: Vec<oneshot::Sender<()>> = Vec::new();
     let max_connections = ctx.cfg.max_connections;
+    debug!("signaling ready");
     let _ = ready.send(ctx.listen_addr);
     loop {
         select_biased! {
@@ -830,7 +837,7 @@ async fn server_loop(
                 for cl in client_stops.drain(..) {
                     let _ = cl.send(());
                 }
-                return Ok(ctx.listen_addr)
+                return Ok(())
             },
             cl = listener.accept().fuse() => match cl {
                 Err(e) => warn!("accept failed: {}", e),
@@ -879,9 +886,16 @@ impl Server {
     pub async fn new(cfg: Config, delay_reads: bool, id: usize) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        let tsk = server_loop(cfg, delay_reads, recv_stop, send_ready, id);
+        let jh = task::spawn(async move {
+            let res = server_loop(cfg, delay_reads, recv_stop, send_ready, id).await;
+            match &res {
+                Ok(_) => info!("resolver server shutdown"),
+                Err(e) => error!("resolver server failed {}", e),
+            }
+            res
+        });
         let local_addr = select_biased! {
-            a = task::spawn(tsk).fuse() => a??,
+            _ = jh.fuse() => bail!("resolver server shutdown"),
             a = recv_ready.fuse() => a?,
         };
         Ok(Server { stop: Some(send_stop), local_addr })
