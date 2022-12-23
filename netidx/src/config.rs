@@ -2,12 +2,14 @@ use crate::{
     path::Path,
     pool::Pooled,
     protocol::resolver::{Auth, Referral},
+    subscriber::DesiredAuth,
     utils,
 };
 use anyhow::Result;
 use log::debug;
 use serde_json::from_str;
 use std::{
+    collections::HashMap,
     convert::AsRef,
     convert::Into,
     env,
@@ -46,7 +48,66 @@ mod file {
         pub(super) base: String,
         pub(super) addrs: Vec<(SocketAddr, Auth)>,
         #[serde(default)]
-        pub(super) tls_ca_certs: Option<String>,
+        pub(super) tls: Option<super::Tls>,
+        #[serde(default)]
+        pub(super) default_auth: super::DefaultAuthMech,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsIdentity {
+    certificate: String,
+    private_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tls {
+    ca_certs: String,
+    identities: HashMap<String, TlsIdentity>,
+    agent: Option<String>,
+}
+
+impl Tls {
+    fn check(&self) -> Result<()> {
+        use std::fs;
+        if let Err(e) = fs::File::open(&self.ca_certs) {
+            bail!("ca certs cannot be read {}", e)
+        }
+        if self.identities.len() == 0 {
+            bail!("at least one identity is required for tls authentication")
+        }
+        for (name, id) in &self.identities {
+            if let Err(e) = fs::File::open(&id.certificate) {
+                bail!("{} certificate can't be read {}", name, e)
+            }
+            match &id.private_key {
+                None => {
+                    if self.agent.is_none() {
+                        bail!("if not using the agent private keys must be specified")
+                    }
+                }
+                Some(pkey) => {
+                    if let Err(e) = fs::File::open(pkey) {
+                        bail!("{} private_key can't be read {}", name, e)
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DefaultAuthMech {
+    Anonymous,
+    Local,
+    Krb5,
+    Tls,
+}
+
+impl Default for DefaultAuthMech {
+    fn default() -> Self {
+        DefaultAuthMech::Krb5
     }
 }
 
@@ -54,7 +115,8 @@ mod file {
 pub struct Config {
     pub base: Path,
     pub addrs: Vec<(SocketAddr, Auth)>,
-    pub tls_ca_certs: Option<String>,
+    pub tls: Option<Tls>,
+    pub default_auth: DefaultAuthMech,
 }
 
 impl Config {
@@ -63,13 +125,31 @@ impl Config {
         if cfg.addrs.is_empty() {
             bail!("you must specify at least one address");
         }
+        match cfg.default_auth {
+            DefaultAuthMech::Anonymous
+            | DefaultAuthMech::Local
+            | DefaultAuthMech::Krb5 => (),
+            DefaultAuthMech::Tls => {
+                if cfg.tls.is_none() {
+                    bail!("tls identities require for tls auth")
+                }
+            }
+        }
+        if let Some(tls) = &cfg.tls {
+            tls.check()?
+        }
         for (addr, auth) in &cfg.addrs {
             use file::Auth as FAuth;
             utils::check_addr::<()>(addr.ip(), &[])?;
             match auth {
                 FAuth::Anonymous | FAuth::Krb5(_) => (),
-                FAuth::Tls { .. } => if cfg.tls_ca_certs.is_none() {
-                    bail!("tls auth requires tls_ca_certs path to be set")
+                FAuth::Tls(name) => {
+                    match &cfg.tls {
+                        None => bail!("tls auth requires tls_ca_certs path to be set"),
+                        Some(tls) => if !tls.identities.contains_key(name) {
+                            bail!("required identity {} not found in tls identities", name)
+                        }
+                    }
                 }
                 FAuth::Local(_) => {
                     if !addr.ip().is_loopback() {
@@ -86,8 +166,22 @@ impl Config {
         Ok(Config {
             base: Path::from(cfg.base),
             addrs: cfg.addrs.into_iter().map(|(s, a)| (s, a.into())).collect(),
-            tls_ca_certs: cfg.tls_ca_certs,
+            tls: cfg.tls,
+            default_auth: cfg.default_auth,
         })
+    }
+
+    pub fn default_auth(&self) -> DesiredAuth {
+        match self.default_auth {
+            DefaultAuthMech::Anonymous => DesiredAuth::Anonymous,
+            DefaultAuthMech::Local => DesiredAuth::Local,
+            DefaultAuthMech::Krb5 => DesiredAuth::Krb5 { upn: None, spn: None },
+            DefaultAuthMech::Tls => DesiredAuth::Tls {
+                name: None,
+                identity: None,
+                tls: self.tls.as_ref().unwrap().clone(),
+            },
+        }
     }
 
     /// Load the cluster config from the specified file.

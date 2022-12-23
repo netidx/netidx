@@ -1,5 +1,5 @@
 use crate::{
-    channel,
+    channel, config,
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::{
@@ -41,7 +41,7 @@ pub enum DesiredAuth {
     Anonymous,
     Krb5 { upn: Option<String>, spn: Option<String> },
     Local,
-    Tls { name: Option<String>, certificate: String, private_key: String },
+    Tls { name: Option<String> },
 }
 
 impl FromStr for DesiredAuth {
@@ -52,11 +52,7 @@ impl FromStr for DesiredAuth {
             "anonymous" => Ok(DesiredAuth::Anonymous),
             "local" => Ok(DesiredAuth::Local),
             "krb5" => Ok(DesiredAuth::Krb5 { upn: None, spn: None }),
-            "tls" => Ok(DesiredAuth::Tls {
-                name: None,
-                certificate: String::new(),
-                private_key: String::new(),
-            }),
+            "tls" => Ok(DesiredAuth::Tls { name: None }),
             _ => bail!("expected, anonymous, local, krb5, or tls"),
         }
     }
