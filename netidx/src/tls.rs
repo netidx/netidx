@@ -1,7 +1,12 @@
+use crate::config::{Tls, TlsIdentity};
 use anyhow::Result;
 use log::debug;
 use parking_lot::Mutex;
-use std::{fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, Bound},
+    fmt, mem,
+    sync::Arc,
+};
 
 fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
     use std::{fs, io::BufReader};
@@ -72,9 +77,14 @@ pub(crate) fn create_tls_acceptor(
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
+struct CachedInnerLocked<T> {
+    tmp: String,
+    cached: BTreeMap<String, T>,
+}
+
 struct CachedInner<T> {
-    root_certificates: String,
-    t: Mutex<Option<T>>,
+    tls: Tls,
+    t: Mutex<CachedInnerLocked<T>>,
 }
 
 #[derive(Clone)]
@@ -87,22 +97,57 @@ impl<T> fmt::Debug for Cached<T> {
 }
 
 impl<T: Clone + 'static> Cached<T> {
-    fn new(root_certificates: String) -> Self {
-        Self(Arc::new(CachedInner { root_certificates, t: Mutex::new(None) }))
+    fn new(tls: Tls) -> Self {
+        Self(Arc::new(CachedInner {
+            tls,
+            t: Mutex::new(CachedInnerLocked {
+                tmp: String::with_capacity(256),
+                cached: BTreeMap::new(),
+            }),
+        }))
     }
 
-    fn load(
-        &self,
-        certificate: &str,
-        private_key: &str,
-        f: fn(&str, &str, &str) -> Result<T>,
-    ) -> Result<T> {
-        if let Some(con) = self.0.t.lock().as_ref() {
-            return Ok(con.clone());
+    fn load(&self, identity: &str, f: fn(&str, &str, &str) -> Result<T>) -> Result<T> {
+        fn get_match<'a: 'b, 'b, U>(
+            m: &'a BTreeMap<String, U>,
+            candidate: &'b str,
+            parts: usize,
+        ) -> Option<&'a U> {
+            m.range::<str, (Bound<&str>, Bound<&str>)>((
+                Bound::Included(candidate),
+                Bound::Unbounded,
+            ))
+            .next()
+            .and_then(|(k, v)| {
+                if k == candidate || (k.starts_with(candidate) && parts > 1) {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
         }
-        let con = f(&self.0.root_certificates, certificate, private_key)?;
-        *self.0.t.lock() = Some(con.clone());
-        Ok(con)
+        let (rev_identity, parts) = {
+            let inner = self.0.t.lock();
+            inner.tmp.clear();
+            inner.tmp.push_str(&identity);
+            let parts = Tls::reverse_domain_name(&mut inner.tmp);
+            if let Some(v) = get_match(&inner.cached, &inner.tmp, parts) {
+                return Ok(v.clone());
+            }
+            (mem::replace(&mut inner.tmp, String::new()), parts)
+        };
+        match get_match(&self.0.tls.identities, &rev_identity, parts) {
+            None => {
+                self.0.t.lock().tmp = rev_identity;
+                bail!("no plausable identity matches {}", identity)
+            }
+            Some(TlsIdentity { certificate, private_key: Some(pkey) }) => {
+                let con = f(&self.0.tls.ca_certs, certificate, pkey)?;
+                self.0.t.lock().cached.insert(rev_identity, con.clone());
+                Ok(con)
+            }
+            Some(_) => unimplemented!(), // CR estokes: netidx-agent
+        }
     }
 }
 
@@ -110,16 +155,12 @@ impl<T: Clone + 'static> Cached<T> {
 pub(crate) struct CachedConnector(Cached<tokio_rustls::TlsConnector>);
 
 impl CachedConnector {
-    pub(crate) fn new(root_certificates: String) -> Self {
-        Self(Cached::new(root_certificates))
+    pub(crate) fn new(cfg: Tls) -> Self {
+        Self(Cached::new(cfg))
     }
 
-    pub(crate) fn load(
-        &self,
-        certificate: &str,
-        private_key: &str,
-    ) -> Result<tokio_rustls::TlsConnector> {
-        self.0.load(certificate, private_key, create_tls_connector)
+    pub(crate) fn load(&self, identity: &str) -> Result<tokio_rustls::TlsConnector> {
+        self.0.load(identity, create_tls_connector)
     }
 }
 

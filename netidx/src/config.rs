@@ -6,16 +6,20 @@ use crate::{
     utils,
 };
 use anyhow::Result;
+use arcstr::ArcStr;
 use log::debug;
 use serde_json::from_str;
 use std::{
-    collections::HashMap,
+    cmp::min,
+    collections::BTreeMap,
     convert::AsRef,
     convert::Into,
     env,
     fs::read_to_string,
+    mem,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
+    str,
 };
 
 /// The on disk format, encoded as JSON
@@ -56,18 +60,47 @@ mod file {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsIdentity {
-    certificate: String,
-    private_key: Option<String>,
+    pub certificate: String,
+    pub private_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tls {
-    ca_certs: String,
-    identities: HashMap<String, TlsIdentity>,
-    agent: Option<String>,
+    pub ca_certs: String,
+    pub identities: BTreeMap<String, TlsIdentity>,
+    pub agent: Option<String>,
 }
 
 impl Tls {
+    pub(crate) fn reverse_domain_name(name: &mut String) -> usize {
+        const MAX: usize = 1024;
+        let mut tmp = [0u8; MAX + 1];
+        let mut i = 0;
+        let mut parts = 0;
+        for part in name[0..min(name.len(), MAX)].split('.').rev() {
+            dbg!(part);
+            tmp[i..i + part.len()].copy_from_slice(part.as_bytes());
+            tmp[i + part.len()] = '.' as u8;
+            i += part.len() + 1;
+            parts += 1;
+        }
+        name.clear();
+        name.push_str(str::from_utf8(&mut tmp[0..i]).unwrap());
+        parts
+    }
+
+    // Identities are domain names (e.g. the common name in the certificate).
+    // We allow the user to enter them in forward order, but we then reverse them
+    // so we can use the closest match to find the right identity for a publisher
+    // or resolver server
+    fn reverse_domain_names(&mut self) {
+        let identities = mem::replace(&mut self.identities, BTreeMap::new());
+        self.identities.extend(identities.into_iter().map(|(mut domain, v)| {
+            Tls::reverse_domain_name(&mut domain);
+            (domain, v)
+        }))
+    }
+
     fn check(&self) -> Result<()> {
         use std::fs;
         if let Err(e) = fs::File::open(&self.ca_certs) {
@@ -121,7 +154,7 @@ pub struct Config {
 
 impl Config {
     pub fn parse(s: &str) -> Result<Config> {
-        let cfg: file::Config = from_str(s)?;
+        let mut cfg: file::Config = from_str(s)?;
         if cfg.addrs.is_empty() {
             bail!("you must specify at least one address");
         }
@@ -143,14 +176,17 @@ impl Config {
             utils::check_addr::<()>(addr.ip(), &[])?;
             match auth {
                 FAuth::Anonymous | FAuth::Krb5(_) => (),
-                FAuth::Tls(name) => {
-                    match &cfg.tls {
-                        None => bail!("tls auth requires tls_ca_certs path to be set"),
-                        Some(tls) => if !tls.identities.contains_key(name) {
-                            bail!("required identity {} not found in tls identities", name)
+                FAuth::Tls(name) => match &cfg.tls {
+                    None => bail!("tls auth requires tls_ca_certs path to be set"),
+                    Some(tls) => {
+                        if !tls.identities.contains_key(name) {
+                            bail!(
+                                "required identity {} not found in tls identities",
+                                name
+                            )
                         }
                     }
-                }
+                },
                 FAuth::Local(_) => {
                     if !addr.ip().is_loopback() {
                         bail!("local auth is not allowed for remote servers")
