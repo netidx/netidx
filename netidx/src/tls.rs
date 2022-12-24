@@ -110,16 +110,16 @@ impl<T: Clone + 'static> Cached<T> {
     fn load(&self, identity: &str, f: fn(&str, &str, &str) -> Result<T>) -> Result<T> {
         fn get_match<'a: 'b, 'b, U>(
             m: &'a BTreeMap<String, U>,
-            candidate: &'b str,
+            identity: &'b str,
             parts: usize,
         ) -> Option<&'a U> {
             m.range::<str, (Bound<&str>, Bound<&str>)>((
-                Bound::Included(candidate),
                 Bound::Unbounded,
+                Bound::Included(identity),
             ))
-            .next()
+            .next_back()
             .and_then(|(k, v)| {
-                if k == candidate || (k.starts_with(candidate) && parts > 1) {
+                if k == identity || (identity.starts_with(k) && parts > 1) {
                     Some(v)
                 } else {
                     None

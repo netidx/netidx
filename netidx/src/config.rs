@@ -60,6 +60,7 @@ mod file {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsIdentity {
     pub certificate: String,
+    #[serde(default)]
     pub private_key: Option<String>,
 }
 
@@ -67,6 +68,7 @@ pub struct TlsIdentity {
 pub struct Tls {
     pub ca_certs: String,
     pub identities: BTreeMap<String, TlsIdentity>,
+    #[serde(default)]
     pub agent: Option<String>,
 }
 
