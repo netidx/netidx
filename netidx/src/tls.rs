@@ -168,15 +168,11 @@ impl CachedConnector {
 pub(crate) struct CachedAcceptor(Cached<tokio_rustls::TlsAcceptor>);
 
 impl CachedAcceptor {
-    pub(crate) fn new(root_certificates: String) -> Self {
-        Self(Cached::new(root_certificates))
+    pub(crate) fn new(tls: Tls) -> Self {
+        Self(Cached::new(tls))
     }
 
-    pub(crate) fn load(
-        &self,
-        certificate: &str,
-        private_key: &str,
-    ) -> Result<tokio_rustls::TlsAcceptor> {
-        self.0.load(certificate, private_key, create_tls_acceptor)
+    pub(crate) fn load(&self, identity: &str) -> Result<tokio_rustls::TlsAcceptor> {
+        self.0.load(identity, create_tls_acceptor)
     }
 }
