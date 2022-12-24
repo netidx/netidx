@@ -127,7 +127,7 @@ impl<T: Clone + 'static> Cached<T> {
             })
         }
         let (rev_identity, parts) = {
-            let inner = self.0.t.lock();
+            let mut inner = self.0.t.lock();
             inner.tmp.clear();
             inner.tmp.push_str(&identity);
             let parts = Tls::reverse_domain_name(&mut inner.tmp);

@@ -294,7 +294,7 @@ where
         ti_pool: Pool<Vec<(usize, T)>>,
     ) -> ResolverWrap<C, T, F> {
         let secrets = Arc::new(RwLock::new(HashMap::default()));
-        let tls = default.tls_ca_certs.clone().map(tls::CachedConnector::new);
+        let tls = default.tls.clone().map(tls::CachedConnector::new);
         let mut router = Router::new();
         let default: Arc<Referral> = Arc::new(default.to_referral());
         router.add_referral(default.clone());

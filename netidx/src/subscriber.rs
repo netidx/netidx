@@ -655,7 +655,7 @@ impl Subscriber {
     /// create a new subscriber with the specified config and desired auth
     pub fn new(resolver: Config, desired_auth: DesiredAuth) -> Result<Subscriber> {
         let (tx, rx) = mpsc::unbounded();
-        let tls_ctx = resolver.tls_ca_certs.clone().map(tls::CachedConnector::new);
+        let tls_ctx = resolver.tls.clone().map(tls::CachedConnector::new);
         let resolver = ResolverRead::new(resolver, desired_auth.clone());
         let t = Subscriber(Arc::new(Mutex::new(SubscriberInner {
             id: SubscriberId::new(),
@@ -1354,12 +1354,9 @@ async fn hello_publisher(
         (DesiredAuth::Krb5 { .. }, TargetAuth::Tls { .. }) => {
             bail!("desired authentication mechanism not supported")
         }
-        (
-            DesiredAuth::Tls { name: _, certificate, private_key },
-            TargetAuth::Tls { name },
-        ) => {
+        (DesiredAuth::Tls { .. }, TargetAuth::Tls { name }) => {
             let tls = tls_ctx.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
-            let ctx = task::block_in_place(|| tls.load(&certificate, &private_key))?;
+            let ctx = task::block_in_place(|| tls.load(name))?;
             let name = rustls::ServerName::try_from(&**name)?;
             channel::write_raw(&mut con, &Hello::Tls).await?;
             let tls = ctx.connect(name, con).await?;

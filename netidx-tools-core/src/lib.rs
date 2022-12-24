@@ -25,14 +25,16 @@ impl ClientParams {
             Some(path) => Config::load(path).expect("failed to load netidx config"),
         };
         let auth = match self.auth.unwrap_or_else(|| cfg.default_auth()) {
-            auth@ (DesiredAuth::Anonymous | DesiredAuth::Local) => auth,
-            DesiredAuth::Krb5 { .. } => DesiredAuth::Krb5 { upn: self.upn, spn: self.spn },
-            DesiredAuth::Tls { .. } => DesiredAuth::Tls { name: self.name },
+            auth @ (DesiredAuth::Anonymous | DesiredAuth::Local) => auth,
+            DesiredAuth::Krb5 { .. } => {
+                DesiredAuth::Krb5 { upn: self.upn.clone(), spn: self.spn.clone() }
+            }
+            DesiredAuth::Tls { .. } => DesiredAuth::Tls { name: self.name.clone() },
         };
         match &auth {
             DesiredAuth::Krb5 { .. } => (),
             DesiredAuth::Anonymous | DesiredAuth::Local | DesiredAuth::Tls { .. } => {
-                if self.upn.is_some() || self.is_some() {
+                if self.upn.is_some() || self.spn.is_some() {
                     panic!("upn/spn may only be specified for krb5 auth")
                 }
             }

@@ -1216,22 +1216,6 @@ fn add_local_options(application: &gtk::Application) {
         Some("the name"),
     );
     application.add_main_option(
-        "certificate",
-        glib::Char::from(b'k'),
-        glib::OptionFlags::empty(),
-        glib::OptionArg::String,
-        "path to the tls client certificate in pem format",
-        Some("the path"),
-    );
-    application.add_main_option(
-        "private-key",
-        glib::Char::from(b's'),
-        glib::OptionFlags::empty(),
-        glib::OptionArg::String,
-        "path to the tls private-key in pem format",
-        Some("the path"),
-    );
-    application.add_main_option(
         "path",
         glib::Char::from(b'p'),
         glib::OptionFlags::empty(),
@@ -1258,27 +1242,15 @@ fn parse_auth(opts: &glib::VariantDict) -> DesiredAuth {
             .parse::<DesiredAuth>()
             .expect("invalid auth mechanism")
         {
-            auth @ (DesiredAuth::Local | DesiredAuth::Anonymous) => auth,
+            auth @ (DesiredAuth::Local
+            | DesiredAuth::Anonymous
+            | DesiredAuth::Tls { .. }) => auth,
             DesiredAuth::Krb5 { .. } => {
                 match opts.lookup_value("upn", Some(&glib::VariantTy::STRING)) {
                     None => DesiredAuth::Krb5 { upn: None, spn: None },
                     Some(upn) => {
                         DesiredAuth::Krb5 { upn: upn.get::<String>(), spn: None }
                     }
-                }
-            }
-            DesiredAuth::Tls { .. } => {
-                let certificate = opts
-                    .lookup_value("certificate", Some(&glib::VariantTy::STRING))
-                    .and_then(|v| v.get::<String>());
-                let private_key = opts
-                    .lookup_value("private-key", Some(&glib::VariantTy::STRING))
-                    .and_then(|v| v.get::<String>());
-                match (certificate, private_key) {
-                    (Some(certificate), Some(private_key)) => {
-                        DesiredAuth::Tls { name: None, certificate, private_key }
-                    }
-                    (_, _) => panic!("in tls mode certificates, and private-key are required arguments")
                 }
             }
         },

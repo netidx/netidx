@@ -859,7 +859,7 @@ impl Publisher {
                 }
             }
         };
-        let tls_ctx = resolver.tls_ca_certs.clone().map(tls::CachedAcceptor::new);
+        let tls_ctx = resolver.tls.clone().map(tls::CachedAcceptor::new);
         let resolver = ResolverWrite::new(resolver, desired_auth.clone(), addr);
         let (stop, receive_stop) = oneshot::channel();
         let (tx_trigger, rx_trigger) = unbounded();
@@ -1595,11 +1595,13 @@ impl ClientCtx {
                     self.client_arrived();
                     Ok(Channel::new::<ServerCtx, TcpStream>(None, con))
                 }
-                DesiredAuth::Tls { name: _, certificate, private_key } => {
+                DesiredAuth::Tls { name } => {
                     let tls =
                         self.tls_ctx.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
-                    let ctx =
-                        task::block_in_place(|| tls.load(&certificate, &private_key))?;
+                    let name = name
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("tls server name is required"))?;
+                    let ctx = task::block_in_place(|| tls.load(name))?;
                     let tls = time::timeout(HELLO_TIMEOUT, ctx.accept(con)).await??;
                     let mut con = Channel::new::<
                         ServerCtx,

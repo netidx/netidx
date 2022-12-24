@@ -241,14 +241,10 @@ impl Connection {
                 (DesiredAuth::Tls { .. }, Auth::Krb5 { .. }) => {
                     bail!("tls auth not supported")
                 }
-                (
-                    DesiredAuth::Tls { name: publisher_name, certificate, private_key },
-                    Auth::Tls { name },
-                ) => {
+                (DesiredAuth::Tls { name: pname }, Auth::Tls { name }) => {
                     debug!("tls auth selected");
                     let tls = self.tls.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
-                    let ctx =
-                        task::block_in_place(|| tls.load(certificate, private_key))?;
+                    let ctx = task::block_in_place(|| tls.load(name))?;
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
                     let name = rustls::ServerName::try_from(&**name)?;
                     match secret {
@@ -267,7 +263,7 @@ impl Connection {
                         None => {
                             debug!("starting a new tls session");
                             let publisher_name = Chars::from(
-                                publisher_name
+                                pname
                                     .as_ref()
                                     .ok_or_else(|| {
                                         anyhow!("name is required for writers")

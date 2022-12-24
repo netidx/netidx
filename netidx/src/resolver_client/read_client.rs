@@ -114,12 +114,9 @@ async fn connect(
             (DesiredAuth::Tls { .. }, Auth::Krb5 { .. }) => {
                 bail!("tls authentication is not supported")
             }
-            (
-                DesiredAuth::Tls { name: _, certificate, private_key },
-                Auth::Tls { name },
-            ) => {
+            (DesiredAuth::Tls { .. }, Auth::Tls { name }) => {
                 let tls = tls.as_ref().ok_or_else(|| anyhow!("no tls cache"))?;
-                let ctx = task::block_in_place(|| tls.load(&certificate, &private_key))?;
+                let ctx = task::block_in_place(|| tls.load(name))?;
                 let hello = ClientHello::ReadOnly(AuthRead::Tls);
                 cwt!("hello", channel::write_raw(&mut con, &hello));
                 let name = rustls::ServerName::try_from(&**name)?;

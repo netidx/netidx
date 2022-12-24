@@ -6,7 +6,6 @@ use crate::{
     utils,
 };
 use anyhow::Result;
-use arcstr::ArcStr;
 use log::debug;
 use serde_json::from_str;
 use std::{
@@ -72,13 +71,13 @@ pub struct Tls {
 }
 
 impl Tls {
+    // e.g. marketdata.architect.com => com.architect.marketdata.
     pub(crate) fn reverse_domain_name(name: &mut String) -> usize {
         const MAX: usize = 1024;
         let mut tmp = [0u8; MAX + 1];
         let mut i = 0;
         let mut parts = 0;
         for part in name[0..min(name.len(), MAX)].split('.').rev() {
-            dbg!(part);
             tmp[i..i + part.len()].copy_from_slice(part.as_bytes());
             tmp[i + part.len()] = '.' as u8;
             i += part.len() + 1;
@@ -89,15 +88,11 @@ impl Tls {
         parts
     }
 
-    // Identities are domain names (e.g. the common name in the certificate).
-    // We allow the user to enter them in forward order, but we then reverse them
-    // so we can use the closest match to find the right identity for a publisher
-    // or resolver server
     fn reverse_domain_names(&mut self) {
-        let identities = mem::replace(&mut self.identities, BTreeMap::new());
-        self.identities.extend(identities.into_iter().map(|(mut domain, v)| {
-            Tls::reverse_domain_name(&mut domain);
-            (domain, v)
+        let ids = mem::replace(&mut self.identities, BTreeMap::new());
+        self.identities.extend(ids.into_iter().map(|(mut name, v)| {
+            Self::reverse_domain_name(&mut name);
+            (name, v)
         }))
     }
 
@@ -158,6 +153,9 @@ impl Config {
         if cfg.addrs.is_empty() {
             bail!("you must specify at least one address");
         }
+        if let Some(tls) = &mut cfg.tls {
+            tls.reverse_domain_names()
+        }
         match cfg.default_auth {
             DefaultAuthMech::Anonymous
             | DefaultAuthMech::Local
@@ -212,11 +210,7 @@ impl Config {
             DefaultAuthMech::Anonymous => DesiredAuth::Anonymous,
             DefaultAuthMech::Local => DesiredAuth::Local,
             DefaultAuthMech::Krb5 => DesiredAuth::Krb5 { upn: None, spn: None },
-            DefaultAuthMech::Tls => DesiredAuth::Tls {
-                name: None,
-                identity: None,
-                tls: self.tls.as_ref().unwrap().clone(),
-            },
+            DefaultAuthMech::Tls => DesiredAuth::Tls { name: None },
         }
     }
 

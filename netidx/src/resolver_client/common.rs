@@ -1,5 +1,5 @@
 use crate::{
-    channel, config,
+    channel,
     path::Path,
     pool::{Pool, Pooled},
     protocol::resolver::{
