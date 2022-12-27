@@ -49,38 +49,37 @@ impl From<file::Auth> for Auth {
             file::Auth::Anonymous => Self::Anonymous,
             file::Auth::Krb5(spn) => Self::Krb5 { spn: Chars::from(spn) },
             file::Auth::Local(path) => Self::Local { path: Chars::from(path) },
-            file::Auth::Tls { name, trusted, certificate, private_key } => {
-                Self::Tls {
-                    name: Chars::from(name),
-                    trusted: Chars::from(trusted),
-                    certificate: Chars::from(certificate),
-                    private_key: Chars::from(private_key),
-                }
-            }
+            file::Auth::Tls { name, trusted, certificate, private_key } => Self::Tls {
+                name: Chars::from(name),
+                trusted: Chars::from(trusted),
+                certificate: Chars::from(certificate),
+                private_key: Chars::from(private_key),
+            },
         }
     }
 }
 
-pub(crate) fn check_addrs(a: &Vec<(SocketAddr, file::Auth)>) -> Result<()> {
-    use file::Auth;
+pub(crate) fn check_addrs<T: Clone + Into<resolver::Auth>>(
+    a: &Vec<(SocketAddr, T)>,
+) -> Result<()> {
     if a.is_empty() {
         bail!("empty addrs")
     }
     for (addr, auth) in a {
         utils::check_addr::<()>(addr.ip(), &[])?;
-        match auth {
-            Auth::Anonymous => (),
-            Auth::Local(_) if !addr.ip().is_loopback() => {
+        match auth.clone().into() {
+            resolver::Auth::Anonymous => (),
+            resolver::Auth::Local { .. } if !addr.ip().is_loopback() => {
                 bail!("local auth is not allowed for a network server")
             }
-            Auth::Local(_) => (),
-            Auth::Krb5(spn) => {
+            resolver::Auth::Local { .. } => (),
+            resolver::Auth::Krb5 { spn } => {
                 if spn.is_empty() {
                     bail!("spn is required in krb5 mode")
                 }
             }
             // CR estokes: verify the certificates
-            Auth::Tls { .. } => (),
+            resolver::Auth::Tls { .. } => (),
         }
     }
     if !a.iter().all(|(a, _)| a.ip().is_loopback())
@@ -103,8 +102,7 @@ impl Default for PMap {
 
 /// The on disk format, encoded as JSON
 pub(crate) mod file {
-    use super::super::config::check_addrs;
-    use super::PMap;
+    use super::{super::config::check_addrs, resolver, Chars, PMap};
     use crate::{path::Path, pool::Pooled};
     use anyhow::Result;
     use std::net::SocketAddr;
@@ -114,12 +112,37 @@ pub(crate) mod file {
         Anonymous,
         Krb5(String),
         Local(String),
-        Tls {
-            name: String,
-            trusted: String,
-            certificate: String,
-            private_key: String,
-        },
+        Tls { name: String, trusted: String, certificate: String, private_key: String },
+    }
+
+    impl Into<resolver::Auth> for Auth {
+        fn into(self) -> resolver::Auth {
+            match self {
+                Self::Anonymous => resolver::Auth::Anonymous,
+                Self::Krb5(spn) => resolver::Auth::Krb5 { spn: Chars::from(spn) },
+                Self::Local(path) => resolver::Auth::Local { path: Chars::from(path) },
+                Self::Tls { name, .. } => resolver::Auth::Tls { name: Chars::from(name) },
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub(super) enum RefAuth {
+        Anonymous,
+        Krb5(String),
+        Local(String),
+        Tls(String),
+    }
+
+    impl Into<resolver::Auth> for RefAuth {
+        fn into(self) -> resolver::Auth {
+            match self {
+                Self::Anonymous => resolver::Auth::Anonymous,
+                Self::Krb5(spn) => resolver::Auth::Krb5 { spn: Chars::from(spn) },
+                Self::Local(path) => resolver::Auth::Local { path: Chars::from(path) },
+                Self::Tls(name) => resolver::Auth::Tls { name: Chars::from(name) },
+            }
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,7 +150,7 @@ pub(crate) mod file {
         path: String,
         #[serde(default)]
         ttl: Option<u16>,
-        addrs: Vec<(SocketAddr, Auth)>,
+        addrs: Vec<(SocketAddr, RefAuth)>,
     }
 
     impl Referral {
@@ -156,10 +179,7 @@ pub(crate) mod file {
                 path,
                 ttl: self.ttl,
                 addrs: Pooled::orphan(
-                    self.addrs
-                        .into_iter()
-                        .map(|(s, a)| (s, super::Auth::from(a).into()))
-                        .collect(),
+                    self.addrs.into_iter().map(|(s, a)| (s, a.into())).collect(),
                 ),
             })
         }
