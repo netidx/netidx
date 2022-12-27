@@ -3,8 +3,7 @@ use crate::{
     pool::Pooled,
     protocol::resolver::{Auth, Referral},
     subscriber::DesiredAuth,
-    utils,
-    tls,
+    tls, utils,
 };
 use anyhow::Result;
 use log::debug;
@@ -62,15 +61,14 @@ mod file {
 pub struct TlsIdentity {
     pub trusted: String,
     pub certificate: String,
-    #[serde(default)]
-    pub private_key: Option<String>,
+    pub private_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tls {
     pub identities: BTreeMap<String, TlsIdentity>,
     #[serde(default)]
-    pub agent: Option<String>,
+    pub askpass: Option<String>,
 }
 
 impl Tls {
@@ -101,6 +99,11 @@ impl Tls {
         if self.identities.len() == 0 {
             bail!("at least one identity is required for tls authentication")
         }
+        if let Some(askpass) = &self.askpass {
+            if let Err(e) = fs::File::open(askpass) {
+                bail!("{} askpass can't be read {}", askpass, e)
+            }
+        }
         for (name, id) in &self.identities {
             if let Err(e) = fs::File::open(&id.trusted) {
                 bail!("trusted certs {} cannot be read {}", id.trusted, e)
@@ -108,17 +111,8 @@ impl Tls {
             if let Err(e) = fs::File::open(&id.certificate) {
                 bail!("{} certificate can't be read {}", name, e)
             }
-            match &id.private_key {
-                None => {
-                    if self.agent.is_none() {
-                        bail!("if not using the agent private keys must be specified")
-                    }
-                }
-                Some(pkey) => {
-                    if let Err(e) = fs::File::open(pkey) {
-                        bail!("{} private_key can't be read {}", name, e)
-                    }
-                }
+            if let Err(e) = fs::File::open(&id.private_key) {
+                bail!("{} private_key can't be read {}", name, e)
             }
         }
         Ok(())

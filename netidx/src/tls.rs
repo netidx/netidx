@@ -1,6 +1,6 @@
 use crate::config::{Tls, TlsIdentity};
 use anyhow::Result;
-use log::debug;
+use log::{debug, info, warn};
 use parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, Bound},
@@ -16,22 +16,62 @@ fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
         .collect())
 }
 
-fn load_private_key(path: &str) -> Result<rustls::PrivateKey> {
-    use std::{fs, io::BufReader};
-    let mut reader = BufReader::new(fs::File::open(path)?);
-    while let Some(key) = rustls_pemfile::read_one(&mut reader)? {
-        match key {
-            rustls_pemfile::Item::RSAKey(key) => return Ok(rustls::PrivateKey(key)),
-            rustls_pemfile::Item::PKCS8Key(key) => return Ok(rustls::PrivateKey(key)),
-            rustls_pemfile::Item::ECKey(key) => return Ok(rustls::PrivateKey(key)),
-            _ => (),
+fn load_key_password(askpass: &str, path: &str) -> Result<String> {
+    use keyring::Entry;
+    use std::process::Command;
+    let entry = Entry::new("netidx", path);
+    info!("loading password for {} from the system keyring", path);
+    match entry.get_password() {
+        Ok(password) => Ok(password),
+        Err(e) => {
+            info!("failed to find password entry for netidx {}, error {}", path, e);
+            let res = Command::new(askpass).arg(path).output()?;
+            let password = String::from_utf8_lossy(&res.stdout);
+            if let Err(e) = entry.set_password(&password) {
+                warn!("failed to set password entry for netidx {}, error {}", path, e);
+            }
+            Ok(password.into_owned())
         }
     }
-    // CR estokes: probably need to support encrypted keys.
-    bail!("no keys found, encrypted keys not supported")
+}
+
+fn load_private_key(askpass: Option<&str>, path: &str) -> Result<rustls::PrivateKey> {
+    use pkcs8::{
+        der::{pem::PemLabel, zeroize::Zeroize},
+        EncryptedPrivateKeyInfo, PrivateKeyInfo, SecretDocument,
+    };
+    debug!("reading key from {}", path);
+    let key = std::fs::read_to_string(path)?;
+    let (label, doc) = match SecretDocument::from_pem(&key) {
+        Ok((label, doc)) => (label, doc),
+        Err(e) => bail!("failed to load pem {}, error: {}", path, e),
+    };
+    debug!("key label is {}", label);
+    if label == EncryptedPrivateKeyInfo::PEM_LABEL {
+        let key = match EncryptedPrivateKeyInfo::try_from(doc.as_bytes()) {
+            Ok(key) => key,
+            Err(e) => bail!("failed to parse encrypted key {}", e),
+        };
+        debug!("decrypting key");
+        let mut password = match askpass {
+            Some(askpass) => load_key_password(askpass, path)?,
+            None => bail!("loading encrypted private keys not supported"),
+        };
+        let key = match key.decrypt(&password) {
+            Ok(key) => key,
+            Err(e) => bail!("failed to decrypt key {}", e),
+        };
+        password.zeroize();
+        Ok(rustls::PrivateKey(Vec::from(key.as_bytes())))
+    } else if label == PrivateKeyInfo::PEM_LABEL {
+        Ok(rustls::PrivateKey(Vec::from(doc.as_bytes())))
+    } else {
+        bail!("expected a key in pem format")
+    }
 }
 
 pub(crate) fn create_tls_connector(
+    askpass: Option<&str>,
     root_certificates: &str,
     certificate: &str,
     private_key: &str,
@@ -41,7 +81,7 @@ pub(crate) fn create_tls_connector(
         root_store.add(&cert)?;
     }
     let certs = load_certs(certificate)?;
-    let private_key = load_private_key(private_key)?;
+    let private_key = load_private_key(askpass, private_key)?;
     let mut config = rustls::ClientConfig::builder()
         .with_safe_defaults()
         .with_root_certificates(root_store)
@@ -51,6 +91,7 @@ pub(crate) fn create_tls_connector(
 }
 
 pub(crate) fn create_tls_acceptor(
+    askpass: Option<&str>,
     root_certificates: &str,
     certificate: &str,
     private_key: &str,
@@ -67,7 +108,7 @@ pub(crate) fn create_tls_acceptor(
     debug!("loading server certificate");
     let certs = load_certs(certificate)?;
     debug!("loading server private key");
-    let private_key = load_private_key(private_key)?;
+    let private_key = load_private_key(askpass, private_key)?;
     debug!("creating tls acceptor");
     let mut config = rustls::ServerConfig::builder()
         .with_safe_defaults()
@@ -125,7 +166,11 @@ impl<T: Clone + 'static> Cached<T> {
         }))
     }
 
-    fn load(&self, identity: &str, f: fn(&str, &str, &str) -> Result<T>) -> Result<T> {
+    fn load(
+        &self,
+        identity: &str,
+        f: fn(Option<&str>, &str, &str, &str) -> Result<T>,
+    ) -> Result<T> {
         let rev_identity = {
             let mut inner = self.0.t.lock();
             inner.tmp.clear();
@@ -141,12 +186,12 @@ impl<T: Clone + 'static> Cached<T> {
                 self.0.t.lock().tmp = rev_identity;
                 bail!("no plausable identity matches {}", identity)
             }
-            Some(TlsIdentity { trusted, certificate, private_key: Some(pkey) }) => {
-                let con = f(trusted, certificate, pkey)?;
+            Some(TlsIdentity { trusted, certificate, private_key }) => {
+                let askpass = self.0.tls.askpass.as_ref().map(|s| s.as_str());
+                let con = f(askpass, trusted, certificate, private_key)?;
                 self.0.t.lock().cached.insert(rev_identity, con.clone());
                 Ok(con)
             }
-            Some(_) => unimplemented!(), // CR estokes: netidx-agent
         }
     }
 }

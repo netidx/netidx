@@ -12,10 +12,10 @@ use crate::{
     protocol::resolver::PublisherId,
     tls,
 };
-use log::debug;
 use anyhow::{bail, Result};
 use cross_krb5::{K5Ctx, ServerCtx};
 use fxhash::FxHashMap;
+use log::debug;
 use netidx_core::pack::Pack;
 use parking_lot::{RwLock, RwLockReadGuard};
 use std::{collections::HashMap, sync::Arc};
@@ -174,11 +174,8 @@ impl SecCtx {
             }
             Auth::Tls { name: _, trusted, certificate, private_key } => {
                 debug!("creating tls acceptor");
-                let auth = tls::create_tls_acceptor(
-                    trusted,
-                    certificate,
-                    private_key,
-                )?;
+                let auth =
+                    tls::create_tls_acceptor(None, trusted, certificate, private_key)?;
                 let store = RwLock::new(SecCtxData::new(cfg, member)?);
                 SecCtx::Tls(Arc::new((auth, store)))
             }
