@@ -172,10 +172,10 @@ impl SecCtx {
                 let store = RwLock::new(SecCtxData::new(cfg, member)?);
                 SecCtx::Krb5(Arc::new((spn.clone(), store)))
             }
-            Auth::Tls { name: _, root_certificates, certificate, private_key } => {
+            Auth::Tls { name: _, trusted, certificate, private_key } => {
                 debug!("creating tls acceptor");
                 let auth = tls::create_tls_acceptor(
-                    root_certificates,
+                    trusted,
                     certificate,
                     private_key,
                 )?;

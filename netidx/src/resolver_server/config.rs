@@ -29,7 +29,7 @@ pub enum Auth {
     Anonymous,
     Local { path: Chars },
     Krb5 { spn: Chars },
-    Tls { name: Chars, root_certificates: Chars, certificate: Chars, private_key: Chars },
+    Tls { name: Chars, trusted: Chars, certificate: Chars, private_key: Chars },
 }
 
 impl Into<resolver::Auth> for Auth {
@@ -49,10 +49,10 @@ impl From<file::Auth> for Auth {
             file::Auth::Anonymous => Self::Anonymous,
             file::Auth::Krb5(spn) => Self::Krb5 { spn: Chars::from(spn) },
             file::Auth::Local(path) => Self::Local { path: Chars::from(path) },
-            file::Auth::Tls { name, root_certificates, certificate, private_key } => {
+            file::Auth::Tls { name, trusted, certificate, private_key } => {
                 Self::Tls {
                     name: Chars::from(name),
-                    root_certificates: Chars::from(root_certificates),
+                    trusted: Chars::from(trusted),
                     certificate: Chars::from(certificate),
                     private_key: Chars::from(private_key),
                 }
@@ -116,7 +116,7 @@ pub(crate) mod file {
         Local(String),
         Tls {
             name: String,
-            root_certificates: String,
+            trusted: String,
             certificate: String,
             private_key: String,
         },
