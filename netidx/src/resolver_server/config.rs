@@ -252,6 +252,15 @@ impl Config {
             .member_servers
             .into_iter()
             .map(|m| {
+                if let Some(cmd) = &m.id_map_command {
+                    use std::os::unix::fs::MetadataExt;
+                    if let Err(e) = std::fs::File::open(cmd) {
+                        bail!("id_map_command error: {}", e)
+                    }
+                    if std::fs::metadata(cmd)?.mode() & 0o001 == 0 {
+                        bail!("id_map_command must be executable")
+                    }
+                }
                 if m.max_connections == 0 {
                     bail!("max_connections must be positive")
                 }
