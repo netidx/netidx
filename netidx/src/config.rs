@@ -59,6 +59,7 @@ mod file {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsIdentity {
+    pub trusted: String,
     pub certificate: String,
     #[serde(default)]
     pub private_key: Option<String>,
@@ -66,7 +67,6 @@ pub struct TlsIdentity {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tls {
-    pub ca_certs: String,
     pub identities: BTreeMap<String, TlsIdentity>,
     #[serde(default)]
     pub agent: Option<String>,
@@ -100,13 +100,13 @@ impl Tls {
 
     fn check(&self) -> Result<()> {
         use std::fs;
-        if let Err(e) = fs::File::open(&self.ca_certs) {
-            bail!("ca certs cannot be read {}", e)
-        }
         if self.identities.len() == 0 {
             bail!("at least one identity is required for tls authentication")
         }
         for (name, id) in &self.identities {
+            if let Err(e) = fs::File::open(&id.trusted) {
+                bail!("trusted certs {} cannot be read {}", id.trusted, e)
+            }
             if let Err(e) = fs::File::open(&id.certificate) {
                 bail!("{} certificate can't be read {}", name, e)
             }

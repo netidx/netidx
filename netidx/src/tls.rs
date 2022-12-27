@@ -141,8 +141,8 @@ impl<T: Clone + 'static> Cached<T> {
                 self.0.t.lock().tmp = rev_identity;
                 bail!("no plausable identity matches {}", identity)
             }
-            Some(TlsIdentity { certificate, private_key: Some(pkey) }) => {
-                let con = f(&self.0.tls.ca_certs, certificate, pkey)?;
+            Some(TlsIdentity { trusted, certificate, private_key: Some(pkey) }) => {
+                let con = f(trusted, certificate, pkey)?;
                 self.0.t.lock().cached.insert(rev_identity, con.clone());
                 Ok(con)
             }

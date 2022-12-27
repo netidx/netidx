@@ -125,6 +125,7 @@ pub(crate) mod file {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) struct Referral {
         path: String,
+        #[serde(default)]
         ttl: Option<u16>,
         addrs: Vec<(SocketAddr, Auth)>,
     }
