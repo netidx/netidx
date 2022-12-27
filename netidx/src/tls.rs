@@ -77,6 +77,24 @@ pub(crate) fn create_tls_acceptor(
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
+pub(crate) fn get_match<'a: 'b, 'b, U>(
+    m: &'a BTreeMap<String, U>,
+    identity: &'b str,
+) -> Option<&'a U> {
+    m.range::<str, (Bound<&str>, Bound<&str>)>((
+        Bound::Unbounded,
+        Bound::Included(identity),
+    ))
+    .next_back()
+    .and_then(|(k, v)| {
+        if k == identity || (identity.starts_with(k)) {
+            Some(v)
+        } else {
+            None
+        }
+    })
+}
+
 struct CachedInnerLocked<T> {
     tmp: String,
     cached: BTreeMap<String, T>,
@@ -108,35 +126,17 @@ impl<T: Clone + 'static> Cached<T> {
     }
 
     fn load(&self, identity: &str, f: fn(&str, &str, &str) -> Result<T>) -> Result<T> {
-        fn get_match<'a: 'b, 'b, U>(
-            m: &'a BTreeMap<String, U>,
-            identity: &'b str,
-            parts: usize,
-        ) -> Option<&'a U> {
-            m.range::<str, (Bound<&str>, Bound<&str>)>((
-                Bound::Unbounded,
-                Bound::Included(identity),
-            ))
-            .next_back()
-            .and_then(|(k, v)| {
-                if k == identity || (identity.starts_with(k) && parts > 1) {
-                    Some(v)
-                } else {
-                    None
-                }
-            })
-        }
-        let (rev_identity, parts) = {
+        let rev_identity = {
             let mut inner = self.0.t.lock();
             inner.tmp.clear();
             inner.tmp.push_str(&identity);
-            let parts = Tls::reverse_domain_name(&mut inner.tmp);
-            if let Some(v) = get_match(&inner.cached, &inner.tmp, parts) {
+            Tls::reverse_domain_name(&mut inner.tmp);
+            if let Some(v) = get_match(&inner.cached, &inner.tmp) {
                 return Ok(v.clone());
             }
-            (mem::replace(&mut inner.tmp, String::new()), parts)
+            mem::replace(&mut inner.tmp, String::new())
         };
-        match get_match(&self.0.tls.identities, &rev_identity, parts) {
+        match get_match(&self.0.tls.identities, &rev_identity) {
             None => {
                 self.0.t.lock().tmp = rev_identity;
                 bail!("no plausable identity matches {}", identity)

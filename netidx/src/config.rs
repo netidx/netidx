@@ -4,6 +4,7 @@ use crate::{
     protocol::resolver::{Auth, Referral},
     subscriber::DesiredAuth,
     utils,
+    tls,
 };
 use anyhow::Result;
 use log::debug;
@@ -74,20 +75,17 @@ pub struct Tls {
 
 impl Tls {
     // e.g. marketdata.architect.com => com.architect.marketdata.
-    pub(crate) fn reverse_domain_name(name: &mut String) -> usize {
+    pub(crate) fn reverse_domain_name(name: &mut String) {
         const MAX: usize = 1024;
         let mut tmp = [0u8; MAX + 1];
         let mut i = 0;
-        let mut parts = 0;
         for part in name[0..min(name.len(), MAX)].split('.').rev() {
             tmp[i..i + part.len()].copy_from_slice(part.as_bytes());
             tmp[i + part.len()] = '.' as u8;
             i += part.len() + 1;
-            parts += 1;
         }
         name.clear();
         name.push_str(str::from_utf8(&mut tmp[0..i]).unwrap());
-        parts
     }
 
     fn reverse_domain_names(&mut self) {
@@ -177,11 +175,13 @@ impl Config {
             match auth {
                 FAuth::Anonymous | FAuth::Krb5(_) => (),
                 FAuth::Tls(name) => match &cfg.tls {
-                    None => bail!("tls auth requires tls_ca_certs path to be set"),
+                    None => bail!("tls auth requires a valid tls configuration"),
                     Some(tls) => {
-                        if !tls.identities.contains_key(name) {
+                        let mut rev_name = name.clone();
+                        Tls::reverse_domain_name(&mut rev_name);
+                        if tls::get_match(&tls.identities, &rev_name).is_none() {
                             bail!(
-                                "required identity {} not found in tls identities",
+                                "required identity for {} not found in tls identities",
                                 name
                             )
                         }
