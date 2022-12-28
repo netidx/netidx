@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 pub(crate) struct Mapper;
 
 impl Mapper {
-    pub(crate) fn new(cfg: &Config, member: &MemberServer) -> Result<Mapper> {
+    pub(crate) fn new(_cfg: &Config, _member: &MemberServer) -> Result<Mapper> {
         Ok(Mapper)
     }
 
