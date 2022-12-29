@@ -8,12 +8,22 @@ use std::{
     sync::Arc,
 };
 
-fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
+pub(crate) fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
     use std::{fs, io::BufReader};
     Ok(rustls_pemfile::certs(&mut BufReader::new(fs::File::open(path)?))?
         .into_iter()
         .map(|v| rustls::Certificate(v))
         .collect())
+}
+
+pub(crate) fn get_common_name(cert: &[u8]) -> Result<Option<String>> {
+    let (_, cert) = x509_parser::parse_x509_certificate(&cert)?;
+    let name = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok().map(String::from));
+    Ok(name)
 }
 
 fn load_key_password(askpass: &str, path: &str) -> Result<String> {
@@ -35,7 +45,10 @@ fn load_key_password(askpass: &str, path: &str) -> Result<String> {
     }
 }
 
-fn load_private_key(askpass: Option<&str>, path: &str) -> Result<rustls::PrivateKey> {
+pub(crate) fn load_private_key(
+    askpass: Option<&str>,
+    path: &str,
+) -> Result<rustls::PrivateKey> {
     use pkcs8::{
         der::{pem::PemLabel, zeroize::Zeroize},
         EncryptedPrivateKeyInfo, PrivateKeyInfo, SecretDocument,
@@ -166,6 +179,10 @@ impl<T: Clone + 'static> Cached<T> {
         }))
     }
 
+    fn default_identity(&self) -> &TlsIdentity {
+        self.0.tls.default_identity()
+    }
+
     fn load(
         &self,
         identity: &str,
@@ -186,7 +203,7 @@ impl<T: Clone + 'static> Cached<T> {
                 self.0.t.lock().tmp = rev_identity;
                 bail!("no plausable identity matches {}", identity)
             }
-            Some(TlsIdentity { trusted, certificate, private_key }) => {
+            Some(TlsIdentity { name: _, trusted, certificate, private_key }) => {
                 let askpass = self.0.tls.askpass.as_ref().map(|s| s.as_str());
                 let con = f(askpass, trusted, certificate, private_key)?;
                 self.0.t.lock().cached.insert(rev_identity, con.clone());
@@ -206,6 +223,10 @@ impl CachedConnector {
 
     pub(crate) fn load(&self, identity: &str) -> Result<tokio_rustls::TlsConnector> {
         self.0.load(identity, create_tls_connector)
+    }
+
+    pub(crate) fn default_identity(&self) -> &TlsIdentity {
+        self.0.default_identity()
     }
 }
 

@@ -2,7 +2,7 @@ use crate::{
     chars::Chars,
     path::Path,
     protocol::resolver::{self, Referral},
-    utils,
+    tls, utils,
 };
 use anyhow::Result;
 use serde_json::from_str;
@@ -289,6 +289,36 @@ impl Config {
                     {
                         if !cmd.ends_with(".exe") {
                             bail!("id_map_command must be executable")
+                        }
+                    }
+                }
+                match &m.auth {
+                    file::Auth::Anonymous
+                    | file::Auth::Krb5 { .. }
+                    | file::Auth::Local { .. } => (),
+                    file::Auth::Tls { name, trusted, certificate, private_key } => {
+                        if let Err(e) = tls::load_certs(&trusted) {
+                            bail!("failed to load trusted certificates {}", e)
+                        }
+                        if let Err(e) = tls::load_private_key(None, private_key) {
+                            bail!("failed to load the private key {}", e)
+                        }
+                        match tls::load_certs(&certificate) {
+                            Err(e) => bail!("failed to load server certificate {}", e),
+                            Ok(cert) => {
+                                if cert.len() == 0 || cert.len() > 1 {
+                                    bail!("certificate should contain exactly 1 cert")
+                                }
+                                match tls::get_common_name(&cert[0].0)? {
+                                    None => {
+                                        bail!("server certificate has no common name")
+                                    }
+                                    Some(cn) if &cn != name => {
+                                        bail!("name must match the common name")
+                                    }
+                                    Some(_) => (),
+                                }
+                            }
                         }
                     }
                 }

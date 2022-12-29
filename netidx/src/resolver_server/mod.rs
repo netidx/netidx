@@ -19,7 +19,7 @@ use crate::{
             ServerHelloWrite, ToRead, ToWrite,
         },
     },
-    utils,
+    tls, utils,
 };
 use anyhow::Result;
 use auth::{UserInfo, ANONYMOUS};
@@ -561,13 +561,8 @@ fn get_tls_uifo(
     let (_, server_con) = tls.get_ref();
     match server_con.peer_certificates() {
         Some([cert, ..]) => {
-            let (_, cert) = x509_parser::parse_x509_certificate(&cert.0)?;
-            let user = cert
-                .subject()
-                .iter_common_name()
-                .next()
-                .and_then(|cn| cn.as_str().ok());
-            Ok(a.1.write().users.ifo(user)?)
+            let user = tls::get_common_name(&cert.0)?;
+            Ok(a.1.write().users.ifo(user.as_ref().map(|s| s.as_str()))?)
         }
         Some(_) | None => bail!("tls handshake should be complete by now"),
     }

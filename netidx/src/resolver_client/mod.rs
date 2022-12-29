@@ -622,24 +622,15 @@ impl ResolverWrite {
         default: Config,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
-    ) -> Result<Self> {
-        match &desired_auth {
-            DesiredAuth::Tls { name: None } => {
-                bail!("tls write connections require name")
-            }
-            DesiredAuth::Anonymous
-            | DesiredAuth::Local
-            | DesiredAuth::Krb5 { .. }
-            | DesiredAuth::Tls { .. } => (),
-        }
-        Ok(ResolverWrite(ResolverWrap::new(
+    ) -> Self {
+        ResolverWrite(ResolverWrap::new(
             default,
             desired_auth,
             writer_addr,
             RAWFROMWRITEPOOL.clone(),
             FROMWRITEPOOL.clone(),
             TOWRITEPOOL.clone(),
-        )))
+        ))
     }
 
     pub async fn send(

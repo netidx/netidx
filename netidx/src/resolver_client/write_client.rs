@@ -261,15 +261,11 @@ impl Connection {
                             (con, r, false)
                         }
                         None => {
-                            debug!("starting a new tls session");
-                            let publisher_name = Chars::from(
-                                pname
-                                    .as_ref()
-                                    .ok_or_else(|| {
-                                        anyhow!("name is required for writers")
-                                    })?
-                                    .clone(),
-                            );
+                            let publisher_name = Chars::from(match pname {
+                                Some(pname) => pname.clone(),
+                                None => tls.default_identity().name.clone(),
+                            });
+                            debug!("starting a new tls session for {}", publisher_name);
                             let h = hello(AuthWrite::Tls { name: publisher_name });
                             wt!(channel::write_raw(&mut con, &h))??;
                             let tls = ctx.connect(name, con).await?;

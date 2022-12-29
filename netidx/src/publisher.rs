@@ -860,7 +860,7 @@ impl Publisher {
             }
         };
         let tls_ctx = resolver.tls.clone().map(tls::CachedAcceptor::new);
-        let resolver = ResolverWrite::new(resolver, desired_auth.clone(), addr)?;
+        let resolver = ResolverWrite::new(resolver, desired_auth.clone(), addr);
         let (stop, receive_stop) = oneshot::channel();
         let (tx_trigger, rx_trigger) = unbounded();
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {

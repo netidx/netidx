@@ -15,7 +15,6 @@ use std::{
     convert::Into,
     env,
     fs::read_to_string,
-    mem,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     str,
@@ -24,7 +23,7 @@ use std::{
 /// The on disk format, encoded as JSON
 mod file {
     use crate::chars::Chars;
-    use std::net::SocketAddr;
+    use std::{collections::BTreeMap, net::SocketAddr};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) enum Auth {
@@ -47,27 +46,43 @@ mod file {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub(super) struct TlsIdentity {
+        pub trusted: String,
+        pub certificate: String,
+        pub private_key: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub(super) struct Tls {
+        pub default_identity: String,
+        pub identities: BTreeMap<String, TlsIdentity>,
+        #[serde(default)]
+        pub askpass: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) struct Config {
         pub(super) base: String,
         pub(super) addrs: Vec<(SocketAddr, Auth)>,
         #[serde(default)]
-        pub(super) tls: Option<super::Tls>,
+        pub(super) tls: Option<Tls>,
         #[serde(default)]
         pub(super) default_auth: super::DefaultAuthMech,
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TlsIdentity {
     pub trusted: String,
+    pub name: String,
     pub certificate: String,
     pub private_key: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Tls {
+    pub default_identity: String,
     pub identities: BTreeMap<String, TlsIdentity>,
-    #[serde(default)]
     pub askpass: Option<String>,
 }
 
@@ -86,36 +101,56 @@ impl Tls {
         name.push_str(str::from_utf8(&mut tmp[0..i]).unwrap());
     }
 
-    fn reverse_domain_names(&mut self) {
-        let ids = mem::replace(&mut self.identities, BTreeMap::new());
-        self.identities.extend(ids.into_iter().map(|(mut name, v)| {
-            Self::reverse_domain_name(&mut name);
-            (name, v)
-        }))
+    pub(crate) fn default_identity(&self) -> &TlsIdentity {
+        &self.identities[&self.default_identity]
     }
 
-    fn check(&self) -> Result<()> {
+    fn load(mut t: file::Tls) -> Result<Self> {
         use std::fs;
-        if self.identities.len() == 0 {
+        if t.identities.len() == 0 {
             bail!("at least one identity is required for tls authentication")
         }
-        if let Some(askpass) = &self.askpass {
+        if let Some(askpass) = &t.askpass {
             if let Err(e) = fs::File::open(askpass) {
                 bail!("{} askpass can't be read {}", askpass, e)
             }
         }
-        for (name, id) in &self.identities {
-            if let Err(e) = fs::File::open(&id.trusted) {
+        if !t.identities.contains_key(&t.default_identity) {
+            bail!("the default identity must exist")
+        }
+        Self::reverse_domain_name(&mut t.default_identity);
+        let mut identities = BTreeMap::new();
+        for (mut name, id) in t.identities {
+            if let Err(e) = tls::load_certs(&id.trusted) {
                 bail!("trusted certs {} cannot be read {}", id.trusted, e)
             }
-            if let Err(e) = fs::File::open(&id.certificate) {
-                bail!("{} certificate can't be read {}", name, e)
-            }
+            let cn = match tls::load_certs(&id.certificate) {
+                Err(e) => bail!("certificate can't be read {}", e),
+                Ok(certs) => {
+                    if certs.len() == 0 || certs.len() > 1 {
+                        bail!("certificate file should contain 1 cert")
+                    }
+                    match tls::get_common_name(&certs[0].0)? {
+                        Some(name) => name,
+                        None => bail!("certificate has no common name"),
+                    }
+                }
+            };
             if let Err(e) = fs::File::open(&id.private_key) {
                 bail!("{} private_key can't be read {}", name, e)
             }
+            Self::reverse_domain_name(&mut name);
+            identities.insert(
+                name,
+                TlsIdentity {
+                    trusted: id.trusted,
+                    name: cn,
+                    certificate: id.certificate,
+                    private_key: id.private_key,
+                },
+            );
         }
-        Ok(())
+        Ok(Tls { askpass: t.askpass, default_identity: t.default_identity, identities })
     }
 }
 
@@ -143,12 +178,9 @@ pub struct Config {
 
 impl Config {
     pub fn parse(s: &str) -> Result<Config> {
-        let mut cfg: file::Config = from_str(s)?;
+        let cfg: file::Config = from_str(s)?;
         if cfg.addrs.is_empty() {
             bail!("you must specify at least one address");
-        }
-        if let Some(tls) = &mut cfg.tls {
-            tls.reverse_domain_names()
         }
         match cfg.default_auth {
             DefaultAuthMech::Anonymous
@@ -160,15 +192,16 @@ impl Config {
                 }
             }
         }
-        if let Some(tls) = &cfg.tls {
-            tls.check()?
-        }
+        let tls = match cfg.tls {
+            Some(tls) => Some(Tls::load(tls)?),
+            None => None,
+        };
         for (addr, auth) in &cfg.addrs {
             use file::Auth as FAuth;
             utils::check_addr::<()>(addr.ip(), &[])?;
             match auth {
                 FAuth::Anonymous | FAuth::Krb5(_) => (),
-                FAuth::Tls(name) => match &cfg.tls {
+                FAuth::Tls(name) => match &tls {
                     None => bail!("tls auth requires a valid tls configuration"),
                     Some(tls) => {
                         let mut rev_name = name.clone();
@@ -196,7 +229,7 @@ impl Config {
         Ok(Config {
             base: Path::from(cfg.base),
             addrs: cfg.addrs.into_iter().map(|(s, a)| (s, a.into())).collect(),
-            tls: cfg.tls,
+            tls,
             default_auth: cfg.default_auth,
         })
     }
