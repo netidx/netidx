@@ -1,14 +1,14 @@
+use arcstr::ArcStr;
 use netidx::{
     chars::Chars,
     config::Config,
     path::Path,
     protocol::glob::{Glob, GlobSet},
-    resolver_client::{DesiredAuth, ChangeTracker, ResolverRead, ResolverWrite},
+    resolver_client::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
 };
-use std::{collections::HashSet, iter, time::Duration, net::SocketAddr};
-use tokio::{runtime::Runtime, time};
-use arcstr::ArcStr;
+use std::{collections::HashSet, iter, net::SocketAddr, time::Duration};
 use structopt::StructOpt;
+use tokio::{runtime::Runtime, time};
 
 #[derive(StructOpt, Debug)]
 pub(super) enum ResolverCmd {
@@ -64,7 +64,7 @@ pub(super) fn run(config: Config, auth: DesiredAuth, cmd: ResolverCmd) {
                         println!("publisher: {:?}", pb);
                     }
                     for res in resolved.iter() {
-                        for i in 0 .. res.publishers.len() {
+                        for i in 0..res.publishers.len() {
                             if i < res.publishers.len() - 1 {
                                 print!("{:?}, ", res.publishers[i].id);
                             } else {
@@ -122,11 +122,11 @@ pub(super) fn run(config: Config, auth: DesiredAuth, cmd: ResolverCmd) {
                 }
             }
             ResolverCmd::Add { path, socketaddr } => {
-                let resolver = ResolverWrite::new(config, auth, socketaddr);
+                let resolver = ResolverWrite::new(config, auth, socketaddr).unwrap();
                 resolver.publish(vec![path]).await.unwrap();
             }
             ResolverCmd::Remove { path, socketaddr } => {
-                let resolver = ResolverWrite::new(config, auth, socketaddr);
+                let resolver = ResolverWrite::new(config, auth, socketaddr).unwrap();
                 resolver.unpublish(vec![path]).await.unwrap();
             }
         }

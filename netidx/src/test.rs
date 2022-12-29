@@ -27,7 +27,8 @@ mod resolver {
             let server = Server::new(server_cfg, false, 0).await.expect("start server");
             client_cfg.addrs[0].0 = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr);
+            let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr)
+                .unwrap();
             let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
             let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
             let flags = Some(PublishFlags::USE_EXISTING.bits());
@@ -61,7 +62,8 @@ mod resolver {
             let server = Server::new(server_cfg, false, 0).await.expect("start server");
             client_cfg.addrs[0].0 = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr);
+            let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr)
+                .unwrap();
             let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
             w.publish_default(iter::once(p("/default"))).await.unwrap();
             let paths = vec![p("/default/foo/bar"), p("/default/foo/baz")];
@@ -301,12 +303,15 @@ mod resolver {
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(r_root.check_changed(&mut ct_app).await.unwrap());
         let w0 =
-            ResolverWrite::new(ctx.random_server(), DesiredAuth::Anonymous, waddrs[0]);
+            ResolverWrite::new(ctx.random_server(), DesiredAuth::Anonymous, waddrs[0])
+                .unwrap();
         let w1 =
-            ResolverWrite::new(ctx.random_server(), DesiredAuth::Anonymous, waddrs[1]);
+            ResolverWrite::new(ctx.random_server(), DesiredAuth::Anonymous, waddrs[1])
+                .unwrap();
         w0.publish(paths.iter().cloned()).await.unwrap();
         let wl =
-            ResolverWrite::new(ctx.cfg_local.clone(), DesiredAuth::Anonymous, waddrs[0]);
+            ResolverWrite::new(ctx.cfg_local.clone(), DesiredAuth::Anonymous, waddrs[0])
+                .unwrap();
         wl.publish(local_paths.iter().cloned()).await.unwrap();
         time::sleep(Duration::from_millis(1000)).await;
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
