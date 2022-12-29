@@ -183,6 +183,10 @@ impl<T: Clone + 'static> Cached<T> {
         self.0.tls.default_identity()
     }
 
+    fn get_identity(&self, id: &str) -> Option<&TlsIdentity> {
+        self.0.tls.identities.get(id)
+    }
+
     fn load(
         &self,
         identity: &str,
@@ -228,6 +232,10 @@ impl CachedConnector {
     pub(crate) fn default_identity(&self) -> &TlsIdentity {
         self.0.default_identity()
     }
+
+    pub(crate) fn get_identity(&self, name: &str) -> Option<&TlsIdentity> {
+        self.0.get_identity(name)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -238,7 +246,11 @@ impl CachedAcceptor {
         Self(Cached::new(tls))
     }
 
-    pub(crate) fn load(&self, identity: &str) -> Result<tokio_rustls::TlsAcceptor> {
+    pub(crate) fn load(
+        &self,
+        identity: Option<&str>,
+    ) -> Result<tokio_rustls::TlsAcceptor> {
+        let identity = identity.unwrap_or_else(|| &self.0.default_identity().name);
         self.0.load(identity, create_tls_acceptor)
     }
 }

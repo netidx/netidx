@@ -241,7 +241,7 @@ impl Connection {
                 (DesiredAuth::Tls { .. }, Auth::Krb5 { .. }) => {
                     bail!("tls auth not supported")
                 }
-                (DesiredAuth::Tls { name: pname }, Auth::Tls { name }) => {
+                (DesiredAuth::Tls { identity }, Auth::Tls { name }) => {
                     debug!("tls auth selected");
                     let tls = self.tls.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
                     let ctx = task::block_in_place(|| tls.load(name))?;
@@ -261,9 +261,12 @@ impl Connection {
                             (con, r, false)
                         }
                         None => {
-                            let publisher_name = Chars::from(match pname {
-                                Some(pname) => pname.clone(),
+                            let publisher_name = Chars::from(match identity {
                                 None => tls.default_identity().name.clone(),
+                                Some(id) => match tls.get_identity(id) {
+                                    None => bail!("identity not found"),
+                                    Some(id) => id.name.clone(),
+                                },
                             });
                             debug!("starting a new tls session for {}", publisher_name);
                             let h = hello(AuthWrite::Tls { name: publisher_name });

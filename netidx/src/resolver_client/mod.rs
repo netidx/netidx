@@ -622,15 +622,29 @@ impl ResolverWrite {
         default: Config,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
-    ) -> Self {
-        ResolverWrite(ResolverWrap::new(
+    ) -> Result<Self> {
+        match &desired_auth {
+            DesiredAuth::Local
+            | DesiredAuth::Anonymous
+            | DesiredAuth::Krb5 { .. }
+            | DesiredAuth::Tls { identity: None } => (),
+            DesiredAuth::Tls { identity: Some(id) } => match &default.tls {
+                None => bail!("tls auth selected an no tls config"),
+                Some(tls) => {
+                    if !tls.identities.contains_key(id) {
+                        bail!("specified identity is invalid")
+                    }
+                }
+            },
+        }
+        Ok(ResolverWrite(ResolverWrap::new(
             default,
             desired_auth,
             writer_addr,
             RAWFROMWRITEPOOL.clone(),
             FROMWRITEPOOL.clone(),
             TOWRITEPOOL.clone(),
-        ))
+        )))
     }
 
     pub async fn send(

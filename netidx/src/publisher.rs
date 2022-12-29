@@ -860,7 +860,7 @@ impl Publisher {
             }
         };
         let tls_ctx = resolver.tls.clone().map(tls::CachedAcceptor::new);
-        let resolver = ResolverWrite::new(resolver, desired_auth.clone(), addr);
+        let resolver = ResolverWrite::new(resolver, desired_auth.clone(), addr)?;
         let (stop, receive_stop) = oneshot::channel();
         let (tx_trigger, rx_trigger) = unbounded();
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {
@@ -1595,13 +1595,12 @@ impl ClientCtx {
                     self.client_arrived();
                     Ok(Channel::new::<ServerCtx, TcpStream>(None, con))
                 }
-                DesiredAuth::Tls { name } => {
+                DesiredAuth::Tls { identity } => {
                     let tls =
                         self.tls_ctx.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
-                    let name = name
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("tls server name is required"))?;
-                    let ctx = task::block_in_place(|| tls.load(name))?;
+                    let ctx = task::block_in_place(|| {
+                        tls.load(identity.as_ref().map(|s| s.as_str()))
+                    })?;
                     let tls = time::timeout(HELLO_TIMEOUT, ctx.accept(con)).await??;
                     let mut con = Channel::new::<
                         ServerCtx,

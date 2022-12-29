@@ -41,7 +41,7 @@ pub enum DesiredAuth {
     Anonymous,
     Krb5 { upn: Option<String>, spn: Option<String> },
     Local,
-    Tls { name: Option<String> },
+    Tls { identity: Option<String> },
 }
 
 impl FromStr for DesiredAuth {
@@ -52,7 +52,7 @@ impl FromStr for DesiredAuth {
             "anonymous" => Ok(DesiredAuth::Anonymous),
             "local" => Ok(DesiredAuth::Local),
             "krb5" => Ok(DesiredAuth::Krb5 { upn: None, spn: None }),
-            "tls" => Ok(DesiredAuth::Tls { name: None }),
+            "tls" => Ok(DesiredAuth::Tls { identity: None }),
             _ => bail!("expected, anonymous, local, krb5, or tls"),
         }
     }

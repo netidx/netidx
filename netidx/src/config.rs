@@ -54,7 +54,8 @@ mod file {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) struct Tls {
-        pub default_identity: String,
+        #[serde(default)]
+        pub default_identity: Option<String>,
         pub identities: BTreeMap<String, TlsIdentity>,
         #[serde(default)]
         pub askpass: Option<String>,
@@ -105,7 +106,7 @@ impl Tls {
         &self.identities[&self.default_identity]
     }
 
-    fn load(mut t: file::Tls) -> Result<Self> {
+    fn load(t: file::Tls) -> Result<Self> {
         use std::fs;
         if t.identities.len() == 0 {
             bail!("at least one identity is required for tls authentication")
@@ -115,10 +116,22 @@ impl Tls {
                 bail!("{} askpass can't be read {}", askpass, e)
             }
         }
-        if !t.identities.contains_key(&t.default_identity) {
-            bail!("the default identity must exist")
-        }
-        Self::reverse_domain_name(&mut t.default_identity);
+        let mut default_identity = match t.default_identity {
+            Some(id) => {
+                if !t.identities.contains_key(&id) {
+                    bail!("the default identity must exist")
+                }
+                id
+            }
+            None => {
+                if t.identities.len() > 1 {
+                    bail!("default_identity must be specified")
+                } else {
+                    t.identities.keys().next().unwrap().clone()
+                }
+            }
+        };
+        Self::reverse_domain_name(&mut default_identity);
         let mut identities = BTreeMap::new();
         for (mut name, id) in t.identities {
             if let Err(e) = tls::load_certs(&id.trusted) {
@@ -150,7 +163,7 @@ impl Tls {
                 },
             );
         }
-        Ok(Tls { askpass: t.askpass, default_identity: t.default_identity, identities })
+        Ok(Tls { askpass: t.askpass, default_identity, identities })
     }
 }
 
@@ -239,7 +252,7 @@ impl Config {
             DefaultAuthMech::Anonymous => DesiredAuth::Anonymous,
             DefaultAuthMech::Local => DesiredAuth::Local,
             DefaultAuthMech::Krb5 => DesiredAuth::Krb5 { upn: None, spn: None },
-            DefaultAuthMech::Tls => DesiredAuth::Tls { name: None },
+            DefaultAuthMech::Tls => DesiredAuth::Tls { identity: None },
         }
     }
 

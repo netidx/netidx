@@ -122,11 +122,11 @@ pub(super) fn run(config: Config, auth: DesiredAuth, cmd: ResolverCmd) {
                 }
             }
             ResolverCmd::Add { path, socketaddr } => {
-                let resolver = ResolverWrite::new(config, auth, socketaddr);
+                let resolver = ResolverWrite::new(config, auth, socketaddr).unwrap();
                 resolver.publish(vec![path]).await.unwrap();
             }
             ResolverCmd::Remove { path, socketaddr } => {
-                let resolver = ResolverWrite::new(config, auth, socketaddr);
+                let resolver = ResolverWrite::new(config, auth, socketaddr).unwrap();
                 resolver.unpublish(vec![path]).await.unwrap();
             }
         }

@@ -12,10 +12,10 @@ pub struct ClientParams {
     #[structopt(long = "spn", help = "kerberos spn, only if auth = krb5")]
     pub spn: Option<String>,
     #[structopt(
-        long = "server-name",
-        help = "the domain name in the tls certificate, only required for server"
+        long = "identity",
+        help = "the tls identity to publish as, default_identity if omitted"
     )]
-    pub name: Option<String>,
+    pub identity: Option<String>,
 }
 
 impl ClientParams {
@@ -29,7 +29,9 @@ impl ClientParams {
             DesiredAuth::Krb5 { .. } => {
                 DesiredAuth::Krb5 { upn: self.upn.clone(), spn: self.spn.clone() }
             }
-            DesiredAuth::Tls { .. } => DesiredAuth::Tls { name: self.name.clone() },
+            DesiredAuth::Tls { .. } => {
+                DesiredAuth::Tls { identity: self.identity.clone() }
+            }
         };
         match &auth {
             DesiredAuth::Krb5 { .. } => (),
@@ -42,8 +44,8 @@ impl ClientParams {
         match &auth {
             DesiredAuth::Tls { .. } => (),
             DesiredAuth::Anonymous | DesiredAuth::Local | DesiredAuth::Krb5 { .. } => {
-                if self.name.is_some() {
-                    panic!("server-name may only be specified for tls auth")
+                if self.identity.is_some() {
+                    panic!("identity may only be specified for tls auth")
                 }
             }
         }
