@@ -1,18 +1,21 @@
 use anyhow::Result;
+use arcstr::ArcStr;
 use futures::{
     channel::{mpsc, oneshot},
-    future::{self, BoxFuture},
+    future,
     prelude::*,
     select_biased, stream,
 };
 use fxhash::{FxBuildHasher, FxHashMap};
-use log::info;
+use log::{error, info};
 use netidx::{
     chars::Chars,
     path::Path,
     pool::{Pool, Pooled},
     protocol::glob::{Glob, GlobSet},
-    publisher::{ClId, Id, PublishFlags, Publisher, Val, Value, WriteRequest},
+    publisher::{
+        ClId, Id, PublishFlags, Publisher, SendResult, Val, Value, WriteRequest,
+    },
     subscriber::{Dval, Subscriber, SubscriberId},
 };
 use parking_lot::Mutex;
@@ -27,49 +30,77 @@ use std::{
 use tokio::{sync::Mutex as AsyncMutex, task};
 
 pub mod server {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
     use super::*;
 
-    /// The rpc handler function type
-    pub type Handler = Arc<
-        dyn Fn(
-                ClId,
-                Pooled<HashMap<Arc<str>, Pooled<Vec<Value>>>>,
-            ) -> BoxFuture<'static, Value>
-            + Send
-            + Sync
-            + 'static,
-    >;
+    atomic_id!(ProcId);
 
     lazy_static! {
-        static ref ARG: Pool<Vec<Value>> = Pool::new(10000, 50);
-        static ref ARGS: Pool<HashMap<Arc<str>, Pooled<Vec<Value>>>> =
-            Pool::new(10000, 50);
+        static ref ARGS: Pool<HashMap<ArcStr, Value>> = Pool::new(10000, 50);
+    }
+
+    pub struct RpcReply(Option<SendResult>);
+
+    impl Drop for RpcReply {
+        fn drop(&mut self) {
+            if let Some(reply) = self.0.take() {
+                reply.send(Value::Error(Chars::from("rpc call failed")))
+            }
+        }
+    }
+
+    impl RpcReply {
+        pub fn send(&mut self, m: Value) {
+            if let Some(res) = self.0.take() {
+                res.send(m)
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct ArgSpec {
+        pub name: ArcStr,
+        pub doc: Value,
+        pub default_value: Value,
+    }
+
+    pub struct RpcCall {
+        pub client: ClId,
+        pub id: ProcId,
+        pub args: Pooled<HashMap<ArcStr, Value>>,
+        pub reply: RpcReply,
     }
 
     struct Arg {
-        name: Arc<str>,
+        name: ArcStr,
         _value: Val,
         _doc: Val,
     }
 
     struct PendingCall {
-        args: Pooled<HashMap<Arc<str>, Pooled<Vec<Value>>>>,
+        args: Pooled<HashMap<ArcStr, Value>>,
         initiated: Instant,
     }
 
-    struct ProcInner {
-        publisher: Publisher,
+    struct ProcInner<M: FnMut(RpcCall) -> Option<T> + Send + 'static, T: Send + 'static> {
+        id: ProcId,
         call: Arc<Val>,
         _doc: Val,
         args: HashMap<Id, Arg, FxBuildHasher>,
         pending: HashMap<ClId, PendingCall, FxBuildHasher>,
-        handler: Handler,
+        handler: mpsc::Sender<T>,
+        map: M,
         events: stream::Fuse<mpsc::Receiver<Pooled<Vec<WriteRequest>>>>,
         stop: future::Fuse<oneshot::Receiver<()>>,
         last_gc: Instant,
     }
 
-    impl ProcInner {
+    impl<M, T> ProcInner<M, T>
+    where
+        M: FnMut(RpcCall) -> Option<T> + Send + 'static,
+        T: Send + 'static,
+    {
         async fn run(mut self) {
             static GC_FREQ: Duration = Duration::from_secs(1);
             static GC_THRESHOLD: usize = 128;
@@ -85,51 +116,44 @@ pub mod server {
             loop {
                 select_biased! {
                     _ = stop => break,
-                    ev = self.events.next() => match ev {
-                        None => break, // publisher died?
-                        Some(mut batch) => for req in batch.drain(..) {
-                            if req.id == self.call.id() {
-                                let args = self.pending.remove(&req.client).map(|pc| pc.args)
-                                    .unwrap_or_else(|| ARGS.take());
-                                let handler = self.handler.clone();
-                                let call = self.call.clone();
-                                let publisher = self.publisher.clone();
-                                task::spawn(async move {
-                                    let t = task::spawn(handler(req.client, args));
-                                    let r = match t.await {
-                                        Ok(v) => v,
-                                        Err(e) => {
-                                            Value::Error(Chars::from(format!("{}", e)))
-                                        }
-                                    };
-                                    let mut batch = publisher.start_batch();
-                                    match req.send_result {
-                                        None => call.update_subscriber(&mut batch, req.client, r),
-                                        Some(result) => result.send(r)
-                                    }
-                                    batch.commit(None).await
-                                });
-                            } else {
-                                let mut gc = false;
-                                let pending = self.pending.entry(req.client)
-                                    .or_insert_with(|| {
-                                        gc = true;
-                                        PendingCall {
-                                            args: ARGS.take(),
-                                            initiated: Instant::now()
-                                        }
-                                    });
-                                if let Some(Arg {name, ..}) = self.args.get(&req.id) {
-                                    pending.args.entry(name.clone())
-                                        .or_insert_with(|| ARG.take())
-                                        .push(req.value);
+                    mut batch = self.events.select_next_some() => for req in batch.drain(..) {
+                        if req.id == self.call.id() {
+                            let args = self.pending.remove(&req.client).map(|pc| pc.args)
+                                .unwrap_or_else(|| ARGS.take());
+                            let call = RpcCall {
+                                client: req.client,
+                                id: self.id,
+                                args,
+                                reply: RpcReply(req.send_result),
+                            };
+                            let t = match catch_unwind(AssertUnwindSafe(|| (self.map)(call))) {
+                                Ok(t) => t,
+                                Err(_) => {
+                                    error!("rpc map args panic");
+                                    continue
                                 }
-                                if gc && self.pending.len() > GC_THRESHOLD {
-                                    let now = Instant::now();
-                                    if now - self.last_gc > GC_FREQ {
-                                        self.last_gc = now;
-                                        gc_pending(&mut self.pending, now);
+                            };
+                            if let Some(t) = t {
+                                let _: std::result::Result<_, _> = self.handler.send(t).await;
+                            }
+                        } else {
+                            let mut gc = false;
+                            let pending = self.pending.entry(req.client)
+                                .or_insert_with(|| {
+                                    gc = true;
+                                    PendingCall {
+                                        args: ARGS.take(),
+                                        initiated: Instant::now()
                                     }
+                                });
+                            if let Some(Arg {name, ..}) = self.args.get(&req.id) {
+                                pending.args.insert(name.clone(), req.value);
+                            }
+                            if gc && self.pending.len() > GC_THRESHOLD {
+                                let now = Instant::now();
+                                if now - self.last_gc > GC_FREQ {
+                                    self.last_gc = now;
+                                    gc_pending(&mut self.pending, now);
                                 }
                             }
                         }
@@ -140,7 +164,10 @@ pub mod server {
     }
 
     /// A remote procedure published in netidx
-    pub struct Proc(oneshot::Sender<()>);
+    pub struct Proc {
+        _stop: oneshot::Sender<()>,
+        id: ProcId,
+    }
 
     impl Proc {
         /**
@@ -153,40 +180,42 @@ pub mod server {
         * `publisher` - A reference to the publisher that will publish the procedure.
         * `name` - The path of the procedure in netidx.
         * `doc` - The procedure level doc string to be published along with the procedure
-        * `args` - A hashmap containing the allowed arguments to the
-          procedure. The key, is the argument name, the first value is
-          the default value, and the second argument is the doc string
-          for the argument
-        * `handler` - The function that will be called each time the
-          remote procedure is invoked
-
+        * `args` - An iterator containing the procedure arguments
+        * `handler` - The channel that will receive the rpc call invocations
         # Example
         ```no_run
         use netidx::{path::Path, subscriber::Value, chars::Chars};
-        use netidx_protocols::rpc::server::Proc;
+        use netidx_protocols::rpc::server::{Proc, ArgSpec};
+        use arcstr::ArcStr;
         use std::{sync::Arc, collections::HashMap};
         use anyhow::Result;
+        use futures::channel::mpsc;
         # async fn z() -> Result<()> {
         #   let publisher = unimplemented!();
+            let (tx, rx) = mpsc::channel(10);
             let echo = Proc::new(
                 &publisher,
                 Path::from("/examples/api/echo"),
                 Value::from("echos it's argument"),
-                vec![(Arc::from("arg"), (Value::Null, Value::from("argument to echo")))]
-                    .into_iter()
-                    .collect::<HashMap<_, _>>(),
-                Arc::new(move |_, mut args| {
-                    Box::pin(async move {
-                        match args.remove("arg") {
-                            None => Value::Error(Chars::from("expected an arg")),
-                            Some(mut vals) => match vals.pop() {
-                                None => Value::Error(Chars::from("internal error")),
-                                Some(v) => v
-                            }
-                        }
-                    })
-                }),
+                vec![
+                    ArgSpec {
+                        name: ArcStr::from("arg"),
+                        doc: Value::from("argument to echo"),
+                        default_value: Value::Null
+                    }
+                ],
+                tx
             )?;
+            while let Ok(c) = rx.next().await {
+                let res = match c.args.remove("arg") {
+                    None => Value::Error(Chars::from("expected an arg")),
+                    Some(mut vals) => match vals.pop() {
+                        None => Value::Error(Chars::from("internal error")),
+                        Some(v) => v
+                    }
+                };
+                c.send(res).await;
+            }
         #   drop(echo);
         #   Ok(())
         # }
@@ -200,17 +229,18 @@ pub mod server {
         from the set at client creation time.
 
         Arguments with the same key that are specified multiple times
-        are accumulated and passed to the handler in the order they
-        were specified
-
+        will overwrite previous versions; the procedure will receive
+        only the last version set.
          **/
-        pub fn new(
+        pub fn new<T: Send + 'static, F: FnMut(RpcCall) -> Option<T> + Send + 'static>(
             publisher: &Publisher,
             name: Path,
             doc: Value,
-            args: HashMap<Arc<str>, (Value, Value)>,
-            handler: Handler,
+            args: impl IntoIterator<Item = ArgSpec>,
+            map: F,
+            handler: mpsc::Sender<T>,
         ) -> Result<Proc> {
+            let id = ProcId::new();
             let (tx_ev, rx_ev) = mpsc::channel(3);
             let (tx_stop, rx_stop) = oneshot::channel();
             let call = Arc::new(publisher.publish_with_flags(
@@ -226,13 +256,13 @@ pub mod server {
             publisher.writes(call.id(), tx_ev.clone());
             let args = args
                 .into_iter()
-                .map(|(arg, (def, doc))| {
+                .map(|ArgSpec { name: arg, doc, default_value }| {
                     let base = name.append(&*arg);
                     let _value = publisher
                         .publish_with_flags(
                             PublishFlags::USE_EXISTING,
                             base.append("val"),
-                            def,
+                            default_value,
                         )
                         .map(|val| {
                             publisher.writes(val.id(), tx_ev.clone());
@@ -247,11 +277,12 @@ pub mod server {
                 })
                 .collect::<Result<HashMap<Id, Arg, FxBuildHasher>>>()?;
             let inner = ProcInner {
-                publisher: publisher.clone(),
+                id,
                 call,
                 _doc,
                 args,
                 pending: HashMap::with_hasher(FxBuildHasher::default()),
+                map,
                 handler,
                 events: rx_ev.fuse(),
                 stop: rx_stop.fuse(),
@@ -261,7 +292,12 @@ pub mod server {
                 inner.run().await;
                 info!("rpc proc {} shutdown", name);
             });
-            Ok(Proc(tx_stop))
+            Ok(Proc { id, _stop: tx_stop })
+        }
+
+        /// Get the rpc procedure id
+        pub fn id(&self) -> ProcId {
+            self.id
         }
     }
 }
@@ -351,13 +387,12 @@ pub mod client {
             Ok(Proc(Arc::new(ProcInner { name, sid, lock, call, args })))
         }
 
-        /// Call the procedure. If supported by the procedure,
-        /// argument keys may be specified multiple times.
+        /// Call the procedure.
         ///
         /// `call` may be reused to call the procedure again.
         ///
         /// `call` may safely be called concurrently on multiple
-        /// instances of `Proc` that call the same underling procedure
+        /// instances of `Proc` that call the same procedure
         /// (there is internal syncronization).
         pub async fn call<I, K>(&self, args: I) -> Result<Value>
         where
@@ -391,6 +426,8 @@ pub mod client {
 
 #[cfg(test)]
 mod test {
+    use crate::rpc::server::ArgSpec;
+
     use super::*;
     use netidx::{
         config::Config as ClientConfig,
@@ -418,25 +455,28 @@ mod test {
             .unwrap();
             let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
             let proc_name = Path::from("/rpc/procedure");
+            let (tx, mut rx) = mpsc::channel(10);
             let _server_proc: server::Proc = server::Proc::new(
                 &publisher,
                 proc_name.clone(),
                 Value::from("test rpc procedure"),
-                vec![(Arc::from("arg1"), (Value::Null, Value::from("arg1 doc")))]
-                    .into_iter()
-                    .collect(),
-                Arc::new(|addr, args| {
-                    Box::pin(async move {
-                        dbg!(&addr);
-                        dbg!(&*args);
-                        assert_eq!(args.len(), 1);
-                        assert_eq!(args["arg1"].len(), 1);
-                        assert_eq!(args["arg1"][0], Value::from("hello rpc"));
-                        Value::U32(42)
-                    })
-                }),
+                [ArgSpec {
+                    name: ArcStr::from("arg1"),
+                    default_value: Value::Null,
+                    doc: Value::from("arg1 doc"),
+                }],
+                |a| Some(a),
+                tx,
             )
             .unwrap();
+            task::spawn(async move {
+                while let Some(mut c) = rx.next().await {
+                    dbg!(&c.args);
+                    assert_eq!(c.args.len(), 1);
+                    assert_eq!(c.args["arg1"], Value::from("hello rpc"));
+                    c.reply.send(Value::U32(42))
+                }
+            });
             time::sleep(Duration::from_millis(100)).await;
             let proc: client::Proc =
                 client::Proc::new(&subscriber, proc_name.clone()).await.unwrap();

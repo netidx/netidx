@@ -17,6 +17,7 @@ krb5_iov = ["netidx/krb5_iov"]
 [dependencies]
 anyhow = "1"
 netidx = { path = "../netidx", version = "^0.12.1", default_features = false }
+netidx-core = {path = "../netidx-core", version = "^0.12", default_features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "^0.14.0", default_features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "sync"] }
 serde = "1"
@@ -29,6 +30,7 @@ log = "0.4"
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"
+arcstr = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 proptest = "1"
