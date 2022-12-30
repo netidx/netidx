@@ -1,0 +1,28 @@
+{
+  "parent": null,
+  "children": [],
+  "member_servers": [
+    {
+      "pid_file": "",
+      "id_map_command": "../cfg/tls/id",
+      "addr": "127.0.0.1:0",
+      "max_connections": 768,
+      "hello_timeout": 10,
+      "reader_ttl": 60,
+      "writer_ttl": 120,
+      "auth": {
+          "Tls": {
+              "name": "resolver.example.com",
+              "trusted": "../cfg/tls/ca/certificate",
+              "certificate": "../cfg/tls/resolver/certificate",
+              "private_key": "../cfg/tls/resolver/private.key"
+          }
+      }
+    }
+  ],
+  "perms": {
+    "/": {
+      "user": "swlpd"
+    }
+  }
+}

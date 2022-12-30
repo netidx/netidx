@@ -411,11 +411,10 @@ mod publisher {
         cfg: ClientConfig,
         default_destroyed: Arc<Mutex<bool>>,
         tx: oneshot::Sender<()>,
+        auth: DesiredAuth,
     ) {
         let publisher =
-            Publisher::new(cfg, DesiredAuth::Anonymous, "127.0.0.1/32".parse().unwrap())
-                .await
-                .unwrap();
+            Publisher::new(cfg, auth, "127.0.0.1/32".parse().unwrap()).await.unwrap();
         let vp = publisher.publish("/app/v0".into(), Value::U64(0)).unwrap();
         publisher.alias(vp.id(), "/app/v1".into()).unwrap();
         let mut dfp: Option<Val> = None;
@@ -464,8 +463,12 @@ mod publisher {
         }
     }
 
-    async fn run_subscriber(cfg: ClientConfig, default_destroyed: Arc<Mutex<bool>>) {
-        let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
+    async fn run_subscriber(
+        cfg: ClientConfig,
+        default_destroyed: Arc<Mutex<bool>>,
+        auth: DesiredAuth,
+    ) {
+        let subscriber = Subscriber::new(cfg, auth).unwrap();
         let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
         // we should be able to subscribe to an alias and it should
         // behave as if we just cloned the existing
@@ -522,10 +525,47 @@ mod publisher {
             client_cfg.addrs[0].0 = *server.local_addr();
             let default_destroyed = Arc::new(Mutex::new(false));
             let (tx, ready) = oneshot::channel();
-            task::spawn(run_publisher(client_cfg.clone(), default_destroyed.clone(), tx));
+            task::spawn(run_publisher(
+                client_cfg.clone(),
+                default_destroyed.clone(),
+                tx,
+                DesiredAuth::Anonymous,
+            ));
             time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
-            run_subscriber(client_cfg, default_destroyed).await;
+            run_subscriber(client_cfg, default_destroyed, DesiredAuth::Anonymous).await;
             drop(server);
         });
+    }
+
+    #[test]
+    fn publish_subscribe_tls() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let server_cfg = ServerConfig::load("../cfg/tls/resolver/resolver.json")
+                .expect("load tls server config");
+            let mut pub_cfg = ClientConfig::load("../cfg/tls/publisher/client.json")
+                .expect("failed to load tls publisher config");
+            let mut sub_cfg = ClientConfig::load("../cfg/tls/client/client.json")
+                .expect("failed to load subscriber cfg");
+            let default_destroyed = Arc::new(Mutex::new(false));
+            let (tx, ready) = oneshot::channel();
+            let server = Server::new(server_cfg, false, 0).await.expect("start server");
+            pub_cfg.addrs[0].0 = *server.local_addr();
+            sub_cfg.addrs[0].0 = *server.local_addr();
+            task::spawn(run_publisher(
+                pub_cfg.clone(),
+                default_destroyed.clone(),
+                tx,
+                DesiredAuth::Tls { identity: None },
+            ));
+            time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
+            run_subscriber(
+                pub_cfg,
+                default_destroyed,
+                DesiredAuth::Tls { identity: None },
+            )
+            .await;
+            drop(server)
+        })
     }
 }

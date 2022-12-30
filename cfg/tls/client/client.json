@@ -1,0 +1,17 @@
+{
+    "addrs":
+    [
+        ["127.0.0.1:0", {"Tls": "resolver.example.com"}]
+    ],
+    "base": "/",
+    "default_auth": "Tls",
+    "tls": {
+       "identities": {
+            "example.com": {
+                "trusted": "../cfg/tls/ca/certificate",
+                "certificate": "../cfg/tls/client/certificate",
+                "private_key": "../cfg/tls/client/private.key"
+            }
+        }
+    }
+}
