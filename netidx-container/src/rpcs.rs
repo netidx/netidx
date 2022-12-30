@@ -156,7 +156,7 @@ fn start_path_arg_rpc(
         base_path.append(name),
         doc,
         map,
-        tx,
+        Some(tx),
         path: Vec<Path> = Vec::<Path>::new(); argdoc
     )
 }
@@ -283,7 +283,7 @@ pub(super) fn start_set_data_rpc(
         base_path.append("set-data"),
         "make the specified paths data and optionally set the value",
         map,
-        tx,
+        Some(tx),
         path: Vec<Path> = Vec::<Path>::new(); "the paths to set",
         value: Value = Value::Null; "The value to set"
     )
@@ -323,7 +323,7 @@ pub(super) fn start_set_formula_rpc(
         base_path.append("set-formula"),
         "make the specified paths calculated and set their formula",
         map,
-        tx,
+        Some(tx),
         path: Vec<Path> = Vec::<Path>::new(); "the paths to set",
         formula: Option<Chars> = None::<Chars>; "the formula",
         on_write: Option<Chars> = None::<Chars>; "the on write formula"
@@ -363,7 +363,7 @@ pub(super) fn start_create_sheet_rpc(
         base_path.append("create-sheet"),
         "create a spreadsheet like sheet",
         map,
-        tx,
+        Some(tx),
         path: Path = Value::Null; "where to put the sheet",
         rows: usize = 1; "the number of rows",
         columns: usize = 1; "the number of columns",
@@ -387,7 +387,7 @@ pub(super) fn start_add_sheet_rows_rpc(
         base_path.append("add-sheet-rows"),
         "add rows to a previously created sheet",
         map,
-        tx,
+        Some(tx),
         path: Path = Value::Null; "the sheet to modify",
         rows: usize = Value::Null; "the number of rows to add"
     )
@@ -407,7 +407,7 @@ pub(super) fn start_add_sheet_cols_rpc(
         base_path.append("add-sheet-columns"),
         "add columns to a previously created sheet",
         map,
-        tx,
+        Some(tx),
         path: Path = Value::Null; "the sheet to modify",
         columns: usize = Value::Null; "the number of columns to add"
     )
@@ -427,7 +427,7 @@ pub(super) fn start_del_sheet_rows_rpc(
         base_path.append("delete-sheet-rows"),
         "delete rows in a previously created sheet",
         map,
-        tx,
+        Some(tx),
         path: Path = Value::Null; "the sheet to modify",
         rows: usize = Value::Null; "the number of rows to add"
     )
@@ -447,7 +447,7 @@ pub(super) fn start_del_sheet_cols_rpc(
         base_path.append("delete-sheet-columns"),
         "delete columns in a previously created sheet",
         map,
-        tx,
+        Some(tx),
         path: Path = Value::Null; "the sheet to modify",
         columns: usize = Value::Null; "number of columns to delete"
     )
@@ -473,7 +473,7 @@ pub(super) fn start_create_table_rpc(
         base_path.append("create-table"),
         "create a database like table",
         map,
-        tx,
+        Some(tx),
         path: Path = Value::Null; "where to put the table",
         rows: Vec<Chars> = Value::Null; "the row names",
         columns: Vec<Chars> = Value::Null; "the column names",
@@ -495,7 +495,7 @@ pub(super) fn start_add_table_rows_rpc(
         base_path.append("add-table-rows"),
         "add rows to a table",
         map,
-        tx,
+        Some(tx),
         path: Path = Value::Null; "the table to modify",
         rows: Vec<Chars> = Value::Null; "the rows to add"
     )
@@ -515,7 +515,7 @@ pub(super) fn start_add_table_cols_rpc(
         base_path.append("add-table-columns"),
         "add columns to a table",
         map,
-        tx,
+        Some(tx),
         path: Path = Value::Null; "the table to modify",
         columns: Vec<Chars> = Value::Null; "the columns to add"
     )
@@ -535,7 +535,7 @@ pub(super) fn start_del_table_rows_rpc(
         base_path.append("delete-table-rows"),
         "delete rows from a table",
         map,
-        tx,
+        Some(tx),
         path: Path = Value::Null; "the table to modify",
         rows: Vec<Chars> = Value::Null; "the rows to delete"
     )
@@ -555,7 +555,7 @@ pub(super) fn start_del_table_cols_rpc(
         base_path.append("delete-table-columns"),
         "delete columns from a table",
         map,
-        tx,
+        Some(tx),
         path: Path = Value::Null; "the table to modify",
         columns: Vec<Chars> = Value::Null; "the columns to delete"
     )

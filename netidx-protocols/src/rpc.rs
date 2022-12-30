@@ -29,6 +29,7 @@ use std::{
 };
 use tokio::{sync::Mutex as AsyncMutex, task};
 
+#[macro_use]
 pub mod server {
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -36,6 +37,7 @@ pub mod server {
 
     atomic_id!(ProcId);
 
+    /// for use in map functions, will reply to the client with an error and return None
     #[macro_export]
     macro_rules! rpc_err {
         ($reply:expr, $msg:expr) => {{
@@ -44,6 +46,9 @@ pub mod server {
         }};
     }
 
+    /// defines a new rpc.
+    /// `define_rpc!(publisher, path, doc, mapfn, tx, arg: typ = default; doc, ...)`
+    /// see `Proc` for an example
     #[macro_export]
     macro_rules! define_rpc {
         ($publisher:expr, $path:expr, $topdoc:expr, $map:expr, $tx:expr, $($arg:ident: $typ:ty = $default:expr; $doc:expr),*) => {{
@@ -55,12 +60,15 @@ pub mod server {
                         Err(_) => rpc_err!(c.reply, format!("arg: {} invalid type conversion", stringify!($arg)))
                     };
                 )*
+                if c.args.len() != 0 {
+                    rpc_err!(c.reply, format!("unknown argument specified: {:?}", c.args.keys().collect::<Vec<_>>()))
+                }
                 $map(c, $($arg),*)
             };
             let args = [
                 $(ArgSpec {name: ArcStr::from(stringify!($arg)), default_value: Value::from($default), doc: Value::from($doc)}),*
             ];
-            Ok(Proc::new($publisher, $path, Value::from($topdoc), args, map, $tx)?)
+            Proc::new($publisher, $path, Value::from($topdoc), args, map, $tx)
         }}
     }
 
@@ -117,7 +125,7 @@ pub mod server {
         _doc: Val,
         args: HashMap<Id, Arg, FxBuildHasher>,
         pending: HashMap<ClId, PendingCall, FxBuildHasher>,
-        handler: mpsc::Sender<T>,
+        handler: Option<mpsc::Sender<T>>,
         map: M,
         events: stream::Fuse<mpsc::Receiver<Pooled<Vec<WriteRequest>>>>,
         stop: future::Fuse<oneshot::Receiver<()>>,
@@ -162,7 +170,9 @@ pub mod server {
                                 }
                             };
                             if let Some(t) = t {
-                                let _: std::result::Result<_, _> = self.handler.send(t).await;
+                                if let Some(handler) = &mut self.handler {
+                                    let _: std::result::Result<_, _> = handler.send(t).await;
+                                }
                             }
                         } else {
                             let mut gc = false;
@@ -209,7 +219,19 @@ pub mod server {
         * `name` - The path of the procedure in netidx.
         * `doc` - The procedure level doc string to be published along with the procedure
         * `args` - An iterator containing the procedure arguments
-        * `handler` - The channel that will receive the rpc call invocations
+        * `map` - A function that will map the raw parameters into the type of the channel.
+          if it returns None then nothing will be pushed into the channel.
+        * `handler` - The channel that will receive the rpc call invocations (if any)
+
+        If you can handle the procedure entirely without async (or blocking) then you only
+        need to define map, you don't need to pass a handler channel. Your map function should
+        handle the call, reply to the client, and return None.
+
+        If you need to do something async in order to handle the call, then you must pass
+        an mpsc channel that will receive the output of your map function. You can define
+        as little or as much slack as you desire, however be aware that if the channel fills up
+        then clients attempting to call your procedure will wait.
+
         # Example
         ```no_run
         use netidx::{path::Path, subscriber::Value, chars::Chars};
@@ -220,30 +242,17 @@ pub mod server {
         use futures::channel::mpsc;
         # async fn z() -> Result<()> {
         #   let publisher = unimplemented!();
-            let (tx, rx) = mpsc::channel(10);
-            let echo = Proc::new(
+            let echo = define_rpc!(
                 &publisher,
                 Path::from("/examples/api/echo"),
-                Value::from("echos it's argument"),
-                vec![
-                    ArgSpec {
-                        name: ArcStr::from("arg"),
-                        doc: Value::from("argument to echo"),
-                        default_value: Value::Null
-                    }
-                ],
-                tx
-            )?;
-            while let Ok(c) = rx.next().await {
-                let res = match c.args.remove("arg") {
-                    None => Value::Error(Chars::from("expected an arg")),
-                    Some(mut vals) => match vals.pop() {
-                        None => Value::Error(Chars::from("internal error")),
-                        Some(v) => v
-                    }
-                };
-                c.send(res).await;
-            }
+                "echos it's argument",
+                |c: RpcCall, arg: Value| {
+                    c.reply.send(arg);
+                    None
+                },
+                None,
+                arg: Value = Value::Null; "argument to echo"
+            );
         #   drop(echo);
         #   Ok(())
         # }
@@ -266,7 +275,7 @@ pub mod server {
             doc: Value,
             args: impl IntoIterator<Item = ArgSpec>,
             map: F,
-            handler: mpsc::Sender<T>,
+            handler: Option<mpsc::Sender<T>>,
         ) -> Result<Proc> {
             let id = ProcId::new();
             let (tx_ev, rx_ev) = mpsc::channel(3);
@@ -456,6 +465,7 @@ pub mod client {
 mod test {
     use crate::rpc::server::ArgSpec;
 
+    use super::server::*;
     use super::*;
     use netidx::{
         config::Config as ClientConfig,
@@ -484,24 +494,18 @@ mod test {
             let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
             let proc_name = Path::from("/rpc/procedure");
             let (tx, mut rx) = mpsc::channel(10);
-            let _server_proc: server::Proc = server::Proc::new(
+            let _server_proc = define_rpc!(
                 &publisher,
                 proc_name.clone(),
-                Value::from("test rpc procedure"),
-                [ArgSpec {
-                    name: ArcStr::from("arg1"),
-                    default_value: Value::Null,
-                    doc: Value::from("arg1 doc"),
-                }],
-                |a| Some(a),
-                tx,
+                "test rpc procedure",
+                |c, a| Some((c, a)),
+                Some(tx),
+                arg1: Value = Value::Null; "arg1 doc"
             )
             .unwrap();
             task::spawn(async move {
-                while let Some(mut c) = rx.next().await {
-                    dbg!(&c.args);
-                    assert_eq!(c.args.len(), 1);
-                    assert_eq!(c.args["arg1"], Value::from("hello rpc"));
+                while let Some((mut c, a)) = rx.next().await {
+                    assert_eq!(a, Value::from("hello rpc"));
                     c.reply.send(Value::U32(42))
                 }
             });

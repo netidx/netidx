@@ -990,7 +990,7 @@ mod publish {
             publish_base.append("session"),
             "create a new playback session",
             NewSessionConfig::new,
-            control_tx.clone(),
+            Some(control_tx.clone()),
             start: Value = "Unbounded"; START_DOC,
             end: Value = "Unbounded"; END_DOC,
             speed: Value = "1."; SPEED_DOC,
