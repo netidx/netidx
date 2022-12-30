@@ -234,19 +234,18 @@ pub mod server {
 
         # Example
         ```no_run
+        #[macro_use] extern crate netidx_protocols;
         use netidx::{path::Path, subscriber::Value, chars::Chars};
-        use netidx_protocols::rpc::server::{Proc, ArgSpec};
+        use netidx_protocols::rpc::server::{Proc, ArgSpec, RpcCall};
         use arcstr::ArcStr;
-        use std::{sync::Arc, collections::HashMap};
-        use anyhow::Result;
-        use futures::channel::mpsc;
+        # use anyhow::Result;
         # async fn z() -> Result<()> {
         #   let publisher = unimplemented!();
             let echo = define_rpc!(
                 &publisher,
                 Path::from("/examples/api/echo"),
                 "echos it's argument",
-                |c: RpcCall, arg: Value| {
+                |mut c: RpcCall, arg: Value| -> Option<()> {
                     c.reply.send(arg);
                     None
                 },
@@ -443,6 +442,7 @@ pub mod client {
 
         # Example
         ```no_run
+        #[macro_use] extern crate netidx_protocols;
         use netidx::{path::Path, subscriber::Value};
         use netidx_protocols::rpc::client::Proc;
         # use anyhow::Result;
