@@ -36,6 +36,34 @@ pub mod server {
 
     atomic_id!(ProcId);
 
+    #[macro_export]
+    macro_rules! rpc_err {
+        ($reply:expr, $msg:expr) => {{
+            $reply.send(Value::Error(Chars::from($msg)));
+            return None;
+        }};
+    }
+
+    #[macro_export]
+    macro_rules! define_rpc {
+        ($publisher:expr, $path:expr, $topdoc:expr, $map:expr, $tx:expr, $($arg:ident: $typ:ty = $default:expr; $doc:expr),*) => {{
+            let map = |mut c: RpcCall| {
+                $(
+                    let d = Value::from($default);
+                    let $arg = match c.args.remove(stringify!($arg)).unwrap_or(d).cast_to::<$typ>() {
+                        Ok(t) => t,
+                        Err(_) => rpc_err!(c.reply, format!("arg: {} invalid type conversion", stringify!($arg)))
+                    };
+                )*
+                $map(c, $($arg),*)
+            };
+            let args = [
+                $(ArgSpec {name: ArcStr::from(stringify!($arg)), default_value: Value::from($default), doc: Value::from($doc)}),*
+            ];
+            Ok(Proc::new($publisher, $path, Value::from($topdoc), args, map, $tx)?)
+        }}
+    }
+
     lazy_static! {
         static ref ARGS: Pool<HashMap<ArcStr, Value>> = Pool::new(10000, 50);
     }

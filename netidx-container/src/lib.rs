@@ -1,5 +1,7 @@
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate netidx_protocols;
 
 mod db;
 mod rpcs;
@@ -929,8 +931,11 @@ impl ContainerInner {
         let formula_node = expr.map(|e| Node::compile(&mut self.ctx, scope.clone(), e));
         let on_write_node =
             on_write_expr.map(|e| Node::compile(&mut self.ctx, scope.clone(), e));
-        let value =
-            formula_node.as_ref().ok().and_then(|n| n.current(&mut self.ctx)).unwrap_or(Value::Null);
+        let value = formula_node
+            .as_ref()
+            .ok()
+            .and_then(|n| n.current(&mut self.ctx))
+            .unwrap_or(Value::Null);
         let src_path = path.append(".formula");
         let on_write_path = path.append(".on-write");
         let data = self.ctx.user.publisher.publish(path.clone(), value.clone())?;

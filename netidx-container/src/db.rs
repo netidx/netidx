@@ -19,6 +19,7 @@ use netidx::{
     subscriber::Value,
     utils::{BatchItem, Batched},
 };
+use netidx_protocols::rpc::server::RpcReply;
 use sled;
 use std::{
     cmp::{max, min},
@@ -35,15 +36,15 @@ use std::{
 use tokio::task;
 
 pub enum Sendable {
-    Rpc(oneshot::Sender<Value>),
+    Rpc(RpcReply),
     Write(SendResult),
 }
 
 impl Sendable {
     pub fn send(self, v: Value) {
         match self {
-            Sendable::Rpc(reply) => {
-                let _: Result<_, _> = reply.send(v);
+            Sendable::Rpc(mut reply) => {
+                reply.send(v);
             }
             Sendable::Write(reply) => {
                 reply.send(v);

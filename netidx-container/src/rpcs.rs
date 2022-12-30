@@ -1,15 +1,10 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use arcstr::ArcStr;
-use futures::{
-    channel::{mpsc, oneshot},
-    prelude::*,
-};
+use futures::channel::mpsc;
 use netidx::{
-    chars::Chars, path::Path, pool::Pooled, publisher::Publisher, subscriber::Value,
-    utils::Batched,
+    chars::Chars, path::Path, publisher::Publisher, subscriber::Value, utils::Batched,
 };
 use netidx_protocols::rpc::server::{ArgSpec, Proc, RpcCall, RpcReply};
-use std::{collections::HashMap, sync::Arc};
 
 pub(super) enum RpcRequestKind {
     Delete(Path),
@@ -137,57 +132,6 @@ impl RpcApi {
     }
 }
 
-macro_rules! get_arg_opt {
-    ($reply:expr, $typ:ty, $args:expr, $arg:expr) => {
-        match $args.remove($arg).map(|v| v.cast_to::<$typ>()) {
-            Some(Ok(c)) => Some(c),
-            Some(Err(_)) => {
-                let msg = format!("invalid {} expected {}", $arg, stringify!($typ));
-                $reply.send(Value::Error(Chars::from(msg)));
-                return None;
-            }
-            None => None,
-        }
-    };
-}
-
-macro_rules! get_arg {
-    ($reply:expr, $typ:ty, $args:expr, $arg:expr, $default:expr) => {
-        match $args.remove($arg).map(|v| v.cast_to::<$typ>()) {
-            Some(Ok(c)) => c,
-            Some(Err(_)) => {
-                let msg = format!("invalid {} expected {}", $arg, stringify!($typ));
-                $reply.send(Value::Error(Chars::from(msg)));
-                return None;
-            }
-            None => $default,
-        }
-    };
-}
-
-macro_rules! get_path {
-    ($reply:expr, $path:expr) => {
-        match $path {
-            Value::String(path) => Path::from(ArcStr::from(&**path)),
-            _ => {
-                $reply.send(err("invalid argument type, expected string"));
-                return None;
-            }
-        }
-    };
-}
-
-macro_rules! err {
-    ($reply:expr, $msg:expr) => {{
-        $reply.send(Value::Error(Chars::from($msg)));
-        return None;
-    }};
-}
-
-fn err(s: &'static str) -> Value {
-    Value::Error(Chars::from(s))
-}
-
 fn start_path_arg_rpc(
     publisher: &Publisher,
     base_path: &Path,
@@ -197,33 +141,17 @@ fn start_path_arg_rpc(
     f: fn(Path) -> RpcRequestKind,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    let map = |c: RpcCall| match c.args.remove("path") {
-        Some(Value::String(path)) => {
-            let path = Path::from(ArcStr::from(&*path));
-            Some(RpcRequest { kind: f(path), reply: c.reply })
-        }
-        Some(Value::Array(paths)) => {
-            let mut reqs = Vec::new();
-            for path in paths.iter() {
-                let path = get_path!(c.reply, path);
-                reqs.push(f(path));
-            }
+    let map = |c: RpcCall, mut path: Vec<Path>| -> Option<RpcRequest> {
+        if path.len() == 0 {
+            rpc_err!(c.reply, "expected at least 1 path")
+        } else if path.len() == 1 {
+            Some(RpcRequest { kind: f(path.pop().unwrap()), reply: c.reply })
+        } else {
+            let reqs = path.into_iter().map(f).collect();
             Some(RpcRequest { kind: RpcRequestKind::Packed(reqs), reply: c.reply })
         }
-        Some(_) | None => err!(c.reply, "invalid argument, expected path"),
     };
-    Ok(Proc::new(
-        publisher,
-        base_path.append(name),
-        Value::from(doc),
-        [ArgSpec {
-            name: ArcStr::from("path"),
-            default_value: Value::Null,
-            doc: Value::from(argdoc),
-        }],
-        map,
-        tx,
-    )?)
+    define_rpc!(publisher, base_path.append(name), doc, map, tx, path: Vec<Path> = Vec::<Path>::new(); argdoc)
 }
 
 pub(super) fn start_delete_rpc(
@@ -327,43 +255,31 @@ pub(super) fn start_set_data_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    let map = |c: RpcCall| match (c.args.remove("path"), c.args.remove("value")) {
-        (Some(Value::String(path)), Some(value)) => {
-            let path = Path::from(ArcStr::from(&*path));
-            let kind = RpcRequestKind::SetData { path, value };
-            Some(RpcRequest { kind, reply: c.reply })
+    fn map(c: RpcCall, path: Vec<Path>, value: Value) -> Option<RpcRequest> {
+        if path.len() == 0 {
+            rpc_err!(c.reply, "expected at least 1 path")
+        } else if path.len() == 1 {
+            Some(RpcRequest {
+                reply: c.reply,
+                kind: RpcRequestKind::SetData { path: path.pop().unwrap(), value },
+            })
+        } else {
+            let reqs = path
+                .into_iter()
+                .map(|path| RpcRequestKind::SetData { path, value: value.clone() })
+                .collect();
+            Some(RpcRequest { reply: c.reply, kind: RpcRequestKind::Packed(reqs) })
         }
-        (Some(Value::Array(paths)), Some(value)) => {
-            let mut reqs = Vec::new();
-            for path in paths.iter() {
-                let path = get_path!(c.reply, path);
-                reqs.push(RpcRequestKind::SetData { path, value: value.clone() })
-            }
-            Some(RpcRequest { kind: RpcRequestKind::Packed(reqs), reply: c.reply })
-        }
-        (Some(_) | None, Some(_) | None) => {
-            err!(c.reply, "invalid argument, expected path")
-        }
-    };
-    Ok(Proc::new(
+    }
+    define_rpc!(
         publisher,
         base_path.append("set-data"),
-        Value::from("make the specified path(s) as data and optionally set the value"),
-        [
-            ArgSpec {
-                name: ArcStr::from("path"),
-                default_value: Value::Null,
-                doc: Value::from("the path(s) to set"),
-            },
-            ArgSpec {
-                name: ArcStr::from("value"),
-                default_value: Value::Null,
-                doc: Value::from("the value(s)"),
-            },
-        ],
+        "make the specified paths data and optionally set the value",
         map,
         tx,
-    )?)
+        path: Vec<Path> = Vec::<Path>::new(); "the paths to set",
+        value: Value = Value::Null; "The value to set"
+    )
 }
 
 pub(super) fn start_set_formula_rpc(
@@ -371,54 +287,40 @@ pub(super) fn start_set_formula_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    let map = |c: RpcCall| {
-        let formula = get_arg_opt!(c.reply, Chars, c.args, "formula");
-        let on_write = get_arg_opt!(c.reply, Chars, c.args, "on-write");
-        match c.args.remove("path") {
-            Some(Value::String(path)) => {
-                let path = Path::from(ArcStr::from(&*path));
-                Some(RpcRequest {
-                    kind: RpcRequestKind::SetFormula { path, formula, on_write },
-                    reply: c.reply,
+    fn map(
+        c: RpcCall,
+        path: Vec<Path>,
+        formula: Option<Chars>,
+        on_write: Option<Chars>,
+    ) -> Option<RpcRequest> {
+        if path.len() == 0 {
+            rpc_err!(c.reply, "expected at least 1 path")
+        } else if path.len() == 1 {
+            let path = path.pop().unwrap();
+            let kind = RpcRequestKind::SetFormula { path, formula, on_write };
+            Some(RpcRequest { reply: c.reply, kind })
+        } else {
+            let reqs = path
+                .into_iter()
+                .map(|path| RpcRequestKind::SetFormula {
+                    path,
+                    formula: formula.clone(),
+                    on_write: on_write.clone(),
                 })
-            }
-            Some(Value::Array(paths)) => {
-                let formula = formula.clone();
-                let on_write = on_write.clone();
-                let mut reqs = Vec::new();
-                for path in paths.iter() {
-                    let path = get_path!(c.reply, path);
-                    reqs.push(RpcRequestKind::SetFormula { path, formula, on_write });
-                }
-                Some(RpcRequest { kind: RpcRequestKind::Packed(reqs), reply: c.reply })
-            }
-            Some(_) | None => err!(c.reply, "invalid argument, expected path"),
+                .collect();
+            Some(RpcRequest { reply: c.reply, kind: RpcRequestKind::Packed(reqs) })
         }
-    };
-    Ok(Proc::new(
+    }
+    define_rpc!(
         publisher,
         base_path.append("set-formula"),
-        Value::from("make the specified path calculated and set it's formula"),
-        [
-            ArgSpec {
-                name: ArcStr::from("path"),
-                default_value: Value::Null,
-                doc: Value::from("the path(s) to set"),
-            },
-            ArgSpec {
-                name: ArcStr::from("formula"),
-                default_value: Value::Null,
-                doc: Value::from("the formula"),
-            },
-            ArgSpec {
-                name: ArcStr::from("on-write"),
-                default_value: Value::Null,
-                doc: Value::from("the on write formula"),
-            },
-        ],
+        "make the specified paths calculated and set their formula",
         map,
         tx,
-    )?)
+        path: Vec<Path> = Vec::<Path>::new(); "the paths to set",
+        formula: Option<Chars> = None::<Chars>; "the formula",
+        on_write: Option<Chars> = None::<Chars>; "the on write formula"
+    )
 }
 
 pub(super) fn start_create_sheet_rpc(
@@ -426,72 +328,40 @@ pub(super) fn start_create_sheet_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    let map = |c: RpcCall| {
-        let rows = get_arg!(c.reply, u64, c.args, "rows", 1);
-        let max_rows = 10f32.powf(1. + (rows as f32).log10()) as u64;
-        let max_rows = get_arg!(c.reply, u64, c.args, "max-rows", max_rows);
-        let columns = get_arg!(c.reply, u64, c.args, "columns", 1);
-        let max_columns = 10f32.powf(1. + (columns as f32).log10()) as u64;
-        let max_columns = get_arg!(c.reply, u64, c.args, "max-columns", max_columns);
-        let lock = get_arg!(c.reply, bool, c.args, "lock", true);
-        match c.args.remove("path") {
-            Some(Value::String(path)) => {
-                let path = Path::from(ArcStr::from(&*path));
-                Some(RpcRequest {
-                    reply: c.reply,
-                    kind: RpcRequestKind::CreateSheet {
-                        path,
-                        rows: rows as usize,
-                        columns: columns as usize,
-                        max_rows: max_rows as usize,
-                        max_columns: max_columns as usize,
-                        lock,
-                    },
-                })
-            }
-            Some(_) | None => err!(c.reply, "invalid argument, expected path"),
-        }
-    };
-    let args = [
-        ArgSpec {
-            name: ArcStr::from("path"),
-            default_value: Value::Null,
-            doc: Value::from("where to put the sheet"),
-        },
-        ArgSpec {
-            name: ArcStr::from("rows"),
-            default_value: Value::U64(1),
-            doc: Value::from("the number of rows"),
-        },
-        ArgSpec {
-            name: ArcStr::from("columns"),
-            default_value: Value::U64(1),
-            doc: Value::from("the number of columns"),
-        },
-        ArgSpec {
-            name: ArcStr::from("max-rows"),
-            default_value: Value::Null,
-            doc: Value::from("the max rows"),
-        },
-        ArgSpec {
-            name: ArcStr::from("max-columns"),
-            default_value: Value::Null,
-            doc: Value::from("the max columns"),
-        },
-        ArgSpec {
-            name: ArcStr::from("lock"),
-            default_value: Value::True,
-            doc: Value::from("lock the sheet subtree"),
-        },
-    ];
-    Ok(Proc::new(
+    fn map(
+        c: RpcCall,
+        path: Path,
+        rows: usize,
+        columns: usize,
+        max_rows: Option<usize>,
+        max_columns: Option<usize>,
+        lock: bool,
+    ) -> Option<RpcRequest> {
+        let max_rows = 10f32.powf(1. + (rows as f32).log10()) as usize;
+        let max_columns = 10f32.powf(1. + (columns as f32).log10()) as usize;
+        let kind = RpcRequestKind::CreateSheet {
+            path,
+            rows,
+            columns,
+            max_rows,
+            max_columns,
+            lock,
+        };
+        Some(RpcRequest { reply: c.reply, kind })
+    }
+    define_rpc!(
         publisher,
         base_path.append("create-sheet"),
-        Value::from("create a spreadsheet like sheet"),
-        args,
+        "create a spreadsheet like sheet",
         map,
         tx,
-    )?)
+        path: Path = Value::Null; "where to put the sheet",
+        rows: usize = 1; "the number of rows",
+        columns: usize = 1; "the number of columns",
+        max_rows: Option<usize> = None::<u64>; "the maximum number of rows",
+        max_columns: Option<usize> = None::<u64>; "the maximum number of columns",
+        lock: bool = true; "lock the sheet subtree"
+    )
 }
 
 pub(super) fn start_add_sheet_rows_rpc(
@@ -499,37 +369,19 @@ pub(super) fn start_add_sheet_rows_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    let map = |c: RpcCall| match c.args.remove("path") {
-        Some(Value::String(path)) => {
-            let path = Path::from(ArcStr::from(&*path));
-            let rows = get_arg!(c.reply, u64, c.args, "rows", 1);
-            Some(RpcRequest {
-                reply: c.reply,
-                kind: RpcRequestKind::AddSheetRows(path, rows as usize),
-            })
-        }
-        Some(_) | None => err!(c.reply, "invalid argument, expected path"),
-    };
-    let args = [
-        ArgSpec {
-            name: ArcStr::from("path"),
-            default_value: Value::Null,
-            doc: Value::from("the sheets"),
-        },
-        ArgSpec {
-            name: ArcStr::from("rows"),
-            default_value: Value::U64(1),
-            doc: Value::from("how many rows to add"),
-        },
-    ];
-    Ok(Proc::new(
+    fn map(c: RpcCall, path: Path, rows: usize) -> Option<RpcRequest> {
+        let kind = RpcRequestKind::AddSheetRows(path, rows);
+        Some(RpcRequest { reply: c.reply, kind })
+    }
+    define_rpc!(
         publisher,
         base_path.append("add-sheet-rows"),
-        Value::from("add rows to a previously created sheet"),
-        args,
+        "add rows to a previously created sheet",
         map,
         tx,
-    )?)
+        path: Path = Value::Null; "the sheet to modify",
+        rows: usize = Value::Null; "the number of rows to add"
+    )
 }
 
 pub(super) fn start_add_sheet_cols_rpc(
@@ -537,35 +389,19 @@ pub(super) fn start_add_sheet_cols_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    let map = |c: RpcCall| match c.args.remove("path") {
-        Some(Value::String(path)) => {
-            let path = Path::from(ArcStr::from(&*path));
-            let columns = get_arg!(c.reply, u64, c.args, "columns", 1);
-            let kind = RpcRequestKind::AddSheetCols(path, columns as usize);
-            Some(RpcRequest { kind, reply: c.reply })
-        }
-        Some(_) | None => err!(c.reply, "invalid argument, expected path"),
-    };
-    let args = [
-        ArgSpec {
-            name: ArcStr::from("path"),
-            default_value: Value::Null,
-            doc: Value::from("the sheets(s)"),
-        },
-        ArgSpec {
-            name: ArcStr::from("columns"),
-            default_value: Value::U64(1),
-            doc: Value::from("how many cols to add"),
-        },
-    ];
-    Ok(Proc::new(
+    fn map(c: RpcCall, path: Path, columns: usize) -> Option<RpcRequest> {
+        let kind = RpcRequestKind::AddSheetCols(path, columns);
+        Some(RpcRequest { kind, reply: c.reply })
+    }
+    define_rpc!(
         publisher,
         base_path.append("add-sheet-columns"),
-        Value::from("add columns to a previously created sheet"),
-        args,
+        "add columns to a previously created sheet",
         map,
         tx,
-    )?)
+        path: Path = Value::Null; "the sheet to modify",
+        columns: usize = Value::Null; "the number of columns to add"
+    )
 }
 
 pub(super) fn start_del_sheet_rows_rpc(
@@ -573,35 +409,19 @@ pub(super) fn start_del_sheet_rows_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    let map = |c: RpcCall| match c.args.remove("path") {
-        Some(Value::String(path)) => {
-            let path = Path::from(ArcStr::from(&*path));
-            let rows = get_arg!(c.reply, u64, c.args, "rows", 1);
-            let kind = RpcRequestKind::DelSheetRows(path, rows as usize);
-            Some(RpcRequest { kind, reply: c.reply })
-        }
-        Some(_) | None => err!(c.reply, "invalid argument, expected path"),
-    };
-    let args = [
-        ArgSpec {
-            name: ArcStr::from("path"),
-            default_value: Value::Null,
-            doc: Value::from("the sheets(s)"),
-        },
-        ArgSpec {
-            name: ArcStr::from("rows"),
-            default_value: Value::U64(1),
-            doc: Value::from("rows to delete"),
-        },
-    ];
-    Ok(Proc::new(
+    fn map(c: RpcCall, path: Path, rows: usize) -> Option<RpcRequest> {
+        let kind = RpcRequestKind::DelSheetRows(path, rows);
+        Some(RpcRequest { kind, reply: c.reply })
+    }
+    define_rpc!(
         publisher,
         base_path.append("delete-sheet-rows"),
-        Value::from("delete rows in a previously created sheet"),
-        args,
+        "delete rows in a previously created sheet",
         map,
         tx,
-    )?)
+        path: Path = Value::Null; "the sheet to modify",
+        rows: usize = Value::Null; "the number of rows to add"
+    )
 }
 
 pub(super) fn start_del_sheet_cols_rpc(
@@ -609,35 +429,19 @@ pub(super) fn start_del_sheet_cols_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    let map = |c: RpcCall| match c.args.remove("path") {
-        Some(Value::String(path)) => {
-            let path = Path::from(ArcStr::from(&*path));
-            let columns = get_arg!(c.reply, u64, c.args, "columns", 1);
-            let kind = RpcRequestKind::DelSheetCols(path, columns as usize);
-            Some(RpcRequest { kind, reply: c.reply })
-        }
-        Some(_) | None => err!(c.reply, "invalid argument, expected path"),
-    };
-    let args = [
-        ArgSpec {
-            name: ArcStr::from("path"),
-            default_value: Value::Null,
-            doc: Value::from("the sheet"),
-        },
-        ArgSpec {
-            name: ArcStr::from("columns"),
-            default_value: Value::U64(1),
-            doc: Value::from("cols to delete"),
-        },
-    ];
-    Ok(Proc::new(
+    fn map(c: RpcCall, path: Path, columns: usize) -> Option<RpcRequest> {
+        let kind = RpcRequestKind::DelSheetCols(path, columns);
+        Some(RpcRequest { kind, reply: c.reply })
+    }
+    define_rpc!(
         publisher,
         base_path.append("delete-sheet-columns"),
-        Value::from("delete columns in a previously created sheet"),
-        args,
+        "delete columns in a previously created sheet",
         map,
         tx,
-    )?)
+        path: Path = Value::Null; "the sheet to modify",
+        columns: usize = Value::Null; "number of columns to delete"
+    )
 }
 
 pub(super) fn start_create_table_rpc(
@@ -645,53 +449,27 @@ pub(super) fn start_create_table_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    let map = |c: RpcCall| match c.args.remove("path") {
-        Some(Value::String(path)) => {
-            let path = Path::from(ArcStr::from(&*path));
-            let rows = match get_arg_opt!(c.reply, Vec<Chars>, c.args, "row") {
-                Some(rows) => rows,
-                None => err!(c.reply, "expected at least 1 row"),
-            };
-            let columns = match get_arg_opt!(c.reply, Vec<Chars>, c.args, "column") {
-                Some(columns) => columns,
-                None => err!(c.reply, "expected at least 1 column"),
-            };
-            let lock = get_arg!(c.reply, bool, c.args, "lock", true);
-            let kind = RpcRequestKind::CreateTable { path, rows, columns, lock };
-            Some(RpcRequest { kind, reply: c.reply })
-        }
-        Some(_) | None => err!(c.reply, "invalid argument, expected path"),
-    };
-    let args = [
-        ArgSpec {
-            name: ArcStr::from("path"),
-            default_value: Value::Null,
-            doc: Value::from("the tables"),
-        },
-        ArgSpec {
-            name: ArcStr::from("row"),
-            default_value: Value::Null,
-            doc: Value::from("the row names"),
-        },
-        ArgSpec {
-            name: ArcStr::from("column"),
-            default_value: Value::Null,
-            doc: Value::from("the column names"),
-        },
-        ArgSpec {
-            name: ArcStr::from("lock"),
-            default_value: Value::True,
-            doc: Value::from("lock the table subtree"),
-        },
-    ];
-    Ok(Proc::new(
+    fn map(
+        c: RpcCall,
+        path: Path,
+        rows: Vec<Chars>,
+        columns: Vec<Chars>,
+        lock: bool,
+    ) -> Option<RpcRequest> {
+        let kind = RpcRequestKind::CreateTable { path, rows, columns, lock };
+        Some(RpcRequest { kind, reply: c.reply })
+    }
+    define_rpc!(
         publisher,
         base_path.append("create-table"),
-        Value::from("create a database like table"),
-        args,
+        "create a database like table",
         map,
         tx,
-    )?)
+        path: Path = Value::Null; "where to put the table",
+        rows: Vec<Chars> = Value::Null; "the row names",
+        columns: Vec<Chars> = Value::Null; "the column names",
+        lock: bool = true; "lock the table subtree"
+    )
 }
 
 pub(super) fn start_add_table_rows_rpc(
@@ -699,38 +477,19 @@ pub(super) fn start_add_table_rows_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    let map = |c: RpcCall| match c.args.remove("path") {
-        Some(Value::String(path)) => {
-            let path = Path::from(ArcStr::from(&*path));
-            let rows = match get_arg_opt!(c.reply, Vec<Chars>, c.args, "row") {
-                Some(rows) => rows,
-                None => err!(c.reply, "expected at least 1 row"),
-            };
-            let kind = RpcRequestKind::AddTableRows(path, rows.clone());
-            Some(RpcRequest { kind, reply: c.reply })
-        }
-        Some(_) | None => err!(c.reply, "invalid argument, expected path"),
-    };
-    let args = [
-        ArgSpec {
-            name: ArcStr::from("path"),
-            default_value: Value::Null,
-            doc: Value::from("the tables(s)"),
-        },
-        ArgSpec {
-            name: ArcStr::from("row"),
-            default_value: Value::Null,
-            doc: Value::from("the row(s)"),
-        },
-    ];
-    Ok(Proc::new(
+    fn map(c: RpcCall, path: Path, rows: Vec<Chars>) -> Option<RpcRequest> {
+        let kind = RpcRequestKind::AddTableRows(path, rows);
+        Some(RpcRequest { kind, reply: c.reply })
+    }
+    define_rpc!(
         publisher,
         base_path.append("add-table-rows"),
-        Value::from("add rows to a table"),
-        args,
+        "add rows to a table",
         map,
         tx,
-    )?)
+        path: Path = Value::Null; "the table to modify",
+        rows: Vec<Chars> = Value::Null; "the rows to add"
+    )
 }
 
 pub(super) fn start_add_table_cols_rpc(
@@ -738,46 +497,19 @@ pub(super) fn start_add_table_cols_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    Ok(Proc::new(
+    fn map(c: RpcCall, path: Path, columns: Vec<Chars>) -> Option<RpcRequest> {
+        let kind = RpcRequestKind::AddTableCols(path, columns);
+        Some(RpcRequest { reply: c.reply, kind })
+    }
+    define_rpc!(
         publisher,
         base_path.append("add-table-columns"),
-        Value::from("add columns to a table"),
-        vec![
-            (Arc::from("path"), (Value::Null, Value::from("the tables(s)"))),
-            (Arc::from("column"), (Value::Null, Value::from("the column(s)"))),
-        ]
-        .into_iter()
-        .collect(),
-        Arc::new(move |_addr, mut args| {
-            let mut tx = tx.clone();
-            Box::pin(async move {
-                match args.remove("path") {
-                    None => err("invalid argument, expected path"),
-                    Some(mut paths) => {
-                        let cols = match collect_chars_vec(&mut args, "columns") {
-                            Err(e) => return Value::from(format!("{}", e)),
-                            Ok(cols) => cols,
-                        };
-                        for path in paths.drain(..) {
-                            let path = get_path!(path);
-                            let (reply, reply_rx) = oneshot::channel();
-                            let kind = RpcRequestKind::AddTableCols(path, cols.clone());
-                            let _: Result<_, _> =
-                                tx.send(RpcRequest { kind, reply }).await;
-                            match reply_rx.await {
-                                Err(_) => return err("internal error"),
-                                Ok(v) => match v {
-                                    Value::Ok => (),
-                                    v => return v,
-                                },
-                            }
-                        }
-                        Value::Ok
-                    }
-                }
-            })
-        }),
-    )?)
+        "add columns to a table",
+        map,
+        tx,
+        path: Path = Value::Null; "the table to modify",
+        columns: Vec<Chars> = Value::Null; "the columns to add"
+    )
 }
 
 pub(super) fn start_del_table_rows_rpc(
@@ -785,46 +517,19 @@ pub(super) fn start_del_table_rows_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    Ok(Proc::new(
+    fn map(c: RpcCall, path: Path, rows: Vec<Chars>) -> Option<RpcRequest> {
+        let kind = RpcRequestKind::DelTableRows(path, rows);
+        Some(RpcRequest { reply: c.reply, kind })
+    }
+    define_rpc!(
         publisher,
         base_path.append("delete-table-rows"),
-        Value::from("delete rows from a table"),
-        vec![
-            (Arc::from("path"), (Value::Null, Value::from("the tables(s)"))),
-            (Arc::from("row"), (Value::Null, Value::from("the row names"))),
-        ]
-        .into_iter()
-        .collect(),
-        Arc::new(move |_addr, mut args| {
-            let mut tx = tx.clone();
-            Box::pin(async move {
-                match args.remove("path") {
-                    None => err("invalid argument, expected path"),
-                    Some(mut paths) => {
-                        let rows = match collect_chars_vec(&mut args, "row") {
-                            Err(e) => return Value::from(format!("{}", e)),
-                            Ok(rows) => rows,
-                        };
-                        for path in paths.drain(..) {
-                            let path = get_path!(path);
-                            let (reply, reply_rx) = oneshot::channel();
-                            let kind = RpcRequestKind::DelTableRows(path, rows.clone());
-                            let _: Result<_, _> =
-                                tx.send(RpcRequest { kind, reply }).await;
-                            match reply_rx.await {
-                                Err(_) => return err("internal error"),
-                                Ok(v) => match v {
-                                    Value::Ok => (),
-                                    v => return v,
-                                },
-                            }
-                        }
-                        Value::Ok
-                    }
-                }
-            })
-        }),
-    )?)
+        "delete rows from a table",
+        map,
+        tx,
+        path: Path = Value::Null; "the table to modify",
+        rows: Vec<Chars> = Value::Null; "the rows to delete"
+    )
 }
 
 pub(super) fn start_del_table_cols_rpc(
@@ -832,44 +537,17 @@ pub(super) fn start_del_table_cols_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    Ok(Proc::new(
+    fn map(c: RpcCall, path: Path, columns: Vec<Chars>) -> Option<RpcRequest> {
+        let kind = RpcRequestKind::DelTableCols(path, columns);
+        Some(RpcRequest { reply: c.reply, kind })
+    }
+    define_rpc!(
         publisher,
         base_path.append("delete-table-columns"),
-        Value::from("delete columns from a table"),
-        vec![
-            (Arc::from("path"), (Value::Null, Value::from("the tables(s)"))),
-            (Arc::from("columns"), (Value::Null, Value::from("the column names"))),
-        ]
-        .into_iter()
-        .collect(),
-        Arc::new(move |_addr, mut args| {
-            let mut tx = tx.clone();
-            Box::pin(async move {
-                match args.remove("path") {
-                    None => err("invalid argument, expected path"),
-                    Some(mut paths) => {
-                        let cols = match collect_chars_vec(&mut args, "columns") {
-                            Err(e) => return Value::from(format!("{}", e)),
-                            Ok(cols) => cols,
-                        };
-                        for path in paths.drain(..) {
-                            let path = get_path!(path);
-                            let (reply, reply_rx) = oneshot::channel();
-                            let kind = RpcRequestKind::DelTableCols(path, cols.clone());
-                            let _: Result<_, _> =
-                                tx.send(RpcRequest { kind, reply }).await;
-                            match reply_rx.await {
-                                Err(_) => return err("internal error"),
-                                Ok(v) => match v {
-                                    Value::Ok => (),
-                                    v => return v,
-                                },
-                            }
-                        }
-                        Value::Ok
-                    }
-                }
-            })
-        }),
-    )?)
+        "delete columns from a table",
+        map,
+        tx,
+        path: Path = Value::Null; "the table to modify",
+        columns: Vec<Chars> = Value::Null; "the columns to delete"
+    )
 }
