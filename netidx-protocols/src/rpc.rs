@@ -339,6 +339,7 @@ pub mod server {
     }
 }
 
+#[macro_use]
 pub mod client {
     use super::*;
 
@@ -349,6 +350,19 @@ pub mod client {
         // not happen.
         static ref PROCS: Mutex<FxHashMap<SubscriberId, FxHashMap<Path, Weak<AsyncMutex<()>>>>> =
             Mutex::new(HashMap::with_hasher(FxBuildHasher::default()));
+    }
+
+    /// Convenience macro for calling rpcs.
+    /// `call_rpc!(proc, arg0: 3, arg1: "foo", arg2: vec!["foo", "bar", "baz"])`
+    #[macro_export]
+    macro_rules! call_rpc {
+        ($proc:expr, $($name:ident: $arg:expr),*) => {
+            $proc.call([
+                $(
+                    (stringify!($name), Value::from($arg))
+                )*,
+            ])
+        }
     }
 
     #[derive(Debug)]
@@ -424,13 +438,29 @@ pub mod client {
             Ok(Proc(Arc::new(ProcInner { name, sid, lock, call, args })))
         }
 
-        /// Call the procedure.
-        ///
-        /// `call` may be reused to call the procedure again.
-        ///
-        /// `call` may safely be called concurrently on multiple
-        /// instances of `Proc` that call the same procedure
-        /// (there is internal syncronization).
+        /**
+        Call the procedure. `call` may be reused to call the procedure again.
+
+        # Example
+        ```no_run
+        use netidx::{path::Path, subscriber::Value};
+        use netidx_protocols::rpc::client::Proc;
+        # use anyhow::Result;
+        # async fn z() -> Result<()> {
+        #   let subscriber = unimplemented!();
+            let echo = Proc::new(subscriber, Path::from("/examples/api/echo")).await?;
+            let v = call_rpc!(echo, arg1: "hello echo").await?;
+        #   drop(echo);
+        #   Ok(())
+        # }
+        ```
+
+        # Notes
+
+        `call` may safely be called concurrently on multiple
+        instances of `Proc` that call the same procedure
+        (there is internal syncronization).
+        **/
         pub async fn call<I, K>(&self, args: I) -> Result<Value>
         where
             I: IntoIterator<Item = (K, Value)>,
@@ -512,8 +542,7 @@ mod test {
             time::sleep(Duration::from_millis(100)).await;
             let proc: client::Proc =
                 client::Proc::new(&subscriber, proc_name.clone()).await.unwrap();
-            let args = vec![("arg1", Value::from("hello rpc"))];
-            let res = proc.call(args.into_iter()).await.unwrap();
+            let res = call_rpc!(proc, arg1: "hello rpc").await.unwrap();
             assert_eq!(res, Value::U32(42));
             let args: Vec<(Arc<str>, Value)> = vec![];
             let res = proc.call(args.into_iter()).await.unwrap();
