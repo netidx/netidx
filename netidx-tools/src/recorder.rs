@@ -32,7 +32,7 @@ use netidx_archive::{
 };
 use netidx_protocols::{
     cluster::{uuid_string, Cluster},
-    rpc::server::Proc,
+    rpc::server::{ArgSpec, Proc},
 };
 use parking_lot::Mutex;
 use std::{
@@ -112,6 +112,8 @@ enum BCastMsg {
 }
 
 mod publish {
+    use netidx_protocols::rpc::server::{RpcCall, RpcReply};
+
     use super::*;
 
     static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
@@ -329,9 +331,9 @@ mod publish {
 
     struct NewSessionConfig {
         client: ClId,
-        start: Option<Bound<DateTime<Utc>>>,
-        end: Option<Bound<DateTime<Utc>>>,
-        speed: Option<Option<f64>>,
+        start: Bound<DateTime<Utc>>,
+        end: Bound<DateTime<Utc>>,
+        speed: Option<f64>,
         pos: Option<Seek>,
         state: Option<State>,
         play_after: Option<Duration>,
@@ -339,21 +341,36 @@ mod publish {
 
     impl NewSessionConfig {
         fn new(
-            client: ClId,
-            mut args: Pooled<HashMap<Arc<str>, Pooled<Vec<Value>>>>,
-        ) -> Result<NewSessionConfig> {
-            let mut last = |name| args.remove(name).and_then(|mut v| v.pop());
-            Ok(NewSessionConfig {
-                client,
-                start: last("start").map(|v| parse_bound(v)).transpose()?,
-                end: last("end").map(|v| parse_bound(v)).transpose()?,
-                speed: last("speed").map(|v| parse_speed(v)).transpose()?,
-                pos: last("pos").map(|v| v.cast_to::<Seek>()).transpose()?,
-                state: last("state").map(|v| v.cast_to::<State>()).transpose()?,
-                play_after: last("play_after")
-                    .map(|v| v.cast_to::<Duration>())
-                    .transpose()?,
-            })
+            mut req: RpcCall,
+            start: Value,
+            end: Value,
+            speed: Value,
+            pos: Option<Seek>,
+            state: Option<State>,
+            play_after: Option<Duration>,
+        ) -> Option<(NewSessionConfig, RpcReply)> {
+            let start = match parse_bound(start) {
+                Ok(s) => s,
+                Err(e) => rpc_err!(req.reply, format!("invalid start {}", e)),
+            };
+            let end = match parse_bound(end) {
+                Ok(s) => s,
+                Err(e) => rpc_err!(req.reply, format!("invalid end {}", e)),
+            };
+            let speed = match parse_speed(speed) {
+                Ok(s) => s,
+                Err(e) => rpc_err!(req.reply, format!("invalid speed {}", e)),
+            };
+            let s = NewSessionConfig {
+                client: req.client,
+                start,
+                end,
+                speed,
+                pos,
+                state,
+                play_after,
+            };
+            Some((s, req.reply))
         }
     }
 
@@ -576,18 +593,12 @@ mod publish {
             cluster: &Cluster<ClusterCmd>,
             cfg: NewSessionConfig,
         ) -> Result<()> {
-            if let Some(start) = cfg.start {
-                self.set_start(cbatch, start)?;
-                cluster.send_cmd(&ClusterCmd::SetStart(start));
-            }
-            if let Some(end) = cfg.end {
-                self.set_end(cbatch, end)?;
-                cluster.send_cmd(&ClusterCmd::SetEnd(end))
-            }
-            if let Some(speed) = cfg.speed {
-                self.set_speed(cbatch, speed);
-                cluster.send_cmd(&ClusterCmd::SetSpeed(speed));
-            }
+            self.set_start(cbatch, cfg.start)?;
+            cluster.send_cmd(&ClusterCmd::SetStart(cfg.start));
+            self.set_end(cbatch, cfg.end)?;
+            cluster.send_cmd(&ClusterCmd::SetEnd(cfg.end));
+            self.set_speed(cbatch, cfg.speed);
+            cluster.send_cmd(&ClusterCmd::SetSpeed(cfg.speed));
             if let Some(pos) = cfg.pos {
                 self.seek(cbatch, pos)?;
                 cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
@@ -974,38 +985,20 @@ mod publish {
             Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
                 .await?;
         let (control_tx, control_rx) = mpsc::channel(3);
-        let _new_session = Proc::new(
+        let _new_session: Result<Proc> = define_rpc!(
             &publisher,
             publish_base.append("session"),
-            Value::from("create a new playback session"),
-            vec![
-                (Arc::from("start"), (Value::from("Unbounded"), Value::from(START_DOC))),
-                (Arc::from("end"), (Value::from("Unbounded"), Value::from(END_DOC))),
-                (Arc::from("speed"), (Value::from(1.), Value::from(SPEED_DOC))),
-                (Arc::from("pos"), (Value::Null, Value::from(POS_DOC))),
-                (Arc::from("play_after"), (Value::Null, Value::from(PLAY_AFTER_DOC))),
-            ]
-            .into_iter()
-            .collect::<HashMap<_, _>>(),
-            Arc::new(move |cl, args| {
-                let cfg = NewSessionConfig::new(cl, args);
-                let mut control_tx = control_tx.clone();
-                Box::pin(async move {
-                    match cfg {
-                        Err(e) => {
-                            Value::Error(Chars::from(format!("invalid config {}", e)))
-                        }
-                        Ok(cfg) => {
-                            let (tx, rx) = oneshot::channel();
-                            let _ = control_tx.send((cfg, tx)).await;
-                            rx.await.unwrap_or_else(|_| {
-                                Value::Error(Chars::from("cancelled"))
-                            })
-                        }
-                    }
-                })
-            }),
-        )?;
+            "create a new playback session",
+            NewSessionConfig::new,
+            control_tx.clone(),
+            start: Value = "Unbounded"; START_DOC,
+            end: Value = "Unbounded"; END_DOC,
+            speed: Value = "1."; SPEED_DOC,
+            pos: Option<Seek> = Value::Null; POS_DOC,
+            state: Option<State> = Value::Null; STATE_DOC,
+            play_after: Option<Duration> = None::<Duration>; PLAY_AFTER_DOC
+        );
+        let _new_session = _new_session?;
         let mut cluster = Cluster::<(ClId, Uuid)>::new(
             &publisher,
             subscriber.clone(),
@@ -1057,11 +1050,11 @@ mod publish {
                 },
                 m = control_rx.next() => match m {
                     None => break Ok(()),
-                    Some((cfg, reply)) => {
+                    Some((cfg, mut reply)) => {
                         match sessions.add_session(cfg.client) {
                             None => {
                                 let m = format!("too many sessions, client {:?}", cfg.client);
-                                let _ = reply.send(Value::Error(Chars::from(m)));
+                                reply.send(Value::Error(Chars::from(m)));
                             },
                             Some(session_token) => {
                                 let session_id = Uuid::new_v4();
@@ -1082,11 +1075,11 @@ mod publish {
                                     Err(e) => {
                                         let e = Chars::from(format!("{}", e));
                                         warn!("failed to start session {}, {}", session_id, e);
-                                        let _ = reply.send(Value::Error(e));
+                                        reply.send(Value::Error(e));
                                     }
                                     Ok(()) => {
                                         cluster.send_cmd(&(client, session_id));
-                                        let _ = reply.send(Value::from(uuid_string(session_id)));
+                                        reply.send(Value::from(uuid_string(session_id)));
                                     }
                                 }
                             }

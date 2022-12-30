@@ -6,19 +6,21 @@ mod stress_subscriber;
 mod subscriber;
 
 #[cfg(unix)]
+mod activation;
+#[cfg(unix)]
 mod container;
 #[cfg(unix)]
 mod recorder;
 #[cfg(unix)]
 mod resolver_server;
-#[cfg(unix)]
-mod activation;
 
 #[macro_use]
 extern crate anyhow;
 #[cfg(unix)]
 #[macro_use]
 extern crate serde_derive;
+#[macro_use]
+extern crate netidx_protocols;
 use netidx_tools_core::ClientParams;
 use structopt::StructOpt;
 

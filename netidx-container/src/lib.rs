@@ -1512,74 +1512,88 @@ impl ContainerInner {
     }
 
     fn process_rpc_requests(&mut self, txn: &mut Txn, reqs: &mut Vec<RpcRequest>) {
-        for req in reqs.drain(..) {
-            let reply = Sendable::Rpc(req.reply);
+        let mut process_non_packed = |reply: Sendable, req: RpcRequestKind| match req {
+            RpcRequestKind::Delete(path) => self.delete_path(txn, path, Some(reply)),
+            RpcRequestKind::DeleteSubtree(path) => {
+                self.delete_subtree(txn, path, Some(reply))
+            }
+            RpcRequestKind::LockSubtree(path) => {
+                self.lock_subtree(txn, path, Some(reply))
+            }
+            RpcRequestKind::UnlockSubtree(path) => {
+                self.unlock_subtree(txn, path, Some(reply))
+            }
+            RpcRequestKind::SetData { path, value } => {
+                self.set_data(txn, path, value, Some(reply))
+            }
+            RpcRequestKind::SetFormula { path, formula, on_write } => {
+                self.set_formula(txn, path, formula, on_write, Some(reply))
+            }
+            RpcRequestKind::CreateSheet {
+                path,
+                rows,
+                columns,
+                max_rows,
+                max_columns,
+                lock,
+            } => self.create_sheet(
+                txn,
+                path,
+                rows,
+                columns,
+                max_rows,
+                max_columns,
+                lock,
+                Some(reply),
+            ),
+            RpcRequestKind::AddSheetRows(path, rows) => {
+                txn.add_sheet_rows(path, rows, Some(reply));
+            }
+            RpcRequestKind::AddSheetCols(path, cols) => {
+                txn.add_sheet_columns(path, cols, Some(reply));
+            }
+            RpcRequestKind::DelSheetRows(path, rows) => {
+                txn.del_sheet_rows(path, rows, Some(reply));
+            }
+            RpcRequestKind::DelSheetCols(path, cols) => {
+                txn.del_sheet_columns(path, cols, Some(reply));
+            }
+            RpcRequestKind::CreateTable { path, rows, columns, lock } => {
+                self.create_table(txn, path, rows, columns, lock, Some(reply))
+            }
+            RpcRequestKind::AddTableRows(path, rows) => {
+                txn.add_table_rows(path, rows, Some(reply));
+            }
+            RpcRequestKind::AddTableCols(path, cols) => {
+                txn.add_table_columns(path, cols, Some(reply));
+            }
+            RpcRequestKind::DelTableRows(path, rows) => {
+                txn.del_table_rows(path, rows, Some(reply));
+            }
+            RpcRequestKind::DelTableCols(path, cols) => {
+                txn.del_table_columns(path, cols, Some(reply));
+            }
+            RpcRequestKind::AddRoot(path) => {
+                txn.add_root(path, Some(reply));
+            }
+            RpcRequestKind::DelRoot(path) => {
+                txn.del_root(path, Some(reply));
+            }
+            RpcRequestKind::Packed(_) => unreachable!(),
+        };
+        for mut req in reqs.drain(..) {
             match req.kind {
-                RpcRequestKind::Delete(path) => self.delete_path(txn, path, Some(reply)),
-                RpcRequestKind::DeleteSubtree(path) => {
-                    self.delete_subtree(txn, path, Some(reply))
+                RpcRequestKind::Packed(reqs) => {
+                    let res = Arc::new(Mutex::new(Value::Null));
+                    for req in reqs {
+                        let reply = Sendable::Packed(res.clone());
+                        process_non_packed(reply, req)
+                    }
+                    req.reply.send(mem::replace(&mut *res.lock(), Value::Null));
                 }
-                RpcRequestKind::LockSubtree(path) => {
-                    self.lock_subtree(txn, path, Some(reply))
-                }
-                RpcRequestKind::UnlockSubtree(path) => {
-                    self.unlock_subtree(txn, path, Some(reply))
-                }
-                RpcRequestKind::SetData { path, value } => {
-                    self.set_data(txn, path, value, Some(reply))
-                }
-                RpcRequestKind::SetFormula { path, formula, on_write } => {
-                    self.set_formula(txn, path, formula, on_write, Some(reply))
-                }
-                RpcRequestKind::CreateSheet {
-                    path,
-                    rows,
-                    columns,
-                    max_rows,
-                    max_columns,
-                    lock,
-                } => self.create_sheet(
-                    txn,
-                    path,
-                    rows,
-                    columns,
-                    max_rows,
-                    max_columns,
-                    lock,
-                    Some(reply),
-                ),
-                RpcRequestKind::AddSheetRows(path, rows) => {
-                    txn.add_sheet_rows(path, rows, Some(reply));
-                }
-                RpcRequestKind::AddSheetCols(path, cols) => {
-                    txn.add_sheet_columns(path, cols, Some(reply));
-                }
-                RpcRequestKind::DelSheetRows(path, rows) => {
-                    txn.del_sheet_rows(path, rows, Some(reply));
-                }
-                RpcRequestKind::DelSheetCols(path, cols) => {
-                    txn.del_sheet_columns(path, cols, Some(reply));
-                }
-                RpcRequestKind::CreateTable { path, rows, columns, lock } => {
-                    self.create_table(txn, path, rows, columns, lock, Some(reply))
-                }
-                RpcRequestKind::AddTableRows(path, rows) => {
-                    txn.add_table_rows(path, rows, Some(reply));
-                }
-                RpcRequestKind::AddTableCols(path, cols) => {
-                    txn.add_table_columns(path, cols, Some(reply));
-                }
-                RpcRequestKind::DelTableRows(path, rows) => {
-                    txn.del_table_rows(path, rows, Some(reply));
-                }
-                RpcRequestKind::DelTableCols(path, cols) => {
-                    txn.del_table_columns(path, cols, Some(reply));
-                }
-                RpcRequestKind::AddRoot(path) => {
-                    txn.add_root(path, Some(reply));
-                }
-                RpcRequestKind::DelRoot(path) => {
-                    txn.del_root(path, Some(reply));
+                k => {
+                    let reply = Sendable::Rpc(req.reply);
+                    process_non_packed(reply, k)
                 }
             }
         }

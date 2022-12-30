@@ -141,7 +141,7 @@ fn start_path_arg_rpc(
     f: fn(Path) -> RpcRequestKind,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    let map = |c: RpcCall, mut path: Vec<Path>| -> Option<RpcRequest> {
+    let map = move |mut c: RpcCall, mut path: Vec<Path>| -> Option<RpcRequest> {
         if path.len() == 0 {
             rpc_err!(c.reply, "expected at least 1 path")
         } else if path.len() == 1 {
@@ -151,7 +151,14 @@ fn start_path_arg_rpc(
             Some(RpcRequest { kind: RpcRequestKind::Packed(reqs), reply: c.reply })
         }
     };
-    define_rpc!(publisher, base_path.append(name), doc, map, tx, path: Vec<Path> = Vec::<Path>::new(); argdoc)
+    define_rpc!(
+        publisher,
+        base_path.append(name),
+        doc,
+        map,
+        tx,
+        path: Vec<Path> = Vec::<Path>::new(); argdoc
+    )
 }
 
 pub(super) fn start_delete_rpc(
@@ -255,7 +262,7 @@ pub(super) fn start_set_data_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    fn map(c: RpcCall, path: Vec<Path>, value: Value) -> Option<RpcRequest> {
+    fn map(mut c: RpcCall, mut path: Vec<Path>, value: Value) -> Option<RpcRequest> {
         if path.len() == 0 {
             rpc_err!(c.reply, "expected at least 1 path")
         } else if path.len() == 1 {
@@ -288,8 +295,8 @@ pub(super) fn start_set_formula_rpc(
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
     fn map(
-        c: RpcCall,
-        path: Vec<Path>,
+        mut c: RpcCall,
+        mut path: Vec<Path>,
         formula: Option<Chars>,
         on_write: Option<Chars>,
     ) -> Option<RpcRequest> {
@@ -337,8 +344,10 @@ pub(super) fn start_create_sheet_rpc(
         max_columns: Option<usize>,
         lock: bool,
     ) -> Option<RpcRequest> {
-        let max_rows = 10f32.powf(1. + (rows as f32).log10()) as usize;
-        let max_columns = 10f32.powf(1. + (columns as f32).log10()) as usize;
+        let max_rows =
+            max_rows.unwrap_or_else(|| 10f32.powf(1. + (rows as f32).log10()) as usize);
+        let max_columns = max_columns
+            .unwrap_or_else(|| 10f32.powf(1. + (columns as f32).log10()) as usize);
         let kind = RpcRequestKind::CreateSheet {
             path,
             rows,

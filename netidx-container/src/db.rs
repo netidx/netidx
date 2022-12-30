@@ -20,6 +20,7 @@ use netidx::{
     utils::{BatchItem, Batched},
 };
 use netidx_protocols::rpc::server::RpcReply;
+use parking_lot::Mutex;
 use sled;
 use std::{
     cmp::{max, min},
@@ -36,6 +37,7 @@ use std::{
 use tokio::task;
 
 pub enum Sendable {
+    Packed(Arc<Mutex<Value>>),
     Rpc(RpcReply),
     Write(SendResult),
 }
@@ -43,6 +45,15 @@ pub enum Sendable {
 impl Sendable {
     pub fn send(self, v: Value) {
         match self {
+            Sendable::Packed(res) => {
+                let mut res = res.lock();
+                match &*res {
+                    Value::Error(_) => (),
+                    _ => {
+                        *res = v;
+                    }
+                }
+            }
             Sendable::Rpc(mut reply) => {
                 reply.send(v);
             }

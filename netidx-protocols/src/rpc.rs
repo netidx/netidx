@@ -47,7 +47,7 @@ pub mod server {
     #[macro_export]
     macro_rules! define_rpc {
         ($publisher:expr, $path:expr, $topdoc:expr, $map:expr, $tx:expr, $($arg:ident: $typ:ty = $default:expr; $doc:expr),*) => {{
-            let map = |mut c: RpcCall| {
+            let map = move |mut c: RpcCall| {
                 $(
                     let d = Value::from($default);
                     let $arg = match c.args.remove(stringify!($arg)).unwrap_or(d).cast_to::<$typ>() {
