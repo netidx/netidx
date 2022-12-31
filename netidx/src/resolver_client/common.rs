@@ -36,11 +36,31 @@ lazy_static! {
     pub(super) static ref PATHPOOL: Pool<Vec<Path>> = Pool::new(100, 100);
 }
 
+/// `DesiredAuth` instructs publishers and subscribers what authentication mechanism
+/// they should try to use. To use the default specified in the configuration you
+/// can call `Config::default_auth`
 #[derive(Debug, Clone)]
 pub enum DesiredAuth {
+    /// Don't use any authentication, authorization, or encryption.
     Anonymous,
+    /// Use Kerberos for authentication and encryption. upn is the user principal
+    /// name you wish to use to talk to the resolver server and the publishers
+    /// (in the case of a subscriber). You should have a TGT for this user. If
+    /// upn is `None` then the current user will be used.
+    ///
+    /// spn is required for publishers and ignored for subscribers. It is the
+    /// service principal name that the publisher will publish as. The resolver
+    /// will tell clients of the publisher to obtain a service ticket for
+    /// the spn you specify here. Make sure you have a keytab for it available.
     Krb5 { upn: Option<String>, spn: Option<String> },
+    /// Use local authentication. Your bind address must be `local` in order
+    /// to use this mechanism.
     Local,
+    /// Use Transport Layer Security for authentication and encryption.
+    /// You must have one or more identities configured in your client
+    /// configuration. If identity is `None` the default identity will be
+    /// used. Otherwise identity should be the name of an identity in
+    /// the configuration.
     Tls { identity: Option<String> },
 }
 
