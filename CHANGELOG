@@ -1,3 +1,30 @@
+* 0.15 all
+
+  - skipping ahead to 0.15 because tls is a big step forward.
+  - add a new authentication mechanism TLS, for using transport layer
+    security for authentication and encryption.
+    - using rustls
+    - full mutual authentication is REQUIRED. Later I may add PublicTls
+      for server -> client only authentication. We'll see.
+    - The protocol changes are backwards compatible, but obviously old
+      publishers, resolvers, and subscribers will not understand tls.
+    - At the moment it's all or nothing at the resolver level. You can't
+      do kerberos AND tls on the same resolver. There's no reason this
+      couldn't be done, however I don't need it right now, and I wanted
+      to release the MVP.
+    - The book is updated for tls in all the relevant places
+  - RPCs are reworked on the server side and a bit on the client side.
+    The new api is a significant improvement IMHO, but it will break all
+    rpc servers *sorry*. However the protocol did not change significantly,
+    so existing rpc clients can call new rpc servers, and new rpc clients can
+    call old rpc servers.
+    
+    The only thing that did change about the rpc protocol is that there is now
+    only one way to get a reply to your procedure call, by using write_with_recipt.
+    That is what the rpc client always did, so it will continue to work, however if
+    you were manually calling rpcs and depending on the procedure value to update it
+    won't do that anymore.
+
 * 0.12.7 browser
 
   - Use the new bscript functionality to greatly improve tracing. Load
