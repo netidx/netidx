@@ -28,7 +28,7 @@ krb5_iov = ["netidx/krb5_iov"]
 anyhow = "1"
 async-stream = "0.3"
 bytes = "1"
-chrono = "0.4"
+chrono = {version = "0.4", features = ["serde"]}
 env_logger = "0.10"
 futures = "0.3"
 fxhash = "0.2"
