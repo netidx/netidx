@@ -25,7 +25,7 @@ fxhash = "0.2"
 lazy_static = "1"
 packed_struct = "0.10"
 packed_struct_codegen = "0.10"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "^0.4.23", features = ["serde"] }
 log = "0.4"
 parking_lot = "0.12"
 indexmap = "1"
