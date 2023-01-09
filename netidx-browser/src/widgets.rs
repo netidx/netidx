@@ -5,7 +5,7 @@ use crate::{bscript::LocalEvent, containers, view};
 use anyhow::{bail, Result};
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
-use glib::{clone, idle_add_local};
+use glib::{clone, idle_add_local, idle_add_local_once};
 use gtk::{self, prelude::*};
 use indexmap::IndexSet;
 use netidx::{chars::Chars, path::Path, protocol::value::FromValue, subscriber::Value};
@@ -1325,7 +1325,9 @@ impl ProgressBar {
         Self::set_text(&progress, text.current(&mut ctx.borrow_mut()));
         Self::set_show_text(&progress, show_text.current(&mut ctx.borrow_mut()));
         progress.connect_show(clone!(@strong ctx, @strong fraction => move |progress| {
-            Self::set_fraction(&progress, fraction.borrow().current(&mut ctx.borrow_mut()));
+            idle_add_local_once(clone!(@strong ctx, @strong fraction, @strong progress => move || {
+                Self::set_fraction(&progress, fraction.borrow().current(&mut ctx.borrow_mut()));
+            }));
         }));
         Self { progress, ellipsize, fraction, pulse, text, show_text }
     }
