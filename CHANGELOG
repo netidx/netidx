@@ -1,3 +1,7 @@
+* 0.15.1 browser
+
+  - fix a crash when creating progress bars. sorry ...
+
 * 0.15 all
 
   - skipping ahead to 0.15 because tls is a big step forward.
