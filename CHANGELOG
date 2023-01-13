@@ -1,3 +1,7 @@
+* 0.15.1 core
+
+  - expose the inner u64 in atomic_id for ffi bindings
+
 * 0.15.1 browser
 
   - fix a crash when creating progress bars. sorry ...

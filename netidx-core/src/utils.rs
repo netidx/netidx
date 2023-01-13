@@ -135,6 +135,10 @@ macro_rules! atomic_id {
                 $name(NEXT.fetch_add(1, Ordering::Relaxed))
             }
 
+            pub fn inner(&self) -> u64 {
+                self.0
+            }
+
             #[cfg(test)]
             #[allow(dead_code)]
             pub fn mk(i: u64) -> Self {
