@@ -39,7 +39,7 @@ lazy_static! {
 /// `DesiredAuth` instructs publishers and subscribers what authentication mechanism
 /// they should try to use. To use the default specified in the configuration you
 /// can call `Config::default_auth`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DesiredAuth {
     /// Don't use any authentication, authorization, or encryption.
     Anonymous,

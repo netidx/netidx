@@ -1,11 +1,11 @@
 [package]
 name = "netidx"
-version = "0.15.0"
+version = "0.15.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
 description = "Secure, fast, pub/sub messaging"
-homepage = "https://estokes.github.io/netidx-book/"
+homepage = "https://netidx.github.io/netidx-book/"
 repository = "https://github.com/estokes/netidx"
 documentation = "https://docs.rs/netidx"
 readme = "../README.md"

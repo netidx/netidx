@@ -1,6 +1,7 @@
-* 0.15.1 core
+* 0.15.1 core netidx
 
   - expose the inner u64 in atomic_id for ffi bindings
+  - make DesiredAuth Serializable/Deserializable for ffi bindings
 
 * 0.15.1 browser
 
