@@ -656,6 +656,8 @@ impl Pack for i8 {
     }
 }
 
+const MAX_VEC: usize = 2 * 1024 * 1024 * 1024;
+
 impl<T: Pack> Pack for Vec<T> {
     fn encoded_len(&self) -> usize {
         self.iter().fold(varint_len(Vec::len(self) as u64), |len, t| {
@@ -673,7 +675,7 @@ impl<T: Pack> Pack for Vec<T> {
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let elts = decode_varint(buf)? as usize;
-        if mem::size_of::<T>() * elts > buf.remaining() {
+        if mem::size_of::<T>() * elts > MAX_VEC {
             return Err(PackError::TooBig);
         }
         let mut data = Vec::with_capacity(elts);
@@ -685,10 +687,12 @@ impl<T: Pack> Pack for Vec<T> {
 
     fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
         let elts = decode_varint(buf)? as usize;
-        if mem::size_of::<T>() * elts > buf.remaining() {
+        if mem::size_of::<T>() * elts > MAX_VEC {
             return Err(PackError::TooBig);
         }
-        self.reserve(elts);
+        if elts > self.capacity() {
+            self.reserve(elts - self.capacity());
+        }
         for _ in 0..elts {
             self.push(<T as Pack>::decode(buf)?);
         }
@@ -719,7 +723,7 @@ where
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let elts = decode_varint(buf)? as usize;
-        if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > buf.remaining() {
+        if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC {
             return Err(PackError::TooBig)
         }
         let mut data = HashMap::with_capacity_and_hasher(elts, R::default());
@@ -733,10 +737,12 @@ where
 
     fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
         let elts = decode_varint(buf)? as usize;
-        if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > buf.remaining() {
+        if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC {
             return Err(PackError::TooBig)
         }
-        self.reserve(elts);
+        if elts > self.capacity() {
+            self.reserve(elts - self.capacity());
+        }
         for _ in 0..elts {
             let k = <K as Pack>::decode(buf)?;
             let v = <V as Pack>::decode(buf)?;
