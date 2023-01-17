@@ -1302,8 +1302,8 @@ async fn hello_publisher(
     target_auth: &TargetAuth,
 ) -> Result<Channel> {
     use protocol::publisher::Hello;
-    channel::write_raw(&mut con, &2u64).await?;
-    if channel::read_raw::<u64, _>(&mut con).await? != 2 {
+    channel::write_raw(&mut con, &3u64).await?;
+    if channel::read_raw::<u64, _>(&mut con).await? != 3 {
         bail!("incompatible protocol version")
     }
     match (desired_auth, target_auth) {

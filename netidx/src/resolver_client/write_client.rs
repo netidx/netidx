@@ -138,9 +138,9 @@ impl Connection {
         debug!("setting no delay = true");
         con.set_nodelay(true)?;
         debug!("writing protocol version 2");
-        wt!(channel::write_raw(&mut con, &2u64))??;
+        wt!(channel::write_raw(&mut con, &3u64))??;
         debug!("reading protocol version");
-        if wt!(channel::read_raw::<u64, _>(&mut con))?? != 2 {
+        if wt!(channel::read_raw::<u64, _>(&mut con))?? != 3 {
             bail!("incompatible protocol version")
         }
         let sec = Duration::from_secs(1);

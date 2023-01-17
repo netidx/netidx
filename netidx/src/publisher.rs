@@ -1555,8 +1555,8 @@ impl ClientCtx {
         use protocol::publisher::Hello;
         static NO: &str = "authentication mechanism not supported";
         debug!("hello_client");
-        channel::write_raw(&mut con, &2u64).await?;
-        if channel::read_raw::<u64, _>(&mut con).await? != 2 {
+        channel::write_raw(&mut con, &3u64).await?;
+        if channel::read_raw::<u64, _>(&mut con).await? != 3 {
             bail!("incompatible protocol version")
         }
         let hello: Hello = channel::read_raw(&mut con).await?;

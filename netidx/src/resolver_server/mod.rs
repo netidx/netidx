@@ -380,8 +380,8 @@ async fn ownership_check(
     info!("hello_write connecting to {:?} for listener ownership check", write_addr);
     let con = time::timeout(timeout, TcpStream::connect(write_addr)).await??;
     let mut con = Channel::new::<ServerCtx, TcpStream>(None, con);
-    time::timeout(timeout, con.send_one(&2u64)).await??;
-    if time::timeout(timeout, con.receive::<u64>()).await?? != 2 {
+    time::timeout(timeout, con.send_one(&3u64)).await??;
+    if time::timeout(timeout, con.receive::<u64>()).await?? != 3 {
         bail!("incompatible protocol version")
     }
     use publisher::Hello as PHello;
@@ -768,9 +768,9 @@ async fn hello_client(
     server_stop: oneshot::Receiver<()>,
 ) -> Result<()> {
     s.set_nodelay(true)?;
-    send(ctx.cfg.hello_timeout, &mut s, &2u64).await?;
+    send(ctx.cfg.hello_timeout, &mut s, &3u64).await?;
     let version: u64 = recv(ctx.cfg.hello_timeout, &mut s).await?;
-    if version != 2 {
+    if version != 3 {
         bail!("unsupported protocol version")
     }
     let hello: ClientHello = recv(ctx.cfg.hello_timeout, &mut s).await?;

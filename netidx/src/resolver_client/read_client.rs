@@ -55,8 +55,8 @@ async fn connect(
         n += 1;
         let mut con = cwt!("connect", TcpStream::connect(&addr));
         try_cf!("no delay", con.set_nodelay(true));
-        cwt!("send version", channel::write_raw(&mut con, &2u64));
-        if cwt!("recv version", channel::read_raw::<u64, _>(&mut con)) != 2 {
+        cwt!("send version", channel::write_raw(&mut con, &3u64));
+        if cwt!("recv version", channel::read_raw::<u64, _>(&mut con)) != 3 {
             continue;
         }
         let con = match (desired_auth, auth) {

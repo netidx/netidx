@@ -10,3 +10,4 @@ extern crate netidx_core;
 pub mod cluster;
 pub mod rpc;
 pub mod view;
+pub mod channel;
