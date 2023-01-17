@@ -333,6 +333,12 @@ impl Val {
     pub fn id(&self) -> SubId {
         self.0.sub_id
     }
+
+    pub async fn flush(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.0.connection.send(ToCon::Flush(tx));
+        rx.await.map_err(|_| anyhow!("subscription is dead"))
+    }
 }
 
 #[derive(Debug)]

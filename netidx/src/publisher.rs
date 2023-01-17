@@ -27,7 +27,7 @@ use futures::{
         oneshot,
     },
     prelude::*,
-    select_biased,
+    select_biased, 
     stream::{FusedStream, SelectAll},
 };
 use fxhash::{FxHashMap, FxHashSet};
@@ -1229,6 +1229,15 @@ impl Publisher {
     pub fn put_subscribed(&self, id: &Id, into: &mut impl Extend<ClId>) {
         if let Some(p) = self.0.lock().by_id.get(&id) {
             into.extend(p.subscribed.iter().copied())
+        }
+    }
+
+    /// Return true if the specified client is subscribed to the
+    /// specifed Id.
+    pub fn is_subscribed(&self, id: &Id, client: &ClId) -> bool {
+        match self.0.lock().by_id.get(&id) {
+            Some(p) => p.subscribed.contains(client),
+            None => false,
         }
     }
 
