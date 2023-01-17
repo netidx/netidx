@@ -6,7 +6,7 @@ use fxhash::FxBuildHasher;
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
-    cmp::Eq,
+    cmp::{min, Eq},
     collections::HashMap,
     default::Default,
     error, fmt,
@@ -116,7 +116,8 @@ impl Pack for net::SocketAddr {
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         match <u8 as Pack>::decode(buf)? {
             0 => {
-                let ip = net::Ipv4Addr::from(u32::to_be_bytes(<u32 as Pack>::decode(buf)?));
+                let ip =
+                    net::Ipv4Addr::from(u32::to_be_bytes(<u32 as Pack>::decode(buf)?));
                 let port = <u16 as Pack>::decode(buf)?;
                 Ok(net::SocketAddr::V4(net::SocketAddrV4::new(ip, port)))
             }
@@ -282,7 +283,7 @@ impl Pack for ArcStr {
 }
 
 pub fn varint_len(value: u64) -> usize {
-    ((((value | 1).leading_zeros() ^ 63) * 9 + 73) / 64) as usize
+    ((((value | 1).leading_zeros() ^ 63) * 9 + 73) >> 6) as usize
 }
 
 pub fn encode_varint(mut value: u64, buf: &mut impl BufMut) {
@@ -325,6 +326,41 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
         i += 1;
     }
     Err(PackError::InvalidFormat)
+}
+
+pub fn len_wrapped_len(len: usize) -> usize {
+    let vlen = varint_len((len + varint_len(len as u64)) as u64);
+    len + vlen
+}
+
+pub fn len_wrapped_encode<B, T, F>(buf: &mut B, t: &T, f: F) -> Result<(), PackError>
+where
+    B: BufMut,
+    T: Pack,
+    F: FnOnce(&mut B) -> Result<(), PackError>,
+{
+    encode_varint(t.encoded_len() as u64, buf);
+    f(buf)
+}
+
+pub fn len_wrapped_decode<B, T, F>(buf: &mut B, f: F) -> Result<T, PackError>
+where
+    B: Buf,
+    T: Pack + 'static,
+    F: FnOnce(&mut B) -> Result<T, PackError>,
+{
+    let len = decode_varint(buf)?;
+    if len < 1 {
+        return Err(PackError::BufferShort)
+    }
+    let len = (len - varint_len(len) as u64) as usize;
+    let n = buf.remaining();
+    let r = f(buf);
+    let n = n - buf.remaining();
+    if n < len {
+        buf.advance(min(buf.remaining(), len - n));
+    }
+    r
 }
 
 impl Pack for f32 {
@@ -578,7 +614,6 @@ impl Pack for i16 {
     }
 }
 
-
 impl Pack for u8 {
     fn const_encoded_len() -> Option<usize> {
         Some(mem::size_of::<u8>())
@@ -806,5 +841,23 @@ impl Pack for Duration {
         let secs = Pack::decode(buf)?;
         let ns = Pack::decode(buf)?;
         Ok(Duration::new(secs, ns))
+    }
+}
+
+impl Pack for () {
+    fn const_encoded_len() -> Option<usize> {
+        Some(0)
+    }
+
+    fn encoded_len(&self) -> usize {
+        <() as Pack>::const_encoded_len().unwrap()
+    }
+
+    fn encode(&self, _buf: &mut impl BufMut) -> Result<(), PackError> {
+        Ok(())
+    }
+
+    fn decode(_buf: &mut impl Buf) -> Result<Self, PackError> {
+        Ok(())
     }
 }

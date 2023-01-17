@@ -11,8 +11,9 @@ use std::{fmt::Debug, sync::Arc};
 
 fn check<T: Pack + Debug + PartialEq>(t: T) {
     let mut bytes = pack(&t).expect("encode failed");
-    assert_eq!(t.encoded_len(), BytesMut::len(&bytes));
+    let actual_len = BytesMut::len(&bytes);
     let u = T::decode(&mut bytes).expect("decode failed");
+    assert_eq!(t.encoded_len(), actual_len);
     assert_eq!(t, u)
 }
 

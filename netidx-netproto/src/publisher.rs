@@ -1,7 +1,9 @@
 use crate::value::Value;
 use bytes::{Buf, BufMut, Bytes};
 use netidx_core::{
-    pack::{self, Pack, PackError},
+    pack::{
+        self, len_wrapped_decode, len_wrapped_encode, len_wrapped_len, Pack, PackError,
+    },
     path::Path,
 };
 use std::{net::SocketAddr, result};
@@ -59,14 +61,16 @@ pub enum Hello {
 
 impl Pack for Hello {
     fn encoded_len(&self) -> usize {
-        1 + match self {
-            Hello::Anonymous | Hello::Krb5 | Hello::Local | Hello::Tls => 0,
-            Hello::ResolverAuthenticate(addr) => Pack::encoded_len(addr),
-        }
+        len_wrapped_len(
+            1 + match self {
+                Hello::Anonymous | Hello::Krb5 | Hello::Local | Hello::Tls => 0,
+                Hello::ResolverAuthenticate(addr) => Pack::encoded_len(addr),
+            },
+        )
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        match self {
+        len_wrapped_encode(buf, self, |buf| match self {
             Hello::Anonymous => Ok(buf.put_u8(0)),
             Hello::Krb5 => Ok(buf.put_u8(1)),
             Hello::Local => Ok(buf.put_u8(2)),
@@ -75,18 +79,18 @@ impl Pack for Hello {
                 Pack::encode(id, buf)
             }
             Hello::Tls => Ok(buf.put_u8(4)),
-        }
+        })
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match <u8 as Pack>::decode(buf)? {
+        len_wrapped_decode(buf, |buf| match <u8 as Pack>::decode(buf)? {
             0 => Ok(Hello::Anonymous),
             1 => Ok(Hello::Krb5),
             2 => Ok(Hello::Local),
             3 => Ok(Hello::ResolverAuthenticate(Pack::decode(buf)?)),
             4 => Ok(Hello::Tls),
             _ => Err(PackError::UnknownTag),
-        }
+        })
     }
 }
 
@@ -114,23 +118,27 @@ pub enum To {
 
 impl Pack for To {
     fn encoded_len(&self) -> usize {
-        1 + match self {
-            To::Subscribe { path, resolver, timestamp, permissions, token } => {
-                Pack::encoded_len(path)
-                    + Pack::encoded_len(resolver)
-                    + Pack::encoded_len(timestamp)
-                    + Pack::encoded_len(permissions)
-                    + Pack::encoded_len(token)
-            }
-            To::Unsubscribe(id) => Pack::encoded_len(id),
-            To::Write(id, v, reply) => {
-                Pack::encoded_len(id) + Pack::encoded_len(v) + Pack::encoded_len(reply)
-            }
-        }
+        len_wrapped_len(
+            1 + match self {
+                To::Subscribe { path, resolver, timestamp, permissions, token } => {
+                    Pack::encoded_len(path)
+                        + Pack::encoded_len(resolver)
+                        + Pack::encoded_len(timestamp)
+                        + Pack::encoded_len(permissions)
+                        + Pack::encoded_len(token)
+                }
+                To::Unsubscribe(id) => Pack::encoded_len(id),
+                To::Write(id, v, reply) => {
+                    Pack::encoded_len(id)
+                        + Pack::encoded_len(v)
+                        + Pack::encoded_len(reply)
+                }
+            },
+        )
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> anyhow::Result<(), PackError> {
-        match self {
+        len_wrapped_encode(buf, self, |buf| match self {
             To::Subscribe { path, resolver, timestamp, permissions, token } => {
                 buf.put_u8(0);
                 Pack::encode(path, buf)?;
@@ -149,11 +157,11 @@ impl Pack for To {
                 Pack::encode(v, buf)?;
                 Pack::encode(reply, buf)
             }
-        }
+        })
     }
 
     fn decode(buf: &mut impl Buf) -> anyhow::Result<Self, PackError> {
-        match <u8 as Pack>::decode(buf)? {
+        len_wrapped_decode(buf, |buf| match <u8 as Pack>::decode(buf)? {
             0 => {
                 let path = Pack::decode(buf)?;
                 let resolver = Pack::decode(buf)?;
@@ -170,7 +178,7 @@ impl Pack for To {
                 Ok(To::Write(id, v, reply))
             }
             _ => Err(PackError::UnknownTag),
-        }
+        })
     }
 }
 
@@ -202,21 +210,23 @@ pub enum From {
 
 impl Pack for From {
     fn encoded_len(&self) -> usize {
-        1 + match self {
-            From::NoSuchValue(p) => Pack::encoded_len(p),
-            From::Denied(p) => Pack::encoded_len(p),
-            From::Unsubscribed(id) => Pack::encoded_len(id),
-            From::Subscribed(p, id, v) => {
-                Pack::encoded_len(p) + Pack::encoded_len(id) + Pack::encoded_len(v)
-            }
-            From::Update(id, v) => Pack::encoded_len(id) + Pack::encoded_len(v),
-            From::Heartbeat => 0,
-            From::WriteResult(id, v) => Pack::encoded_len(id) + Pack::encoded_len(v),
-        }
+        len_wrapped_len(
+            1 + match self {
+                From::NoSuchValue(p) => Pack::encoded_len(p),
+                From::Denied(p) => Pack::encoded_len(p),
+                From::Unsubscribed(id) => Pack::encoded_len(id),
+                From::Subscribed(p, id, v) => {
+                    Pack::encoded_len(p) + Pack::encoded_len(id) + Pack::encoded_len(v)
+                }
+                From::Update(id, v) => Pack::encoded_len(id) + Pack::encoded_len(v),
+                From::Heartbeat => 0,
+                From::WriteResult(id, v) => Pack::encoded_len(id) + Pack::encoded_len(v),
+            },
+        )
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        match self {
+        len_wrapped_encode(buf, self, |buf| match self {
             From::NoSuchValue(p) => {
                 buf.put_u8(0);
                 Pack::encode(p, buf)
@@ -246,11 +256,11 @@ impl Pack for From {
                 Pack::encode(id, buf)?;
                 Pack::encode(v, buf)
             }
-        }
+        })
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        match <u8 as Pack>::decode(buf)? {
+        len_wrapped_decode(buf, |buf| match <u8 as Pack>::decode(buf)? {
             0 => Ok(From::NoSuchValue(Pack::decode(buf)?)),
             1 => Ok(From::Denied(Pack::decode(buf)?)),
             2 => Ok(From::Unsubscribed(Pack::decode(buf)?)),
@@ -272,6 +282,6 @@ impl Pack for From {
                 Ok(From::WriteResult(id, value))
             }
             _ => Err(PackError::UnknownTag),
-        }
+        })
     }
 }
