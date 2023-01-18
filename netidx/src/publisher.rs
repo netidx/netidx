@@ -271,6 +271,25 @@ bitflags! {
         /// retreivable from e.g. a database and would not all fit in
         /// memory at the same time.
         const DESTROY_ON_IDLE = 0x02;
+
+        /// If set, then subscribers will never reuse an existing
+        /// connection to the publisher when subscribing to this
+        /// value.
+
+        /// This flag should not be set lightly, as connections are
+        /// not an infinite resource. However, for example, channels
+        /// use this flag to ensure that multiple channels connected
+        /// to the same publisher are isolated from each other with
+        /// respect to blocking behavior. That is, if more than one
+        /// channel is connected to the same publisher, and one of
+        /// them backs up, but others do not, then if they were
+        /// subscribed with the ISOLATED flag set they will operate
+        /// independently, whereas if the ISOLATED flag was not set
+        /// then they would all block if one of them blocks.
+        ///
+        /// This flag is mutually exclusive with USE_EXISTING, and if
+        /// both are set then USE_EXISTING will override.
+        const ISOLATED = 0x04;
     }
 }
 

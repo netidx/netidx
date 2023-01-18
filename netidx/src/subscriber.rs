@@ -144,26 +144,6 @@ atomic_id!(SubscriberId);
 atomic_id!(ConId);
 
 bitflags! {
-    pub struct SubscribeFlags: u32 {
-        /// if set, then if an existing connection exists to any
-        /// publisher that publishes the value we are subscribing,
-        /// then subscriber will use that connection instead of
-        /// picking a random publisher and potentially creating a new
-        /// connection.
-        ///
-        /// Because the creation of connections is atomic, this flag
-        /// guarantees that all subscriptions that can will use the
-        /// same connection.
-        ///
-        /// This can be important for control interfaces, and is used
-        /// by the RPC protocol to ensure that all function parameters
-        /// are written to the same publisher, even if a procedure is
-        /// published by multiple publishers.
-        const USE_EXISTING = 0x01;
-    }
-}
-
-bitflags! {
     pub struct UpdatesFlags: u32 {
         /// if set, then an immediate update will be sent consisting
         /// of the last value received from the publisher. If you
@@ -564,10 +544,38 @@ fn pick(n: usize) -> usize {
 }
 
 #[derive(Debug)]
+struct Connection {
+    primary: Option<(ConId, BatchSender<ToCon>)>,
+    isolated: FxHashMap<ConId, BatchSender<ToCon>>,
+}
+
+impl Connection {
+    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = &'a BatchSender<ToCon>> + 'a> {
+        match &self.primary {
+            Some((_, c)) => Box::new(iter::once(c).chain(self.isolated.values())),
+            None => Box::new(self.isolated.values()),
+        }
+    }
+
+    fn remove(&mut self, id: ConId) {
+        if let Some((other, _)) = &self.primary {
+            if id == *other {
+                self.primary = None;
+            }
+        }
+        self.isolated.remove(&id);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.primary.is_none() && self.isolated.is_empty()
+    }
+}
+
+#[derive(Debug)]
 struct SubscriberInner {
     id: SubscriberId,
     resolver: ResolverRead,
-    connections: FxHashMap<SocketAddr, BatchSender<ToCon>>,
+    connections: FxHashMap<SocketAddr, Connection>,
     recently_failed: FxHashMap<SocketAddr, Instant>,
     subscribed: HashMap<Path, SubStatus>,
     durable_dead: HashMap<Path, DvalWeak>,
@@ -592,10 +600,11 @@ impl SubscriberInner {
         &mut self,
         publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
         resolved: &Resolved,
-    ) -> Option<(SocketAddr, TargetAuth, Bytes)> {
+    ) -> Option<(SocketAddr, TargetAuth, Bytes, PublishFlags)> {
         use rand::seq::IteratorRandom;
-        let flags = PublishFlags::from_bits(resolved.flags)?;
+        let mut flags = PublishFlags::from_bits(resolved.flags)?;
         if flags.contains(PublishFlags::USE_EXISTING) {
+            flags = flags & !PublishFlags::ISOLATED;
             for pref in &*resolved.publishers {
                 if let Some(pb) = publishers.get(&pref.id) {
                     if self.connections.contains_key(&pb.addr) {
@@ -603,6 +612,7 @@ impl SubscriberInner {
                             pb.addr,
                             pb.target_auth.clone(),
                             pref.token.clone(),
+                            flags,
                         ));
                     }
                 }
@@ -619,15 +629,17 @@ impl SubscriberInner {
             })
             .choose(&mut rand::thread_rng())
             .map(|(pref, pb)| (pb.addr, pb.target_auth.clone(), pref.token.clone()));
-        if res.is_some() {
-            res
+        if let Some((addr, auth, token)) = res {
+            Some((addr, auth, token, flags))
         } else {
             resolved
                 .publishers
                 .iter()
                 .filter_map(|pref| publishers.get(&pref.id).map(|pb| (pref, pb)))
                 .choose(&mut rand::thread_rng())
-                .map(|(pref, pb)| (pb.addr, pb.target_auth.clone(), pref.token.clone()))
+                .map(|(pref, pb)| {
+                    (pb.addr, pb.target_auth.clone(), pref.token.clone(), flags)
+                })
         }
     }
 
@@ -926,6 +938,53 @@ impl Subscriber {
         });
     }
 
+    fn start_connection(
+        &self,
+        tls_ctx: Option<tls::CachedConnector>,
+        addr: SocketAddr,
+        target_auth: &TargetAuth,
+        desired_auth: &DesiredAuth,
+    ) -> (ConId, BatchSender<ToCon>) {
+        let (tx, rx) = batch_channel::channel();
+        let subscriber = self.downgrade();
+        let desired_auth = desired_auth.clone();
+        let conid = ConId::new();
+        let target_auth = target_auth.clone();
+        task::spawn(async move {
+            let res = connection(
+                subscriber.clone(),
+                addr,
+                target_auth,
+                rx,
+                desired_auth,
+                tls_ctx,
+                conid,
+            )
+            .await;
+            if let Some(subscriber) = subscriber.upgrade() {
+                if let Entry::Occupied(mut e) =
+                    subscriber.0.lock().connections.entry(addr)
+                {
+                    let c = e.get_mut();
+                    c.remove(conid);
+                    if c.is_empty() {
+                        e.remove();
+                    }
+                }
+                match res {
+                    Ok(()) => {
+                        info!("connection to {} closed", addr)
+                    }
+                    Err(e) => {
+                        subscriber.0.lock().recently_failed.insert(addr, Instant::now());
+                        warn!("connection to {} failed {}", addr, e)
+                    }
+                }
+            }
+        });
+        (conid, tx)
+    }
+
     /// Subscribe to the specified set of values.
     ///
     /// To minimize round trips and amortize locking path resolution
@@ -1030,47 +1089,38 @@ impl Subscriber {
                     for (p, resolved) in to_resolve.into_iter().zip(res.drain(..)) {
                         if resolved.publishers.len() == 0 {
                             pending.insert(p, St::Error(anyhow!("path not found")));
-                        } else if let Some((addr, target_auth, token)) =
+                        } else if let Some((addr, target_auth, token, flags)) =
                             t.choose_addr(&publishers, &resolved)
                         {
-                            let sub_id = t.durable_id(&p).unwrap_or_else(SubId::new);
                             let tls_ctx = t.tls_ctx.clone();
+                            let sub_id = t.durable_id(&p).unwrap_or_else(SubId::new);
                             let con = t.connections.entry(addr).or_insert_with(|| {
-                                let (tx, rx) = batch_channel::channel();
-                                let subscriber = self.downgrade();
-                                let desired_auth = desired_auth.clone();
-                                task::spawn(async move {
-                                    let res = connection(
-                                        subscriber.clone(),
-                                        addr,
-                                        target_auth,
-                                        rx,
-                                        desired_auth,
-                                        tls_ctx,
-                                    )
-                                    .await;
-                                    if let Some(subscriber) = subscriber.upgrade() {
-                                        subscriber.0.lock().connections.remove(&addr);
-                                        match res {
-                                            Ok(()) => {
-                                                info!("connection to {} closed", addr)
-                                            }
-                                            Err(e) => {
-                                                subscriber
-                                                    .0
-                                                    .lock()
-                                                    .recently_failed
-                                                    .insert(addr, Instant::now());
-                                                warn!(
-                                                    "connection to {} failed {}",
-                                                    addr, e
-                                                )
-                                            }
-                                        }
-                                    }
-                                });
-                                tx
+                                Connection { primary: None, isolated: HashMap::default() }
                             });
+                            let con = if flags.contains(PublishFlags::ISOLATED) {
+                                let (id, c) = self.start_connection(
+                                    tls_ctx,
+                                    addr,
+                                    &target_auth,
+                                    &desired_auth,
+                                );
+                                con.isolated.insert(id, c.clone());
+                                c
+                            } else {
+                                match &con.primary {
+                                    Some((_, c)) => c.clone(),
+                                    None => {
+                                        let (id, c) = self.start_connection(
+                                            tls_ctx,
+                                            addr,
+                                            &target_auth,
+                                            &desired_auth,
+                                        );
+                                        con.primary = Some((id, c.clone()));
+                                        c
+                                    }
+                                }
+                            };
                             let (tx, rx) = oneshot::channel();
                             let con_ = con.clone();
                             let r = con.send(ToCon::Subscribe(SubscribeValRequest {
@@ -1224,10 +1274,12 @@ impl Subscriber {
             let t = self.0.lock();
             t.connections
                 .values()
-                .map(|c| {
-                    let (tx, rx) = oneshot::channel();
-                    c.send(ToCon::Flush(tx));
-                    rx
+                .flat_map(|c| {
+                    c.iter().map(|c| {
+                        let (tx, rx) = oneshot::channel();
+                        c.send(ToCon::Flush(tx));
+                        rx
+                    })
                 })
                 .collect::<Vec<_>>()
         };
@@ -1564,12 +1616,12 @@ async fn connection(
     from_sub: BatchReceiver<ToCon>,
     auth: DesiredAuth,
     tls_ctx: Option<tls::CachedConnector>,
+    conid: ConId,
 ) -> Result<()> {
     let mut pending: HashMap<Path, SubscribeValRequest> = HashMap::new();
     let mut subscriptions: FxHashMap<Id, Sub> = HashMap::default();
     let mut msg_recvd = false;
     let soc = time::timeout(PERIOD, TcpStream::connect(addr)).await??;
-    let conid = ConId::new();
     soc.set_nodelay(true)?;
     const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
     let con =
@@ -1717,7 +1769,16 @@ async fn connection(
                         if subscriptions.is_empty() && pending.is_empty() {
                             let mut inner = subscriber.0.lock();
                             if from_sub.len() == 0 {
-                                inner.connections.remove(&addr);
+                                // we do this here the make sure we
+                                // hold the lock and there can be no
+                                // subscriptions while we clean up.
+                                if let Entry::Occupied(mut e) = inner.connections.entry(addr) {
+                                    let c = e.get_mut();
+                                    c.remove(conid);
+                                    if c.is_empty() {
+                                        e.remove();
+                                    }
+                                }
                                 let _ = tx_stop.send(());
                                 return Ok(())
                             }

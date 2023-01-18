@@ -4,7 +4,9 @@ pub mod server {
     use netidx::{
         path::Path,
         pool::Pooled,
-        publisher::{ClId, Publisher, UpdateBatch, Val, Value, WriteRequest},
+        publisher::{
+            ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest,
+        },
     };
     use std::{
         collections::VecDeque,
@@ -190,8 +192,11 @@ pub mod server {
             };
             let session = session(&self.base);
             let queue_depth = self.queue_depth;
-            let val =
-                self.publisher.publish(session.clone(), Value::from("connection"))?;
+            let val = self.publisher.publish_with_flags(
+                PublishFlags::ISOLATED,
+                session.clone(),
+                Value::from("connection"),
+            )?;
             let publisher = self.publisher.clone();
             let timeout = self.timeout;
             let (tx, rx) = mpsc::channel(queue_depth);
@@ -426,7 +431,8 @@ pub(crate) mod test {
         resolver_server::{config::Config as ServerConfig, Server},
         subscriber::{Subscriber, Value},
     };
-    use tokio::{runtime::Runtime, task};
+    use std::{sync::Arc, time::Duration};
+    use tokio::{runtime::Runtime, sync::oneshot, task, time};
 
     pub(crate) struct Ctx {
         pub(crate) _server: Server,
@@ -497,14 +503,10 @@ pub(crate) mod test {
                     .await
                     .unwrap();
             task::spawn(async move {
-                let con = client::Connection::connect(
-                    &ctx.subscriber,
-                    50,
-                    None,
-                    ctx.base,
-                )
-                .await
-                .unwrap();
+                let con =
+                    client::Connection::connect(&ctx.subscriber, 50, None, ctx.base)
+                        .await
+                        .unwrap();
                 for _ in 0..100 {
                     let mut b = con.start_batch();
                     for i in 0..100u64 {
@@ -531,6 +533,73 @@ pub(crate) mod test {
                 }
                 con.send(b).await.unwrap();
             }
+        })
+    }
+
+    #[test]
+    fn subscriber_hang_tolerance() {
+        Runtime::new().unwrap().block_on(async move {
+            let ctx = Arc::new(Ctx::new().await);
+            let mut listener =
+                server::Listener::new(&ctx.publisher, 50, None, ctx.base.clone())
+                    .await
+                    .unwrap();
+            let ctx_ = ctx.clone();
+            task::spawn(async move {
+                let con = client::Connection::connect(
+                    &ctx_.subscriber,
+                    50,
+                    None,
+                    ctx_.base.clone(),
+                )
+                .await
+                .unwrap();
+                for i in 0..1000 {
+                    con.send_one(Value::U64(i as u64)).unwrap();
+                }
+                con.flush().await.unwrap();
+                for i in 0..1000 {
+                    match con.recv_one().await.unwrap() {
+                        Value::U64(j) => assert_eq!(j, i),
+                        _ => panic!("expected u64"),
+                    }
+                }
+            });
+            let ctx_ = ctx.clone();
+            task::spawn(async move {
+                let con = client::Connection::connect(
+                    &ctx_.subscriber,
+                    50,
+                    None,
+                    ctx_.base.clone(),
+                )
+                .await
+                .unwrap();
+                for i in 0..1000 {
+                    con.send_one(Value::U64(i as u64)).unwrap();
+                }
+                con.flush().await.unwrap();
+                for i in 0..1000 {
+                    match con.recv_one().await.unwrap() {
+                        Value::U64(j) => assert_eq!(j, i),
+                        _ => panic!("expected u64"),
+                    }
+                }
+            });
+            let con = listener.accept().await.unwrap().await.unwrap();
+            let (tx, rx) = oneshot::channel();
+            task::spawn(async move {
+                for _ in 0..1000 {
+                    match con.recv_one().await.unwrap() {
+                        Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
+                        _ => panic!("expected u64"),
+                    }
+                }
+                let _ = tx.send(());
+            });
+            // hang the second connection
+            let _con = listener.accept().await.unwrap().await.unwrap();
+            time::timeout(Duration::from_secs(10), rx).await.unwrap().unwrap()
         })
     }
 }
