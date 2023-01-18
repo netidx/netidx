@@ -14,7 +14,7 @@ pub mod server {
         },
         time::Duration,
     };
-    use tokio::sync::Mutex;
+    use tokio::{sync::Mutex, time};
 
     fn session(base: &Path) -> Path {
         use uuid::{fmt::Simple, Uuid};
@@ -210,8 +210,9 @@ pub mod server {
                 };
                 req.send_result.unwrap().send(Value::from(session));
                 loop {
+                    let to = Duration::from_secs(3);
                     if con.publisher.is_subscribed(&con.anchor.id(), &con.client) {
-                        match con.recv_one().await? {
+                        match time::timeout(to, con.recv_one()).await?? {
                             Value::String(s) if &*s == "ready" => {
                                 con.send_one(Value::from("ready")).await?
                             }
@@ -219,7 +220,8 @@ pub mod server {
                             _ => (),
                         }
                     } else {
-                        con.publisher.wait_client(con.anchor.id()).await
+                        let f = con.publisher.wait_client(con.anchor.id());
+                        time::timeout(to, f).await?
                     }
                 }
             })
@@ -308,14 +310,16 @@ pub mod client {
                     let mut n = 0;
                     let con = loop {
                         if n >= 7 {
-                            break subscriber.subscribe_one(path.clone(), timeout).await?
+                            break subscriber
+                                .subscribe_one(path.clone(), timeout)
+                                .await?;
                         } else {
                             match subscriber.subscribe_one(path.clone(), timeout).await {
                                 Ok(con) => break con,
                                 Err(_) => {
                                     n += 1;
                                     time::sleep(Duration::from_millis(250)).await;
-                                    continue
+                                    continue;
                                 }
                             }
                         }
