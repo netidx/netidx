@@ -219,7 +219,7 @@ pub mod server {
                             _ => (),
                         }
                     } else {
-                        con.publisher.wait_any_new_client().await
+                        con.publisher.wait_client(con.anchor.id()).await
                     }
                 }
             })
@@ -411,7 +411,7 @@ mod test {
     use tokio::{runtime::Runtime, task};
 
     #[test]
-    fn test_channel() {
+    fn ping_pong() {
         Runtime::new().unwrap().block_on(async move {
             let cfg = ServerConfig::load("../cfg/simple-server.json")
                 .expect("load simple server config");
