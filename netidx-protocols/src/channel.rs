@@ -7,6 +7,7 @@ pub mod server {
         publisher::{ClId, Publisher, UpdateBatch, Val, Value, WriteRequest},
     };
     use std::{
+        collections::VecDeque,
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
@@ -36,7 +37,30 @@ pub mod server {
 
     struct Receiver {
         writes: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
-        queued: Pooled<Vec<WriteRequest>>,
+        queued: VecDeque<Value>,
+    }
+
+    impl Receiver {
+        async fn fill_queue(&mut self, dead: &AtomicBool, client: ClId) -> Result<()> {
+            while self.queued.len() == 0 {
+                match self.writes.next().await {
+                    Some(mut batch) => {
+                        self.queued.extend(batch.drain(..).filter_map(|req| {
+                            if req.client == client {
+                                Some(req.value)
+                            } else {
+                                None
+                            }
+                        }))
+                    }
+                    None => {
+                        dead.store(true, Ordering::Relaxed);
+                        bail!("connection is dead")
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 
     pub struct Connection {
@@ -83,23 +107,13 @@ pub mod server {
         pub async fn recv(&self) -> Result<Value> {
             let mut recv = self.receiver.lock().await;
             loop {
-                match recv.queued.pop() {
-                    Some(req) => {
-                        if req.client == self.client {
-                            break Ok(req.value);
-                        }
-                    }
+                match recv.queued.pop_front() {
+                    Some(v) => break Ok(v),
                     None => {
                         if self.is_dead() {
                             bail!("connection is dead")
                         }
-                        match recv.writes.next().await {
-                            Some(batch) => recv.queued = batch,
-                            None => {
-                                self.dead.store(true, Ordering::Relaxed);
-                                bail!("connection is dead")
-                            }
-                        }
+                        recv.fill_queue(&self.dead, self.client).await?
                     }
                 }
             }
@@ -107,31 +121,14 @@ pub mod server {
 
         pub async fn recv_batch(&self, dst: &mut impl Extend<Value>) -> Result<()> {
             let mut recv = self.receiver.lock().await;
-            let mut n = 0;
             loop {
                 if recv.queued.len() > 0 {
-                    dst.extend(recv.queued.drain(..).filter_map(|req| {
-                        if req.client == self.client {
-                            n += 1;
-                            Some(req.value)
-                        } else {
-                            None
-                        }
-                    }))
+                    break Ok(dst.extend(recv.queued.drain(..)));
                 } else {
                     if self.is_dead() {
                         bail!("connection is dead")
                     }
-                    match recv.writes.next().await {
-                        Some(batch) => recv.queued = batch,
-                        None => {
-                            self.dead.store(true, Ordering::Relaxed);
-                            bail!("connection is dead")
-                        }
-                    }
-                }
-                if n > 0 {
-                    break Ok(());
+                    recv.fill_queue(&self.dead, self.client).await?
                 }
             }
         }
@@ -139,7 +136,7 @@ pub mod server {
 
     pub struct Listener {
         publisher: Publisher,
-        listener: Val,
+        _listener: Val,
         waiting: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
         queued: Pooled<Vec<WriteRequest>>,
         base: Path,
@@ -160,7 +157,7 @@ pub mod server {
             publisher.writes(listener.id(), tx_waiting);
             Ok(Self {
                 publisher,
-                listener,
+                _listener: listener,
                 waiting: rx_waiting,
                 queued: Pooled::orphan(Vec::new()),
                 base: path,
@@ -207,14 +204,17 @@ pub mod server {
                     timeout,
                     receiver: Mutex::new(Receiver {
                         writes: rx,
-                        queued: Pooled::orphan(Vec::new()),
+                        queued: VecDeque::new(),
                     }),
                 };
                 req.send_result.unwrap().send(Value::from(session));
                 loop {
                     if con.publisher.is_subscribed(&con.anchor.id(), &con.client) {
                         match con.recv().await? {
-                            Value::String(s) if &*s == "ready" => break Ok(con),
+                            Value::String(s) if &*s == "ready" => {
+                                con.send(Value::from("ready")).await?
+                            }
+                            Value::String(s) if &*s == "go" => break Ok(con),
                             _ => (),
                         }
                     } else {
@@ -227,7 +227,7 @@ pub mod server {
 }
 
 pub mod client {
-    use anyhow::{Result, anyhow};
+    use anyhow::{anyhow, Result};
     use futures::{channel::mpsc, prelude::*};
     use netidx::{
         path::Path,
@@ -235,13 +235,11 @@ pub mod client {
         subscriber::{Event, SubId, Subscriber, UpdatesFlags, Val, Value},
     };
     use std::{
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc,
-        },
+        collections::VecDeque,
+        sync::atomic::{AtomicBool, Ordering},
         time::Duration,
     };
-    use tokio::sync::Mutex;
+    use tokio::{sync::Mutex, time};
 
     lazy_static! {
         static ref BATCHES: Pool<Vec<Value>> = Pool::new(1000, 100_000);
@@ -259,17 +257,83 @@ pub mod client {
 
     struct Receiver {
         updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
-        queued: Pooled<Vec<(SubId, Event)>>,
+        queued: VecDeque<Value>,
+    }
+
+    impl Receiver {
+        async fn fill_queue(&mut self, dead: &AtomicBool) -> Result<()> {
+            if self.queued.len() == 0 {
+                match self.updates.next().await {
+                    None => {
+                        dead.store(true, Ordering::Relaxed);
+                        bail!("connection is dead")
+                    }
+                    Some(mut batch) => {
+                        for (_, ev) in batch.drain(..) {
+                            match ev {
+                                Event::Update(v) => self.queued.push_back(v),
+                                Event::Unsubscribed => {
+                                    dead.store(true, Ordering::Relaxed)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 
     pub struct Connection {
-        subscriber: Subscriber,
+        _subscriber: Subscriber,
         con: Val,
         receiver: Mutex<Receiver>,
         dead: AtomicBool,
     }
 
     impl Connection {
+        pub async fn connect(
+            subscriber: &Subscriber,
+            queue_depth: usize,
+            timeout: Option<Duration>,
+            path: Path,
+        ) -> Result<Connection> {
+            let acceptor = subscriber.subscribe_one(path.clone(), timeout).await?;
+            match acceptor.write_with_recipt(Value::from("connect")).await {
+                Err(_) => bail!("connect failed"),
+                Ok(v @ Value::String(_)) => {
+                    let path = v.cast_to::<Path>()?;
+                    let (tx, rx) = mpsc::channel(queue_depth);
+                    let con = subscriber.subscribe_one(path, timeout).await?;
+                    con.updates(UpdatesFlags::empty(), tx);
+                    let con = Connection {
+                        _subscriber: subscriber.clone(),
+                        con,
+                        dead: AtomicBool::new(false),
+                        receiver: Mutex::new(Receiver {
+                            updates: rx,
+                            queued: VecDeque::new(),
+                        }),
+                    };
+                    let to = Duration::from_millis(100);
+                    loop {
+                        con.send(Value::from("ready"))?;
+                        match time::timeout(to, con.recv()).await {
+                            Err(_) => (),
+                            Ok(Err(e)) => return Err(e),
+                            Ok(Ok(Value::String(s))) if &*s == "ready" => {
+                                con.send(Value::from("go"))?;
+                                break;
+                            }
+                            _ => (),
+                        }
+                    }
+                    Ok(con)
+                }
+                Ok(_) => bail!("unexpected response from publisher"),
+            }
+        }
+
         pub fn is_dead(&self) -> bool {
             self.dead.load(Ordering::Relaxed)
         }
@@ -299,47 +363,34 @@ pub mod client {
 
         pub async fn flush(&self) -> Result<()> {
             self.check_dead()?;
-            self.con.flush().await.map_err(|e| {
+            self.con.flush().await.map_err(|_| {
                 self.dead.store(true, Ordering::Relaxed);
                 anyhow!("connection is dead")
             })
         }
 
         pub async fn recv(&self) -> Result<Value> {
-            self.check_dead()?;
             let mut recv = self.receiver.lock().await;
             loop {
-                
+                match recv.queued.pop_front() {
+                    Some(v) => break Ok(v),
+                    None => {
+                        self.check_dead()?;
+                        recv.fill_queue(&self.dead).await?
+                    }
+                }
             }
         }
-    }
 
-    impl Connection {
-        pub async fn connect(
-            subscriber: &Subscriber,
-            queue_depth: usize,
-            timeout: Option<Duration>,
-            path: Path,
-        ) -> Result<Connection> {
-            let acceptor = subscriber.subscribe_one(path.clone(), timeout).await?;
-            match acceptor.write_with_recipt(Value::from("connect")).await {
-                Err(_) => bail!("connect failed"),
-                Ok(v @ Value::String(_)) => {
-                    let path = v.cast_to::<Path>()?;
-                    let (tx, rx) = mpsc::channel(queue_depth);
-                    let con = subscriber.subscribe_one(path, timeout).await?;
-                    con.updates(UpdatesFlags::empty(), tx);
-                    con.write(Value::from("ready"));
-                    Ok(Connection {
-                        con,
-                        dead: AtomicBool::new(false),
-                        receiver: Mutex::new(Receiver {
-                            updates: rx,
-                            queued: Pooled::orphan(Vec::new()),
-                        }),
-                    })
+        pub async fn recv_batch(&self, dst: &mut impl Extend<Value>) -> Result<()> {
+            let mut recv = self.receiver.lock().await;
+            loop {
+                if recv.queued.len() > 0 {
+                    break Ok(dst.extend(recv.queued.drain(..)));
+                } else {
+                    self.check_dead()?;
+                    recv.fill_queue(&self.dead).await?
                 }
-                Ok(_) => bail!("unexpected response from publisher"),
             }
         }
     }
