@@ -307,7 +307,7 @@ pub mod client {
                     let (tx, rx) = mpsc::channel(queue_depth);
                     let mut n = 0;
                     let con = loop {
-                        if n >= 3 {
+                        if n >= 7 {
                             break subscriber.subscribe_one(path.clone(), timeout).await?
                         } else {
                             match subscriber.subscribe_one(path.clone(), timeout).await {
