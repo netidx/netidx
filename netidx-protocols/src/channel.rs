@@ -416,7 +416,7 @@ pub mod client {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use netidx::{
         config::Config as ClientConfig,
@@ -428,22 +428,22 @@ mod test {
     };
     use tokio::{runtime::Runtime, task};
 
-    struct Ctx {
-        _server: Server,
-        publisher: Publisher,
-        subscriber: Subscriber,
-        base: Path,
+    pub(crate) struct Ctx {
+        pub(crate) _server: Server,
+        pub(crate) publisher: Publisher,
+        pub(crate) subscriber: Subscriber,
+        pub(crate) base: Path,
     }
 
     impl Ctx {
-        async fn new() -> Self {
+        pub(crate) async fn new() -> Self {
             let cfg = ServerConfig::load("../cfg/simple-server.json")
                 .expect("load simple server config");
             let _server =
                 Server::new(cfg.clone(), false, 0).await.expect("start resolver server");
             let mut cfg = ClientConfig::load("../cfg/simple-client.json")
                 .expect("load simple client config");
-            cfg.addrs[0].0 = *server.local_addr();
+            cfg.addrs[0].0 = *_server.local_addr();
             let publisher = Publisher::new(
                 cfg.clone(),
                 DesiredAuth::Anonymous,
