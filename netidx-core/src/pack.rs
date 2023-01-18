@@ -214,7 +214,7 @@ impl Pack for String {
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let len = decode_varint(buf)? as usize;
         if len > buf.remaining() {
-            return Err(PackError::TooBig)
+            return Err(PackError::TooBig);
         }
         let mut v = vec![0; len];
         buf.copy_to_slice(&mut v);
@@ -241,7 +241,7 @@ impl Pack for Arc<str> {
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let len = decode_varint(buf)? as usize;
         if len > buf.remaining() {
-            return Err(PackError::TooBig)
+            return Err(PackError::TooBig);
         }
         let mut v = vec![0; len];
         buf.copy_to_slice(&mut v);
@@ -349,7 +349,7 @@ where
 {
     let len = decode_varint(buf)?;
     if len < 1 {
-        return Err(PackError::BufferShort)
+        return Err(PackError::BufferShort);
     }
     let len = (len - varint_len(len) as u64) as usize;
     let n = buf.remaining();
@@ -675,7 +675,7 @@ impl<T: Pack> Pack for Vec<T> {
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let elts = decode_varint(buf)? as usize;
-        if mem::size_of::<T>() * elts > MAX_VEC {
+        if elts > MAX_VEC || mem::size_of::<T>() * elts > MAX_VEC {
             return Err(PackError::TooBig);
         }
         let mut data = Vec::with_capacity(elts);
@@ -687,7 +687,7 @@ impl<T: Pack> Pack for Vec<T> {
 
     fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
         let elts = decode_varint(buf)? as usize;
-        if mem::size_of::<T>() * elts > MAX_VEC {
+        if elts > MAX_VEC || mem::size_of::<T>() * elts > MAX_VEC {
             return Err(PackError::TooBig);
         }
         if elts > self.capacity() {
@@ -723,8 +723,9 @@ where
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let elts = decode_varint(buf)? as usize;
-        if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC {
-            return Err(PackError::TooBig)
+        if elts > MAX_VEC || elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC
+        {
+            return Err(PackError::TooBig);
         }
         let mut data = HashMap::with_capacity_and_hasher(elts, R::default());
         for _ in 0..elts {
@@ -737,8 +738,9 @@ where
 
     fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
         let elts = decode_varint(buf)? as usize;
-        if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC {
-            return Err(PackError::TooBig)
+        if elts > MAX_VEC || elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC
+        {
+            return Err(PackError::TooBig);
         }
         if elts > self.capacity() {
             self.reserve(elts - self.capacity());
