@@ -305,7 +305,21 @@ pub mod client {
                 Ok(v @ Value::String(_)) => {
                     let path = v.cast_to::<Path>()?;
                     let (tx, rx) = mpsc::channel(queue_depth);
-                    let con = subscriber.subscribe_one(path, timeout).await?;
+                    let mut n = 0;
+                    let con = loop {
+                        if n >= 3 {
+                            break subscriber.subscribe_one(path.clone(), timeout).await?
+                        } else {
+                            match subscriber.subscribe_one(path.clone(), timeout).await {
+                                Ok(con) => break con,
+                                Err(_) => {
+                                    n += 1;
+                                    time::sleep(Duration::from_millis(250)).await;
+                                    continue
+                                }
+                            }
+                        }
+                    };
                     con.updates(UpdatesFlags::empty(), tx);
                     let con = Connection {
                         _subscriber: subscriber.clone(),
@@ -402,11 +416,11 @@ mod test {
     use super::*;
     use netidx::{
         config::Config as ClientConfig,
+        path::Path,
+        publisher::Publisher,
         resolver_client::DesiredAuth,
         resolver_server::{config::Config as ServerConfig, Server},
-        publisher::Publisher,
         subscriber::{Subscriber, Value},
-        path::Path,
     };
     use tokio::{runtime::Runtime, task};
 
@@ -432,12 +446,14 @@ mod test {
             let mut listener =
                 server::Listener::new(&publisher, 50, None, base.clone()).await.unwrap();
             task::spawn(async move {
-                let con = client::Connection::connect(&subscriber, 50, None, base).await.unwrap();
+                let con = client::Connection::connect(&subscriber, 50, None, base)
+                    .await
+                    .unwrap();
                 for i in 0..100 {
                     con.send_one(Value::U64(i as u64)).unwrap();
                     match con.recv_one().await.unwrap() {
                         Value::U64(j) => assert_eq!(j, i),
-                        _ => panic!("expected u64")
+                        _ => panic!("expected u64"),
                     }
                 }
             });
@@ -445,7 +461,7 @@ mod test {
             for _ in 0..100 {
                 match con.recv_one().await.unwrap() {
                     Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
-                    _ => panic!("expected u64")
+                    _ => panic!("expected u64"),
                 }
             }
         })

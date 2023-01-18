@@ -234,7 +234,7 @@ mod test {
     use tokio::{runtime::Runtime, task};
 
     #[test]
-    fn ping_pong() {
+    fn pack_ping_pong() {
         Runtime::new().unwrap().block_on(async move {
             let cfg = ServerConfig::load("../cfg/simple-server.json")
                 .expect("load simple server config");
@@ -270,6 +270,62 @@ mod test {
             for _ in 0..100 {
                 let i = con.recv_one().await.unwrap();
                 con.send_one(&i).await.unwrap();
+            }
+        })
+    }
+
+    #[test]
+    fn pack_batch_ping_pong() {
+        Runtime::new().unwrap().block_on(async move {
+            let cfg = ServerConfig::load("../cfg/simple-server.json")
+                .expect("load simple server config");
+            let server =
+                Server::new(cfg.clone(), false, 0).await.expect("start resolver server");
+            let mut cfg = ClientConfig::load("../cfg/simple-client.json")
+                .expect("load simple client config");
+            cfg.addrs[0].0 = *server.local_addr();
+            let publisher = Publisher::new(
+                cfg.clone(),
+                DesiredAuth::Anonymous,
+                "127.0.0.1/32".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+            let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
+            let base = Path::from("/channel");
+            let mut listener =
+                server::Listener::<u64>::new(&publisher, 50, None, base.clone())
+                    .await
+                    .unwrap();
+            task::spawn(async move {
+                let con = client::Connection::<u64>::connect(&subscriber, 50, None, base)
+                    .await
+                    .unwrap();
+                for _ in 0..100 {
+                    let mut b = con.start_batch();
+                    for i in 0..100u64 {
+                        b.queue(&i).unwrap()
+                    }
+                    con.send(b).unwrap();
+                    let mut v = Vec::new();
+                    con.recv(|i| v.push(i)).await.unwrap();
+                    let mut i = 0;
+                    for j in v {
+                        assert_eq!(j, i);
+                        i += 1;
+                    }
+                    assert_eq!(i, 100)
+                }
+            });
+            let con = listener.accept().await.unwrap().await.unwrap();
+            for _ in 0..100 {
+                let mut v = Vec::new();
+                con.recv(|i| v.push(i)).await.unwrap();
+                let mut b = con.start_batch();
+                for i in v {
+                    b.queue(&i).unwrap();
+                }
+                con.send(b).await.unwrap();
             }
         })
     }
