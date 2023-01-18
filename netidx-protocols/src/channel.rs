@@ -145,7 +145,7 @@ pub mod server {
     }
 
     impl Listener {
-        pub fn new(
+        pub async fn new(
             publisher: &Publisher,
             queue_depth: usize,
             timeout: Option<Duration>,
@@ -155,6 +155,7 @@ pub mod server {
             let listener = publisher.publish(path.clone(), Value::from("channel"))?;
             let (tx_waiting, rx_waiting) = mpsc::channel(queue_depth);
             publisher.writes(listener.id(), tx_waiting);
+            publisher.flushed().await;
             Ok(Self {
                 publisher,
                 _listener: listener,
@@ -393,5 +394,60 @@ pub mod client {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use netidx::{
+        config::Config as ClientConfig,
+        resolver_client::DesiredAuth,
+        resolver_server::{config::Config as ServerConfig, Server},
+        publisher::Publisher,
+        subscriber::{Subscriber, Value},
+        path::Path,
+    };
+    use tokio::{runtime::Runtime, task};
+
+    #[test]
+    fn test_channel() {
+        Runtime::new().unwrap().block_on(async move {
+            let cfg = ServerConfig::load("../cfg/simple-server.json")
+                .expect("load simple server config");
+            let server =
+                Server::new(cfg.clone(), false, 0).await.expect("start resolver server");
+            let mut cfg = ClientConfig::load("../cfg/simple-client.json")
+                .expect("load simple client config");
+            cfg.addrs[0].0 = *server.local_addr();
+            let publisher = Publisher::new(
+                cfg.clone(),
+                DesiredAuth::Anonymous,
+                "127.0.0.1/32".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+            let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
+            let base = Path::from("/channel");
+            let mut listener =
+                server::Listener::new(&publisher, 50, None, base.clone()).await.unwrap();
+            task::spawn(async move {
+                let con = client::Connection::connect(&subscriber, 50, None, base).await.unwrap();
+                for i in 0..100 {
+                    con.send(Value::U64(i as u64)).unwrap();
+                    match con.recv().await.unwrap() {
+                        Value::U64(j) => assert_eq!(j, i),
+                        _ => panic!("expected u64")
+                    }
+                }
+            });
+            let con = listener.accept().await.unwrap().await.unwrap();
+            for _ in 0..100 {
+                match con.recv().await.unwrap() {
+                    Value::U64(i) => con.send(Value::U64(i)).await.unwrap(),
+                    _ => panic!("expected u64")
+                }
+            }
+        })
     }
 }
