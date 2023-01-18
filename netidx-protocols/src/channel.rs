@@ -88,14 +88,14 @@ pub mod server {
             self.dead.load(Ordering::Relaxed)
         }
 
-        pub async fn send_batch(&self, batch: Batch) -> Result<()> {
+        pub async fn send(&self, batch: Batch) -> Result<()> {
             if self.is_dead() {
                 bail!("connection is dead")
             }
             Ok(batch.queued.commit(self.timeout).await)
         }
 
-        pub async fn send(&self, v: Value) -> Result<()> {
+        pub async fn send_one(&self, v: Value) -> Result<()> {
             if self.is_dead() {
                 bail!("connection is dead")
             }
@@ -104,7 +104,7 @@ pub mod server {
             Ok(batch.commit(self.timeout).await)
         }
 
-        pub async fn recv(&self) -> Result<Value> {
+        pub async fn recv_one(&self) -> Result<Value> {
             let mut recv = self.receiver.lock().await;
             loop {
                 match recv.queued.pop_front() {
@@ -119,7 +119,7 @@ pub mod server {
             }
         }
 
-        pub async fn recv_batch(&self, dst: &mut impl Extend<Value>) -> Result<()> {
+        pub async fn recv(&self, dst: &mut impl Extend<Value>) -> Result<()> {
             let mut recv = self.receiver.lock().await;
             loop {
                 if recv.queued.len() > 0 {
@@ -211,9 +211,9 @@ pub mod server {
                 req.send_result.unwrap().send(Value::from(session));
                 loop {
                     if con.publisher.is_subscribed(&con.anchor.id(), &con.client) {
-                        match con.recv().await? {
+                        match con.recv_one().await? {
                             Value::String(s) if &*s == "ready" => {
-                                con.send(Value::from("ready")).await?
+                                con.send_one(Value::from("ready")).await?
                             }
                             Value::String(s) if &*s == "go" => break Ok(con),
                             _ => (),
@@ -318,12 +318,12 @@ pub mod client {
                     };
                     let to = Duration::from_millis(100);
                     loop {
-                        con.send(Value::from("ready"))?;
-                        match time::timeout(to, con.recv()).await {
+                        con.send_one(Value::from("ready"))?;
+                        match time::timeout(to, con.recv_one()).await {
                             Err(_) => (),
                             Ok(Err(e)) => return Err(e),
                             Ok(Ok(Value::String(s))) if &*s == "ready" => {
-                                con.send(Value::from("go"))?;
+                                con.send_one(Value::from("go"))?;
                                 break;
                             }
                             _ => (),
@@ -349,7 +349,7 @@ pub mod client {
             Batch { updates: BATCHES.take() }
         }
 
-        pub fn send_batch(&self, mut batch: Batch) -> Result<()> {
+        pub fn send(&self, mut batch: Batch) -> Result<()> {
             self.check_dead()?;
             for v in batch.updates.drain(..) {
                 self.con.write(v);
@@ -357,7 +357,7 @@ pub mod client {
             Ok(())
         }
 
-        pub fn send(&self, v: Value) -> Result<()> {
+        pub fn send_one(&self, v: Value) -> Result<()> {
             self.check_dead()?;
             Ok(self.con.write(v))
         }
@@ -370,7 +370,7 @@ pub mod client {
             })
         }
 
-        pub async fn recv(&self) -> Result<Value> {
+        pub async fn recv_one(&self) -> Result<Value> {
             let mut recv = self.receiver.lock().await;
             loop {
                 match recv.queued.pop_front() {
@@ -383,7 +383,7 @@ pub mod client {
             }
         }
 
-        pub async fn recv_batch(&self, dst: &mut impl Extend<Value>) -> Result<()> {
+        pub async fn recv(&self, dst: &mut impl Extend<Value>) -> Result<()> {
             let mut recv = self.receiver.lock().await;
             loop {
                 if recv.queued.len() > 0 {
@@ -434,8 +434,8 @@ mod test {
             task::spawn(async move {
                 let con = client::Connection::connect(&subscriber, 50, None, base).await.unwrap();
                 for i in 0..100 {
-                    con.send(Value::U64(i as u64)).unwrap();
-                    match con.recv().await.unwrap() {
+                    con.send_one(Value::U64(i as u64)).unwrap();
+                    match con.recv_one().await.unwrap() {
                         Value::U64(j) => assert_eq!(j, i),
                         _ => panic!("expected u64")
                     }
@@ -443,8 +443,8 @@ mod test {
             });
             let con = listener.accept().await.unwrap().await.unwrap();
             for _ in 0..100 {
-                match con.recv().await.unwrap() {
-                    Value::U64(i) => con.send(Value::U64(i)).await.unwrap(),
+                match con.recv_one().await.unwrap() {
+                    Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
                     _ => panic!("expected u64")
                 }
             }
