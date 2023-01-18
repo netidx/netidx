@@ -219,3 +219,58 @@ pub mod client {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use netidx::{
+        config::Config as ClientConfig,
+        path::Path,
+        publisher::Publisher,
+        resolver_client::DesiredAuth,
+        resolver_server::{config::Config as ServerConfig, Server},
+        subscriber::Subscriber,
+    };
+    use tokio::{runtime::Runtime, task};
+
+    #[test]
+    fn ping_pong() {
+        Runtime::new().unwrap().block_on(async move {
+            let cfg = ServerConfig::load("../cfg/simple-server.json")
+                .expect("load simple server config");
+            let server =
+                Server::new(cfg.clone(), false, 0).await.expect("start resolver server");
+            let mut cfg = ClientConfig::load("../cfg/simple-client.json")
+                .expect("load simple client config");
+            cfg.addrs[0].0 = *server.local_addr();
+            let publisher = Publisher::new(
+                cfg.clone(),
+                DesiredAuth::Anonymous,
+                "127.0.0.1/32".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+            let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
+            let base = Path::from("/channel");
+            let mut listener =
+                server::Listener::<u64>::new(&publisher, 50, None, base.clone())
+                    .await
+                    .unwrap();
+            task::spawn(async move {
+                let con = client::Connection::<u64>::connect(&subscriber, 50, None, base)
+                    .await
+                    .unwrap();
+                for i in 0..100u64 {
+                    con.send_one(&i).unwrap();
+                    let j = con.recv_one().await.unwrap();
+                    assert_eq!(j, i)
+                }
+            });
+            let con = listener.accept().await.unwrap().await.unwrap();
+            for _ in 0..100 {
+                let i = con.recv_one().await.unwrap();
+                con.send_one(&i).await.unwrap();
+            }
+        })
+    }
+}
