@@ -30,7 +30,7 @@ pub mod server {
     }
 
     impl Batch {
-        pub fn push(&mut self, v: Value) {
+        pub fn queue(&mut self, v: Value) {
             self.anchor.update_subscriber(&mut self.queued, self.client, v);
         }
     }
@@ -253,7 +253,7 @@ pub mod client {
     }
 
     impl Batch {
-        pub fn push(&mut self, v: Value) {
+        pub fn queue(&mut self, v: Value) {
             self.updates.push(v);
         }
     }
@@ -428,12 +428,18 @@ mod test {
     };
     use tokio::{runtime::Runtime, task};
 
-    #[test]
-    fn ping_pong() {
-        Runtime::new().unwrap().block_on(async move {
+    struct Ctx {
+        _server: Server,
+        publisher: Publisher,
+        subscriber: Subscriber,
+        base: Path,
+    }
+
+    impl Ctx {
+        async fn new() -> Self {
             let cfg = ServerConfig::load("../cfg/simple-server.json")
                 .expect("load simple server config");
-            let server =
+            let _server =
                 Server::new(cfg.clone(), false, 0).await.expect("start resolver server");
             let mut cfg = ClientConfig::load("../cfg/simple-client.json")
                 .expect("load simple client config");
@@ -447,12 +453,23 @@ mod test {
             .unwrap();
             let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
             let base = Path::from("/channel");
+            Self { _server, publisher, subscriber, base }
+        }
+    }
+
+    #[test]
+    fn ping_pong() {
+        Runtime::new().unwrap().block_on(async move {
+            let ctx = Ctx::new().await;
             let mut listener =
-                server::Listener::new(&publisher, 50, None, base.clone()).await.unwrap();
-            task::spawn(async move {
-                let con = client::Connection::connect(&subscriber, 50, None, base)
+                server::Listener::new(&ctx.publisher, 50, None, ctx.base.clone())
                     .await
                     .unwrap();
+            task::spawn(async move {
+                let con =
+                    client::Connection::connect(&ctx.subscriber, 50, None, ctx.base)
+                        .await
+                        .unwrap();
                 for i in 0..100 {
                     con.send_one(Value::U64(i as u64)).unwrap();
                     match con.recv_one().await.unwrap() {
@@ -467,6 +484,52 @@ mod test {
                     Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
                     _ => panic!("expected u64"),
                 }
+            }
+        })
+    }
+
+    #[test]
+    fn batch_ping_pong() {
+        Runtime::new().unwrap().block_on(async move {
+            let ctx = Ctx::new().await;
+            let mut listener =
+                server::Listener::new(&ctx.publisher, 50, None, ctx.base.clone())
+                    .await
+                    .unwrap();
+            task::spawn(async move {
+                let con = client::Connection::connect(
+                    &ctx.subscriber,
+                    50,
+                    None,
+                    ctx.base,
+                )
+                .await
+                .unwrap();
+                for _ in 0..100 {
+                    let mut b = con.start_batch();
+                    for i in 0..100u64 {
+                        b.queue(Value::U64(i))
+                    }
+                    con.send(b).unwrap();
+                    let mut v = Vec::new();
+                    con.recv(&mut v).await.unwrap();
+                    let mut i = 0;
+                    for j in v {
+                        assert_eq!(j, Value::U64(i));
+                        i += 1;
+                    }
+                    assert_eq!(i, 100)
+                }
+            });
+            let con = listener.accept().await.unwrap().await.unwrap();
+            for _ in 0..100 {
+                let mut v = Vec::new();
+                con.recv(&mut v).await.unwrap();
+                let mut b = con.start_batch();
+                for i in v {
+                    b.queue(i);
+                }
+                con.send(b).await.unwrap();
             }
         })
     }
