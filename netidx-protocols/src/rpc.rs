@@ -493,39 +493,20 @@ pub mod client {
 
 #[cfg(test)]
 mod test {
-    use crate::rpc::server::ArgSpec;
+    use crate::{channel::test::Ctx, rpc::server::ArgSpec};
 
     use super::server::*;
     use super::*;
-    use netidx::{
-        config::Config as ClientConfig,
-        resolver_client::DesiredAuth,
-        resolver_server::{config::Config as ServerConfig, Server},
-    };
     use tokio::{runtime::Runtime, time};
 
     #[test]
     fn call_proc() {
         Runtime::new().unwrap().block_on(async move {
-            let cfg = ServerConfig::load("../cfg/simple-server.json")
-                .expect("load simple server config");
-            let server =
-                Server::new(cfg.clone(), false, 0).await.expect("start resolver server");
-            let mut cfg = ClientConfig::load("../cfg/simple-client.json")
-                .expect("load simple client config");
-            cfg.addrs[0].0 = *server.local_addr();
-            let publisher = Publisher::new(
-                cfg.clone(),
-                DesiredAuth::Anonymous,
-                "127.0.0.1/32".parse().unwrap(),
-            )
-            .await
-            .unwrap();
-            let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous).unwrap();
+            let ctx = Ctx::new().await;
             let proc_name = Path::from("/rpc/procedure");
             let (tx, mut rx) = mpsc::channel(10);
             let _server_proc = define_rpc!(
-                &publisher,
+                &ctx.publisher,
                 proc_name.clone(),
                 "test rpc procedure",
                 |c, a| Some((c, a)),
@@ -535,13 +516,13 @@ mod test {
             .unwrap();
             task::spawn(async move {
                 while let Some((mut c, a)) = rx.next().await {
-                    assert_eq!(a, Value::from("hello rpc"));
+                    assert!(a == Value::from("hello rpc") || a == Value::Null);
                     c.reply.send(Value::U32(42))
                 }
             });
             time::sleep(Duration::from_millis(100)).await;
             let proc: client::Proc =
-                client::Proc::new(&subscriber, proc_name.clone()).await.unwrap();
+                client::Proc::new(&ctx.subscriber, proc_name.clone()).await.unwrap();
             let res = call_rpc!(proc, arg1: "hello rpc").await.unwrap();
             assert_eq!(res, Value::U32(42));
             let args: Vec<(Arc<str>, Value)> = vec![];

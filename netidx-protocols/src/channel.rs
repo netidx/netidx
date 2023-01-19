@@ -202,10 +202,18 @@ pub mod server {
             let (tx, rx) = mpsc::channel(queue_depth);
             publisher.writes(val.id(), tx);
             Ok(async move {
+                req.send_result.unwrap().send(Value::from(session));
+                let mut subscribed = loop {
+                    publisher.wait_client(val.id()).await;
+                    let subs = publisher.subscribed(&val.id());
+                    if subs.len() > 0 {
+                        break subs;
+                    }
+                };
                 let con = Connection {
                     publisher,
                     anchor: Arc::new(val),
-                    client: req.client,
+                    client: subscribed.pop().unwrap(),
                     dead: AtomicBool::new(false),
                     timeout,
                     receiver: Mutex::new(Receiver {
@@ -213,22 +221,17 @@ pub mod server {
                         queued: VecDeque::new(),
                     }),
                 };
-                req.send_result.unwrap().send(Value::from(session));
-                loop {
+                for _ in 1..3 {
                     let to = Duration::from_secs(3);
-                    if con.publisher.is_subscribed(&con.anchor.id(), &con.client) {
-                        match time::timeout(to, con.recv_one()).await?? {
-                            Value::String(s) if &*s == "ready" => {
-                                con.send_one(Value::from("ready")).await?
-                            }
-                            Value::String(s) if &*s == "go" => break Ok(con),
-                            _ => (),
+                    match time::timeout(to, con.recv_one()).await?? {
+                        Value::String(s) if &*s == "ready" => {
+                            con.send_one(Value::from("ready")).await?
                         }
-                    } else {
-                        let f = con.publisher.wait_client(con.anchor.id());
-                        time::timeout(to, f).await?
+                        Value::String(s) if &*s == "go" => return Ok(con),
+                        _ => (),
                     }
                 }
+                bail!("protocol negotiation failed")
             })
         }
     }
@@ -303,11 +306,12 @@ pub mod client {
         pub async fn connect(
             subscriber: &Subscriber,
             queue_depth: usize,
-            timeout: Option<Duration>,
             path: Path,
         ) -> Result<Connection> {
-            let acceptor = subscriber.subscribe_one(path.clone(), timeout).await?;
-            match acceptor.write_with_recipt(Value::from("connect")).await {
+            let to = Duration::from_secs(3);
+            let acceptor = subscriber.subscribe_one(path.clone(), Some(to)).await?;
+            let f = acceptor.write_with_recipt(Value::from("connect"));
+            match time::timeout(to, f).await? {
                 Err(_) => bail!("connect failed"),
                 Ok(v @ Value::String(_)) => {
                     let path = v.cast_to::<Path>()?;
@@ -316,10 +320,10 @@ pub mod client {
                     let con = loop {
                         if n >= 7 {
                             break subscriber
-                                .subscribe_one(path.clone(), timeout)
+                                .subscribe_one(path.clone(), Some(to))
                                 .await?;
                         } else {
-                            match subscriber.subscribe_one(path.clone(), timeout).await {
+                            match subscriber.subscribe_one(path.clone(), Some(to)).await {
                                 Ok(con) => break con,
                                 Err(_) => {
                                     n += 1;
@@ -472,10 +476,9 @@ pub(crate) mod test {
                     .await
                     .unwrap();
             task::spawn(async move {
-                let con =
-                    client::Connection::connect(&ctx.subscriber, 50, None, ctx.base)
-                        .await
-                        .unwrap();
+                let con = client::Connection::connect(&ctx.subscriber, 50, ctx.base)
+                    .await
+                    .unwrap();
                 for i in 0..100 {
                     con.send_one(Value::U64(i as u64)).unwrap();
                     match con.recv_one().await.unwrap() {
@@ -503,10 +506,9 @@ pub(crate) mod test {
                     .await
                     .unwrap();
             task::spawn(async move {
-                let con =
-                    client::Connection::connect(&ctx.subscriber, 50, None, ctx.base)
-                        .await
-                        .unwrap();
+                let con = client::Connection::connect(&ctx.subscriber, 50, ctx.base)
+                    .await
+                    .unwrap();
                 for _ in 0..100 {
                     let mut b = con.start_batch();
                     for i in 0..100u64 {
@@ -546,14 +548,10 @@ pub(crate) mod test {
                     .unwrap();
             let ctx_ = ctx.clone();
             task::spawn(async move {
-                let con = client::Connection::connect(
-                    &ctx_.subscriber,
-                    50,
-                    None,
-                    ctx_.base.clone(),
-                )
-                .await
-                .unwrap();
+                let con =
+                    client::Connection::connect(&ctx_.subscriber, 50, ctx_.base.clone())
+                        .await
+                        .unwrap();
                 for i in 0..1000 {
                     con.send_one(Value::U64(i as u64)).unwrap();
                 }
@@ -567,14 +565,10 @@ pub(crate) mod test {
             });
             let ctx_ = ctx.clone();
             task::spawn(async move {
-                let con = client::Connection::connect(
-                    &ctx_.subscriber,
-                    50,
-                    None,
-                    ctx_.base.clone(),
-                )
-                .await
-                .unwrap();
+                let con =
+                    client::Connection::connect(&ctx_.subscriber, 50, ctx_.base.clone())
+                        .await
+                        .unwrap();
                 for i in 0..1000 {
                     con.send_one(Value::U64(i as u64)).unwrap();
                 }

@@ -127,7 +127,7 @@ pub mod client {
         subscriber::{Subscriber, Value},
     };
     use parking_lot::Mutex;
-    use std::{marker::PhantomData, mem, time::Duration};
+    use std::{marker::PhantomData, mem};
     use tokio::sync::Mutex as AsyncMutex;
 
     pub struct Batch<T: Pack + 'static> {
@@ -152,12 +152,10 @@ pub mod client {
         pub async fn connect(
             subscriber: &Subscriber,
             queue_depth: usize,
-            timeout: Option<Duration>,
             path: Path,
         ) -> Result<Connection<T>> {
             let inner =
-                client::Connection::connect(subscriber, queue_depth, timeout, path)
-                    .await?;
+                client::Connection::connect(subscriber, queue_depth, path).await?;
             Ok(Connection {
                 inner,
                 phantom: PhantomData,
@@ -235,14 +233,10 @@ mod test {
                     .await
                     .unwrap();
             task::spawn(async move {
-                let con = client::Connection::<u64>::connect(
-                    &ctx.subscriber,
-                    50,
-                    None,
-                    ctx.base,
-                )
-                .await
-                .unwrap();
+                let con =
+                    client::Connection::<u64>::connect(&ctx.subscriber, 50, ctx.base)
+                        .await
+                        .unwrap();
                 for i in 0..100u64 {
                     con.send_one(&i).unwrap();
                     let j = con.recv_one().await.unwrap();
@@ -266,14 +260,10 @@ mod test {
                     .await
                     .unwrap();
             task::spawn(async move {
-                let con = client::Connection::<u64>::connect(
-                    &ctx.subscriber,
-                    50,
-                    None,
-                    ctx.base,
-                )
-                .await
-                .unwrap();
+                let con =
+                    client::Connection::<u64>::connect(&ctx.subscriber, 50, ctx.base)
+                        .await
+                        .unwrap();
                 for _ in 0..100 {
                     let mut b = con.start_batch();
                     for i in 0..100u64 {

@@ -1083,7 +1083,7 @@ impl Subscriber {
                     }
                 }
                 Ok(Ok((publishers, mut res))) => {
-                    let mut t = self.0.lock();
+                    let mut t = self.0.lock(); 
                     let deadline = timeout.map(|t| now + t);
                     let desired_auth = t.desired_auth.clone();
                     for (p, resolved) in to_resolve.into_iter().zip(res.drain(..)) {
