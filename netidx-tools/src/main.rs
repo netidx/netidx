@@ -4,6 +4,8 @@ mod resolver;
 mod stress_publisher;
 mod stress_subscriber;
 mod subscriber;
+mod stress_channel_publisher;
+mod stress_channel_subscriber;
 
 #[cfg(unix)]
 mod activation;

@@ -19,39 +19,39 @@ pub mod server {
         phantom: PhantomData<T>,
     }
 
-    impl<T: Pack + 'static> Batch<T> {
-        pub fn queue(&mut self, t: &T) -> Result<()> {
+    impl<S: Pack + 'static> Batch<S> {
+        pub fn queue(&mut self, t: &S) -> Result<()> {
             Ok(Pack::encode(t, &mut self.data)?)
         }
     }
 
-    pub struct Connection<T: Pack + 'static> {
+    pub struct Connection<S: Pack + 'static, R: Pack + 'static> {
         inner: server::Connection,
-        phantom: PhantomData<T>,
         buf: Mutex<BytesMut>,
         queue: AsyncMutex<Bytes>,
+        phantom: PhantomData<(S, R)>,
     }
 
-    impl<T: Pack + 'static> Connection<T> {
+    impl<S: Pack + 'static, R: Pack + 'static> Connection<S, R> {
         pub fn is_dead(&self) -> bool {
             self.inner.is_dead()
         }
 
-        pub fn start_batch(&self) -> Batch<T> {
+        pub fn start_batch(&self) -> Batch<S> {
             Batch {
                 data: mem::replace(&mut *self.buf.lock(), BytesMut::new()),
                 phantom: PhantomData,
             }
         }
 
-        pub async fn send(&self, mut batch: Batch<T>) -> Result<()> {
+        pub async fn send(&self, mut batch: Batch<S>) -> Result<()> {
             let v = Value::Bytes(batch.data.split().freeze());
             self.inner.send_one(v).await?;
             *self.buf.lock() = batch.data;
             Ok(())
         }
 
-        pub async fn send_one(&self, t: &T) -> Result<()> {
+        pub async fn send_one(&self, t: &S) -> Result<()> {
             let mut b = self.start_batch();
             b.queue(t)?;
             self.send(b).await
@@ -67,28 +67,28 @@ pub mod server {
             Ok(())
         }
 
-        pub async fn recv<F: FnMut(T)>(&self, mut f: F) -> Result<()> {
+        pub async fn recv<F: FnMut(R)>(&self, mut f: F) -> Result<()> {
             let mut queue = self.queue.lock().await;
             self.fill_queue(&mut *queue).await?;
             while queue.has_remaining() {
-                f(<T as Pack>::decode(&mut *queue)?);
+                f(<R as Pack>::decode(&mut *queue)?);
             }
             Ok(())
         }
 
-        pub async fn recv_one(&self) -> Result<T> {
+        pub async fn recv_one(&self) -> Result<R> {
             let mut queue = self.queue.lock().await;
             self.fill_queue(&mut *queue).await?;
-            Ok(<T as Pack>::decode(&mut *queue)?)
+            Ok(<R as Pack>::decode(&mut *queue)?)
         }
     }
 
-    pub struct Listener<T: Pack + 'static> {
+    pub struct Listener<S: Pack + 'static, R: Pack + 'static> {
         inner: server::Listener,
-        phantom: PhantomData<T>,
+        phantom: PhantomData<(S, R)>,
     }
 
-    impl<T: Pack + 'static> Listener<T> {
+    impl<S: Pack + 'static, R: Pack + 'static> Listener<S, R> {
         pub async fn new(
             publisher: &Publisher,
             queue_depth: usize,
@@ -102,7 +102,7 @@ pub mod server {
 
         pub async fn accept(
             &mut self,
-        ) -> Result<impl Future<Output = Result<Connection<T>>>> {
+        ) -> Result<impl Future<Output = Result<Connection<S, R>>>> {
             let inner = self.inner.accept().await?;
             Ok(inner.map(|c| {
                 let inner = c?;
@@ -130,30 +130,30 @@ pub mod client {
     use std::{marker::PhantomData, mem};
     use tokio::sync::Mutex as AsyncMutex;
 
-    pub struct Batch<T: Pack + 'static> {
+    pub struct Batch<S: Pack + 'static> {
         data: BytesMut,
-        phantom: PhantomData<T>,
+        phantom: PhantomData<S>,
     }
 
-    impl<T: Pack + 'static> Batch<T> {
-        pub fn queue(&mut self, t: &T) -> Result<()> {
+    impl<S: Pack + 'static> Batch<S> {
+        pub fn queue(&mut self, t: &S) -> Result<()> {
             Ok(Pack::encode(t, &mut self.data)?)
         }
     }
 
-    pub struct Connection<T: Pack + 'static> {
+    pub struct Connection<S: Pack + 'static, R: Pack + 'static> {
         inner: client::Connection,
-        phantom: PhantomData<T>,
         buf: Mutex<BytesMut>,
         queue: AsyncMutex<Bytes>,
+        phantom: PhantomData<(S, R)>,
     }
 
-    impl<T: Pack + 'static> Connection<T> {
+    impl<S: Pack + 'static, R: Pack + 'static> Connection<S, R> {
         pub async fn connect(
             subscriber: &Subscriber,
             queue_depth: usize,
             path: Path,
-        ) -> Result<Connection<T>> {
+        ) -> Result<Connection<S, R>> {
             let inner =
                 client::Connection::connect(subscriber, queue_depth, path).await?;
             Ok(Connection {
@@ -168,20 +168,20 @@ pub mod client {
             self.inner.is_dead()
         }
 
-        pub fn start_batch(&self) -> Batch<T> {
+        pub fn start_batch(&self) -> Batch<S> {
             Batch {
                 data: mem::replace(&mut *self.buf.lock(), BytesMut::new()),
                 phantom: PhantomData,
             }
         }
 
-        pub fn send(&self, mut batch: Batch<T>) -> Result<()> {
+        pub fn send(&self, mut batch: Batch<S>) -> Result<()> {
             let v = Value::Bytes(batch.data.split().freeze());
             self.inner.send(v)?;
             Ok(*self.buf.lock() = batch.data)
         }
 
-        pub fn send_one(&self, t: &T) -> Result<()> {
+        pub fn send_one(&self, t: &S) -> Result<()> {
             let mut b = self.start_batch();
             b.queue(t)?;
             self.send(b)
@@ -201,19 +201,19 @@ pub mod client {
             Ok(())
         }
 
-        pub async fn recv<F: FnMut(T)>(&self, mut f: F) -> Result<()> {
+        pub async fn recv<F: FnMut(R)>(&self, mut f: F) -> Result<()> {
             let mut queue = self.queue.lock().await;
             self.fill_queue(&mut *queue).await?;
             while queue.has_remaining() {
-                f(<T as Pack>::decode(&mut *queue)?)
+                f(<R as Pack>::decode(&mut *queue)?)
             }
             Ok(())
         }
 
-        pub async fn recv_one(&self) -> Result<T> {
+        pub async fn recv_one(&self) -> Result<R> {
             let mut queue = self.queue.lock().await;
             self.fill_queue(&mut *queue).await?;
-            Ok(<T as Pack>::decode(&mut *queue)?)
+            Ok(<R as Pack>::decode(&mut *queue)?)
         }
     }
 }
@@ -228,15 +228,22 @@ mod test {
     fn pack_ping_pong() {
         Runtime::new().unwrap().block_on(async move {
             let ctx = Ctx::new().await;
-            let mut listener =
-                server::Listener::<u64>::new(&ctx.publisher, 50, None, ctx.base.clone())
-                    .await
-                    .unwrap();
+            let mut listener = server::Listener::<u64, u64>::new(
+                &ctx.publisher,
+                50,
+                None,
+                ctx.base.clone(),
+            )
+            .await
+            .unwrap();
             task::spawn(async move {
-                let con =
-                    client::Connection::<u64>::connect(&ctx.subscriber, 50, ctx.base)
-                        .await
-                        .unwrap();
+                let con = client::Connection::<u64, u64>::connect(
+                    &ctx.subscriber,
+                    50,
+                    ctx.base,
+                )
+                .await
+                .unwrap();
                 for i in 0..100u64 {
                     con.send_one(&i).unwrap();
                     let j = con.recv_one().await.unwrap();
@@ -255,15 +262,22 @@ mod test {
     fn pack_batch_ping_pong() {
         Runtime::new().unwrap().block_on(async move {
             let ctx = Ctx::new().await;
-            let mut listener =
-                server::Listener::<u64>::new(&ctx.publisher, 50, None, ctx.base.clone())
-                    .await
-                    .unwrap();
+            let mut listener = server::Listener::<u64, u64>::new(
+                &ctx.publisher,
+                50,
+                None,
+                ctx.base.clone(),
+            )
+            .await
+            .unwrap();
             task::spawn(async move {
-                let con =
-                    client::Connection::<u64>::connect(&ctx.subscriber, 50, ctx.base)
-                        .await
-                        .unwrap();
+                let con = client::Connection::<u64, u64>::connect(
+                    &ctx.subscriber,
+                    50,
+                    ctx.base,
+                )
+                .await
+                .unwrap();
                 for _ in 0..100 {
                     let mut b = con.start_batch();
                     for i in 0..100u64 {
