@@ -89,8 +89,7 @@ pub mod server {
     impl RpcReply {
         pub fn send(&mut self, m: Value) {
             if let Some(res) = self.0.take() {
-                // CR estokes: fix this
-                let _ = res.send(m);
+                res.send(m);
             }
         }
     }

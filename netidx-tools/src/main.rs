@@ -1,11 +1,11 @@
 #![recursion_limit = "2048"]
 mod publisher;
 mod resolver;
+mod stress_channel_publisher;
+mod stress_channel_subscriber;
 mod stress_publisher;
 mod stress_subscriber;
 mod subscriber;
-mod stress_channel_publisher;
-mod stress_channel_subscriber;
 
 #[cfg(unix)]
 mod activation;
@@ -32,6 +32,10 @@ enum Stress {
     Publisher(stress_publisher::Params),
     #[structopt(name = "subscriber", about = "run a stress test subscriber")]
     Subscriber(stress_subscriber::Params),
+    #[structopt(name = "channel_publisher", about = "run a stress channel publisher")]
+    ChannelPublisher(stress_channel_publisher::Params),
+    #[structopt(name = "channel_subscriber", about = "run a stress channel subscriber")]
+    ChannelSubscriber(stress_channel_subscriber::Params),
 }
 
 #[derive(StructOpt, Debug)]
@@ -131,6 +135,12 @@ fn main() {
             match cmd {
                 Stress::Subscriber(params) => stress_subscriber::run(cfg, auth, params),
                 Stress::Publisher(params) => stress_publisher::run(cfg, auth, params),
+                Stress::ChannelPublisher(params) => {
+                    stress_channel_publisher::run(cfg, auth, params)
+                }
+                Stress::ChannelSubscriber(params) => {
+                    stress_channel_subscriber::run(cfg, auth, params)
+                }
             }
         }
     }

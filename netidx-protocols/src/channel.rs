@@ -202,7 +202,7 @@ pub mod server {
             let (tx, rx) = mpsc::channel(queue_depth);
             publisher.writes(val.id(), tx);
             Ok(async move {
-                send_result.send(Value::from(session))?;
+                send_result.send(Value::from(session));
                 let mut subscribed = loop {
                     publisher.wait_client(val.id()).await;
                     let subs = publisher.subscribed(&val.id());

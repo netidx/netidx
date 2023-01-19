@@ -303,14 +303,10 @@ impl SendResult {
         (SendResult(Arc::new(Mutex::new(Some(tx)))), rx)
     }
 
-    pub fn send(self, v: Value) -> Result<()> {
+    pub fn send(self, v: Value) {
         if let Some(s) = self.0.lock().take() {
-            match s.send(v) {
-                Ok(()) => (),
-                Err(_) => bail!("value could not be sent"),
-            }
+            let _ = s.send(v);
         }
-        Ok(())
     }
 }
 

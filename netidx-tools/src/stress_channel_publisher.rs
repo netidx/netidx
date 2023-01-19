@@ -1,16 +1,13 @@
-use futures::{prelude::*, select};
+use anyhow::Result;
 use netidx::{
     config::Config,
     path::Path,
-    publisher::{BindCfg, Publisher, Value, DesiredAuth},
+    publisher::{BindCfg, DesiredAuth, Publisher},
 };
-use netidx_protocols::pack_channel::server::{Listener, Connection, Batch};
-use std::{
-    mem,
-    time::{Duration, Instant},
-};
+use netidx_protocols::pack_channel::server::{Connection, Listener};
+use std::time::Duration;
 use structopt::StructOpt;
-use tokio::{runtime::Runtime, signal, time};
+use tokio::{runtime::Runtime, task, time};
 
 #[derive(StructOpt, Debug)]
 pub(super) struct Params {
@@ -36,14 +33,18 @@ pub(super) struct Params {
     batch: usize,
 }
 
-async fn handle_client(mut con: Connection, delay: Option<Duration>, n: usize) -> Result<()> {
+async fn handle_client(
+    con: Connection<u64, u64>,
+    delay: Option<Duration>,
+    n: usize,
+) -> Result<()> {
     let mut i = 0u64;
     loop {
         let mut batch = con.start_batch();
         for _ in 0..n {
             batch.queue(&i)?;
             i += 1;
-        }    
+        }
         con.send(batch).await?;
         if let Some(delay) = delay {
             time::sleep(delay).await
@@ -51,63 +52,29 @@ async fn handle_client(mut con: Connection, delay: Option<Duration>, n: usize) -
     }
 }
 
-async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) {
+async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {
     let delay = if p.delay == 0 { None } else { Some(Duration::from_millis(p.delay)) };
     let publisher =
         Publisher::new(config, auth, p.bind).await.expect("failed to create publisher");
-    let listener = Listener::new(&publisher, 500, None, p.base.clone()).await?;
-    let mut sent: usize = 0;
-    let mut v = 0u64;
-    let published = {
-        let mut published = Vec::with_capacity(p.rows * p.cols);
-        for row in 0..p.rows {
-            for col in 0..p.cols {
-                let path = Path::from(format!("{}/{}/{}", p.base, row, col));
-                published.push(publisher.publish(path, Value::V64(v)).expect("encode"))
-            }
-        }
-        published
-    };
-    let mut last_stat = Instant::now();
-    let mut batch: usize = 0;
-    let one_second = Duration::from_secs(1);
+    let mut listener = Listener::new(&publisher, 500, None, p.base.clone()).await?;
     loop {
-        let mut updates = publisher.start_batch();
-        v += 1;
-        for (i, p) in published.iter().enumerate() {
-            p.update(&mut updates, Value::V64(v + i as u64));
-            sent += 1;
-            batch += 1;
-            if batch > 10000 {
-                batch = 0;
-                mem::replace(&mut updates, publisher.start_batch()).commit(None).await;
-                if let Some(delay) = delay {
-                    time::sleep(delay).await;
-                }
+        let client = listener.accept().await?;
+        task::spawn(async move {
+            match client.await {
+                Err(e) => println!("client accept failed {}", e),
+                Ok(client) => match handle_client(client, delay, p.batch).await {
+                    Ok(()) => println!("client disconnected"),
+                    Err(e) => println!("client disconnected {}", e),
+                },
             }
-        }
-        updates.commit(None).await;
-        if let Some(delay) = delay {
-            time::sleep(delay).await;
-        }
-        let now = Instant::now();
-        let elapsed = now - last_stat;
-        if elapsed > one_second {
-            select! {
-                _ = publisher.wait_any_client().fuse() => (),
-                _ = signal::ctrl_c().fuse() => break,
-            }
-            last_stat = now;
-            println!("tx: {:.0}", sent as f64 / elapsed.as_secs_f64());
-            sent = 0;
-        }
+        });
     }
 }
 
 pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
     let rt = Runtime::new().expect("failed to init runtime");
     rt.block_on(async {
-        run_publisher(config, auth, params).await;
+        run_publisher(config, auth, params).await.unwrap();
         // Allow the publisher time to send the clear message
         time::sleep(Duration::from_secs(1)).await;
     });
