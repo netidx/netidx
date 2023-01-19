@@ -256,16 +256,6 @@ pub mod client {
         static ref BATCHES: Pool<Vec<Value>> = Pool::new(1000, 100_000);
     }
 
-    pub struct Batch {
-        updates: Pooled<Vec<Value>>,
-    }
-
-    impl Batch {
-        pub fn queue(&mut self, v: Value) {
-            self.updates.push(v);
-        }
-    }
-
     struct Receiver {
         updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
         queued: VecDeque<Value>,
@@ -345,12 +335,12 @@ pub mod client {
                     };
                     let to = Duration::from_millis(100);
                     loop {
-                        con.send_one(Value::from("ready"))?;
+                        con.send(Value::from("ready"))?;
                         match time::timeout(to, con.recv_one()).await {
                             Err(_) => (),
                             Ok(Err(e)) => return Err(e),
                             Ok(Ok(Value::String(s))) if &*s == "ready" => {
-                                con.send_one(Value::from("go"))?;
+                                con.send(Value::from("go"))?;
                                 break;
                             }
                             _ => (),
@@ -372,19 +362,7 @@ pub mod client {
             })
         }
 
-        pub fn start_batch(&self) -> Batch {
-            Batch { updates: BATCHES.take() }
-        }
-
-        pub fn send(&self, mut batch: Batch) -> Result<()> {
-            self.check_dead()?;
-            for v in batch.updates.drain(..) {
-                self.con.write(v);
-            }
-            Ok(())
-        }
-
-        pub fn send_one(&self, v: Value) -> Result<()> {
+        pub fn send(&self, v: Value) -> Result<()> {
             self.check_dead()?;
             Ok(self.con.write(v))
         }
@@ -480,7 +458,7 @@ pub(crate) mod test {
                     .await
                     .unwrap();
                 for i in 0..100 {
-                    con.send_one(Value::U64(i as u64)).unwrap();
+                    con.send(Value::U64(i as u64)).unwrap();
                     match con.recv_one().await.unwrap() {
                         Value::U64(j) => assert_eq!(j, i),
                         _ => panic!("expected u64"),
@@ -493,47 +471,6 @@ pub(crate) mod test {
                     Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
                     _ => panic!("expected u64"),
                 }
-            }
-        })
-    }
-
-    #[test]
-    fn batch_ping_pong() {
-        Runtime::new().unwrap().block_on(async move {
-            let ctx = Ctx::new().await;
-            let mut listener =
-                server::Listener::new(&ctx.publisher, 50, None, ctx.base.clone())
-                    .await
-                    .unwrap();
-            task::spawn(async move {
-                let con = client::Connection::connect(&ctx.subscriber, 50, ctx.base)
-                    .await
-                    .unwrap();
-                for _ in 0..100 {
-                    let mut b = con.start_batch();
-                    for i in 0..100u64 {
-                        b.queue(Value::U64(i))
-                    }
-                    con.send(b).unwrap();
-                    let mut v = Vec::new();
-                    con.recv(&mut v).await.unwrap();
-                    let mut i = 0;
-                    for j in v {
-                        assert_eq!(j, Value::U64(i));
-                        i += 1;
-                    }
-                    assert_eq!(i, 100)
-                }
-            });
-            let con = listener.accept().await.unwrap().await.unwrap();
-            for _ in 0..100 {
-                let mut v = Vec::new();
-                con.recv(&mut v).await.unwrap();
-                let mut b = con.start_batch();
-                for i in v {
-                    b.queue(i);
-                }
-                con.send(b).await.unwrap();
             }
         })
     }
@@ -553,7 +490,7 @@ pub(crate) mod test {
                         .await
                         .unwrap();
                 for i in 0..1000 {
-                    con.send_one(Value::U64(i as u64)).unwrap();
+                    con.send(Value::U64(i as u64)).unwrap();
                 }
                 con.flush().await.unwrap();
                 for i in 0..1000 {
@@ -570,7 +507,7 @@ pub(crate) mod test {
                         .await
                         .unwrap();
                 for i in 0..1000 {
-                    con.send_one(Value::U64(i as u64)).unwrap();
+                    con.send(Value::U64(i as u64)).unwrap();
                 }
                 con.flush().await.unwrap();
                 for i in 0..1000 {
