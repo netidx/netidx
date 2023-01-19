@@ -177,7 +177,7 @@ pub mod client {
 
         pub fn send(&self, mut batch: Batch<T>) -> Result<()> {
             let v = Value::Bytes(batch.data.split().freeze());
-            self.inner.send_one(v)?;
+            self.inner.send(v)?;
             Ok(*self.buf.lock() = batch.data)
         }
 
