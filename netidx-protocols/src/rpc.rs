@@ -516,7 +516,7 @@ mod test {
             .unwrap();
             task::spawn(async move {
                 while let Some((mut c, a)) = rx.next().await {
-                    assert!(a == Value::from("hello rpc") || a == Value::Null);
+                    assert_eq!(a, Value::from("hello rpc"));
                     c.reply.send(Value::U32(42))
                 }
             });
