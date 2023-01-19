@@ -34,7 +34,7 @@ serde_derive = "1"
 serde_json = "1"
 sled = { version = "0.34", features = ["zstd", "compression"] }
 structopt = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "fs", "parking_lot"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 lazy_static = "1"
 arcstr = { version = "1", features = ["serde"] }

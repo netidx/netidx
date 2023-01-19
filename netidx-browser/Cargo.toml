@@ -22,7 +22,7 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 futures = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "parking_lot"] }
 serde = "1"
 chrono = { version = "^0.4.23", features = ["serde"] }
 netidx-core = { path = "../netidx-core", version = "^0.15" }

@@ -1,6 +1,9 @@
 use anyhow::Result;
+use bytes::{Buf, BufMut};
+use chrono::prelude::*;
 use netidx::{
     config::Config,
+    pack::{Pack, PackError},
     path::Path,
     publisher::{BindCfg, DesiredAuth, Publisher},
 };
@@ -18,42 +21,64 @@ pub(super) struct Params {
     )]
     bind: BindCfg,
     #[structopt(
-        long = "delay",
-        help = "time in ms to wait between batches",
-        default_value = "100"
-    )]
-    delay: u64,
-    #[structopt(
         long = "base",
         help = "base path",
         default_value = "/local/channel/bench"
     )]
     base: Path,
-    #[structopt(name = "batch-size", default_value = "100")]
-    batch: usize,
 }
 
-async fn handle_client(
-    con: Connection<u64, u64>,
-    delay: Option<Duration>,
-    n: usize,
-) -> Result<()> {
-    let mut i = 0u64;
+pub(crate) struct BatchHeader {
+    pub(crate) timestamp: DateTime<Utc>,
+    pub(crate) count: u32,
+}
+
+impl Pack for BatchHeader {
+    fn const_encoded_len() -> Option<usize> {
+        let r = <DateTime<Utc> as Pack>::const_encoded_len()?
+            + <u32 as Pack>::const_encoded_len()?;
+        Some(r)
+    }
+
+    fn encoded_len(&self) -> usize {
+        self.timestamp.encoded_len() + self.count.encoded_len()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Pack::encode(&self.timestamp, buf)?;
+        Pack::encode(&self.count, buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let timestamp = Pack::decode(buf)?;
+        let count = Pack::decode(buf)?;
+        Ok(Self { timestamp, count })
+    }
+}
+
+async fn handle_client(con: Connection) -> Result<()> {
+    let mut buf = Vec::new();
     loop {
+        let hdr: BatchHeader = con.recv_one().await?;
+        let mut n = 0;
+        while n < hdr.count {
+            con.recv(|i: u64| {
+                buf.push(i);
+                n += 1;
+                n < hdr.count
+            })
+            .await?;
+        }
         let mut batch = con.start_batch();
-        for _ in 0..n {
-            batch.queue(&i)?;
-            i += 1;
+        batch.queue(&hdr)?;
+        for i in buf.drain(..) {
+            batch.queue(&i)?
         }
-        con.send(batch).await?;
-        if let Some(delay) = delay {
-            time::sleep(delay).await
-        }
+        con.send(batch).await?
     }
 }
 
 async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {
-    let delay = if p.delay == 0 { None } else { Some(Duration::from_millis(p.delay)) };
     let publisher =
         Publisher::new(config, auth, p.bind).await.expect("failed to create publisher");
     let mut listener = Listener::new(&publisher, 500, None, p.base.clone()).await?;
@@ -62,7 +87,7 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
         task::spawn(async move {
             match client.await {
                 Err(e) => println!("client accept failed {}", e),
-                Ok(client) => match handle_client(client, delay, p.batch).await {
+                Ok(client) => match handle_client(client).await {
                     Ok(()) => println!("client disconnected"),
                     Err(e) => println!("client disconnected {}", e),
                 },
