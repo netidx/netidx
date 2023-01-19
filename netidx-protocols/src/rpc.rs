@@ -81,7 +81,7 @@ pub mod server {
     impl Drop for RpcReply {
         fn drop(&mut self) {
             if let Some(reply) = self.0.take() {
-                reply.send(Value::Error(Chars::from("rpc call failed")))
+                let _ = reply.send(Value::Error(Chars::from("rpc call failed")));
             }
         }
     }
@@ -89,7 +89,8 @@ pub mod server {
     impl RpcReply {
         pub fn send(&mut self, m: Value) {
             if let Some(res) = self.0.take() {
-                res.send(m)
+                // CR estokes: fix this
+                let _ = res.send(m);
             }
         }
     }

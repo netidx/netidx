@@ -172,12 +172,12 @@ pub mod server {
         pub async fn accept(
             &mut self,
         ) -> Result<impl Future<Output = Result<Connection>>> {
-            let req = loop {
+            let send_result = loop {
                 if let Some(req) = self.queued.pop() {
                     match &req.value {
                         Value::String(c) if &**c == "connect" => {
-                            if req.send_result.is_some() {
-                                break req;
+                            if let Some(send_result) = req.send_result {
+                                break send_result;
                             }
                         }
                         _ => (),
@@ -202,7 +202,7 @@ pub mod server {
             let (tx, rx) = mpsc::channel(queue_depth);
             publisher.writes(val.id(), tx);
             Ok(async move {
-                req.send_result.unwrap().send(Value::from(session));
+                send_result.send(Value::from(session))?;
                 let mut subscribed = loop {
                     publisher.wait_client(val.id()).await;
                     let subs = publisher.subscribed(&val.id());
@@ -476,24 +476,24 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn subscriber_hang_tolerance() {
+    fn hang() {
         Runtime::new().unwrap().block_on(async move {
             let ctx = Arc::new(Ctx::new().await);
             let mut listener =
-                server::Listener::new(&ctx.publisher, 50, None, ctx.base.clone())
+                server::Listener::new(&ctx.publisher, 3, None, ctx.base.clone())
                     .await
                     .unwrap();
             let ctx_ = ctx.clone();
             task::spawn(async move {
                 let con =
-                    client::Connection::connect(&ctx_.subscriber, 50, ctx_.base.clone())
+                    client::Connection::connect(&ctx_.subscriber, 3, ctx_.base.clone())
                         .await
                         .unwrap();
-                for i in 0..1000 {
+                for i in 0..100 {
                     con.send(Value::U64(i as u64)).unwrap();
                 }
                 con.flush().await.unwrap();
-                for i in 0..1000 {
+                for i in 0..100 {
                     match con.recv_one().await.unwrap() {
                         Value::U64(j) => assert_eq!(j, i),
                         _ => panic!("expected u64"),
@@ -503,14 +503,14 @@ pub(crate) mod test {
             let ctx_ = ctx.clone();
             task::spawn(async move {
                 let con =
-                    client::Connection::connect(&ctx_.subscriber, 50, ctx_.base.clone())
+                    client::Connection::connect(&ctx_.subscriber, 3, ctx_.base.clone())
                         .await
                         .unwrap();
-                for i in 0..1000 {
+                for i in 0..100 {
                     con.send(Value::U64(i as u64)).unwrap();
                 }
                 con.flush().await.unwrap();
-                for i in 0..1000 {
+                for i in 0..100 {
                     match con.recv_one().await.unwrap() {
                         Value::U64(j) => assert_eq!(j, i),
                         _ => panic!("expected u64"),
@@ -520,7 +520,7 @@ pub(crate) mod test {
             let con = listener.accept().await.unwrap().await.unwrap();
             let (tx, rx) = oneshot::channel();
             task::spawn(async move {
-                for _ in 0..1000 {
+                for _ in 0..100 {
                     match con.recv_one().await.unwrap() {
                         Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
                         _ => panic!("expected u64"),

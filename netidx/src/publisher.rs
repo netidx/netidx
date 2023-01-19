@@ -27,8 +27,8 @@ use futures::{
         oneshot,
     },
     prelude::*,
-    select_biased, 
-    stream::{FusedStream, SelectAll},
+    select_biased,
+    stream::{FusedStream, FuturesUnordered, SelectAll},
 };
 use fxhash::{FxHashMap, FxHashSet};
 use get_if_addrs::get_if_addrs;
@@ -303,10 +303,14 @@ impl SendResult {
         (SendResult(Arc::new(Mutex::new(Some(tx)))), rx)
     }
 
-    pub fn send(self, v: Value) {
+    pub fn send(self, v: Value) -> Result<()> {
         if let Some(s) = self.0.lock().take() {
-            let _ = s.send(v);
+            match s.send(v) {
+                Ok(()) => (),
+                Err(_) => bail!("value could not be sent"),
+            }
         }
+        Ok(())
     }
 }
 
@@ -1787,16 +1791,32 @@ impl ClientCtx {
     async fn handle_batch(&mut self, con: &mut Channel) -> Result<()> {
         use protocol::publisher::From;
         self.handle_batch_inner(con)?;
-        for (_, (batch, mut sender)) in self.write_batches.drain() {
-            let _ = sender.send(batch).await;
-        }
-        for (id, rx) in self.wait_write_res.drain(..) {
-            match rx.await {
-                Ok(v) => con.queue_send(&From::WriteResult(id, v))?,
-                Err(_) => con.queue_send(&From::WriteResult(id, Value::Ok))?,
+        con.flush().await?;
+        if self.write_batches.len() > 0 || self.wait_write_res.len() > 0 {
+            let mut writes = FuturesUnordered::from_iter(self.write_batches.drain().map(
+                |(_, (batch, mut sender))| async move {
+                    let _ = sender.send(batch).await;
+                },
+            ));
+            let mut replies = FuturesUnordered::from_iter(
+                self.wait_write_res.drain(..).map(|(id, rx)| async move {
+                    match rx.await {
+                        Ok(v) => From::WriteResult(id, v),
+                        Err(_) => From::WriteResult(id, Value::Ok),
+                    }
+                }),
+            );
+            loop {
+                select_biased! {
+                    _ = writes.select_next_some() => (),
+                    m = replies.select_next_some() => {
+                        con.send_one(&m).await?
+                    }
+                    complete => break
+                }
             }
         }
-        Ok(con.flush().await?)
+        Ok(())
     }
 
     async fn flush_with_timeout(
