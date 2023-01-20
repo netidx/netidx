@@ -1613,6 +1613,14 @@ fn decode_task(
     recv
 }
 
+async fn flush_if_pending(con: &mut WriteChannel) -> Result<()> {
+    if con.bytes_queued() == 0 {
+        future::pending().await
+    } else {
+        con.flush().await
+    }
+}
+
 async fn connection(
     subscriber: SubscriberWeak,
     addr: SocketAddr,
@@ -1643,6 +1651,12 @@ async fn connection(
     let mut by_chan: ByChan = FxHashMap::default();
     let res = 'main: loop {
         select_biased! {
+            r = flush_if_pending(&mut write_con).fuse() => {
+                try_cf!(r);
+                for s in pending_flushes.drain(..) {
+                    let _ = s.send(());
+                }
+            }
             now = periodic.tick().fuse() => {
                 if !msg_recvd {
                     break 'main Err(anyhow!("hung publisher"));
