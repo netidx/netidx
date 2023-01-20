@@ -1526,6 +1526,35 @@ const HB: Duration = Duration::from_secs(5);
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
+enum BlockedWrite {
+    Wrote,
+    Reply(publisher::From),
+}
+
+type BlockedWriteFut =
+    Pin<Box<dyn Future<Output = BlockedWrite> + Send + Sync + 'static>>;
+
+enum ReadFromSubscriber {
+    Empty,
+    Batch,
+    BlockedWrite(BlockedWrite),
+}
+
+async fn read_from_subscriber(
+    con: &mut Channel,
+    batch: &mut Vec<publisher::To>,
+    blocked: &mut FuturesUnordered<BlockedWriteFut>,
+) -> Result<ReadFromSubscriber> {
+    if blocked.len() > 0 {
+        match blocked.next().await {
+            Some(w) => Ok(ReadFromSubscriber::BlockedWrite(w)),
+            None => Ok(ReadFromSubscriber::Empty),
+        }
+    } else {
+        con.receive_batch(batch).await.map(|()| ReadFromSubscriber::Batch)
+    }
+}
+
 struct ClientCtx {
     desired_auth: DesiredAuth,
     client: ClId,
@@ -1534,6 +1563,7 @@ struct ClientCtx {
     batch: Vec<publisher::To>,
     write_batches:
         FxHashMap<ChanId, (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>)>,
+    blocked_writes: FuturesUnordered<BlockedWriteFut>,
     deferred_subs: DeferredSubs,
     deferred_subs_batch: Vec<(Path, Permissions)>,
     wait_write_res: Vec<(Id, oneshot::Receiver<Value>)>,
@@ -1560,6 +1590,7 @@ impl ClientCtx {
             secrets,
             batch: Vec::new(),
             write_batches: HashMap::default(),
+            blocked_writes: FuturesUnordered::new(),
             deferred_subs,
             deferred_subs_batch: Vec::new(),
             wait_write_res: Vec::new(),
@@ -1789,27 +1820,52 @@ impl ClientCtx {
         self.handle_batch_inner(con)?;
         con.flush().await?;
         if self.write_batches.len() > 0 || self.wait_write_res.len() > 0 {
-            let mut writes = FuturesUnordered::from_iter(self.write_batches.drain().map(
-                |(_, (batch, mut sender))| async move {
-                    let _ = sender.send(batch).await;
-                },
-            ));
-            let mut replies = FuturesUnordered::from_iter(
-                self.wait_write_res.drain(..).map(|(id, rx)| async move {
-                    match rx.await {
-                        Ok(v) => From::WriteResult(id, v),
-                        Err(_) => From::WriteResult(id, Value::Ok),
+            let blocked_writes = self
+                .write_batches
+                .drain()
+                .filter_map(|(_, (batch, mut sender))| match sender.try_send(batch) {
+                    Ok(()) => None,
+                    Err(e) => {
+                        if e.is_disconnected() {
+                            None
+                        } else if e.is_full() {
+                            Some((e.into_inner(), sender))
+                        } else {
+                            None
+                        }
                     }
-                }),
-            );
-            loop {
-                select_biased! {
-                    _ = writes.select_next_some() => (),
-                    m = replies.select_next_some() => {
-                        con.send_one(&m).await?
+                })
+                .map(|(batch, mut sender)| {
+                    Box::pin(async move {
+                        let _ = sender.send(batch).await;
+                        BlockedWrite::Wrote
+                    }) as BlockedWriteFut
+                });
+            self.blocked_writes.extend(blocked_writes);
+            let mut flush = false;
+            for (id, mut rx) in self.wait_write_res.drain(..) {
+                match rx.try_recv() {
+                    Err(_) => {
+                        con.queue_send(&From::WriteResult(id, Value::Ok))?;
+                        flush = true;
                     }
-                    complete => break
+                    Ok(Some(v)) => {
+                        con.queue_send(&From::WriteResult(id, v))?;
+                        flush = true;
+                    }
+                    Ok(None) => {
+                        let f = Box::pin(async move {
+                            BlockedWrite::Reply(match rx.await {
+                                Ok(v) => From::WriteResult(id, v),
+                                Err(_) => From::WriteResult(id, Value::Ok),
+                            })
+                        }) as BlockedWriteFut;
+                        self.blocked_writes.push(f)
+                    }
                 }
+            }
+            if flush {
+                con.flush().await?
             }
         }
         Ok(())
@@ -1866,7 +1922,6 @@ impl ClientCtx {
     ) -> Result<()> {
         let mut updates = updates.fuse();
         let mut hb = time::interval(HB);
-        // make sure the deferred subs stream never ends
         let mut con = time::timeout(HELLO_TIMEOUT, self.hello(con)).await??;
         loop {
             select_biased! {
@@ -1878,9 +1933,22 @@ impl ClientCtx {
                     self.msg_sent = false;
                 },
                 s = self.deferred_subs.next() => self.handle_deferred_sub(&mut con, s).await?,
-                r = con.receive_batch(&mut self.batch).fuse() => match r {
+                r = read_from_subscriber(
+                    &mut con,
+                    &mut self.batch,
+                    &mut self.blocked_writes
+                ).fuse() => match r {
                     Err(e) => return Err(Error::from(e)),
-                    Ok(()) => self.handle_batch(&mut con).await?
+                    Ok(r) => match r {
+                        ReadFromSubscriber::Batch => self.handle_batch(&mut con).await?,
+                        ReadFromSubscriber::BlockedWrite(bw) => match bw {
+                            BlockedWrite::Wrote => (),
+                            BlockedWrite::Reply(m) => {
+                                con.send_one(&m).await?
+                            }
+                        }
+                        ReadFromSubscriber::Empty => (),
+                    }
                 },
                 u = updates.next() => match u {
                     None => break Ok(()),

@@ -1,4 +1,5 @@
 use crate::stress_channel_publisher::BatchHeader;
+use anyhow::Result;
 use chrono::prelude::*;
 use futures::{prelude::*, select_biased};
 use hdrhistogram::Histogram;
@@ -8,11 +9,12 @@ use netidx::{
     subscriber::{DesiredAuth, Subscriber},
 };
 use netidx_protocols::pack_channel::client::Connection;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use structopt::StructOpt;
 use tokio::{
     runtime::Runtime,
     time::{self, Instant},
+    task,
 };
 
 #[derive(StructOpt, Debug)]
@@ -33,59 +35,66 @@ pub(super) struct Params {
     batch: usize,
 }
 
+async fn send_batches(con: Arc<Connection>, count: u32, delay: Option<Duration>) -> Result<()> {
+    loop {
+        let mut batch = con.start_batch();
+        batch.queue(&BatchHeader { timestamp: Utc::now(), count })?;
+        for i in 0..count {
+            batch.queue(&(i as u64))?;
+        }
+        con.send(batch)?;
+        con.flush().await?;
+        if let Some(delay) = delay {
+            time::sleep(delay).await
+        }
+    }
+}
+
 async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {
     let delay = if p.delay == 0 { None } else { Some(Duration::from_millis(p.delay)) };
     let subscriber = Subscriber::new(config, auth)?;
     let mut interval = tokio::time::interval(Duration::from_secs(1));
-    let con = Connection::connect(&subscriber, 500, p.base.clone()).await?;
+    let con = Arc::new(Connection::connect(&subscriber, 500, p.base.clone()).await?);
+    let mut sum = 0;
     let mut total = 0;
-    let mut latency = Histogram::new_with_bounds(10, 1_000_000, 3)?;
-    let mut buf = Vec::new();
+    let mut latency = Histogram::<u64>::new_with_bounds(10, 1_000_000_000, 3)?;
     let mut last_stat = Instant::now();
+    task::spawn(send_batches(con.clone(), p.batch as u32, delay));
     loop {
         select_biased! {
             now = interval.tick().fuse() => {
                 let elapsed = now - last_stat;
+                let sum = sum / 1000000000;
                 let rate = (total as f64) / elapsed.as_secs_f64();
-                let min = latency.min();
-                let max = latency.max();
-                let med = latency.value_at_quantile(0.5);
-                let ni = latency.value_at_quantile(0.9);
-                let nn = latency.value_at_quantile(0.99);
+                let med = latency.value_at_quantile(0.5) / 1000;
+                let ni = latency.value_at_quantile(0.9) / 1000;
+                let nn = latency.value_at_quantile(0.99) / 1000;
                 println!(
-                    "{} msgs/s RTT min {}ns, 50th {}ns 90th {}ns 99th {}ns max {}ns",
-                    rate, min, med, ni, nn, max
+                    "{} msgs/s RTT, 50th {}us, 90th {}us 99th {}us {}",
+                    rate, med, ni, nn, sum
                 );
                 total = 0;
                 last_stat = now;
-            }
-            hdr = con.recv_one::<BatchHeader>().fuse() => {
-                let hdr = hdr?;
-                buf.clear();
-                let mut j = 0;
+            },
+            hdr = con.recv_one().fuse() => {
+                let hdr: BatchHeader = hdr?;
+                let mut j: u32 = 0;
                 while j < hdr.count {
                     con.recv(|i: u64| {
-                        buf.push(i);
+                        sum += i;
+                        total += 1;
                         j += 1;
                         j < hdr.count
-                    }).await?
+                    })
+                        .await?
                 }
+                assert_eq!(j, hdr.count);
                 match (Utc::now() - hdr.timestamp).num_nanoseconds() {
-                    Some(ns) if ns > 10 && ns <= 1_000_000 => {
-                        total += 1 + j;
-                        latency += ns;
+                    Some(ns) if ns >= 10 && ns <= 1_000_000_000 => {
+                        latency += ns as u64;
                     }
-                    Some(_) | None => ()
+                    Some(_) | None => (),
                 }
-            }
-            default => {
-                let mut batch = con.start_batch();
-                batch.queue(&BatchHeader {timestamp: Utc::now(), count: p.batch as u32})?;
-                for i in 0..p.batch {
-                    batch.queue(&(i as u64))?;
-                }
-                con.send(batch);
-                con.flush().await?
             }
         }
     }
@@ -97,7 +106,5 @@ pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
         if let Err(e) = run_client(config, auth, params).await {
             eprintln!("client stopped with error {}", e);
         }
-        // Allow the publisher time to send the clear message
-        time::sleep(Duration::from_secs(1)).await;
     });
 }

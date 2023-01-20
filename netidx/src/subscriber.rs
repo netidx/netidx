@@ -1083,7 +1083,7 @@ impl Subscriber {
                     }
                 }
                 Ok(Ok((publishers, mut res))) => {
-                    let mut t = self.0.lock(); 
+                    let mut t = self.0.lock();
                     let deadline = timeout.map(|t| now + t);
                     let desired_auth = t.desired_auth.clone();
                     for (p, resolved) in to_resolve.into_iter().zip(res.drain(..)) {
@@ -1568,13 +1568,17 @@ async fn process_batch(
     Ok(())
 }
 
-fn try_flush(con: &mut WriteChannel) -> Result<()> {
-    if con.bytes_queued() > 0 {
-        con.try_flush()?;
-        Ok(())
-    } else {
-        Ok(())
+fn try_flush(
+    con: &mut WriteChannel,
+    pending: &mut Vec<oneshot::Sender<()>>,
+) -> Result<()> {
+    let flushed = if con.bytes_queued() > 0 { con.try_flush()? } else { true };
+    if flushed {
+        for c in pending.drain(..) {
+            let _ = c.send(());
+        }
     }
+    Ok(())
 }
 
 fn decode_task(
@@ -1631,6 +1635,7 @@ async fn connection(
     let (tx_stop, rx_stop) = oneshot::channel();
     let mut pending_writes: FxHashMap<Id, VecDeque<oneshot::Sender<Value>>> =
         HashMap::default();
+    let mut pending_flushes: Vec<oneshot::Sender<()>> = Vec::new();
     let mut batches = decode_task(read_con, rx_stop);
     let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD);
     let mut by_receiver: FxHashMap<ChanWrap<Pooled<Vec<(SubId, Event)>>>, ChanId> =
@@ -1657,7 +1662,7 @@ async fn connection(
                         let _ = req.finished.send(Err(anyhow!("timed out")));
                     }
                 }
-                try_cf!(try_flush(&mut write_con))
+                try_cf!(try_flush(&mut write_con, &mut pending_flushes))
             },
             batch = from_sub.recv().fuse() => match batch {
                 None => break Err(anyhow!("dropped")),
@@ -1735,12 +1740,10 @@ async fn connection(
                                         .push_back(tx);
                                 }
                             }
-                            ToCon::Flush(tx) => {
-                                let _ = tx.send(());
-                            }
+                            ToCon::Flush(tx) => pending_flushes.push(tx),
                         }
                     }
-                    try_cf!(try_flush(&mut write_con));
+                    try_cf!(try_flush(&mut write_con, &mut pending_flushes));
                 }
             },
             r = batches.next() => match r {
@@ -1751,7 +1754,7 @@ async fn connection(
                         batch,
                         &mut subscriptions
                     ).await;
-                    try_cf!(try_flush(&mut write_con))
+                    try_cf!(try_flush(&mut write_con, &mut pending_flushes))
                 },
                 Some(Ok((batch, false))) =>
                     if let Some(subscriber) = subscriber.upgrade() {
@@ -1765,7 +1768,7 @@ async fn connection(
                             &mut write_con,
                             &subscriber,
                             conid).await);
-                        try_cf!(try_flush(&mut write_con));
+                        try_cf!(try_flush(&mut write_con, &mut pending_flushes));
                         if subscriptions.is_empty() && pending.is_empty() {
                             let mut inner = subscriber.0.lock();
                             if from_sub.len() == 0 {

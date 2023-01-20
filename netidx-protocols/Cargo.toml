@@ -19,7 +19,7 @@ anyhow = "1"
 netidx = { path = "../netidx", version = "^0.15", default_features = false }
 netidx-core = {path = "../netidx-core", version = "^0.15", default_features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "^0.15", default_features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "sync", "parking_lot"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "sync"] }
 serde = "1"
 serde_derive = "1"
 serde_json = "1"

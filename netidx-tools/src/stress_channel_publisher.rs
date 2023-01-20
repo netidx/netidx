@@ -28,6 +28,7 @@ pub(super) struct Params {
     base: Path,
 }
 
+#[derive(Debug)]
 pub(crate) struct BatchHeader {
     pub(crate) timestamp: DateTime<Utc>,
     pub(crate) count: u32,
@@ -74,7 +75,7 @@ async fn handle_client(con: Connection) -> Result<()> {
         for i in buf.drain(..) {
             batch.queue(&i)?
         }
-        con.send(batch).await?
+        con.send(batch).await?;
     }
 }
 

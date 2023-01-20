@@ -11,7 +11,7 @@ pub mod server {
         publisher::{Publisher, Value},
     };
     use parking_lot::Mutex;
-    use std::{marker::PhantomData, mem, time::Duration};
+    use std::{mem, time::Duration};
     use tokio::sync::Mutex as AsyncMutex;
 
     pub struct Batch {
