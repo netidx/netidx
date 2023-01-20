@@ -299,20 +299,7 @@ pub mod client {
             path: Path,
         ) -> Result<Connection> {
             let to = Duration::from_secs(3);
-            let mut n = 0;
-            let acceptor = loop {
-                match subscriber.subscribe_one(path.clone(), Some(to)).await {
-                    Ok(c) => break c,
-                    Err(e) => {
-                        if n > 7 {
-                            return Err(e)
-                        } else {
-                            n += 1;
-                            time::sleep(Duration::from_millis(250)).await;
-                        }
-                    }
-                }
-            };
+            let acceptor = subscriber.durable_subscribe(path.clone());
             let f = acceptor.write_with_recipt(Value::from("connect"));
             match time::timeout(to, f).await? {
                 Err(_) => bail!("connect failed"),
