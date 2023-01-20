@@ -30,27 +30,24 @@ pub(super) struct Params {
         default_value = "100"
     )]
     delay: u64,
+    #[structopt(long = "latency", help = "test latency not throughput")]
+    latency: bool,
     #[structopt(name = "batch-size", default_value = "100")]
     batch: usize,
 }
 
-async fn can_send(flushed: bool, waited: bool) {
-    if flushed && waited {
-        ()
+async fn can_send(flushed: bool, delay: Option<Duration>) {
+    if flushed {
+        if let Some(duration) = delay {
+            time::sleep(duration).await
+        }
     } else {
         future::pending().await
     }
 }
 
-async fn wait_delay(delay: Option<Duration>) {
-    match delay {
-        None => future::pending().await,
-        Some(delay) => time::sleep(delay).await,
-    }
-}
-
-async fn maybe_flush(con: &Connection) -> Result<()> {
-    if con.dirty() {
+async fn maybe_flush(con: &Connection, latency: bool) -> Result<()> {
+    if !latency && con.dirty() {
         con.flush().await
     } else {
         future::pending().await
@@ -58,7 +55,13 @@ async fn maybe_flush(con: &Connection) -> Result<()> {
 }
 
 async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {
-    let delay = if p.delay == 0 { None } else { Some(Duration::from_micros(p.delay)) };
+    let delay = if p.latency {
+        None
+    } else if p.delay == 0 {
+        None
+    } else {
+        Some(Duration::from_micros(p.delay))
+    };
     let subscriber = Subscriber::new(config, auth)?;
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let con = Arc::new(Connection::connect(&subscriber, 500, p.base.clone()).await?);
@@ -67,7 +70,6 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
     let mut latency = Histogram::<u64>::new_with_bounds(10, 1_000_000_000, 3)?;
     let mut last_stat = Instant::now();
     let mut flushed = true;
-    let mut waited = true;
     loop {
         select_biased! {
             now = interval.tick().fuse() => {
@@ -103,15 +105,15 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
                     }
                     Some(_) | None => (),
                 }
+                if p.latency {
+                    flushed = true;
+                }
             },
-            () = wait_delay(delay).fuse() => {
-                waited = true;
-            },
-            r = maybe_flush(&con).fuse() => {
+            r = maybe_flush(&con, p.latency).fuse() => {
                 r?;
                 flushed = true;
             },
-            () = can_send(flushed, waited).fuse() => {
+            () = can_send(flushed, delay).fuse() => {
                 let mut batch = con.start_batch();
                 batch.queue(&BatchHeader { timestamp: Utc::now(), count: p.batch as u32 })?;
                 for i in 0..p.batch {
@@ -119,9 +121,6 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
                 }
                 con.send(batch)?;
                 flushed = false;
-                if delay.is_some() {
-                    waited = false;
-                }
             }
         }
     }
