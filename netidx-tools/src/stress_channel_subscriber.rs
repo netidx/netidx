@@ -51,7 +51,7 @@ async fn send_batches(con: Arc<Connection>, count: u32, delay: Option<Duration>)
 }
 
 async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {
-    let delay = if p.delay == 0 { None } else { Some(Duration::from_millis(p.delay)) };
+    let delay = if p.delay == 0 { None } else { Some(Duration::from_micros(p.delay)) };
     let subscriber = Subscriber::new(config, auth)?;
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let con = Arc::new(Connection::connect(&subscriber, 500, p.base.clone()).await?);
@@ -70,7 +70,7 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
                 let ni = latency.value_at_quantile(0.9) / 1000;
                 let nn = latency.value_at_quantile(0.99) / 1000;
                 println!(
-                    "{} msgs/s RTT, 50th {}us, 90th {}us 99th {}us {}",
+                    "{} msgs/s RTT, 50th {}us, 90th {}us, 99th {}us, sum {}bn",
                     rate, med, ni, nn, sum
                 );
                 total = 0;
