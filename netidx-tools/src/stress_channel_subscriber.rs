@@ -14,7 +14,6 @@ use structopt::StructOpt;
 use tokio::{
     runtime::Runtime,
     time::{self, Instant},
-    task,
 };
 
 #[derive(StructOpt, Debug)]
@@ -35,18 +34,26 @@ pub(super) struct Params {
     batch: usize,
 }
 
-async fn send_batches(con: Arc<Connection>, count: u32, delay: Option<Duration>) -> Result<()> {
-    loop {
-        let mut batch = con.start_batch();
-        batch.queue(&BatchHeader { timestamp: Utc::now(), count })?;
-        for i in 0..count {
-            batch.queue(&(i as u64))?;
-        }
-        con.send(batch)?;
-        con.flush().await?;
-        if let Some(delay) = delay {
-            time::sleep(delay).await
-        }
+async fn can_send(flushed: bool, waited: bool) {
+    if flushed && waited {
+        ()
+    } else {
+        future::pending().await
+    }
+}
+
+async fn wait_delay(delay: Option<Duration>) {
+    match delay {
+        None => future::pending().await,
+        Some(delay) => time::sleep(delay).await,
+    }
+}
+
+async fn maybe_flush(con: &Connection) -> Result<()> {
+    if con.dirty() {
+        con.flush().await
+    } else {
+        future::pending().await
     }
 }
 
@@ -59,7 +66,8 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
     let mut total = 0;
     let mut latency = Histogram::<u64>::new_with_bounds(10, 1_000_000_000, 3)?;
     let mut last_stat = Instant::now();
-    task::spawn(send_batches(con.clone(), p.batch as u32, delay));
+    let mut flushed = true;
+    let mut waited = true;
     loop {
         select_biased! {
             now = interval.tick().fuse() => {
@@ -94,6 +102,25 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
                         latency += ns as u64;
                     }
                     Some(_) | None => (),
+                }
+            },
+            () = wait_delay(delay).fuse() => {
+                waited = true;
+            },
+            r = maybe_flush(&con).fuse() => {
+                r?;
+                flushed = true;
+            },
+            () = can_send(flushed, waited).fuse() => {
+                let mut batch = con.start_batch();
+                batch.queue(&BatchHeader { timestamp: Utc::now(), count: p.batch as u32 })?;
+                for i in 0..p.batch {
+                    batch.queue(&(i as u64))?;
+                }
+                con.send(batch)?;
+                flushed = false;
+                if delay.is_some() {
+                    waited = false;
                 }
             }
         }

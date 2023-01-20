@@ -290,6 +290,7 @@ pub mod client {
         con: Val,
         receiver: Mutex<Receiver>,
         dead: AtomicBool,
+        dirty: AtomicBool,
     }
 
     impl Connection {
@@ -328,6 +329,7 @@ pub mod client {
                         _subscriber: subscriber.clone(),
                         con,
                         dead: AtomicBool::new(false),
+                        dirty: AtomicBool::new(false),
                         receiver: Mutex::new(Receiver {
                             updates: rx,
                             queued: VecDeque::new(),
@@ -364,15 +366,22 @@ pub mod client {
 
         pub fn send(&self, v: Value) -> Result<()> {
             self.check_dead()?;
+            self.dirty.store(true, Ordering::Relaxed);
             Ok(self.con.write(v))
+        }
+
+        pub fn dirty(&self) -> bool {
+            self.dirty.load(Ordering::Relaxed)
         }
 
         pub async fn flush(&self) -> Result<()> {
             self.check_dead()?;
-            self.con.flush().await.map_err(|_| {
+            let r = self.con.flush().await.map_err(|_| {
                 self.dead.store(true, Ordering::Relaxed);
                 anyhow!("connection is dead")
-            })
+            });
+            self.dirty.store(false, Ordering::Relaxed);
+            r
         }
 
         pub async fn recv_one(&self) -> Result<Value> {

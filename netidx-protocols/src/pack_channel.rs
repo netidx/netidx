@@ -173,6 +173,10 @@ pub mod client {
             self.send(b)
         }
 
+        pub fn dirty(&self) -> bool {
+            self.inner.dirty()
+        }
+
         pub async fn flush(&self) -> Result<()> {
             self.inner.flush().await
         }
