@@ -445,6 +445,7 @@ pub(crate) mod test {
                 cfg.clone(),
                 DesiredAuth::Anonymous,
                 "127.0.0.1/32".parse().unwrap(),
+                768,
             )
             .await
             .unwrap();
