@@ -4,7 +4,7 @@ pub use crate::protocol::{
 };
 pub use crate::resolver_client::DesiredAuth;
 use crate::{
-    channel::{self, Channel, K5CtxWrap},
+    channel::{self, Channel, K5CtxWrap, ReadChannel, WriteChannel},
     chars::Chars,
     config::Config,
     pack::BoundedBytes,
@@ -1328,7 +1328,7 @@ type DeferredSubs =
 
 fn subscribe(
     t: &mut PublisherInner,
-    con: &mut Channel,
+    con: &mut WriteChannel,
     client: ClId,
     path: Path,
     permissions: Permissions,
@@ -1423,7 +1423,7 @@ fn unsubscribe(t: &mut PublisherInner, client: ClId, id: Id) {
 
 fn write(
     t: &mut PublisherInner,
-    con: &mut Channel,
+    con: &mut WriteChannel,
     client: ClId,
     gc_on_write: &mut Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
     wait_write_res: &mut Vec<(Id, oneshot::Receiver<Value>)>,
@@ -1534,27 +1534,6 @@ enum BlockedWrite {
 type BlockedWriteFut =
     Pin<Box<dyn Future<Output = BlockedWrite> + Send + Sync + 'static>>;
 
-enum ReadFromSubscriber {
-    Empty,
-    Batch,
-    BlockedWrite(BlockedWrite),
-}
-
-async fn read_from_subscriber(
-    con: &mut Channel,
-    batch: &mut Vec<publisher::To>,
-    blocked: &mut FuturesUnordered<BlockedWriteFut>,
-) -> Result<ReadFromSubscriber> {
-    if blocked.len() > 0 {
-        match blocked.next().await {
-            Some(w) => Ok(ReadFromSubscriber::BlockedWrite(w)),
-            None => Ok(ReadFromSubscriber::Empty),
-        }
-    } else {
-        con.receive_batch(batch).await.map(|()| ReadFromSubscriber::Batch)
-    }
-}
-
 struct ClientCtx {
     desired_auth: DesiredAuth,
     client: ClId,
@@ -1564,6 +1543,8 @@ struct ClientCtx {
     write_batches:
         FxHashMap<ChanId, (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>)>,
     blocked_writes: FuturesUnordered<BlockedWriteFut>,
+    flushing_updates: bool,
+    flush_timeout: Option<Duration>,
     deferred_subs: DeferredSubs,
     deferred_subs_batch: Vec<(Path, Permissions)>,
     wait_write_res: Vec<(Id, oneshot::Receiver<Value>)>,
@@ -1591,6 +1572,8 @@ impl ClientCtx {
             batch: Vec::new(),
             write_batches: HashMap::default(),
             blocked_writes: FuturesUnordered::new(),
+            flushing_updates: false,
+            flush_timeout: None,
             deferred_subs,
             deferred_subs_batch: Vec::new(),
             wait_write_res: Vec::new(),
@@ -1695,9 +1678,9 @@ impl ClientCtx {
         }
     }
 
-    async fn handle_deferred_sub(
+    fn handle_deferred_sub(
         &mut self,
-        con: &mut Channel,
+        con: &mut WriteChannel,
         s: Option<BatchItem<(Path, Permissions)>>,
     ) -> Result<()> {
         match s {
@@ -1710,32 +1693,29 @@ impl ClientCtx {
                     self.deferred_subs_batch.clear();
                 }
                 Some(t) => {
-                    {
-                        let mut pb = t.0.lock();
-                        for (path, perms) in self.deferred_subs_batch.drain(..) {
-                            if !pb.by_path.contains_key(path.as_ref()) {
-                                let m = publisher::From::NoSuchValue(path);
-                                con.queue_send(&m)?
-                            } else {
-                                subscribe(
-                                    &mut *pb,
-                                    con,
-                                    self.client,
-                                    path,
-                                    perms,
-                                    &mut self.deferred_subs,
-                                )?
-                            }
+                    let mut pb = t.0.lock();
+                    for (path, perms) in self.deferred_subs_batch.drain(..) {
+                        if !pb.by_path.contains_key(path.as_ref()) {
+                            let m = publisher::From::NoSuchValue(path);
+                            con.queue_send(&m)?
+                        } else {
+                            subscribe(
+                                &mut *pb,
+                                con,
+                                self.client,
+                                path,
+                                perms,
+                                &mut self.deferred_subs,
+                            )?
                         }
                     }
-                    con.flush().await?
                 }
             },
         }
         Ok(())
     }
 
-    fn handle_batch_inner(&mut self, con: &mut Channel) -> Result<()> {
+    fn handle_batch_inner(&mut self, con: &mut WriteChannel) -> Result<()> {
         use protocol::publisher::{From, To::*};
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
         let t_st = self.publisher.upgrade().ok_or_else(|| anyhow!("dead publisher"))?;
@@ -1815,10 +1795,9 @@ impl ClientCtx {
         Ok(())
     }
 
-    async fn handle_batch(&mut self, con: &mut Channel) -> Result<()> {
+    fn handle_batch(&mut self, con: &mut WriteChannel) -> Result<()> {
         use protocol::publisher::From;
         self.handle_batch_inner(con)?;
-        con.flush().await?;
         if self.write_batches.len() > 0 || self.wait_write_res.len() > 0 {
             let blocked_writes = self
                 .write_batches
@@ -1842,17 +1821,10 @@ impl ClientCtx {
                     }) as BlockedWriteFut
                 });
             self.blocked_writes.extend(blocked_writes);
-            let mut flush = false;
             for (id, mut rx) in self.wait_write_res.drain(..) {
                 match rx.try_recv() {
-                    Err(_) => {
-                        con.queue_send(&From::WriteResult(id, Value::Ok))?;
-                        flush = true;
-                    }
-                    Ok(Some(v)) => {
-                        con.queue_send(&From::WriteResult(id, v))?;
-                        flush = true;
-                    }
+                    Err(_) => con.queue_send(&From::WriteResult(id, Value::Ok))?,
+                    Ok(Some(v)) => con.queue_send(&From::WriteResult(id, v))?,
                     Ok(None) => {
                         let f = Box::pin(async move {
                             BlockedWrite::Reply(match rx.await {
@@ -1864,42 +1836,18 @@ impl ClientCtx {
                     }
                 }
             }
-            if flush {
-                con.flush().await?
-            }
         }
         Ok(())
     }
 
-    async fn flush_with_timeout(
+    fn handle_updates(
         &mut self,
-        con: &mut Channel,
-        timeout: Option<Duration>,
-    ) -> Result<()> {
-        self.msg_sent = true;
-        let f = con.flush();
-        match timeout {
-            None => f.await?,
-            Some(d) => time::timeout(d, f).await??,
-        }
-        Ok(())
-    }
-
-    async fn handle_updates(
-        &mut self,
-        con: &mut Channel,
+        con: &mut WriteChannel,
         (timeout, mut up): (Option<Duration>, Update),
     ) -> Result<()> {
         use publisher::To;
         for m in up.updates.drain(..) {
-            if let Err(e) = con.queue_send(&m) {
-                if con.bytes_queued() > 0 {
-                    self.flush_with_timeout(con, timeout).await?;
-                    con.queue_send(&m)?;
-                } else {
-                    return Err(e);
-                }
-            }
+            con.queue_send(&m)?
         }
         if let Some(usubs) = &mut up.unsubscribes {
             for id in usubs.drain(..) {
@@ -1907,10 +1855,12 @@ impl ClientCtx {
             }
         }
         if self.batch.len() > 0 {
-            self.handle_batch(con).await?;
+            self.handle_batch(con)?;
         }
         if con.bytes_queued() > 0 {
-            self.flush_with_timeout(con, timeout).await?
+            self.flushing_updates = true;
+            self.flush_timeout = timeout;
+            self.msg_sent = true;
         }
         Ok(())
     }
@@ -1918,41 +1868,84 @@ impl ClientCtx {
     async fn run(
         mut self,
         con: TcpStream,
-        updates: Receiver<(Option<Duration>, Update)>,
+        mut updates: Receiver<(Option<Duration>, Update)>,
     ) -> Result<()> {
-        let mut updates = updates.fuse();
+        async fn flush(c: &mut WriteChannel, timeout: Option<Duration>) -> Result<()> {
+            if c.bytes_queued() > 0 {
+                if let Some(timeout) = timeout {
+                    c.flush_timeout(timeout).await
+                } else {
+                    c.flush().await
+                }
+            } else {
+                future::pending().await
+            }
+        }
+        async fn read_updates(
+            flushing: bool,
+            c: &mut Receiver<(Option<Duration>, Update)>,
+        ) -> Option<(Option<Duration>, Update)> {
+            if flushing {
+                future::pending().await
+            } else {
+                c.next().await
+            }
+        }
+        enum ReadFromSubscriber {
+            Empty,
+            Batch,
+            BlockedWrite(BlockedWrite),
+        }
+        async fn read_from_subscriber(
+            con: &mut ReadChannel,
+            batch: &mut Vec<publisher::To>,
+            blocked: &mut FuturesUnordered<BlockedWriteFut>,
+        ) -> Result<ReadFromSubscriber> {
+            if blocked.len() > 0 {
+                match blocked.next().await {
+                    Some(w) => Ok(ReadFromSubscriber::BlockedWrite(w)),
+                    None => Ok(ReadFromSubscriber::Empty),
+                }
+            } else {
+                con.receive_batch(batch).await.map(|()| ReadFromSubscriber::Batch)
+            }
+        }
         let mut hb = time::interval(HB);
-        let mut con = time::timeout(HELLO_TIMEOUT, self.hello(con)).await??;
+        let (mut read_con, mut write_con) =
+            time::timeout(HELLO_TIMEOUT, self.hello(con)).await??.split();
         loop {
             select_biased! {
+                r = flush(&mut write_con, self.flush_timeout).fuse() => {
+                    r?;
+                    self.flushing_updates = false;
+                    self.flush_timeout = None;
+                },
                 _ = hb.tick().fuse() => {
                     if !self.msg_sent {
-                        con.queue_send(&publisher::From::Heartbeat)?;
-                        con.flush().await?;
+                        write_con.queue_send(&publisher::From::Heartbeat)?;
                     }
                     self.msg_sent = false;
                 },
-                s = self.deferred_subs.next() => self.handle_deferred_sub(&mut con, s).await?,
+                s = self.deferred_subs.next() =>
+                    self.handle_deferred_sub(&mut write_con, s)?,
                 r = read_from_subscriber(
-                    &mut con,
+                    &mut read_con,
                     &mut self.batch,
                     &mut self.blocked_writes
                 ).fuse() => match r {
                     Err(e) => return Err(Error::from(e)),
                     Ok(r) => match r {
-                        ReadFromSubscriber::Batch => self.handle_batch(&mut con).await?,
+                        ReadFromSubscriber::Batch => self.handle_batch(&mut write_con)?,
                         ReadFromSubscriber::BlockedWrite(bw) => match bw {
                             BlockedWrite::Wrote => (),
-                            BlockedWrite::Reply(m) => {
-                                con.send_one(&m).await?
-                            }
+                            BlockedWrite::Reply(m) => write_con.queue_send(&m)?,
                         }
                         ReadFromSubscriber::Empty => (),
                     }
                 },
-                u = updates.next() => match u {
+                u = read_updates(self.flushing_updates, &mut updates).fuse() => match u {
                     None => break Ok(()),
-                    Some(u) => self.handle_updates(&mut con, u).await?,
+                    Some(u) => self.handle_updates(&mut write_con, u)?,
                 },
             }
         }
