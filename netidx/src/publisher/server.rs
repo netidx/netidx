@@ -27,7 +27,6 @@ use futures::{
         mpsc::{channel, Receiver, Sender},
         oneshot,
     },
-    future::FusedFuture,
     prelude::*,
     select_biased,
     stream::{FuturesUnordered, SelectAll},
@@ -46,7 +45,6 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
-    task::Poll,
     time::{Duration, SystemTime},
 };
 use tokio::{
@@ -263,61 +261,8 @@ enum BlockedWrite {
     Reply(publisher::From),
 }
 
-enum BlockedWriteFuture {
-    Write(Sender<Pooled<Vec<WriteRequest>>>, Pooled<Vec<WriteRequest>>),
-    Reply(Id, oneshot::Receiver<Value>),
-    Finished,
-}
-
-impl FusedFuture for BlockedWriteFuture {
-    fn is_terminated(&self) -> bool {
-        match self {
-            BlockedWriteFuture::Write(_, _) | BlockedWriteFuture::Reply(_, _) => false,
-            BlockedWriteFuture::Finished => true,
-        }
-    }
-}
-
-impl Future for BlockedWriteFuture {
-    type Output = BlockedWrite;
-
-    fn poll(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Self::Output> {
-        match *self {
-            BlockedWriteFuture::Write(ref mut tx, _) => match Pin::new(tx).poll_ready(cx)
-            {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(Ok(())) => {
-                    let t = mem::replace(&mut *self, BlockedWriteFuture::Finished);
-                    if let BlockedWriteFuture::Write(mut tx, batch) = t {
-                        let _ = tx.start_send(batch);
-                    }
-                    Poll::Ready(BlockedWrite::Wrote)
-                }
-                Poll::Ready(Err(_)) => {
-                    *self = BlockedWriteFuture::Finished;
-                    Poll::Ready(BlockedWrite::Wrote)
-                }
-            },
-            BlockedWriteFuture::Reply(id, ref mut f) => match Pin::new(f).poll(cx) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(Ok(v)) => {
-                    *self = BlockedWriteFuture::Finished;
-                    let r = publisher::From::WriteResult(id, v);
-                    Poll::Ready(BlockedWrite::Reply(r))
-                }
-                Poll::Ready(Err(_)) => {
-                    *self = BlockedWriteFuture::Finished;
-                    let r = publisher::From::WriteResult(id, Value::Ok);
-                    Poll::Ready(BlockedWrite::Reply(r))
-                }
-            },
-            BlockedWriteFuture::Finished => Poll::Ready(BlockedWrite::Wrote),
-        }
-    }
-}
+type BlockedWriteFut =
+    Pin<Box<dyn Future<Output = BlockedWrite> + Send + Sync + 'static>>;
 
 struct ClientCtx {
     desired_auth: DesiredAuth,
@@ -327,7 +272,7 @@ struct ClientCtx {
     batch: Vec<publisher::To>,
     write_batches:
         FxHashMap<ChanId, (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>)>,
-    blocked_writes: FuturesUnordered<BlockedWriteFuture>,
+    blocked_writes: FuturesUnordered<BlockedWriteFut>,
     flushing_updates: bool,
     flush_timeout: Option<Duration>,
     deferred_subs: DeferredSubs,
@@ -601,18 +546,25 @@ impl ClientCtx {
     }
 
     fn handle_batch(&mut self, con: &mut WriteChannel) -> Result<()> {
+        use protocol::publisher::From;
         self.handle_batch_inner(con)?;
         if self.write_batches.len() > 0 || self.wait_write_res.len() > 0 {
-            self.blocked_writes.extend(
-                self.write_batches
-                    .drain()
-                    .map(|(_, (batch, sender))| BlockedWriteFuture::Write(sender, batch)),
-            );
-            self.blocked_writes.extend(
-                self.wait_write_res
-                    .drain(..)
-                    .map(|(id, rx)| BlockedWriteFuture::Reply(id, rx)),
-            );
+            self.blocked_writes.extend(self.write_batches.drain().map(
+                |(_, (batch, mut sender))| {
+                    Box::pin(async move {
+                        let _ = sender.send(batch).await;
+                        BlockedWrite::Wrote
+                    }) as BlockedWriteFut
+                },
+            ));
+            self.blocked_writes.extend(self.wait_write_res.drain(..).map(|(id, rx)| {
+                Box::pin(async move {
+                    BlockedWrite::Reply(match rx.await {
+                        Ok(v) => From::WriteResult(id, v),
+                        Err(_) => From::WriteResult(id, Value::Ok),
+                    })
+                }) as BlockedWriteFut
+            }));
         }
         Ok(())
     }
@@ -671,14 +623,13 @@ impl ClientCtx {
         async fn read_from_subscriber(
             con: &mut ReadChannel,
             batch: &mut Vec<publisher::To>,
-            blocked: &mut FuturesUnordered<BlockedWriteFuture>,
+            blocked: &mut FuturesUnordered<BlockedWriteFut>,
         ) -> Result<Option<publisher::From>> {
             loop {
                 if blocked.len() == 0 {
                     con.receive_batch(batch).await?;
                     break Ok(None);
                 } else {
-                    dbg!("waiting for blocked write");
                     if let Some(w) = blocked.next().await {
                         match w {
                             BlockedWrite::Wrote => (),
