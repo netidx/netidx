@@ -19,7 +19,7 @@ pub(super) struct Params {
         long = "bind",
         help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
     )]
-    bind: BindCfg,
+    bind: Option<BindCfg>,
     #[structopt(
         long = "base",
         help = "base path",
@@ -80,13 +80,12 @@ async fn handle_client(con: Connection) -> Result<()> {
 }
 
 async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {
-    let publisher = PublisherBuilder::new()
-        .config(config)
-        .desired_auth(auth)
-        .bind_cfg(p.bind)
-        .build()
-        .await
-        .expect("failed to create publisher");
+    let mut builder = PublisherBuilder::new();
+    builder.config(config).desired_auth(auth);
+    if let Some(b) = p.bind {
+        builder.bind_cfg(p.bind)
+    }
+    let publisher = builder.build().await.expect("failed to create publisher");
     let mut listener = Listener::new(&publisher, 500, None, p.base.clone()).await?;
     loop {
         let client = listener.accept().await?;
