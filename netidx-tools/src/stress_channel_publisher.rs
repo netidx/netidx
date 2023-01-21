@@ -86,7 +86,7 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
         builder.bind_cfg(b);
     }
     let publisher = builder.build().await.expect("failed to create publisher");
-    let mut listener = Listener::new(&publisher, 3, None, p.base.clone()).await?;
+    let mut listener = Listener::new(&publisher, None, p.base.clone()).await?;
     loop {
         let client = listener.accept().await?;
         task::spawn(async move {

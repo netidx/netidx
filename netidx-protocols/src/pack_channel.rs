@@ -84,12 +84,10 @@ pub mod server {
     impl Listener {
         pub async fn new(
             publisher: &Publisher,
-            queue_depth: usize,
             timeout: Option<Duration>,
             path: Path,
         ) -> Result<Self> {
-            let inner =
-                server::Listener::new(publisher, queue_depth, timeout, path).await?;
+            let inner = server::Listener::new(publisher, timeout, path).await?;
             Ok(Self(inner))
         }
 
@@ -139,13 +137,8 @@ pub mod client {
     }
 
     impl Connection {
-        pub async fn connect(
-            subscriber: &Subscriber,
-            queue_depth: usize,
-            path: Path,
-        ) -> Result<Connection> {
-            let inner =
-                client::Connection::connect(subscriber, queue_depth, path).await?;
+        pub async fn connect(subscriber: &Subscriber, path: Path) -> Result<Connection> {
+            let inner = client::Connection::connect(subscriber, path).await?;
             Ok(Connection {
                 inner,
                 buf: Mutex::new(BytesMut::new()),
@@ -220,11 +213,11 @@ mod test {
         Runtime::new().unwrap().block_on(async move {
             let ctx = Ctx::new().await;
             let mut listener =
-                server::Listener::new(&ctx.publisher, 50, None, ctx.base.clone())
+                server::Listener::new(&ctx.publisher, None, ctx.base.clone())
                     .await
                     .unwrap();
             task::spawn(async move {
-                let con = client::Connection::connect(&ctx.subscriber, 50, ctx.base)
+                let con = client::Connection::connect(&ctx.subscriber, ctx.base)
                     .await
                     .unwrap();
                 for i in 0..100u64 {
@@ -246,11 +239,11 @@ mod test {
         Runtime::new().unwrap().block_on(async move {
             let ctx = Ctx::new().await;
             let mut listener =
-                server::Listener::new(&ctx.publisher, 50, None, ctx.base.clone())
+                server::Listener::new(&ctx.publisher, None, ctx.base.clone())
                     .await
                     .unwrap();
             task::spawn(async move {
-                let con = client::Connection::connect(&ctx.subscriber, 50, ctx.base)
+                let con = client::Connection::connect(&ctx.subscriber, ctx.base)
                     .await
                     .unwrap();
                 for _ in 0..100 {

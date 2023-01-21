@@ -65,6 +65,68 @@ pub mod server {
         }
     }
 
+    pub struct Singleton {
+        publisher: Publisher,
+        anchor: Arc<Val>,
+        timeout: Option<Duration>,
+        writes: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    }
+
+    pub async fn singleton(
+        publisher: &Publisher,
+        timeout: Option<Duration>,
+        path: Path,
+    ) -> Result<Singleton> {
+        let val = publisher.publish_with_flags(
+            PublishFlags::ISOLATED,
+            path.clone(),
+            Value::from("connection"),
+        )?;
+        let (tx, rx) = mpsc::channel(5);
+        publisher.writes(val.id(), tx);
+        publisher.flushed().await;
+        Ok(Singleton {
+            publisher: publisher.clone(),
+            timeout,
+            anchor: Arc::new(val),
+            writes: rx,
+        })
+    }
+
+    impl Singleton {
+        pub async fn wait_connected(self) -> Result<Connection> {
+            let mut subscribed = loop {
+                self.publisher.wait_client(self.anchor.id()).await;
+                let subs = self.publisher.subscribed(&self.anchor.id());
+                if subs.len() > 0 {
+                    break subs;
+                }
+            };
+            let con = Connection {
+                publisher: self.publisher,
+                anchor: self.anchor,
+                client: subscribed.pop().unwrap(),
+                dead: AtomicBool::new(false),
+                timeout: self.timeout,
+                receiver: Mutex::new(Receiver {
+                    writes: self.writes,
+                    queued: VecDeque::new(),
+                }),
+            };
+            for _ in 1..3 {
+                let to = Duration::from_secs(3);
+                match time::timeout(to, con.recv_one()).await?? {
+                    Value::String(s) if &*s == "ready" => {
+                        con.send_one(Value::from("ready")).await?
+                    }
+                    Value::String(s) if &*s == "go" => return Ok(con),
+                    _ => (),
+                }
+            }
+            bail!("protocol negotiation failed")
+        }
+    }
+
     pub struct Connection {
         publisher: Publisher,
         anchor: Arc<Val>,
@@ -142,20 +204,18 @@ pub mod server {
         waiting: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
         queued: Pooled<Vec<WriteRequest>>,
         base: Path,
-        queue_depth: usize,
         timeout: Option<Duration>,
     }
 
     impl Listener {
         pub async fn new(
             publisher: &Publisher,
-            queue_depth: usize,
             timeout: Option<Duration>,
             path: Path,
         ) -> Result<Listener> {
             let publisher = publisher.clone();
             let listener = publisher.publish(path.clone(), Value::from("channel"))?;
-            let (tx_waiting, rx_waiting) = mpsc::channel(queue_depth);
+            let (tx_waiting, rx_waiting) = mpsc::channel(50);
             publisher.writes(listener.id(), tx_waiting);
             publisher.flushed().await;
             Ok(Self {
@@ -164,14 +224,11 @@ pub mod server {
                 waiting: rx_waiting,
                 queued: Pooled::orphan(Vec::new()),
                 base: path,
-                queue_depth,
                 timeout,
             })
         }
 
-        pub async fn accept(
-            &mut self,
-        ) -> Result<impl Future<Output = Result<Connection>>> {
+        pub async fn accept(&mut self) -> Result<Singleton> {
             let send_result = loop {
                 if let Some(req) = self.queued.pop() {
                     match &req.value {
@@ -191,48 +248,8 @@ pub mod server {
                 }
             };
             let session = session(&self.base);
-            let queue_depth = self.queue_depth;
-            let val = self.publisher.publish_with_flags(
-                PublishFlags::ISOLATED,
-                session.clone(),
-                Value::from("connection"),
-            )?;
-            let publisher = self.publisher.clone();
-            let timeout = self.timeout;
-            let (tx, rx) = mpsc::channel(queue_depth);
-            publisher.writes(val.id(), tx);
-            Ok(async move {
-                send_result.send(Value::from(session));
-                let mut subscribed = loop {
-                    publisher.wait_client(val.id()).await;
-                    let subs = publisher.subscribed(&val.id());
-                    if subs.len() > 0 {
-                        break subs;
-                    }
-                };
-                let con = Connection {
-                    publisher,
-                    anchor: Arc::new(val),
-                    client: subscribed.pop().unwrap(),
-                    dead: AtomicBool::new(false),
-                    timeout,
-                    receiver: Mutex::new(Receiver {
-                        writes: rx,
-                        queued: VecDeque::new(),
-                    }),
-                };
-                for _ in 1..3 {
-                    let to = Duration::from_secs(3);
-                    match time::timeout(to, con.recv_one()).await?? {
-                        Value::String(s) if &*s == "ready" => {
-                            con.send_one(Value::from("ready")).await?
-                        }
-                        Value::String(s) if &*s == "go" => return Ok(con),
-                        _ => (),
-                    }
-                }
-                bail!("protocol negotiation failed")
-            })
+            send_result.send(Value::from(session.clone()));
+            Ok(singleton(&self.publisher, self.timeout, session).await?)
         }
     }
 }
@@ -294,63 +311,69 @@ pub mod client {
     }
 
     impl Connection {
-        pub async fn connect(
-            subscriber: &Subscriber,
-            queue_depth: usize,
-            path: Path,
-        ) -> Result<Connection> {
+        async fn connect_singleton(subscriber: &Subscriber, path: Path) -> Result<Self> {
             let to = Duration::from_secs(3);
-            let acceptor = subscriber.durable_subscribe(path.clone());
-            let f = acceptor.write_with_recipt(Value::from("connect"));
-            match time::timeout(to, f).await? {
-                Err(_) => bail!("connect failed"),
-                Ok(v @ Value::String(_)) => {
-                    let path = v.cast_to::<Path>()?;
-                    let (tx, rx) = mpsc::channel(queue_depth);
-                    let mut n = 0;
-                    let con = loop {
-                        if n > 7 {
-                            break subscriber
-                                .subscribe_one(path.clone(), Some(to))
-                                .await?;
-                        } else {
-                            match subscriber.subscribe_one(path.clone(), Some(to)).await {
-                                Ok(con) => break con,
-                                Err(_) => {
-                                    n += 1;
-                                    time::sleep(Duration::from_millis(250)).await;
-                                    continue;
-                                }
-                            }
-                        }
-                    };
-                    con.updates(UpdatesFlags::empty(), tx);
-                    let con = Connection {
-                        _subscriber: subscriber.clone(),
-                        con,
-                        dead: AtomicBool::new(false),
-                        dirty: AtomicBool::new(false),
-                        receiver: Mutex::new(Receiver {
-                            updates: rx,
-                            queued: VecDeque::new(),
-                        }),
-                    };
-                    let to = Duration::from_millis(100);
-                    loop {
-                        con.send(Value::from("ready"))?;
-                        match time::timeout(to, con.recv_one()).await {
-                            Err(_) => (),
-                            Ok(Err(e)) => return Err(e),
-                            Ok(Ok(Value::String(s))) if &*s == "ready" => {
-                                con.send(Value::from("go"))?;
-                                break;
-                            }
-                            _ => (),
+            let (tx, rx) = mpsc::channel(5);
+            let mut n = 0;
+            let con = loop {
+                if n > 7 {
+                    break subscriber.subscribe_one(path.clone(), Some(to)).await?;
+                } else {
+                    match subscriber.subscribe_one(path.clone(), Some(to)).await {
+                        Ok(con) => break con,
+                        Err(_) => {
+                            n += 1;
+                            time::sleep(Duration::from_millis(250)).await;
+                            continue;
                         }
                     }
-                    Ok(con)
                 }
-                Ok(_) => bail!("unexpected response from publisher"),
+            };
+            con.updates(UpdatesFlags::empty(), tx);
+            let con = Connection {
+                _subscriber: subscriber.clone(),
+                con,
+                dead: AtomicBool::new(false),
+                dirty: AtomicBool::new(false),
+                receiver: Mutex::new(Receiver { updates: rx, queued: VecDeque::new() }),
+            };
+            let to = Duration::from_millis(100);
+            loop {
+                con.send(Value::from("ready"))?;
+                match time::timeout(to, con.recv_one()).await {
+                    Err(_) => (),
+                    Ok(Err(e)) => return Err(e),
+                    Ok(Ok(Value::String(s))) if &*s == "ready" => {
+                        con.send(Value::from("go"))?;
+                        break;
+                    }
+                    _ => (),
+                }
+            }
+            Ok(con)
+        }
+
+        pub async fn connect(subscriber: &Subscriber, path: Path) -> Result<Self> {
+            let to = Duration::from_secs(3);
+            let acceptor = subscriber.durable_subscribe(path.clone());
+            time::timeout(to, acceptor.wait_subscribed()).await??;
+            match acceptor.last() {
+                Event::Unsubscribed => bail!("connect failed"),
+                Event::Update(Value::String(s)) if &*s == "connection" => {
+                    Self::connect_singleton(subscriber, path).await
+                }
+                Event::Update(Value::String(s)) if &*s == "channel" => {
+                    let f = acceptor.write_with_recipt(Value::from("connect"));
+                    match time::timeout(to, f).await? {
+                        Err(_) => bail!("connect failed"),
+                        Ok(v @ Value::String(_)) => {
+                            let path = v.cast_to::<Path>()?;
+                            Self::connect_singleton(subscriber, path).await
+                        }
+                        Ok(_) => bail!("unexpected response from publisher"),
+                    }
+                }
+                Event::Update(_) => bail!("not a channel or connection"),
             }
         }
 
@@ -460,13 +483,12 @@ pub(crate) mod test {
         Runtime::new().unwrap().block_on(async move {
             let ctx = Ctx::new().await;
             let mut listener =
-                server::Listener::new(&ctx.publisher, 50, None, ctx.base.clone())
+                server::Listener::new(&ctx.publisher, None, ctx.base.clone())
                     .await
                     .unwrap();
             task::spawn(async move {
-                let con = client::Connection::connect(&ctx.subscriber, 50, ctx.base)
-                    .await
-                    .unwrap();
+                let con =
+                    client::Connection::connect(&ctx.subscriber, ctx.base).await.unwrap();
                 for i in 0..100 {
                     con.send(Value::U64(i as u64)).unwrap();
                     match con.recv_one().await.unwrap() {
@@ -475,7 +497,35 @@ pub(crate) mod test {
                     }
                 }
             });
-            let con = listener.accept().await.unwrap().await.unwrap();
+            let con = listener.accept().await.unwrap().wait_connected().await.unwrap();
+            for _ in 0..100 {
+                match con.recv_one().await.unwrap() {
+                    Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
+                    _ => panic!("expected u64"),
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn singleton() {
+        Runtime::new().unwrap().block_on(async move {
+            let ctx = Ctx::new().await;
+            let path = ctx.base.clone();
+            let acceptor =
+                server::singleton(&ctx.publisher, None, ctx.base).await.unwrap();
+            task::spawn(async move {
+                let con =
+                    client::Connection::connect(&ctx.subscriber, path).await.unwrap();
+                for i in 0..100 {
+                    con.send(Value::U64(i as u64)).unwrap();
+                    match con.recv_one().await.unwrap() {
+                        Value::U64(j) => assert_eq!(j, i),
+                        _ => panic!("expected u64"),
+                    }
+                }
+            });
+            let con = acceptor.wait_connected().await.unwrap();
             for _ in 0..100 {
                 match con.recv_one().await.unwrap() {
                     Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
@@ -490,13 +540,13 @@ pub(crate) mod test {
         Runtime::new().unwrap().block_on(async move {
             let ctx = Arc::new(Ctx::new().await);
             let mut listener =
-                server::Listener::new(&ctx.publisher, 3, None, ctx.base.clone())
+                server::Listener::new(&ctx.publisher, None, ctx.base.clone())
                     .await
                     .unwrap();
             let ctx_ = ctx.clone();
             task::spawn(async move {
                 let con =
-                    client::Connection::connect(&ctx_.subscriber, 3, ctx_.base.clone())
+                    client::Connection::connect(&ctx_.subscriber, ctx_.base.clone())
                         .await
                         .unwrap();
                 for i in 0..100 {
@@ -513,7 +563,7 @@ pub(crate) mod test {
             let ctx_ = ctx.clone();
             task::spawn(async move {
                 let con =
-                    client::Connection::connect(&ctx_.subscriber, 3, ctx_.base.clone())
+                    client::Connection::connect(&ctx_.subscriber, ctx_.base.clone())
                         .await
                         .unwrap();
                 for i in 0..100 {
@@ -527,7 +577,7 @@ pub(crate) mod test {
                     }
                 }
             });
-            let con = listener.accept().await.unwrap().await.unwrap();
+            let con = listener.accept().await.unwrap().wait_connected().await.unwrap();
             let (tx, rx) = oneshot::channel();
             task::spawn(async move {
                 for _ in 0..100 {
@@ -539,7 +589,7 @@ pub(crate) mod test {
                 let _ = tx.send(());
             });
             // hang the second connection
-            let _con = listener.accept().await.unwrap().await.unwrap();
+            let _con = listener.accept().await.unwrap().wait_connected().await.unwrap();
             time::timeout(Duration::from_secs(10), rx).await.unwrap().unwrap()
         })
     }
