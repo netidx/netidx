@@ -126,7 +126,7 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
                 }
                 con.send(batch)?;
                 since_flush += 1;
-                if p.latency || since_flush > 100 {
+                if p.latency || since_flush > 10 {
                     flushed = false;
                     since_flush = 0;
                 }
