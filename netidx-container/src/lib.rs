@@ -70,10 +70,9 @@ pub struct Params {
     #[structopt(
         short = "b",
         long = "bind",
-        help = "configure the bind address e.g. local, 192.168.0.0/16, 127.0.0.1:5000",
-        default_value = "local"
+        help = "configure the bind address e.g. local, 192.168.0.0/16, 127.0.0.1:5000"
     )]
-    pub bind: BindCfg,
+    pub bind: Option<BindCfg>,
     #[structopt(
         long = "timeout",
         help = "require subscribers to consume values before timeout (seconds)"
@@ -830,12 +829,12 @@ struct ContainerInner {
 impl ContainerInner {
     async fn new(cfg: Config, auth: DesiredAuth, params: Params) -> Result<Self> {
         let (publish_events_tx, publish_events) = mpsc::unbounded();
-        let publisher = PublisherBuilder::new()
-            .config(cfg.clone())
-            .desired_auth(auth.clone())
-            .bind_cfg(params.bind)
-            .build()
-            .await?;
+        let mut builder = PublisherBuilder::new();
+        builder.config(cfg.clone()).desired_auth(auth.clone());
+        if let Some(b) = params.bind {
+            builder.bind_cfg(b);
+        }
+        let publisher = builder.build().await?;
         publisher.events(publish_events_tx);
         let (db, db_updates) =
             Db::new(&params, publisher.clone(), params.api_path.clone())?;

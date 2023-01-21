@@ -973,7 +973,7 @@ mod publish {
         archive: ArchiveReader,
         resolver: Config,
         desired_auth: DesiredAuth,
-        bind_cfg: BindCfg,
+        bind_cfg: Option<BindCfg>,
         publish_base: Path,
         shards: usize,
         max_sessions: usize,
@@ -981,12 +981,12 @@ mod publish {
     ) -> Result<()> {
         let sessions: Sessions = Sessions::new(max_sessions, max_sessions_per_client);
         let subscriber = Subscriber::new(resolver.clone(), desired_auth.clone())?;
-        let publisher = PublisherBuilder::new()
-            .config(resolver.clone())
-            .desired_auth(desired_auth.clone())
-            .bind_cfg(bind_cfg.clone())
-            .build()
-            .await?;
+        let mut builder = PublisherBuilder::new();
+        builder.config(resolver.clone()).desired_auth(desired_auth.clone());
+        if let Some(b) = bind_cfg {
+            builder.bind_cfg(b);
+        }
+        let publisher = builder.build().await?;
         let (control_tx, control_rx) = mpsc::channel(3);
         let _new_session: Result<Proc> = define_rpc!(
             &publisher,
@@ -1367,7 +1367,7 @@ async fn should_exit() -> Result<()> {
 
 async fn run_async(
     config: Config,
-    publish_args: Option<(BindCfg, Path)>,
+    publish_args: Option<(Option<BindCfg>, Path)>,
     auth: DesiredAuth,
     image_frequency: Option<usize>,
     poll_interval: Option<time::Duration>,
@@ -1463,6 +1463,7 @@ pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
     };
     let publish_args = match (params.bind, params.publish_base) {
         (None, None) => None,
+        (None, Some(publish_base)) => Some((None, publish_base)),
         (Some(bind), Some(publish_base)) => {
             match bind {
                 BindCfg::Match { .. } | BindCfg::Local => (),
@@ -1470,7 +1471,7 @@ pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
                     panic!("exact bindcfgs are not supported for this publisher")
                 }
             }
-            Some((bind, publish_base))
+            Some((Some(bind), publish_base))
         }
         (Some(_), None) | (None, Some(_)) => {
             panic!("you must specify bind and publish_base to publish an archive")

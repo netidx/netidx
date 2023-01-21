@@ -18,7 +18,7 @@ pub(super) struct Params {
         long = "bind",
         help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
     )]
-    bind: BindCfg,
+    bind: Option<BindCfg>,
     #[structopt(
         long = "delay",
         help = "time in ms to wait between batches",
@@ -35,13 +35,12 @@ pub(super) struct Params {
 
 async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) {
     let delay = if p.delay == 0 { None } else { Some(Duration::from_millis(p.delay)) };
-    let publisher = PublisherBuilder::new()
-        .config(config)
-        .desired_auth(auth)
-        .bind_cfg(p.bind)
-        .build()
-        .await
-        .expect("failed to create publisher");
+    let mut builder = PublisherBuilder::new();
+    builder.config(config).desired_auth(auth);
+    if let Some(b) = p.bind {
+        builder.bind_cfg(b);
+    }
+    let publisher = builder.build().await.expect("failed to create publisher");
     let mut sent: usize = 0;
     let mut v = 0u64;
     let published = {

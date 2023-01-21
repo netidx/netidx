@@ -31,10 +31,9 @@ pub(super) struct Params {
     #[structopt(
         short = "b",
         long = "bind",
-        help = "configure the bind address e.g. local, 192.168.0.0/16",
-        default_value = "local"
+        help = "configure the bind address e.g. local, 192.168.0.0/16"
     )]
-    bind: BindCfg,
+    bind: Option<BindCfg>,
     #[structopt(
         short = "u",
         long = "units",
@@ -448,12 +447,12 @@ async fn start_processes(
 }
 
 async fn run_server(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
-    let publisher = PublisherBuilder::new()
-        .config(cfg)
-        .desired_auth(auth)
-        .bind_cfg(params.bind)
-        .build()
-        .await?;
+    let mut builder = PublisherBuilder::new();
+    builder.config(cfg).desired_auth(auth);
+    if let Some(b) = params.bind {
+        builder.bind_cfg(b);
+    }
+    let publisher = builder.build().await?;
     let mut units = Unit::load(params.units.as_ref()).await?;
     let mut processes: HashMap<String, Process> = HashMap::new();
     let mut sighup = signal(SignalKind::hangup())?;
