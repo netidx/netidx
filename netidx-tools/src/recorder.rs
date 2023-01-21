@@ -1473,7 +1473,7 @@ pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
             }
             Some((Some(bind), publish_base))
         }
-        (Some(_), None) | (None, Some(_)) => {
+        (Some(_), None) => {
             panic!("you must specify bind and publish_base to publish an archive")
         }
     };
