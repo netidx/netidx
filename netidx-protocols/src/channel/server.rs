@@ -15,7 +15,8 @@ use std::{
 };
 use tokio::{sync::Mutex, time};
 
-fn session(base: &Path) -> Path {
+/// Generate a random session name ${base}/uuid
+pub fn session(base: &Path) -> Path {
     use uuid::{fmt::Simple, Uuid};
     let id = Uuid::new_v4();
     let mut buf = [0u8; Simple::LENGTH];
@@ -29,6 +30,7 @@ pub struct Batch {
 }
 
 impl Batch {
+    /// queue a value in the batch
     pub fn queue(&mut self, v: Value) {
         self.anchor.update_subscriber(&mut self.queued, self.client, v);
     }
@@ -62,6 +64,8 @@ impl Receiver {
     }
 }
 
+/// This is a single pending connection. You must call wait_connected
+/// to finish the handshake.
 pub struct Singleton {
     publisher: Publisher,
     anchor: Arc<Val>,
@@ -69,6 +73,10 @@ pub struct Singleton {
     writes: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
 }
 
+/// Create a new single connection at path. One client can connect to
+/// this connection, further connection attempts will be ignored. This
+/// is useful for example for returning a channel from an rpc call, in
+/// that case there is no need for a listener.
 pub async fn singleton(
     publisher: &Publisher,
     timeout: Option<Duration>,
@@ -91,6 +99,8 @@ pub async fn singleton(
 }
 
 impl Singleton {
+    /// Wait for the client to connect and return the connection when
+    /// then have done so.
     pub async fn wait_connected(self) -> Result<Connection> {
         let mut subscribed = loop {
             self.publisher.wait_client(self.anchor.id()).await;
@@ -124,6 +134,7 @@ impl Singleton {
     }
 }
 
+/// A bidirectional channel between two endpoints.
 pub struct Connection {
     publisher: Publisher,
     anchor: Arc<Val>,
@@ -134,6 +145,8 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Start a new batch of messages, return the batch. You may fill
+    /// it with the queue method.
     pub fn start_batch(&self) -> Batch {
         Batch {
             anchor: self.anchor.clone(),
@@ -142,6 +155,8 @@ impl Connection {
         }
     }
 
+    /// Return true of the channel has been disconnected. A
+    /// disconnected channel is permanently dead.
     pub fn is_dead(&self) -> bool {
         if !self.publisher.is_subscribed(&self.anchor.id(), &self.client) {
             self.dead.store(true, Ordering::Relaxed);
@@ -149,6 +164,7 @@ impl Connection {
         self.dead.load(Ordering::Relaxed)
     }
 
+    /// Send a batch of message to the other side
     pub async fn send(&self, batch: Batch) -> Result<()> {
         if self.is_dead() {
             bail!("connection is dead")
@@ -156,6 +172,8 @@ impl Connection {
         Ok(batch.queued.commit(self.timeout).await)
     }
 
+    /// Send just one message to the other side. This is less
+    /// efficient than send.
     pub async fn send_one(&self, v: Value) -> Result<()> {
         if self.is_dead() {
             bail!("connection is dead")
@@ -165,6 +183,8 @@ impl Connection {
         Ok(batch.commit(self.timeout).await)
     }
 
+    /// Wait for one message from the other side, and return it when
+    /// it arrives.
     pub async fn recv_one(&self) -> Result<Value> {
         let mut recv = self.receiver.lock().await;
         loop {
@@ -180,6 +200,8 @@ impl Connection {
         }
     }
 
+    /// Receive a batch of messages from the other side and place them
+    /// in the specified data structure.
     pub async fn recv(&self, dst: &mut impl Extend<Value>) -> Result<()> {
         let mut recv = self.receiver.lock().await;
         loop {
@@ -195,6 +217,8 @@ impl Connection {
     }
 }
 
+/// A listener can accept connections from muliple clients and produce
+/// a channel to talk to each one.
 pub struct Listener {
     publisher: Publisher,
     _listener: Val,
@@ -205,6 +229,9 @@ pub struct Listener {
 }
 
 impl Listener {
+    /// Create a new listener at the specified path. The actual
+    /// connections will be randomly generated uuids under the
+    /// specified path.
     pub async fn new(
         publisher: &Publisher,
         timeout: Option<Duration>,
@@ -225,6 +252,8 @@ impl Listener {
         })
     }
 
+    /// Wait for a client to connect, and return a singleton
+    /// connection to the new client.
     pub async fn accept(&mut self) -> Result<Singleton> {
         let send_result = loop {
             if let Some(req) = self.queued.pop() {

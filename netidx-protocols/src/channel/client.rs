@@ -43,6 +43,7 @@ impl Receiver {
     }
 }
 
+/// A connection is a bidirectional channel between two endpoints.
 pub struct Connection {
     _subscriber: Subscriber,
     con: Val,
@@ -94,6 +95,7 @@ impl Connection {
         Ok(con)
     }
 
+    /// Connect to the endpoint at the specified path. This 
     pub async fn connect(subscriber: &Subscriber, path: Path) -> Result<Self> {
         let to = Duration::from_secs(3);
         let acceptor = subscriber.durable_subscribe(path.clone());
