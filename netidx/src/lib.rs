@@ -11,7 +11,7 @@
 //! ```no_run
 //! # fn get_cpu_temp() -> f32 { 42. }
 //! use netidx::{
-//!     publisher::{Publisher, Value, BindCfg, DesiredAuth},
+//!     publisher::{PublisherBuilder, Value, BindCfg, DesiredAuth},
 //!     config::Config,
 //!     path::Path,
 //! };
@@ -23,9 +23,13 @@
 //! // load the site cluster config. You can also just use a file.
 //! let cfg = Config::load_default()?;
 //!
-//! // no authentication (kerberos v5 is the other option)
 //! // listen on any unique address matching 192.168.0.0/16
-//! let publisher = Publisher::new(cfg, DesiredAuth::Anonymous, "192.168.0.0/16".parse()?).await?;
+//! let publisher = PublisherBuilder::new()
+//!     .config(cfg)
+//!     .desired_auth(DesiredAuth::Anonymous)
+//!     .bind_cfg("192.168.0.0/16".parse()?)
+//!     .build()
+//!     .await?;
 //!
 //! let temp = publisher.publish(
 //!     Path::from("/hw/washu-chan/cpu-temp"),
