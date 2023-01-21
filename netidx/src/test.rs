@@ -413,8 +413,9 @@ mod publisher {
         tx: oneshot::Sender<()>,
         auth: DesiredAuth,
     ) {
-        let publisher =
-            Publisher::new(cfg, auth, "127.0.0.1/32".parse().unwrap()).await.unwrap();
+        let publisher = Publisher::new(cfg, auth, "127.0.0.1/32".parse().unwrap(), 768)
+            .await
+            .unwrap();
         let vp = publisher.publish("/app/v0".into(), Value::U64(0)).unwrap();
         publisher.alias(vp.id(), "/app/v1".into()).unwrap();
         let mut dfp: Option<Val> = None;

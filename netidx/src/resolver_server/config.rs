@@ -108,6 +108,7 @@ pub(crate) mod file {
     use std::net::SocketAddr;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(crate) enum Auth {
         Anonymous,
         Krb5(String),
@@ -127,6 +128,7 @@ pub(crate) mod file {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) enum RefAuth {
         Anonymous,
         Krb5(String),
@@ -146,6 +148,7 @@ pub(crate) mod file {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) struct Referral {
         path: String,
         #[serde(default)]
@@ -186,6 +189,7 @@ pub(crate) mod file {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) struct MemberServer {
         pub(super) addr: SocketAddr,
         pub(super) auth: Auth,
@@ -198,6 +202,7 @@ pub(crate) mod file {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) struct Config {
         pub(super) children: Vec<Referral>,
         pub(super) parent: Option<Referral>,

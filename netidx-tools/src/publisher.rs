@@ -9,7 +9,10 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, Id, Publisher, Typ, Val, Value, WriteRequest, DesiredAuth},
+    publisher::{
+        BindCfg, DesiredAuth, Id, Publisher, PublisherBuilder, Typ, Val, Value,
+        WriteRequest,
+    },
     utils,
 };
 use parking_lot::Mutex;
@@ -27,7 +30,7 @@ pub(super) struct Params {
         short = "b",
         long = "bind",
         help = "configure the bind address e.g. local, 192.168.0.0/16",
-        default_value = "local",
+        default_value = "local"
     )]
     bind: BindCfg,
     #[structopt(
@@ -84,8 +87,13 @@ pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
         let mut by_path: HashMap<Path, Arc<Val>> = HashMap::new();
         let by_id: ById =
             Arc::new(Mutex::new(HashMap::with_hasher(FxBuildHasher::default())));
-        let publisher =
-            Publisher::new(config, auth, params.bind).await.expect("creating publisher");
+        let publisher = PublisherBuilder::new()
+            .config(config)
+            .desired_auth(auth)
+            .bind_cfg(params.bind)
+            .build()
+            .await
+            .expect("creating publisher");
         let (writes_tx, writes_rx) = mpsc::channel(100);
         let mut buf = String::new();
         let mut stdin = BufReader::new(stdin());

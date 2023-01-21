@@ -2,6 +2,7 @@ use crate::{
     path::Path,
     pool::Pooled,
     protocol::resolver::{Auth, Referral},
+    publisher,
     subscriber::DesiredAuth,
     tls, utils,
 };
@@ -26,6 +27,7 @@ mod file {
     use std::{collections::BTreeMap, net::SocketAddr};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) enum Auth {
         Anonymous,
         Krb5(String),
@@ -46,6 +48,7 @@ mod file {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) struct TlsIdentity {
         pub trusted: String,
         pub certificate: String,
@@ -53,6 +56,7 @@ mod file {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) struct Tls {
         #[serde(default)]
         pub default_identity: Option<String>,
@@ -62,6 +66,7 @@ mod file {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) struct Config {
         pub(super) base: String,
         pub(super) addrs: Vec<(SocketAddr, Auth)>,
@@ -69,6 +74,8 @@ mod file {
         pub(super) tls: Option<Tls>,
         #[serde(default)]
         pub(super) default_auth: super::DefaultAuthMech,
+        #[serde(default)]
+        pub(super) default_bind_config: Option<String>,
     }
 }
 
@@ -187,6 +194,7 @@ pub struct Config {
     pub addrs: Vec<(SocketAddr, Auth)>,
     pub tls: Option<Tls>,
     pub default_auth: DefaultAuthMech,
+    pub default_bind_config: publisher::BindCfg,
 }
 
 impl Config {
@@ -244,6 +252,10 @@ impl Config {
             addrs: cfg.addrs.into_iter().map(|(s, a)| (s, a.into())).collect(),
             tls,
             default_auth: cfg.default_auth,
+            default_bind_config: match cfg.default_bind_config {
+                None => publisher::BindCfg::default(),
+                Some(s) => s.parse()?,
+            },
         })
     }
 

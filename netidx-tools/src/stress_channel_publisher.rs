@@ -5,7 +5,7 @@ use netidx::{
     config::Config,
     pack::{Pack, PackError},
     path::Path,
-    publisher::{BindCfg, DesiredAuth, Publisher},
+    publisher::{BindCfg, DesiredAuth, PublisherBuilder},
 };
 use netidx_protocols::pack_channel::server::{Connection, Listener};
 use std::time::Duration;
@@ -80,8 +80,13 @@ async fn handle_client(con: Connection) -> Result<()> {
 }
 
 async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {
-    let publisher =
-        Publisher::new(config, auth, p.bind).await.expect("failed to create publisher");
+    let publisher = PublisherBuilder::new()
+        .config(config)
+        .desired_auth(auth)
+        .bind_cfg(p.bind)
+        .build()
+        .await
+        .expect("failed to create publisher");
     let mut listener = Listener::new(&publisher, 500, None, p.base.clone()).await?;
     loop {
         let client = listener.accept().await?;

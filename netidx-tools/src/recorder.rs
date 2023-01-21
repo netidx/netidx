@@ -19,8 +19,8 @@ use netidx::{
         value::FromValue,
     },
     publisher::{
-        self, BindCfg, ClId, PublishFlags, Publisher, UpdateBatch, Val, Value,
-        WriteRequest,
+        self, BindCfg, ClId, PublishFlags, Publisher, PublisherBuilder, UpdateBatch, Val,
+        Value, WriteRequest,
     },
     resolver_client::{ChangeTracker, DesiredAuth, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
@@ -981,9 +981,12 @@ mod publish {
     ) -> Result<()> {
         let sessions: Sessions = Sessions::new(max_sessions, max_sessions_per_client);
         let subscriber = Subscriber::new(resolver.clone(), desired_auth.clone())?;
-        let publisher =
-            Publisher::new(resolver.clone(), desired_auth.clone(), bind_cfg.clone())
-                .await?;
+        let publisher = PublisherBuilder::new()
+            .config(resolver.clone())
+            .desired_auth(desired_auth.clone())
+            .bind_cfg(bind_cfg.clone())
+            .build()
+            .await?;
         let (control_tx, control_rx) = mpsc::channel(3);
         let _new_session: Result<Proc> = define_rpc!(
             &publisher,

@@ -5,7 +5,7 @@ use log::{error, info, warn};
 use netidx::{
     config::Config,
     path::Path,
-    publisher::{BindCfg, DefaultHandle, DesiredAuth, Publisher},
+    publisher::{BindCfg, DefaultHandle, DesiredAuth, Publisher, PublisherBuilder},
 };
 use serde_derive::Deserialize;
 use std::{
@@ -448,7 +448,12 @@ async fn start_processes(
 }
 
 async fn run_server(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
-    let publisher = Publisher::new(cfg, auth, params.bind).await?;
+    let publisher = PublisherBuilder::new()
+        .config(cfg)
+        .desired_auth(auth)
+        .bind_cfg(params.bind)
+        .build()
+        .await?;
     let mut units = Unit::load(params.units.as_ref()).await?;
     let mut processes: HashMap<String, Process> = HashMap::new();
     let mut sighup = signal(SignalKind::hangup())?;

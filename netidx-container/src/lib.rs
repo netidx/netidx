@@ -28,7 +28,7 @@ use netidx::{
     pool::{Pool, Pooled},
     publisher::{
         BindCfg, DefaultHandle, Event as PEvent, Id, PublishFlags, Publisher,
-        UpdateBatch, Val, WriteRequest,
+        PublisherBuilder, UpdateBatch, Val, WriteRequest,
     },
     resolver_client::DesiredAuth,
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags, Value},
@@ -830,7 +830,12 @@ struct ContainerInner {
 impl ContainerInner {
     async fn new(cfg: Config, auth: DesiredAuth, params: Params) -> Result<Self> {
         let (publish_events_tx, publish_events) = mpsc::unbounded();
-        let publisher = Publisher::new(cfg.clone(), auth.clone(), params.bind).await?;
+        let publisher = PublisherBuilder::new()
+            .config(cfg.clone())
+            .desired_auth(auth.clone())
+            .bind_cfg(params.bind)
+            .build()
+            .await?;
         publisher.events(publish_events_tx);
         let (db, db_updates) =
             Db::new(&params, publisher.clone(), params.api_path.clone())?;

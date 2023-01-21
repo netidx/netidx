@@ -2,7 +2,7 @@ use futures::{prelude::*, select};
 use netidx::{
     config::Config,
     path::Path,
-    publisher::{BindCfg, Publisher, Value, DesiredAuth},
+    publisher::{BindCfg, DesiredAuth, PublisherBuilder, Value},
 };
 use std::{
     mem,
@@ -25,11 +25,7 @@ pub(super) struct Params {
         default_value = "100"
     )]
     delay: u64,
-    #[structopt(
-        long = "base",
-        help = "base path",
-        default_value = "/bench"
-    )]
+    #[structopt(long = "base", help = "base path", default_value = "/bench")]
     base: String,
     #[structopt(name = "rows", default_value = "100")]
     rows: usize,
@@ -39,8 +35,13 @@ pub(super) struct Params {
 
 async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) {
     let delay = if p.delay == 0 { None } else { Some(Duration::from_millis(p.delay)) };
-    let publisher =
-        Publisher::new(config, auth, p.bind).await.expect("failed to create publisher");
+    let publisher = PublisherBuilder::new()
+        .config(config)
+        .desired_auth(auth)
+        .bind_cfg(p.bind)
+        .build()
+        .await
+        .expect("failed to create publisher");
     let mut sent: usize = 0;
     let mut v = 0u64;
     let published = {
