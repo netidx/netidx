@@ -2,25 +2,26 @@ use super::{
     ClId, Client, Event, PublisherInner, PublisherWeak, SendResult, Update, WriteRequest,
     BATCHES,
 };
-pub use crate::protocol::{
-    publisher::Id,
-    value::{FromValue, Typ, Value},
-};
-pub use crate::resolver_client::DesiredAuth;
 use crate::{
     channel::{self, Channel, K5CtxWrap, ReadChannel, WriteChannel},
     chars::Chars,
     pack::BoundedBytes,
     path::Path,
     pool::Pooled,
-    protocol::{self, publisher},
+    protocol::{
+        self,
+        publisher::{self, Id},
+        value::Value,
+    },
+    resolver_client::DesiredAuth,
     resolver_server::{auth::Permissions, krb5_authentication},
     tls,
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
+use arcstr::ArcStr;
 use bytes::Bytes;
-use cross_krb5::ServerCtx;
+use cross_krb5::{K5ServerCtx, ServerCtx};
 use futures::{
     channel::{
         mpsc::{channel, Receiver, Sender},
@@ -321,6 +322,15 @@ impl ClientCtx {
         }
     }
 
+    fn set_user(&mut self, user: String) {
+        if let Some(pb) = self.publisher.upgrade() {
+            let mut t = pb.0.lock();
+            if let Some(ci) = t.clients.get_mut(&self.client) {
+                ci.user = Some(ArcStr::from(user));
+            }
+        }
+    }
+
     // CR estokes: Implement periodic rekeying to improve security
     async fn hello(&mut self, mut con: TcpStream) -> Result<Channel> {
         use protocol::publisher::Hello;
@@ -352,7 +362,9 @@ impl ClientCtx {
                 }
                 DesiredAuth::Krb5 { upn: _, spn } => {
                     let spn = spn.as_ref().map(|s| s.as_str());
-                    let ctx = krb5_authentication(HELLO_TIMEOUT, spn, &mut con).await?;
+                    let mut ctx =
+                        krb5_authentication(HELLO_TIMEOUT, spn, &mut con).await?;
+                    self.set_user(ctx.client()?);
                     let mut con = Channel::new(Some(K5CtxWrap::new(ctx)), con);
                     con.send_one(&Hello::Krb5).await?;
                     self.client_arrived();
@@ -373,6 +385,15 @@ impl ClientCtx {
                         tls.load(identity.as_ref().map(|s| s.as_str()))
                     })?;
                     let tls = time::timeout(HELLO_TIMEOUT, ctx.accept(con)).await??;
+                    let user = match tls.get_ref().1.peer_certificates() {
+                        Some([cert, ..]) => tls::get_common_name(&cert.0)?,
+                        Some(_) | None => {
+                            bail!("tls handshake should be complete by now")
+                        }
+                    };
+                    if let Some(user) = user {
+                        self.set_user(user);
+                    }
                     let mut con = Channel::new::<
                         ServerCtx,
                         tokio_rustls::server::TlsStream<TcpStream>,
@@ -711,6 +732,7 @@ pub(super) async fn start(
                         pb.clients.insert(clid, Client {
                             msg_queue: tx,
                             subscribed: HashMap::default(),
+                            user: None,
                         });
                         let desired_auth = desired_auth.clone();
                         let tls_ctx = tls_ctx.clone();

@@ -15,6 +15,7 @@ use crate::{
     utils::{self, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
+use arcstr::ArcStr;
 use futures::{
     channel::{
         mpsc::{unbounded, Sender, UnboundedReceiver, UnboundedSender},
@@ -660,6 +661,7 @@ impl UpdateBatch {
 struct Client {
     msg_queue: MsgQ,
     subscribed: FxHashMap<Id, Permissions>,
+    user: Option<ArcStr>,
 }
 
 pub struct Published {
@@ -1301,6 +1303,18 @@ impl Publisher {
             Some(p) => p.subscribed.contains(client),
             None => false,
         }
+    }
+
+    /// Return the user associated with the specified client id.  If
+    /// the authentication mechanism is Krb5 then this will be the
+    /// remote user's user principal name, e.g. eric@RYU-OH.ORG on
+    /// posix systems. If the auth mechanism is tls, then this will be
+    /// the common name of the user's certificate.
+    ///
+    /// This will always be None if the auth mechanism is Local or
+    /// Anonymous.
+    pub fn user(&self, client: &ClId) -> Option<ArcStr> {
+        self.0.lock().clients.get(client).and_then(|c| c.user.clone())
     }
 
     /// Get the number of clients subscribed to a published `Val`
