@@ -68,6 +68,7 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
     let mut last_stat = Instant::now();
     let mut flushed = true;
     let mut delayed = false;
+    let mut since_flush = 0;
     loop {
         select_biased! {
             now = interval.tick().fuse() => {
@@ -124,7 +125,11 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
                     batch.queue(&(i as u64))?;
                 }
                 con.send(batch)?;
-                flushed = false;
+                since_flush += 1;
+                if p.latency || since_flush > 100 {
+                    flushed = false;
+                    since_flush = 0;
+                }
                 if delay.is_some() {
                     delayed = true;
                 }
