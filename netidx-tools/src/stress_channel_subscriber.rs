@@ -61,7 +61,7 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
     let subscriber = Subscriber::new(config, auth)?;
     let mut interval = time::interval(Duration::from_secs(1));
     let mut delay_interval = time::interval(delay.unwrap_or(Duration::from_secs(1)));
-    let con = Arc::new(Connection::connect(&subscriber, 500, p.base.clone()).await?);
+    let con = Arc::new(Connection::connect(&subscriber, p.base.clone()).await?);
     let mut sum = 0;
     let mut total = 0;
     let mut latency = Histogram::<u64>::new_with_bounds(10, 1_000_000_000, 3)?;
