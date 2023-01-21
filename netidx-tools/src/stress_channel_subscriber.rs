@@ -36,12 +36,8 @@ pub(super) struct Params {
     batch: usize,
 }
 
-async fn can_send(flushed: bool, delay: Option<Duration>) {
-    if flushed {
-        if let Some(duration) = delay {
-            time::sleep(duration).await
-        }
-    } else {
+async fn can_send(flushed: bool, delayed: bool) {
+    if !flushed || delayed {
         future::pending().await
     }
 }
@@ -63,13 +59,15 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
         Some(Duration::from_micros(p.delay))
     };
     let subscriber = Subscriber::new(config, auth)?;
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let mut interval = time::interval(Duration::from_secs(1));
+    let mut delay_interval = time::interval(delay.unwrap_or(Duration::from_secs(1)));
     let con = Arc::new(Connection::connect(&subscriber, 500, p.base.clone()).await?);
     let mut sum = 0;
     let mut total = 0;
     let mut latency = Histogram::<u64>::new_with_bounds(10, 1_000_000_000, 3)?;
     let mut last_stat = Instant::now();
     let mut flushed = true;
+    let mut delayed = false;
     loop {
         select_biased! {
             now = interval.tick().fuse() => {
@@ -113,14 +111,23 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
                 r?;
                 flushed = true;
             },
-            () = can_send(flushed, delay).fuse() => {
+            _ = delay_interval.tick().fuse() => {
+                delayed = false;
+            },
+            () = can_send(flushed, delayed).fuse() => {
                 let mut batch = con.start_batch();
-                batch.queue(&BatchHeader { timestamp: Utc::now(), count: p.batch as u32 })?;
+                batch.queue(&BatchHeader {
+                    timestamp: Utc::now(),
+                    count: p.batch as u32
+                })?;
                 for i in 0..p.batch {
                     batch.queue(&(i as u64))?;
                 }
                 con.send(batch)?;
                 flushed = false;
+                if delay.is_some() {
+                    delayed = true;
+                }
             }
         }
     }

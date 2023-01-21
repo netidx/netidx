@@ -563,51 +563,54 @@ impl ConnectionCtx {
         write_con: &mut WriteChannel,
     ) -> Result<()> {
         async fn read_batch(
-            blocked: bool,
             batches: &mut Receiver<Result<(Pooled<Vec<From>>, bool)>>,
+            blocked: &mut FuturesUnordered<BlockedChannelFut>,
         ) -> Option<Result<(Pooled<Vec<From>>, bool)>> {
-            if blocked {
-                future::pending().await
-            } else {
-                batches.next().await
+            loop {
+                if blocked.len() > 0 {
+                    let _: Option<_> = blocked.next().await;
+                } else {
+                    break batches.next().await;
+                }
             }
         }
-        async fn flush(con: &mut WriteChannel) -> Result<()> {
+        async fn flush(
+            con: &mut WriteChannel,
+            pending: &mut Vec<oneshot::Sender<()>>,
+        ) -> Result<()> {
+            let mut flushed = || {
+                for s in pending.drain(..) {
+                    let _ = s.send(());
+                }
+            };
             if con.bytes_queued() == 0 {
+                flushed();
                 future::pending().await
             } else {
-                con.flush().await
-            }
-        }
-        async fn blocked(blocked: &mut FuturesUnordered<BlockedChannelFut>) {
-            if blocked.len() == 0 {
-                future::pending().await
-            } else {
-                let _ = blocked.next().await;
+                con.flush().await?;
+                flushed();
+                Ok(())
             }
         }
         let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD);
         loop {
-            let is_blocked = self.blocked_channels.len() > 0;
             select_biased! {
-                r = flush(write_con).fuse() => {
-                    try_cf!(r);
-                    for s in self.pending_flushes.drain(..) {
-                        let _ = s.send(());
-                    }
-                }
+                r = flush(write_con, &mut self.pending_flushes).fuse() => r?,
                 now = periodic.tick().fuse() => self.handle_heartbeat(now)?,
                 batch = self.from_sub.recv().fuse() => match batch {
                     Some(batch) => self.handle_from_sub(write_con, batch)?,
                     None => bail!("dropped"),
                 },
-                () = blocked(&mut self.blocked_channels).fuse() => (),
-                r = read_batch(is_blocked, &mut batches).fuse() => match r {
+                r = read_batch(
+                    &mut batches,
+                    &mut self.blocked_channels
+                ).fuse() => match r {
                     Some(Ok((batch, true))) => {
                         self.msg_recvd = true;
                         self.process_updates_batch(batch);
                     },
-                    Some(Ok((batch, false))) => self.handle_updates(write_con, batch)?,
+                    Some(Ok((batch, false))) =>
+                        self.handle_updates(write_con, batch)?,
                     Some(Err(e)) => break Err(Error::from(e)),
                     None => break Err(anyhow!("EOF")),
                 }
