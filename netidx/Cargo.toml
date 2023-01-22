@@ -48,7 +48,3 @@ webpki = "0.22"
 x509-parser = "0.14"
 pkcs8 = { version = "0.9", features = ["pem", "encryption"] }
 keyring = "1"
-chrono = { version = "^0.4.23", features = ["serde"] }
-
-[dev-dependencies]
-proptest = "1"
