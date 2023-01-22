@@ -377,7 +377,12 @@ impl ConnectionCtx {
                     self.handle_connect_stream(id, sub_id, tx, flags)?
                 }
                 ToCon::Write(id, v, tx) => {
-                    write_con.queue_send(&To::Write(id, v, tx.is_some()))?;
+                    match v {
+                        Value::Bytes(v) => {
+                            write_con.queue_send_zero_copy_write(id, tx.is_some(), v)?
+                        }
+                        v => write_con.queue_send(&To::Write(id, tx.is_some(), v))?,
+                    }
                     if let Some(tx) = tx {
                         self.pending_writes
                             .entry(id)
@@ -583,7 +588,7 @@ impl ConnectionCtx {
                     let _ = s.send(());
                 }
             };
-            if con.bytes_queued() == 0 {
+            if !con.has_queued() {
                 flushed();
                 future::pending().await
             } else {

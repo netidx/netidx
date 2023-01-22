@@ -398,7 +398,7 @@ mod publisher {
                 }
             ),
             any::<u64>().prop_map(|i| To::Unsubscribe(Id::mk(i))),
-            (any::<u64>(), value(), any::<bool>()).prop_map(|(i, v, r)| To::Write(
+            (any::<u64>(), any::<bool>(), value()).prop_map(|(i, v, r)| To::Write(
                 Id::mk(i),
                 v,
                 r

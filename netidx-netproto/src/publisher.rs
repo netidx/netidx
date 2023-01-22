@@ -113,7 +113,7 @@ pub enum To {
     /// to the value, or it doesn't exist.
     Unsubscribe(Id),
     /// Send a write to the specified value.
-    Write(Id, Value, bool),
+    Write(Id, bool, Value),
 }
 
 impl Pack for To {
@@ -128,10 +128,10 @@ impl Pack for To {
                         + Pack::encoded_len(token)
                 }
                 To::Unsubscribe(id) => Pack::encoded_len(id),
-                To::Write(id, v, reply) => {
+                To::Write(id, reply, v) => {
                     Pack::encoded_len(id)
-                        + Pack::encoded_len(v)
                         + Pack::encoded_len(reply)
+                        + Pack::encoded_len(v)
                 }
             },
         )
@@ -154,8 +154,8 @@ impl Pack for To {
             To::Write(id, v, reply) => {
                 buf.put_u8(2);
                 Pack::encode(id, buf)?;
-                Pack::encode(v, buf)?;
-                Pack::encode(reply, buf)
+                Pack::encode(reply, buf)?;
+                Pack::encode(v, buf)
             }
         })
     }
@@ -283,5 +283,113 @@ impl Pack for From {
             }
             _ => Err(PackError::UnknownTag),
         })
+    }
+}
+
+// This allows encoding the header of a From::Update with a
+// Value::Bytes without copying the actual bytes buffer. It will
+// decode as a From::Update(id, Value::Bytes(..))
+pub struct ZeroCopyUpdate {
+    pub id: Id,
+    pub update: Bytes,
+}
+
+impl Pack for ZeroCopyUpdate {
+    fn encoded_len(&self) -> usize {
+        len_wrapped_len(
+            // our enum tag
+            // id len
+            // value enum tag
+            // update length
+            1 + Pack::encoded_len(&self.id) + 1 + Pack::encoded_len(&self.update),
+        )
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        len_wrapped_encode(buf, self, |buf| {
+            buf.put_u8(4); // From::Update
+            Pack::encode(&self.id, buf)?;
+            buf.put_u8(13); // Value::Bytes
+            Ok(())
+            // now you put the raw buffer on the wire
+        })
+    }
+
+    fn decode(_buf: &mut impl Buf) -> Result<Self> {
+        unreachable!("this will never be decoded")
+    }
+}
+
+// This allows encoding the header of a To::Write with a
+// Value::Bytes without copying the actual bytes buffer. It will
+// decode as a To::Write(id, reply, Value::Bytes(..))
+pub struct ZeroCopyWrite {
+    pub id: Id,
+    pub reply: bool,
+    pub update: Bytes,
+}
+
+impl Pack for ZeroCopyWrite {
+    fn encoded_len(&self) -> usize {
+        len_wrapped_len(
+            // our enum tag
+            // id len
+            // reply len
+            // value enum tag
+            // update length
+            1 + Pack::encoded_len(&self.id)
+                + Pack::encoded_len(&self.reply)
+                + 1
+                + Pack::encoded_len(&self.update),
+        )
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        len_wrapped_encode(buf, self, |buf| {
+            buf.put_u8(2); // To::Write
+            Pack::encode(&self.id, buf)?;
+            Pack::encode(&self.reply, buf)?;
+            buf.put_u8(13); // Value::Bytes
+            Ok(())
+            // now you put the raw buffer on the wire
+        })
+    }
+
+    fn decode(_buf: &mut impl Buf) -> Result<Self> {
+        unreachable!("this will never be decoded")
+    }
+}
+
+// This allows encoding the header of a To::Write with a
+// Value::Bytes without copying the actual bytes buffer. It will
+// decode as a To::Write(id, reply, Value::Bytes(..))
+pub struct ZeroCopyWriteResult {
+    pub id: Id,
+    pub update: Bytes,
+}
+
+impl Pack for ZeroCopyWriteResult {
+    fn encoded_len(&self) -> usize {
+        len_wrapped_len(
+            // our enum tag
+            // id len
+            // value enum tag
+            // update length
+            1 + Pack::encoded_len(&self.id) + 1 + Pack::encoded_len(&self.update),
+        )
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
+        len_wrapped_encode(buf, self, |buf| {
+            buf.put_u8(6); // To::WriteResult
+            Pack::encode(&self.id, buf)?;
+            buf.put_u8(13); // Value::Bytes
+            Ok(())
+            // now you put the raw buffer on the wire
+        })
+    }
+
+    fn decode(_buf: &mut impl Buf) -> Result<Self> {
+        unreachable!("this will never be decoded")
     }
 }
