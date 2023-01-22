@@ -377,11 +377,12 @@ impl ConnectionCtx {
                     self.handle_connect_stream(id, sub_id, tx, flags)?
                 }
                 ToCon::Write(id, v, tx) => {
+                    let reply = tx.is_some();
                     match v {
                         Value::Bytes(v) => {
-                            write_con.queue_send_zero_copy_write(id, tx.is_some(), v)?
+                            write_con.queue_send_zero_copy_write(id, reply, v)?
                         }
-                        v => write_con.queue_send(&To::Write(id, tx.is_some(), v))?,
+                        v => write_con.queue_send(&To::Write(id, reply, v))?,
                     }
                     if let Some(tx) = tx {
                         self.pending_writes

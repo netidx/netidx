@@ -122,36 +122,6 @@ enum ToFlush {
     ZeroCopy(Chain<Bytes, Bytes>),
 }
 
-impl Buf for ToFlush {
-    fn advance(&mut self, cnt: usize) {
-        match self {
-            ToFlush::Normal(b) => b.advance(cnt),
-            ToFlush::ZeroCopy(b) => b.advance(cnt),
-        }
-    }
-
-    fn chunk(&self) -> &[u8] {
-        match self {
-            ToFlush::Normal(b) => b.chunk(),
-            ToFlush::ZeroCopy(b) => b.chunk(),
-        }
-    }
-
-    fn remaining(&self) -> usize {
-        match self {
-            ToFlush::Normal(b) => b.remaining(),
-            ToFlush::ZeroCopy(b) => b.remaining(),
-        }
-    }
-
-    fn copy_to_bytes(&mut self, len: usize) -> bytes::Bytes {
-        match self {
-            ToFlush::Normal(b) => b.copy_to_bytes(len),
-            ToFlush::ZeroCopy(b) => b.copy_to_bytes(len),
-        }
-    }
-}
-
 fn flush_task<
     C: K5Ctx + Debug + Send + Sync + 'static,
     S: AsyncWrite + Send + 'static,
@@ -166,7 +136,14 @@ fn flush_task<
             match rx.next().await {
                 None => break Ok(()),
                 Some(data) => match ctx {
-                    None => try_cf!(flush_buf(&mut soc, data, false).await),
+                    None => match data {
+                        ToFlush::Normal(b) => {
+                            try_cf!(flush_buf(&mut soc, b, false).await)
+                        }
+                        ToFlush::ZeroCopy(b) => {
+                            try_cf!(flush_buf(&mut soc, b, false).await)
+                        }
+                    },
                     Some(ref ctx) => {
                         let data = match data {
                             ToFlush::Normal(b) => b,
@@ -217,13 +194,13 @@ impl WriteChannel {
         if len > MAX_BATCH as usize {
             return Err(anyhow!("message length {} exceeds max size {}", len, MAX_BATCH));
         }
-        if self.buf.len() + len > MAX_BATCH {
+        if self.buf.remaining() + len > MAX_BATCH {
             self.chunks.push_back(ToFlush::Normal(self.buf.split()));
         }
         if self.buf.remaining_mut() < len {
             self.buf.reserve(self.buf.capacity());
         }
-        let buf_len = self.buf.len();
+        let buf_len = self.buf.remaining();
         match msg.encode(&mut self.buf) {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -238,7 +215,7 @@ impl WriteChannel {
         hdr: T,
         get: F,
     ) -> Result<()> {
-        if self.buf.len() > 0 {
+        if self.buf.remaining() > 0 {
             self.chunks.push_back(ToFlush::Normal(self.buf.split()));
         }
         if let Err(e) = hdr.encode(&mut self.buf) {
@@ -247,11 +224,11 @@ impl WriteChannel {
         }
         let update = get(hdr);
         let hdr = self.buf.split().freeze();
-        if update.len() + hdr.len() > MAX_BATCH {
+        if update.remaining() + hdr.remaining() > MAX_BATCH {
             bail!("message is too large")
         }
         self.chunks.push_back(ToFlush::ZeroCopy(hdr.chain(update)));
-        Ok(())
+        unimplemented!()
     }
 
     pub(crate) fn queue_send_zero_copy_update(
@@ -293,14 +270,14 @@ impl WriteChannel {
 
     /// Return the number of bytes queued for sending.
     pub(crate) fn has_queued(&self) -> bool {
-        self.buf.len() > 0 || self.chunks.len() > 0
+        self.buf.has_remaining() || !self.chunks.is_empty()
     }
 
     /// Initiate sending all outgoing messages. The actual send will
     /// be done on a background task. If there is sufficient room in
     /// the buffer flush will complete immediately.
     pub(crate) async fn flush(&mut self) -> Result<()> {
-        if self.buf.len() > 0 {
+        if self.buf.remaining() > 0 {
             self.chunks.push_back(ToFlush::Normal(self.buf.split()));
         }
         while let Some(chunk) = self.chunks.pop_front() {
@@ -315,7 +292,7 @@ impl WriteChannel {
     /// channel is full. Return true if all data was flushed,
     /// otherwise false.
     pub(crate) fn try_flush(&mut self) -> Result<bool> {
-        if self.buf.len() > 0 {
+        if self.buf.remaining() > 0 {
             self.chunks.push_back(ToFlush::Normal(self.buf.split()));
         }
         while let Some(chunk) = self.chunks.pop_front() {
