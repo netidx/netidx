@@ -456,7 +456,7 @@ mod publisher {
                 mut batch = rx.select_next_some() => {
                     let mut ub = publisher.start_batch();
                     for req in batch.drain(..) {
-                        vp.update(&mut ub, dbg!(req.value));
+                        vp.update(&mut ub, req.value);
                     }
                     ub.commit(None).await;
                 }
@@ -494,13 +494,13 @@ mod publisher {
                 None => panic!("publisher died"),
                 Some(mut batch) => {
                     for (_, v) in batch.drain(..) {
-                        match dbg!(v) {
+                        match v {
                             Event::Update(Value::U64(v)) => {
                                 assert_eq!(c, v);
                                 c += 1;
                                 vs.write(Value::U64(c));
                             }
-                            v => panic!("unexpected value from publisher {:?}", v),
+                            _ => panic!("unexpected value from publisher"),
                         }
                     }
                 }
