@@ -95,7 +95,8 @@ impl Connection {
         Ok(con)
     }
 
-    /// Connect to the endpoint at the specified path. This 
+    /// Connect to the endpoint at the specified path. The endpoint
+    /// may be either a listener or a singleton.
     pub async fn connect(subscriber: &Subscriber, path: Path) -> Result<Self> {
         let to = Duration::from_secs(3);
         let acceptor = subscriber.durable_subscribe(path.clone());
@@ -120,6 +121,7 @@ impl Connection {
         }
     }
 
+    /// Return true if the connection is dead.
     pub fn is_dead(&self) -> bool {
         self.dead.load(Ordering::Relaxed)
     }
@@ -130,16 +132,22 @@ impl Connection {
         })
     }
 
+    /// Send the specified value to the other side. Note, the value
+    /// will start it's journey immediatly, there is no need to call
+    /// flush unless you want pushback.
     pub fn send(&self, v: Value) -> Result<()> {
         self.check_dead()?;
         self.dirty.store(true, Ordering::Relaxed);
         Ok(self.con.write(v))
     }
 
+    /// True if you have sent values, but have not called flush.
     pub fn dirty(&self) -> bool {
         self.dirty.load(Ordering::Relaxed)
     }
 
+    /// Wait for previously sent values to be flushed out to os
+    /// buffers.
     pub async fn flush(&self) -> Result<()> {
         self.check_dead()?;
         let r = self.con.flush().await.map_err(|_| {
@@ -150,6 +158,8 @@ impl Connection {
         r
     }
 
+    /// Wait for a value to arrive from the other side and return it
+    /// when it does.
     pub async fn recv_one(&self) -> Result<Value> {
         let mut recv = self.receiver.lock().await;
         loop {
@@ -163,6 +173,8 @@ impl Connection {
         }
     }
 
+    /// Wait for a batch of values to arrive from the other side and
+    /// put them in the specified data structure.
     pub async fn recv(&self, dst: &mut impl Extend<Value>) -> Result<()> {
         let mut recv = self.receiver.lock().await;
         loop {
