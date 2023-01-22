@@ -1,6 +1,6 @@
 [package]
 name = "netidx-archive"
-version = "0.16.0"
+version = "0.15.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 homepage = "https://netidx.github.io/netidx-book/"
@@ -16,7 +16,7 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 anyhow = "1"
-netidx = { path = "../netidx", version = "^0.16", default_features = false }
+netidx = { path = "../netidx", version = "^0.15", default_features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"] }
 bytes = "1"
 fs3 = "0.5"

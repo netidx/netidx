@@ -518,7 +518,7 @@ impl ClientCtx {
                         },
                     }
                 }
-                Write(id, r, v) => write(
+                Write(id, v, r) => write(
                     &mut *pb,
                     con,
                     self.client,
@@ -576,12 +576,7 @@ impl ClientCtx {
     ) -> Result<()> {
         use publisher::To;
         for m in up.updates.drain(..) {
-            match m {
-                publisher::From::Update(id, Value::Bytes(b)) => {
-                    con.queue_send_zero_copy_update(id, b)?
-                }
-                m => con.queue_send(&m)?
-            }
+            con.queue_send(&m)?
         }
         if let Some(usubs) = &mut up.unsubscribes {
             for id in usubs.drain(..) {
@@ -591,7 +586,7 @@ impl ClientCtx {
         if self.batch.len() > 0 {
             self.handle_batch(con)?;
         }
-        if con.has_queued() {
+        if con.bytes_queued() > 0 {
             self.flushing_updates = true;
             self.flush_timeout = timeout;
             self.msg_sent = true;
@@ -605,7 +600,7 @@ impl ClientCtx {
         mut updates: Receiver<(Option<Duration>, Update)>,
     ) -> Result<()> {
         async fn flush(c: &mut WriteChannel, timeout: Option<Duration>) -> Result<()> {
-            if c.has_queued() {
+            if c.bytes_queued() > 0 {
                 if let Some(timeout) = timeout {
                     c.flush_timeout(timeout).await
                 } else {
@@ -669,10 +664,6 @@ impl ClientCtx {
                 ).fuse() => match r {
                     Err(e) => return Err(Error::from(e)),
                     Ok(None) => self.handle_batch(&mut write_con)?,
-                    Ok(Some(publisher::From::WriteResult(id, Value::Bytes(b)))) => {
-                        write_con.queue_send_zero_copy_write_result(id, b)?;
-                        self.msg_sent = true;
-                    }
                     Ok(Some(m)) => {
                         write_con.queue_send(&m)?;
                         self.msg_sent = true;

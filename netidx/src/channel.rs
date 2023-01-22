@@ -1,26 +1,20 @@
-use crate::{
-    pack::Pack,
-    protocol::publisher::{Id, ZeroCopyUpdate, ZeroCopyWrite, ZeroCopyWriteResult},
-    utils,
-};
+use crate::{pack::Pack, utils};
 use anyhow::{anyhow, Error, Result};
 use byteorder::{BigEndian, ByteOrder};
-use bytes::{buf::Chain, Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use cross_krb5::K5Ctx;
 use futures::{
     channel::{
         mpsc::{self, Receiver, Sender},
         oneshot,
     },
+    future,
     prelude::*,
     select_biased, stream,
 };
 use log::info;
 use parking_lot::Mutex;
-use std::{
-    clone::Clone, collections::VecDeque, fmt::Debug, mem, ops::Deref, sync::Arc,
-    time::Duration,
-};
+use std::{clone::Clone, fmt::Debug, mem, ops::Deref, sync::Arc, time::Duration};
 use tokio::{
     io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
     task, time,
@@ -117,65 +111,21 @@ async fn flush_buf<B: Buf, S: AsyncWrite + Send + 'static>(
     Ok(())
 }
 
-enum ToFlush {
-    Normal(BytesMut),
-    ZeroCopy(Chain<Bytes, Bytes>),
-}
-
-impl Buf for ToFlush {
-    fn advance(&mut self, cnt: usize) {
-        match self {
-            ToFlush::Normal(b) => b.advance(cnt),
-            ToFlush::ZeroCopy(b) => b.advance(cnt),
-        }
-    }
-
-    fn chunk(&self) -> &[u8] {
-        match self {
-            ToFlush::Normal(b) => b.chunk(),
-            ToFlush::ZeroCopy(b) => b.chunk(),
-        }
-    }
-
-    fn remaining(&self) -> usize {
-        match self {
-            ToFlush::Normal(b) => b.remaining(),
-            ToFlush::ZeroCopy(b) => b.remaining(),
-        }
-    }
-
-    fn copy_to_bytes(&mut self, len: usize) -> bytes::Bytes {
-        match self {
-            ToFlush::Normal(b) => b.copy_to_bytes(len),
-            ToFlush::ZeroCopy(b) => b.copy_to_bytes(len),
-        }
-    }
-}
-
 fn flush_task<
     C: K5Ctx + Debug + Send + Sync + 'static,
     S: AsyncWrite + Send + 'static,
 >(
     ctx: Option<K5CtxWrap<C>>,
     mut soc: WriteHalf<S>,
-) -> Sender<ToFlush> {
-    let (tx, mut rx): (Sender<ToFlush>, Receiver<ToFlush>) = mpsc::channel(3);
+) -> Sender<BytesMut> {
+    let (tx, mut rx): (Sender<BytesMut>, Receiver<BytesMut>) = mpsc::channel(3);
     task::spawn(async move {
-        let mut copybuf = BytesMut::new();
         let res = loop {
             match rx.next().await {
                 None => break Ok(()),
                 Some(data) => match ctx {
                     None => try_cf!(flush_buf(&mut soc, data, false).await),
                     Some(ref ctx) => {
-                        let data = match data {
-                            ToFlush::Normal(b) => b,
-                            ToFlush::ZeroCopy(b) => {
-                                // *sigh* kerberos
-                                copybuf.extend(b);
-                                copybuf.split()
-                            }
-                        };
                         let msg = try_cf!(task::block_in_place(|| ctx
                             .lock()
                             .wrap_iov(true, data)));
@@ -190,9 +140,9 @@ fn flush_task<
 }
 
 pub(crate) struct WriteChannel {
-    to_flush: Sender<ToFlush>,
+    to_flush: Sender<BytesMut>,
     buf: BytesMut,
-    chunks: VecDeque<ToFlush>,
+    boundries: Vec<usize>,
 }
 
 impl WriteChannel {
@@ -206,7 +156,7 @@ impl WriteChannel {
         WriteChannel {
             to_flush: flush_task(ctx, socket),
             buf: BytesMut::with_capacity(BUF),
-            chunks: VecDeque::new(),
+            boundries: Vec::new(),
         }
     }
 
@@ -217,71 +167,27 @@ impl WriteChannel {
         if len > MAX_BATCH as usize {
             return Err(anyhow!("message length {} exceeds max size {}", len, MAX_BATCH));
         }
-        if self.buf.len() + len > MAX_BATCH {
-            self.chunks.push_back(ToFlush::Normal(self.buf.split()));
-        }
         if self.buf.remaining_mut() < len {
             self.buf.reserve(self.buf.capacity());
         }
-        let buf_len = self.buf.len();
+        let buf_len = self.buf.remaining();
+        if (buf_len - self.boundries.last().copied().unwrap_or(0)) + len > MAX_BATCH {
+            let prev_len: usize = self.boundries.iter().sum();
+            self.boundries.push(buf_len - prev_len);
+        }
         match msg.encode(&mut self.buf) {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.buf.resize(buf_len, 0x0);
+                self.boundries.pop();
                 Err(Error::from(e))
             }
         }
     }
 
-    fn queue_send_zero_copy<T: Pack, F: FnOnce(T) -> Bytes>(
-        &mut self,
-        hdr: T,
-        get: F,
-    ) -> Result<()> {
-        if self.buf.len() > 0 {
-            self.chunks.push_back(ToFlush::Normal(self.buf.split()));
-        }
-        if let Err(e) = hdr.encode(&mut self.buf) {
-            self.buf.clear();
-            bail!(e)
-        }
-        let update = get(hdr);
-        let hdr = self.buf.split().freeze();
-        if update.len() + hdr.len() > MAX_BATCH {
-            bail!("message is too large")
-        }
-        self.chunks.push_back(ToFlush::ZeroCopy(hdr.chain(update)));
-        Ok(())
-    }
-
-    pub(crate) fn queue_send_zero_copy_update(
-        &mut self,
-        id: Id,
-        update: Bytes,
-    ) -> Result<()> {
-        self.queue_send_zero_copy(ZeroCopyUpdate { id, update }, |h| h.update)
-    }
-
-    pub(crate) fn queue_send_zero_copy_write(
-        &mut self,
-        id: Id,
-        reply: bool,
-        update: Bytes,
-    ) -> Result<()> {
-        self.queue_send_zero_copy(ZeroCopyWrite { id, reply, update }, |h| h.update)
-    }
-
-    pub(crate) fn queue_send_zero_copy_write_result(
-        &mut self,
-        id: Id,
-        update: Bytes,
-    ) -> Result<()> {
-        self.queue_send_zero_copy(ZeroCopyWriteResult { id, update }, |h| h.update)
-    }
-
     /// Clear unflused queued messages
     pub(crate) fn clear(&mut self) {
-        self.chunks.clear();
+        self.boundries.clear();
         self.buf.clear();
     }
 
@@ -292,37 +198,40 @@ impl WriteChannel {
     }
 
     /// Return the number of bytes queued for sending.
-    pub(crate) fn has_queued(&self) -> bool {
-        self.buf.len() > 0 || self.chunks.len() > 0
+    pub(crate) fn bytes_queued(&self) -> usize {
+        self.buf.remaining()
     }
 
     /// Initiate sending all outgoing messages. The actual send will
     /// be done on a background task. If there is sufficient room in
     /// the buffer flush will complete immediately.
     pub(crate) async fn flush(&mut self) -> Result<()> {
-        if self.buf.len() > 0 {
-            self.chunks.push_back(ToFlush::Normal(self.buf.split()));
-        }
-        while let Some(chunk) = self.chunks.pop_front() {
-            if let Err(_) = self.to_flush.send(chunk).await {
-                bail!("can't flush to closed connection")
+        loop {
+            if self.try_flush()? {
+                break Ok(());
+            } else {
+                future::poll_fn(|cx| self.to_flush.poll_ready(cx)).await?
             }
         }
-        Ok(())
     }
 
     /// Flush as much data as possible now, but don't wait if the
     /// channel is full. Return true if all data was flushed,
     /// otherwise false.
     pub(crate) fn try_flush(&mut self) -> Result<bool> {
-        if self.buf.len() > 0 {
-            self.chunks.push_back(ToFlush::Normal(self.buf.split()));
-        }
-        while let Some(chunk) = self.chunks.pop_front() {
+        while self.buf.has_remaining() {
+            let boundry = self.boundries.first().copied().unwrap_or(self.buf.len());
+            let chunk = self.buf.split_to(boundry);
             match self.to_flush.try_send(chunk) {
-                Ok(()) => (),
+                Ok(()) => {
+                    if self.boundries.len() > 0 {
+                        self.boundries.remove(0);
+                    }
+                }
                 Err(e) if e.is_full() => {
-                    self.chunks.push_front(e.into_inner());
+                    let mut chunk = e.into_inner();
+                    chunk.unsplit(self.buf.split());
+                    self.buf = chunk;
                     return Ok(false);
                 }
                 Err(_) => bail!("can't flush to closed connection"),
@@ -492,6 +401,11 @@ impl Channel {
 
     pub(crate) async fn send_one<T: Pack>(&mut self, msg: &T) -> Result<(), Error> {
         self.write.send_one(msg).await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn bytes_queued(&self) -> usize {
+        self.write.bytes_queued()
     }
 
     pub(crate) async fn flush(&mut self) -> Result<(), Error> {
