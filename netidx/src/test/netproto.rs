@@ -365,6 +365,9 @@ pub(crate) mod publisher {
     };
     use chrono::prelude::*;
     use netidx_core::pack::PackError;
+    use netidx_netproto::publisher::{
+        ZeroCopyUpdate, ZeroCopyWrite, ZeroCopyWriteResult,
+    };
     use proptest::collection;
     use std::{net::SocketAddr, time::Duration};
 
@@ -512,5 +515,60 @@ pub(crate) mod publisher {
         fn test_value_roundtrip(v in value()) {
             round_trip(v)
         }
+    }
+
+    #[test]
+    fn test_zero_copy_write() {
+        let mut buf = BytesMut::new();
+        let update = Bytes::from("klasdjflakdfkjahkajshfajhfawfhadwjh");
+        let id = unsafe { Id::mk(0) };
+        let reply = false;
+        let m = To::Write(id, reply, Value::Bytes(update.clone()));
+        let zcw = ZeroCopyWrite { id, reply, update };
+        assert_eq!(zcw.encoded_len(), m.encoded_len());
+        zcw.encode(&mut buf).unwrap();
+        buf.extend(&zcw.update);
+        let zc_buf = buf.split().freeze();
+        m.encode(&mut buf).unwrap();
+        let m_buf = buf.split().freeze();
+        assert_eq!(zc_buf, m_buf);
+        let mzc = To::decode(&mut &zc_buf[..]).unwrap();
+        assert_eq!(mzc, m)
+    }
+
+    #[test]
+    fn test_zero_copy_write_result() {
+        let mut buf = BytesMut::new();
+        let update = Bytes::from("klasdjflakdfkjahkajshfajhfawfhadwjh");
+        let id = unsafe { Id::mk(0) };
+        let m = From::WriteResult(id, Value::Bytes(update.clone()));
+        let zcw = ZeroCopyWriteResult { id, update };
+        assert_eq!(zcw.encoded_len(), m.encoded_len());
+        zcw.encode(&mut buf).unwrap();
+        buf.extend(&zcw.update);
+        let zc_buf = buf.split().freeze();
+        m.encode(&mut buf).unwrap();
+        let m_buf = buf.split().freeze();
+        assert_eq!(zc_buf, m_buf);
+        let mzc = From::decode(&mut &zc_buf[..]).unwrap();
+        assert_eq!(mzc, m)
+    }
+
+    #[test]
+    fn test_zero_copy_update() {
+        let mut buf = BytesMut::new();
+        let update = Bytes::from("klasdjflakdfkjahkajshfajhfawfhadwjh");
+        let id = unsafe { Id::mk(0) };
+        let m = From::Update(id, Value::Bytes(update.clone()));
+        let zcw = ZeroCopyUpdate { id, update };
+        assert_eq!(zcw.encoded_len(), m.encoded_len());
+        zcw.encode(&mut buf).unwrap();
+        buf.extend(&zcw.update);
+        let zc_buf = buf.split().freeze();
+        m.encode(&mut buf).unwrap();
+        let m_buf = buf.split().freeze();
+        assert_eq!(zc_buf, m_buf);
+        let mzc = From::decode(&mut &zc_buf[..]).unwrap();
+        assert_eq!(mzc, m)
     }
 }
