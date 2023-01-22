@@ -2,7 +2,7 @@ use crate::value::Value;
 use bytes::{Buf, BufMut, Bytes};
 use netidx_core::{
     pack::{
-        self, len_wrapped_decode, len_wrapped_encode, len_wrapped_len, Pack, PackError, encode_varint,
+        self, len_wrapped_decode, len_wrapped_encode, len_wrapped_len, Pack, PackError,
     },
     path::Path,
 };
@@ -151,7 +151,7 @@ impl Pack for To {
                 buf.put_u8(1);
                 Pack::encode(id, buf)
             }
-            To::Write(id, reply, v) => {
+            To::Write(id, v, reply) => {
                 buf.put_u8(2);
                 Pack::encode(id, buf)?;
                 Pack::encode(reply, buf)?;
@@ -175,7 +175,7 @@ impl Pack for To {
                 let id = Pack::decode(buf)?;
                 let reply = Pack::decode(buf)?;
                 let v = Pack::decode(buf)?;
-                Ok(To::Write(id, reply, v))
+                Ok(To::Write(id, v, reply))
             }
             _ => Err(PackError::UnknownTag),
         })
@@ -310,7 +310,6 @@ impl Pack for ZeroCopyUpdate {
             buf.put_u8(4); // From::Update
             Pack::encode(&self.id, buf)?;
             buf.put_u8(13); // Value::Bytes
-            encode_varint(Bytes::len(&self.update) as u64, buf); // bytes len
             Ok(())
             // now you put the raw buffer on the wire
         })
@@ -351,7 +350,6 @@ impl Pack for ZeroCopyWrite {
             Pack::encode(&self.id, buf)?;
             Pack::encode(&self.reply, buf)?;
             buf.put_u8(13); // Value::Bytes
-            encode_varint(Bytes::len(&self.update) as u64, buf); // bytes len
             Ok(())
             // now you put the raw buffer on the wire
         })
@@ -386,7 +384,6 @@ impl Pack for ZeroCopyWriteResult {
             buf.put_u8(6); // To::WriteResult
             Pack::encode(&self.id, buf)?;
             buf.put_u8(13); // Value::Bytes
-            encode_varint(Bytes::len(&self.update) as u64, buf); // bytes len
             Ok(())
             // now you put the raw buffer on the wire
         })

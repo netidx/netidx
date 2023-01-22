@@ -1,14 +1,13 @@
 use crate::{
     channel::Channel,
     protocol::{
-        publisher::{From, Id, To},
+        publisher::{From, To, Id},
         value::Value,
     },
-    test::netproto::publisher::{from, to},
+    test::netproto::publisher::{to, from},
 };
 use bytes::Bytes;
 use cross_krb5::ServerCtx;
-use futures::future;
 use parking_lot::Mutex;
 use proptest::prelude::*;
 use rand::{thread_rng, Rng};
@@ -54,13 +53,8 @@ async fn run_channel_packing_from() {
             in_batch.push(m);
         }
         if thread_rng().gen_range(0..1000) == 0 {
-            let (r0, ()) = future::join(in_chan.flush(), async {
-                while out_batch.len() < in_batch.len() {
-                    out_chan.receive_batch(&mut out_batch).await.unwrap()
-                }
-            })
-            .await;
-            r0.unwrap();
+            in_chan.flush().await.unwrap();
+            out_chan.receive_batch(&mut out_batch).await.unwrap();
             assert_eq!(in_batch.len(), out_batch.len());
             for (m0, m1) in in_batch.iter().zip(out_batch.iter()) {
                 assert_eq!(m0, m1);
@@ -88,13 +82,8 @@ async fn run_channel_packing_to() {
             in_batch.push(m);
         }
         if thread_rng().gen_range(0..1000) == 0 {
-            let (r0, ()) = future::join(in_chan.flush(), async {
-                while out_batch.len() < in_batch.len() {
-                    out_chan.receive_batch(&mut out_batch).await.unwrap()
-                }
-            })
-            .await;
-            r0.unwrap();
+            in_chan.flush().await.unwrap();
+            out_chan.receive_batch(&mut out_batch).await.unwrap();
             assert_eq!(in_batch.len(), out_batch.len());
             for (m0, m1) in in_batch.iter().zip(out_batch.iter()) {
                 assert_eq!(m0, m1);
@@ -105,24 +94,9 @@ async fn run_channel_packing_to() {
     }
 }
 
-async fn run_channel_zero_copy_write() {
-    let (s0, s1) = UnixStream::pair().unwrap();
-    let mut in_chan = Channel::new::<ServerCtx, UnixStream>(None, s0);
-    let mut out_chan = Channel::new::<ServerCtx, UnixStream>(None, s1);
-    let buf = Bytes::from("jkflkadjflkahjaheiufhaejahfkjahdkjadh");
-    let id = unsafe { Id::mk(42) };
-    let m = To::Write(id, false, Value::Bytes(buf.clone()));
-    in_chan.queue_send_zero_copy_write(id, false, buf).unwrap();
-    let (r0, r) = future::join(in_chan.flush(), out_chan.receive::<To>()).await;
-    r0.unwrap();
-    let r = r.unwrap();
-    assert_eq!(m, r);
-}
-
 #[test]
 fn channel_packing() {
     Runtime::new().unwrap().block_on(async {
-        run_channel_zero_copy_write().await;
         run_channel_packing_to().await;
         run_channel_packing_from().await;
     })

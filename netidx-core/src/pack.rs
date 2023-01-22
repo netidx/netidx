@@ -146,7 +146,7 @@ impl Pack for Bytes {
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         encode_varint(Bytes::len(self) as u64, buf);
-        Ok(buf.put_slice(&self[..]))
+        Ok(buf.put_slice(&*self))
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
