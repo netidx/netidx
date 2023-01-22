@@ -474,6 +474,34 @@ impl Channel {
         self.write.queue_send(msg)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn queue_send_zero_copy_update(
+        &mut self,
+        id: Id,
+        update: Bytes,
+    ) -> Result<()> {
+        self.write.queue_send_zero_copy(ZeroCopyUpdate { id, update }, |h| h.update)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn queue_send_zero_copy_write(
+        &mut self,
+        id: Id,
+        reply: bool,
+        update: Bytes,
+    ) -> Result<()> {
+        self.write.queue_send_zero_copy(ZeroCopyWrite { id, reply, update }, |h| h.update)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn queue_send_zero_copy_write_result(
+        &mut self,
+        id: Id,
+        update: Bytes,
+    ) -> Result<()> {
+        self.write.queue_send_zero_copy(ZeroCopyWriteResult { id, update }, |h| h.update)
+    }
+
     pub(crate) fn clear(&mut self) {
         self.write.clear();
     }
