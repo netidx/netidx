@@ -1,4 +1,5 @@
 use anyhow::Result;
+use arcstr::ArcStr;
 use futures::{channel::mpsc, prelude::*};
 use netidx::{
     path::Path,
@@ -214,6 +215,11 @@ impl Connection {
                 recv.fill_queue(&self.dead, self.client).await?
             }
         }
+    }
+
+    /// Return the user connected to this channel, if known
+    pub fn user(&self) -> Option<ArcStr> {
+        self.publisher.user(&self.client)
     }
 }
 

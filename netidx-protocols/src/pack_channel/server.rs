@@ -1,5 +1,6 @@
 use crate::channel::server;
 use anyhow::Result;
+use arcstr::ArcStr;
 use bytes::{Buf, Bytes, BytesMut};
 use netidx::{
     pack::Pack,
@@ -88,6 +89,11 @@ impl Connection {
         let mut queue = self.queue.lock().await;
         self.fill_queue(&mut *queue).await?;
         Ok(<R as Pack>::decode(&mut *queue)?)
+    }
+
+    /// Return the user connected to this channel, if known
+    pub fn user(&self) -> Option<ArcStr> {
+        self.inner.user()
     }
 }
 

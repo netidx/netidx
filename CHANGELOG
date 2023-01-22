@@ -1,3 +1,17 @@
+* 0.16 all
+
+  - protocol version 3 changes the wire format to introduce additional
+    extensibility. Unfortunatly version 3 isn't backwards compatibile
+    with version 2. I decided to do this now, as it may be the last
+    chance.
+
+  - Introducing netidx channels. Bidirectional message channels that
+    function like tcp sockets, except the address is a netidx path,
+    and all the security features of netidx are applied.
+
+  - Major refactor of publisher and subscriber to completely eliminate
+    blocking awaits from their respective message handling loops.
+
 * 0.15.1 core netidx
 
   - expose the inner u64 in atomic_id for ffi bindings
