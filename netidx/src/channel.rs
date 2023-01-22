@@ -200,11 +200,10 @@ impl WriteChannel {
         if self.buf.remaining_mut() < len {
             self.buf.reserve(self.buf.capacity());
         }
-        let buf_len = self.buf.remaining();
         match msg.encode(&mut self.buf) {
             Ok(()) => Ok(()),
             Err(e) => {
-                self.buf.resize(buf_len, 0x0);
+                self.buf.resize(self.buf.remaining() - len, 0x0);
                 Err(Error::from(e))
             }
         }
@@ -228,7 +227,7 @@ impl WriteChannel {
             bail!("message is too large")
         }
         self.chunks.push_back(ToFlush::ZeroCopy(hdr.chain(update)));
-        unimplemented!()
+        Ok(())
     }
 
     pub(crate) fn queue_send_zero_copy_update(
@@ -277,10 +276,13 @@ impl WriteChannel {
     /// be done on a background task. If there is sufficient room in
     /// the buffer flush will complete immediately.
     pub(crate) async fn flush(&mut self) -> Result<()> {
-        if self.buf.remaining() > 0 {
-            self.chunks.push_back(ToFlush::Normal(self.buf.split()));
-        }
         while let Some(chunk) = self.chunks.pop_front() {
+            if let Err(_) = self.to_flush.send(chunk).await {
+                bail!("can't flush to closed connection")
+            }
+        }
+        if self.buf.remaining() > 0 {
+            let chunk = ToFlush::Normal(self.buf.split());
             if let Err(_) = self.to_flush.send(chunk).await {
                 bail!("can't flush to closed connection")
             }
@@ -292,9 +294,6 @@ impl WriteChannel {
     /// channel is full. Return true if all data was flushed,
     /// otherwise false.
     pub(crate) fn try_flush(&mut self) -> Result<bool> {
-        if self.buf.remaining() > 0 {
-            self.chunks.push_back(ToFlush::Normal(self.buf.split()));
-        }
         while let Some(chunk) = self.chunks.pop_front() {
             match self.to_flush.try_send(chunk) {
                 Ok(()) => (),
@@ -305,12 +304,24 @@ impl WriteChannel {
                 Err(_) => bail!("can't flush to closed connection"),
             }
         }
+        if self.buf.remaining() > 0 {
+            let chunk = ToFlush::Normal(self.buf.split());
+            match self.to_flush.try_send(chunk) {
+                Ok(()) => (),
+                Err(e) if e.is_full() => {
+                    self.chunks.push_back(e.into_inner());
+                    return Ok(false);
+                }
+                Err(_) => bail!("can't flush to closed connection"),
+            }
+        }
         Ok(true)
     }
 
     /// Initiate sending all outgoing messages and wait `timeout` for
     /// the operation to complete. If `timeout` expires some data may
-    /// have been sent.
+    /// have been sent. If a timeout occurrs you should close the
+    /// connection.
     pub(crate) async fn flush_timeout(&mut self, timeout: Duration) -> Result<()> {
         Ok(time::timeout(timeout, self.flush()).await??)
     }

@@ -173,8 +173,8 @@ impl Pack for To {
             1 => Ok(To::Unsubscribe(Pack::decode(buf)?)),
             2 => {
                 let id = Pack::decode(buf)?;
-                let v = Pack::decode(buf)?;
                 let reply = Pack::decode(buf)?;
+                let v = Pack::decode(buf)?;
                 Ok(To::Write(id, v, reply))
             }
             _ => Err(PackError::UnknownTag),

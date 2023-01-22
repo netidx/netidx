@@ -11,4 +11,4 @@ pub mod value;
 pub mod resolver;
 
 #[cfg(test)]
-mod test;
+pub mod test;

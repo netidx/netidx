@@ -139,9 +139,8 @@ macro_rules! atomic_id {
                 self.0
             }
 
-            #[cfg(test)]
             #[allow(dead_code)]
-            pub fn mk(i: u64) -> Self {
+            pub unsafe fn mk(i: u64) -> Self {
                 $name(i)
             }
         }

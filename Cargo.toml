@@ -5,10 +5,7 @@ lto = true
 debug = false
 
 [profile.dev]
-opt-level = "z"
-lto = "thin"
-debug = 1
-
+debug = true
 
 [workspace]
 members = [
