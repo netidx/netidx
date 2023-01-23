@@ -1257,7 +1257,7 @@ mod record {
                         for mut batch in batches.drain(..) {
                             for path in batch.drain(..) {
                                 if !subscribed.contains_key(&path) {
-                                    let dv = subscriber.durable_subscribe(path.clone());
+                                    let dv = subscriber.subscribe(path.clone());
                                     let id = dv.id();
                                     dv.updates(
                                         UpdatesFlags::BEGIN_WITH_LAST

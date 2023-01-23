@@ -193,7 +193,7 @@ impl vm::Ctx for WidgetCtx {
         path: Path,
         _ref_id: ExprId,
     ) -> Dval {
-        let dv = self.backend.subscriber.durable_subscribe(path);
+        let dv = self.backend.subscriber.subscribe(path);
         dv.updates(flags, self.backend.updates.clone());
         dv
     }

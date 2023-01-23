@@ -59,9 +59,11 @@ impl Connection {
         let mut n = 0;
         let con = loop {
             if n > 7 {
-                break subscriber.subscribe_one(path.clone(), Some(to)).await?;
+                break subscriber
+                    .subscribe_nondurable_one(path.clone(), Some(to))
+                    .await?;
             } else {
-                match subscriber.subscribe_one(path.clone(), Some(to)).await {
+                match subscriber.subscribe_nondurable_one(path.clone(), Some(to)).await {
                     Ok(con) => break con,
                     Err(_) => {
                         n += 1;
@@ -99,7 +101,7 @@ impl Connection {
     /// may be either a listener or a singleton.
     pub async fn connect(subscriber: &Subscriber, path: Path) -> Result<Self> {
         let to = Duration::from_secs(3);
-        let acceptor = subscriber.durable_subscribe(path.clone());
+        let acceptor = subscriber.subscribe(path.clone());
         time::timeout(to, acceptor.wait_subscribed()).await??;
         match acceptor.last() {
             Event::Unsubscribed => bail!("connect failed"),

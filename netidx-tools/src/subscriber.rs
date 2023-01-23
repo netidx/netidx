@@ -260,7 +260,7 @@ impl Ctx {
         let subscriber = &self.subscriber;
         let sender_updates = self.sender_updates.clone();
         subscriptions.entry(path.clone()).or_insert_with(|| {
-            let s = subscriber.durable_subscribe(path.clone());
+            let s = subscriber.subscribe(path.clone());
             paths.insert(s.id(), path.clone());
             s.updates(
                 UpdatesFlags::BEGIN_WITH_LAST | UpdatesFlags::STOP_COLLECTING_LAST,

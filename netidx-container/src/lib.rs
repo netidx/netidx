@@ -320,7 +320,7 @@ impl Ctx for Lc {
         path: Path,
         ref_id: ExprId,
     ) -> Dval {
-        let dv = self.subscriber.durable_subscribe(path);
+        let dv = self.subscriber.subscribe(path);
         dv.updates(flags, self.sub_updates.clone());
         *self
             .sub

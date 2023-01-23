@@ -33,7 +33,7 @@ pub(super) fn run(config: Config, auth: DesiredAuth, p: Params) {
             let mut subs = Vec::with_capacity(table.rows.len() * table.cols.len());
             for row in table.rows.iter() {
                 for (col, _) in table.cols.iter() {
-                    subs.push(subscriber.durable_subscribe(row.append(col)));
+                    subs.push(subscriber.subscribe(row.append(col)));
                 }
             }
             subs

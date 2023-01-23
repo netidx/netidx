@@ -159,7 +159,7 @@ impl CtxInner {
         };
         self.to_gui.send(m)?;
         if !self.raw_view.load(Ordering::Relaxed) {
-            let s = self.subscriber.durable_subscribe(base_path.append(".view"));
+            let s = self.subscriber.subscribe(base_path.append(".view"));
             let (tx, rx) = mpsc::channel(2);
             s.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
             self.view_path = Some(base_path.clone());
@@ -222,7 +222,7 @@ impl CtxInner {
         let subscriber = self.subscriber.clone();
         task::spawn(async move {
             let to = Some(Duration::from_secs(10));
-            match subscriber.subscribe_one(path, to).await {
+            match subscriber.subscribe_nondurable_one(path, to).await {
                 Err(e) => {
                     let _ = fin.send(Err(e));
                 }

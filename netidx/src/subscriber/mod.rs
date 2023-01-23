@@ -830,7 +830,7 @@ impl Subscriber {
                 None
             } else {
                 update_retry(&mut *subscriber.0.lock(), retry);
-                Some(subscriber.subscribe(batch, Some(timeout)).await)
+                Some(subscriber.subscribe_nondurable(batch, Some(timeout)).await)
             }
         }
         fn finish_resubscription_batch(
@@ -1034,7 +1034,7 @@ impl Subscriber {
     /// the batch, which may complete successfully. If you need all or
     /// nothing behavior, specify None for timeout and wrap the
     /// `subscribe` future in a `tokio::time::timeout`.
-    pub async fn subscribe(
+    pub async fn subscribe_nondurable(
         &self,
         batch: impl IntoIterator<Item = Path>,
         timeout: Option<Duration>,
@@ -1247,12 +1247,12 @@ impl Subscriber {
     /// number of paths, but if you need to subscribe to a lot of
     /// values it is more efficent to use `subscribe`. The semantics
     /// of this method are the same as `subscribe` called with 1 path.
-    pub async fn subscribe_one(
+    pub async fn subscribe_nondurable_one(
         &self,
         path: Path,
         timeout: Option<Duration>,
     ) -> Result<Val> {
-        self.subscribe(iter::once(path), timeout).await.next().await.unwrap().1
+        self.subscribe_nondurable(iter::once(path), timeout).await.next().await.unwrap().1
     }
 
     /// Create a durable value subscription to `path`.
@@ -1261,9 +1261,9 @@ impl Subscriber {
     /// a lot of durable subscriptions all at once they will batch.
     ///
     /// The semantics of `durable_subscribe` are the same as
-    /// subscribe, except that certain errors are caught, and
-    /// resubscriptions are attempted. see `Dval`.
-    pub fn durable_subscribe(&self, path: Path) -> Dval {
+    /// subscribe_nondurable, except that certain errors are caught,
+    /// and resubscriptions are attempted. see `Dval`.
+    pub fn subscribe(&self, path: Path) -> Dval {
         let mut t = self.0.lock();
         if let Some(s) = t
             .durable_dead

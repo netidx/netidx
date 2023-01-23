@@ -967,14 +967,7 @@ impl RaeifiedTable {
         } else {
             let path = Path::from(ArcStr::from(&*selected));
             // we should already be subscribed, so we're just looking up the dval by path.
-            let dv = self
-                .shared
-                .ctx
-                .borrow_mut()
-                .user
-                .backend
-                .subscriber
-                .durable_subscribe(path);
+            let dv = self.shared.ctx.borrow_mut().user.backend.subscriber.subscribe(path);
             let val = Rc::new(RefCell::new(match dv.last() {
                 Event::Unsubscribed => Some(Value::Null),
                 Event::Update(v) => Some(v),
@@ -1189,7 +1182,7 @@ impl RaeifiedTable {
                 let s = {
                     let (s, u) = {
                         let r = &self.shared.ctx.borrow().user;
-                        let s = r.backend.subscriber.durable_subscribe(p);
+                        let s = r.backend.subscriber.subscribe(p);
                         let u = r.backend.updates.clone();
                         (s, u)
                     };

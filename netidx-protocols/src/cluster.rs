@@ -118,7 +118,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
             self.others.retain(|p, _| all.contains(p));
             for path in all {
                 if !self.others.contains_key(&path) {
-                    let dv = self.subscriber.durable_subscribe(path.clone());
+                    let dv = self.subscriber.subscribe(path.clone());
                     self.others.insert(path, dv);
                 }
             }

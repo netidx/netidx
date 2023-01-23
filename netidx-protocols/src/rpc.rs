@@ -417,7 +417,7 @@ pub mod client {
                     }
                 }
             };
-            let call = subscriber.durable_subscribe(name.clone());
+            let call = subscriber.subscribe(name.clone());
             let pat = GlobSet::new(
                 true,
                 iter::once(Glob::new(Chars::from(format!("{}/*/val", name.clone())))?),
@@ -430,7 +430,7 @@ pub mod client {
                         Path::basename(Path::dirname(&*arg_path).unwrap()).unwrap();
                     args.insert(
                         String::from(arg_name),
-                        subscriber.durable_subscribe(arg_path),
+                        subscriber.subscribe(arg_path),
                     );
                 }
             }
