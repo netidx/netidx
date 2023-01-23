@@ -19,12 +19,12 @@ pub struct ClientParams {
 }
 
 impl ClientParams {
-    pub fn load(self) -> (Config, DesiredAuth) {
-        let cfg = match self.config {
+    pub fn load(&self) -> (Config, DesiredAuth) {
+        let cfg = match &self.config {
             None => Config::load_default().expect("failed to load default netidx config"),
             Some(path) => Config::load(path).expect("failed to load netidx config"),
         };
-        let auth = match self.auth.unwrap_or_else(|| cfg.default_auth()) {
+        let auth = match self.auth.clone().unwrap_or_else(|| cfg.default_auth()) {
             auth @ (DesiredAuth::Anonymous | DesiredAuth::Local) => auth,
             DesiredAuth::Krb5 { .. } => {
                 DesiredAuth::Krb5 { upn: self.upn.clone(), spn: self.spn.clone() }
