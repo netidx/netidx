@@ -25,6 +25,7 @@ base64 = "0.20"
 arcstr = { version = "1", features = ["serde"] }
 smallvec = "1"
 indexmap = "1"
+rust_decimal = { version = "1",  features = ["serde-with-float", "serde-with-str", "serde-with-arbitrary-precision"] }
 
 [dev-dependencies]
 proptest = "1"

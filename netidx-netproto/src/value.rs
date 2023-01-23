@@ -8,6 +8,7 @@ use netidx_core::{
     path::Path,
     utils,
 };
+use rust_decimal::Decimal;
 use smallvec::SmallVec;
 use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
@@ -40,6 +41,7 @@ pub enum Typ {
     Z64,
     F32,
     F64,
+    Decimal,
     DateTime,
     Duration,
     Bool,
@@ -50,7 +52,7 @@ pub enum Typ {
     Null,
 }
 
-static TYPES: [Typ; 18] = [
+static TYPES: [Typ; 19] = [
     Typ::U32,
     Typ::V32,
     Typ::I32,
@@ -61,6 +63,7 @@ static TYPES: [Typ; 18] = [
     Typ::Z64,
     Typ::F32,
     Typ::F64,
+    Typ::Decimal,
     Typ::DateTime,
     Typ::Duration,
     Typ::Bool,
@@ -84,6 +87,7 @@ impl Typ {
             Typ::Z64 => Ok(Value::Z64(s.parse::<i64>()?)),
             Typ::F32 => Ok(Value::F32(s.parse::<f32>()?)),
             Typ::F64 => Ok(Value::F64(s.parse::<f64>()?)),
+            Typ::Decimal => Ok(Value::Decimal(s.parse::<Decimal>()?)),
             Typ::DateTime => Ok(Value::DateTime(DateTime::from_str(s)?)),
             Typ::Duration => {
                 let mut tmp = String::from("duration:");
@@ -124,6 +128,7 @@ impl Typ {
             Typ::Z64 => "z64",
             Typ::F32 => "f32",
             Typ::F64 => "f64",
+            Typ::Decimal => "decimal",
             Typ::DateTime => "datetime",
             Typ::Duration => "duration",
             Typ::Bool => "bool",
@@ -147,6 +152,7 @@ impl Typ {
             Value::Z64(_) => Typ::Z64,
             Value::F32(_) => Typ::F32,
             Value::F64(_) => Typ::F64,
+            Value::Decimal(_) => Typ::Decimal,
             Value::DateTime(_) => Typ::DateTime,
             Value::Duration(_) => Typ::Duration,
             Value::String(_) => Typ::String,
@@ -173,7 +179,8 @@ impl Typ {
             | Typ::I64
             | Typ::Z64
             | Typ::F32
-            | Typ::F64 => true,
+            | Typ::F64
+            | Typ::Decimal => true,
             Typ::DateTime
             | Typ::Duration
             | Typ::Bool
@@ -197,6 +204,7 @@ impl Typ {
             | Typ::Z64 => true,
             Typ::F32
             | Typ::F64
+            | Typ::Decimal
             | Typ::DateTime
             | Typ::Duration
             | Typ::Bool
@@ -217,6 +225,7 @@ impl Typ {
             | Typ::V64
             | Typ::F32
             | Typ::F64
+            | Typ::Decimal
             | Typ::DateTime
             | Typ::Duration
             | Typ::Bool
@@ -237,6 +246,7 @@ impl Typ {
             | Typ::Z64
             | Typ::F32
             | Typ::F64
+            | Typ::Decimal
             | Typ::DateTime
             | Typ::Duration
             | Typ::Bool
@@ -250,7 +260,7 @@ impl Typ {
 
     pub fn float(&self) -> bool {
         match self {
-            Typ::F32 | Typ::F64 => true,
+            Typ::F32 | Typ::F64 | Typ::Decimal => true,
             Typ::U32
             | Typ::V32
             | Typ::U64
@@ -286,6 +296,7 @@ impl FromStr for Typ {
             "z64" => Ok(Typ::Z64),
             "f32" => Ok(Typ::F32),
             "f64" => Ok(Typ::F64),
+            "decimal" => Ok(Typ::Decimal),
             "datetime" => Ok(Typ::DateTime),
             "duration" => Ok(Typ::Duration),
             "bool" => Ok(Typ::Bool),
@@ -350,6 +361,8 @@ pub enum Value {
     Error(Chars),
     /// An array of values
     Array(Arc<[Value]>),
+    /// fixed point decimal type
+    Decimal(Decimal),
 }
 
 impl Hash for Value {
@@ -434,6 +447,10 @@ impl Hash for Value {
                     v.hash(state)
                 }
             }
+            Value::Decimal(d) => {
+                20u8.hash(state);
+                d.hash(state);
+            }
         }
     }
 }
@@ -456,6 +473,7 @@ impl PartialEq for Value {
                 (Zero, Zero) => true,
                 (_, _) => l == r,
             },
+            (Value::Decimal(l), Value::Decimal(r)) => l == r,
             (Value::DateTime(l), Value::DateTime(r)) => l == r,
             (Value::Duration(l), Value::Duration(r)) => l == r,
             (Value::String(l), Value::String(r)) => l == r,
@@ -514,6 +532,7 @@ impl PartialOrd for Value {
                 (_, Nan) => Some(Ordering::Greater),
                 (_, _) => l.partial_cmp(r),
             },
+            (Value::Decimal(l), Value::Decimal(r)) => l.partial_cmp(r),
             (Value::DateTime(l), Value::DateTime(r)) => l.partial_cmp(r),
             (Value::Duration(l), Value::Duration(r)) => l.partial_cmp(r),
             (Value::String(l), Value::String(r)) => l.partial_cmp(r),
@@ -585,6 +604,7 @@ macro_rules! apply_op {
             }
             (Value::F32(l), Value::F32(r)) => Value::F32(l $op r),
             (Value::F64(l), Value::F64(r)) => Value::F64(l $op r),
+            (Value::Decimal(l), Value::Decimal(r)) => Value::Decimal(l $op r),
             (Value::U32(l) | Value::V32(l), Value::U64(r) | Value::V64(r)) => {
                 Value::U64((Wrapping(l as u64) $op Wrapping(r)).0)
             }
@@ -639,6 +659,50 @@ macro_rules! apply_op {
             (Value::F64(l), Value::I64(r) | Value::Z64(r)) => Value::F64(l $op r as f64),
             (Value::I64(l) | Value::Z64(l), Value::F64(r)) => Value::F64(l as f64 $op r),
             (Value::F64(l), Value::F32(r)) => Value::F64(l $op r as f64),
+            (Value::Decimal(l), Value::U32(r) | Value::V32(r)) =>
+                Value::Decimal(l $op Decimal::from(r)),
+            (Value::U32(l) | Value::V32(l), Value::Decimal(r)) =>
+                Value::Decimal(Decimal::from(l) $op r),
+            (Value::Decimal(l), Value::U64(r) | Value::V64(r)) =>
+                Value::Decimal(l $op Decimal::from(r)),
+            (Value::U64(l) | Value::V64(l), Value::Decimal(r)) =>
+                Value::Decimal(Decimal::from(l) $op r),
+            (Value::Decimal(l), Value::I32(r) | Value::Z32(r)) =>
+                Value::Decimal(l $op Decimal::from(r)),
+            (Value::I32(l) | Value::Z32(l), Value::Decimal(r)) =>
+                Value::Decimal(Decimal::from(l) $op r),
+            (Value::Decimal(l), Value::I64(r) | Value::Z64(r)) =>
+                Value::Decimal(l $op Decimal::from(r)),
+            (Value::I64(l) | Value::Z64(l), Value::Decimal(r)) =>
+                Value::Decimal(Decimal::from(l) $op r),
+            (Value::Decimal(l), Value::F32(r)) => match Decimal::try_from(r) {
+                Ok(r) => Value::Decimal(l $op r),
+                Err(_) => {
+                    let e = format!("can't parse {} as a decimal", r);
+                    Value::Error(Chars::from(e))
+                },
+            },
+            (Value::F32(l), Value::Decimal(r)) => match Decimal::try_from(l) {
+                Ok(l) => Value::Decimal(l $op r),
+                Err(_) => {
+                    let e = format!("can't parse {} as a decimal", l);
+                    Value::Error(Chars::from(e))
+                },
+            },
+            (Value::Decimal(l), Value::F64(r)) => match Decimal::try_from(r) {
+                Ok(r) => Value::Decimal(l $op r),
+                Err(_) => {
+                    let e = format!("can't parse {} as a decimal", r);
+                    Value::Error(Chars::from(e))
+                },
+            },
+            (Value::F64(l), Value::Decimal(r)) => match Decimal::try_from(l) {
+                Ok(l) => Value::Decimal(l $op r),
+                Err(_) => {
+                    let e = format!("can't parse {} as a decimal", l);
+                    Value::Error(Chars::from(e))
+                },
+            },
             (Value::String(s), n) => match s.parse::<Value>() {
                 Err(e) => Value::Error(Chars::from(format!("{}", e))),
                 Ok(s) => s $op n,
