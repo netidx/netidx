@@ -3,6 +3,7 @@ use arcstr::ArcStr;
 use bytes::{Buf, BufMut, Bytes};
 use chrono::{naive::NaiveDateTime, prelude::*};
 use fxhash::FxBuildHasher;
+use rust_decimal::Decimal;
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
@@ -401,6 +402,30 @@ impl Pack for f64 {
             Err(PackError::BufferShort)
         } else {
             Ok(buf.get_f64())
+        }
+    }
+}
+
+impl Pack for Decimal {
+    fn const_encoded_len() -> Option<usize> {
+        Some(16)
+    }
+
+    fn encoded_len(&self) -> usize {
+        Self::const_encoded_len().unwrap()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Ok(buf.put_slice(&self.serialize()[..]))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        if buf.remaining() < Self::const_encoded_len().unwrap() {
+            Err(PackError::BufferShort)
+        } else {
+            let mut b = [0u8; 16];
+            buf.copy_to_slice(&mut b);
+            Ok(Decimal::deserialize(b))
         }
     }
 }

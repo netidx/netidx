@@ -113,7 +113,7 @@ pub enum To {
     /// to the value, or it doesn't exist.
     Unsubscribe(Id),
     /// Send a write to the specified value.
-    Write(Id, Value, bool),
+    Write(Id, bool, Value),
 }
 
 impl Pack for To {
@@ -128,7 +128,7 @@ impl Pack for To {
                         + Pack::encoded_len(token)
                 }
                 To::Unsubscribe(id) => Pack::encoded_len(id),
-                To::Write(id, v, reply) => {
+                To::Write(id, reply, v) => {
                     Pack::encoded_len(id)
                         + Pack::encoded_len(v)
                         + Pack::encoded_len(reply)
@@ -151,11 +151,11 @@ impl Pack for To {
                 buf.put_u8(1);
                 Pack::encode(id, buf)
             }
-            To::Write(id, v, reply) => {
+            To::Write(id, reply, v) => {
                 buf.put_u8(2);
                 Pack::encode(id, buf)?;
-                Pack::encode(v, buf)?;
-                Pack::encode(reply, buf)
+                Pack::encode(reply, buf)?;
+                Pack::encode(v, buf)
             }
         })
     }
@@ -173,9 +173,9 @@ impl Pack for To {
             1 => Ok(To::Unsubscribe(Pack::decode(buf)?)),
             2 => {
                 let id = Pack::decode(buf)?;
-                let v = Pack::decode(buf)?;
                 let reply = Pack::decode(buf)?;
-                Ok(To::Write(id, v, reply))
+                let v = Pack::decode(buf)?;
+                Ok(To::Write(id, reply, v))
             }
             _ => Err(PackError::UnknownTag),
         })

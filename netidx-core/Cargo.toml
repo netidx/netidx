@@ -25,3 +25,4 @@ serde = { version = "1.0", features = ["rc"] }
 serde_derive = "1"
 pin-utils = "0.1"
 arcstr = { version = "1", features = ["serde"] }
+rust_decimal = { version = "1",  features = ["serde-with-float", "serde-with-str", "serde-with-arbitrary-precision"] }

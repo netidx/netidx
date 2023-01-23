@@ -876,6 +876,9 @@ impl Not for Value {
             Value::F64(v) => {
                 Value::Error(Chars::from(format!("can't apply not to F64({})", v)))
             }
+            Value::Decimal(v) => {
+                Value::Error(Chars::from(format!("can't apply not to Decimal({})", v)))
+            }
             Value::DateTime(v) => {
                 Value::Error(Chars::from(format!("can't apply not to DateTime({})", v)))
             }
@@ -927,6 +930,7 @@ impl Pack for Value {
                 pack::varint_len(elts.len() as u64)
                     + elts.iter().fold(0, |sum, v| sum + Pack::encoded_len(v))
             }
+            Value::Decimal(d) => <Decimal as Pack>::encoded_len(d),
         }
     }
 
@@ -1006,6 +1010,10 @@ impl Pack for Value {
                 }
                 Ok(())
             }
+            Value::Decimal(d) => {
+                buf.put_u8(20);
+                <Decimal as Pack>::encode(d, buf)
+            }
         }
     }
 
@@ -1038,6 +1046,7 @@ impl Pack for Value {
                 }
                 Ok(Value::Array(Arc::from(elts)))
             }
+            20 => Ok(Value::Decimal(<Decimal as Pack>::decode(buf)?)),
             _ => Err(PackError::UnknownTag),
         }
     }
@@ -1078,6 +1087,7 @@ impl Value {
             Value::I64(v) | Value::Z64(v) => write!(f, "{}", v),
             Value::F32(v) => write!(f, "{}", v),
             Value::F64(v) => write!(f, "{}", v),
+            Value::Decimal(v) => write!(f, "{}", v),
             Value::DateTime(v) => write!(f, "{}", v),
             Value::Duration(v) => {
                 let v = v.as_secs_f64();
@@ -1181,6 +1191,13 @@ impl Value {
                     write!(f, "{}{}", pfx, v)
                 }
             }
+            Value::Decimal(v) => {
+                if types {
+                    write!(f, "decimal:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
             Value::DateTime(v) => {
                 if types {
                     write!(f, r#"datetime:"{}""#, v)
@@ -1241,6 +1258,10 @@ impl Value {
                     Typ::Z64 => Some(Value::Z64($v as i64)),
                     Typ::F32 => Some(Value::F32($v as f32)),
                     Typ::F64 => Some(Value::F64($v as f64)),
+                    Typ::Decimal => match Decimal::try_from($v) {
+                        Ok(d) => Some(Value::Decimal(d)),
+                        Err(_) => None,
+                    },
                     Typ::DateTime => Some(Value::DateTime(DateTime::from_utc(
                         NaiveDateTime::from_timestamp_opt($v as i64, 0)?,
                         Utc,
@@ -1277,6 +1298,27 @@ impl Value {
             Value::I64(v) | Value::Z64(v) => cast_number!(v, typ),
             Value::F32(v) => cast_number!(v, typ),
             Value::F64(v) => cast_number!(v, typ),
+            Value::Decimal(v) => match typ {
+                Typ::Decimal => Some(Value::Decimal(v)),
+                Typ::U32 => v.try_into().ok().map(Value::U32),
+                Typ::V32 => v.try_into().ok().map(Value::V32),
+                Typ::I32 => v.try_into().ok().map(Value::I32),
+                Typ::Z32 => v.try_into().ok().map(Value::Z32),
+                Typ::U64 => v.try_into().ok().map(Value::U64),
+                Typ::V64 => v.try_into().ok().map(Value::V64),
+                Typ::I64 => v.try_into().ok().map(Value::I64),
+                Typ::Z64 => v.try_into().ok().map(Value::Z64),
+                Typ::F32 => v.try_into().ok().map(Value::F32),
+                Typ::F64 => v.try_into().ok().map(Value::F64),
+                Typ::String => Some(Value::String(Chars::from(format!("{}", v)))),
+                Typ::Bool
+                | Typ::Array
+                | Typ::Bytes
+                | Typ::DateTime
+                | Typ::Duration
+                | Typ::Null
+                | Typ::Result => None,
+            },
             Value::DateTime(v) => match typ {
                 Typ::U32 | Typ::V32 => {
                     let ts = v.timestamp();
@@ -1326,6 +1368,7 @@ impl Value {
                     }
                 }
                 Typ::DateTime => Some(Value::DateTime(v)),
+                Typ::Decimal => None,
                 Typ::Duration => None,
                 Typ::Bool => None,
                 Typ::Bytes => None,
@@ -1345,6 +1388,7 @@ impl Value {
                 Typ::Z64 => Some(Value::Z64(d.as_secs() as i64)),
                 Typ::F32 => Some(Value::F32(d.as_secs_f32())),
                 Typ::F64 => Some(Value::F64(d.as_secs_f64())),
+                Typ::Decimal => None,
                 Typ::DateTime => None,
                 Typ::Duration => Some(Value::Duration(d)),
                 Typ::Bool => None,
@@ -1367,6 +1411,7 @@ impl Value {
                     Typ::Z64 => Some(Value::Z64(b as i64)),
                     Typ::F32 => Some(Value::F32(b as u32 as f32)),
                     Typ::F64 => Some(Value::F64(b as u64 as f64)),
+                    Typ::Decimal => None,
                     Typ::DateTime => None,
                     Typ::Duration => None,
                     Typ::Bool => Some(self),
@@ -1408,7 +1453,8 @@ impl Value {
             | Value::I64(_)
             | Value::Z64(_)
             | Value::F32(_)
-            | Value::F64(_) => true,
+            | Value::F64(_)
+            | Value::Decimal(_) => true,
             Value::DateTime(_)
             | Value::Duration(_)
             | Value::String(_)
@@ -1751,6 +1797,28 @@ impl FromValue for f64 {
 impl convert::From<f64> for Value {
     fn from(v: f64) -> Value {
         Value::F64(v)
+    }
+}
+
+impl FromValue for Decimal {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Decimal).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Decimal(v) => Ok(v),
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Decimal(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+impl convert::From<Decimal> for Value {
+    fn from(value: Decimal) -> Self {
+        Value::Decimal(value)
     }
 }
 
