@@ -1,6 +1,6 @@
 [package]
 name = "netidx-core"
-version = "0.16.0"
+version = "0.16.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -26,3 +26,4 @@ serde_derive = "1"
 pin-utils = "0.1"
 arcstr = { version = "1", features = ["serde"] }
 rust_decimal = { version = "1",  features = ["serde-with-float", "serde-with-str", "serde-with-arbitrary-precision"] }
+uuid = "1"
