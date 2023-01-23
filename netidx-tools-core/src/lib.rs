@@ -1,7 +1,7 @@
 use netidx::{config::Config, resolver_client::DesiredAuth};
 use structopt::StructOpt;
 
-#[derive(StructOpt, Debug)]
+#[derive(StructOpt, Debug, Clone)]
 pub struct ClientParams {
     #[structopt(short = "c", long = "config", help = "path to the client config")]
     pub config: Option<String>,
