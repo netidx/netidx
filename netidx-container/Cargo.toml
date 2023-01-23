@@ -18,7 +18,7 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 anyhow = "1"
-base64 = "0.20"
+base64 = "0.21"
 bytes = "1"
 chrono = { version = "^0.4.23" }
 futures = "0.3"

@@ -21,7 +21,7 @@ fxhash = "0.2"
 lazy_static = "1"
 serde = { version = "1.0", features = ["rc"] }
 serde_derive = "1"
-base64 = "0.20"
+base64 = "0.21"
 arcstr = { version = "1", features = ["serde"] }
 smallvec = "1"
 indexmap = "1"
