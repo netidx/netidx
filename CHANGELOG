@@ -1,4 +1,9 @@
 * 0.16 all
+  - rename Subscriber::durable_subscribe -> Subscriber::subscribe
+
+  - rename Subscriber::subscribe -> Subscriber::subscribe_nondurable
+  
+  - rename Subscriber::subscribe_one -> Subscriber::subscribe_nondurable_one
 
   - protocol version 3 changes the wire format to introduce additional
     extensibility. Unfortunatly version 3 isn't backwards compatibile

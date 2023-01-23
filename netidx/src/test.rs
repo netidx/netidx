@@ -470,17 +470,21 @@ mod publisher {
         auth: DesiredAuth,
     ) {
         let subscriber = Subscriber::new(cfg, auth).unwrap();
-        let vs = subscriber.subscribe_one("/app/v0".into(), None).await.unwrap();
+        let vs =
+            subscriber.subscribe_nondurable_one("/app/v0".into(), None).await.unwrap();
         // we should be able to subscribe to an alias and it should
         // behave as if we just cloned the existing
         // subscription. E.G. no extra values in the channel.
-        let va = subscriber.subscribe_one("/app/v1".into(), None).await.unwrap();
-        let q = subscriber.subscribe_one("/app/q/foo".into(), None).await.unwrap();
+        let va =
+            subscriber.subscribe_nondurable_one("/app/v1".into(), None).await.unwrap();
+        let q =
+            subscriber.subscribe_nondurable_one("/app/q/foo".into(), None).await.unwrap();
         assert_eq!(q.last(), Event::Update(Value::True));
         let (_, res) =
             subscriber.resolver().resolve(iter::once("/app/q/adv".into())).await.unwrap();
         assert_eq!(res.len(), 1);
-        let a = subscriber.subscribe_one("/app/q/adv".into(), None).await.unwrap();
+        let a =
+            subscriber.subscribe_nondurable_one("/app/q/adv".into(), None).await.unwrap();
         assert_eq!(a.last(), Event::Update(Value::False));
         drop(q);
         drop(a);
