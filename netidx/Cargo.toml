@@ -1,6 +1,6 @@
 [package]
 name = "netidx"
-version = "0.16.0"
+version = "0.16.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -13,7 +13,7 @@ keywords = ["network", "networking", "distributed", "kerberos"]
 categories = ["network-programming"]
 
 [features]
-default = ["krb5_iov"]
+default = []
 krb5_iov = ["cross-krb5/iov"]
 
 [dependencies]

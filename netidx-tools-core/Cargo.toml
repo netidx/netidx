@@ -1,6 +1,6 @@
 [package]
 name = "netidx-tools-core"
-version = "0.16.1"
+version = "0.16.2"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -13,7 +13,7 @@ keywords = ["networking", "distributed", "kerberos", "tool"]
 categories = ["network-programming"]
 
 [features]
-default = ["krb5_iov"]
+default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]

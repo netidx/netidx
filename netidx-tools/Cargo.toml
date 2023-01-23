@@ -1,6 +1,6 @@
 [package]
 name = "netidx-tools"
-version = "0.16.0"
+version = "0.16.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -21,7 +21,7 @@ daemonize = "0.4"
 nix = "0.26"
 
 [features]
-default = ["krb5_iov"]
+default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
