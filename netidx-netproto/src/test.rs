@@ -1,4 +1,5 @@
 use bytes::{Bytes, BytesMut};
+use rust_decimal::Decimal;
 use netidx_core::{
     chars::Chars,
     pack::{Pack, Z64},
@@ -400,8 +401,8 @@ mod publisher {
             any::<u64>().prop_map(|i| To::Unsubscribe(Id::mk(i))),
             (any::<u64>(), value(), any::<bool>()).prop_map(|(i, v, r)| To::Write(
                 Id::mk(i),
-                v,
-                r
+                r,
+                v
             ))
         ]
     }
@@ -430,6 +431,7 @@ mod publisher {
             any::<i64>().prop_map(Value::Z64),
             any::<f32>().prop_map(Value::F32),
             any::<f64>().prop_map(Value::F64),
+            any::<[u8; 16]>().prop_map(|a| Value::Decimal(Decimal::deserialize(a))),
             datetime().prop_map(Value::DateTime),
             duration().prop_map(Value::Duration),
             chars().prop_map(Value::String),

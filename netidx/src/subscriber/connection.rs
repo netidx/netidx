@@ -377,7 +377,7 @@ impl ConnectionCtx {
                     self.handle_connect_stream(id, sub_id, tx, flags)?
                 }
                 ToCon::Write(id, v, tx) => {
-                    write_con.queue_send(&To::Write(id, v, tx.is_some()))?;
+                    write_con.queue_send(&To::Write(id, tx.is_some(), v))?;
                     if let Some(tx) = tx {
                         self.pending_writes
                             .entry(id)
