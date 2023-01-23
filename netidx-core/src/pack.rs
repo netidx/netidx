@@ -1,13 +1,13 @@
 use crate::pool::{Pool, Poolable, Pooled};
 use arcstr::ArcStr;
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{buf, Buf, BufMut, Bytes};
 use chrono::{naive::NaiveDateTime, prelude::*};
 use fxhash::FxBuildHasher;
 use rust_decimal::Decimal;
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
-    cmp::{min, Eq},
+    cmp::Eq,
     collections::HashMap,
     default::Default,
     error, fmt,
@@ -346,18 +346,16 @@ pub fn len_wrapped_decode<B, T, F>(buf: &mut B, f: F) -> Result<T, PackError>
 where
     B: Buf,
     T: Pack + 'static,
-    F: FnOnce(&mut B) -> Result<T, PackError>,
+    F: FnOnce(&mut buf::Take<&mut B>) -> Result<T, PackError>,
 {
     let len = decode_varint(buf)?;
     if len < 1 {
         return Err(PackError::BufferShort);
     }
-    let len = (len - varint_len(len) as u64) as usize;
-    let n = buf.remaining();
-    let r = f(buf);
-    let n = n - buf.remaining();
-    if n < len {
-        buf.advance(min(buf.remaining(), len - n));
+    let mut limited = buf.take((len - varint_len(len) as u64) as usize);
+    let r = f(&mut limited);
+    if limited.has_remaining() {
+        limited.advance(limited.remaining());
     }
     r
 }
@@ -860,15 +858,11 @@ impl Pack for DateTime<Utc> {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        if buf.remaining() < Self::const_encoded_len().unwrap() {
-            Err(PackError::BufferShort)
-        } else {
-            let ts = Pack::decode(buf)?;
-            let ns = Pack::decode(buf)?;
-            let ndt = NaiveDateTime::from_timestamp_opt(ts, ns)
-                .ok_or_else(|| PackError::InvalidFormat)?;
-            Ok(DateTime::from_utc(ndt, Utc))
-        }
+        let ts = Pack::decode(buf)?;
+        let ns = Pack::decode(buf)?;
+        let ndt = NaiveDateTime::from_timestamp_opt(ts, ns)
+            .ok_or_else(|| PackError::InvalidFormat)?;
+        Ok(DateTime::from_utc(ndt, Utc))
     }
 }
 
@@ -887,13 +881,9 @@ impl Pack for Duration {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        if buf.remaining() < Self::const_encoded_len().unwrap() {
-            Err(PackError::BufferShort)
-        } else {
-            let secs = Pack::decode(buf)?;
-            let ns = Pack::decode(buf)?;
-            Ok(Duration::new(secs, ns))
-        }
+        let secs = Pack::decode(buf)?;
+        let ns = Pack::decode(buf)?;
+        Ok(Duration::new(secs, ns))
     }
 }
 
@@ -925,14 +915,10 @@ impl Pack for uuid::Uuid {
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        Ok(buf.put_u128(self.as_u128()))
+        Pack::encode(&self.as_u128(), buf)
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        if buf.remaining() < Self::const_encoded_len().unwrap() {
-            Err(PackError::BufferShort)
-        } else {
-            Ok(uuid::Uuid::from_u128(buf.get_u128()))
-        }
+        Ok(uuid::Uuid::from_u128(Pack::decode(buf)?))
     }
 }
