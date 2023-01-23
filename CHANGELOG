@@ -1,3 +1,12 @@
+* 0.16.1 and 2
+
+  - add a pack implementation for UUID
+
+  - remove krb5_iov as a default feature
+
+  - make clientparams cloneable, and make load take a reference
+    instead of an owned value.
+
 * 0.16 all
   - rename Subscriber::durable_subscribe -> Subscriber::subscribe
 
