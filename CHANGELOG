@@ -2,7 +2,7 @@
   - rename Subscriber::durable_subscribe -> Subscriber::subscribe
 
   - rename Subscriber::subscribe -> Subscriber::subscribe_nondurable
-  
+
   - rename Subscriber::subscribe_one -> Subscriber::subscribe_nondurable_one
 
   - protocol version 3 changes the wire format to introduce additional
@@ -11,8 +11,7 @@
     chance.
 
   - Introducing netidx channels. Bidirectional message channels that
-    function like tcp sockets, except the address is a netidx path,
-    and all the security features of netidx are applied.
+    function like tcp sockets, except the address is a netidx path
 
   - Major refactor of publisher and subscriber to completely eliminate
     blocking awaits from their respective message handling loops.
