@@ -1,3 +1,4 @@
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use anyhow::{bail, Result as Res};
 use bytes::{Buf, BufMut, Bytes};
 use chrono::{naive::NaiveDateTime, prelude::*};
@@ -1098,7 +1099,7 @@ impl Value {
                 }
             }
             Value::String(s) => write!(f, "{}", s),
-            Value::Bytes(b) => write!(f, "{}", base64::encode(&*b)),
+            Value::Bytes(b) => write!(f, "{}", BASE64.encode(&*b)),
             Value::True => write!(f, "true"),
             Value::False => write!(f, "false"),
             Value::Null => write!(f, "null"),
@@ -1219,7 +1220,7 @@ impl Value {
             }
             Value::Bytes(b) => {
                 let pfx = if types { "bytes:" } else { "" };
-                write!(f, "{}{}", pfx, base64::encode(&*b))
+                write!(f, "{}{}", pfx, BASE64.encode(&*b))
             }
             Value::True => write!(f, "true"),
             Value::False => write!(f, "false"),

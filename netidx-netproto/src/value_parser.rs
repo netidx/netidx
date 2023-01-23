@@ -1,5 +1,5 @@
 use crate::value::Value;
-use base64;
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use combine::{
     attempt, between, choice, from_str, many1, none_of, not_followed_by, one_of,
@@ -107,7 +107,7 @@ impl FromStr for Base64Encoded {
     type Err = base64::DecodeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        base64::decode(s).map(Base64Encoded)
+        BASE64.decode(s).map(Base64Encoded)
     }
 }
 
