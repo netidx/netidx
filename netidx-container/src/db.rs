@@ -1319,10 +1319,9 @@ async fn stats_commit_task(rx: UnboundedReceiver<UpdateBatch>) {
 
 impl Stats {
     fn new(publisher: Publisher, base_path: Path) -> Result<Arc<Self>> {
-        let busy = publisher.publish(base_path.append("busy"), false.into())?;
-        let queued = publisher.publish(base_path.append("queued"), 0.into())?;
-        let deleting =
-            publisher.publish(base_path.append("background-delete"), false.into())?;
+        let busy = publisher.publish(base_path.append("busy"), false)?;
+        let queued = publisher.publish(base_path.append("queued"), 0)?;
+        let deleting = publisher.publish(base_path.append("background-delete"), false)?;
         let (tx, rx) = unbounded();
         task::spawn(stats_commit_task(rx));
         Ok(Arc::new(Stats {

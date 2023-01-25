@@ -1,3 +1,15 @@
+* 0.16.2 and 3
+
+  - change publisher::{publish, publish_with_flags, update,
+    update_subscriber} take Into<Value> instead of a direct
+    value. Implement try_ variants of update and update_subscriber
+    that take TryInto<Value>.
+
+  - call_rpc can now take any TryInto type as an argument
+
+  - I may have slighly broken semantic versioning here, but 0.16 just
+    released, so I don't think it's a huge deal.
+
 * 0.16.1 and 2
  
   - improve the safety of len_wrapped_decode

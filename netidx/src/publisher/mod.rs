@@ -1045,12 +1045,17 @@ impl Publisher {
     /// as many times as they like. Subscribers will then pick
     /// randomly among the advertised publishers when subscribing. See
     /// `subscriber`
-    pub fn publish_with_flags(
+    pub fn publish_with_flags<T>(
         &self,
         mut flags: PublishFlags,
         path: Path,
-        init: Value,
-    ) -> Result<Val> {
+        init: T,
+    ) -> Result<Val>
+    where
+        T: TryInto<Value>,
+        <T as TryInto<Value>>::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let init: Value = init.try_into()?;
         let id = Id::new();
         let destroy_on_idle = flags.contains(PublishFlags::DESTROY_ON_IDLE);
         flags.remove(PublishFlags::DESTROY_ON_IDLE);
@@ -1112,7 +1117,11 @@ impl Publisher {
     /// as many times as they like. Subscribers will then pick
     /// randomly among the advertised publishers when subscribing. See
     /// `subscriber`
-    pub fn publish(&self, path: Path, init: Value) -> Result<Val> {
+    pub fn publish<T>(&self, path: Path, init: T) -> Result<Val>
+    where
+        T: TryInto<Value>,
+        <T as TryInto<Value>>::Error: std::error::Error + Send + Sync + 'static,
+    {
         self.publish_with_flags(PublishFlags::empty(), path, init)
     }
 
