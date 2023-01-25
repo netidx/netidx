@@ -1,5 +1,7 @@
 * 0.16.1 and 2
-
+ 
+  - improve the safety of len_wrapped_decode
+  
   - add a pack implementation for UUID
 
   - remove krb5_iov as a default feature
