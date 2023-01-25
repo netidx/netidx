@@ -32,11 +32,12 @@ use rand::{self, Rng};
 use std::{
     boxed::Box,
     collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
-    convert::From,
+    convert::{From, Into, TryInto},
     default::Default,
     iter, mem,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     pin::Pin,
+    result,
     str::FromStr,
     sync::{Arc, Weak},
     time::Duration,
@@ -374,20 +375,55 @@ impl Val {
     ///
     /// Clients that subscribe after an update is queued, but before
     /// the batch is committed will still receive the update.
-    pub fn update(&self, batch: &mut UpdateBatch, v: Value) {
-        batch.updates.push(BatchMsg::Update(None, self.0, v));
+    pub fn update<T: Into<Value>>(&self, batch: &mut UpdateBatch, v: T) {
+        batch.updates.push(BatchMsg::Update(None, self.0, v.into()))
+    }
+
+    /// Same as update, except the argument can be TryInto<Value>
+    /// instead of Into<Value>
+    pub fn try_update<T: TryInto<Value>>(
+        &self,
+        batch: &mut UpdateBatch,
+        v: T,
+    ) -> result::Result<(), T::Error> {
+        Ok(batch.updates.push(BatchMsg::Update(None, self.0, v.try_into()?)))
     }
 
     /// update the current value only if the new value is different
     /// from the existing one. Otherwise exactly the same as update.
-    pub fn update_changed(&self, batch: &mut UpdateBatch, v: Value) {
-        batch.updates.push(BatchMsg::UpdateChanged(self.0, v));
+    pub fn update_changed<T: Into<Value>>(&self, batch: &mut UpdateBatch, v: T) {
+        batch.updates.push(BatchMsg::UpdateChanged(self.0, v.into()))
+    }
+
+    /// Same as update_changed except the argument can be
+    /// TryInto<Value> instead of Into<Value>.
+    pub fn try_update_changed<T: TryInto<Value>>(
+        &self,
+        batch: &mut UpdateBatch,
+        v: T,
+    ) -> result::Result<(), T::Error> {
+        Ok(batch.updates.push(BatchMsg::UpdateChanged(self.0, v.try_into()?)))
     }
 
     /// Queue sending `v` as an update ONLY to the specified
     /// subscriber, and do not update `current`.
-    pub fn update_subscriber(&self, batch: &mut UpdateBatch, dst: ClId, v: Value) {
-        batch.updates.push(BatchMsg::Update(Some(dst), self.0, v));
+    pub fn update_subscriber<T: Into<Value>>(
+        &self,
+        batch: &mut UpdateBatch,
+        dst: ClId,
+        v: T,
+    ) {
+        batch.updates.push(BatchMsg::Update(Some(dst), self.0, v.into()));
+    }
+
+    /// Same as update_subscriber except the argument can be TryInto<Value>.
+    pub fn try_update_subscriber<T: TryInto<Value>>(
+        &self,
+        batch: &mut UpdateBatch,
+        dst: ClId,
+        v: T,
+    ) -> result::Result<(), T::Error> {
+        Ok(batch.updates.push(BatchMsg::Update(Some(dst), self.0, v.try_into()?)))
     }
 
     /// Queue unsubscribing the specified client. Like update, this

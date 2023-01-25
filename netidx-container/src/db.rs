@@ -1338,27 +1338,27 @@ impl Stats {
     fn inc_queued(&self) {
         let n = self.queued_cnt.fetch_add(1, Ordering::Relaxed) + 1;
         let mut batch = self.publisher.start_batch();
-        self.queued.update(&mut batch, n.into());
+        self.queued.update(&mut batch, n);
         let _: Result<_, _> = self.to_commit.unbounded_send(batch);
     }
 
     fn dec_queued(&self) {
         let n = self.queued_cnt.fetch_sub(1, Ordering::Relaxed) - 1;
         let mut batch = self.publisher.start_batch();
-        self.queued.update(&mut batch, n.into());
-        self.busy.update(&mut batch, true.into());
+        self.queued.update(&mut batch, n);
+        self.busy.update(&mut batch, true);
         let _: Result<_, _> = self.to_commit.unbounded_send(batch);
     }
 
     fn set_busy(&self, busy: bool) {
         let mut batch = self.publisher.start_batch();
-        self.busy.update(&mut batch, busy.into());
+        self.busy.update(&mut batch, busy);
         let _: Result<_, _> = self.to_commit.unbounded_send(batch);
     }
 
     fn set_deleting(&self, deleting: bool) {
         let mut batch = self.publisher.start_batch();
-        self.deleting.update(&mut batch, deleting.into());
+        self.deleting.update(&mut batch, deleting);
         let _: Result<_, _> = self.to_commit.unbounded_send(batch);
     }
 }

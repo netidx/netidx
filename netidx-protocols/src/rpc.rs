@@ -51,7 +51,14 @@ pub mod server {
     /// see `Proc` for an example
     #[macro_export]
     macro_rules! define_rpc {
-        ($publisher:expr, $path:expr, $topdoc:expr, $map:expr, $tx:expr, $($arg:ident: $typ:ty = $default:expr; $doc:expr),*) => {{
+        (
+            $publisher:expr,
+            $path:expr,
+            $topdoc:expr,
+            $map:expr,
+            $tx:expr,
+            $($arg:ident: $typ:ty = $default:expr; $doc:expr),*
+        ) => {{
             let map = move |mut c: RpcCall| {
                 $(
                     let d = Value::from($default);
@@ -358,7 +365,7 @@ pub mod client {
         ($proc:expr, $($name:ident: $arg:expr),*) => {
             $proc.call([
                 $(
-                    (stringify!($name), Value::from($arg))
+                    (stringify!($name), Value::try_from($arg)?)
                 )*,
             ])
         }
@@ -428,10 +435,7 @@ pub mod client {
                 for arg_path in batch.drain(..) {
                     let arg_name =
                         Path::basename(Path::dirname(&*arg_path).unwrap()).unwrap();
-                    args.insert(
-                        String::from(arg_name),
-                        subscriber.subscribe(arg_path),
-                    );
+                    args.insert(String::from(arg_name), subscriber.subscribe(arg_path));
                 }
             }
             Ok(Proc(Arc::new(ProcInner { name, sid, lock, call, args })))
@@ -533,6 +537,7 @@ mod test {
             });
             let args = vec![("arg2", Value::from("hello rpc"))];
             assert!(proc.call(args.into_iter()).await.is_err());
-        })
+            Ok::<(), anyhow::Error>(())
+        }).unwrap()
     }
 }

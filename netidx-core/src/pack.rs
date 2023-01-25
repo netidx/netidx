@@ -922,3 +922,21 @@ impl Pack for uuid::Uuid {
         Ok(uuid::Uuid::from_u128(Pack::decode(buf)?))
     }
 }
+
+impl Pack for usize {
+    fn const_encoded_len() -> Option<usize> {
+        Some(mem::size_of::<u64>())
+    }
+
+    fn encoded_len(&self) -> usize {
+        Self::const_encoded_len().unwrap()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        <u64 as Pack>::encode(&(*self as u64), buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        Ok(<u64 as Pack>::decode(buf)? as usize)
+    }
+}

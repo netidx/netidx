@@ -30,7 +30,7 @@ impl Stats {
             self.roots.push(self.publisher.publish(p, Value::Null)?);
         }
         for (path, p) in roots.keys().zip(self.roots.iter()) {
-            p.update(batch, String::from(path.as_ref()).into());
+            p.update(batch, String::from(path.as_ref()));
         }
         Ok(())
     }
@@ -50,8 +50,8 @@ impl Stats {
             self.locked.push((pk, pv));
         }
         for ((path, locked), (pv, lv)) in locked.iter().zip(self.locked.iter()) {
-            pv.update(batch, String::from(path.as_ref()).into());
-            lv.update(batch, locked.into());
+            pv.update(batch, String::from(path.as_ref()));
+            lv.update(batch, locked);
         }
         Ok(())
     }
