@@ -1,6 +1,6 @@
 [package]
 name = "netidx-container"
-version = "0.16.1"
+version = "0.16.2"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -25,7 +25,7 @@ futures = "0.3"
 fxhash = "0.2"
 log = "0.4"
 netidx-core = { path = "../netidx-core", version = "^0.16" }
-netidx = { path = "../netidx", version = "^0.16" , default_features = false }
+netidx = { path = "../netidx", version = "^0.16.2" , default_features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "^0.16", default_features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "^0.16", default_features = false }
 parking_lot = "0.12"
