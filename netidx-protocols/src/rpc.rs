@@ -366,7 +366,7 @@ pub mod client {
             $proc.call([
                 $(
                     (stringify!($name), Value::try_from($arg)?)
-                )*,
+                ),*
             ])
         }
     }
