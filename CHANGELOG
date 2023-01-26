@@ -1,4 +1,5 @@
 * 0.16.2 and 3
+  - a couple of convenience methods in value and rpc
 
   - change publisher::{publish, publish_with_flags, update,
     update_subscriber} take Into<Value> instead of a direct

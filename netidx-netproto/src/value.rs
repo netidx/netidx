@@ -1441,6 +1441,10 @@ impl Value {
         <T as FromValue>::get(self)
     }
 
+    pub fn err<T: std::error::Error>(e: T) -> Value {
+        Value::Error(Chars::from(e.to_string()))
+    }
+
     /// return true if the value is some kind of number, otherwise
     /// false.
     pub fn number(&self) -> bool {

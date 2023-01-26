@@ -94,9 +94,9 @@ pub mod server {
     }
 
     impl RpcReply {
-        pub fn send(&mut self, m: Value) {
+        pub fn send<T: Into<Value>>(&mut self, m: T) {
             if let Some(res) = self.0.take() {
-                res.send(m);
+                res.send(m.into());
             }
         }
     }
