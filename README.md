@@ -1,3 +1,14 @@
+[![Crates.io][crates-badge]][crates-url]
+[![docs.rs][docs-badge]][docs-url]
+[![MIT licensed][mit-badge]][mit-url]
+
+[crates-badge]: https://img.shields.io/crates/v/netidx.svg?style=flat-square
+[crates-url]: https://crates.io/crates/netidx
+[docs-badge]: https://img.shields.io/badge/docs-latest-blue.svg?style=flat-square
+[docs-url]: https://docs.rs/netidx/latest/netidx/
+[mit-badge]: https://img.shields.io/badge/license-MIT-lightgray.svg?style=flat-square
+[mit-url]: https://github.com/netidx/netidx/blob/master/LICENSE
+
 # What is Netidx
 
 Netidx is middleware that enables publishing a value, like 42, in one
