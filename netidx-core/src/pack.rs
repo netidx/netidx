@@ -25,6 +25,7 @@ pub enum PackError {
     TooBig,
     InvalidFormat,
     BufferShort,
+    Application(u64),
 }
 
 impl fmt::Display for PackError {
