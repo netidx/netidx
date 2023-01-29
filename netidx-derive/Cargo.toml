@@ -1,0 +1,13 @@
+[package]
+name = "netidx-derive"
+version = "0.16.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+netidx-core = { version = "0.16", path = "../netidx-core" }
+syn = "1"
+quote = "1"
+proc-macro2 = "1"

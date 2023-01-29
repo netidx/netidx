@@ -21,5 +21,6 @@ members = [
     "netidx-tools",
     "netidx-tools-core",
     "netidx-browser",
-    "netidx-container"
+    "netidx-container",
+    "netidx-derive"
 ]
