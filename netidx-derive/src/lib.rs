@@ -88,7 +88,7 @@ fn encode(input: &Data) -> TokenStream {
                 });
                 quote! {
                     len_wrapped_encode(buf, self, |buf| {
-                        #(#fields);*
+                        #(#fields);*;
                         Ok(())
                     })
                 }
@@ -102,7 +102,7 @@ fn encode(input: &Data) -> TokenStream {
                 });
                 quote! {
                     len_wrapped_encode(buf, self, |buf| {
-                        #(#fields);*
+                        #(#fields);*;
                         Ok(())
                     })
                 }
@@ -122,8 +122,8 @@ fn encode(input: &Data) -> TokenStream {
                     let tag = &v.ident;
                     quote! {
                         #tag { #(#match_fields),* } => {
-                            <u8 as netidx::pack::Pack>::encode(&#i, buf)?;
-                            #(#pack_fields);*
+                            <u8 as netidx_core::pack::Pack>::encode(&#i, buf)?;
+                            #(#pack_fields);*;
                             Ok(())
                         }
                     }
@@ -143,8 +143,8 @@ fn encode(input: &Data) -> TokenStream {
                     let tag = &v.ident;
                     quote! {
                         #tag(#(#match_fields),*) => {
-                            <u8 as netidx::pack::Pack>::encode(&#i, buf)?;
-                            #(#pack_fields);*
+                            <u8 as netidx_core::pack::Pack>::encode(&#i, buf)?;
+                            #(#pack_fields);*;
                             Ok(())
                         }
                     }
@@ -176,7 +176,7 @@ fn decode(input: &Data) -> TokenStream {
                 });
                 quote! {
                     len_wrapped_decode(buf, |buf| {
-                        #(#decode_fields);*
+                        #(#decode_fields);*;
                         Ok(Self { #(#name_fields),* })
                     })
                 }
@@ -195,7 +195,7 @@ fn decode(input: &Data) -> TokenStream {
                 });
                 quote! {
                     len_wrapped_decode(buf, |buf| {
-                        #(#decode_fields);*
+                        #(#decode_fields);*;
                         Ok(Self(#(#name_fields),*))
                     })
                 }
@@ -215,7 +215,7 @@ fn decode(input: &Data) -> TokenStream {
                     let tag = &v.ident;
                     quote! {
                         #i => {
-                            #(#decode_fields);*
+                            #(#decode_fields);*;
                             Ok(#tag { #(#name_fields),* })
                         }
                     }
@@ -235,7 +235,7 @@ fn decode(input: &Data) -> TokenStream {
                     let tag = &v.ident;
                     quote! {
                         #i => {
-                            #(#decode_fields);*
+                            #(#decode_fields);*;
                             Ok(#tag(#(#name_fields),*))
                         }
                     }
@@ -244,9 +244,9 @@ fn decode(input: &Data) -> TokenStream {
             });
             quote! {
                 len_wrapped_decode(buf, |buf| {
-                    match <u8 as netidx::pack::Pack>::decode(buf)? {
+                    match <u8 as netidx_core::pack::Pack>::decode(buf)? {
                         #(#cases)*
-                        _ => Err(netidx::pack::PackError::UnknownTag)
+                        _ => Err(netidx_core::pack::PackError::UnknownTag)
                     }
                 })
             }
@@ -261,7 +261,7 @@ pub fn derive_pack(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let name = input.ident;
     for param in &mut input.generics.params {
         if let GenericParam::Type(typ) = param {
-            typ.bounds.push(parse_quote!(netidx::pack::Pack))
+            typ.bounds.push(parse_quote!(netidx_core::pack::Pack))
         }
     }
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
@@ -269,21 +269,21 @@ pub fn derive_pack(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let encode = encode(&input.data);
     let decode = decode(&input.data);
     let expanded = quote! {
-        #impl_generics netidx::pack::Pack for #name #ty_generics #where_clause {
+        impl #impl_generics netidx_core::pack::Pack for #name #ty_generics #where_clause {
             fn encoded_len(&self) -> usize {
                 #encoded_len
             }
 
             fn encode(
                 &self,
-                &mut impl bytes::BufMut
-            ) -> std::result::Result<(), netidx::pack::PackError> {
+                buf: &mut impl bytes::BufMut
+            ) -> std::result::Result<(), netidx_core::pack::PackError> {
                 #encode
             }
 
             fn decode(
-                &mut impl bytes::Buf
-            ) -> std::result::Result<Self, netidx::pack::PackError> {
+                buf: &mut impl bytes::Buf
+            ) -> std::result::Result<Self, netidx_core::pack::PackError> {
                 #decode
             }
         }
