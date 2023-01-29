@@ -16,7 +16,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                     }
                 });
                 quote! {
-                    len_wrapped_len(0 #(+ #fields)*)
+                    netidx_core::pack::len_wrapped_len(0 #(+ #fields)*)
                 }
             }
             Fields::Unnamed(fields) => {
@@ -27,7 +27,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                     }
                 });
                 quote! {
-                    len_wrapped_len(0 #(+ #fields)*)
+                    netidx_core::pack::len_wrapped_len(0 #(+ #fields)*)
                 }
             }
             Fields::Unit => quote! { 0 },
@@ -67,7 +67,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                 Fields::Unit => unimplemented!(),
             });
             quote! {
-                len_wrapped_len(1 + match self {
+                netidx_core::pack::len_wrapped_len(1 + match self {
                     #(#cases)*
                 })
             }
@@ -87,7 +87,7 @@ fn encode(input: &Data) -> TokenStream {
                     }
                 });
                 quote! {
-                    len_wrapped_encode(buf, self, |buf| {
+                    netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
                         #(#fields);*;
                         Ok(())
                     })
@@ -101,7 +101,7 @@ fn encode(input: &Data) -> TokenStream {
                     }
                 });
                 quote! {
-                    len_wrapped_encode(buf, self, |buf| {
+                    netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
                         #(#fields);*;
                         Ok(())
                     })
@@ -152,7 +152,7 @@ fn encode(input: &Data) -> TokenStream {
                 Fields::Unit => unimplemented!(),
             });
             quote! {
-                len_wrapped_encode(buf, self, |buf| {
+                netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
                     match self {
                         #(#cases)*
                     }
@@ -175,7 +175,7 @@ fn decode(input: &Data) -> TokenStream {
                     }
                 });
                 quote! {
-                    len_wrapped_decode(buf, |buf| {
+                    netidx_core::pack::len_wrapped_decode(buf, |buf| {
                         #(#decode_fields);*;
                         Ok(Self { #(#name_fields),* })
                     })
@@ -194,7 +194,7 @@ fn decode(input: &Data) -> TokenStream {
                     }
                 });
                 quote! {
-                    len_wrapped_decode(buf, |buf| {
+                    netidx_core::pack::len_wrapped_decode(buf, |buf| {
                         #(#decode_fields);*;
                         Ok(Self(#(#name_fields),*))
                     })
@@ -243,7 +243,7 @@ fn decode(input: &Data) -> TokenStream {
                 Fields::Unit => unimplemented!(),
             });
             quote! {
-                len_wrapped_decode(buf, |buf| {
+                netidx_core::pack::len_wrapped_decode(buf, |buf| {
                     match <u8 as netidx_core::pack::Pack>::decode(buf)? {
                         #(#cases)*
                         _ => Err(netidx_core::pack::PackError::UnknownTag)
