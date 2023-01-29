@@ -149,7 +149,12 @@ fn encode(input: &Data) -> TokenStream {
                         }
                     }
                 }
-                Fields::Unit => unimplemented!(),
+                Fields::Unit => {
+                    let tag = &v.ident;
+                    quote! {
+                        #tag => <u8 as netidx_core_pack::Pack>::encode(&#i, buf)?,
+                    }
+                },
             });
             quote! {
                 netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
@@ -240,7 +245,10 @@ fn decode(input: &Data) -> TokenStream {
                         }
                     }
                 }
-                Fields::Unit => unimplemented!(),
+                Fields::Unit => {
+                    let tag = &v.ident;
+                    quote! { #i => #tag, }
+                },
             });
             quote! {
                 netidx_core::pack::len_wrapped_decode(buf, |buf| {
