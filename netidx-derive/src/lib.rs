@@ -30,7 +30,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                     netidx_core::pack::len_wrapped_len(0 #(+ #fields)*)
                 }
             }
-            Fields::Unit => quote! { 0 },
+            Fields::Unit => panic!("unit structs are not supported by Pack"),
         },
         Data::Enum(en) => {
             let cases = en.variants.iter().map(|v| match &v.fields {
@@ -64,7 +64,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                         #tag(#(#match_fields),*) => { 0 #(+ #size_fields)* }
                     }
                 }
-                Fields::Unit => unimplemented!(),
+                Fields::Unit => quote! { 0 },
             });
             quote! {
                 netidx_core::pack::len_wrapped_len(1 + match self {
@@ -72,7 +72,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                 })
             }
         }
-        Data::Union(_) => unimplemented!(),
+        Data::Union(_) => panic!("unions are not supported by Pack"),
     }
 }
 
@@ -107,7 +107,7 @@ fn encode(input: &Data) -> TokenStream {
                     })
                 }
             }
-            Fields::Unit => unimplemented!(),
+            Fields::Unit => panic!("unit structs are not supported by Pack"),
         },
         Data::Enum(en) => {
             let cases = en.variants.iter().enumerate().map(|(i, v)| match &v.fields {
@@ -164,7 +164,7 @@ fn encode(input: &Data) -> TokenStream {
                 })
             }
         }
-        Data::Union(_) => unimplemented!(),
+        Data::Union(_) => panic!("unions are not supported by Pack"),
     }
 }
 
@@ -205,7 +205,7 @@ fn decode(input: &Data) -> TokenStream {
                     })
                 }
             }
-            Fields::Unit => unimplemented!(),
+            Fields::Unit => panic!("unit structs are not supported by Pack"),
         },
         Data::Enum(en) => {
             let cases = en.variants.iter().enumerate().map(|(i, v)| match &v.fields {
@@ -259,7 +259,7 @@ fn decode(input: &Data) -> TokenStream {
                 })
             }
         }
-        Data::Union(_) => unimplemented!(),
+        Data::Union(_) => panic!("unions are not supported by Pack"),
     }
 }
 
