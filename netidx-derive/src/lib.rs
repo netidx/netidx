@@ -12,7 +12,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                 let fields = fields.named.iter().map(|f| {
                     let name = &f.ident;
                     quote_spanned! {
-                        f.span() => Pack::encoded_len(&self.#name)
+                        f.span() => netidx_core::pack::Pack::encoded_len(&self.#name)
                     }
                 });
                 quote! {
@@ -23,7 +23,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                 let fields = fields.unnamed.iter().enumerate().map(|(i, f)| {
                     let index = Index::from(i);
                     quote_spanned! {
-                        f.span() => Pack::encoded_len(&self.#index)
+                        f.span() => netidx_core::pack::Pack::encoded_len(&self.#index)
                     }
                 });
                 quote! {
@@ -39,7 +39,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                     let size_fields = f.named.iter().map(|f| {
                         let name = &f.ident;
                         quote_spanned! {
-                            f.span() => Pack::encoded_len(#name)
+                            f.span() => netidx_core::pack::Pack::encoded_len(#name)
                         }
                     });
                     let tag = &v.ident;
@@ -56,7 +56,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                     let size_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
                         let name = format_ident!("field{}", i);
                         quote_spanned! {
-                            f.span() => Pack::encoded_len(#name)
+                            f.span() => netidx_core::pack::Pack::encoded_len(#name)
                         }
                     });
                     let tag = &v.ident;
@@ -83,7 +83,7 @@ fn encode(input: &Data) -> TokenStream {
                 let fields = fields.named.iter().map(|f| {
                     let name = &f.ident;
                     quote_spanned! {
-                        f.span() => Pack::encode(&self.#name, buf)?
+                        f.span() => netidx_core::pack::Pack::encode(&self.#name, buf)?
                     }
                 });
                 quote! {
@@ -97,7 +97,7 @@ fn encode(input: &Data) -> TokenStream {
                 let fields = fields.unnamed.iter().enumerate().map(|(i, f)| {
                     let index = Index::from(i);
                     quote_spanned! {
-                        f.span() => Pack::encode(&self.#index, buf)?
+                        f.span() => netidx_core::pack::Pack::encode(&self.#index, buf)?
                     }
                 });
                 quote! {
@@ -116,7 +116,7 @@ fn encode(input: &Data) -> TokenStream {
                     let pack_fields = f.named.iter().map(|f| {
                         let name = &f.ident;
                         quote_spanned! {
-                            f.span() => Pack::encode(#name, buf)?
+                            f.span() => netidx_core::pack::Pack::encode(#name, buf)?
                         }
                     });
                     let tag = &v.ident;
@@ -137,7 +137,7 @@ fn encode(input: &Data) -> TokenStream {
                     let pack_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
                         let name = format_ident!("field{}", i);
                         quote_spanned! {
-                            f.span() => Pack::encode(#name, buf)?
+                            f.span() => netidx_core::pack::Pack::encode(#name, buf)?
                         }
                     });
                     let tag = &v.ident;
@@ -171,7 +171,7 @@ fn decode(input: &Data) -> TokenStream {
                 let decode_fields = fields.named.iter().map(|f| {
                     let name = &f.ident;
                     quote_spanned! {
-                        f.span() => let #name = Pack::decode(buf)?
+                        f.span() => let #name = netidx_core::pack::Pack::decode(buf)?
                     }
                 });
                 quote! {
@@ -190,7 +190,7 @@ fn decode(input: &Data) -> TokenStream {
                 let decode_fields = fields.unnamed.iter().enumerate().map(|(i, f)| {
                     let name = format_ident!("field{}", i);
                     quote_spanned! {
-                        f.span() => let #name = Pack::decode(buf)?
+                        f.span() => let #name = netidx_core::pack::Pack::decode(buf)?
                     }
                 });
                 quote! {
@@ -209,7 +209,7 @@ fn decode(input: &Data) -> TokenStream {
                     let decode_fields = f.named.iter().map(|f| {
                         let name = &f.ident;
                         quote_spanned! {
-                            f.span() => let #name = Pack::decode(buf)?
+                            f.span() => let #name = netidx_core::pack::Pack::decode(buf)?
                         }
                     });
                     let tag = &v.ident;
@@ -229,7 +229,7 @@ fn decode(input: &Data) -> TokenStream {
                     let decode_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
                         let name = format_ident!("field{}", i);
                         quote_spanned! {
-                            f.span() => let #name = Pack::decode(buf)?
+                            f.span() => let #name = netidx_core::pack::Pack::decode(buf)?
                         }
                     });
                     let tag = &v.ident;
