@@ -1,4 +1,3 @@
-use netidx_core::pack::{len_wrapped_decode, len_wrapped_encode, len_wrapped_len, Pack};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
 use syn::{
@@ -36,7 +35,7 @@ fn encoded_len(input: &Data) -> TokenStream {
         Data::Enum(en) => {
             let cases = en.variants.iter().map(|v| match &v.fields {
                 Fields::Named(f) => {
-                    let match_fields = f.named.iter().map(|f| f.ident);
+                    let match_fields = f.named.iter().map(|f| &f.ident);
                     let size_fields = f.named.iter().map(|f| {
                         let name = &f.ident;
                         quote_spanned! {
@@ -53,7 +52,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                         .unnamed
                         .iter()
                         .enumerate()
-                        .map(|(i, f)| format_ident!("field{}", i));
+                        .map(|(i, _)| format_ident!("field{}", i));
                     let size_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
                         let name = format_ident!("field{}", i);
                         quote_spanned! {
@@ -113,7 +112,7 @@ fn encode(input: &Data) -> TokenStream {
         Data::Enum(en) => {
             let cases = en.variants.iter().enumerate().map(|(i, v)| match &v.fields {
                 Fields::Named(f) => {
-                    let match_fields = f.named.iter().map(|f| f.ident);
+                    let match_fields = f.named.iter().map(|f| &f.ident);
                     let pack_fields = f.named.iter().map(|f| {
                         let name = &f.ident;
                         quote_spanned! {
@@ -123,7 +122,7 @@ fn encode(input: &Data) -> TokenStream {
                     let tag = &v.ident;
                     quote! {
                         #tag { #(#match_fields),* } => {
-                            <u8 as netidx::pack::Pack>::encode(&i, buf)?;
+                            <u8 as netidx::pack::Pack>::encode(&#i, buf)?;
                             #(#pack_fields);*
                             Ok(())
                         }
@@ -134,7 +133,7 @@ fn encode(input: &Data) -> TokenStream {
                         .unnamed
                         .iter()
                         .enumerate()
-                        .map(|(i, f)| format_ident!("field{}", i));
+                        .map(|(i, _)| format_ident!("field{}", i));
                     let pack_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
                         let name = format_ident!("field{}", i);
                         quote_spanned! {
@@ -144,7 +143,7 @@ fn encode(input: &Data) -> TokenStream {
                     let tag = &v.ident;
                     quote! {
                         #tag(#(#match_fields),*) => {
-                            <u8 as netidx::pack::Pack>::encode(&i, buf)?;
+                            <u8 as netidx::pack::Pack>::encode(&#i, buf)?;
                             #(#pack_fields);*
                             Ok(())
                         }
@@ -187,7 +186,7 @@ fn decode(input: &Data) -> TokenStream {
                     .unnamed
                     .iter()
                     .enumerate()
-                    .map(|(i, f)| format_ident!("field{}", i));
+                    .map(|(i, _)| format_ident!("field{}", i));
                 let decode_fields = fields.unnamed.iter().enumerate().map(|(i, f)| {
                     let name = format_ident!("field{}", i);
                     quote_spanned! {
@@ -195,7 +194,7 @@ fn decode(input: &Data) -> TokenStream {
                     }
                 });
                 quote! {
-                    len_wrapped_encode(buf, self, |buf| {
+                    len_wrapped_decode(buf, |buf| {
                         #(#decode_fields);*
                         Ok(Self(#(#name_fields),*))
                     })
@@ -206,7 +205,7 @@ fn decode(input: &Data) -> TokenStream {
         Data::Enum(en) => {
             let cases = en.variants.iter().enumerate().map(|(i, v)| match &v.fields {
                 Fields::Named(f) => {
-                    let name_fields = f.named.iter().map(|f| f.ident);
+                    let name_fields = f.named.iter().map(|f| &f.ident);
                     let decode_fields = f.named.iter().map(|f| {
                         let name = &f.ident;
                         quote_spanned! {
@@ -226,7 +225,7 @@ fn decode(input: &Data) -> TokenStream {
                         .unnamed
                         .iter()
                         .enumerate()
-                        .map(|(i, f)| format_ident!("field{}", i));
+                        .map(|(i, _)| format_ident!("field{}", i));
                     let decode_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
                         let name = format_ident!("field{}", i);
                         quote_spanned! {
@@ -244,8 +243,11 @@ fn decode(input: &Data) -> TokenStream {
                 Fields::Unit => unimplemented!(),
             });
             quote! {
-                len_wrapped_len(1 + match self {
-                    #(#cases)*
+                len_wrapped_decode(buf, |buf| {
+                    match <u8 as netidx::pack::Pack>::decode(buf)? {
+                        #(#cases)*
+                        _ => Err(netidx::pack::PackError::UnknownTag)
+                    }
                 })
             }
         }
@@ -254,11 +256,11 @@ fn decode(input: &Data) -> TokenStream {
 }
 
 #[proc_macro_derive(Pack)]
-pub fn derive_pack(input: TokenStream) -> TokenStream {
+pub fn derive_pack(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
     for param in &mut input.generics.params {
-        if let GenericParam::Type(typ) = *param {
+        if let GenericParam::Type(typ) = param {
             typ.bounds.push(parse_quote!(netidx::pack::Pack))
         }
     }
@@ -286,5 +288,5 @@ pub fn derive_pack(input: TokenStream) -> TokenStream {
             }
         }
     };
-    TokenStream::from(expanded)
+    proc_macro::TokenStream::from(expanded)
 }
