@@ -123,6 +123,7 @@ fn encode(input: &Data) -> TokenStream {
                         }
                     });
                     let tag = &v.ident;
+                    let i = Index::from(i);
                     quote! {
                         Self::#tag { #(#match_fields),* } => {
                             <u8 as netidx_core::pack::Pack>::encode(&#i, buf)?;
@@ -144,6 +145,7 @@ fn encode(input: &Data) -> TokenStream {
                         }
                     });
                     let tag = &v.ident;
+                    let i = Index::from(i);
                     quote! {
                         Self::#tag(#(#match_fields),*) => {
                             <u8 as netidx_core::pack::Pack>::encode(&#i, buf)?;
@@ -154,6 +156,7 @@ fn encode(input: &Data) -> TokenStream {
                 }
                 Fields::Unit => {
                     let tag = &v.ident;
+                    let i = Index::from(i);
                     quote! {
                         Self::#tag => <u8 as netidx_core::pack::Pack>::encode(&#i, buf)?,
                     }
@@ -221,6 +224,7 @@ fn decode(input: &Data) -> TokenStream {
                         }
                     });
                     let tag = &v.ident;
+                    let i = Index::from(i);
                     quote! {
                         #i => {
                             #(#decode_fields);*;
@@ -241,6 +245,7 @@ fn decode(input: &Data) -> TokenStream {
                         }
                     });
                     let tag = &v.ident;
+                    let i = Index::from(i);
                     quote! {
                         #i => {
                             #(#decode_fields);*;
@@ -250,6 +255,7 @@ fn decode(input: &Data) -> TokenStream {
                 }
                 Fields::Unit => {
                     let tag = &v.ident;
+                    let i = Index::from(i);
                     quote! { #i => Self::#tag, }
                 },
             });
