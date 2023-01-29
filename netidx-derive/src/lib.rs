@@ -158,7 +158,7 @@ fn encode(input: &Data) -> TokenStream {
                     let tag = &v.ident;
                     let i = Index::from(i);
                     quote! {
-                        Self::#tag => <u8 as netidx_core::pack::Pack>::encode(&#i, buf)?,
+                        Self::#tag => <u8 as netidx_core::pack::Pack>::encode(&#i, buf),
                     }
                 },
             });
@@ -256,7 +256,7 @@ fn decode(input: &Data) -> TokenStream {
                 Fields::Unit => {
                     let tag = &v.ident;
                     let i = Index::from(i);
-                    quote! { #i => Self::#tag, }
+                    quote! { #i => Ok(Self::#tag), }
                 },
             });
             quote! {
