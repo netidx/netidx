@@ -1,31 +1,65 @@
-use proc_macro2::TokenStream;
+use proc_macro2::{TokenStream, TokenTree};
 use quote::{format_ident, quote, quote_spanned};
 use syn::{
-    parse_macro_input, parse_quote, spanned::Spanned, Data, DeriveInput, Fields,
-    GenericParam, Index,
+    parse_macro_input, parse_quote, spanned::Spanned, AttrStyle, Attribute, Data,
+    DeriveInput, Fields, GenericParam, Index,
 };
+
+fn is_attr(att: &Attribute, s: &str) -> bool {
+    dbg!(att);
+    match att.style {
+        AttrStyle::Inner(_) => false,
+        AttrStyle::Outer => {
+            if let Some(seg) = att.path.segments.iter().next() {
+                seg.ident.to_string() == "pack"
+                    && match att.tokens.clone().into_iter().next() {
+                        None => false,
+                        Some(TokenTree::Group(g)) => {
+                            match g.stream().into_iter().next() {
+                                None => false,
+                                Some(TokenTree::Ident(i)) => i.to_string() == s,
+                                Some(_) => false,
+                            }
+                        }
+                        Some(_) => false,
+                    }
+            } else {
+                false
+            }
+        }
+    }
+}
 
 fn encoded_len(input: &Data) -> TokenStream {
     match input {
         Data::Struct(st) => match &st.fields {
             Fields::Named(fields) => {
-                let fields = fields.named.iter().map(|f| {
-                    let name = &f.ident;
-                    quote_spanned! {
-                        f.span() => netidx_core::pack::Pack::encoded_len(&self.#name)
-                    }
-                });
+                let fields = fields
+                    .named
+                    .iter()
+                    .filter(|f| !f.attrs.iter().any(|f| is_attr(f, "skip")))
+                    .map(|f| {
+                        let name = &f.ident;
+                        quote_spanned! {
+                            f.span() => netidx_core::pack::Pack::encoded_len(&self.#name)
+                        }
+                    });
                 quote! {
                     netidx_core::pack::len_wrapped_len(0 #(+ #fields)*)
                 }
             }
             Fields::Unnamed(fields) => {
-                let fields = fields.unnamed.iter().enumerate().map(|(i, f)| {
-                    let index = Index::from(i);
-                    quote_spanned! {
-                        f.span() => netidx_core::pack::Pack::encoded_len(&self.#index)
-                    }
-                });
+                let fields = fields
+                    .unnamed
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| !f.attrs.iter().any(|f| is_attr(f, "skip")))
+                    .map(|(i, f)| {
+                        let index = Index::from(i);
+                        quote_spanned! {
+                            f.span() => netidx_core::pack::Pack::encoded_len(&self.#index)
+                        }
+                    });
                 quote! {
                     netidx_core::pack::len_wrapped_len(0 #(+ #fields)*)
                 }
@@ -35,13 +69,21 @@ fn encoded_len(input: &Data) -> TokenStream {
         Data::Enum(en) => {
             let cases = en.variants.iter().map(|v| match &v.fields {
                 Fields::Named(f) => {
-                    let match_fields = f.named.iter().map(|f| &f.ident);
-                    let size_fields = f.named.iter().map(|f| {
-                        let name = &f.ident;
-                        quote_spanned! {
-                            f.span() => netidx_core::pack::Pack::encoded_len(#name)
-                        }
-                    });
+                    let match_fields = f
+                        .named
+                        .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .map(|f| &f.ident);
+                    let size_fields = f
+                        .named
+                        .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .map(|f| {
+                            let name = &f.ident;
+                            quote_spanned! {
+                                f.span() => netidx_core::pack::Pack::encoded_len(#name)
+                            }
+                        });
                     let tag = &v.ident;
                     quote! {
                         Self::#tag { #(#match_fields),* } => { 0 #(+ #size_fields)* }
@@ -51,14 +93,20 @@ fn encoded_len(input: &Data) -> TokenStream {
                     let match_fields = f
                         .unnamed
                         .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
                         .enumerate()
                         .map(|(i, _)| format_ident!("field{}", i));
-                    let size_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
-                        let name = format_ident!("field{}", i);
-                        quote_spanned! {
-                            f.span() => netidx_core::pack::Pack::encoded_len(#name)
-                        }
-                    });
+                    let size_fields = f
+                        .unnamed
+                        .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .enumerate()
+                        .map(|(i, f)| {
+                            let name = format_ident!("field{}", i);
+                            quote_spanned! {
+                                f.span() => netidx_core::pack::Pack::encoded_len(#name)
+                            }
+                        });
                     let tag = &v.ident;
                     quote! {
                         Self::#tag(#(#match_fields),*) => { 0 #(+ #size_fields)* }
@@ -67,7 +115,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                 Fields::Unit => {
                     let tag = &v.ident;
                     quote! { Self::#tag => 0 }
-                },
+                }
             });
             quote! {
                 netidx_core::pack::len_wrapped_len(1 + match self {
@@ -83,12 +131,16 @@ fn encode(input: &Data) -> TokenStream {
     match input {
         Data::Struct(st) => match &st.fields {
             Fields::Named(fields) => {
-                let fields = fields.named.iter().map(|f| {
-                    let name = &f.ident;
-                    quote_spanned! {
-                        f.span() => netidx_core::pack::Pack::encode(&self.#name, buf)?
-                    }
-                });
+                let fields = fields
+                    .named
+                    .iter()
+                    .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                    .map(|f| {
+                        let name = &f.ident;
+                        quote_spanned! {
+                            f.span() => netidx_core::pack::Pack::encode(&self.#name, buf)?
+                        }
+                    });
                 quote! {
                     netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
                         #(#fields);*;
@@ -97,12 +149,18 @@ fn encode(input: &Data) -> TokenStream {
                 }
             }
             Fields::Unnamed(fields) => {
-                let fields = fields.unnamed.iter().enumerate().map(|(i, f)| {
-                    let index = Index::from(i);
-                    quote_spanned! {
-                        f.span() => netidx_core::pack::Pack::encode(&self.#index, buf)?
-                    }
-                });
+                let fields = fields
+                    .unnamed
+                    .iter()
+                    .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let index = Index::from(i);
+                        quote_spanned! {
+                            f.span() =>
+                                netidx_core::pack::Pack::encode(&self.#index, buf)?
+                        }
+                    });
                 quote! {
                     netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
                         #(#fields);*;
@@ -115,13 +173,21 @@ fn encode(input: &Data) -> TokenStream {
         Data::Enum(en) => {
             let cases = en.variants.iter().enumerate().map(|(i, v)| match &v.fields {
                 Fields::Named(f) => {
-                    let match_fields = f.named.iter().map(|f| &f.ident);
-                    let pack_fields = f.named.iter().map(|f| {
-                        let name = &f.ident;
-                        quote_spanned! {
-                            f.span() => netidx_core::pack::Pack::encode(#name, buf)?
-                        }
-                    });
+                    let match_fields = f
+                        .named
+                        .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .map(|f| &f.ident);
+                    let pack_fields = f
+                        .named
+                        .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .map(|f| {
+                            let name = &f.ident;
+                            quote_spanned! {
+                                f.span() => netidx_core::pack::Pack::encode(#name, buf)?
+                            }
+                        });
                     let tag = &v.ident;
                     let i = Index::from(i);
                     quote! {
@@ -136,14 +202,21 @@ fn encode(input: &Data) -> TokenStream {
                     let match_fields = f
                         .unnamed
                         .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
                         .enumerate()
                         .map(|(i, _)| format_ident!("field{}", i));
-                    let pack_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
-                        let name = format_ident!("field{}", i);
-                        quote_spanned! {
-                            f.span() => netidx_core::pack::Pack::encode(#name, buf)?
-                        }
-                    });
+                    let pack_fields = f
+                        .unnamed
+                        .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .enumerate()
+                        .map(|(i, f)| {
+                            let name = format_ident!("field{}", i);
+                            quote_spanned! {
+                                f.span() =>
+                                    netidx_core::pack::Pack::encode(#name, buf)?
+                            }
+                        });
                     let tag = &v.ident;
                     let i = Index::from(i);
                     quote! {
@@ -160,7 +233,7 @@ fn encode(input: &Data) -> TokenStream {
                     quote! {
                         Self::#tag => <u8 as netidx_core::pack::Pack>::encode(&#i, buf),
                     }
-                },
+                }
             });
             quote! {
                 netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
@@ -178,13 +251,37 @@ fn decode(input: &Data) -> TokenStream {
     match input {
         Data::Struct(st) => match &st.fields {
             Fields::Named(fields) => {
-                let name_fields = fields.named.iter().map(|f| &f.ident);
-                let decode_fields = fields.named.iter().map(|f| {
-                    let name = &f.ident;
-                    quote_spanned! {
-                        f.span() => let #name = netidx_core::pack::Pack::decode(buf)?
-                    }
-                });
+                let name_fields = fields
+                    .named
+                    .iter()
+                    .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                    .map(|f| &f.ident);
+                let decode_fields = fields
+                    .named
+                    .iter()
+                    .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                    .map(|f| {
+                        let name = &f.ident;
+                        let typ = &f.ty;
+                        let is_default = f.attrs.iter().any(|a| is_attr(a, "default"));
+                        if is_default {
+                            quote_spanned! {
+                                f.span() =>
+                                    let #name =
+                                    match netidx_core::pack::Pack::decode(buf) {
+                                        Ok(t) => t,
+                                        Err(netidx_core::pack::PackError::BufferShort) =>
+                                            #typ::default(),
+                                        Err(e) => return Err(e)
+                                    }
+                            }
+                        } else {
+                            quote_spanned! {
+                                f.span() =>
+                                    let #name = netidx_core::pack::Pack::decode(buf)?
+                            }
+                        }
+                    });
                 quote! {
                     netidx_core::pack::len_wrapped_decode(buf, |buf| {
                         #(#decode_fields);*;
@@ -196,14 +293,20 @@ fn decode(input: &Data) -> TokenStream {
                 let name_fields = fields
                     .unnamed
                     .iter()
+                    .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
                     .enumerate()
                     .map(|(i, _)| format_ident!("field{}", i));
-                let decode_fields = fields.unnamed.iter().enumerate().map(|(i, f)| {
-                    let name = format_ident!("field{}", i);
-                    quote_spanned! {
-                        f.span() => let #name = netidx_core::pack::Pack::decode(buf)?
-                    }
-                });
+                let decode_fields = fields
+                    .unnamed
+                    .iter()
+                    .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let name = format_ident!("field{}", i);
+                        quote_spanned! {
+                            f.span() => let #name = netidx_core::pack::Pack::decode(buf)?
+                        }
+                    });
                 quote! {
                     netidx_core::pack::len_wrapped_decode(buf, |buf| {
                         #(#decode_fields);*;
@@ -216,13 +319,22 @@ fn decode(input: &Data) -> TokenStream {
         Data::Enum(en) => {
             let cases = en.variants.iter().enumerate().map(|(i, v)| match &v.fields {
                 Fields::Named(f) => {
-                    let name_fields = f.named.iter().map(|f| &f.ident);
-                    let decode_fields = f.named.iter().map(|f| {
-                        let name = &f.ident;
-                        quote_spanned! {
-                            f.span() => let #name = netidx_core::pack::Pack::decode(buf)?
-                        }
-                    });
+                    let name_fields = f
+                        .named
+                        .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .map(|f| &f.ident);
+                    let decode_fields = f
+                        .named
+                        .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .map(|f| {
+                            let name = &f.ident;
+                            quote_spanned! {
+                                f.span() =>
+                                    let #name = netidx_core::pack::Pack::decode(buf)?
+                            }
+                        });
                     let tag = &v.ident;
                     let i = Index::from(i);
                     quote! {
@@ -236,14 +348,21 @@ fn decode(input: &Data) -> TokenStream {
                     let name_fields = f
                         .unnamed
                         .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
                         .enumerate()
                         .map(|(i, _)| format_ident!("field{}", i));
-                    let decode_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
-                        let name = format_ident!("field{}", i);
-                        quote_spanned! {
-                            f.span() => let #name = netidx_core::pack::Pack::decode(buf)?
-                        }
-                    });
+                    let decode_fields = f
+                        .unnamed
+                        .iter()
+                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .enumerate()
+                        .map(|(i, f)| {
+                            let name = format_ident!("field{}", i);
+                            quote_spanned! {
+                                f.span() =>
+                                    let #name = netidx_core::pack::Pack::decode(buf)?
+                            }
+                        });
                     let tag = &v.ident;
                     let i = Index::from(i);
                     quote! {
@@ -257,7 +376,7 @@ fn decode(input: &Data) -> TokenStream {
                     let tag = &v.ident;
                     let i = Index::from(i);
                     quote! { #i => Ok(Self::#tag), }
-                },
+                }
             });
             quote! {
                 netidx_core::pack::len_wrapped_decode(buf, |buf| {
@@ -272,7 +391,7 @@ fn decode(input: &Data) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(Pack)]
+#[proc_macro_derive(Pack, attributes(pack))]
 pub fn derive_pack(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
