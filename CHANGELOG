@@ -1,4 +1,5 @@
-* 0.16.2 and 3
+* 0.16.2, 3, and 4
+  - add a pack implementation for usize, and Result
 
   - introducing netidx-derive, a crate for netidx derive macros. The
     first of which is #[derive(Pack)]. Pack is netidx's native binary
