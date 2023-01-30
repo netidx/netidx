@@ -888,6 +888,23 @@ impl Pack for Duration {
     }
 }
 
+impl Pack for chrono::Duration {
+    fn encoded_len(&self) -> usize {
+        mem::size_of::<i64>()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        match self.num_nanoseconds() {
+            Some(i) => Pack::encode(&i, buf),
+            None => Err(PackError::TooBig),
+        }
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        Ok(chrono::Duration::nanoseconds(<i64 as Pack>::decode(buf)?))
+    }
+}
+
 impl Pack for () {
     fn const_encoded_len() -> Option<usize> {
         Some(0)
@@ -967,7 +984,7 @@ impl<T: Pack, U: Pack> Pack for result::Result<T, U> {
         match <u8 as Pack>::decode(buf)? {
             0 => Ok(Ok(Pack::decode(buf)?)),
             1 => Ok(Err(Pack::decode(buf)?)),
-            _ => Err(PackError::UnknownTag)
+            _ => Err(PackError::UnknownTag),
         }
     }
 }
