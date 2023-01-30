@@ -1,29 +1,10 @@
 use crate::value::Value;
-use bytes::{Buf, BufMut, Bytes};
-use netidx_core::{
-    pack::{self, Pack, PackError},
-    path::Path,
-};
+use bytes::Bytes;
+use netidx_core::path::Path;
 use netidx_derive::Pack;
-use std::{net::SocketAddr, result};
-
-type Result<T> = result::Result<T, PackError>;
+use std::net::SocketAddr;
 
 atomic_id!(Id);
-
-impl Pack for Id {
-    fn encoded_len(&self) -> usize {
-        pack::varint_len(self.0)
-    }
-
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        Ok(pack::encode_varint(self.0, buf))
-    }
-
-    fn decode(buf: &mut impl Buf) -> Result<Self> {
-        Ok(Id(pack::decode_varint(buf)?))
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Pack)]
 pub enum Hello {

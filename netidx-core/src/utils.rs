@@ -145,6 +145,25 @@ macro_rules! atomic_id {
                 $name(i)
             }
         }
+
+        impl netidx_core::pack::Pack for $name {
+            fn encoded_len(&self) -> usize {
+                netidx_core::pack::varint_len(self.0)
+            }
+
+            fn encode(
+                &self,
+                buf: &mut impl bytes::BufMut,
+            ) -> std::result::Result<(), netidx_core::pack::PackError> {
+                Ok(netidx_core::pack::encode_varint(self.0, buf))
+            }
+
+            fn decode(
+                buf: &mut impl bytes::Buf,
+            ) -> std::result::Result<Self, netidx_core::pack::PackError> {
+                Ok(Self(netidx_core::pack::decode_varint(buf)?))
+            }
+        }
     };
 }
 

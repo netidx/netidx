@@ -3,8 +3,7 @@ use bytes::{Buf, BufMut, Bytes};
 use netidx_core::{
     chars::Chars,
     pack::{
-        self, len_wrapped_decode, len_wrapped_encode, len_wrapped_len, Pack, PackError,
-        Z64,
+        len_wrapped_decode, len_wrapped_encode, len_wrapped_len, Pack, PackError, Z64,
     },
     path::Path,
     pool::Pooled,
@@ -122,20 +121,6 @@ pub enum Auth {
 }
 
 atomic_id!(PublisherId);
-
-impl Pack for PublisherId {
-    fn encoded_len(&self) -> usize {
-        pack::varint_len(self.0)
-    }
-
-    fn encode(&self, buf: &mut impl BufMut) -> Result<()> {
-        Ok(pack::encode_varint(self.0, buf))
-    }
-
-    fn decode(buf: &mut impl Buf) -> Result<Self> {
-        Ok(Self(pack::decode_varint(buf)?))
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub enum TargetAuth {
