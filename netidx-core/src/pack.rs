@@ -14,7 +14,7 @@ use std::{
     hash::{BuildHasher, Hash},
     mem, net,
     ops::{Deref, DerefMut},
-    str,
+    result, str,
     sync::Arc,
     time::Duration,
 };
@@ -939,5 +939,35 @@ impl Pack for usize {
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         Ok(<u64 as Pack>::decode(buf)? as usize)
+    }
+}
+
+impl<T: Pack, U: Pack> Pack for result::Result<T, U> {
+    fn encoded_len(&self) -> usize {
+        1 + match self {
+            Ok(t) => Pack::encoded_len(t),
+            Err(u) => Pack::encoded_len(u),
+        }
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        match self {
+            Ok(t) => {
+                <u8 as Pack>::encode(&0, buf)?;
+                Pack::encode(t, buf)
+            }
+            Err(u) => {
+                <u8 as Pack>::encode(&1, buf)?;
+                Pack::encode(u, buf)
+            }
+        }
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        match <u8 as Pack>::decode(buf)? {
+            0 => Ok(Ok(Pack::decode(buf)?)),
+            1 => Ok(Err(Pack::decode(buf)?)),
+            _ => Err(PackError::UnknownTag)
+        }
     }
 }
