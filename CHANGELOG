@@ -5,6 +5,9 @@
     encoding format. Initially it was implemented by hand, but now it
     can also be implemented using the derive macro. Happy packing!
 
+  - most existing protocols in netidx-netproto changed to use the proc
+    macro. With the exception of Value, which does some custom stuff.
+
   - a couple of convenience methods in value and rpc
 
   - change publisher::{publish, publish_with_flags, update,

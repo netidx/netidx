@@ -13,6 +13,7 @@ license = "MIT"
 [dependencies]
 combine = "4"
 netidx-core = { version = "^0.16", path = "../netidx-core" }
+netidx-derive = { version = "0.16", path = "../netidx-derive" }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "^0.4.23", features = ["serde"] }
 anyhow = "1"
