@@ -988,3 +988,17 @@ impl<T: Pack, U: Pack> Pack for result::Result<T, U> {
         }
     }
 }
+
+impl<T: Pack> Pack for Arc<T> {
+    fn encoded_len(&self) -> usize {
+        Pack::encoded_len(&**self)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Pack::encode(&**self, buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        Ok(Arc::new(Pack::decode(buf)?))
+    }
+}
