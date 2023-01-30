@@ -2,7 +2,7 @@ use proc_macro2::{TokenStream, TokenTree};
 use quote::{format_ident, quote};
 use syn::{
     parse_macro_input, parse_quote, AttrStyle, Attribute, Data, DeriveInput, Field,
-    Fields, GenericParam, Ident, Index, Type,
+    Fields, GenericParam, Ident, Index
 };
 
 fn is_attr(att: &Attribute, s: &str) -> bool {
@@ -247,18 +247,18 @@ fn encode(input: &Data) -> TokenStream {
     }
 }
 
-fn decode_default(typ: &Type, name: &Option<Ident>) -> TokenStream {
+fn decode_default(name: &Option<Ident>) -> TokenStream {
     quote! {
-        let #name = #typ::default();
+        let #name = std::default::Default::default();
     }
 }
 
-fn decode_with_default(typ: &Type, name: &Option<Ident>) -> TokenStream {
+fn decode_with_default(name: &Option<Ident>) -> TokenStream {
     quote! {
         let #name = match netidx_core::pack::Pack::decode(buf) {
             Ok(t) => t,
             Err(netidx_core::pack::PackError::BufferShort) =>
-                #typ::default(),
+                std::default::Default::default(),
             Err(e) => return Err(e),
         };
     }
@@ -272,13 +272,12 @@ fn decode_normal(name: &Option<Ident>) -> TokenStream {
 
 fn decode_named_field(f: &Field) -> TokenStream {
     let name = &f.ident;
-    let typ = &f.ty;
     let is_skipped = f.attrs.iter().any(|a| is_attr(a, "skip"));
     let is_default = f.attrs.iter().any(|a| is_attr(a, "default"));
     if is_skipped {
-        decode_default(typ, name)
+        decode_default(name)
     } else if is_default {
-        decode_with_default(typ, name)
+        decode_with_default(name)
     } else {
         decode_normal(name)
     }
@@ -286,13 +285,12 @@ fn decode_named_field(f: &Field) -> TokenStream {
 
 fn decode_unnamed_field(f: &Field, i: usize) -> TokenStream {
     let name = Some(format_ident!("field{}", i));
-    let typ = &f.ty;
     let is_skipped = f.attrs.iter().any(|a| is_attr(a, "skip"));
     let is_default = f.attrs.iter().any(|a| is_attr(a, "default"));
     if is_skipped {
-        decode_default(typ, &name)
+        decode_default(&name)
     } else if is_default {
-        decode_with_default(typ, &name)
+        decode_with_default(&name)
     } else {
         decode_normal(&name)
     }
