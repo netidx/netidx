@@ -1,12 +1,21 @@
 [package]
 name = "netidx-derive"
 version = "0.16.0"
+authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
+license = "MIT"
+description = "Secure, fast, pub/sub messaging"
+homepage = "https://netidx.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
+documentation = "https://docs.rs/netidx-derive"
+readme = "../README.md"
+keywords = ["network", "networking", "distributed", "kerberos"]
+categories = ["network-programming"]
 
 [lib]
 proc-macro = true
 
 [dependencies]
-syn = {version = "1", features = ["extra-traits"]}
+syn = "1"
 quote = "1"
 proc-macro2 = "1"
