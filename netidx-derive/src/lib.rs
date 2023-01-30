@@ -6,7 +6,6 @@ use syn::{
 };
 
 fn is_attr(att: &Attribute, s: &str) -> bool {
-    dbg!(att);
     match att.style {
         AttrStyle::Inner(_) => false,
         AttrStyle::Outer => {
@@ -91,7 +90,7 @@ fn encoded_len(input: &Data) -> TokenStream {
                 }
                 Fields::Unnamed(f) => {
                     let match_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
-                        let skip = !f.attrs.iter().any(|a| is_attr(a, "skip"));
+                        let skip = f.attrs.iter().any(|a| is_attr(a, "skip"));
                         if skip {
                             format_ident!("_")
                         } else {
@@ -201,7 +200,7 @@ fn encode(input: &Data) -> TokenStream {
                 }
                 Fields::Unnamed(f) => {
                     let match_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
-                        if !f.attrs.iter().any(|a| is_attr(a, "skip")) {
+                        if f.attrs.iter().any(|a| is_attr(a, "skip")) {
                             format_ident!("_")
                         } else {
                             format_ident!("field{}", i)
@@ -350,13 +349,11 @@ fn decode(input: &Data) -> TokenStream {
                     let name_fields = f
                         .unnamed
                         .iter()
-                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
                         .enumerate()
                         .map(|(i, _)| format_ident!("field{}", i));
                     let decode_fields = f
                         .unnamed
                         .iter()
-                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
                         .enumerate()
                         .map(|(i, f)| decode_unnamed_field(f, i));
                     let tag = &v.ident;
