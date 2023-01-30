@@ -896,12 +896,12 @@ impl Pack for chrono::Duration {
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         match self.num_nanoseconds() {
             Some(i) => Pack::encode(&i, buf),
-            None => Err(PackError::TooBig),
+            None => Err(PackError::InvalidFormat),
         }
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        Ok(chrono::Duration::nanoseconds(<i64 as Pack>::decode(buf)?))
+        Ok(chrono::Duration::nanoseconds(Pack::decode(buf)?))
     }
 }
 
