@@ -1,4 +1,10 @@
 * 0.16.2 and 3
+
+  - introducing netidx-derive, a crate for netidx derive macros. The
+    first of which is #[derive(Pack)]. Pack is netidx's native binary
+    encoding format. Initially it was implemented by hand, but now it
+    can also be implemented using the derive macro. Happy packing!
+
   - a couple of convenience methods in value and rpc
 
   - change publisher::{publish, publish_with_flags, update,
