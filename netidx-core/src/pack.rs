@@ -1,6 +1,6 @@
 use crate::pool::{Pool, Poolable, Pooled};
 use arcstr::ArcStr;
-use bytes::{buf, Buf, BufMut, Bytes};
+use bytes::{buf, Buf, BufMut, Bytes, BytesMut};
 use chrono::{naive::NaiveDateTime, prelude::*};
 use fxhash::FxBuildHasher;
 use rust_decimal::Decimal;
@@ -1000,5 +1000,50 @@ impl<T: Pack> Pack for Arc<T> {
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         Ok(Arc::new(Pack::decode(buf)?))
+    }
+}
+
+thread_local! {
+    static ERR: RefCell<BytesMut> = RefCell::new(BytesMut::new());
+}
+
+fn write_anyhow(s: &mut BytesMut, e: &anyhow::Error) {
+    use std::fmt::Write;
+    s.clear();
+    let _ = write!(s, "{}", e);
+}
+
+// this won't round trip to exactly the same object
+impl Pack for anyhow::Error {
+    fn encoded_len(&self) -> usize {
+        ERR.with(|s| {
+            let mut s = s.borrow_mut();
+            write_anyhow(&mut *s, self);
+            let len = s.len();
+            varint_len(len as u64) + len
+        })
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        ERR.with(|s| {
+            let mut s = s.borrow_mut();
+            write_anyhow(&mut *s, self);
+            let len = s.len();
+            encode_varint(len as u64, buf);
+            Ok(buf.put_slice(&*s))
+        })
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let len = decode_varint(buf)? as usize;
+        if len > buf.remaining() {
+            Err(PackError::BufferShort)
+        } else {
+            let s = match crate::chars::Chars::from_bytes(buf.copy_to_bytes(len)) {
+                Ok(s) => s,
+                Err(_) => return Err(PackError::InvalidFormat),
+            };
+            Ok(anyhow::anyhow!(s))
+        }
     }
 }
