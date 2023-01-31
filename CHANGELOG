@@ -1,5 +1,6 @@
-* 0.16.2, 3, and 4
-  - add a pack implementation for usize, and Result
+* 0.16.0-8
+  - add a pack implementation for usize, and Result, Arc, Box,
+    anyhow::Error, and atomic_id
 
   - introducing netidx-derive, a crate for netidx derive macros. The
     first of which is #[derive(Pack)]. Pack is netidx's native binary
