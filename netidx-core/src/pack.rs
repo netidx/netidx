@@ -6,6 +6,7 @@ use fxhash::FxBuildHasher;
 use rust_decimal::Decimal;
 use std::{
     any::{Any, TypeId},
+    boxed::Box,
     cell::RefCell,
     cmp::Eq,
     collections::HashMap,
@@ -1045,5 +1046,19 @@ impl Pack for anyhow::Error {
             };
             Ok(anyhow::anyhow!(s))
         }
+    }
+}
+
+impl<T: Pack> Pack for Box<T> {
+    fn encoded_len(&self) -> usize {
+        Pack::encoded_len(&**self)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Pack::encode(&**self, buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        Ok(Box::new(Pack::decode(buf)?))
     }
 }
