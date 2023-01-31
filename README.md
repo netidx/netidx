@@ -61,7 +61,7 @@ network can refer to 42 by that name, and will receive updates in the
     resolver server only stores the address of the publisher/s
     publishing a value.
 
-For more details see the [netidx book](https://estokes.github.io/netidx-book/)
+For more details see the [netidx book](https://netidx.github.io/netidx-book/)
 
 Here is an example service that publishes a cpu temperature, along
 with the corresponding subscriber that consumes the data.
