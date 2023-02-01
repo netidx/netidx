@@ -2054,11 +2054,9 @@ impl<T: FromValue> FromValue for Vec<T> {
 
     fn get(v: Value) -> Option<Self> {
         match v {
-            Value::Array(elts) => Some(
-                elts.iter()
-                    .map(|v| FromValue::get(v.clone()))
-                    .collect::<Option<Vec<_>>>()?,
-            ),
+            Value::Array(elts) => {
+                elts.iter().map(|v| FromValue::get(v.clone())).collect::<Option<Vec<_>>>()
+            }
             _ => None,
         }
     }
@@ -2066,6 +2064,43 @@ impl<T: FromValue> FromValue for Vec<T> {
 
 impl<T: convert::Into<Value>> convert::From<Vec<T>> for Value {
     fn from(v: Vec<T>) -> Value {
+        let v = v.into_iter().map(|e| e.into()).collect::<Vec<Value>>();
+        Value::Array(Arc::from(v))
+    }
+}
+
+impl<A> FromValue for SmallVec<A>
+where
+    A: smallvec::Array,
+    <A as smallvec::Array>::Item: FromValue,
+{
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+            Value::Array(elts) => elts
+                .iter()
+                .map(|v| FromValue::from_value(v.clone()))
+                .collect::<Res<SmallVec<A>>>(),
+            _ => bail!("can't cast"),
+        })
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(elts) => elts
+                .iter()
+                .map(|v| FromValue::get(v.clone()))
+                .collect::<Option<SmallVec<A>>>(),
+            _ => None,
+        }
+    }
+}
+
+impl<A> convert::From<SmallVec<A>> for Value
+where
+    A: smallvec::Array,
+    <A as smallvec::Array>::Item: convert::Into<Value>,
+{
+    fn from(v: SmallVec<A>) -> Self {
         let v = v.into_iter().map(|e| e.into()).collect::<Vec<Value>>();
         Value::Array(Arc::from(v))
     }
@@ -2322,5 +2357,32 @@ impl<T: FromValue> FromValue for Option<T> {
 impl<T: convert::Into<Value>> convert::From<Option<T>> for Value {
     fn from(o: Option<T>) -> Value {
         o.map(|v| v.into()).unwrap_or(Value::Null)
+    }
+}
+
+use enumflags2::{BitFlag, BitFlags, _internal::RawBitFlags};
+impl<T> FromValue for BitFlags<T>
+where
+    T: BitFlag,
+    <T as RawBitFlags>::Numeric: FromValue,
+{
+    fn from_value(v: Value) -> Res<Self> {
+        let bits = v.cast_to::<<T as RawBitFlags>::Numeric>()?;
+        BitFlags::from_bits(bits).map_err(|_| anyhow!("invalid bits"))
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        let bits = v.get_as::<<T as RawBitFlags>::Numeric>()?;
+        BitFlags::from_bits(bits).ok()
+    }
+}
+
+impl<T> convert::From<BitFlags<T>> for Value
+where
+    T: BitFlag,
+    <T as RawBitFlags>::Numeric: Into<Value>,
+{
+    fn from(v: BitFlags<T>) -> Self {
+        v.bits().into()
     }
 }

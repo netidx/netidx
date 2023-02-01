@@ -1,6 +1,6 @@
 [package]
 name = "netidx-netproto"
-version = "0.16.3"
+version = "0.16.4"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 homepage = "https://netidx.github.io/netidx-book/"
@@ -25,6 +25,7 @@ serde_derive = "1"
 base64 = "0.21"
 arcstr = { version = "1", features = ["serde"] }
 smallvec = "1"
+enumflags2 = "0.7"
 indexmap = "1"
 rust_decimal = { version = "1",  features = ["serde-with-float", "serde-with-str", "serde-with-arbitrary-precision"] }
 
