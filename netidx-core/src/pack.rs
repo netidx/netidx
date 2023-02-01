@@ -1062,3 +1062,37 @@ impl<T: Pack> Pack for Box<T> {
         Ok(Box::new(Pack::decode(buf)?))
     }
 }
+
+use smallvec::{Array, SmallVec};
+
+impl<A> Pack for SmallVec<A>
+where
+    A: Array,
+    <A as Array>::Item: Pack,
+{
+    fn encoded_len(&self) -> usize {
+        self.iter().fold(varint_len(SmallVec::len(self) as u64), |len, t| {
+            len + Pack::encoded_len(t)
+        })
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(SmallVec::len(self) as u64, buf);
+        for t in self {
+            Pack::encode(t, buf)?
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC || mem::size_of::<A::Item>() * elts > MAX_VEC {
+            return Err(PackError::TooBig)
+        }
+        let mut data = SmallVec::new();
+        for _ in 0..elts {
+            data.push(Pack::decode(buf)?);
+        }
+        Ok(data)
+    }
+}
