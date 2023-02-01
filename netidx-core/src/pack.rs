@@ -1087,12 +1087,33 @@ where
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let elts = decode_varint(buf)? as usize;
         if elts > MAX_VEC || mem::size_of::<A::Item>() * elts > MAX_VEC {
-            return Err(PackError::TooBig)
+            return Err(PackError::TooBig);
         }
         let mut data = SmallVec::new();
         for _ in 0..elts {
             data.push(Pack::decode(buf)?);
         }
         Ok(data)
+    }
+}
+
+use enumflags2::{BitFlag, BitFlags, _internal::RawBitFlags};
+
+impl<T> Pack for BitFlags<T>
+where
+    T: BitFlag,
+    <T as RawBitFlags>::Numeric: Pack,
+{
+    fn encoded_len(&self) -> usize {
+        <<T as RawBitFlags>::Numeric as Pack>::encoded_len(&self.bits())
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        <<T as RawBitFlags>::Numeric as Pack>::encode(&self.bits(), buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let bits = <<T as RawBitFlags>::Numeric as Pack>::decode(buf)?;
+        Self::from_bits(bits).map_err(|_| PackError::InvalidFormat)
     }
 }
