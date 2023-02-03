@@ -43,21 +43,49 @@ struct Receiver {
 }
 
 impl Receiver {
-    async fn fill_queue(&mut self, dead: &AtomicBool, client: ClId) -> Result<()> {
-        while self.queued.len() == 0 {
-            match self.writes.next().await {
-                Some(mut batch) => {
-                    self.queued.extend(batch.drain(..).filter_map(|req| {
-                        if req.client == client {
-                            Some(req.value)
-                        } else {
-                            None
-                        }
-                    }))
+    fn fill_from_channel(
+        &mut self,
+        dead: &AtomicBool,
+        client: ClId,
+        r: Option<Pooled<Vec<WriteRequest>>>,
+    ) -> Result<()> {
+        match r {
+            Some(mut batch) => self.queued.extend(batch.drain(..).filter_map(|req| {
+                if req.client == client {
+                    Some(req.value)
+                } else {
+                    None
                 }
-                None => {
-                    dead.store(true, Ordering::Relaxed);
-                    bail!("connection is dead")
+            })),
+            None => {
+                dead.store(true, Ordering::Relaxed);
+                bail!("connection is dead")
+            }
+        }
+        Ok(())
+    }
+
+    async fn fill_queue(&mut self, dead: &AtomicBool, client: ClId) -> Result<()> {
+        self.try_fill_queue(dead, client)?;
+        while self.queued.len() == 0 {
+            let r = self.writes.next().await;
+            self.fill_from_channel(dead, client, r)?
+        }
+        Ok(())
+    }
+
+    fn try_fill_queue(&mut self, dead: &AtomicBool, client: ClId) -> Result<()> {
+        for _ in 0..10 {
+            match self.writes.try_next() {
+                Err(_) => break,
+                Ok(r) => {
+                    if let Err(e) = self.fill_from_channel(dead, client, r) {
+                        if self.queued.len() == 0 {
+                            return Err(e);
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -184,6 +212,13 @@ impl Connection {
         Ok(batch.commit(self.timeout).await)
     }
 
+    fn check_dead(&self) -> Result<()> {
+        if self.is_dead() {
+            bail!("connection is dead")
+        }
+        Ok(())
+    }
+
     /// Wait for one message from the other side, and return it when
     /// it arrives.
     pub async fn recv_one(&self) -> Result<Value> {
@@ -192,28 +227,52 @@ impl Connection {
             match recv.queued.pop_front() {
                 Some(v) => break Ok(v),
                 None => {
-                    if self.is_dead() {
-                        bail!("connection is dead")
-                    }
+                    self.check_dead()?;
                     recv.fill_queue(&self.dead, self.client).await?
                 }
             }
         }
     }
 
-    /// Receive a batch of messages from the other side and place them
-    /// in the specified data structure.
+    /// Return a message if one is available now, but don't wait for
+    /// one to arrive. Will only block if another receive is in
+    /// progress.
+    pub async fn try_recv_one(&self) -> Result<Option<Value>> {
+        let mut recv = self.receiver.lock().await;
+        if recv.queued.len() == 0 {
+            recv.try_fill_queue(&self.dead, self.client)?
+        }
+        Ok(recv.queued.pop_front())
+    }
+
+    /// Receive all available messages from the other side and place
+    /// them in the specified data structure. If no messages are
+    /// available right now, then wait until at least 1 message
+    /// arrives.
     pub async fn recv(&self, dst: &mut impl Extend<Value>) -> Result<()> {
         let mut recv = self.receiver.lock().await;
+        recv.try_fill_queue(&self.dead, self.client)?;
         loop {
             if recv.queued.len() > 0 {
                 break Ok(dst.extend(recv.queued.drain(..)));
             } else {
-                if self.is_dead() {
-                    bail!("connection is dead")
-                }
+                self.check_dead()?;
                 recv.fill_queue(&self.dead, self.client).await?
             }
+        }
+    }
+
+    /// Receive all available messages, if any, but don't wait for
+    /// messages to arrive. This will only block if another receive is
+    /// in progress. Returns true if any messages were received.
+    pub async fn try_recv(&self, dst: &mut impl Extend<Value>) -> Result<bool> {
+        let mut recv = self.receiver.lock().await;
+        recv.try_fill_queue(&self.dead, self.client)?;
+        if recv.queued.len() > 0 {
+            dst.extend(recv.queued.drain(..));
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 

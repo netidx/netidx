@@ -55,6 +55,17 @@ impl Connection {
         self.send(b).await
     }
 
+    async fn try_fill_queue(&self, queue: &mut Bytes) -> Result<()> {
+        if !queue.has_remaining() {
+            match self.inner.try_recv_one().await? {
+                Some(Value::Bytes(buf)) => *queue = buf,
+                Some(_) => bail!("unexpected response"),
+                None => (),
+            }
+        }
+        Ok(())
+    }
+
     async fn fill_queue(&self, queue: &mut Bytes) -> Result<()> {
         if !queue.has_remaining() {
             match self.inner.recv_one().await? {
@@ -70,16 +81,51 @@ impl Connection {
     /// either,
     ///
     /// - the closure returns false
-    /// - or there are no more messages in the batch
+    /// - there are no more messages
     ///
-    /// All messages in the batch must be the same type.
     pub async fn recv<R: Pack + 'static, F: FnMut(R) -> bool>(
         &self,
         mut f: F,
     ) -> Result<()> {
         let mut queue = self.queue.lock().await;
         self.fill_queue(&mut *queue).await?;
-        while queue.has_remaining() && f(<R as Pack>::decode(&mut *queue)?) {}
+        loop {
+            if queue.has_remaining() {
+                if !f(Pack::decode(&mut *queue)?) {
+                    break;
+                }
+            } else {
+                self.try_fill_queue(&mut *queue).await?;
+                if !queue.has_remaining() {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Receive all available messages, but do not wait for at least 1
+    /// message to arrive. If no messages are available return
+    /// immediatly. This will only block if a concurrent receive is in
+    /// progress.
+    pub async fn try_recv<R: Pack + 'static, F: FnMut(R) -> bool>(
+        &self,
+        mut f: F,
+    ) -> Result<()> {
+        let mut queue = self.queue.lock().await;
+        self.try_fill_queue(&mut *queue).await?;
+        loop {
+            if queue.has_remaining() {
+                if !f(Pack::decode(&mut *queue)?) {
+                    break;
+                }
+            } else {
+                self.try_fill_queue(&mut *queue).await?;
+                if !queue.has_remaining() {
+                    break;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -89,6 +135,18 @@ impl Connection {
         let mut queue = self.queue.lock().await;
         self.fill_queue(&mut *queue).await?;
         Ok(<R as Pack>::decode(&mut *queue)?)
+    }
+
+    /// Receive a message if one is available, otherwise return
+    /// Ok(None).
+    pub async fn try_recv_one<R: Pack + 'static>(&self) -> Result<Option<R>> {
+        let mut queue = self.queue.lock().await;
+        self.try_fill_queue(&mut *queue).await?;
+        if queue.remaining() > 0 {
+            Ok(Some(Pack::decode(&mut *queue)?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Return the user connected to this channel, if known
