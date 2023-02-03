@@ -1,4 +1,12 @@
 * 0.16.0-9
+
+  - implement better batching in channel recv. Pack channels are now
+    capable of sending 1 GB/s of u64s locally on a 1260P, and the
+    latency of sending 1000 u64s to and from a receiver on the same
+    host is 39us in the 90th percentile.
+
+  - implement try_recv, try_recv_one in both kinds of channel
+
   - add a pack implementation for usize, Result, Arc, Box,
     anyhow::Error, atomic_id, smallvec, and enumflags2
 
