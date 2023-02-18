@@ -1,15 +1,15 @@
 use super::super::{bscript::LocalEvent, util::ask_modal, BSCtx};
-use super::{completion::BScriptCompletionProvider, Scope};
+use super::Scope;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
 use gdk::keys;
 use glib::idle_add_local_once;
 use glib::{clone, prelude::*, subclass::prelude::*, thread_guard::ThreadGuard};
-use gtk::{self, prelude::*};
+use gtk4::{self as gtk, prelude::*, Inhibit};
 use netidx::subscriber::Value;
 use netidx_bscript::{expr, vm};
 use parking_lot::Mutex;
-use sourceview4_sc::{self as sv, prelude::*, traits::ViewExt};
+use sourceview5::{self as sv, prelude::*, traits::ViewExt};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -89,12 +89,10 @@ struct DataFlow {
 
 impl DataFlow {
     fn new(ctx: BSCtx) -> Self {
-        let call_root =
-            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        let call_root = gtk::ScrolledWindow::new();
         call_root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         call_root.set_expand(false);
-        let event_root =
-            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        let event_root = gtk::ScrolledWindow::new();
         event_root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         event_root.set_expand(false);
         let call_store = gtk::TreeStore::new(&[
@@ -204,8 +202,7 @@ struct ErrorDisplay {
 
 impl ErrorDisplay {
     fn new() -> Self {
-        let root =
-            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        let root = gtk::ScrolledWindow::new();
         root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         let error_body = gtk::Label::new(None);
         let error_lbl = gtk::Label::new(None);
@@ -266,14 +263,13 @@ struct ExprEditor {
 impl ExprEditor {
     fn new(
         tools: Rc<Tools>,
-        save_button: gtk::ToolButton,
+        save_button: gtk::Button,
         unsaved: Rc<Cell<bool>>,
         ctx: BSCtx,
         scope: Scope,
         expr: Rc<RefCell<expr::Expr>>,
     ) -> Self {
-        let root =
-            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        let root = gtk::ScrolledWindow::new();
         root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         root.set_expand(true);
         let view = sv::View::builder()
@@ -283,9 +279,11 @@ impl ExprEditor {
             .build();
         view.set_expand(true);
         if let Some(completion) = view.completion() {
+            /* CR estokes: port to sourceview5
             let provider = BScriptCompletionProvider::new();
             provider.imp().init(ctx, scope);
             completion.add_provider(&provider).expect("bscript completion");
+             */
             completion
                 .add_provider(&sv::CompletionWords::default())
                 .expect("words completion");
@@ -343,9 +341,7 @@ impl ExprInspector {
         let unsaved = Rc::new(Cell::new(false));
         let expr = Rc::new(RefCell::new(init));
         let headerbar = gtk::HeaderBar::new();
-        let save_img =
-            gtk::Image::from_icon_name(Some("media-floppy"), gtk::IconSize::SmallToolbar);
-        let save_button = gtk::ToolButton::new(Some(&save_img), None);
+        let save_button = gtk::Button::from_icon_name("media-floppy");
         save_button.set_sensitive(false);
         headerbar.pack_start(&save_button);
         headerbar.set_show_close_button(true);

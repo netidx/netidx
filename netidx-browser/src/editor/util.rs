@@ -1,4 +1,4 @@
-use gtk::{self, prelude::*};
+use gtk4::{self as gtk, prelude::*};
 use log::warn;
 use std::{fmt::Display, str::FromStr, string::ToString};
 

@@ -1,4 +1,4 @@
-use gtk::{self, prelude::*};
+use gtk4::{self as gtk, prelude::*};
 
 pub(super) fn set_highlight<T: WidgetExt>(w: &T, h: bool) {
     let s = w.style_context();

@@ -6,7 +6,7 @@ use chrono::prelude::*;
 use futures::channel::oneshot;
 use gdk::{self, cairo, prelude::*};
 use glib::clone;
-use gtk::{self, prelude::*};
+use gtk4::{self as gtk, prelude::*};
 use log::warn;
 use netidx::{
     path::Path,

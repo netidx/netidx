@@ -1,3 +1,4 @@
+use gtk4 as gtk;
 use super::{util::ask_modal, ToGui, ViewLoc, WidgetCtx};
 use glib::thread_guard::ThreadGuard;
 use netidx::{chars::Chars, path::Path, resolver_client, subscriber::Value};

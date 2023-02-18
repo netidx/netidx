@@ -3,7 +3,7 @@
 // updated. If the crate is updated in the future then this code
 // should be removed in favor of using the crate.
 
-use gtk::cairo::{Context as CairoContext, Error as CairoError, FontSlant, FontWeight};
+use gtk4::cairo::{Context as CairoContext, Error as CairoError, FontSlant, FontWeight};
 use plotters_backend::text_anchor::{HPos, VPos};
 use plotters_backend::{
     BackendColor, BackendCoord, BackendStyle, BackendTextStyle, DrawingBackend,

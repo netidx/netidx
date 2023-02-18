@@ -6,7 +6,7 @@ use crate::bscript::LocalEvent;
 use futures::channel::oneshot;
 use gio::prelude::*;
 use glib::{self, clone, idle_add_local, source::Continue};
-use gtk::{prelude::*, Adjustment, Label, ScrolledWindow};
+use gtk4::{self as gtk, prelude::*, Label, ScrolledWindow};
 use netidx::{path::Path, subscriber::Value};
 use netidx_bscript::vm;
 use netidx_protocols::view;
@@ -82,7 +82,7 @@ impl Table {
             BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.on_edit);
         let on_header_click =
             BSNode::compile(&mut *ctx.borrow_mut(), scope, spec.on_header_click);
-        let root = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+        let root = ScrolledWindow::new();
         let shared = Rc::new(SharedState::new(
             ctx.clone(),
             selected_path,

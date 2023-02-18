@@ -5,7 +5,7 @@ use super::{
     OnChange, Scope,
 };
 use glib::{clone, prelude::*};
-use gtk::{self, prelude::*};
+use gtk4::{self as gtk, prelude::*, Inhibit};
 use indexmap::IndexMap;
 use netidx::subscriber::Value;
 use netidx_bscript::expr;
@@ -70,7 +70,7 @@ pub(super) fn expr(
                 w.close()
             }
         } else {
-            let w = gtk::Window::new(gtk::WindowType::Toplevel);
+            let w = gtk::Window::new();
             w.set_default_size(640, 480);
             let on_change = clone!(
                 @strong source, @strong entry, @strong on_change => move |s: expr::Expr| {

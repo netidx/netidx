@@ -1,10 +1,10 @@
-mod completion;
+//mod completion;
 mod expr_inspector;
 mod util;
 mod widgets;
 use super::{default_view, BSCtx, WidgetPath, DEFAULT_PROPS};
 use glib::{clone, idle_add_local, prelude::*, GString};
-use gtk::{self, prelude::*};
+use gtk4::{self as gtk, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_bscript::expr;
 use netidx_protocols::view;
@@ -955,8 +955,7 @@ impl Editor {
         root.set_margin_start(5);
         root.set_margin_end(5);
         let root_upper = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        let win_lower =
-            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        let win_lower = gtk::ScrolledWindow::new();
         win_lower.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         let root_lower = gtk::Box::new(gtk::Orientation::Vertical, 5);
         win_lower.add(&root_lower);
@@ -964,38 +963,17 @@ impl Editor {
         root.pack2(&win_lower, true, true);
         let treebtns = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         root_upper.pack_start(&treebtns, false, false, 0);
-        let addbtnicon = gtk::Image::from_icon_name(
-            Some("list-add-symbolic"),
-            gtk::IconSize::SmallToolbar,
-        );
-        let addbtn = gtk::ToolButton::new(Some(&addbtnicon), None);
-        let addchbtnicon = gtk::Image::from_icon_name(
-            Some("go-down-symbolic"),
-            gtk::IconSize::SmallToolbar,
-        );
-        let addchbtn = gtk::ToolButton::new(Some(&addchbtnicon), None);
-        let delbtnicon = gtk::Image::from_icon_name(
-            Some("list-remove-symbolic"),
-            gtk::IconSize::SmallToolbar,
-        );
-        let delbtn = gtk::ToolButton::new(Some(&delbtnicon), None);
-        let dupbtnicon = gtk::Image::from_icon_name(
-            Some("edit-copy-symbolic"),
-            gtk::IconSize::SmallToolbar,
-        );
-        let dupbtn = gtk::ToolButton::new(Some(&dupbtnicon), None);
-        let undobtnicon = gtk::Image::from_icon_name(
-            Some("edit-undo-symbolic"),
-            gtk::IconSize::SmallToolbar,
-        );
-        let undobtn = gtk::ToolButton::new(Some(&undobtnicon), None);
+        let addbtn = gtk::Button::from_icon_name("list-add-symbolic");
+        let addchbtn = gtk::Button::from_icon_name("go-down-symbolic");
+        let delbtn = gtk::Button::from_icon_name("list-remove-symbolic");
+        let dupbtn = gtk::Button::from_icon_name("edit-copy-symbolic");
+        let undobtn = gtk::Button::from_icon_name("edit-undo-symbolic");
         treebtns.pack_start(&addbtn, false, false, 5);
         treebtns.pack_start(&addchbtn, false, false, 5);
         treebtns.pack_start(&delbtn, false, false, 5);
         treebtns.pack_start(&dupbtn, false, false, 5);
         treebtns.pack_start(&undobtn, false, false, 5);
-        let treewin =
-            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        let treewin = gtk::ScrolledWindow::new();
         treewin.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         root_upper.pack_start(&treewin, true, true, 5);
         let view = gtk::TreeView::new();
@@ -1174,17 +1152,6 @@ impl Editor {
                     }
                 }
         }));
-        let menu = gtk::Menu::new();
-        let duplicate = gtk::MenuItem::with_label("Duplicate");
-        let new_sib = gtk::MenuItem::with_label("New Sibling");
-        let new_child = gtk::MenuItem::with_label("New Child");
-        let delete = gtk::MenuItem::with_label("Delete");
-        let undo = gtk::MenuItem::with_label("Undo");
-        menu.append(&duplicate);
-        menu.append(&new_sib);
-        menu.append(&new_child);
-        menu.append(&delete);
-        menu.append(&undo);
         let dup = Rc::new(clone!(
             @strong scope,
             @strong on_change,
@@ -1205,7 +1172,6 @@ impl Editor {
                     on_change()
                 }
         }));
-        duplicate.connect_activate(clone!(@strong dup => move |_| dup()));
         dupbtn.connect_clicked(clone!(@strong dup => move |_| dup()));
         let newsib = Rc::new(clone!(
             @strong scope,
@@ -1218,7 +1184,6 @@ impl Editor {
                 Widget::insert(&ctx, on_change.clone(), &store, &iter, scope.clone(), spec);
                 on_change();
         }));
-        new_sib.connect_activate(clone!(@strong newsib => move |_| newsib()));
         addbtn.connect_clicked(clone!(@strong newsib => move |_| newsib()));
         let newch = Rc::new(clone!(
             @strong scope,
@@ -1238,7 +1203,6 @@ impl Editor {
                 );
                 on_change();
         }));
-        new_child.connect_activate(clone!(@strong newch => move |_| newch()));
         addchbtn.connect_clicked(clone!(@strong newch => move |_| newch()));
         let del = Rc::new(clone!(
             @weak selection,
@@ -1252,7 +1216,6 @@ impl Editor {
                     on_change();
                 }
         }));
-        delete.connect_activate(clone!(@strong del => move |_| del()));
         delbtn.connect_clicked(clone!(@strong del => move |_| del()));
         let und = Rc::new(clone!(
             @strong ctx,
@@ -1283,19 +1246,7 @@ impl Editor {
                     on_change();
                 }
         }));
-        undo.connect_activate(clone!(@strong und => move |_| und()));
         undobtn.connect_clicked(clone!(@strong und => move |_| und()));
-        view.connect_button_press_event(move |_, b| {
-            let right_click =
-                gdk::EventType::ButtonPress == b.event_type() && b.button() == 3;
-            if right_click {
-                menu.show_all();
-                menu.popup_at_pointer(Some(&*b));
-                Inhibit(true)
-            } else {
-                Inhibit(false)
-            }
-        });
         store.connect_row_deleted(clone!(@strong on_change => move |_, _| {
             on_change();
         }));

@@ -12,11 +12,12 @@ use crate::bscript::LocalEvent;
 use arcstr::ArcStr;
 use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
-use gdk::{keys, EventButton, EventKey, RGBA};
+use gdk4::RGBA;
 use gio::prelude::*;
-use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
-use gtk::{
-    prelude::*, CellRenderer, CellRendererCombo, CellRendererPixbuf,
+use glib::{self, clone, idle_add_local, source::Continue};
+use gtk::CellLayout;
+use gtk4::{
+    self as gtk, prelude::*, CellRenderer, CellRendererCombo, CellRendererPixbuf,
     CellRendererProgress, CellRendererSpin, CellRendererText, CellRendererToggle,
     ListStore, SortColumn, SortType, StateFlags, StyleContext, TreeIter, TreeModel,
     TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
@@ -32,7 +33,7 @@ use netidx::{
 use netidx_bscript::vm;
 use std::{
     cell::{Cell, RefCell},
-    cmp::Ordering,
+    cmp,
     collections::{HashMap, HashSet},
     fmt::Write,
     ops::Deref,
@@ -63,16 +64,20 @@ fn get_sort_column(store: &ListStore) -> Option<u32> {
     }
 }
 
-fn compare_row(col: i32, m: &TreeModel, r0: &TreeIter, r1: &TreeIter) -> Ordering {
-    let v0_v = m.value(r0, col);
-    let v1_v = m.value(r1, col);
+fn compare_row(col: i32, m: &ListStore, r0: &TreeIter, r1: &TreeIter) -> gtk::Ordering {
+    let v0_v = m.get_value(r0, col);
+    let v1_v = m.get_value(r1, col);
     let v0_r = v0_v.get::<&BVal>();
     let v1_r = v1_v.get::<&BVal>();
     match (v0_r, v1_r) {
-        (Err(_), Err(_)) => Ordering::Equal,
-        (Err(_), _) => Ordering::Greater,
-        (_, Err(_)) => Ordering::Less,
-        (Ok(v0), Ok(v1)) => v0.value.partial_cmp(&v1.value).unwrap_or(Ordering::Equal),
+        (Err(_), Err(_)) => gtk::Ordering::Equal,
+        (Err(_), _) => gtk::Ordering::Larger,
+        (_, Err(_)) => gtk::Ordering::Smaller,
+        (Ok(v0), Ok(v1)) => match v0.value.partial_cmp(&v1.value) {
+            None | Some(cmp::Ordering::Equal) => gtk::Ordering::Equal,
+            Some(cmp::Ordering::Greater) => gtk::Ordering::Larger,
+            Some(cmp::Ordering::Less) => gtk::Ordering::Smaller,
+        },
     }
 }
 
@@ -187,21 +192,14 @@ impl RaeifiedTable {
                         &vm::Event::User(LocalEvent::Event(v.into()))
                     );
                 }
-                let e = editable.borrow_mut().take();
-                if let Some(e) = e {
-                    unsafe { e.destroy(); }
-                }
+                editable.borrow_mut().take();
             }),
         );
         cell.connect_editing_started(clone!(@strong editable => move |_, e, _| {
             *editable.borrow_mut() = Some(e.clone());
-            e.connect_editing_done(|e| {
-                e.event(&gdk::Event::new(gdk::EventType::FocusChange));
-            });
             e.connect_remove_widget(clone!(@strong editable => move |e| {
                 if e.is_editing_canceled() {
                     editable.borrow_mut().take();
-                    unsafe { e.destroy() }
                 }
             }));
         }));
@@ -228,13 +226,13 @@ impl RaeifiedTable {
             }
             let f =
                 Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
-                    move |_: &TreeViewColumn,
+                    move |_: &CellLayout,
                 _: &CellRenderer,
                 _: &TreeModel,
                 i: &TreeIter| {
                     t.render_text_cell(&common, &*name, &foreground, &cell, i)
                 }));
-            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            CellLayoutExt::set_cell_data_func(&column, &cell, f);
             self.setup_editable(&cell, common);
         }
         t.set_column_properties(&column, name, &common, sorting_disabled);
@@ -250,13 +248,13 @@ impl RaeifiedTable {
         if let Some(common) = common.as_ref() {
             let f = Box::new(clone!(
             @weak t, @strong cell, @strong name, @strong common =>
-                move |_: &TreeViewColumn,
+                move |_: &CellLayout,
             _: &CellRenderer,
             _: &TreeModel,
             i: &TreeIter| {
                 t.render_image_cell(&common, &*name, &cell, i)
             }));
-            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            CellLayoutExt::set_cell_data_func(&column, &cell, f);
         }
         t.set_column_properties(&column, name, &common, true);
         t.view().append_column(&column);
@@ -283,18 +281,18 @@ impl RaeifiedTable {
             }
             let f =
                 Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
-                    move |_: &TreeViewColumn,
+                    move |_: &CellLayout,
                 _: &CellRenderer,
                 _: &TreeModel,
                 i: &TreeIter| {
                     t.render_toggle_cell(&common, &*name, &radio, &cell, i)
                 }));
-            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            CellLayoutExt::set_cell_data_func(&column, &cell, f);
             cell.connect_toggled(clone!(@weak t, @strong common => move |_, p| {
                 if let Some(path) = t.path_from_treepath(&p, &*common.source_column) {
                     let val = t.store()
                         .iter(&p)
-                        .map(|i| t.store().value(&i, common.source))
+                        .map(|i| t.store().get_value(&i, common.source))
                         .and_then(|v| v.get::<&BVal>().ok()
                                        .and_then(|v| v.value.clone().cast_to::<bool>().ok()))
                         .unwrap_or(false);
@@ -331,13 +329,13 @@ impl RaeifiedTable {
             }
             let f =
                 Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
-                move |_: &TreeViewColumn,
+                move |_: &CellLayout,
                 _: &CellRenderer,
                 _: &TreeModel,
                 i: &TreeIter| {
                     t.render_combo_cell(&common, &*name, &choices, &has_entry, &cell, i)
                 }));
-            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            CellLayoutExt::set_cell_data_func(&column, &cell, f);
             self.setup_editable(&cell, common);
         }
         t.set_column_properties(&column, name, &common, sorting_disabled);
@@ -374,7 +372,7 @@ impl RaeifiedTable {
             }
             let f =
                 Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
-                move |_: &TreeViewColumn,
+                move |_: &CellLayout,
                 _: &CellRenderer,
                 _: &TreeModel,
                 i: &TreeIter| {
@@ -391,7 +389,7 @@ impl RaeifiedTable {
                         i
                     )
                 }));
-            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            CellLayoutExt::set_cell_data_func(&column, &cell, f);
             t.setup_editable(&cell, common);
         }
         t.set_column_properties(&column, name, &common, sorting_disabled);
@@ -420,7 +418,7 @@ impl RaeifiedTable {
             let inverted = spec.inverted.as_ref().and_then(|v| v.resolve(&t.descriptor));
             let f =
                 Box::new(clone!(@weak t, @strong cell, @strong name, @strong common =>
-                move |_: &TreeViewColumn,
+                move |_: &CellLayout,
                 _: &CellRenderer,
                 _: &TreeModel,
                 i: &TreeIter| {
@@ -436,7 +434,7 @@ impl RaeifiedTable {
                         i
                     )
                 }));
-            TreeViewColumnExt::set_cell_data_func(&column, &cell, Some(f));
+            CellLayoutExt::set_cell_data_func(&column, &cell, f);
         }
         t.set_column_properties(&column, name, &common, sorting_disabled);
         t.view().append_column(&column);
@@ -517,8 +515,7 @@ impl RaeifiedTable {
         let (selection_changed, descriptor) = shared.apply_filters();
         let column_spec = shared.generate_column_spec(&descriptor);
         let view = TreeView::new();
-        view.set_no_show_all(true);
-        shared.root.add(&view);
+        shared.root.set_child(Some(&view));
         view.selection().set_mode(gtk::SelectionMode::None);
         let vector_mode = descriptor.cols.len() == 0;
         let column_types = if vector_mode {
@@ -579,10 +576,16 @@ impl RaeifiedTable {
             clone!(@weak t => move |_| t.handle_sort_column_changed()),
         );
         t.view().set_fixed_height_mode(true);
-        t.view().connect_key_press_event(clone!(
-            @weak t => @default-return Inhibit(false), move |_, k| t.handle_key(k)));
-        t.view().connect_button_press_event(clone!(
-            @weak t => @default-return Inhibit(false), move |_, b| t.handle_button(b)));
+        let view_key_events = gtk::EventControllerKey::new();
+        let view_but_events = gtk::GestureClick::new();
+        t.view().add_controller(view_key_events.clone());
+        t.view().add_controller(view_but_events.clone());
+        view_key_events.connect_key_released(
+            clone!(@weak t => move |c, k, _, m| t.handle_key(c, k, m)),
+        );
+        view_but_events.connect_released(
+            clone!(@weak t => move |c, _, x, y| t.handle_button(c, x, y)),
+        );
         t.view().connect_row_activated(
             clone!(@weak t => move |_, p, _| t.handle_row_activated(p)),
         );
@@ -905,7 +908,13 @@ impl RaeifiedTable {
         self.render_cell_selected(common, cr, i, name);
     }
 
-    fn handle_key(&self, key: &EventKey) -> Inhibit {
+    fn handle_key(
+        &self,
+        handler: &gtk::EventControllerKey,
+        key: gdk4::Key,
+        modifier: gdk4::ModifierType,
+    ) {
+        let ms = handler.current_event_state();
         let clear_selection = || {
             let n = {
                 let mut paths = self.shared.selected.borrow_mut();
@@ -918,45 +927,39 @@ impl RaeifiedTable {
                 self.handle_selection_changed();
             }
         };
-        let kv = key.keyval();
-        if kv == keys::constants::Escape {
+        if key == gdk4::Key::Escape {
             clear_selection();
-            self.view().set_cursor(&TreePath::new(), None::<&TreeViewColumn>, false);
+            TreeViewExt::set_cursor(self.view(), &TreePath::new(), None, false);
         }
-        if kv == keys::constants::Down
-            || kv == keys::constants::Up
-            || kv == keys::constants::Left
-            || kv == keys::constants::Right
+        if key == gdk4::Key::Down
+            || key == gdk4::Key::Up
+            || key == gdk4::Key::Left
+            || key == gdk4::Key::Right
         {
-            if !key.state().contains(gdk::ModifierType::SHIFT_MASK)
+            if !ms.contains(gdk4::ModifierType::SHIFT_MASK)
                 || self.shared.selection_mode.get() != SelectionMode::Multi
             {
                 clear_selection();
             }
         }
-        if kv == keys::constants::w
-            && key.state().contains(gdk::ModifierType::CONTROL_MASK)
-        {
+        if key == gdk4::Key::w && ms.contains(gdk4::ModifierType::CONTROL_MASK) {
             self.write_dialog()
         }
-        Inhibit(false)
     }
 
-    fn handle_button(&self, ev: &EventButton) -> Inhibit {
-        let (x, y) = ev.position();
-        let n = ev.button();
-        let typ = ev.event_type();
-        match (self.view().path_at_pos(x as i32, y as i32), typ) {
-            (Some((Some(_), Some(_), _, _)), gdk::EventType::ButtonPress) if n == 1 => {
-                if !ev.state().contains(gdk::ModifierType::SHIFT_MASK)
+    fn handle_button(&self, ev: &gtk::GestureClick, x: f64, y: f64) {
+        let ms = ev.current_event_state();
+        let n = ev.current_button();
+        match self.view().path_at_pos(x as i32, y as i32) {
+            Some((Some(_), Some(_), _, _)) if n == 1 => {
+                if !ms.contains(gdk4::ModifierType::SHIFT_MASK)
                     || self.shared.selection_mode.get() != SelectionMode::Multi
                 {
                     self.shared.selected.borrow_mut().clear();
                 }
             }
-            (None, _) | (Some((_, _, _, _)), _) => (),
+            None | Some((_, _, _, _)) => (),
         }
-        Inhibit(false)
     }
 
     fn write_dialog(&self) {

@@ -4,9 +4,9 @@ use super::{
 use crate::{bscript::LocalEvent, containers, view};
 use anyhow::{bail, Result};
 use futures::channel::oneshot;
-use gdk::{self, prelude::*};
+use gdk4::{self as gdk4, prelude::*};
 use glib::{clone, idle_add_local, idle_add_local_once};
-use gtk::{self, prelude::*};
+use gtk4::{self as gtk, prelude::*, Inhibit};
 use indexmap::IndexSet;
 use netidx::{chars::Chars, path::Path, protocol::value::FromValue, subscriber::Value};
 use netidx_bscript::{expr::Expr, vm};
@@ -32,16 +32,11 @@ fn hover_path(
     name: &'static str,
     expr: &Expr,
 ) {
-    w.connect_focus(clone!(@strong selected_path, @strong expr => move |_, _| {
+    let ec = gtk::EventControllerFocus::new();
+    w.add_controller(ec.clone());
+    ec.connect_enter(clone!(@strong selected_path, @strong expr => move |_| {
         selected_path.set_label(&format!("{}: {}", name, expr));
-        Inhibit(false)
     }));
-    w.connect_enter_notify_event(
-        clone!(@strong selected_path, @strong expr => move |_, _| {
-            selected_path.set_label(&format!("{}: {}", name, expr));
-            Inhibit(false)
-        }),
-    );
 }
 
 pub(super) struct Button {
@@ -59,7 +54,6 @@ impl Button {
         selected_path: gtk::Label,
     ) -> Self {
         let button = gtk::Button::new();
-        button.set_no_show_all(true);
         let (label, image, on_click) = {
             let label =
                 BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.label.clone());
@@ -92,14 +86,11 @@ impl Button {
 
     fn set_image(button: &gtk::Button, value: Option<Value>) {
         if let Some(s) = value.and_then(|v| v.cast_to::<ImageSpec>().ok()) {
-            match button.image() {
+            match button.child() {
                 Some(image) if image.is::<gtk::Image>() => {
                     s.apply(image.downcast_ref().unwrap())
                 }
-                Some(_) | None => {
-                    button.set_image(Some(&s.get()));
-                    button.set_always_show_image(true);
-                }
+                Some(_) | None => button.set_child(Some(&s.get())),
             }
         }
     }
@@ -145,25 +136,16 @@ impl LinkButton {
             spec.on_activate_link.clone(),
         )));
         let button = gtk::LinkButton::new("file:///");
-        button.set_no_show_all(true);
         Self::set_uri(&button, uri.current(&mut ctx.borrow_mut()));
         Self::set_label(&button, label.current(&mut ctx.borrow_mut()));
         hover_path(&button, &selected_path, "on_activate_link", &spec.on_activate_link);
         button.connect_activate_link(
             clone!(@strong ctx, @strong on_activate_link => move |button| {
-                match button.uri().map(|s| s.to_string()) {
-                    None => {
-                        let ev = vm::Event::User(LocalEvent::Event(Value::Null));
-                        on_activate_link.borrow_mut().update(&mut ctx.borrow_mut(), &ev);
-                        Inhibit(true)
-                    },
-                    Some(uri) => {
-                        let ev = vm::Event::User(LocalEvent::Event(uri.into()));
-                        match on_activate_link.borrow_mut().update(&mut ctx.borrow_mut(), &ev) {
-                            Some(Value::True) => Inhibit(true),
-                            _ => Inhibit(false),
-                        }
-                    }
+                let uri = button.uri().as_str();
+                let ev = vm::Event::User(LocalEvent::Event(uri.into()));
+                match on_activate_link.borrow_mut().update(&mut ctx.borrow_mut(), &ev) {
+                    Some(Value::True) => Inhibit(true),
+                    _ => Inhibit(false),
                 }
             }),
         );
@@ -230,7 +212,6 @@ impl Label {
         let selectable =
             BSNode::compile(&mut ctx.borrow_mut(), scope, spec.selectable.clone());
         let label = gtk::Label::new(None);
-        label.set_no_show_all(true);
         Self::set_text(&label, text.current(&mut ctx.borrow_mut()));
         Self::set_single_line(&label, single_line.current(&mut ctx.borrow_mut()));
         Self::set_selectable(&label, selectable.current(&mut ctx.borrow_mut()));
@@ -346,7 +327,6 @@ where
         new: F,
     ) -> Self {
         let button = new();
-        button.set_no_show_all(true);
         let we_set = Rc::new(Cell::new(false));
         let value = Rc::new(RefCell::new(BSNode::compile(
             &mut ctx.borrow_mut(),
@@ -393,12 +373,9 @@ where
 
     fn set_image(button: &T, v: Option<Value>) {
         if let Some(s) = v.and_then(|v| v.cast_to::<ImageSpec>().ok()) {
-            match button.image() {
+            match button.child() {
                 Some(w) if w.is::<gtk::Image>() => s.apply(w.downcast_ref().unwrap()),
-                Some(_) | None => {
-                    button.set_image(Some(&s.get()));
-                    button.set_always_show_image(true);
-                }
+                Some(_) | None => button.set_child(Some(&s.get())),
             }
         }
     }
@@ -412,10 +389,10 @@ where
     fn set_value(button: &T, v: Option<Value>) {
         if let Some(v) = v {
             match v.get_as::<bool>() {
-                None => button.set_inconsistent(true),
+                None => (), //button.set_inconsistent(true)
                 Some(b) => {
                     button.set_active(b);
-                    button.set_inconsistent(false);
+                    //button.set_inconsistent(false);
                 }
             }
         }
@@ -453,8 +430,7 @@ where
 }
 
 pub(super) struct ComboBox {
-    root: gtk::EventBox,
-    combo: gtk::ComboBoxText,
+    root: gtk::ComboBoxText,
     choices: BSNode,
     selected: Rc<RefCell<BSNode>>,
     on_change: Rc<RefCell<BSNode>>,
@@ -468,10 +444,7 @@ impl ComboBox {
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
-        let combo = gtk::ComboBoxText::new();
-        combo.set_no_show_all(true);
-        let root = gtk::EventBox::new();
-        root.add(&combo);
+        let root = gtk::ComboBoxText::new();
         let choices =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.choices.clone());
         let selected = Rc::new(RefCell::new(BSNode::compile(
@@ -485,14 +458,14 @@ impl ComboBox {
             spec.on_change.clone(),
         )));
         let we_set = Rc::new(Cell::new(false));
-        Self::set_choices(&combo, choices.current(&mut ctx.borrow_mut()));
+        Self::set_choices(&root, choices.current(&mut ctx.borrow_mut()));
         Self::we_set_selected(
             &we_set,
-            &combo,
+            &root,
             selected.borrow().current(&mut ctx.borrow_mut()),
         );
-        hover_path(&combo, &selected_path, "on_change", &spec.on_change);
-        combo.connect_changed(clone!(
+        hover_path(&root, &selected_path, "on_change", &spec.on_change);
+        root.connect_changed(clone!(
             @strong we_set,
             @strong on_change,
             @strong ctx,
@@ -513,7 +486,7 @@ impl ComboBox {
                 );
             }
         }));
-        Self { root, combo, choices, selected, on_change, we_set }
+        Self { root, choices, selected, on_change, we_set }
     }
 
     fn set_selected(combo: &gtk::ComboBoxText, v: Option<Value>) {
@@ -546,10 +519,10 @@ impl BWidget for ComboBox {
         event: &vm::Event<LocalEvent>,
     ) {
         self.on_change.borrow_mut().update(ctx, event);
-        Self::set_choices(&self.combo, self.choices.update(ctx, event));
+        Self::set_choices(&self.root, self.choices.update(ctx, event));
         Self::we_set_selected(
             &self.we_set,
-            &self.combo,
+            &self.root,
             self.selected.borrow_mut().update(ctx, event),
         );
     }
@@ -560,23 +533,21 @@ impl BWidget for ComboBox {
 
     fn set_visible(&self, v: bool) {
         self.root.set_visible(v);
-        self.combo.set_visible(v);
     }
 
     fn set_sensitive(&self, e: bool) {
         self.root.set_sensitive(e);
-        self.combo.set_sensitive(e);
     }
 
     fn set_highlight(&self, mut path: std::slice::Iter<WidgetPath>, h: bool) {
         if let Some(WidgetPath::Leaf) = path.next() {
-            util::set_highlight(&self.combo, h);
+            util::set_highlight(&self.root, h);
         }
     }
 }
 
 pub(super) struct RadioButton {
-    button: gtk::RadioButton,
+    button: gtk::CheckButton,
     on_toggled: Rc<RefCell<BSNode>>,
     label: BSNode,
     image: BSNode,
@@ -609,8 +580,7 @@ impl RadioButton {
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.group.clone());
         let value =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.value.clone());
-        let button = gtk::RadioButton::new();
-        button.set_no_show_all(true);
+        let button = gtk::CheckButton::new();
         button.connect_toggled(clone!(
         @strong on_toggled,
         @strong ctx,
@@ -642,7 +612,6 @@ impl RadioButton {
             current_group: None,
         };
         t.set_label(t.label.current(&mut ctx.borrow_mut()));
-        t.set_image(t.image.current(&mut ctx.borrow_mut()));
         let group_current = t.group.current(&mut ctx.borrow_mut());
         t.set_group(&mut ctx.borrow_mut(), group_current);
         t.we_set_value(t.value.current(&mut ctx.borrow_mut()));
@@ -651,21 +620,7 @@ impl RadioButton {
 
     fn set_label(&self, v: Option<Value>) {
         if let Some(text) = v.and_then(|v| v.cast_to::<Chars>().ok()) {
-            self.button.set_label(&*text);
-        }
-    }
-
-    fn set_image(&self, v: Option<Value>) {
-        if let Some(spec) = v.and_then(|v| v.cast_to::<ImageSpec>().ok()) {
-            match self.button.image() {
-                Some(image) if image.is::<gtk::Image>() => {
-                    spec.apply(image.downcast_ref().unwrap());
-                }
-                Some(_) | None => {
-                    self.button.set_image(Some(&spec.get()));
-                    self.button.set_always_show_image(true);
-                }
-            }
+            self.button.set_label(Some(&*text));
         }
     }
 
@@ -673,7 +628,7 @@ impl RadioButton {
         if let Some(group) = v.and_then(|v| v.cast_to::<String>().ok()) {
             self.group_changing.set(true);
             if let Some(current) = self.current_group.take() {
-                self.button.join_group(gtk::RadioButton::NONE);
+                self.button.set_group(None::<&gtk::CheckButton>);
                 if let Some((_, group)) = ctx.user.radio_groups.get_mut(&current) {
                     group.remove(&self.button);
                     if group.is_empty() {
@@ -688,14 +643,14 @@ impl RadioButton {
                 .entry(group)
                 .or_insert_with(|| (self.we_changed.clone(), IndexSet::default()));
             self.we_changed = we_changed.clone();
-            self.button.join_group(group.last());
+            self.button.set_group(group.last());
             group.insert(self.button.clone());
             self.group_changing.set(false);
         }
     }
 
     fn we_set_value_(
-        button: &gtk::RadioButton,
+        button: &gtk::CheckButton,
         we_changed: &Rc<Cell<bool>>,
         v: Option<Value>,
     ) {
@@ -721,7 +676,7 @@ impl BWidget for RadioButton {
         let v = self.label.update(ctx, event);
         self.set_label(v);
         let v = self.image.update(ctx, event);
-        self.set_image(v);
+        // CR: estokes implement set_image on gtk4
         let v = self.group.update(ctx, event);
         self.set_group(ctx, v);
         let v = self.value.update(ctx, event);
@@ -749,7 +704,8 @@ impl Switch {
         selected_path: gtk::Label,
     ) -> Self {
         let switch = gtk::Switch::new();
-        switch.set_no_show_all(true);
+        let switch_ev = gtk::EventControllerFocus::new();
+        switch.add_controller(switch_ev.clone());
         let value = Rc::new(RefCell::new(BSNode::compile(
             &mut ctx.borrow_mut(),
             scope.clone(),
@@ -784,20 +740,11 @@ impl Switch {
             }
             Inhibit(true)
         }));
-        switch.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
+        switch_ev.connect_enter(clone!(@strong selected_path, @strong spec => move |_| {
             selected_path.set_label(
                 &format!("value: {}, on_change: {}", spec.value, spec.on_change)
             );
-            Inhibit(false)
         }));
-        switch.connect_enter_notify_event(
-            clone!(@strong selected_path, @strong spec => move |_, _| {
-                selected_path.set_label(
-                    &format!("value: {}, on_change: {}", spec.value, spec.on_change)
-                );
-                Inhibit(false)
-            }),
-        );
         Self { value, on_change, switch, we_set }
     }
 
@@ -870,7 +817,6 @@ impl Entry {
             spec.on_activate.clone(),
         )));
         let entry = gtk::Entry::new();
-        entry.set_no_show_all(true);
         Self::set_text(&entry, text.borrow().current(&mut ctx.borrow_mut()));
         entry.set_icon_activatable(gtk::EntryIconPosition::Secondary, true);
         entry.connect_activate(clone!(
@@ -1038,8 +984,7 @@ impl BWidget for SearchEntry {
 pub(super) struct Image {
     image_spec: BSNode,
     on_click: Rc<RefCell<BSNode>>,
-    image: gtk::Image,
-    root: gtk::EventBox,
+    root: gtk::Image,
 }
 
 impl Image {
@@ -1049,17 +994,15 @@ impl Image {
         scope: Path,
         selected_path: gtk::Label,
     ) -> Self {
-        let root = gtk::EventBox::new();
-        let image = gtk::Image::new();
-        image.set_no_show_all(true);
-        root.add(&image);
+        let root = gtk::Image::new();
+        root.set_no_show_all(true);
         let image_spec =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.spec.clone());
         let on_click =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.on_click.clone());
         let on_click = Rc::new(RefCell::new(on_click));
         let button_pressed = Rc::new(Cell::new(false));
-        Self::set_spec(&image, image_spec.current(&mut ctx.borrow_mut()));
+        Self::set_spec(&root, image_spec.current(&mut ctx.borrow_mut()));
         root.connect_button_press_event(clone!(@strong button_pressed => move |_, e| {
             if e.button() == 1 {
                 button_pressed.set(true);
@@ -1077,8 +1020,8 @@ impl Image {
             }
             Inhibit(true)
         }));
-        hover_path(&image, &selected_path, "on_click", &spec.spec);
-        Image { image_spec, on_click, image, root }
+        hover_path(&root, &selected_path, "on_click", &spec.spec);
+        Image { image_spec, on_click, root }
     }
 
     fn set_spec(image: &gtk::Image, v: Option<Value>) {

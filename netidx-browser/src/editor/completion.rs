@@ -2,9 +2,9 @@ use super::Scope;
 use glib::{prelude::*, subclass::prelude::*};
 use netidx::path::Path;
 use radix_trie::TrieCommon;
-use sourceview4_sc::{
+use sourceview5::{
     prelude::*, subclass::prelude::*, CompletionActivation, CompletionContext,
-    CompletionItem, CompletionProvider,
+    CompletionProvider,
 };
 use std::{default::Default, rc::Rc};
 
@@ -15,7 +15,7 @@ glib::wrapper! {
 
 impl BScriptCompletionProvider {
     pub(crate) fn new() -> Self {
-        glib::Object::new(&[]).expect("failed to create BScriptCompletionProvider")
+        glib::Object::new().expect("failed to create BScriptCompletionProvider")
     }
 }
 

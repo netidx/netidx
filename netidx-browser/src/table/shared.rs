@@ -4,7 +4,7 @@ use arcstr::ArcStr;
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use gdk::RGBA;
 use glib;
-use gtk::{prelude::*, Label, ListStore, ScrolledWindow, TreeIter};
+use gtk4::{prelude::*, Label, ListStore, ScrolledWindow, TreeIter};
 use indexmap::{IndexMap, IndexSet};
 use netidx::{
     chars::Chars, pack::Z64, path::Path, pool::Pooled, protocol::value::FromValue,

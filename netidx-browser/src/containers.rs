@@ -3,7 +3,7 @@ use crate::{bscript::LocalEvent, view};
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
 use glib::idle_add_local_once;
-use gtk::{self, prelude::*, Orientation};
+use gtk4::{self as gtk, prelude::*, Orientation};
 use netidx::{chars::Chars, path::Path};
 use netidx_bscript::vm;
 use std::{cell::RefCell, cmp::max, rc::Rc};
@@ -112,7 +112,7 @@ impl Frame {
         let label_val = label_val.as_ref().map(|s| s.as_ref());
         let root = gtk::Frame::new(label_val);
         root.set_no_show_all(true);
-        root.set_label_align(spec.label_align_horizontal, spec.label_align_vertical);
+        root.set_label_align(spec.label_align_horizontal);
         let child = spec.child.map(|child| {
             let w =
                 Widget::new(ctx, (*child).clone(), scope.clone(), selected_path.clone());

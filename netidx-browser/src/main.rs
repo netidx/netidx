@@ -21,9 +21,9 @@ use bytes::Bytes;
 use editor::Editor;
 use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap};
-use gdk::{self, prelude::*};
+use gdk4::{self as gdk, prelude::*};
 use glib::{clone, idle_add_local, idle_add_local_once, source::PRIORITY_LOW};
-use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
+use gtk4::{self as gtk, prelude::*, Application, ApplicationWindow, Inhibit};
 use indexmap::IndexSet;
 use netidx::{
     chars::Chars,
@@ -181,7 +181,7 @@ struct WidgetCtx {
     fns: Trie<String, ()>,
     vars: Trie<String, Trie<String, ()>>,
     radio_groups:
-        FxHashMap<String, (Rc<Cell<bool>>, IndexSet<gtk::RadioButton, FxBuildHasher>)>,
+        FxHashMap<String, (Rc<Cell<bool>>, IndexSet<gtk::CheckButton, FxBuildHasher>)>,
 }
 
 impl vm::Ctx for WidgetCtx {
@@ -286,8 +286,11 @@ impl ImageSpec {
     // apply the spec to an existing image
     fn apply(&self, image: &gtk::Image) {
         match self {
-            Self::Icon { name, size } => image.set_from_icon_name(Some(&**name), *size),
             Self::PixBuf { .. } => image.set_from_pixbuf(self.get_pixbuf().as_ref()),
+            Self::Icon { name, size } => {
+                image.set_from_icon_name(Some(&**name));
+                image.set_icon_size(*size)
+            }
         }
     }
 }
@@ -296,7 +299,7 @@ impl FromValue for ImageSpec {
     fn from_value(v: Value) -> Result<Self> {
         match v {
             Value::String(name) => {
-                Ok(Self::Icon { name, size: gtk::IconSize::SmallToolbar })
+                Ok(Self::Icon { name, size: gtk::IconSize::Inherit })
             }
             Value::Bytes(bytes) => {
                 Ok(Self::PixBuf { bytes, width: None, height: None, keep_aspect: true })
@@ -304,11 +307,11 @@ impl FromValue for ImageSpec {
             Value::Array(elts) => match &*elts {
                 [Value::String(name), Value::String(size)] => {
                     let size = match &**size {
-                        "menu" => gtk::IconSize::Menu,
-                        "small-toolbar" => gtk::IconSize::SmallToolbar,
-                        "large-toolbar" => gtk::IconSize::LargeToolbar,
-                        "dnd" => gtk::IconSize::Dnd,
-                        "dialog" => gtk::IconSize::Dialog,
+                        "menu" => gtk::IconSize::Inherit,
+                        "small-toolbar" => gtk::IconSize::Inherit,
+                        "large-toolbar" => gtk::IconSize::Inherit,
+                        "dnd" => gtk::IconSize::Inherit,
+                        "dialog" => gtk::IconSize::Inherit,
                         _ => bail!("invalid size"),
                     };
                     Ok(Self::Icon { name: name.clone(), size })
@@ -588,7 +591,7 @@ impl BWidget for Widget {
 }
 
 fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
-    let root = gtk::ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+    let root = gtk::ScrolledWindow::new();
     root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     root.add(&hbox);
@@ -682,8 +685,7 @@ impl View {
         selected_path.set_margin_start(0);
         selected_path.set_selectable(true);
         selected_path.set_single_line_mode(true);
-        let selected_path_window =
-            gtk::ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
+        let selected_path_window = gtk::ScrolledWindow::new();
         selected_path_window
             .set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
         selected_path_window.add(&selected_path);
@@ -804,7 +806,7 @@ fn save_view(
     ctx: &BSCtx,
     save_loc: &Rc<RefCell<Option<ViewLoc>>>,
     current_spec: &Rc<RefCell<view::Widget>>,
-    save_button: &gtk::ToolButton,
+    save_button: &gtk::Button,
     save_as: bool,
 ) {
     let do_save = |loc: ViewLoc| {
@@ -885,18 +887,13 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     group.add_window(&ctx.borrow().user.window);
     let headerbar = gtk::HeaderBar::new();
     let design_mode = gtk::ToggleButton::new();
-    let design_img = gtk::Image::from_icon_name(
-        Some("document-page-setup"),
-        gtk::IconSize::SmallToolbar,
-    );
-    let save_img = gtk::Image::from_icon_name(
-        Some("media-floppy-symbolic"),
-        gtk::IconSize::SmallToolbar,
-    );
-    let save_button = gtk::ToolButton::new(Some(&save_img), None);
+    let design_img = gtk::Image::from_icon_name(Some("document-page-setup"));
+    design_img.set_icon_size(gtk::IconSize::SmallToolbar);
+    let save_button = gtk::Button::from_icon_name("media-floppy-symbolic");
     let prefs_button = gtk::MenuButton::new();
     let menu_img =
-        gtk::Image::from_icon_name(Some("open-menu"), gtk::IconSize::SmallToolbar);
+        gtk::Image::from_icon_name(Some("open-menu"));
+    menu_img.set_icon_size(gtk::IconSize::SmallToolbar);
     prefs_button.set_image(Some(&menu_img));
     let main_menu = gio::Menu::new();
     main_menu.append(Some("Go"), Some("win.go"));
@@ -915,7 +912,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     {
         let w = &ctx.borrow().user.window;
         w.set_titlebar(Some(&headerbar));
-        w.set_title("Netidx browser");
+        w.set_title(Some("Netidx browser"));
         w.set_default_size(800, 600);
         w.show_all();
         if let Some(screen) = w.screen() {
@@ -955,7 +952,6 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             let win = gtk::Window::builder()
                 .default_width(800)
                 .default_height(600)
-                .type_(gtk::WindowType::Toplevel)
                 .visible(true)
                 .build();
             win.connect_destroy(clone!(@strong b, @strong editor_window => move |_| {
