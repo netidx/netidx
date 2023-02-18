@@ -860,7 +860,7 @@ impl Entry {
                 }
             }
         }));
-        entry.connect_icon_press(move |e, _, _| e.emit_activate());
+        entry.connect_icon_press(move |e, _| e.emit_activate());
         hover_path(&entry, &selected_path, "on_change", &spec.on_change);
         Entry { we_changed, entry, text, on_change, on_activate }
     }
@@ -931,7 +931,6 @@ impl SearchEntry {
         )));
         let entry = gtk::SearchEntry::new();
         hover_path(&entry, &selected_path, "on_search_changed", &spec.on_search_changed);
-        entry.set_no_show_all(true);
         Self::set_text(&entry, text.current(&mut ctx.borrow_mut()));
         entry.connect_search_changed(
             clone!(@strong on_search_changed, @strong ctx, @strong we_changed => move |entry| {
@@ -995,7 +994,7 @@ impl Image {
         selected_path: gtk::Label,
     ) -> Self {
         let root = gtk::Image::new();
-        root.set_no_show_all(true);
+        let root_ev = gtk::GestureClick::new();
         let image_spec =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.spec.clone());
         let on_click =
@@ -1003,22 +1002,20 @@ impl Image {
         let on_click = Rc::new(RefCell::new(on_click));
         let button_pressed = Rc::new(Cell::new(false));
         Self::set_spec(&root, image_spec.current(&mut ctx.borrow_mut()));
-        root.connect_button_press_event(clone!(@strong button_pressed => move |_, e| {
-            if e.button() == 1 {
+        root_ev.connect_pressed(clone!(@strong button_pressed => move |c, _, _, _| {
+            if c.current_button() == 1 {
                 button_pressed.set(true);
             }
-            Inhibit(true)
         }));
-        root.connect_button_release_event(clone!(
-            @strong button_pressed, @strong on_click, @strong ctx => move |_, e| {
-            if e.button() == 1 && button_pressed.get() {
+        root_ev.connect_released(clone!(
+            @strong button_pressed, @strong on_click, @strong ctx => move |c, _, _, _| {
+            if c.current_button() == 1 && button_pressed.get() {
                 button_pressed.set(false);
                 on_click.borrow_mut().update(
                     &mut ctx.borrow_mut(),
                     &vm::Event::User(LocalEvent::Event(Value::Null))
                 );
             }
-            Inhibit(true)
         }));
         hover_path(&root, &selected_path, "on_click", &spec.spec);
         Image { image_spec, on_click, root }
@@ -1039,7 +1036,7 @@ impl BWidget for Image {
         event: &vm::Event<LocalEvent>,
     ) {
         self.on_click.borrow_mut().update(ctx, event);
-        Self::set_spec(&self.image, self.image_spec.update(ctx, event));
+        Self::set_spec(&self.root, self.image_spec.update(ctx, event));
     }
 
     fn root(&self) -> Option<&gtk::Widget> {
@@ -1048,7 +1045,6 @@ impl BWidget for Image {
 
     fn set_visible(&self, v: bool) {
         self.root.set_visible(v);
-        self.image.set_visible(v);
     }
 
     fn set_sensitive(&self, e: bool) {
@@ -1057,7 +1053,7 @@ impl BWidget for Image {
 
     fn set_highlight(&self, mut path: std::slice::Iter<crate::WidgetPath>, h: bool) {
         if let Some(WidgetPath::Leaf) = path.next() {
-            util::set_highlight(&self.image, h)
+            util::set_highlight(&self.root, h)
         }
     }
 }
@@ -1112,7 +1108,6 @@ impl Scale {
             containers::dir_to_gtk(&spec.direction),
             gtk::Adjustment::NONE,
         );
-        scale.set_no_show_all(true);
         let draw_value = BSNode::compile(
             &mut ctx.borrow_mut(),
             scope.clone(),
@@ -1250,7 +1245,6 @@ impl ProgressBar {
         selected_path: gtk::Label,
     ) -> Self {
         let progress = gtk::ProgressBar::new();
-        progress.set_no_show_all(true);
         hover_path(&progress, &selected_path, "fraction", &spec.fraction);
         let ellipsize =
             BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.ellipsize);
