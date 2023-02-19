@@ -594,11 +594,15 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
     root.set_child(Some(&hbox));
     let ask_saved = Rc::new(clone!(@weak ctx, @weak hbox => move |loc: ViewLoc| {
         if !ctx.borrow().user.view_saved.get() {
-            ask_modal(&hbox, "Unsaved view will be lost.", clone!(@weak ctx, @weak hbox => move |resp| {
-                if resp {
-                    ctx.borrow().user.backend.navigate(loc);
-                }
-            }))
+            ask_modal(
+                &hbox,
+                "Unsaved view will be lost.",
+                clone!(@strong loc, @weak ctx, @weak hbox => move |resp| {
+                    if resp {
+                        ctx.borrow().user.backend.navigate(loc.clone());
+                    }
+                })
+            )
         } else {
             ctx.borrow().user.backend.navigate(loc);
         }
@@ -722,7 +726,7 @@ fn setup_css(screen: &gdk::Display) {
     gtk::StyleContext::add_provider_for_display(screen, &style, 800);
 }
 
-fn choose_location<F: FnOnce(ViewLoc)>(
+fn choose_location<F: FnMut(ViewLoc) + 'static>(
     parent: &gtk::ApplicationWindow,
     save: bool,
     f: F,
@@ -775,18 +779,19 @@ fn choose_location<F: FnOnce(ViewLoc)>(
             Some(_) => unreachable!(),
         }
     }));
-    d.connect_response(clone!(@strong mainw => move |_, r| {
+    let f = Rc::new(RefCell::new(f));
+    d.connect_response(clone!(@strong f, @strong mainw => move |_, r| {
         match r {
             gtk::ResponseType::Accept => match &*mainw.borrow() {
                 None => (),
                 Some(W::Netidx(_, e)) => {
                     let loc = ViewLoc::Netidx(Path::from(e.text().to_string()));
-                    f(loc)
+                    (f.borrow_mut())(loc)
                 }
                 Some(W::File(ch)) => {
                     let loc = ch.file().map(|f| ViewLoc::File(PathBuf::from(f.to_string())));
                     if let Some(loc) = loc {
-                        f(loc)
+                        (f.borrow_mut())(loc)
                     }
                 }
             },
@@ -803,13 +808,17 @@ fn save_view(
     save_button: &gtk::Button,
     save_as: bool,
 ) {
-    let do_save = |loc: ViewLoc| {
+    let do_save = clone!(
+        @strong save_loc,
+        @strong ctx,
+        @strong current_spec,
+        @strong save_button => move |loc: ViewLoc| {
         glib::MainContext::default().spawn_local({
             let save_button = save_button.clone();
-            let save_loc = save_loc.clone();
             let spec = current_spec.borrow().clone();
-            let ctx = ctx.clone();
             let backend = ctx.borrow().user.backend.clone();
+            let save_loc = save_loc.clone();
+            let ctx = ctx.clone();
             async move {
                 match backend.save(loc.clone(), spec).await {
                     Err(e) => {
@@ -833,7 +842,7 @@ fn save_view(
                 }
             }
         });
-    };
+    });
     let sl = save_loc.borrow_mut();
     match &*sl {
         Some(loc) if !save_as => do_save(loc.clone()),
@@ -992,7 +1001,8 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 clone!(@weak ctx, @strong window => move |ok| {
                     if ok {
                         choose_location(&window, false, clone!(@weak ctx => move |loc| {
-                            ctx.borrow().user.backend.navigate(loc)
+                            let ctx = ctx.borrow();
+                            ctx.user.backend.navigate(loc)
                         }));
                     }
                 })
@@ -1024,7 +1034,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 (saved, window)
             };
             if !new_v || saved {
-                ask_modal(&window, m, clone!(@weak ctx => move |ok| {
+                ask_modal(&window, m, clone!(@weak ctx, @strong current_loc => move |ok| {
                     if ok {
                         ctx.borrow().user.raw_view.store(new_v, Ordering::Relaxed);
                         a.change_state(&new_v.to_variant());
@@ -1123,9 +1133,9 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 ask_modal(
                     &window,
                     "Unsaved view will be lost",
-                    clone!(@weak ctx => move |ok| {
+                    clone!(@weak ctx, @strong loc => move |ok| {
                         if ok {
-                            ctx.borrow().user.backend.navigate(loc)
+                            ctx.borrow().user.backend.navigate(loc.clone())
                         }
                     }),
                 )
