@@ -1,4 +1,5 @@
 use gtk4::{self as gtk, prelude::*};
+use std::{rc::Rc, cell::RefCell};
 
 pub(super) fn set_highlight<T: WidgetExt>(w: &T, h: bool) {
     let s = w.style_context();
@@ -16,7 +17,8 @@ pub(super) fn toplevel<W: WidgetExt>(w: &W) -> gtk::Window {
         .expect("not a window")
 }
 
-pub(super) fn ask_modal<W: WidgetExt, F: FnMut(bool)>(w: &W, msg: &str, f: F) {
+pub(super) fn ask_modal<W: WidgetExt, F: FnMut(bool) + 'static>(w: &W, msg: &str, f: F) {
+    let f = Rc::new(RefCell::new(f));
     let d = gtk::MessageDialog::new(
         Some(&toplevel(w)),
         gtk::DialogFlags::MODAL,
@@ -24,13 +26,13 @@ pub(super) fn ask_modal<W: WidgetExt, F: FnMut(bool)>(w: &W, msg: &str, f: F) {
         gtk::ButtonsType::YesNo,
         msg,
     );
-    d.connect_response(move |_, resp| {
-        f(resp == gtk::ResponseType::Yes)
-    });
+    d.connect_response(clone!(@strong f => move |_, resp| {
+        (f.borrow_mut())(resp == gtk::ResponseType::Yes)
+    }));
 }
 
 pub(super) fn err_modal<W: WidgetExt>(w: &W, msg: &str) {
-    let d = gtk::MessageDialog::new(
+    gtk::MessageDialog::new(
         Some(&toplevel(w)),
         gtk::DialogFlags::MODAL,
         gtk::MessageType::Error,

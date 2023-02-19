@@ -141,7 +141,7 @@ impl LinkButton {
         hover_path(&button, &selected_path, "on_activate_link", &spec.on_activate_link);
         button.connect_activate_link(
             clone!(@strong ctx, @strong on_activate_link => move |button| {
-                let uri = button.uri().as_str();
+                let uri = button.uri().to_string();
                 let ev = vm::Event::User(LocalEvent::Event(uri.into()));
                 match on_activate_link.borrow_mut().update(&mut ctx.borrow_mut(), &ev) {
                     Some(Value::True) => Inhibit(true),

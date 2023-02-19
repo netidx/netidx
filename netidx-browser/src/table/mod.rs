@@ -160,7 +160,7 @@ impl Table {
         let shared = &self.shared;
         idle_add_local(
             clone!(@strong state, @strong visible, @strong shared => move || {
-                if let Some(c) = shared.root.child() {
+                if let Some(_) = shared.root.child() {
                     shared.root.set_child(None::<&gtk::Widget>);
                 }
                 let table = RaeifiedTable::new(shared.clone());
@@ -215,7 +215,8 @@ impl BWidget for Table {
                 | vm::Event::Timer(_)
                 | vm::Event::Variable(_, _, _)
                 | vm::Event::User(LocalEvent::Event(_))
-                | vm::Event::User(LocalEvent::Poll(_)) => (),
+                | vm::Event::User(LocalEvent::Poll(_))
+                | vm::Event::User(LocalEvent::ConfirmResponse(_)) => (),
                 vm::Event::User(LocalEvent::TableResolved(path, descriptor)) => {
                     if path == rpath {
                         match self.selection.current(ctx) {

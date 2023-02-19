@@ -1034,7 +1034,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 (saved, window)
             };
             if !new_v || saved {
-                ask_modal(&window, m, clone!(@weak ctx, @strong current_loc => move |ok| {
+                ask_modal(&window, m, clone!(@weak ctx, @strong current_loc, @strong a => move |ok| {
                     if ok {
                         ctx.borrow().user.raw_view.store(new_v, Ordering::Relaxed);
                         a.change_state(&new_v.to_variant());

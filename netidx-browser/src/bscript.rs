@@ -7,7 +7,7 @@ use netidx_bscript::{
     vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register},
 };
 use parking_lot::Mutex;
-use std::{cell::RefCell, collections::VecDeque, mem, rc::Rc, result::Result, sync::Arc};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc, result::Result, sync::Arc};
 
 #[derive(Clone, Debug)]
 pub(crate) enum LocalEvent {
