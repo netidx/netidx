@@ -511,6 +511,10 @@ impl RaeifiedTable {
         let column_spec = shared.generate_column_spec(&descriptor);
         let view = TreeView::new();
         shared.root.set_child(Some(&view));
+        view.set_valign(gtk::Align::Fill);
+        view.set_halign(gtk::Align::Fill);
+        view.set_vexpand(true);
+        view.set_hexpand(true);
         view.selection().set_mode(gtk::SelectionMode::None);
         let vector_mode = descriptor.cols.len() == 0;
         let column_types = if vector_mode {

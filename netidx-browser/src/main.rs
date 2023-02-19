@@ -688,11 +688,14 @@ impl View {
         root.set_margin_top(2);
         root.set_margin_start(2);
         root.set_margin_end(2);
+        root.set_valign(gtk::Align::Fill);
+        root.set_halign(gtk::Align::Fill);
+        root.set_vexpand(true);
+        root.set_hexpand(true);
         root.append(&make_crumbs(ctx, path));
         root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         if let Some(wroot) = widget.root() {
             root.append(wroot);
-            wroot.set_valign(gtk::Align::Start);
         }
         root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         root.append(&selected_path_window);
@@ -858,8 +861,8 @@ lazy_static! {
     static ref DEFAULT_PROPS: view::WidgetProps = view::WidgetProps {
         halign: view::Align::Fill,
         valign: view::Align::Fill,
-        hexpand: false,
-        vexpand: false,
+        hexpand: true,
+        vexpand: true,
         margin_top: 0,
         margin_bottom: 0,
         margin_start: 0,
