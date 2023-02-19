@@ -19,7 +19,7 @@ where
     entry.connect_changed(move |e| {
         e.set_icon_from_icon_name(gtk::EntryIconPosition::Secondary, Some("media-floppy"))
     });
-    entry.connect_icon_press(move |e, _, _| e.emit_activate());
+    entry.connect_icon_press(move |e, _| e.emit_activate());
     entry.connect_activate(move |e| {
         let txt = e.text();
         match txt.parse::<T>() {
@@ -71,6 +71,7 @@ impl TwoColGrid {
     }
 }
 
+/*
 /// 2020-09-29: for some reason expanders are very hard to click
 /// properly on a touch screen. However just adding an event that
 /// causes them to toggle when clicked with button 1 is all that's
@@ -93,3 +94,4 @@ pub(super) fn expander_touch_enable(root: &gtk::Expander) {
         }),
     );
 }
+*/

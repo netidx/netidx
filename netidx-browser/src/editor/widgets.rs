@@ -1,9 +1,10 @@
 use super::super::{util::err_modal, BSCtx};
 use super::{
     expr_inspector::ExprInspector,
-    util::{self, parse_entry, TwoColGrid},
+    util::{parse_entry, TwoColGrid},
     OnChange, Scope,
 };
+use gdk4 as gdk;
 use glib::{clone, prelude::*};
 use gtk4::{self as gtk, prelude::*, Inhibit};
 use indexmap::IndexMap;
@@ -32,13 +33,10 @@ pub(super) fn expr(
     let ibox = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     let entry = gtk::Entry::new();
     let inspect = gtk::ToggleButton::new();
-    let inspect_icon = gtk::Image::from_icon_name(
-        Some("preferences-system"),
-        gtk::IconSize::SmallToolbar,
-    );
-    inspect.set_image(Some(&inspect_icon));
-    ibox.pack_start(&entry, true, true, 0);
-    ibox.pack_end(&inspect, false, false, 0);
+    let inspect_icon = gtk::Image::from_icon_name("preferences-system");
+    inspect.set_child(Some(&inspect_icon));
+    ibox.prepend(&entry);
+    ibox.append(&inspect);
     entry.set_text(&source.borrow().to_string());
     entry.set_icon_activatable(gtk::EntryIconPosition::Secondary, true);
     entry.connect_changed(move |e| {
@@ -47,7 +45,7 @@ pub(super) fn expr(
             Some("media-floppy"),
         );
     });
-    entry.connect_icon_press(move |e, _, _| e.emit_activate());
+    entry.connect_icon_press(move |e, _| e.emit_activate());
     entry.connect_activate(clone!(
         @strong on_change, @strong source, @weak ibox => move |e| {
         match e.text().parse::<expr::Expr>() {
@@ -86,14 +84,16 @@ pub(super) fn expr(
                 scope.clone(),
                 source.borrow().clone()
             );
-            w.add(si.root());
-            si.root().set_margin(5);
-            w.connect_delete_event(clone!(@strong inspector, @strong b => move |_, _| {
+            w.set_child(Some(si.root()));
+            si.root().set_margin_bottom(5);
+            si.root().set_margin_top(5);
+            si.root().set_margin_start(5);
+            si.root().set_margin_end(5);
+            w.connect_close_request(clone!(@strong inspector, @strong b => move |_| {
                 *inspector.borrow_mut() = None;
                 b.set_active(false);
                 Inhibit(false)
             }));
-            w.show_all();
             *inspector.borrow_mut() = Some((w, si));
         }
     }));
@@ -151,16 +151,13 @@ impl Table {
         let mut col_config = TwoColGrid::new();
         let mut row_config = TwoColGrid::new();
         let mut event = TwoColGrid::new();
-        util::expander_touch_enable(&col_config_exp);
-        util::expander_touch_enable(&row_config_exp);
-        util::expander_touch_enable(&event_exp);
-        root.pack_start(shared_config.root(), false, false, 0);
-        root.pack_start(&col_config_exp, false, false, 0);
-        root.pack_start(&row_config_exp, false, false, 0);
-        root.pack_start(&event_exp, false, false, 0);
-        col_config_exp.add(col_config.root());
-        row_config_exp.add(row_config.root());
-        event_exp.add(event.root());
+        root.prepend(shared_config.root());
+        root.prepend(&col_config_exp);
+        root.prepend(&row_config_exp);
+        root.prepend(&event_exp);
+        col_config_exp.set_child(Some(col_config.root()));
+        row_config_exp.set_child(Some(row_config.root()));
+        event_exp.set_child(Some(event.root()));
         let (l, e, _dbg_path) = expr!(ctx, "Path:", scope, spec, on_change, path);
         shared_config.add((l, e));
         let (l, e, _dbg_refresh) =
@@ -743,16 +740,10 @@ impl LinePlot {
         spec: &Rc<RefCell<view::LinePlot>>,
     ) {
         let axis_exp = gtk::Expander::new(Some("Axis Style"));
-        util::expander_touch_enable(&axis_exp);
         let mut axis = TwoColGrid::new();
-        root.pack_start(&axis_exp, false, false, 0);
-        root.pack_start(
-            &gtk::Separator::new(gtk::Orientation::Horizontal),
-            false,
-            false,
-            0,
-        );
-        axis_exp.add(axis.root());
+        root.prepend(&axis_exp);
+        root.prepend(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        axis_exp.set_child(Some(axis.root()));
         axis.add(parse_entry(
             "X Axis Label:",
             &spec.borrow().x_label,
@@ -809,16 +800,10 @@ impl LinePlot {
         spec: &Rc<RefCell<view::LinePlot>>,
     ) -> (DbgExpr, DbgExpr, DbgExpr, DbgExpr, DbgExpr) {
         let range_exp = gtk::Expander::new(Some("Axis Range"));
-        util::expander_touch_enable(&range_exp);
         let mut range = TwoColGrid::new();
-        root.pack_start(&range_exp, false, false, 0);
-        root.pack_start(
-            &gtk::Separator::new(gtk::Orientation::Horizontal),
-            false,
-            false,
-            0,
-        );
-        range_exp.add(range.root());
+        root.prepend(&range_exp);
+        root.prepend(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        range_exp.set_child(Some(range.root()));
         let (l, e, x_min) = expr!(ctx, "x min:", scope, spec, on_change, x_min);
         range.add((l, e));
         let (l, e, x_max) = expr!(ctx, "x max:", scope, spec, on_change, x_max);
@@ -839,16 +824,10 @@ impl LinePlot {
         spec: &Rc<RefCell<view::LinePlot>>,
     ) {
         let style_exp = gtk::Expander::new(Some("Chart Style"));
-        util::expander_touch_enable(&style_exp);
         let mut style = TwoColGrid::new();
-        root.pack_start(&style_exp, false, false, 0);
-        root.pack_start(
-            &gtk::Separator::new(gtk::Orientation::Horizontal),
-            false,
-            false,
-            0,
-        );
-        style_exp.add(style.root());
+        root.prepend(&style_exp);
+        root.prepend(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        style_exp.set_child(Some(style.root()));
         style.add(parse_entry(
             "Title:",
             &spec.borrow().title,
@@ -860,12 +839,12 @@ impl LinePlot {
         let has_fill = gtk::CheckButton::with_label("Fill");
         let fill_reveal = gtk::Revealer::new();
         let fill_color = gtk::ColorButton::new();
-        fill_reveal.add(&fill_color);
+        fill_reveal.set_child(Some(&fill_color));
         style.add((has_fill.clone(), fill_reveal.clone()));
         if let Some(c) = spec.borrow().fill {
             has_fill.set_active(true);
             fill_reveal.set_reveal_child(true);
-            fill_color.set_rgba(&gdk::RGBA::new(c.r, c.g, c.b, 1.));
+            fill_color.set_rgba(&gdk::RGBA::new(c.r as f32, c.g as f32, c.b as f32, 1.));
         }
         has_fill.connect_toggled(clone!(
             @strong on_change,
@@ -875,7 +854,7 @@ impl LinePlot {
                 if b.is_active() {
                     fill_reveal.set_reveal_child(true);
                     let c = fill_color.rgba();
-                    let c = view::RGB { r: c.red(), g: c.green(), b: c.blue() };
+                    let c = view::RGB { r: c.red() as f64, g: c.green() as f64, b: c.blue() as f64 };
                     spec.borrow_mut().fill = Some(c);
                 } else {
                     fill_reveal.set_reveal_child(false);
@@ -886,7 +865,7 @@ impl LinePlot {
         fill_color.connect_color_set(
             clone!(@strong on_change, @strong spec => move |b| {
                 let c = b.rgba();
-                let c = view::RGB { r: c.red(), g: c.green(), b: c.blue() };
+                let c = view::RGB { r: c.red() as f64, g: c.green() as f64, b: c.blue() as f64 };
                 spec.borrow_mut().fill = Some(c);
                 on_change()
             }),
@@ -917,17 +896,11 @@ impl LinePlot {
         spec: &Rc<RefCell<view::LinePlot>>,
     ) -> Rc<RefCell<IndexMap<usize, Series>>> {
         let series_exp = gtk::Expander::new(Some("Series"));
-        util::expander_touch_enable(&series_exp);
         let seriesbox = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let addbtn = gtk::Button::with_label("+");
-        series_exp.add(&seriesbox);
-        root.pack_start(&series_exp, false, false, 0);
-        root.pack_start(
-            &gtk::Separator::new(gtk::Orientation::Horizontal),
-            false,
-            false,
-            0,
-        );
+        series_exp.set_child(Some(&seriesbox));
+        root.prepend(&series_exp);
+        root.prepend(&gtk::Separator::new(gtk::Orientation::Horizontal));
         let series_id = Rc::new(Cell::new(0));
         let series: Rc<RefCell<IndexMap<usize, Series>>> =
             Rc::new(RefCell::new(IndexMap::new()));
@@ -938,7 +911,7 @@ impl LinePlot {
             spec.series.extend(series.borrow().values().map(|s| s.spec.borrow().clone()));
             on_change()
         }));
-        seriesbox.pack_start(&addbtn, false, false, 0);
+        seriesbox.prepend(&addbtn);
         let build_series = Rc::new(clone!(
             @weak seriesbox,
             @strong ctx,
@@ -946,7 +919,7 @@ impl LinePlot {
             @strong series => move |spec: view::Series| {
                 let spec = Rc::new(RefCell::new(spec));
                 let mut grid = TwoColGrid::new();
-                seriesbox.pack_start(grid.root(), false, false, 0);
+                seriesbox.prepend(grid.root());
                 let sep = gtk::Separator::new(gtk::Orientation::Vertical);
                 grid.attach(&sep, 0, 2, 1);
                 grid.add(parse_entry(
@@ -958,13 +931,13 @@ impl LinePlot {
                     })
                 ));
                 let c = spec.borrow().line_color;
-                let rgba = gdk::RGBA::new(c.r, c.g, c.b, 1.);
+                let rgba = gdk::RGBA::new(c.r as f32, c.g as f32, c.b as f32, 1.);
                 let line_color = gtk::ColorButton::with_rgba(&rgba);
                 let lbl_line_color = gtk::Label::new(Some("Line Color:"));
                 line_color.connect_color_set(clone!(
                     @strong on_change, @strong spec => move |b| {
                         let c = b.rgba();
-                        let c = view::RGB { r: c.red(), g: c.green(), b: c.blue() };
+                        let c = view::RGB { r: c.red() as f64, g: c.green() as f64, b: c.blue() as f64 };
                         spec.borrow_mut().line_color = c;
                         on_change()
                     }));
@@ -993,7 +966,6 @@ impl LinePlot {
                 let i = series_id.get();
                 series_id.set(i + 1);
                 series.borrow_mut().insert(i, Series { _x, _y, spec });
-                seriesbox.show_all();
                 let grid_root = grid.root();
                 remove.connect_clicked(clone!(
                     @strong series,
@@ -1001,9 +973,15 @@ impl LinePlot {
                     @weak seriesbox,
                     @strong on_change => move |_| {
                         grid_root.hide();
-                        for c in seriesbox.children() {
-                            if c == grid_root {
-                                seriesbox.remove(&c);
+                        if let Some(mut child) = seriesbox.first_child() {
+                            loop {
+                                if child == grid_root {
+                                    seriesbox.remove(&child);
+                                }
+                                match child.next_sibling() {
+                                    None => break,
+                                    Some(c) => { child = c; }
+                                }
                             }
                         }
                         series.borrow_mut().remove(&i);

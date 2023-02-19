@@ -161,7 +161,7 @@ impl Table {
         idle_add_local(
             clone!(@strong state, @strong visible, @strong shared => move || {
                 if let Some(c) = shared.root.child() {
-                    shared.root.remove(&c);
+                    shared.root.set_child(None::<&gtk::Widget>);
                 }
                 let table = RaeifiedTable::new(shared.clone());
                 if visible.get() {

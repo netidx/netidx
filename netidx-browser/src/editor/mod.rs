@@ -62,9 +62,8 @@ impl WidgetProps {
                 on_change()
             }
         });
-        util::expander_touch_enable(&root);
         let mut grid = TwoColGrid::new();
-        root.add(grid.root());
+        root.set_child(Some(grid.root()));
         let aligns = ["Fill", "Start", "End", "Center", "Baseline"];
         fn align_to_str(a: view::Align) -> &'static str {
             match a {
@@ -544,16 +543,11 @@ impl Widget {
         };
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         if let Some(p) = props.as_ref() {
-            root.pack_start(p.root(), false, false, 0);
-            root.pack_start(
-                &gtk::Separator::new(gtk::Orientation::Horizontal),
-                false,
-                false,
-                0,
-            );
+            root.prepend(p.root());
+            root.prepend(&gtk::Separator::new(gtk::Orientation::Horizontal));
         }
         if let Some(r) = kind.root() {
-            root.pack_start(r, true, true, 0);
+            root.prepend(r);
         }
         store.set_value(iter, 0, &name.to_value());
         root.set_sensitive(false);
@@ -958,26 +952,26 @@ impl Editor {
         let win_lower = gtk::ScrolledWindow::new();
         win_lower.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         let root_lower = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        win_lower.add(&root_lower);
-        root.pack1(&root_upper, true, false);
-        root.pack2(&win_lower, true, true);
+        win_lower.set_child(Some(&root_lower));
+        root.set_start_child(Some(&root_upper));
+        root.set_end_child(Some(&win_lower));
         let treebtns = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        root_upper.pack_start(&treebtns, false, false, 0);
+        root_upper.prepend(&treebtns);
         let addbtn = gtk::Button::from_icon_name("list-add-symbolic");
         let addchbtn = gtk::Button::from_icon_name("go-down-symbolic");
         let delbtn = gtk::Button::from_icon_name("list-remove-symbolic");
         let dupbtn = gtk::Button::from_icon_name("edit-copy-symbolic");
         let undobtn = gtk::Button::from_icon_name("edit-undo-symbolic");
-        treebtns.pack_start(&addbtn, false, false, 5);
-        treebtns.pack_start(&addchbtn, false, false, 5);
-        treebtns.pack_start(&delbtn, false, false, 5);
-        treebtns.pack_start(&dupbtn, false, false, 5);
-        treebtns.pack_start(&undobtn, false, false, 5);
+        treebtns.prepend(&addbtn);
+        treebtns.prepend(&addchbtn);
+        treebtns.prepend(&delbtn);
+        treebtns.prepend(&dupbtn);
+        treebtns.prepend(&undobtn);
         let treewin = gtk::ScrolledWindow::new();
         treewin.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        root_upper.pack_start(&treewin, true, true, 5);
+        root_upper.prepend(&treewin);
         let view = gtk::TreeView::new();
-        treewin.add(&view);
+        treewin.set_child(Some(&view));
         view.append_column(&{
             let column = gtk::TreeViewColumn::new();
             let cell = gtk::CellRendererText::new();
@@ -1052,9 +1046,9 @@ impl Editor {
         );
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
-        root_lower.pack_start(&reveal_properties, true, true, 5);
+        root_lower.prepend(&reveal_properties);
         let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        reveal_properties.add(&properties);
+        reveal_properties.set_child(Some(&properties));
         let inhibit_change = Rc::new(Cell::new(false));
         let kind = gtk::ComboBoxText::new();
         for k in &KINDS {
@@ -1070,7 +1064,7 @@ impl Editor {
             @strong inhibit_change => move |c| {
                 if let Some(iter) = selected.borrow().clone() {
                     if !inhibit_change.get() {
-                        let wv = store.value(&iter, 1);
+                        let wv = store.get_value(&iter, 1);
                         if let Ok(w) = wv.get::<&Widget>() {
                             w.root().hide();
                             w.root().set_sensitive(false);
@@ -1088,24 +1082,18 @@ impl Editor {
                             scope.clone(), // will be overwritten by on_change
                             spec
                         );
-                        let wv = store.value(&iter, 1);
+                        let wv = store.get_value(&iter, 1);
                         if let Ok(w) = wv.get::<&Widget>() {
-                            properties.pack_start(w.root(), true, true, 5);
+                            properties.prepend(w.root());
                             w.root().set_sensitive(true);
                             w.root().grab_focus();
                         }
-                        properties.show_all();
                         on_change();
                     }
                 }
         }));
-        properties.pack_start(&kind, false, false, 0);
-        properties.pack_start(
-            &gtk::Separator::new(gtk::Orientation::Vertical),
-            false,
-            false,
-            0,
-        );
+        properties.prepend(&kind);
+        properties.prepend(&gtk::Separator::new(gtk::Orientation::Vertical));
         let selection = view.selection();
         selection.set_mode(gtk::SelectionMode::Single);
         selection.connect_changed(clone!(
@@ -1117,11 +1105,17 @@ impl Editor {
             @weak properties,
             @strong inhibit_change => move |s| {
                 {
-                    let children = properties.children();
-                    if children.len() == 3 {
-                        children[2].hide();
-                        children[2].set_sensitive(false);
-                        properties.remove(&children[2]);
+                    if let Some(mut child) = properties.first_child() {
+                        let mut n = 1;
+                        while let Some(c) = child.next_sibling() {
+                            n += 1;
+                            child = c;
+                            if n == 3 {
+                                child.hide();
+                                child.set_sensitive(false);
+                                properties.remove(&child);
+                            }
+                        }
                     }
                 }
                 match s.selected() {
@@ -1135,19 +1129,18 @@ impl Editor {
                         let mut path = Vec::new();
                         Editor::build_widget_path(&store, &iter, 0, 0, &mut path);
                         ctx.borrow().user.backend.highlight(path);
-                        let v = store.value(&iter, 0);
+                        let v = store.get_value(&iter, 0);
                         if let Ok(id) = v.get::<&str>() {
                             inhibit_change.set(true);
                             kind.set_active_id(Some(id));
                             inhibit_change.set(false);
                         }
-                        let v = store.value(&iter, 1);
+                        let v = store.get_value(&iter, 1);
                         if let Ok(w) = v.get::<&Widget>() {
-                            properties.pack_start(w.root(), true, true, 5);
+                            properties.prepend(w.root());
                             w.root().set_sensitive(true);
                             w.root().grab_focus();
                         }
-                        properties.show_all();
                         reveal_properties.set_reveal_child(true);
                     }
                 }
@@ -1253,7 +1246,7 @@ impl Editor {
         store.connect_row_inserted(clone!(
             @strong store, @strong on_change => move |_, _, iter| {
                 idle_add_local(clone!(@strong store, @strong iter => move || {
-                    let v = store.value(&iter, 1);
+                    let v = store.get_value(&iter, 1);
                     if let Ok(w) = v.get::<&Widget>() {
                         w.moved(&iter)
                     }
@@ -1265,7 +1258,7 @@ impl Editor {
     }
 
     fn update_scope(store: &gtk::TreeStore, scope: Path, root: &gtk::TreeIter) {
-        let v = store.value(root, 1);
+        let v = store.get_value(root, 1);
         if let Ok(w) = v.get::<&Widget>() {
             *w.scope.borrow_mut() = scope.clone();
             let scope = match &w.kind {
@@ -1418,7 +1411,7 @@ impl Editor {
     }
 
     fn build_spec(store: &gtk::TreeStore, root: &gtk::TreeIter) -> view::Widget {
-        let v = store.value(root, 1);
+        let v = store.get_value(root, 1);
         match v.get::<&Widget>() {
             Err(_) => label_with_txt("tree error"),
             Ok(w) => {
@@ -1532,7 +1525,7 @@ impl Editor {
         nchild: usize,
         path: &mut Vec<WidgetPath>,
     ) {
-        let v = store.value(start, 1);
+        let v = store.get_value(start, 1);
         let skip_idx = match v.get::<&Widget>() {
             Err(_) => false,
             Ok(w) => match &w.kind {
@@ -1591,10 +1584,9 @@ impl Editor {
                     false
                 }
                 WidgetKind::GridRow => {
-                    if let Some(idx) = store.path(start).map(|t| t.indices()) {
-                        if let Some(i) = idx.last() {
-                            nrow = *i as usize;
-                        }
+                    let idx = store.path(start).indices();
+                    if let Some(i) = idx.last() {
+                        nrow = *i as usize;
                     }
                     if path.len() == 0 {
                         path.insert(0, WidgetPath::GridRow(nrow));
@@ -1606,11 +1598,10 @@ impl Editor {
             },
         };
         if let Some(parent) = store.iter_parent(start) {
-            if let Some(idx) = store.path(start).map(|t| t.indices()) {
-                if let Some(i) = idx.last() {
-                    let nchild = if skip_idx { nchild } else { *i as usize };
-                    Editor::build_widget_path(store, &parent, nrow, nchild, path);
-                }
+            let idx = store.path(start).indices();
+            if let Some(i) = idx.last() {
+                let nchild = if skip_idx { nchild } else { *i as usize };
+                Editor::build_widget_path(store, &parent, nrow, nchild, path);
             }
         };
     }

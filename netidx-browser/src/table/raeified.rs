@@ -1,7 +1,4 @@
-use super::super::{
-    util::{err_modal, toplevel},
-    BSCtxRef, ImageSpec, WVal,
-};
+use super::super::{BSCtxRef, ImageSpec, WVal};
 use super::shared::{
     BVal, CTCommonResolved, Color, ColumnSpec, ColumnType, ColumnTypeCombo,
     ColumnTypeCommon, ColumnTypeProgress, ColumnTypeSpin, ColumnTypeText,
@@ -9,25 +6,23 @@ use super::shared::{
     SortSpec, NAME_COL,
 };
 use crate::bscript::LocalEvent;
-use arcstr::ArcStr;
 use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
-use gdk4::RGBA;
 use gio::prelude::*;
 use glib::{self, clone, idle_add_local, source::Continue};
 use gtk::CellLayout;
 use gtk4::{
     self as gtk, prelude::*, CellRenderer, CellRendererCombo, CellRendererPixbuf,
     CellRendererProgress, CellRendererSpin, CellRendererText, CellRendererToggle,
-    ListStore, SortColumn, SortType, StateFlags, StyleContext, TreeIter, TreeModel,
-    TreePath, TreeView, TreeViewColumn, TreeViewColumnSizing,
+    ListStore, SortColumn, SortType, StyleContext, TreeIter, TreeModel, TreePath,
+    TreeView, TreeViewColumn, TreeViewColumnSizing,
 };
 use indexmap::IndexMap;
 use netidx::{
     chars::Chars,
     path::Path,
     pool::{Pool, Pooled},
-    subscriber::{Dval, Event, SubId, UpdatesFlags, Value},
+    subscriber::{Dval, SubId, UpdatesFlags, Value},
     utils::Either,
 };
 use netidx_bscript::vm;
@@ -596,14 +591,13 @@ impl RaeifiedTable {
             SortSpec::External(spec) => {
                 for col in t.view().columns() {
                     col.set_sort_indicator(false);
-                    if let Some(title) = col.title() {
-                        if let Some(dir) = spec.get(&*title) {
-                            col.set_sort_indicator(true);
-                            col.set_sort_order(match dir {
-                                SortDir::Ascending => gtk::SortType::Ascending,
-                                SortDir::Descending => gtk::SortType::Descending,
-                            });
-                        }
+                    let title = col.title();
+                    if let Some(dir) = spec.get(&*title) {
+                        col.set_sort_indicator(true);
+                        col.set_sort_order(match dir {
+                            SortDir::Ascending => gtk::SortType::Ascending,
+                            SortDir::Descending => gtk::SortType::Descending,
+                        });
                     }
                 }
             }
@@ -634,7 +628,7 @@ impl RaeifiedTable {
 
     fn handle_row_activated(&self, p: &TreePath) {
         if let Some(iter) = self.store().iter(&p) {
-            if let Ok(row_name) = self.store().value(&iter, 0).get::<&str>() {
+            if let Ok(row_name) = self.store().get_value(&iter, 0).get::<&str>() {
                 let path = String::from(&*self.path.append(row_name));
                 let e = LocalEvent::Event(Value::String(Chars::from(path)));
                 self.shared
@@ -675,14 +669,7 @@ impl RaeifiedTable {
         let sel = self.shared.selected.borrow();
         match self.row_of(Either::Right(i)).as_ref().map(|r| r.get::<&str>().unwrap()) {
             Some(r) if sel.get(r).map(|t| t.contains(name)).unwrap_or(false) => {
-                let bg = StyleContextExt::style_property_for_state(
-                    &self.style,
-                    "background-color",
-                    StateFlags::SELECTED,
-                )
-                .get::<RGBA>()
-                .unwrap();
-                cr.set_cell_background_rgba(Some(&bg));
+                cr.set_cell_background(Some("blue"));
                 true
             }
             Some(_) | None => {
@@ -705,14 +692,13 @@ impl RaeifiedTable {
         cr: &CellRendererText,
         i: &TreeIter,
     ) {
-        let bv = self.store().value(i, common.source);
+        let bv = self.store().get_value(i, common.source);
         cr.set_text(match bv.get::<&BVal>() {
             Ok(v) => Some(v.formatted.as_str()),
             Err(_) => None,
         });
         if self.render_cell_selected(common, cr, i, name) {
-            let fg = self.style.color(StateFlags::SELECTED);
-            cr.set_foreground_rgba(Some(&fg));
+            cr.set_foreground(Some("blue"));
         } else {
             let fg =
                 foreground.as_ref().and_then(|s| s.load(i, self.store())).map(|c| c.0);
@@ -733,7 +719,7 @@ impl RaeifiedTable {
         cr: &CellRendererSpin,
         i: &TreeIter,
     ) {
-        let bv = self.store().value(i, common.source);
+        let bv = self.store().get_value(i, common.source);
         let cur = bv.get::<&BVal>().ok().map(|bv| bv.formatted.as_str());
         let min = min.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(0.);
         let max = max.as_ref().and_then(|v| v.load(i, self.store())).unwrap_or(1.);
@@ -763,7 +749,7 @@ impl RaeifiedTable {
         cr: &CellRendererPixbuf,
         i: &TreeIter,
     ) {
-        let bv = self.store().value(i, common.source);
+        let bv = self.store().get_value(i, common.source);
         let spec = bv
             .get::<&BVal>()
             .ok()
@@ -793,7 +779,7 @@ impl RaeifiedTable {
         cr: &CellRendererProgress,
         i: &TreeIter,
     ) {
-        let bv = self.store().value(i, common.source);
+        let bv = self.store().get_value(i, common.source);
         let bv = bv
             .get::<&BVal>()
             .ok()
@@ -836,7 +822,7 @@ impl RaeifiedTable {
         cr: &CellRendererToggle,
         i: &TreeIter,
     ) {
-        let bv = self.store().value(i, common.source);
+        let bv = self.store().get_value(i, common.source);
         let val = bv
             .get::<&BVal>()
             .ok()
@@ -857,7 +843,7 @@ impl RaeifiedTable {
         cr: &CellRendererCombo,
         i: &TreeIter,
     ) {
-        let bv = self.store().value(i, common.source);
+        let bv = self.store().get_value(i, common.source);
         let val =
             bv.get::<&BVal>().ok().and_then(|v| v.value.clone().cast_to::<Chars>().ok());
         let choices = choices
@@ -943,7 +929,8 @@ impl RaeifiedTable {
             }
         }
         if key == gdk4::Key::w && ms.contains(gdk4::ModifierType::CONTROL_MASK) {
-            self.write_dialog()
+            //self.write_dialog()
+            ()
         }
     }
 
@@ -962,6 +949,7 @@ impl RaeifiedTable {
         }
     }
 
+    /* CR estokes: port to gtk4
     fn write_dialog(&self) {
         let window = toplevel(self.view());
         let selected = self.shared.selected_path.text();
@@ -988,8 +976,8 @@ impl RaeifiedTable {
             let data_lbl = gtk::Label::new(Some("value:"));
             let data = gtk::Entry::new();
             let data_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-            data_box.add(&data_lbl);
-            data_box.add(&data);
+            data_box.append(&data_lbl);
+            data_box.append(&data);
             if let Some(v) = &*val.borrow() {
                 data.set_text(&format!("{}", v));
             }
@@ -1030,8 +1018,7 @@ impl RaeifiedTable {
                     }
                 }
             }));
-            root.add(&data_box);
-            root.show_all();
+            root.append(&data_box);
             match d.run() {
                 gtk::ResponseType::Accept => match &*val.borrow() {
                     None => {
@@ -1046,13 +1033,14 @@ impl RaeifiedTable {
             d.close();
         }
     }
+    */
 
     fn row_of(&self, row: Either<&gtk::TreePath, &gtk::TreeIter>) -> Option<glib::Value> {
         let row_name = match row {
-            Either::Right(i) => Some(self.store().value(i, 0)),
+            Either::Right(i) => Some(self.store().get_value(i, 0)),
             Either::Left(row) => match self.store().iter(&row) {
                 None => None,
-                Some(i) => Some(self.store().value(&i, 0)),
+                Some(i) => Some(self.store().get_value(&i, 0)),
             },
         };
         row_name.and_then(|v| if v.get::<&str>().is_ok() { Some(v) } else { None })
@@ -1077,11 +1065,11 @@ impl RaeifiedTable {
     }
 
     fn cursor_changed(&self) {
-        if let (Some(p), Some(c)) = self.view().cursor() {
+        if let (Some(p), Some(c)) = TreeViewExt::cursor(self.view()) {
             if let Some(row) =
                 self.row_of(Either::Left(&p)).as_ref().and_then(|r| r.get::<&str>().ok())
             {
-                let title = c.title().map(|t| t.to_string()).unwrap_or_else(String::new);
+                let title = c.title().to_string();
                 let path = self.path_from_selected(row, &title);
                 self.shared.selected_path.set_label(path.as_ref());
                 match self.shared.selection_mode.get() {
@@ -1143,25 +1131,23 @@ impl RaeifiedTable {
             end.next();
         }
         // unsubscribe invisible rows
-        self.by_id.borrow_mut().retain(|_, v| match self.store().path(&v.row) {
-            None => false,
-            Some(p) => {
-                let visible =
-                    (p >= start && p <= end) || (Some(v.col) == self.sort_column.get());
-                if !visible {
-                    let row_name_v = self.store().value(&v.row, 0);
-                    if let Ok(row_name) = row_name_v.get::<&str>() {
-                        let mut subscribed = self.subscribed.borrow_mut();
-                        if let Some(set) = subscribed.get_mut(row_name) {
-                            set.remove(&v.col);
-                            if set.is_empty() {
-                                subscribed.remove(row_name);
-                            }
+        self.by_id.borrow_mut().retain(|_, v| {
+            let p = self.store().path(&v.row);
+            let visible =
+                (p >= start && p <= end) || (Some(v.col) == self.sort_column.get());
+            if !visible {
+                let row_name_v = self.store().get_value(&v.row, 0);
+                if let Ok(row_name) = row_name_v.get::<&str>() {
+                    let mut subscribed = self.subscribed.borrow_mut();
+                    if let Some(set) = subscribed.get_mut(row_name) {
+                        set.remove(&v.col);
+                        if set.is_empty() {
+                            subscribed.remove(row_name);
                         }
                     }
                 }
-                visible
             }
+            visible
         });
         let empty =
             BVal { value: Value::from(""), formatted: Pooled::orphan(String::new()) }
@@ -1201,7 +1187,7 @@ impl RaeifiedTable {
         // subscribe to all the visible rows
         while start < end {
             if let Some(row) = self.store().iter(&start) {
-                let row_name_v = self.store().value(&row, 0);
+                let row_name_v = self.store().get_value(&row, 0);
                 if let Ok(row_name) = row_name_v.get::<&str>() {
                     for col in 0..ncols {
                         maybe_subscribe_col(
@@ -1219,7 +1205,7 @@ impl RaeifiedTable {
         if let Some(id) = self.sort_column.get() {
             if let Some(row) = self.store().iter_first() {
                 loop {
-                    let row_name_v = self.store().value(&row, 0);
+                    let row_name_v = self.store().get_value(&row, 0);
                     if let Ok(row_name) = row_name_v.get::<&str>() {
                         maybe_subscribe_col(&self.store(), &row, row_name, id);
                     }

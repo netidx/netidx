@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 
 use chrono::prelude::*;
 use futures::channel::oneshot;
-use gdk4::{self as gdk, cairo, prelude::*};
+use gdk4::{cairo, prelude::*};
 use glib::clone;
 use gtk4::{self as gtk, prelude::*};
 use log::warn;

@@ -2,7 +2,7 @@ use super::super::{BSCtx, BSNode};
 use anyhow::{anyhow, bail};
 use arcstr::ArcStr;
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
-use gdk::RGBA;
+use gdk4::RGBA;
 use glib;
 use gtk4::{prelude::*, Label, ListStore, ScrolledWindow, TreeIter};
 use indexmap::{IndexMap, IndexSet};
@@ -260,14 +260,14 @@ impl<T: FromValue + Clone> OrLoad<T> {
         match self {
             Self::Static(v) => Some(v.clone()),
             Self::Load(i) => {
-                let v = store.value(row, *i);
+                let v = store.get_value(row, *i);
                 match v.get::<&BVal>() {
                     Ok(bv) => bv.value.clone().cast_to::<T>().ok(),
                     Err(_) => None,
                 }
             }
             Self::LoadWithFallback(s, i) => {
-                let v = store.value(row, *i);
+                let v = store.get_value(row, *i);
                 match v.get::<&BVal>() {
                     Err(_) => Some(s.clone()),
                     Ok(bv) => Some(
