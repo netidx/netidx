@@ -2,14 +2,12 @@ use super::super::{bscript::LocalEvent, util::ask_modal, BSCtx};
 use super::Scope;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
-use gdk::keys;
-use glib::idle_add_local_once;
-use glib::{clone, prelude::*, subclass::prelude::*, thread_guard::ThreadGuard};
+use glib::{clone, prelude::*, thread_guard::ThreadGuard};
 use gtk4::{self as gtk, prelude::*, Inhibit};
 use netidx::subscriber::Value;
 use netidx_bscript::{expr, vm};
 use parking_lot::Mutex;
-use sourceview5::{self as sv, prelude::*, traits::ViewExt};
+use sourceview5::{self as sv};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -91,10 +89,8 @@ impl DataFlow {
     fn new(ctx: BSCtx) -> Self {
         let call_root = gtk::ScrolledWindow::new();
         call_root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        call_root.set_expand(false);
         let event_root = gtk::ScrolledWindow::new();
         event_root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        event_root.set_expand(false);
         let call_store = gtk::TreeStore::new(&[
             String::static_type(),
             String::static_type(),
@@ -108,8 +104,8 @@ impl DataFlow {
         ]);
         let call_view = gtk::TreeView::new();
         let event_view = gtk::TreeView::new();
-        call_root.add(&call_view);
-        event_root.add(&event_view);
+        call_root.set_child(Some(&call_view));
+        event_root.set_child(Some(&event_view));
         for (i, name) in ["kind", "current"].iter().enumerate() {
             call_view.append_column(&{
                 let column = gtk::TreeViewColumn::new();
@@ -207,7 +203,7 @@ impl ErrorDisplay {
         let error_body = gtk::Label::new(None);
         let error_lbl = gtk::Label::new(None);
         error_lbl.set_markup("<span>Errors</span>");
-        root.add(&error_body);
+        root.set_child(Some(&error_body));
         ErrorDisplay { root, error_body, error_lbl }
     }
 
@@ -271,19 +267,17 @@ impl ExprEditor {
     ) -> Self {
         let root = gtk::ScrolledWindow::new();
         root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        root.set_expand(true);
         let view = sv::View::builder()
             .insert_spaces_instead_of_tabs(true)
             .show_line_numbers(true)
             .auto_indent(true)
             .build();
-        view.set_expand(true);
+        /*
         if let Some(completion) = view.completion() {
-            /* CR estokes: port to sourceview5
+             CR estokes: port to sourceview5
             let provider = BScriptCompletionProvider::new();
             provider.imp().init(ctx, scope);
             completion.add_provider(&provider).expect("bscript completion");
-             */
             completion
                 .add_provider(&sv::CompletionWords::default())
                 .expect("words completion");
@@ -300,26 +294,25 @@ impl ExprEditor {
                 }
             });
         }
-        root.add(&view);
-        if let Some(buf) = view.buffer() {
-            buf.set_text(&expr.borrow().to_string_pretty(80));
-            buf.connect_changed(clone!(@strong tools => move |buf: &gtk::TextBuffer| {
-                unsaved.set(true);
-                if let Some(text) = buf.slice(&buf.start_iter(), &buf.end_iter(), false) {
-                    match text.parse::<expr::Expr>() {
-                        Err(e) => {
-                            tools.set_error(&format!("{}", e));
-                            save_button.set_sensitive(false);
-                        },
-                        Ok(e) => {
-                            *expr.borrow_mut() = e;
-                            save_button.set_sensitive(true);
-                            tools.clear_error();
-                        },
-                    }
-                }
-            }));
-        }
+         */
+        root.set_child(Some(&view));
+        let buf = view.buffer();
+        buf.set_text(&expr.borrow().to_string_pretty(80));
+        buf.connect_changed(clone!(@strong tools => move |buf: &gtk::TextBuffer| {
+            unsaved.set(true);
+            let text = buf.slice(&buf.start_iter(), &buf.end_iter(), false);
+            match text.parse::<expr::Expr>() {
+                Err(e) => {
+                    tools.set_error(&format!("{}", e));
+                    save_button.set_sensitive(false);
+                },
+                Ok(e) => {
+                    *expr.borrow_mut() = e;
+                    save_button.set_sensitive(true);
+                    tools.clear_error();
+                },
+            }
+        }));
         ExprEditor { root }
     }
 }
@@ -344,7 +337,7 @@ impl ExprInspector {
         let save_button = gtk::Button::from_icon_name("media-floppy");
         save_button.set_sensitive(false);
         headerbar.pack_start(&save_button);
-        headerbar.set_show_close_button(true);
+        headerbar.set_show_title_buttons(true);
         window.set_titlebar(Some(&headerbar));
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         let tools = Rc::new(Tools::new(ctx.clone()));
@@ -365,19 +358,21 @@ impl ExprInspector {
                 on_change(expr.clone());
             }),
         );
-        window.connect_delete_event(clone!(@strong unsaved => move |w, _| {
-            if !unsaved.get() || ask_modal(w, "Unsaved changes will be lost") {
-                Inhibit(false)
-            } else {
-                Inhibit(true)
+        let close = Rc::new(Cell::new(false));
+        window.connect_close_request(clone!(@strong unsaved, @strong close => move |w| {
+            if unsaved.get() {
+                ask_modal(w, "Unsaved changes will be lost", clone!(@strong close, @strong w => move |res| {
+                    close.set(res);
+                    if res {
+                        w.close()
+                    }
+                }))
             }
+            Inhibit(unsaved.get() && !close.get())
         }));
-        root.pack1(&editor.root, true, false);
-        root.pack2(&tools.root, true, true);
+        root.set_start_child(Some(&editor.root));
+        root.set_end_child(Some(&tools.root));
         tools.display(&*expr.borrow());
-        idle_add_local_once(clone!(@weak root => move || {
-            root.set_position_set(true);
-        }));
         ExprInspector { root, _tools: tools, _editor: editor }
     }
 

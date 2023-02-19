@@ -10,13 +10,13 @@ pub(super) fn set_highlight<T: WidgetExt>(w: &T, h: bool) {
 }
 
 pub(super) fn toplevel<W: WidgetExt>(w: &W) -> gtk::Window {
-    w.toplevel()
+    w.parent()
         .expect("modal dialog must have a toplevel window")
         .downcast::<gtk::Window>()
         .expect("not a window")
 }
 
-pub(super) fn ask_modal<W: WidgetExt>(w: &W, msg: &str) -> bool {
+pub(super) fn ask_modal<W: WidgetExt, F: FnMut(bool)>(w: &W, msg: &str, f: F) {
     let d = gtk::MessageDialog::new(
         Some(&toplevel(w)),
         gtk::DialogFlags::MODAL,
@@ -24,9 +24,9 @@ pub(super) fn ask_modal<W: WidgetExt>(w: &W, msg: &str) -> bool {
         gtk::ButtonsType::YesNo,
         msg,
     );
-    let resp = d.run();
-    unsafe { d.destroy() };
-    resp == gtk::ResponseType::Yes
+    d.connect_response(move |_, resp| {
+        f(resp == gtk::ResponseType::Yes)
+    });
 }
 
 pub(super) fn err_modal<W: WidgetExt>(w: &W, msg: &str) {
@@ -37,8 +37,6 @@ pub(super) fn err_modal<W: WidgetExt>(w: &W, msg: &str) {
         gtk::ButtonsType::Ok,
         msg,
     );
-    d.run();
-    unsafe { d.destroy() };
 }
 
 use parking_lot::{Condvar, Mutex};

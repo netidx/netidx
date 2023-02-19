@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 
 use chrono::prelude::*;
 use futures::channel::oneshot;
-use gdk::{self, cairo, prelude::*};
+use gdk4::{self as gdk, cairo, prelude::*};
 use glib::clone;
 use gtk4::{self as gtk, prelude::*};
 use log::warn;
@@ -83,9 +83,6 @@ impl LinePlot {
     ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let canvas = gtk::DrawingArea::new();
-        root.set_no_show_all(true);
-        canvas.set_no_show_all(true);
-        root.pack_start(&canvas, true, true, 0);
         let x_min = Rc::new(RefCell::new(BSNode::compile(
             &mut ctx.borrow_mut(),
             scope.clone(),
@@ -137,7 +134,7 @@ impl LinePlot {
         ));
         let allocated_width = Rc::new(Cell::new(0));
         let allocated_height = Rc::new(Cell::new(0));
-        canvas.connect_draw(clone!(
+        canvas.set_draw_func(clone!(
             @strong ctx,
             @strong allocated_width,
             @strong allocated_height,
@@ -145,7 +142,7 @@ impl LinePlot {
             @strong x_max,
             @strong y_min,
             @strong y_max,
-            @strong series => move |_, context| {
+            @strong series => move |_, context, _, _| {
                 // CR estokes: there is a bug in plotters that causes
                 // it to somtimes panic in draw it probably isn't
                 // strictly unwind safe, but whatever happens it's a
@@ -167,13 +164,12 @@ impl LinePlot {
                 Ok(Err(e)) => warn!("failed to draw lineplot {}", e),
                 Err(_) => warn!("failed to draw lineplot, draw paniced"),
             }
-            gtk::Inhibit(true)
         }));
-        canvas.connect_size_allocate(clone!(
+        canvas.connect_resize(clone!(
         @strong allocated_width,
-        @strong allocated_height => move |_, a| {
-            allocated_width.set(i32::abs(a.width()) as u32);
-            allocated_height.set(i32::abs(a.height()) as u32);
+        @strong allocated_height => move |_, w, h| {
+            allocated_width.set(i32::abs(w) as u32);
+            allocated_height.set(i32::abs(h) as u32);
         }));
         LinePlot { root, canvas, x_min, x_max, y_min, y_max, keep_points, series }
     }

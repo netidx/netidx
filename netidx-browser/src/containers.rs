@@ -1,7 +1,7 @@
 use super::{util, BSCtx, BSCtxRef, BSNode, BWidget, Widget, WidgetPath, DEFAULT_PROPS};
 use crate::{bscript::LocalEvent, view};
 use futures::channel::oneshot;
-use gdk::{self, prelude::*};
+use gdk4::{self as gdk, prelude::*};
 use glib::idle_add_local_once;
 use gtk4::{self as gtk, prelude::*, Orientation};
 use netidx::{chars::Chars, path::Path};
@@ -30,26 +30,22 @@ impl Paned {
     ) -> Self {
         let scope = scope.append("p");
         let root = gtk::Paned::new(dir_to_gtk(&spec.direction));
-        root.set_no_show_all(true);
         root.set_wide_handle(spec.wide_handle);
         let first_child = spec.first_child.map(|child| {
             let w =
                 Widget::new(ctx, (*child).clone(), scope.clone(), selected_path.clone());
             if let Some(w) = w.root() {
-                root.pack1(w, true, true);
+                root.set_start_child(Some(w));
             }
             w
         });
         let second_child = spec.second_child.map(|child| {
             let w = Widget::new(ctx, (*child).clone(), scope, selected_path.clone());
             if let Some(w) = w.root() {
-                root.pack2(w, true, true);
+                root.set_end_child(Some(w));
             }
             w
         });
-        idle_add_local_once(clone!(@weak root => move || {
-            root.set_position_set(true);
-        }));
         Paned { root, first_child, second_child }
     }
 }
@@ -111,13 +107,12 @@ impl Frame {
             label.current(&mut ctx.borrow_mut()).and_then(|v| v.get_as::<Chars>());
         let label_val = label_val.as_ref().map(|s| s.as_ref());
         let root = gtk::Frame::new(label_val);
-        root.set_no_show_all(true);
         root.set_label_align(spec.label_align_horizontal);
         let child = spec.child.map(|child| {
             let w =
                 Widget::new(ctx, (*child).clone(), scope.clone(), selected_path.clone());
             if let Some(w) = w.root() {
-                root.add(w);
+                root.set_child(Some(w));
             }
             w
         });
@@ -175,7 +170,6 @@ impl Notebook {
     ) -> Self {
         let scope = scope.append("n");
         let root = gtk::Notebook::new();
-        root.set_no_show_all(true);
         let page = BSNode::compile(&mut *ctx.borrow_mut(), scope.clone(), spec.page);
         let on_switch_page = Rc::new(RefCell::new(BSNode::compile(
             &mut *ctx.borrow_mut(),
@@ -288,7 +282,6 @@ impl Box {
         }
         let scope = scope.append("b");
         let root = gtk::Box::new(dir_to_gtk(&spec.direction), 0);
-        root.set_no_show_all(true);
         root.set_homogeneous(spec.homogeneous);
         root.set_spacing(spec.spacing as i32);
         let mut children = Vec::new();
@@ -312,12 +305,8 @@ impl Box {
                             }
                         };
                         match pack {
-                            view::Pack::Start => {
-                                root.pack_start(r, expand, fill, *padding as u32)
-                            }
-                            view::Pack::End => {
-                                root.pack_end(r, expand, fill, *padding as u32)
-                            }
+                            view::Pack::Start => root.prepend(r),
+                            view::Pack::End => root.append(r),
                         }
                     }
                     children.push(w);
@@ -326,7 +315,7 @@ impl Box {
                     let w =
                         Widget::new(ctx, s.clone(), scope.clone(), selected_path.clone());
                     if let Some(r) = w.root() {
-                        root.add(r);
+                        root.append(r);
                     }
                     children.push(w);
                 }
@@ -379,7 +368,6 @@ impl Grid {
     ) -> Self {
         let scope = scope.append("g");
         let root = gtk::Grid::new();
-        root.set_no_show_all(true);
         let attach_child = |spec: view::GridChild,
                             max_height: &mut i32,
                             i: &mut i32,
