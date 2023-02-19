@@ -449,14 +449,12 @@ impl Widget {
                 spec,
                 scope.clone(),
                 selected_path,
-                || gtk::ToggleButton::new(),
             )),
-            view::WidgetKind::CheckButton(spec) => Box::new(widgets::ToggleButton::new(
+            view::WidgetKind::CheckButton(spec) => Box::new(widgets::CheckButton::new(
                 ctx,
                 spec,
                 scope.clone(),
                 selected_path,
-                || gtk::CheckButton::new(),
             )),
             view::WidgetKind::ProgressBar(spec) => Box::new(widgets::ProgressBar::new(
                 ctx,

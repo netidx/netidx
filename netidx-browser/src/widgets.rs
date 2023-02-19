@@ -301,8 +301,8 @@ impl BWidget for BScript {
     }
 }
 
-pub(super) struct ToggleButton<T> {
-    button: T,
+pub(super) struct ToggleButton {
+    button: gtk::ToggleButton,
     we_set: Rc<Cell<bool>>,
     value: Rc<RefCell<BSNode>>,
     label: BSNode,
@@ -310,23 +310,14 @@ pub(super) struct ToggleButton<T> {
     on_change: Rc<RefCell<BSNode>>,
 }
 
-impl<T> ToggleButton<T>
-where
-    T: ToggleButtonExt
-        + ButtonExt
-        + WidgetExt
-        + glib::ObjectType
-        + IsA<gtk::Widget>
-        + 'static,
-{
-    pub(super) fn new<F: FnOnce() -> T>(
+impl ToggleButton {
+    pub(super) fn new(
         ctx: &BSCtx,
         spec: view::ToggleButton,
         scope: Path,
         selected_path: gtk::Label,
-        new: F,
     ) -> Self {
-        let button = new();
+        let button = gtk::ToggleButton::new();
         let we_set = Rc::new(Cell::new(false));
         let value = Rc::new(RefCell::new(BSNode::compile(
             &mut ctx.borrow_mut(),
@@ -365,13 +356,13 @@ where
         Self { button, label, image, value, on_change, we_set }
     }
 
-    fn set_label(button: &T, v: Option<Value>) {
+    fn set_label(button: &gtk::ToggleButton, v: Option<Value>) {
         if let Some(v) = v {
             button.set_label(&format!("{}", WVal(&v)));
         }
     }
 
-    fn set_image(button: &T, v: Option<Value>) {
+    fn set_image(button: &gtk::ToggleButton, v: Option<Value>) {
         if let Some(s) = v.and_then(|v| v.cast_to::<ImageSpec>().ok()) {
             match button.child() {
                 Some(w) if w.is::<gtk::Image>() => s.apply(w.downcast_ref().unwrap()),
@@ -380,13 +371,13 @@ where
         }
     }
 
-    fn we_set_value(we_set: &Cell<bool>, button: &T, v: Option<Value>) {
+    fn we_set_value(we_set: &Cell<bool>, button: &gtk::ToggleButton, v: Option<Value>) {
         we_set.set(true);
         Self::set_value(button, v);
         we_set.set(false);
     }
 
-    fn set_value(button: &T, v: Option<Value>) {
+    fn set_value(button: &gtk::ToggleButton, v: Option<Value>) {
         if let Some(v) = v {
             match v.get_as::<bool>() {
                 None => (), //button.set_inconsistent(true)
@@ -399,15 +390,7 @@ where
     }
 }
 
-impl<T> BWidget for ToggleButton<T>
-where
-    T: ToggleButtonExt
-        + ButtonExt
-        + WidgetExt
-        + glib::ObjectType
-        + IsA<gtk::Widget>
-        + 'static,
-{
+impl BWidget for ToggleButton {
     fn root(&self) -> Option<&gtk::Widget> {
         Some(self.button.upcast_ref())
     }
@@ -425,6 +408,106 @@ where
         );
         Self::set_label(&self.button, self.label.update(ctx, event));
         Self::set_image(&self.button, self.image.update(ctx, event));
+        self.on_change.borrow_mut().update(ctx, event);
+    }
+}
+
+pub(super) struct CheckButton {
+    button: gtk::CheckButton,
+    we_set: Rc<Cell<bool>>,
+    value: Rc<RefCell<BSNode>>,
+    label: BSNode,
+    image: BSNode,
+    on_change: Rc<RefCell<BSNode>>,
+}
+
+impl CheckButton {
+    pub(super) fn new(
+        ctx: &BSCtx,
+        spec: view::ToggleButton,
+        scope: Path,
+        selected_path: gtk::Label,
+    ) -> Self {
+        let button = gtk::CheckButton::new();
+        let we_set = Rc::new(Cell::new(false));
+        let value = Rc::new(RefCell::new(BSNode::compile(
+            &mut ctx.borrow_mut(),
+            scope.clone(),
+            spec.toggle.value.clone(),
+        )));
+        let on_change = Rc::new(RefCell::new(BSNode::compile(
+            &mut ctx.borrow_mut(),
+            scope.clone(),
+            spec.toggle.on_change.clone(),
+        )));
+        let label =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.label.clone());
+        let image =
+            BSNode::compile(&mut ctx.borrow_mut(), scope.clone(), spec.image.clone());
+        Self::set_label(&button, label.current(&mut ctx.borrow_mut()));
+        Self::we_set_value(
+            &we_set,
+            &button,
+            value.borrow().current(&mut ctx.borrow_mut()),
+        );
+        hover_path(&button, &selected_path, "on_change", &spec.toggle.on_change);
+        button.connect_toggled(clone!(
+            @strong value, @strong on_change, @strong ctx, @strong we_set => move |button| {
+                if !we_set.get() {
+                    let e = vm::Event::User(LocalEvent::Event(button.is_active().into()));
+                    on_change.borrow_mut().update(&mut ctx.borrow_mut(), &e);
+                    idle_add_local(clone!(@strong ctx, @strong we_set, @strong value, @strong button => move || {
+                        Self::we_set_value(&we_set, &button, value.borrow().current(&mut ctx.borrow_mut()));
+                        Continue(false)
+                    }));
+                }
+            }),
+        );
+        Self { button, label, image, value, on_change, we_set }
+    }
+
+    fn set_label(button: &gtk::CheckButton, v: Option<Value>) {
+        if let Some(v) = v {
+            button.set_label(Some(&format!("{}", WVal(&v))));
+        }
+    }
+
+    fn we_set_value(we_set: &Cell<bool>, button: &gtk::CheckButton, v: Option<Value>) {
+        we_set.set(true);
+        Self::set_value(button, v);
+        we_set.set(false);
+    }
+
+    fn set_value(button: &gtk::CheckButton, v: Option<Value>) {
+        if let Some(v) = v {
+            match v.get_as::<bool>() {
+                None => (), //button.set_inconsistent(true)
+                Some(b) => {
+                    button.set_active(b);
+                    //button.set_inconsistent(false);
+                }
+            }
+        }
+    }
+}
+
+impl BWidget for CheckButton {
+    fn root(&self) -> Option<&gtk::Widget> {
+        Some(self.button.upcast_ref())
+    }
+
+    fn update(
+        &mut self,
+        ctx: BSCtxRef,
+        _waits: &mut Vec<oneshot::Receiver<()>>,
+        event: &vm::Event<LocalEvent>,
+    ) {
+        Self::we_set_value(
+            &self.we_set,
+            &self.button,
+            self.value.borrow_mut().update(ctx, event),
+        );
+        Self::set_label(&self.button, self.label.update(ctx, event));
         self.on_change.borrow_mut().update(ctx, event);
     }
 }
