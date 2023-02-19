@@ -911,6 +911,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         w.set_title(Some("Netidx browser"));
         w.set_default_size(800, 600);
         setup_css(&gtk::prelude::WidgetExt::display(w));
+        w.show();
     }
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let current_loc: Rc<RefCell<ViewLoc>> = ctx.borrow().user.current_loc.clone();
@@ -1170,7 +1171,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                     }
                 }
             }
-            if let Some(cur) = current.borrow_mut().take() {
+            if let Some(_) = current.borrow_mut().take() {
                 ctx.borrow().user.window.set_child(None::<&gtk::Widget>);
             }
             ctx.borrow_mut().user.radio_groups.clear();
