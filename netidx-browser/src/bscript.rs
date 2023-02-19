@@ -1,16 +1,20 @@
-use gtk4 as gtk;
 use super::{util::ask_modal, ToGui, ViewLoc, WidgetCtx};
 use glib::thread_guard::ThreadGuard;
+use gtk4 as gtk;
 use netidx::{chars::Chars, path::Path, resolver_client, subscriber::Value};
-use netidx_bscript::vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register};
+use netidx_bscript::{
+    expr::ExprId,
+    vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register},
+};
 use parking_lot::Mutex;
-use std::{cell::RefCell, mem, rc::Rc, result::Result, sync::Arc};
+use std::{cell::RefCell, collections::VecDeque, mem, rc::Rc, result::Result, sync::Arc};
 
 #[derive(Clone, Debug)]
 pub(crate) enum LocalEvent {
     Event(Value),
     TableResolved(Path, Rc<resolver_client::Table>),
     Poll(Path),
+    ConfirmResponse(ExprId),
 }
 
 pub(crate) struct Event {
@@ -50,7 +54,8 @@ impl Apply<WidgetCtx, LocalEvent> for Event {
             | vm::Event::Rpc(_, _)
             | vm::Event::Timer(_)
             | vm::Event::User(LocalEvent::TableResolved(_, _))
-            | vm::Event::User(LocalEvent::Poll(_)) => None,
+            | vm::Event::User(LocalEvent::Poll(_))
+            | vm::Event::User(LocalEvent::ConfirmResponse(_)) => None,
             vm::Event::User(LocalEvent::Event(value)) => {
                 self.cur = Some(value.clone());
                 self.current(ctx)
@@ -102,41 +107,44 @@ impl Apply<WidgetCtx, LocalEvent> for CurrentPath {
     }
 }
 
-enum ConfirmState {
-    Empty,
-    Invalid,
-    Ready { message: Option<Value>, value: Value },
-}
-
 pub(crate) struct ConfirmInner {
+    id: ExprId,
     window: gtk::ApplicationWindow,
-    state: RefCell<ConfirmState>,
+    to_gui: glib::Sender<ToGui>,
+    invalid: bool,
+    message: Option<Value>,
+    queued: VecDeque<Value>,
 }
 
 pub(crate) struct Confirm(Mutex<ThreadGuard<ConfirmInner>>);
 
 impl Register<WidgetCtx, LocalEvent> for Confirm {
     fn register(ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) {
-        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from, _, _| {
-            let mut state = ConfirmState::Empty;
+        let f: InitFn<WidgetCtx, LocalEvent> = Arc::new(|ctx, from, _, id| {
+            let mut message = None;
+            let mut queued = VecDeque::new();
+            let mut invalid = false;
             match from {
                 [msg, val] => {
+                    message = msg.current(ctx);
                     if let Some(value) = val.current(ctx) {
-                        state = ConfirmState::Ready { message: msg.current(ctx), value };
+                        queued.push_back(value);
                     }
                 }
                 [val] => {
                     if let Some(value) = val.current(ctx) {
-                        state = ConfirmState::Ready { message: None, value };
+                        queued.push_back(value);
                     }
                 }
-                _ => {
-                    state = ConfirmState::Invalid;
-                }
+                _ => invalid = false,
             }
             Box::new(Confirm(Mutex::new(ThreadGuard::new(ConfirmInner {
+                id,
                 window: ctx.user.window.clone(),
-                state: RefCell::new(state),
+                to_gui: ctx.user.backend.to_gui.clone(),
+                message,
+                queued,
+                invalid,
             }))))
         });
         ctx.functions.insert("confirm".into(), f);
@@ -146,20 +154,8 @@ impl Register<WidgetCtx, LocalEvent> for Confirm {
 
 impl Apply<WidgetCtx, LocalEvent> for Confirm {
     fn current(&self, _ctx: &mut ExecCtx<WidgetCtx, LocalEvent>) -> Option<Value> {
-        let inner = self.0.lock();
-        let inner = inner.get_ref();
-        let c = mem::replace(&mut *inner.state.borrow_mut(), ConfirmState::Empty);
-        match c {
-            ConfirmState::Empty => None,
-            ConfirmState::Invalid => Confirm::usage(),
-            ConfirmState::Ready { message, value } => {
-                if self.ask(message.as_ref(), &value) {
-                    Some(value)
-                } else {
-                    None
-                }
-            }
-        }
+        self.ask();
+        None
     }
 
     fn update(
@@ -170,13 +166,21 @@ impl Apply<WidgetCtx, LocalEvent> for Confirm {
     ) -> Option<Value> {
         match from {
             [msg, val] => {
-                let m = msg.update(ctx, event).or_else(|| msg.current(ctx));
-                let v = val.update(ctx, event);
-                v.and_then(|v| if self.ask(m.as_ref(), &v) { Some(v) } else { None })
+                if let Some(m) = msg.update(ctx, event).or_else(|| msg.current(ctx)) {
+                    self.0.lock().get_mut().message = Some(m);
+                }
+                if let Some(v) = val.update(ctx, event) {
+                    self.0.lock().get_mut().queued.push_back(v);
+                    self.ask();
+                }
+                self.maybe_done(event)
             }
             [val] => {
-                let v = val.update(ctx, event);
-                v.and_then(|v| if self.ask(None, &v) { Some(v) } else { None })
+                if let Some(v) = val.update(ctx, event) {
+                    self.0.lock().get_mut().queued.push_back(v);
+                    self.ask()
+                }
+                self.maybe_done(event)
             }
             exprs => {
                 let mut up = false;
@@ -198,12 +202,42 @@ impl Confirm {
         Some(Value::Error(Chars::from("confirm([msg], val): expected 1 or 2 arguments")))
     }
 
-    fn ask(&self, msg: Option<&Value>, val: &Value) -> bool {
-        let default = Value::from("proceed with");
-        let msg = msg.unwrap_or(&default);
-        let inner = self.0.lock();
-        let inner = inner.get_ref();
-        ask_modal(&inner.window, &format!("{} {}?", msg, val))
+    fn maybe_done(&self, event: &vm::Event<LocalEvent>) -> Option<Value> {
+        match event {
+            vm::Event::Variable(_, _, _)
+            | vm::Event::Netidx(_, _)
+            | vm::Event::Rpc(_, _)
+            | vm::Event::Timer(_)
+            | vm::Event::User(LocalEvent::TableResolved(_, _))
+            | vm::Event::User(LocalEvent::Poll(_))
+            | vm::Event::User(LocalEvent::Event(_)) => None,
+            vm::Event::User(LocalEvent::ConfirmResponse(id)) => {
+                let mut t = self.0.lock();
+                let t = t.get_mut();
+                if id == &t.id {
+                    t.queued.pop_front()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn ask(&self) {
+        let t = self.0.lock();
+        let t = t.get_ref();
+        if let Some(val) = t.queued.back() {
+            let val = val.clone();
+            let default = Value::from("proceed with");
+            let msg = t.message.as_ref().unwrap_or(&default);
+            let to_gui = t.to_gui.clone();
+            let id = t.id;
+            ask_modal(&t.window, &format!("{} {}?", msg, val), move |ok| {
+                if ok {
+                    let _ = to_gui.send(ToGui::UpdateConfirm(id));
+                }
+            });
+        }
     }
 }
 
@@ -370,6 +404,7 @@ impl Apply<WidgetCtx, LocalEvent> for Poll {
                     vm::Event::User(LocalEvent::Poll(_))
                     | vm::Event::User(LocalEvent::Event(_))
                     | vm::Event::User(LocalEvent::TableResolved(_, _))
+                    | vm::Event::User(LocalEvent::ConfirmResponse(_))
                     | vm::Event::Variable(_, _, _)
                     | vm::Event::Netidx(_, _)
                     | vm::Event::Rpc(_, _)

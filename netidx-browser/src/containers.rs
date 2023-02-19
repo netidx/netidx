@@ -1,8 +1,7 @@
 use super::{util, BSCtx, BSCtxRef, BSNode, BWidget, Widget, WidgetPath, DEFAULT_PROPS};
 use crate::{bscript::LocalEvent, view};
 use futures::channel::oneshot;
-use gdk4::{self as gdk, prelude::*};
-use glib::idle_add_local_once;
+use gdk4::prelude::*;
 use gtk4::{self as gtk, prelude::*, Orientation};
 use netidx::{chars::Chars, path::Path};
 use netidx_bscript::vm;

@@ -150,6 +150,7 @@ enum ToGui {
     Update(Batch),
     UpdateVar(Path, Chars, Value),
     UpdateRpc(RpcCallId, Value),
+    UpdateConfirm(ExprId),
     UpdateTimer(TimerId),
     UpdatePoll(Path),
     TableResolved(Path, resolver_client::Table),
@@ -298,9 +299,7 @@ impl ImageSpec {
 impl FromValue for ImageSpec {
     fn from_value(v: Value) -> Result<Self> {
         match v {
-            Value::String(name) => {
-                Ok(Self::Icon { name, size: gtk::IconSize::Inherit })
-            }
+            Value::String(name) => Ok(Self::Icon { name, size: gtk::IconSize::Inherit }),
             Value::Bytes(bytes) => {
                 Ok(Self::PixBuf { bytes, width: None, height: None, keep_aspect: true })
             }
@@ -592,28 +591,31 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
     let root = gtk::ScrolledWindow::new();
     root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-    root.add(&hbox);
-    let ask_saved =
-        Rc::new(clone!(@weak ctx, @weak hbox => @default-return true, move || {
-            if !ctx.borrow().user.view_saved.get() {
-                ask_modal(&hbox, "Unsaved view will be lost.")
-            } else {
-                true
-            }
-        }));
+    root.set_child(Some(&hbox));
+    let ask_saved = Rc::new(clone!(@weak ctx, @weak hbox => move |loc: ViewLoc| {
+        if !ctx.borrow().user.view_saved.get() {
+            ask_modal(&hbox, "Unsaved view will be lost.", clone!(@weak ctx, @weak hbox => move |resp| {
+                if resp {
+                    ctx.borrow().user.backend.navigate(loc);
+                }
+            }))
+        } else {
+            ctx.borrow().user.backend.navigate(loc);
+        }
+    }));
     match loc {
         ViewLoc::Netidx(path) => {
             for target in Path::dirnames(&path) {
                 let lbl = gtk::Label::new(None);
                 let name = match Path::basename(target) {
                     None => {
-                        hbox.add(&lbl);
+                        hbox.append(&lbl);
                         lbl.set_margin_start(10);
                         " / "
                     }
                     Some(name) => {
-                        hbox.add(&gtk::Label::new(Some(" > ")));
-                        hbox.add(&lbl);
+                        hbox.append(&gtk::Label::new(Some(" > ")));
+                        hbox.append(&lbl);
                         name
                     }
                 };
@@ -622,44 +624,33 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
                 lbl.connect_activate_link(clone!(
                 @weak ctx,
                 @strong ask_saved => @default-return Inhibit(false), move |_, uri| {
-                    if !ask_saved() {
-                        return Inhibit(false)
-                    }
-                    ctx.borrow().user.backend.navigate(
-                        ViewLoc::Netidx(Path::from(String::from(uri)))
-                    );
+                    ask_saved(ViewLoc::Netidx(Path::from(String::from(uri))));
                     Inhibit(false)
                 }));
             }
         }
         ViewLoc::File(name) => {
             let rl = gtk::Label::new(None);
-            hbox.add(&rl);
+            hbox.append(&rl);
             rl.set_margin_start(10);
             rl.set_markup(r#"<a href=""> / </a>"#);
             rl.connect_activate_link(clone!(
                 @weak ctx,
                 @strong ask_saved => @default-return Inhibit(false), move |_, _| {
-                    if !ask_saved() {
-                        return Inhibit(false)
-                    }
-                    ctx.borrow().user.backend.navigate(ViewLoc::Netidx(Path::from("/")));
+                    ask_saved(ViewLoc::Netidx(Path::from("/")));
                     Inhibit(false)
             }));
             let sep = gtk::Label::new(Some(" > "));
-            hbox.add(&sep);
+            hbox.append(&sep);
             let fl = gtk::Label::new(None);
-            hbox.add(&fl);
+            hbox.append(&fl);
             fl.set_margin_start(10);
             fl.set_markup(&format!(r#"<a href="">file:{:?}</a>"#, name));
             fl.connect_activate_link(clone!(
                 @weak ctx,
                 @strong ask_saved,
                 @strong name => @default-return Inhibit(false), move |_, _| {
-                    if !ask_saved() {
-                        return Inhibit(false)
-                    }
-                    ctx.borrow().user.backend.navigate(ViewLoc::File(name.clone()));
+                    ask_saved(ViewLoc::File(name.clone()));
                     Inhibit(false)
             }));
         }
@@ -686,19 +677,22 @@ impl View {
         let selected_path_window = gtk::ScrolledWindow::new();
         selected_path_window
             .set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
-        selected_path_window.add(&selected_path);
+        selected_path_window.set_child(Some(&selected_path));
         let widget = Widget::new(ctx, spec.clone(), Path::root(), selected_path.clone());
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        root.set_margin(2);
-        root.add(&make_crumbs(ctx, path));
-        root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        root.set_margin_bottom(2);
+        root.set_margin_top(2);
+        root.set_margin_start(2);
+        root.set_margin_end(2);
+        root.append(&make_crumbs(ctx, path));
+        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         if let Some(wroot) = widget.root() {
-            root.add(wroot);
-            root.set_child_packing(wroot, true, true, 1, gtk::PackType::Start);
+            root.append(wroot);
+            wroot.set_valign(gtk::Align::Start);
         }
-        root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        root.add(&selected_path_window);
-        root.set_child_packing(&selected_path, false, false, 1, gtk::PackType::End);
+        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        root.append(&selected_path_window);
+        selected_path.set_valign(gtk::Align::End);
         View { root, widget }
     }
 
@@ -716,25 +710,26 @@ impl View {
     }
 }
 
-fn setup_css(screen: &gdk::Screen) {
+fn setup_css(screen: &gdk::Display) {
     let style = gtk::CssProvider::new();
-    style
-        .load_from_data(
-            r#"*.highlighted {
+    style.load_from_data(
+        r#"*.highlighted {
     border-width: 2px;
     border-style: solid;
     border-color: blue;
-}"#
-            .as_bytes(),
-        )
-        .unwrap();
-    gtk::StyleContext::add_provider_for_screen(screen, &style, 800);
+}"#,
+    );
+    gtk::StyleContext::add_provider_for_display(screen, &style, 800);
 }
 
-fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLoc> {
+fn choose_location<F: FnOnce(ViewLoc)>(
+    parent: &gtk::ApplicationWindow,
+    save: bool,
+    f: F,
+) {
     enum W {
         File(gtk::FileChooserWidget),
-        Netidx(gtk::Box),
+        Netidx(gtk::Box, gtk::Entry),
     }
     let d = gtk::Dialog::with_buttons(
         Some("Choose Location"),
@@ -742,19 +737,18 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
         gtk::DialogFlags::MODAL | gtk::DialogFlags::USE_HEADER_BAR,
         &[("Cancel", gtk::ResponseType::Cancel), ("Choose", gtk::ResponseType::Accept)],
     );
-    let loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let mainw: Rc<RefCell<Option<W>>> = Rc::new(RefCell::new(None));
     let root = d.content_area();
     let cb = gtk::ComboBoxText::new();
     cb.append(Some("Netidx"), "Netidx");
     cb.append(Some("File"), "File");
-    root.add(&cb);
-    root.add(&gtk::Separator::new(gtk::Orientation::Vertical));
-    cb.connect_changed(clone!(@weak root, @strong loc, @strong mainw => move |cb| {
+    root.append(&cb);
+    root.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+    cb.connect_changed(clone!(@weak root, @strong mainw => move |cb| {
         if let Some(mw) = mainw.borrow_mut().take() {
             match mw {
                 W::File(w) => root.remove(&w),
-                W::Netidx(w) => root.remove(&w),
+                W::Netidx(w, _) => root.remove(&w),
             }
         }
         let id = cb.active_id();
@@ -766,38 +760,40 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
                     } else {
                         gtk::FileChooserAction::Open
                     });
-                w.connect_selection_changed(clone!(@strong loc => move |w| {
-                    *loc.borrow_mut() = w.filename().map(|f| ViewLoc::File(f));
-                }));
-                root.add(&w);
+                root.append(&w);
                 *mainw.borrow_mut() = Some(W::File(w));
             }
             Some("Netidx") | None => {
                 let b = gtk::Box::new(gtk::Orientation::Horizontal, 10);
                 let l = gtk::Label::new(Some("Netidx Path:"));
                 let e = gtk::Entry::new();
-                b.pack_start(&l, true, true, 5);
-                b.pack_start(&e, true, true, 5);
-                root.add(&b);
-                e.connect_changed(clone!(@strong loc => move |e| {
-                    let p = Path::from(String::from(e.text()));
-                    *loc.borrow_mut() = Some(ViewLoc::Netidx(p));
-                }));
-                *mainw.borrow_mut() = Some(W::Netidx(b));
+                b.prepend(&l);
+                b.prepend(&e);
+                root.append(&b);
+                *mainw.borrow_mut() = Some(W::Netidx(b, e));
             }
             Some(_) => unreachable!(),
         }
-        root.show_all();
+    }));
+    d.connect_response(clone!(@strong mainw => move |_, r| {
+        match r {
+            gtk::ResponseType::Accept => match &*mainw.borrow() {
+                None => (),
+                Some(W::Netidx(_, e)) => {
+                    let loc = ViewLoc::Netidx(Path::from(e.text().to_string()));
+                    f(loc)
+                }
+                Some(W::File(ch)) => {
+                    let loc = ch.file().map(|f| ViewLoc::File(PathBuf::from(f.to_string())));
+                    if let Some(loc) = loc {
+                        f(loc)
+                    }
+                }
+            },
+            _ => ()
+        }
     }));
     cb.set_active_id(Some("Netidx"));
-    let res = match d.run() {
-        gtk::ResponseType::Accept => loc.borrow_mut().take(),
-        gtk::ResponseType::Cancel | _ => None,
-    };
-    unsafe {
-        d.destroy();
-    }
-    res
 }
 
 fn save_view(
@@ -843,10 +839,7 @@ fn save_view(
         Some(loc) if !save_as => do_save(loc.clone()),
         _ => {
             let window = ctx.borrow().user.window.clone();
-            match choose_location(&window, true) {
-                None => (),
-                Some(loc) => do_save(loc),
-            }
+            choose_location(&window, true, move |loc| do_save(loc))
         }
     }
 }
@@ -885,25 +878,21 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     group.add_window(&ctx.borrow().user.window);
     let headerbar = gtk::HeaderBar::new();
     let design_mode = gtk::ToggleButton::new();
-    let design_img = gtk::Image::from_icon_name(Some("document-page-setup"));
-    design_img.set_icon_size(gtk::IconSize::SmallToolbar);
+    let design_img = gtk::Image::from_icon_name("document-page-setup");
     let save_button = gtk::Button::from_icon_name("media-floppy-symbolic");
     let prefs_button = gtk::MenuButton::new();
-    let menu_img =
-        gtk::Image::from_icon_name(Some("open-menu"));
-    menu_img.set_icon_size(gtk::IconSize::SmallToolbar);
-    prefs_button.set_image(Some(&menu_img));
+    let menu_img = gtk::Image::from_icon_name("open-menu");
+    prefs_button.set_child(Some(&menu_img));
     let main_menu = gio::Menu::new();
     main_menu.append(Some("Go"), Some("win.go"));
     main_menu.append(Some("Save View As"), Some("win.save_as"));
     main_menu.append(Some("Raw View"), Some("win.raw_view"));
     main_menu.append(Some("Bscript Tracing"), Some("win.bscript_tracing"));
     main_menu.append(Some("New Window"), Some("win.new_window"));
-    prefs_button.set_use_popover(true);
     prefs_button.set_menu_model(Some(&main_menu));
     save_button.set_sensitive(false);
-    design_mode.set_image(Some(&design_img));
-    headerbar.set_show_close_button(true);
+    design_mode.set_child(Some(&design_img));
+    headerbar.set_show_title_buttons(true);
     headerbar.pack_start(&design_mode);
     headerbar.pack_start(&save_button);
     headerbar.pack_end(&prefs_button);
@@ -912,10 +901,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         w.set_titlebar(Some(&headerbar));
         w.set_title(Some("Netidx browser"));
         w.set_default_size(800, 600);
-        w.show_all();
-        if let Some(screen) = w.screen() {
-            setup_css(&screen);
-        }
+        setup_css(&gtk::prelude::WidgetExt::display(w));
     }
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let current_loc: Rc<RefCell<ViewLoc>> = ctx.borrow().user.current_loc.clone();
@@ -925,15 +911,23 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
     let editor_window: Rc<RefCell<Option<gtk::Window>>> = Rc::new(RefCell::new(None));
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
-    ctx.borrow().user.window.connect_delete_event(clone!(
-        @weak ctx => @default-return Inhibit(false), move |w, _| {
+    let force: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    ctx.borrow().user.window.connect_close_request(clone!(
+        @weak ctx, @strong force => @default-return Inhibit(false), move |w| {
             let saved = ctx.borrow().user.view_saved.get();
-            if saved || ask_modal(w, "Unsaved view will be lost.") {
-                ctx.borrow().user.backend.terminate();
-                Inhibit(false)
-            } else {
-                Inhibit(true)
+            let close = saved || force.get();
+            if !close {
+                ask_modal(
+                    w,
+                    "Unsaved view will be lost.",
+                    clone!(@strong force, @strong ctx => move |ok| {
+                        force.set(ok);
+                        if ok {
+                            ctx.borrow().user.window.close();
+                        }
+                    }))
             }
+            Inhibit(!close)
     }));
     design_mode.connect_toggled(clone!(
     @strong editor_window,
@@ -956,8 +950,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 editor_window.borrow_mut().take();
                 b.set_active(false);
             }));
-            win.add(e.root());
-            win.show_all();
+            win.set_child(Some(e.root()));
             *editor_window.borrow_mut() = Some(win);
             *editor.borrow_mut() = Some(e);
         } else {
@@ -988,10 +981,22 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             let window = ctx.user.window.clone();
             (saved, window)
         };
-        if saved || ask_modal(&window, "Unsaved view will be lost.") {
-            if let Some(loc) = choose_location(&window, false) {
+        if saved {
+            choose_location(&window, false, clone!(@weak ctx => move |loc| {
                 ctx.borrow().user.backend.navigate(loc);
-            }
+            }));
+        } else {
+            ask_modal(
+                &window,
+                "Unsaved view will be lost.",
+                clone!(@weak ctx, @strong window => move |ok| {
+                    if ok {
+                        choose_location(&window, false, clone!(@weak ctx => move |loc| {
+                            ctx.borrow().user.backend.navigate(loc)
+                        }));
+                    }
+                })
+            )
         }
     }));
     let save_as_act = gio::SimpleAction::new("save_as", None);
@@ -1005,7 +1010,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         }
     ));
     let raw_view_act =
-        gio::SimpleAction::new_stateful("raw_view", None, &false.to_variant());
+        gio::SimpleAction::new_stateful("raw_view", None, false.to_variant());
     ctx.borrow().user.window.add_action(&raw_view_act);
     raw_view_act.connect_activate(clone!(
         @weak ctx, @strong current_loc  => move |a, _| {
@@ -1018,15 +1023,19 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 let window = ctx.user.window.clone();
                 (saved, window)
             };
-            if !new_v || saved || ask_modal(&window, m) {
-                ctx.borrow().user.raw_view.store(new_v, Ordering::Relaxed);
-                a.change_state(&new_v.to_variant());
-                ctx.borrow().user.backend.navigate(current_loc.borrow().clone());
+            if !new_v || saved {
+                ask_modal(&window, m, clone!(@weak ctx => move |ok| {
+                    if ok {
+                        ctx.borrow().user.raw_view.store(new_v, Ordering::Relaxed);
+                        a.change_state(&new_v.to_variant());
+                        ctx.borrow().user.backend.navigate(current_loc.borrow().clone());
+                    }
+                }));
             }
         }
     }));
     let bscript_tracing_act =
-        gio::SimpleAction::new_stateful("bscript_tracing", None, &true.to_variant());
+        gio::SimpleAction::new_stateful("bscript_tracing", None, true.to_variant());
     ctx.borrow().user.window.add_action(&bscript_tracing_act);
     ctx.borrow_mut().dbg_ctx.trace = true;
     bscript_tracing_act.connect_activate(clone!(@weak ctx => move |a, _| {
@@ -1061,6 +1070,14 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 &current,
                 &mut ctx.borrow_mut(),
                 &vm::Event::User(LocalEvent::Poll(path)),
+            );
+            Continue(true)
+        }
+        ToGui::UpdateConfirm(id) => {
+            update_single(
+                &current,
+                &mut ctx.borrow_mut(),
+                &vm::Event::User(LocalEvent::ConfirmResponse(id)),
             );
             Continue(true)
         }
@@ -1100,8 +1117,18 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 let window = ctx.user.window.clone();
                 (saved, window)
             };
-            if saved || ask_modal(&window, "Unsaved view will be lost") {
+            if saved {
                 ctx.borrow().user.backend.navigate(loc)
+            } else {
+                ask_modal(
+                    &window,
+                    "Unsaved view will be lost",
+                    clone!(@weak ctx => move |ok| {
+                        if ok {
+                            ctx.borrow().user.backend.navigate(loc)
+                        }
+                    }),
+                )
             }
             Continue(true)
         }
@@ -1134,16 +1161,15 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 }
             }
             if let Some(cur) = current.borrow_mut().take() {
-                ctx.borrow().user.window.remove(cur.root());
+                ctx.borrow().user.window.set_child(None::<&gtk::Widget>);
             }
             ctx.borrow_mut().user.radio_groups.clear();
             ctx.borrow_mut().clear();
             *current_spec.borrow_mut() = spec.clone();
             let cur = View::new(&ctx, &*current_loc.borrow(), spec);
             let window = ctx.borrow().user.window.clone();
-            window.set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
-            window.add(cur.root());
-            window.show_all();
+            window.set_title(Some(&format!("Netidx Browser {}", &*current_loc.borrow())));
+            window.set_child(Some(cur.root()));
             let hl = highlight.borrow();
             cur.widget.set_highlight(hl.iter(), true);
             *current.borrow_mut() = Some(cur);
