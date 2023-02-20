@@ -1311,10 +1311,6 @@ impl RaeifiedTable {
         event: &vm::Event<LocalEvent>,
     ) {
         match event {
-            vm::Event::User(_)
-            | vm::Event::Timer(_)
-            | vm::Event::Variable(_, _, _)
-            | vm::Event::Rpc(_, _) => (),
             vm::Event::Netidx(id, value) => {
                 self.update.borrow_mut().insert(*id, value.clone());
                 if self.update.borrow().len() == 1 {
@@ -1323,6 +1319,10 @@ impl RaeifiedTable {
                     self.start_update_task(Some(tx));
                 }
             }
+            vm::Event::User(_)
+            | vm::Event::Timer(_)
+            | vm::Event::Variable(_, _, _)
+            | vm::Event::Rpc(_, _) => (),
         }
     }
 }
