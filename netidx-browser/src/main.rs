@@ -696,6 +696,10 @@ impl View {
         root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         if let Some(wroot) = widget.root() {
             root.append(wroot);
+            wroot.set_valign(gtk::Align::Fill);
+            wroot.set_halign(gtk::Align::Fill);
+            wroot.set_hexpand(true);
+            wroot.set_vexpand(true);
         }
         root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         root.append(&selected_path_window);
@@ -861,8 +865,8 @@ lazy_static! {
     static ref DEFAULT_PROPS: view::WidgetProps = view::WidgetProps {
         halign: view::Align::Fill,
         valign: view::Align::Fill,
-        hexpand: true,
-        vexpand: true,
+        hexpand: false,
+        vexpand: false,
         margin_top: 0,
         margin_bottom: 0,
         margin_start: 0,
@@ -959,9 +963,10 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 .default_height(600)
                 .visible(true)
                 .build();
-            win.connect_destroy(clone!(@strong b, @strong editor_window => move |_| {
+            win.connect_close_request(clone!(@strong b, @strong editor_window => move |_| {
                 editor_window.borrow_mut().take();
                 b.set_active(false);
+                Inhibit(false)
             }));
             win.set_child(Some(e.root()));
             *editor_window.borrow_mut() = Some(win);

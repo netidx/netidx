@@ -36,6 +36,7 @@ pub(super) fn expr(
     let inspect_icon = gtk::Image::from_icon_name("preferences-system");
     inspect.set_child(Some(&inspect_icon));
     ibox.prepend(&entry);
+    entry.set_hexpand(true);
     ibox.append(&inspect);
     entry.set_text(&source.borrow().to_string());
     entry.set_icon_activatable(gtk::EntryIconPosition::Secondary, true);
@@ -152,10 +153,10 @@ impl Table {
         let mut col_config = TwoColGrid::new();
         let mut row_config = TwoColGrid::new();
         let mut event = TwoColGrid::new();
-        root.prepend(shared_config.root());
-        root.prepend(&col_config_exp);
-        root.prepend(&row_config_exp);
-        root.prepend(&event_exp);
+        root.append(shared_config.root());
+        root.append(&col_config_exp);
+        root.append(&row_config_exp);
+        root.append(&event_exp);
         col_config_exp.set_child(Some(col_config.root()));
         row_config_exp.set_child(Some(row_config.root()));
         event_exp.set_child(Some(event.root()));
@@ -742,8 +743,8 @@ impl LinePlot {
     ) {
         let axis_exp = gtk::Expander::new(Some("Axis Style"));
         let mut axis = TwoColGrid::new();
-        root.prepend(&axis_exp);
-        root.prepend(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        root.append(&axis_exp);
+        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         axis_exp.set_child(Some(axis.root()));
         axis.add(parse_entry(
             "X Axis Label:",
@@ -802,8 +803,8 @@ impl LinePlot {
     ) -> (DbgExpr, DbgExpr, DbgExpr, DbgExpr, DbgExpr) {
         let range_exp = gtk::Expander::new(Some("Axis Range"));
         let mut range = TwoColGrid::new();
-        root.prepend(&range_exp);
-        root.prepend(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        root.append(&range_exp);
+        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         range_exp.set_child(Some(range.root()));
         let (l, e, x_min) = expr!(ctx, "x min:", scope, spec, on_change, x_min);
         range.add((l, e));
@@ -826,8 +827,8 @@ impl LinePlot {
     ) {
         let style_exp = gtk::Expander::new(Some("Chart Style"));
         let mut style = TwoColGrid::new();
-        root.prepend(&style_exp);
-        root.prepend(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        root.append(&style_exp);
+        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         style_exp.set_child(Some(style.root()));
         style.add(parse_entry(
             "Title:",
@@ -900,8 +901,8 @@ impl LinePlot {
         let seriesbox = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let addbtn = gtk::Button::with_label("+");
         series_exp.set_child(Some(&seriesbox));
-        root.prepend(&series_exp);
-        root.prepend(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        root.append(&series_exp);
+        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         let series_id = Rc::new(Cell::new(0));
         let series: Rc<RefCell<IndexMap<usize, Series>>> =
             Rc::new(RefCell::new(IndexMap::new()));
@@ -912,7 +913,7 @@ impl LinePlot {
             spec.series.extend(series.borrow().values().map(|s| s.spec.borrow().clone()));
             on_change()
         }));
-        seriesbox.prepend(&addbtn);
+        seriesbox.append(&addbtn);
         let build_series = Rc::new(clone!(
             @weak seriesbox,
             @strong ctx,
@@ -920,7 +921,7 @@ impl LinePlot {
             @strong series => move |spec: view::Series| {
                 let spec = Rc::new(RefCell::new(spec));
                 let mut grid = TwoColGrid::new();
-                seriesbox.prepend(grid.root());
+                seriesbox.append(grid.root());
                 let sep = gtk::Separator::new(gtk::Orientation::Vertical);
                 grid.attach(&sep, 0, 2, 1);
                 grid.add(parse_entry(
