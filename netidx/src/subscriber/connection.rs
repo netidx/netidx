@@ -518,14 +518,9 @@ impl ConnectionCtx {
             }
         }
         for (_, (mut c, batch)) in self.by_chan.drain() {
-            if let Err(e) = c.0.try_send(batch) {
-                if e.is_full() {
-                    let batch = e.into_inner();
-                    self.blocked_channels.push(Box::pin(async move {
-                        let _ = c.0.send(batch).await;
-                    }));
-                }
-            }
+            self.blocked_channels.push(Box::pin(async move {
+                let _ = c.0.send(batch).await;
+            }));
         }
     }
 
