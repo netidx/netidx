@@ -968,6 +968,15 @@ impl Editor {
         treebtns.append(&delbtn);
         treebtns.append(&dupbtn);
         treebtns.append(&undobtn);
+        treebtns.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        let mvdownbtn = gtk::Button::from_icon_name("go-down-symbolic");
+        let mvupbtn = gtk::Button::from_icon_name("go-up-symbolic");
+        let mvoutbtn = gtk::Button::from_icon_name("go-previous-symbolic");
+        let mvinbtn = gtk::Button::from_icon_name("go-next-symbolic");
+        treebtns.append(&mvdownbtn);
+        treebtns.append(&mvupbtn);
+        treebtns.append(&mvoutbtn);
+        treebtns.append(&mvinbtn);
         let treewin = gtk::ScrolledWindow::new();
         treewin.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
         root_upper.append(&treewin);
@@ -1055,11 +1064,8 @@ impl Editor {
         let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
         reveal_properties.set_child(Some(&properties));
         let inhibit_change = Rc::new(Cell::new(false));
-        let kind = gtk::ComboBoxText::new();
-        for k in &KINDS {
-            kind.append(Some(k), k);
-        }
-        kind.connect_changed(clone!(
+        let kind = gtk::DropDown::from_strings(&KINDS);
+        kind.connect_selected_notify(clone!(
             @strong scope,
             @strong on_change,
             @strong store,
@@ -1075,8 +1081,13 @@ impl Editor {
                             w.root().set_sensitive(false);
                             properties.remove(w.root());
                         }
-                        let id = c.active_id();
-                        let spec = Widget::default_spec(id.as_ref().map(|s| &**s));
+                        let id = c.selected() as usize;
+                        let id = if id < KINDS.len() {
+                            Some(KINDS[id])
+                        } else {
+                            None
+                        };
+                        let spec = Widget::default_spec(id);
                         // clear description column
                         store.set_value(&iter, 2, &"".to_value());
                         Widget::insert(
@@ -1136,8 +1147,9 @@ impl Editor {
                         ctx.borrow().user.backend.highlight(path);
                         let v = store.get_value(&iter, 0);
                         if let Ok(id) = v.get::<&str>() {
+                            let i = KINDS.iter().enumerate().find(|(_, s)| **s == id).unwrap().0;
                             inhibit_change.set(true);
-                            kind.set_active_id(Some(id));
+                            kind.set_selected(i as u32);
                             inhibit_change.set(false);
                         }
                         let v = store.get_value(&iter, 1);
@@ -1249,16 +1261,73 @@ impl Editor {
             on_change();
         }));
         store.connect_row_inserted(clone!(
-            @strong store, @strong on_change => move |_, _, iter| {
-                idle_add_local(clone!(@strong store, @strong iter => move || {
-                    let v = store.get_value(&iter, 1);
-                    if let Ok(w) = v.get::<&Widget>() {
-                        w.moved(&iter)
-                    }
-                    glib::Continue(false)
-                }));
-                on_change();
+        @strong store, @strong on_change => move |_, _, iter| {
+            idle_add_local(clone!(@strong store, @strong iter => move || {
+                let v = store.get_value(&iter, 1);
+                if let Ok(w) = v.get::<&Widget>() {
+                    w.moved(&iter)
+                }
+                glib::Continue(false)
+            }));
+            on_change();
         }));
+        mvdownbtn.connect_clicked(
+            clone!(@strong store, @strong on_change, @strong view => move |_| {
+                if let Some((_, iter)) = view.selection().selected() {
+                    let next = iter.clone();
+                    if store.iter_next(&next) {
+                        store.swap(&iter, &next);
+                        on_change()
+                    }
+                }
+            }),
+        );
+        mvupbtn.connect_clicked(
+            clone!(@strong store, @strong on_change, @strong view => move |_| {
+                if let Some((_, iter)) = view.selection().selected() {
+                    let prev = iter.clone();
+                    if store.iter_previous(&prev) {
+                        store.swap(&iter, &prev);
+                        on_change()
+                    }
+                }
+            }),
+        );
+        mvinbtn.connect_clicked(
+            clone!(@strong store, @strong on_change, @strong view => move |_| {
+                if let Some((_, iter)) = view.selection().selected() {
+                    let prev = iter.clone();
+                    if store.iter_previous(&prev) {
+                        let name = store.get::<String>(&iter, 0);
+                        let widget = store.get::<Widget>(&iter, 1);
+                        let s = store.get::<Option<String>>(&iter, 2);
+                        store.remove(&iter);
+                        let iter = store.append(Some(&prev));
+                        store.set_value(&iter, 0, &name.to_value());
+                        store.set_value(&iter, 1, &widget.to_value());
+                        store.set_value(&iter, 2, &s.to_value());
+                        on_change()
+                    }
+                }
+            }),
+        );
+        mvoutbtn.connect_clicked(
+            clone!(@strong store, @strong on_change, @strong view => move |_| {
+                if let Some((_, iter)) = view.selection().selected() {
+                    if let Some(parent) = store.iter_parent(&iter) {
+                        let name = store.get::<String>(&iter, 0);
+                        let widget = store.get::<Widget>(&iter, 1);
+                        let s = store.get::<Option<String>>(&iter, 2);
+                        store.remove(&iter);
+                        let iter = store.insert_after(None, Some(&parent));
+                        store.set_value(&iter, 0, &name.to_value());
+                        store.set_value(&iter, 1, &widget.to_value());
+                        store.set_value(&iter, 2, &s.to_value());
+                        on_change()
+                    }
+                }
+            }),
+        );
         Editor { root }
     }
 
