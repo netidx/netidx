@@ -309,12 +309,13 @@ impl ConnectionCtx {
     ) -> Result<()> {
         if let Some(sub) = self.subscriptions.get_mut(&id) {
             let mut already_have = false;
-            for (_, c) in sub.streams.0.iter() {
+            for (id, c) in sub.streams.0.iter() {
                 if tx.same_receiver(&c.0) {
                     already_have = true;
                 }
                 if c.0.is_closed() {
                     self.by_receiver.remove(&c);
+                    self.gc_chan.insert(*id);
                 }
             }
             if flags.contains(UpdatesFlags::BEGIN_WITH_LAST)
@@ -524,6 +525,7 @@ impl ConnectionCtx {
                         let _ = c.0.send(batch).await;
                     }))
                 } else if e.is_disconnected() {
+                    self.by_receiver.remove(c);
                     self.gc_chan.insert(*id);
                 }
             }
