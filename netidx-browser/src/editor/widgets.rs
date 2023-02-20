@@ -94,6 +94,7 @@ pub(super) fn expr(
                 b.set_active(false);
                 Inhibit(false)
             }));
+            w.show();
             *inspector.borrow_mut() = Some((w, si));
         }
     }));
