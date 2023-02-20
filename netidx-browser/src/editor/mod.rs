@@ -1120,22 +1120,21 @@ impl Editor {
             @weak reveal_properties,
             @weak properties,
             @strong inhibit_change => move |s| {
-                {
-                    if let Some(mut child) = properties.first_child() {
-                        let mut n = 1;
-                        while let Some(c) = child.next_sibling() {
-                            n += 1;
-                            child = c;
-                            if n == 3 {
-                                child.hide();
-                                child.set_sensitive(false);
-                                properties.remove(&child);
-                            }
+                if let Some(mut child) = properties.first_child() {
+                    let mut n = 1;
+                    while let Some(c) = child.next_sibling() {
+                        n += 1;
+                        child = c;
+                        if n == 3 {
+                            child.hide();
+                            child.set_sensitive(false);
+                            properties.remove(&child);
                         }
                     }
                 }
                 match s.selected() {
                     None => {
+                        dbg!(());
                         *selected.borrow_mut() = None;
                         ctx.borrow().user.backend.highlight(vec![]);
                         reveal_properties.set_reveal_child(false);
@@ -1157,6 +1156,7 @@ impl Editor {
                             properties.append(w.root());
                             w.root().set_sensitive(true);
                             w.root().grab_focus();
+                            w.root().show();
                         }
                         reveal_properties.set_reveal_child(true);
                     }
