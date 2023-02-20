@@ -543,11 +543,11 @@ impl Widget {
         };
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         if let Some(p) = props.as_ref() {
-            root.prepend(p.root());
-            root.prepend(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            root.append(p.root());
+            root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         }
         if let Some(r) = kind.root() {
-            root.prepend(r);
+            root.append(r);
         }
         store.set_value(iter, 0, &name.to_value());
         root.set_sensitive(false);
@@ -940,6 +940,7 @@ pub(super) struct Editor {
 impl Editor {
     pub(super) fn new(ctx: BSCtx, scope: Path, spec: view::Widget) -> Editor {
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
+        root.set_shrink_start_child(false);
         idle_add_local(
             clone!(@weak root => @default-return glib::Continue(false), move || {
                 root.set_position(root.allocated_height() / 2);
@@ -956,21 +957,25 @@ impl Editor {
         root.set_start_child(Some(&root_upper));
         root.set_end_child(Some(&win_lower));
         let treebtns = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        root_upper.prepend(&treebtns);
+        root_upper.append(&treebtns);
         let addbtn = gtk::Button::from_icon_name("list-add-symbolic");
         let addchbtn = gtk::Button::from_icon_name("go-down-symbolic");
         let delbtn = gtk::Button::from_icon_name("list-remove-symbolic");
         let dupbtn = gtk::Button::from_icon_name("edit-copy-symbolic");
         let undobtn = gtk::Button::from_icon_name("edit-undo-symbolic");
-        treebtns.prepend(&addbtn);
-        treebtns.prepend(&addchbtn);
-        treebtns.prepend(&delbtn);
-        treebtns.prepend(&dupbtn);
-        treebtns.prepend(&undobtn);
+        treebtns.append(&addbtn);
+        treebtns.append(&addchbtn);
+        treebtns.append(&delbtn);
+        treebtns.append(&dupbtn);
+        treebtns.append(&undobtn);
         let treewin = gtk::ScrolledWindow::new();
         treewin.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        root_upper.prepend(&treewin);
+        root_upper.append(&treewin);
         let view = gtk::TreeView::new();
+        view.set_valign(gtk::Align::Fill);
+        view.set_vexpand(true);
+        view.set_halign(gtk::Align::Fill);
+        view.set_hexpand(true);
         treewin.set_child(Some(&view));
         view.append_column(&{
             let column = gtk::TreeViewColumn::new();
@@ -1046,7 +1051,7 @@ impl Editor {
         );
         let selected: Rc<RefCell<Option<gtk::TreeIter>>> = Rc::new(RefCell::new(None));
         let reveal_properties = gtk::Revealer::new();
-        root_lower.prepend(&reveal_properties);
+        root_lower.append(&reveal_properties);
         let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
         reveal_properties.set_child(Some(&properties));
         let inhibit_change = Rc::new(Cell::new(false));
@@ -1084,7 +1089,7 @@ impl Editor {
                         );
                         let wv = store.get_value(&iter, 1);
                         if let Ok(w) = wv.get::<&Widget>() {
-                            properties.prepend(w.root());
+                            properties.append(w.root());
                             w.root().set_sensitive(true);
                             w.root().grab_focus();
                         }
@@ -1092,8 +1097,8 @@ impl Editor {
                     }
                 }
         }));
-        properties.prepend(&kind);
-        properties.prepend(&gtk::Separator::new(gtk::Orientation::Vertical));
+        properties.append(&kind);
+        properties.append(&gtk::Separator::new(gtk::Orientation::Vertical));
         let selection = view.selection();
         selection.set_mode(gtk::SelectionMode::Single);
         selection.connect_changed(clone!(
@@ -1137,7 +1142,7 @@ impl Editor {
                         }
                         let v = store.get_value(&iter, 1);
                         if let Ok(w) = v.get::<&Widget>() {
-                            properties.prepend(w.root());
+                            properties.append(w.root());
                             w.root().set_sensitive(true);
                             w.root().grab_focus();
                         }
