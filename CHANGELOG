@@ -1,4 +1,6 @@
 * 0.16.0-9
+  - Fix a bug in subscriber that could cause pushback not to work at
+    very high message rates
 
   - implement better batching in channel recv. Pack channels are now
     capable of sending 1 GB/s of u64s locally on a 1260P, and the
