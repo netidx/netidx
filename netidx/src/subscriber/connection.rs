@@ -30,11 +30,11 @@ use futures::{
     select_biased,
     stream::FuturesUnordered,
 };
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use log::info;
 use parking_lot::Mutex;
 use std::{
-    collections::{hash_map::Entry, HashMap, VecDeque},
+    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     mem,
     net::SocketAddr,
     pin::Pin,
@@ -243,6 +243,7 @@ pub(super) struct ConnectionCtx {
     pending_writes: FxHashMap<Id, VecDeque<oneshot::Sender<Value>>>,
     by_receiver: FxHashMap<ChanWrap<Pooled<Vec<(SubId, Event)>>>, ChanId>,
     by_chan: ByChan,
+    gc_chan: FxHashSet<ChanId>,
     blocked_channels: FuturesUnordered<BlockedChannelFut>,
     timed_out: Vec<Path>,
 }
@@ -272,6 +273,7 @@ impl ConnectionCtx {
             pending_writes: HashMap::default(),
             by_receiver: HashMap::default(),
             by_chan: HashMap::default(),
+            gc_chan: HashSet::default(),
             blocked_channels: FuturesUnordered::<BlockedChannelFut>::new(),
             timed_out: Vec::new(),
         }
@@ -484,16 +486,7 @@ impl ConnectionCtx {
                 },
             }
         }
-        for (_, (mut c, batch)) in self.by_chan.drain() {
-            if let Err(e) = c.0.try_send(batch) {
-                if e.is_full() {
-                    let batch = e.into_inner();
-                    self.blocked_channels.push(Box::pin(async move {
-                        let _ = c.0.send(batch).await;
-                    }))
-                }
-            }
-        }
+        self.send_updates();
         Ok(())
     }
 
@@ -517,10 +510,26 @@ impl ConnectionCtx {
                 }
             }
         }
-        for (_, (mut c, batch)) in self.by_chan.drain() {
-            self.blocked_channels.push(Box::pin(async move {
-                let _ = c.0.send(batch).await;
-            }));
+        self.send_updates()
+    }
+
+    fn send_updates(&mut self) {
+        for (id, (c, batch)) in self.by_chan.iter_mut() {
+            let batch = mem::replace(batch, BATCHES.take());
+            if let Err(e) = c.0.try_send(batch) {
+                if e.is_full() {
+                    let batch = e.into_inner();
+                    let mut c = c.clone();
+                    self.blocked_channels.push(Box::pin(async move {
+                        let _ = c.0.send(batch).await;
+                    }))
+                } else if e.is_disconnected() {
+                    self.gc_chan.insert(*id);
+                }
+            }
+        }
+        for id in self.gc_chan.drain() {
+            self.by_chan.remove(&id);
         }
     }
 
