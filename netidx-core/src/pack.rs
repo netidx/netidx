@@ -823,6 +823,51 @@ impl<T: Pack, U: Pack> Pack for (T, U) {
     }
 }
 
+impl<T: Pack, U: Pack, V: Pack> Pack for (T, U, V) {
+    fn encoded_len(&self) -> usize {
+        <T as Pack>::encoded_len(&self.0)
+            + <U as Pack>::encoded_len(&self.1)
+            + <V as Pack>::encoded_len(&self.2)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        <T as Pack>::encode(&self.0, buf)?;
+        <U as Pack>::encode(&self.1, buf)?;
+        Ok(<V as Pack>::encode(&self.2, buf)?)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let fst = <T as Pack>::decode(buf)?;
+        let snd = <U as Pack>::decode(buf)?;
+        let trd = <V as Pack>::decode(buf)?;
+        Ok((fst, snd, trd))
+    }
+}
+
+impl<T: Pack, U: Pack, V: Pack, W: Pack> Pack for (T, U, V, W) {
+    fn encoded_len(&self) -> usize {
+        <T as Pack>::encoded_len(&self.0)
+            + <U as Pack>::encoded_len(&self.1)
+            + <V as Pack>::encoded_len(&self.2)
+            + <W as Pack>::encoded_len(&self.3)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        <T as Pack>::encode(&self.0, buf)?;
+        <U as Pack>::encode(&self.1, buf)?;
+        <V as Pack>::encode(&self.2, buf)?;
+        Ok(<W as Pack>::encode(&self.3, buf)?)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let fst = <T as Pack>::decode(buf)?;
+        let snd = <U as Pack>::decode(buf)?;
+        let trd = <V as Pack>::decode(buf)?;
+        let fth = <W as Pack>::decode(buf)?;
+        Ok((fst, snd, trd, fth))
+    }
+}
+
 impl Pack for bool {
     fn const_encoded_len() -> Option<usize> {
         Some(mem::size_of::<bool>())
