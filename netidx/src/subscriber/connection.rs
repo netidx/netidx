@@ -33,6 +33,7 @@ use futures::{
 use fxhash::{FxHashMap, FxHashSet};
 use log::info;
 use parking_lot::Mutex;
+use protocol::resolver::UserInfo;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     mem,
@@ -115,6 +116,7 @@ fn unsubscribe(
 async fn hello_publisher(
     mut con: TcpStream,
     tls_ctx: Option<tls::CachedConnector>,
+    uifo: Option<UserInfo>,
     desired_auth: &DesiredAuth,
     target_auth: &TargetAuth,
 ) -> Result<Channel> {
@@ -148,9 +150,9 @@ async fn hello_publisher(
             DesiredAuth::Local | DesiredAuth::Krb5 { .. } | DesiredAuth::Tls { .. },
             TargetAuth::Local,
         ) => {
-            channel::write_raw(&mut con, &Hello::Local).await?;
+            channel::write_raw(&mut con, &Hello::Local(uifo)).await?;
             match channel::read_raw(&mut con).await? {
-                Hello::Local => (),
+                Hello::Local(_) => (),
                 _ => bail!("unexpected response from publisher"),
             }
             Ok(Channel::new::<ClientCtx, TcpStream>(None, con))
@@ -160,11 +162,12 @@ async fn hello_publisher(
         }
         (DesiredAuth::Krb5 { upn, .. }, TargetAuth::Krb5 { spn }) => {
             let upn = upn.as_ref().map(|p| p.as_str());
-            channel::write_raw(&mut con, &Hello::Krb5).await?;
+            channel::write_raw(&mut con, &Hello::Krb5(uifo)).await?;
             let ctx = krb5_authentication(upn, spn, &mut con).await?;
             let mut con = Channel::new(Some(K5CtxWrap::new(ctx)), con);
-            if con.receive::<Hello>().await? != Hello::Krb5 {
-                bail!("protocol error")
+            match con.receive::<Hello>().await? {
+                Hello::Krb5(_) => (),
+                _ => bail!("protocol error")
             }
             Ok(con)
         }
@@ -175,14 +178,15 @@ async fn hello_publisher(
             let tls = tls_ctx.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
             let ctx = task::block_in_place(|| tls.load(name))?;
             let name = rustls::ServerName::try_from(&**name)?;
-            channel::write_raw(&mut con, &Hello::Tls).await?;
+            channel::write_raw(&mut con, &Hello::Tls(uifo)).await?;
             let tls = ctx.connect(name, con).await?;
             let mut con = Channel::new::<
                 ClientCtx,
                 tokio_rustls::client::TlsStream<TcpStream>,
             >(None, tls);
-            if con.receive::<Hello>().await? != Hello::Tls {
-                bail!("protocol error")
+            match con.receive::<Hello>().await? {
+                Hello::Tls(_) => (),
+                _ => bail!("protocol error")
             }
             Ok(con)
         }
@@ -235,6 +239,7 @@ pub(super) struct ConnectionCtx {
     desired_auth: DesiredAuth,
     conid: ConId,
     tls_ctx: Option<tls::CachedConnector>,
+    uifo: Option<UserInfo>,
     from_sub: BatchReceiver<ToCon>,
     pending: HashMap<Path, SubscribeValRequest>,
     subscriptions: FxHashMap<Id, Sub>,
@@ -254,6 +259,7 @@ impl ConnectionCtx {
         subscriber: SubscriberWeak,
         conid: ConId,
         tls_ctx: Option<tls::CachedConnector>,
+        uifo: Option<UserInfo>,
         target_auth: TargetAuth,
         desired_auth: DesiredAuth,
         from_sub: BatchReceiver<ToCon>,
@@ -265,6 +271,7 @@ impl ConnectionCtx {
             desired_auth,
             conid,
             tls_ctx,
+            uifo,
             from_sub,
             pending: HashMap::default(),
             subscriptions: HashMap::default(),
@@ -633,6 +640,7 @@ impl ConnectionCtx {
             hello_publisher(
                 soc,
                 self.tls_ctx.clone(),
+                self.uifo.take(),
                 &self.desired_auth,
                 &self.target_auth,
             ),

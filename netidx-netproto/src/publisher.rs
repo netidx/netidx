@@ -1,4 +1,4 @@
-use crate::value::Value;
+use crate::{resolver::UserInfo, value::Value};
 use bytes::Bytes;
 use netidx_core::path::Path;
 use netidx_derive::Pack;
@@ -15,10 +15,10 @@ pub enum Hello {
     /// Authenticate using kerberos 5, following the hello, the
     /// subscriber and publisher will exchange tokens to complete the
     /// authentication.
-    Krb5,
+    Krb5(#[pack(default)] Option<UserInfo>),
     /// Authenticate using a local unix socket, only valid for
     /// publishers on the same machine as the subscriber.
-    Local,
+    Local(#[pack(default)] Option<UserInfo>),
     /// In order to prevent denial of service, spoofing, etc,
     /// authenticated publishers must prove that they are actually
     /// listening on the socket they claim to be listening on. To
@@ -36,7 +36,7 @@ pub enum Hello {
     /// Authenticate using transport layer security. In this case both
     /// the server AND the client must have certificates that are
     /// signed by a CA they mutually trust.
-    Tls,
+    Tls(#[pack(default)] Option<UserInfo>),
 }
 
 #[derive(Debug, Clone, PartialEq, Pack)]

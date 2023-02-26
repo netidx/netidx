@@ -19,9 +19,8 @@ use crate::{
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
-use arcstr::ArcStr;
 use bytes::Bytes;
-use cross_krb5::{K5ServerCtx, ServerCtx};
+use cross_krb5::ServerCtx;
 use futures::{
     channel::{
         mpsc::{channel, Receiver, Sender},
@@ -34,7 +33,7 @@ use futures::{
 use fxhash::FxHashMap;
 use log::{debug, info};
 use parking_lot::RwLock;
-use protocol::resolver::{AuthChallenge, HashMethod};
+use protocol::resolver::{AuthChallenge, HashMethod, UserInfo};
 use std::{
     boxed::Box,
     collections::{hash_map::Entry, BTreeSet, Bound, HashMap, HashSet},
@@ -234,9 +233,9 @@ fn check_token(
     if token.len() < mem::size_of::<u64>() {
         bail!("error, token too short");
     }
-    let expected = utils::make_sha3_token(&[
+    let expected = utils::make_sha3_token([
         &secret.to_be_bytes(),
-        &timestamp.to_be_bytes(),
+        &timestamp.to_be_bytes()[..],
         &permissions.to_be_bytes(),
         path.as_bytes(),
     ]);
@@ -322,11 +321,23 @@ impl ClientCtx {
         }
     }
 
-    fn set_user(&mut self, user: String) {
-        if let Some(pb) = self.publisher.upgrade() {
-            let mut t = pb.0.lock();
-            if let Some(ci) = t.clients.get_mut(&self.client) {
-                ci.user = Some(ArcStr::from(user));
+    fn set_user(&mut self, ifo: Option<UserInfo>) {
+        if let Some(ifo) = ifo {
+            if let Some(secret) = self.secrets.read().get(&ifo.resolver).copied() {
+                let expected = utils::make_sha3_token(
+                    iter::once(&secret.to_be_bytes()[..])
+                        .chain(iter::once(ifo.name.as_bytes()))
+                        .chain(iter::once(ifo.primary_group.as_bytes()))
+                        .chain(ifo.groups.iter().map(|s| s.as_bytes())),
+                );
+                if ifo.token == expected {
+                    if let Some(pb) = self.publisher.upgrade() {
+                        let mut t = pb.0.lock();
+                        if let Some(ci) = t.clients.get_mut(&self.client) {
+                            ci.user = Some(ifo);
+                        }
+                    }
+                }
             }
         }
     }
@@ -348,33 +359,35 @@ impl ClientCtx {
                 self.client_arrived();
                 Ok(Channel::new::<ServerCtx, TcpStream>(None, con))
             }
-            Hello::Local => {
-                channel::write_raw(&mut con, &Hello::Local).await?;
+            Hello::Local(uifo) => {
+                channel::write_raw(&mut con, &Hello::Local(None)).await?;
+                self.set_user(uifo);
                 self.client_arrived();
                 Ok(Channel::new::<ServerCtx, TcpStream>(None, con))
             }
-            Hello::Krb5 => match &self.desired_auth {
+            Hello::Krb5(uifo) => match &self.desired_auth {
                 DesiredAuth::Anonymous | DesiredAuth::Tls { .. } => bail!(NO),
                 DesiredAuth::Local => {
-                    channel::write_raw(&mut con, &Hello::Local).await?;
+                    channel::write_raw(&mut con, &Hello::Local(None)).await?;
+                    self.set_user(uifo);
                     self.client_arrived();
                     Ok(Channel::new::<ServerCtx, TcpStream>(None, con))
                 }
                 DesiredAuth::Krb5 { upn: _, spn } => {
                     let spn = spn.as_ref().map(|s| s.as_str());
-                    let mut ctx =
-                        krb5_authentication(HELLO_TIMEOUT, spn, &mut con).await?;
-                    self.set_user(ctx.client()?);
+                    let ctx = krb5_authentication(HELLO_TIMEOUT, spn, &mut con).await?;
+                    self.set_user(uifo);
                     let mut con = Channel::new(Some(K5CtxWrap::new(ctx)), con);
-                    con.send_one(&Hello::Krb5).await?;
+                    con.send_one(&Hello::Krb5(None)).await?;
                     self.client_arrived();
                     Ok(con)
                 }
             },
-            Hello::Tls => match &self.desired_auth {
+            Hello::Tls(uifo) => match &self.desired_auth {
                 DesiredAuth::Anonymous | DesiredAuth::Krb5 { .. } => bail!(NO),
                 DesiredAuth::Local => {
-                    channel::write_raw(&mut con, &Hello::Local).await?;
+                    channel::write_raw(&mut con, &Hello::Local(None)).await?;
+                    self.set_user(uifo);
                     self.client_arrived();
                     Ok(Channel::new::<ServerCtx, TcpStream>(None, con))
                 }
@@ -385,20 +398,12 @@ impl ClientCtx {
                         tls.load(identity.as_ref().map(|s| s.as_str()))
                     })?;
                     let tls = time::timeout(HELLO_TIMEOUT, ctx.accept(con)).await??;
-                    let user = match tls.get_ref().1.peer_certificates() {
-                        Some([cert, ..]) => tls::get_common_name(&cert.0)?,
-                        Some(_) | None => {
-                            bail!("tls handshake should be complete by now")
-                        }
-                    };
-                    if let Some(user) = user {
-                        self.set_user(user);
-                    }
+                    self.set_user(uifo);
                     let mut con = Channel::new::<
                         ServerCtx,
                         tokio_rustls::server::TlsStream<TcpStream>,
                     >(None, tls);
-                    con.send_one(&Hello::Tls).await?;
+                    con.send_one(&Hello::Tls(None)).await?;
                     self.client_arrived();
                     Ok(con)
                 }
@@ -416,9 +421,9 @@ impl ClientCtx {
                 if challenge.hash_method != HashMethod::Sha3_512 {
                     bail!("requested hash method not supported")
                 }
-                let reply = utils::make_sha3_token(&[
-                    &challenge.challenge.to_be_bytes(),
-                    &secret.to_be_bytes(),
+                let reply = utils::make_sha3_token([
+                    &challenge.challenge.to_be_bytes()[..],
+                    &secret.to_be_bytes()[..],
                 ]);
                 con.send_one(&BoundedBytes::<4096>(reply)).await?;
                 // prevent fishing for the key

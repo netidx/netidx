@@ -1,4 +1,5 @@
 use crate::resolver_server::config::{Config, MemberServer};
+use arcstr::ArcStr;
 use anyhow::{bail, Result};
 
 pub(crate) struct Mapper;
@@ -8,7 +9,11 @@ impl Mapper {
         Ok(Mapper)
     }
 
-    pub(crate) fn groups(&mut self, _user: &str) -> Result<Vec<String>> {
+    pub(crate) fn user(&self, user: u32) -> Result<ArcStr> {
+        bail!("user listing is not implemented on windows")
+    }
+
+    pub(crate) fn groups(&mut self, _user: &str) -> Result<(ArcStr, Vec<ArcStr>)> {
         bail!("group listing is not implemented on windows")
     }
 }

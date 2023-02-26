@@ -1,5 +1,7 @@
 use crate::glob::GlobSet;
+use arcstr::ArcStr;
 use bytes::{Buf, BufMut, Bytes};
+use smallvec::SmallVec;
 use netidx_core::{
     chars::Chars,
     pack::{
@@ -153,6 +155,15 @@ impl TryFrom<AuthWrite> for TargetAuth {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Pack)]
+pub struct UserInfo {
+    pub name: ArcStr,
+    pub primary_group: ArcStr,
+    pub groups: SmallVec<[ArcStr; 16]>,
+    pub resolver: SocketAddr,
+    pub token: Bytes,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub struct Publisher {
     pub resolver: SocketAddr,
@@ -160,6 +171,8 @@ pub struct Publisher {
     pub addr: SocketAddr,
     pub hash_method: HashMethod,
     pub target_auth: TargetAuth,
+    #[pack(default)]
+    pub user_info: Option<UserInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
@@ -250,17 +263,6 @@ pub enum ToWrite {
     PublishDefaultWithFlags(Path, u32),
     /// Unpublish a default publisher
     UnpublishDefault(Path),
-    /// Get info about a user
-    GetUserInfo(Chars),
-    #[pack(other)]
-    Unknown
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Pack)]
-pub struct UserInfo {
-    pub name: Chars,
-    pub primary_group: Chars,
-    pub groups: Vec<Chars>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Pack)]
@@ -270,5 +272,4 @@ pub enum FromWrite {
     Referral(Referral),
     Denied,
     Error(Chars),
-    UserInfo(UserInfo),
 }

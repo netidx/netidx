@@ -8,7 +8,7 @@ use crate::{
     config::Config,
     path::Path,
     pool::{Pool, Pooled},
-    protocol::publisher,
+    protocol::{publisher, resolver::UserInfo},
     resolver_client::ResolverWrite,
     resolver_server::auth::Permissions,
     tls,
@@ -697,7 +697,7 @@ impl UpdateBatch {
 struct Client {
     msg_queue: MsgQ,
     subscribed: FxHashMap<Id, Permissions>,
-    user: Option<ArcStr>,
+    user: Option<UserInfo>,
 }
 
 pub struct Published {
@@ -1350,15 +1350,16 @@ impl Publisher {
         }
     }
 
-    /// Return the user associated with the specified client id.  If
-    /// the authentication mechanism is Krb5 then this will be the
-    /// remote user's user principal name, e.g. eric@RYU-OH.ORG on
-    /// posix systems. If the auth mechanism is tls, then this will be
-    /// the common name of the user's certificate.
+    /// Return the user information associated with the specified
+    /// client id. If the authentication mechanism is Krb5 then this
+    /// will be the remote user's user principal name,
+    /// e.g. eric@RYU-OH.ORG on posix systems. If the auth mechanism
+    /// is tls, then this will be the common name of the user's
+    /// certificate. If the authentication mechanism is Local then
+    /// this will be the local user name.
     ///
-    /// This will always be None if the auth mechanism is Local or
-    /// Anonymous.
-    pub fn user(&self, client: &ClId) -> Option<ArcStr> {
+    /// This will always be None if the auth mechanism is Anonymous.
+    pub fn user(&self, client: &ClId) -> Option<UserInfo> {
         self.0.lock().clients.get(client).and_then(|c| c.user.clone())
     }
 

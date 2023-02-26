@@ -304,9 +304,9 @@ thread_local! {
     static BUF: RefCell<BytesMut> = RefCell::new(BytesMut::with_capacity(512));
 }
 
-pub fn make_sha3_token(data: &[&[u8]]) -> Bytes {
+pub fn make_sha3_token<'a>(data: impl IntoIterator<Item = &'a [u8]> + 'a) -> Bytes {
     let mut hash = Sha3_512::new();
-    for v in data {
+    for v in data.into_iter() {
         hash.update(v);
     }
     BUF.with(|buf| {

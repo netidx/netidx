@@ -1,4 +1,7 @@
-use super::{auth::Permissions, secctx::SecCtxDataReadGuard};
+use super::{
+    auth::{Permissions, UserInfo},
+    secctx::SecCtxDataReadGuard,
+};
 use crate::{
     pack::Z64,
     path::Path,
@@ -476,7 +479,7 @@ impl Store {
     fn defaults_for_id(&self, id: &PublisherId) -> HashSet<Path> {
         self.defaults_by_id.get(id).map(|s| s.clone()).unwrap_or_else(HashSet::new)
     }
-    
+
     pub(super) fn clear(&mut self, publisher: &Arc<Publisher>) {
         for path in self.published_for_id(&publisher.id).drain() {
             self.unpublish(publisher, false, path);
@@ -492,14 +495,38 @@ impl Store {
 
     fn record_publisher(
         &self,
+        sec: Option<(&SecCtxDataReadGuard, &UserInfo)>,
         publishers: &mut FxHashMap<PublisherId, Publisher>,
         id: &PublisherId,
     ) {
-        publishers.entry(*id).or_insert_with(|| (*self.publishers_by_id[id]).clone());
+        publishers.entry(*id).or_insert_with(|| {
+            let mut pb = (*self.publishers_by_id[id]).clone();
+            if let Some((sec, uifo)) = sec {
+                let secret = match sec {
+                    SecCtxDataReadGuard::Anonymous => None,
+                    SecCtxDataReadGuard::Local(sec) => sec.secret(id),
+                    SecCtxDataReadGuard::Krb5(sec) => sec.secret(id),
+                    SecCtxDataReadGuard::Tls(sec) => sec.secret(id),
+                };
+                let user_info = uifo.user_info.clone();
+                if let (Some(secret), Some(mut user_info)) = (secret, user_info) {
+                    let token = utils::make_sha3_token(
+                        iter::once(&secret.to_be_bytes()[..])
+                            .chain(iter::once(user_info.name.as_bytes()))
+                            .chain(iter::once(user_info.primary_group.as_bytes()))
+                            .chain(user_info.groups.iter().map(|s| s.as_bytes())),
+                    );
+                    user_info.token = token;
+                    pb.user_info = Some(user_info);
+                }
+            }
+            pb
+        });
     }
 
     fn resolve_default(
         &self,
+        sec: Option<(&SecCtxDataReadGuard, &UserInfo)>,
         publishers: &mut FxHashMap<PublisherId, Publisher>,
         path: &Path,
     ) -> (u32, Pooled<Vec<PublisherRef>>) {
@@ -515,7 +542,7 @@ impl Store {
             Some((p, ids)) if Path::is_parent(p, path) => {
                 let mut pubs = SIGNED_PUBS_POOL.take();
                 let refs = ids.into_iter().map(|id| {
-                    self.record_publisher(publishers, id);
+                    self.record_publisher(sec, publishers, id);
                     PublisherRef { id: *id, token: Bytes::new() }
                 });
                 pubs.extend(refs);
@@ -530,13 +557,13 @@ impl Store {
         publishers: &mut FxHashMap<PublisherId, Publisher>,
         path: &Path,
     ) -> (u32, Pooled<Vec<PublisherRef>>) {
-        let (flags, mut pubs) = self.resolve_default(publishers, path);
+        let (flags, mut pubs) = self.resolve_default(None, publishers, path);
         let flags = match self.published_by_path.get(path.as_ref()) {
             None => flags,
             Some(ids) => {
                 if pubs.len() == 0 {
                     pubs.extend(ids.into_iter().map(|id| {
-                        self.record_publisher(publishers, id);
+                        self.record_publisher(None, publishers, id);
                         PublisherRef { id: *id, token: Bytes::new() }
                     }));
                     self.get_flags(path.as_ref())
@@ -544,7 +571,7 @@ impl Store {
                     let mut by_id = BY_ID_POOL.take();
                     by_id.extend(pubs.drain(..).map(|r| (r.id, r)));
                     by_id.extend(ids.into_iter().map(|id| {
-                        self.record_publisher(publishers, id);
+                        self.record_publisher(None, publishers, id);
                         (*id, PublisherRef { id: *id, token: Bytes::new() })
                     }));
                     pubs.extend(by_id.drain().map(|(_, r)| r));
@@ -559,6 +586,7 @@ impl Store {
         &self,
         publishers: &mut FxHashMap<PublisherId, Publisher>,
         sec: &SecCtxDataReadGuard,
+        uifo: &UserInfo,
         now: u64,
         perm: Permissions,
         path: &Path,
@@ -574,16 +602,16 @@ impl Store {
                 None => PublisherRef { id, token: Bytes::new() },
                 Some(secret) => PublisherRef {
                     id,
-                    token: utils::make_sha3_token(&[
+                    token: utils::make_sha3_token([
                         &secret.to_be_bytes(),
-                        &now.to_be_bytes(),
+                        &now.to_be_bytes()[..],
                         &perm.bits().to_be_bytes(),
                         path.as_bytes(),
                     ]),
                 },
             }
         };
-        let (flags, mut pubs) = self.resolve_default(publishers, path);
+        let (flags, mut pubs) = self.resolve_default(Some((sec, uifo)), publishers, path);
         for i in 0..pubs.len() {
             pubs[i] = sign(pubs[i].id);
         }
@@ -592,7 +620,7 @@ impl Store {
             Some(ids) => {
                 if pubs.len() == 0 {
                     pubs.extend(ids.into_iter().map(|id| {
-                        self.record_publisher(publishers, id);
+                        self.record_publisher(Some((sec, uifo)), publishers, id);
                         sign(*id)
                     }));
                     self.get_flags(&*path)
@@ -600,7 +628,7 @@ impl Store {
                     let mut by_id = BY_ID_POOL.take();
                     by_id.extend(pubs.drain(..).map(|r| (r.id, r)));
                     by_id.extend(ids.into_iter().map(|id| {
-                        self.record_publisher(publishers, id);
+                        self.record_publisher(Some((sec, uifo)), publishers, id);
                         (*id, sign(*id))
                     }));
                     pubs.extend(by_id.drain().map(|(_, r)| r));

@@ -1,3 +1,4 @@
+use arcstr::ArcStr;
 use bytes::{Bytes, BytesMut};
 use netidx_core::{
     chars::Chars,
@@ -6,7 +7,8 @@ use netidx_core::{
     pool::Pooled,
     utils::pack,
 };
-use proptest::{prelude::*, string::string_regex};
+use crate::resolver::UserInfo;
+use proptest::{prelude::*, string::string_regex, collection};
 use rust_decimal::Decimal;
 use std::{fmt::Debug, sync::Arc};
 
@@ -18,8 +20,18 @@ fn check<T: Pack + Debug + PartialEq>(t: T) {
     assert_eq!(t, u)
 }
 
+fn option<T: Clone + Debug, S: Strategy<Value = T>>(
+    some: S,
+) -> impl Strategy<Value = Option<T>> {
+    prop_oneof![Just(None), some.prop_map(Some)]
+}
+
 fn chars() -> impl Strategy<Value = Chars> {
     any::<String>().prop_map(Chars::from)
+}
+
+fn arcstr() -> impl Strategy<Value = ArcStr> {
+    any::<String>().prop_map(ArcStr::from)
 }
 
 fn chars_regex(rex: &str) -> impl Strategy<Value = Chars> {
@@ -34,6 +46,17 @@ fn path() -> impl Strategy<Value = Path> {
     chars().prop_map(Path::from)
 }
 
+fn user_info() -> impl Strategy<Value = UserInfo> {
+    (arcstr(), arcstr(), collection::vec(arcstr(), (0, 20)), bytes()).prop_map(
+        |(name, primary_group, groups, token)| UserInfo {
+            name,
+            primary_group,
+            groups,
+            token,
+        },
+    )
+}
+
 mod resolver {
     use super::*;
     use crate::{
@@ -42,7 +65,7 @@ mod resolver {
             Auth, AuthChallenge, AuthRead, AuthWrite, ClientHello, ClientHelloWrite,
             FromRead, FromWrite, GetChangeNr, HashMethod, ListMatching, Publisher,
             PublisherId, PublisherRef, ReadyForOwnershipCheck, Referral, Resolved,
-            Secret, ServerHelloWrite, Table, TargetAuth, ToRead, ToWrite, UserInfo,
+            Secret, ServerHelloWrite, Table, TargetAuth, ToRead, ToWrite,
         },
     };
     use netidx_core::pack::PackError;
@@ -168,13 +191,15 @@ mod resolver {
         let addr = any::<SocketAddr>();
         let hash_method = hash_method();
         let target_auth = target_auth();
-        (resolver, id, addr, hash_method, target_auth).prop_map(
-            |(resolver, id, addr, hash_method, target_auth)| Publisher {
+        let user_info = option(user_info());
+        (resolver, id, addr, hash_method, target_auth, user_info).prop_map(
+            |(resolver, id, addr, hash_method, target_auth, user_info)| Publisher {
                 resolver,
                 id,
                 addr,
                 hash_method,
                 target_auth,
+                user_info,
             },
         )
     }
@@ -280,12 +305,6 @@ mod resolver {
         any::<u8>().prop_map(|_| ReadyForOwnershipCheck)
     }
 
-    fn user_info() -> impl Strategy<Value = UserInfo> {
-        (chars(), chars(), collection::vec(chars(), (0, 20))).prop_map(
-            |(name, primary_group, groups)| UserInfo { name, primary_group, groups },
-        )
-    }
-
     fn to_write() -> impl Strategy<Value = ToWrite> {
         prop_oneof![
             path().prop_map(ToWrite::Publish),
@@ -297,9 +316,7 @@ mod resolver {
                 .prop_map(|(path, flags)| ToWrite::PublishWithFlags(path, flags)),
             (path(), any::<u32>())
                 .prop_map(|(path, flags)| ToWrite::PublishDefaultWithFlags(path, flags)),
-            path().prop_map(ToWrite::UnpublishDefault),
-            chars().prop_map(ToWrite::GetUserInfo),
-            Just(ToWrite::Unknown),
+            path().prop_map(ToWrite::UnpublishDefault)
         ]
     }
 
@@ -309,8 +326,7 @@ mod resolver {
             Just(FromWrite::Unpublished),
             referral().prop_map(FromWrite::Referral),
             Just(FromWrite::Denied),
-            chars().prop_map(FromWrite::Error),
-            user_info().prop_map(FromWrite::UserInfo)
+            chars().prop_map(FromWrite::Error)
         ]
     }
 
@@ -390,8 +406,9 @@ mod publisher {
     fn hello() -> impl Strategy<Value = Hello> {
         prop_oneof![
             Just(Hello::Anonymous),
-            Just(Hello::Krb5),
-            Just(Hello::Local),
+            option(user_info()).prop_map(Hello::Krb5),
+            option(user_info()).prop_map(Hello::Local),
+            option(user_info()).prop_map(Hello::Tls),
             any::<SocketAddr>().prop_map(Hello::ResolverAuthenticate)
         ]
     }

@@ -180,6 +180,7 @@ impl Shard {
                                 let (flags, publishers) = store.resolve_and_sign(
                                     &mut resp.publishers,
                                     &secctx,
+                                    &uifo,
                                     now,
                                     perm,
                                     &path,

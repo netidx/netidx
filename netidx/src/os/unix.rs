@@ -29,14 +29,22 @@ impl Mapper {
         }
     }
 
-    pub(crate) fn groups(&self, user: &str) -> Result<Vec<String>> {
+    pub(crate) fn groups(&self, user: &str) -> Result<(ArcStr, Vec<ArcStr>)> {
         task::block_in_place(|| {
             let out = Command::new(&*self.0).arg(user).output()?;
-            Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "groups=")
+            let s = String::from_utf8_lossy(&out.stdout);
+            let primary = Mapper::parse_output(&s, "gid=")?;
+            let groups = Mapper::parse_output(&s, "groups=")?;
+            let primary = if primary.is_empty() {
+                bail!("missing primary group")
+            } else {
+                primary.swap_remove(0)
+            };
+            Ok((primary, groups))
         })
     }
 
-    pub(crate) fn user(&self, user: u32) -> Result<Chars> {
+    pub(crate) fn user(&self, user: u32) -> Result<ArcStr> {
         task::block_in_place(|| {
             let out = Command::new(&*self.0).arg(user.to_string()).output()?;
             let mut user =
@@ -44,12 +52,12 @@ impl Mapper {
             if user.is_empty() {
                 bail!("user not found")
             } else {
-                Ok(Chars::from(user.swap_remove(0)))
+                Ok(user.swap_remove(0))
             }
         })
     }
 
-    fn parse_output(out: &str, key: &str) -> Result<Vec<String>> {
+    fn parse_output(out: &str, key: &str) -> Result<Vec<ArcStr>> {
         let mut groups = Vec::new();
         match out.find(key) {
             None => Ok(Vec::new()),
@@ -63,7 +71,7 @@ impl Mapper {
                             ))
                         }
                         Some(i_cp) => {
-                            groups.push(String::from(&s[i_op + 1..i_cp]));
+                            groups.push(ArcStr::from(&s[i_op + 1..i_cp]));
                             s = &s[i_cp + 1..];
                         }
                     }

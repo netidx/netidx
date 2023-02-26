@@ -29,6 +29,7 @@ use futures::{
 };
 use fxhash::FxHashMap;
 use log::{info, warn};
+use netidx_netproto::resolver::UserInfo;
 use parking_lot::Mutex;
 use rand::Rng;
 use std::{
@@ -568,6 +569,14 @@ impl Connection {
     }
 }
 
+struct Chosen {
+    addr: SocketAddr,
+    target_auth: TargetAuth,
+    token: Bytes,
+    uifo: Option<UserInfo>,
+    flags: PublishFlags,
+}
+
 #[derive(Debug)]
 struct SubscriberInner {
     id: SubscriberId,
@@ -597,7 +606,7 @@ impl SubscriberInner {
         &mut self,
         publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
         resolved: &Resolved,
-    ) -> Option<(SocketAddr, TargetAuth, Bytes, PublishFlags)> {
+    ) -> Option<Chosen> {
         use rand::seq::IteratorRandom;
         let mut flags = PublishFlags::from_bits(resolved.flags)?;
         if flags.contains(PublishFlags::USE_EXISTING) {
@@ -605,12 +614,13 @@ impl SubscriberInner {
             for pref in &*resolved.publishers {
                 if let Some(pb) = publishers.get(&pref.id) {
                     if self.connections.contains_key(&pb.addr) {
-                        return Some((
-                            pb.addr,
-                            pb.target_auth.clone(),
-                            pref.token.clone(),
+                        return Some(Chosen {
+                            addr: pb.addr,
+                            target_auth: pb.target_auth.clone(),
+                            token: pref.token.clone(),
+                            uifo: pb.user_info.clone(),
                             flags,
-                        ));
+                        });
                     }
                 }
             }
@@ -625,17 +635,27 @@ impl SubscriberInner {
                     .map(|pb| (pref, pb))
             })
             .choose(&mut rand::thread_rng())
-            .map(|(pref, pb)| (pb.addr, pb.target_auth.clone(), pref.token.clone()));
-        if let Some((addr, auth, token)) = res {
-            Some((addr, auth, token, flags))
+            .map(|(pref, pb)| Chosen {
+                addr: pb.addr,
+                target_auth: pb.target_auth.clone(),
+                token: pref.token.clone(),
+                uifo: pb.user_info.clone(),
+                flags,
+            });
+        if let Some(chosen) = res {
+            Some(chosen)
         } else {
             resolved
                 .publishers
                 .iter()
                 .filter_map(|pref| publishers.get(&pref.id).map(|pb| (pref, pb)))
                 .choose(&mut rand::thread_rng())
-                .map(|(pref, pb)| {
-                    (pb.addr, pb.target_auth.clone(), pref.token.clone(), flags)
+                .map(|(pref, pb)| Chosen {
+                    addr: pb.addr,
+                    target_auth: pb.target_auth.clone(),
+                    token: pref.token.clone(),
+                    uifo: pb.user_info.clone(),
+                    flags,
                 })
         }
     }
@@ -965,6 +985,7 @@ impl Subscriber {
     fn start_connection(
         &self,
         tls_ctx: Option<tls::CachedConnector>,
+        uifo: Option<UserInfo>,
         addr: SocketAddr,
         target_auth: &TargetAuth,
         desired_auth: &DesiredAuth,
@@ -980,6 +1001,7 @@ impl Subscriber {
                 subscriber.clone(),
                 conid,
                 tls_ctx,
+                uifo,
                 target_auth,
                 desired_auth,
                 rx,
@@ -1114,19 +1136,18 @@ impl Subscriber {
                     for (p, resolved) in to_resolve.into_iter().zip(res.drain(..)) {
                         if resolved.publishers.len() == 0 {
                             pending.insert(p, St::Error(anyhow!("path not found")));
-                        } else if let Some((addr, target_auth, token, flags)) =
-                            t.choose_addr(&publishers, &resolved)
-                        {
+                        } else if let Some(ch) = t.choose_addr(&publishers, &resolved) {
                             let tls_ctx = t.tls_ctx.clone();
                             let sub_id = t.durable_id(&p).unwrap_or_else(SubId::new);
-                            let con = t.connections.entry(addr).or_insert_with(|| {
+                            let con = t.connections.entry(ch.addr).or_insert_with(|| {
                                 Connection { primary: None, isolated: HashMap::default() }
                             });
-                            let con = if flags.contains(PublishFlags::ISOLATED) {
+                            let con = if ch.flags.contains(PublishFlags::ISOLATED) {
                                 let (id, c) = self.start_connection(
                                     tls_ctx,
-                                    addr,
-                                    &target_auth,
+                                    ch.uifo,
+                                    ch.addr,
+                                    &ch.target_auth,
                                     &desired_auth,
                                 );
                                 con.isolated.insert(id, c.clone());
@@ -1137,8 +1158,9 @@ impl Subscriber {
                                     None => {
                                         let (id, c) = self.start_connection(
                                             tls_ctx,
-                                            addr,
-                                            &target_auth,
+                                            ch.uifo,
+                                            ch.addr,
+                                            &ch.target_auth,
                                             &desired_auth,
                                         );
                                         con.primary = Some((id, c.clone()));
@@ -1153,7 +1175,7 @@ impl Subscriber {
                                 sub_id,
                                 timestamp: resolved.timestamp,
                                 permissions: resolved.permissions as u32,
-                                token,
+                                token: ch.token,
                                 resolver: resolved.resolver,
                                 finished: tx,
                                 con: con_,

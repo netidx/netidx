@@ -5,6 +5,10 @@ use crate::{
     protocol::{glob::Scope, resolver::Referral},
 };
 use anyhow::{anyhow, Error, Result};
+use arcstr::ArcStr;
+use fxhash::FxHashMap;
+use netidx_core::pool::{Pool, Pooled};
+use netidx_netproto::resolver;
 use std::{
     collections::{BTreeMap, Bound, HashMap},
     convert::TryFrom,
@@ -70,30 +74,47 @@ pub struct Entity(u32);
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct UserInfo {
     pub(crate) id: Entity,
+    pub(crate) primary_group: Entity,
     pub(crate) groups: Vec<Entity>,
+    pub(crate) user_info: Option<resolver::UserInfo>,
 }
 
 impl UserInfo {
     fn entities(&self) -> impl Iterator<Item = &Entity> {
-        iter::once(&self.id).chain(self.groups.iter())
+        iter::once(&self.id)
+            .chain(iter::once(&self.primary_group))
+            .chain(self.groups.iter())
     }
 }
 
 lazy_static! {
-    pub(crate) static ref ANONYMOUS: Arc<UserInfo> =
-        Arc::new(UserInfo { id: Entity(0), groups: Vec::new() });
+    pub(crate) static ref ANONYMOUS: Arc<UserInfo> = Arc::new(UserInfo {
+        id: Entity(0),
+        primary_group: Entity(0),
+        groups: vec![Entity(0)],
+        user_info: None,
+    });
+
+    static ref GROUPS: Pool<Vec<ArcStr>> = Pool::new(200, 100);
 }
 
 pub(crate) struct UserDb {
     next: u32,
     mapper: Mapper,
-    entities: HashMap<String, Entity>,
-    users: HashMap<String, Arc<UserInfo>>,
+    names: FxHashMap<Entity, ArcStr>,
+    entities: FxHashMap<ArcStr, Entity>,
+    users: FxHashMap<ArcStr, Arc<UserInfo>>,
 }
 
 impl UserDb {
     pub(crate) fn new(mapper: Mapper) -> UserDb {
-        UserDb { next: 1, mapper, entities: HashMap::new(), users: HashMap::new() }
+        UserDb {
+            next: 1,
+            mapper,
+            names: HashMap::default(),
+            entities: HashMap::default(),
+            users: HashMap::default(),
+        }
     }
 
     fn entity(&mut self, name: &str) -> Entity {
@@ -102,28 +123,38 @@ impl UserDb {
             None => {
                 let e = Entity(self.next);
                 self.next += 1;
-                self.entities.insert(String::from(name), e);
+                let name = ArcStr::from(name);
+                self.entities.insert(name.clone(), e);
+                self.names.insert(e, name);
                 e
             }
         }
     }
 
-    pub(crate) fn ifo(&mut self, user: Option<&str>) -> Result<Arc<UserInfo>> {
+    pub(crate) fn ifo(&mut self, resolver: SocketAddr, user: Option<&str>) -> Result<Arc<UserInfo>> {
         match user {
             None => Ok(ANONYMOUS.clone()),
             Some(user) => match self.users.get(user) {
                 Some(user) => Ok(user.clone()),
                 None => {
+                    let (primary_group_s, groups_s) = self.mapper.groups(user)?;
+                    let primary_group = self.entity(&primary_group_s);
+                    let groups =
+                        groups_s.iter().map(|b| self.entity(b)).collect::<Vec<_>>();
+                    let id = self.entity(user);
                     let ifo = Arc::new(UserInfo {
-                        id: self.entity(user),
-                        groups: self
-                            .mapper
-                            .groups(user)?
-                            .into_iter()
-                            .map(|b| self.entity(&b))
-                            .collect::<Vec<_>>(),
+                        id,
+                        primary_group,
+                        groups,
+                        user_info: Some(resolver::UserInfo {
+                            name: ArcStr::from(user),
+                            primary_group: primary_group_s,
+                            groups: groups_s.into(),
+                            resolver,
+                            token: bytes::Bytes::new(),
+                        }),
                     });
-                    self.users.insert(String::from(user), ifo.clone());
+                    self.users.insert(self.names[&id].clone(), ifo.clone());
                     Ok(ifo)
                 }
             },
