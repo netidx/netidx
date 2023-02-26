@@ -1,5 +1,4 @@
 use bytes::{Bytes, BytesMut};
-use rust_decimal::Decimal;
 use netidx_core::{
     chars::Chars,
     pack::{Pack, Z64},
@@ -8,6 +7,7 @@ use netidx_core::{
     utils::pack,
 };
 use proptest::{prelude::*, string::string_regex};
+use rust_decimal::Decimal;
 use std::{fmt::Debug, sync::Arc};
 
 fn check<T: Pack + Debug + PartialEq>(t: T) {
@@ -42,7 +42,7 @@ mod resolver {
             Auth, AuthChallenge, AuthRead, AuthWrite, ClientHello, ClientHelloWrite,
             FromRead, FromWrite, GetChangeNr, HashMethod, ListMatching, Publisher,
             PublisherId, PublisherRef, ReadyForOwnershipCheck, Referral, Resolved,
-            Secret, ServerHelloWrite, Table, TargetAuth, ToRead, ToWrite,
+            Secret, ServerHelloWrite, Table, TargetAuth, ToRead, ToWrite, UserInfo,
         },
     };
     use netidx_core::pack::PackError;
@@ -280,6 +280,12 @@ mod resolver {
         any::<u8>().prop_map(|_| ReadyForOwnershipCheck)
     }
 
+    fn user_info() -> impl Strategy<Value = UserInfo> {
+        (chars(), chars(), collection::vec(chars(), (0, 20))).prop_map(
+            |(name, primary_group, groups)| UserInfo { name, primary_group, groups },
+        )
+    }
+
     fn to_write() -> impl Strategy<Value = ToWrite> {
         prop_oneof![
             path().prop_map(ToWrite::Publish),
@@ -292,6 +298,8 @@ mod resolver {
             (path(), any::<u32>())
                 .prop_map(|(path, flags)| ToWrite::PublishDefaultWithFlags(path, flags)),
             path().prop_map(ToWrite::UnpublishDefault),
+            chars().prop_map(ToWrite::GetUserInfo),
+            Just(ToWrite::Unknown),
         ]
     }
 
@@ -301,7 +309,8 @@ mod resolver {
             Just(FromWrite::Unpublished),
             referral().prop_map(FromWrite::Referral),
             Just(FromWrite::Denied),
-            chars().prop_map(FromWrite::Error)
+            chars().prop_map(FromWrite::Error),
+            user_info().prop_map(FromWrite::UserInfo)
         ]
     }
 

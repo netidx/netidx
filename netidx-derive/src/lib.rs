@@ -2,7 +2,7 @@ use proc_macro2::{TokenStream, TokenTree};
 use quote::{format_ident, quote};
 use syn::{
     parse_macro_input, parse_quote, AttrStyle, Attribute, Data, DeriveInput, Field,
-    Fields, GenericParam, Ident, Index
+    Fields, GenericParam, Ident, Index,
 };
 
 fn is_attr(att: &Attribute, s: &str) -> bool {
@@ -330,8 +330,12 @@ fn decode(input: &Data) -> TokenStream {
             Fields::Unit => panic!("unit structs are not supported by Pack"),
         },
         Data::Enum(en) => {
+            let mut other: Option<TokenStream> = None;
             let cases = en.variants.iter().enumerate().map(|(i, v)| match &v.fields {
                 Fields::Named(f) => {
+                    if v.attrs.iter().any(|a| is_attr(a, "other")) {
+                        panic!("other attribute must be applied to a unit variant")
+                    }
                     let name_fields = f.named.iter().map(|f| &f.ident);
                     let decode_fields = f.named.iter().map(decode_named_field);
                     let tag = &v.ident;
@@ -344,6 +348,9 @@ fn decode(input: &Data) -> TokenStream {
                     }
                 }
                 Fields::Unnamed(f) => {
+                    if v.attrs.iter().any(|a| is_attr(a, "other")) {
+                        panic!("other attribute must be applied to a unit variant")
+                    }
                     let name_fields = f
                         .unnamed
                         .iter()
@@ -366,16 +373,32 @@ fn decode(input: &Data) -> TokenStream {
                 Fields::Unit => {
                     let tag = &v.ident;
                     let i = Index::from(i);
+                    if v.attrs.iter().any(|a| is_attr(a, "other")) {
+                        if other.is_some() {
+                            panic!("other attribute may be specified at most once")
+                        }
+                        other = Some(quote! { _ => Ok(Self::#tag) })
+                    }
                     quote! { #i => Ok(Self::#tag), }
                 }
-            });
-            quote! {
-                netidx_core::pack::len_wrapped_decode(buf, |buf| {
-                    match <u8 as netidx_core::pack::Pack>::decode(buf)? {
-                        #(#cases)*
-                        _ => Err(netidx_core::pack::PackError::UnknownTag)
-                    }
-                })
+            }).collect::<Vec<_>>();
+            match other {
+                Some(other) => quote! {
+                    netidx_core::pack::len_wrapped_decode(buf, |buf| {
+                        match <u8 as netidx_core::pack::Pack>::decode(buf)? {
+                            #(#cases)*
+                            #other
+                        }
+                    })
+                },
+                None => quote! {
+                    netidx_core::pack::len_wrapped_decode(buf, |buf| {
+                        match <u8 as netidx_core::pack::Pack>::decode(buf)? {
+                            #(#cases)*
+                            _ => Err(netidx_core::pack::PackError::UnknownTag)
+                        }
+                    })
+                }
             }
         }
         Data::Union(_) => panic!("unions are not supported by Pack"),

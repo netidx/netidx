@@ -250,6 +250,17 @@ pub enum ToWrite {
     PublishDefaultWithFlags(Path, u32),
     /// Unpublish a default publisher
     UnpublishDefault(Path),
+    /// Get info about a user
+    GetUserInfo(Chars),
+    #[pack(other)]
+    Unknown
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Pack)]
+pub struct UserInfo {
+    pub name: Chars,
+    pub primary_group: Chars,
+    pub groups: Vec<Chars>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Pack)]
@@ -259,4 +270,5 @@ pub enum FromWrite {
     Referral(Referral),
     Denied,
     Error(Chars),
+    UserInfo(UserInfo),
 }
