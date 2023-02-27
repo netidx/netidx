@@ -167,7 +167,11 @@ impl UserDb {
 }
 
 #[derive(Debug)]
-pub(super) struct PMap(BTreeMap<Path, HashMap<Entity, Permissions>>);
+pub(super) struct PMap {
+    normal: BTreeMap<Path, FxHashMap<Entity, Permissions>>,
+    user_dynamic: BTreeMap<Path, Permissions>,
+    group_dynamic: BTreeMap<Path, Permissions>,
+}
 
 impl PMap {
     pub(super) fn from_file(
@@ -176,7 +180,28 @@ impl PMap {
         root: &str,
         children: &BTreeMap<Path, Referral>,
     ) -> Result<Self> {
-        let mut pmap = BTreeMap::new();
+        fn build_dynamic(
+            store: &mut BTreeMap<Path, Permissions>,
+            tbl: &HashMap<String, String>,
+            path: &Path,
+            suffix: &'static str,
+        ) -> Result<()> {
+            let path = Path::from(ArcStr::from(Path::dirname(path).unwrap()));
+            let mut dynamic = Permissions::empty();
+            for (ent, perm) in tbl.iter() {
+                let p = Permissions::try_from(perm.as_str())?;
+                if ent == suffix {
+                    dynamic = p;
+                } else {
+                    bail!("dynamic permissions may only include the $[user] or $[group] permission set")
+                }
+            }
+            store.insert(path, dynamic);
+            Ok(())
+        }
+        let mut normal = BTreeMap::new();
+        let mut user_dynamic = BTreeMap::new();
+        let mut group_dynamic = BTreeMap::new();
         for (path, tbl) in file.0.iter() {
             let path = Path::from(path);
             if !Path::is_parent(root, &path) {
@@ -187,14 +212,26 @@ impl PMap {
                     bail!("permission entry for child: {}, entry: {}", child, path)
                 }
             }
-            let mut entry = HashMap::with_capacity(tbl.len());
-            for (ent, perm) in tbl.iter() {
-                let entity = if ent == "" { ANONYMOUS.id } else { db.entity(ent) };
-                entry.insert(entity, Permissions::try_from(perm.as_str())?);
+            if path.contains("$[user]") && !path.ends_with("$[user]") {
+                bail!("user dynamic permissions must end in $[user]")
             }
-            pmap.insert(path, entry);
+            if path.contains("$[group]") && !path.ends_with("$[group]") {
+                bail!("group dynamic permissions must end in $[group]")
+            }
+            if path.ends_with("$[user]") {
+                build_dynamic(&mut user_dynamic, tbl, &path, "$[user]")?
+            } else if path.ends_with("$[group]") {
+                build_dynamic(&mut group_dynamic, tbl, &path, "$[group]")?
+            } else {
+                let mut entry = HashMap::default();
+                for (ent, perm) in tbl.iter() {
+                    let entity = if ent == "" { ANONYMOUS.id } else { db.entity(ent) };
+                    entry.insert(entity, Permissions::try_from(perm.as_str())?);
+                }
+                normal.insert(path, entry);
+            }
         }
-        Ok(PMap(pmap))
+        Ok(PMap { normal, user_dynamic, group_dynamic })
     }
 
     pub(crate) fn allowed(
@@ -207,6 +244,7 @@ impl PMap {
         actual_rights & desired_rights == desired_rights
     }
 
+    // should only be used by list_matching
     pub(crate) fn allowed_in_scope(
         &self,
         base_path: &str,
@@ -216,7 +254,7 @@ impl PMap {
     ) -> bool {
         let rights_at_base = self.permissions(base_path, user);
         let mut rights = rights_at_base;
-        let mut iter = self.0.range::<str, (Bound<&str>, Bound<&str>)>((
+        let mut iter = self.normal.range::<str, (Bound<&str>, Bound<&str>)>((
             Bound::Excluded(base_path),
             Bound::Unbounded,
         ));
@@ -242,23 +280,60 @@ impl PMap {
     }
 
     pub(crate) fn permissions(&self, path: &str, user: &UserInfo) -> Permissions {
-        Path::dirnames(path).fold(Permissions::empty(), |p, s| match self.0.get(s) {
-            None => p,
-            Some(set) => {
-                let init = (p, Permissions::empty());
-                let (ap, dp) =
-                    user.entities().fold(init, |(ap, dp), e| match set.get(e) {
-                        None => (ap, dp),
-                        Some(p_) => {
-                            if p_.contains(Permissions::DENY) {
-                                (ap, dp | *p_)
-                            } else {
-                                (ap | *p_, dp)
+        Path::dirnames(path).fold(Permissions::empty(), |p, s| {
+            let (basename, dirname) = (Path::basename(s), Path::dirname(s));
+            let uifo = user.user_info.as_ref();
+            let p = {
+                match (basename, dirname, uifo) {
+                    (_, _, None) | (_, None, _) | (None, _, _) => p,
+                    (Some(sub), Some(parent), Some(uifo)) => {
+                        let p = match self.user_dynamic.get(parent) {
+                            None => p,
+                            Some(ud) if sub == uifo.name => {
+                                if ud.contains(Permissions::DENY) {
+                                    p & !*ud
+                                } else {
+                                    p | *ud
+                                }
                             }
-                        }
-                    });
-                ap & !dp
-            }
+                            Some(_) => p,
+                        };
+                        let p = match self.group_dynamic.get(parent) {
+                            None => p,
+                            Some(gd)
+                                if uifo.groups.iter().find(|s| &**s == sub).is_some() =>
+                            {
+                                if gd.contains(Permissions::DENY) {
+                                    p & !*gd
+                                } else {
+                                    p | *gd
+                                }
+                            }
+                            Some(_) => p,
+                        };
+                        p
+                    }
+                }
+            };
+            let p = match self.normal.get(s) {
+                None => p,
+                Some(set) => {
+                    let init = (p, Permissions::empty());
+                    let (ap, dp) =
+                        user.entities().fold(init, |(ap, dp), e| match set.get(e) {
+                            None => (ap, dp),
+                            Some(p_) => {
+                                if p_.contains(Permissions::DENY) {
+                                    (ap, dp | *p_)
+                                } else {
+                                    (ap | *p_, dp)
+                                }
+                            }
+                        });
+                    ap & !dp
+                }
+            };
+            p
         })
     }
 }
