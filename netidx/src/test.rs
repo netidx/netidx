@@ -413,6 +413,10 @@ mod publisher {
         tx: oneshot::Sender<()>,
         auth: DesiredAuth,
     ) {
+        let check_user = match &auth {
+            DesiredAuth::Tls { .. } => true,
+            _ => false,
+        };
         let publisher = Publisher::new(cfg, auth, "127.0.0.1/32".parse().unwrap(), 768)
             .await
             .unwrap();
@@ -456,6 +460,9 @@ mod publisher {
                 mut batch = rx.select_next_some() => {
                     let mut ub = publisher.start_batch();
                     for req in batch.drain(..) {
+                        if check_user {
+                            assert!(publisher.user(&req.client).is_some())
+                        }
                         vp.update(&mut ub, req.value);
                     }
                     ub.commit(None).await;
