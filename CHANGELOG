@@ -1,3 +1,21 @@
+* 0.17.0
+  
+  - netidx_derive::Pack implement #[pack(other)] attribute for
+    enums. Does the same thing as #[serde(other)], if the enum tag
+    isn't know will decode as the enum #[pack(other)] is placed on.
+
+  - fully propagate user and group info from the resolver through to
+    the publisher. Now for all authentication mechanisms, the
+    publisher will be able to return a UserInfo struct that contains
+    the name, primary group, and groups of a connected user. This will
+    only work if all components are running 0.17 or later, previous
+    versions will work, but won't provide user info.
+
+  - implement pack for three tuples, and four tuples.
+
+  - update the browser to the latest version of gtk-rs, and make use
+    of the finally upstreamed gktsourceview4 subclassing
+
 * 0.16.0-9
   - Fix a bug in subscriber that could cause pushback not to work at
     very high message rates
