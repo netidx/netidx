@@ -9,7 +9,7 @@ use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::{expr, vm};
 use parking_lot::Mutex;
-use sourceview4_sc::{self as sv, prelude::*, traits::ViewExt};
+use sourceview4::{self as sv, prelude::*, traits::ViewExt};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -116,10 +116,10 @@ impl DataFlow {
             call_view.append_column(&{
                 let column = gtk::TreeViewColumn::new();
                 let cell = gtk::CellRendererText::new();
-                column.pack_start(&cell, true);
+                CellLayoutExt::pack_start(&column, &cell, true);
                 column.set_resizable(true);
                 column.set_title(name);
-                column.add_attribute(&cell, "text", i as i32);
+                CellLayoutExt::add_attribute(&column, &cell, "text", i as i32);
                 column
             });
         }
@@ -127,10 +127,10 @@ impl DataFlow {
             event_view.append_column(&{
                 let column = gtk::TreeViewColumn::new();
                 let cell = gtk::CellRendererText::new();
-                column.pack_start(&cell, true);
+                CellLayoutExt::pack_start(&column, &cell, true);
                 column.set_resizable(true);
                 column.set_title(name);
-                column.add_attribute(&cell, "text", i as i32);
+                CellLayoutExt::add_attribute(&column, &cell, "text", i as i32);
                 column
             });
         }

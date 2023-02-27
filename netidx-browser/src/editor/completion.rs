@@ -15,7 +15,7 @@ glib::wrapper! {
 
 impl BScriptCompletionProvider {
     pub(crate) fn new() -> Self {
-        glib::Object::new(&[]).expect("failed to create BScriptCompletionProvider")
+        glib::Object::new::<BScriptCompletionProvider>()
     }
 }
 
@@ -61,29 +61,19 @@ pub(crate) mod imp {
     impl ObjectImpl for BScriptCompletionProvider {}
 
     impl CompletionProviderImpl for BScriptCompletionProvider {
-        fn activation(
-            &self,
-            _provider: &super::BScriptCompletionProvider,
-        ) -> CompletionActivation {
+        fn activation(&self) -> CompletionActivation {
             CompletionActivation::USER_REQUESTED
         }
 
-        fn interactive_delay(&self, _provider: &super::BScriptCompletionProvider) -> i32 {
+        fn interactive_delay(&self) -> i32 {
             100
         }
 
-        fn name(
-            &self,
-            _provider: &super::BScriptCompletionProvider,
-        ) -> Option<glib::GString> {
+        fn name(&self) -> Option<glib::GString> {
             Some("bscript".into())
         }
 
-        fn populate(
-            &self,
-            provider: &super::BScriptCompletionProvider,
-            context: &CompletionContext,
-        ) {
+        fn populate(&self, context: &CompletionContext) {
             macro_rules! get {
                 ($e:expr) => {
                     match $e {
@@ -158,6 +148,7 @@ pub(crate) mod imp {
                     CompletionItem::builder().text(c).label(&l).build().upcast()
                 });
             let candidates = fn_candidates.chain(var_candidates).collect::<Vec<_>>();
+            let provider = self.obj().dynamic_cast_ref::<CompletionProvider>().unwrap();
             context.add_proposals(provider, &*candidates, true);
         }
     }
