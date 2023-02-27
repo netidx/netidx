@@ -13,6 +13,7 @@ use crate::{
     tls,
 };
 use anyhow::{bail, Result};
+use arcstr::ArcStr;
 use cross_krb5::{K5Ctx, ServerCtx};
 use fxhash::FxHashMap;
 use log::debug;
@@ -100,7 +101,7 @@ impl SecCtxData<K5SecData> {
 
 #[derive(Debug, Clone)]
 pub(super) struct LocalSecData {
-    pub(super) user: Chars,
+    pub(super) user: ArcStr,
     pub(super) secret: u128,
 }
 

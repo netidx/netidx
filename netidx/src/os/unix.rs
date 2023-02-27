@@ -1,7 +1,6 @@
 use crate::resolver_server::config::{Config, MemberServer};
 use anyhow::{anyhow, Result};
 use arcstr::ArcStr;
-use netidx_core::chars::Chars;
 use std::process::Command;
 use tokio::task;
 
@@ -33,7 +32,7 @@ impl Mapper {
         task::block_in_place(|| {
             let out = Command::new(&*self.0).arg(user).output()?;
             let s = String::from_utf8_lossy(&out.stdout);
-            let primary = Mapper::parse_output(&s, "gid=")?;
+            let mut primary = Mapper::parse_output(&s, "gid=")?;
             let groups = Mapper::parse_output(&s, "groups=")?;
             let primary = if primary.is_empty() {
                 bail!("missing primary group")
@@ -141,10 +140,10 @@ pub(crate) mod local_auth {
                     break salt;
                 }
             };
-            let token = make_sha3_token(&[
-                &salt.to_be_bytes(),
+            let token = make_sha3_token([
+                &salt.to_be_bytes()[..],
                 user.as_bytes(),
-                &secret.to_be_bytes(),
+                &secret.to_be_bytes()[..],
             ]);
             let c = Credential { hash_method: HashMethod::Sha3_512, salt, user, token };
             let mut msg = pack(&c)?;
@@ -223,10 +222,10 @@ pub(crate) mod local_auth {
             if cred.hash_method != HashMethod::Sha3_512 {
                 false
             } else {
-                let token = make_sha3_token(&[
-                    &cred.salt.to_be_bytes(),
+                let token = make_sha3_token([
+                    &cred.salt.to_be_bytes()[..],
                     cred.user.as_bytes(),
-                    &self.secret.to_be_bytes(),
+                    &self.secret.to_be_bytes()[..],
                 ]);
                 token == cred.token && self.issued.lock().remove(&cred.salt).is_some()
             }

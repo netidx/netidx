@@ -7,12 +7,13 @@ use crate::{
 use anyhow::{anyhow, Error, Result};
 use arcstr::ArcStr;
 use fxhash::FxHashMap;
-use netidx_core::pool::{Pool, Pooled};
+use netidx_core::pool::Pool;
 use netidx_netproto::resolver;
 use std::{
     collections::{BTreeMap, Bound, HashMap},
     convert::TryFrom,
     iter,
+    net::SocketAddr,
     sync::Arc,
 };
 
@@ -94,7 +95,6 @@ lazy_static! {
         groups: vec![Entity(0)],
         user_info: None,
     });
-
     static ref GROUPS: Pool<Vec<ArcStr>> = Pool::new(200, 100);
 }
 
@@ -131,7 +131,11 @@ impl UserDb {
         }
     }
 
-    pub(crate) fn ifo(&mut self, resolver: SocketAddr, user: Option<&str>) -> Result<Arc<UserInfo>> {
+    pub(crate) fn ifo(
+        &mut self,
+        resolver: SocketAddr,
+        user: Option<&str>,
+    ) -> Result<Arc<UserInfo>> {
         match user {
             None => Ok(ANONYMOUS.clone()),
             Some(user) => match self.users.get(user) {

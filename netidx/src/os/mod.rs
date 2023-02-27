@@ -8,9 +8,9 @@ pub(crate) mod windows;
 
 pub(crate) mod local_auth {
     use super::*;
+    use arcstr::ArcStr;
     use bytes::{Buf, BufMut, Bytes};
     use netidx_core::{
-        chars::Chars,
         pack::{Pack, PackError},
     };
     use netidx_netproto::resolver::HashMethod;
@@ -18,7 +18,7 @@ pub(crate) mod local_auth {
     pub(crate) struct Credential {
         pub(crate) hash_method: HashMethod,
         pub(crate) salt: u128,
-        pub(crate) user: Chars,
+        pub(crate) user: ArcStr,
         pub(crate) token: Bytes,
     }
 

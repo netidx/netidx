@@ -15,7 +15,6 @@ use crate::{
     utils::{self, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
-use arcstr::ArcStr;
 use futures::{
     channel::{
         mpsc::{unbounded, Sender, UnboundedReceiver, UnboundedSender},

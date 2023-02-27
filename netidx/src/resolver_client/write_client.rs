@@ -127,8 +127,8 @@ impl Connection {
             if c.hash_method != HashMethod::Sha3_512 {
                 bail!("hash method not supported")
             }
-            let answer = utils::make_sha3_token(&[
-                &c.challenge.to_be_bytes(),
+            let answer = utils::make_sha3_token([
+                &c.challenge.to_be_bytes()[..],
                 &secret.to_be_bytes(),
             ]);
             Ok(con.send_one(&answer).await?)
