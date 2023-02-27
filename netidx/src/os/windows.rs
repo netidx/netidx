@@ -1,6 +1,6 @@
 use crate::resolver_server::config::{Config, MemberServer};
-use arcstr::ArcStr;
 use anyhow::{bail, Result};
+use arcstr::ArcStr;
 
 pub(crate) struct Mapper;
 
@@ -9,7 +9,8 @@ impl Mapper {
         Ok(Mapper)
     }
 
-    pub(crate) fn user(&self, user: u32) -> Result<ArcStr> {
+    #[allow(dead_code)]
+    pub(crate) fn user(&self, _user: u32) -> Result<ArcStr> {
         bail!("user listing is not implemented on windows")
     }
 
