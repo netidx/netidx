@@ -217,7 +217,7 @@ impl RaeifiedTable {
         let t = self;
         let column = TreeViewColumn::new();
         let cell = CellRendererText::new();
-        column.pack_start(&cell, true);
+        CellLayoutExt::pack_start(&column, &cell, true);
         let common = spec.common.resolve(vector_mode, name, &self.descriptor);
         if let Some(common) = common.as_ref() {
             let foreground =
@@ -245,7 +245,7 @@ impl RaeifiedTable {
         let t = self;
         let column = TreeViewColumn::new();
         let cell = CellRendererPixbuf::new();
-        column.pack_start(&cell, true);
+        CellLayoutExt::pack_start(&column, &cell, true);
         let common = spec.resolve(false, name, &self.descriptor);
         if let Some(common) = common.as_ref() {
             let f = Box::new(clone!(
@@ -271,7 +271,7 @@ impl RaeifiedTable {
         let t = self;
         let column = TreeViewColumn::new();
         let cell = CellRendererToggle::new();
-        column.pack_start(&cell, true);
+        CellLayoutExt::pack_start(&column, &cell, true);
         let common = spec.common.resolve(false, name, &self.descriptor);
         if let Some(common) = common.as_ref() {
             let radio = spec.radio.as_ref().and_then(|v| v.resolve(&t.descriptor));
@@ -319,7 +319,7 @@ impl RaeifiedTable {
         let t = self;
         let column = TreeViewColumn::new();
         let cell = CellRendererCombo::new();
-        column.pack_start(&cell, true);
+        CellLayoutExt::pack_start(&column, &cell, true);
         let common = spec.common.resolve(false, name, &self.descriptor);
         if let Some(common) = common.as_ref() {
             let choices = spec.choices.resolve(&t.descriptor);
@@ -353,7 +353,7 @@ impl RaeifiedTable {
         let t = self;
         let column = TreeViewColumn::new();
         let cell = CellRendererSpin::new();
-        column.pack_start(&cell, true);
+        CellLayoutExt::pack_start(&column, &cell, true);
         let common = spec.common.resolve(false, name, &self.descriptor);
         if let Some(common) = common.as_ref() {
             let min = spec.min.as_ref().and_then(|v| v.resolve(&t.descriptor));
@@ -407,7 +407,7 @@ impl RaeifiedTable {
         let t = self;
         let column = TreeViewColumn::new();
         let cell = CellRendererProgress::new();
-        column.pack_start(&cell, true);
+        CellLayoutExt::pack_start(&column, &cell, true);
         let common = spec.common.resolve(false, name, &self.descriptor);
         if let Some(common) = common.as_ref() {
             let activity_mode =
@@ -453,9 +453,9 @@ impl RaeifiedTable {
             t.view().append_column(&{
                 let column = TreeViewColumn::new();
                 let cell = CellRendererText::new();
-                column.pack_start(&cell, true);
+                CellLayoutExt::pack_start(&column, &cell, true);
                 column.set_title(NAME_COL);
-                column.add_attribute(&cell, "text", 0);
+                CellLayoutExt::add_attribute(&column, &cell, "text", 0);
                 if sorting_disabled {
                     column.set_clickable(true);
                 } else {

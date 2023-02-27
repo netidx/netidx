@@ -148,7 +148,8 @@ pub(crate) mod imp {
                     CompletionItem::builder().text(c).label(&l).build().upcast()
                 });
             let candidates = fn_candidates.chain(var_candidates).collect::<Vec<_>>();
-            let provider = self.obj().dynamic_cast_ref::<CompletionProvider>().unwrap();
+            let obj = self.obj();
+            let provider = obj.dynamic_cast_ref::<CompletionProvider>().unwrap();
             context.add_proposals(provider, &*candidates, true);
         }
     }

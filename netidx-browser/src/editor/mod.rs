@@ -1003,17 +1003,17 @@ impl Editor {
         view.append_column(&{
             let column = gtk::TreeViewColumn::new();
             let cell = gtk::CellRendererText::new();
-            column.pack_start(&cell, true);
+            CellLayoutExt::pack_start(&column, &cell, true);
             column.set_title("widget name");
-            column.add_attribute(&cell, "text", 0);
+            CellLayoutExt::add_attribute(&column, &cell, "text", 0);
             column
         });
         view.append_column(&{
             let column = gtk::TreeViewColumn::new();
             let cell = gtk::CellRendererText::new();
-            column.pack_start(&cell, true);
+            CellLayoutExt::pack_start(&column, &cell, true);
             column.set_title("desc");
-            column.add_attribute(&cell, "text", 2);
+            CellLayoutExt::add_attribute(&column, &cell, "text", 2);
             column
         });
         let store = gtk::TreeStore::new(&[

@@ -918,7 +918,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         w.set_title("Netidx browser");
         w.set_default_size(800, 600);
         w.show_all();
-        if let Some(screen) = w.screen() {
+        if let Some(screen) = WidgetExt::screen(w) {
             setup_css(&screen);
         }
     }
@@ -1011,7 +1011,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         }
     ));
     let raw_view_act =
-        gio::SimpleAction::new_stateful("raw_view", None, &false.to_variant());
+        gio::SimpleAction::new_stateful("raw_view", None, false.to_variant());
     ctx.borrow().user.window.add_action(&raw_view_act);
     raw_view_act.connect_activate(clone!(
         @weak ctx, @strong current_loc  => move |a, _| {
@@ -1032,7 +1032,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         }
     }));
     let bscript_tracing_act =
-        gio::SimpleAction::new_stateful("bscript_tracing", None, &true.to_variant());
+        gio::SimpleAction::new_stateful("bscript_tracing", None, true.to_variant());
     ctx.borrow().user.window.add_action(&bscript_tracing_act);
     ctx.borrow_mut().dbg_ctx.trace = true;
     bscript_tracing_act.connect_activate(clone!(@weak ctx => move |a, _| {

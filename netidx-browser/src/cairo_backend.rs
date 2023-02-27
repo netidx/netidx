@@ -279,7 +279,7 @@ impl<'a> DrawingBackend for CairoBackend<'a> {
         self.set_font(font)?;
         self.call_cairo(|c| {
             c.text_extents(text)
-                .map(|extents| (extents.width as u32, extents.height as u32))
+                .map(|extents| (extents.width() as u32, extents.height() as u32))
         })
     }
 
@@ -319,17 +319,17 @@ impl<'a> DrawingBackend for CairoBackend<'a> {
             let extents = c.text_extents(text)?;
             let dx = match style.anchor().h_pos {
                 HPos::Left => 0.0,
-                HPos::Right => -extents.width,
-                HPos::Center => -extents.width / 2.0,
+                HPos::Right => -extents.width(),
+                HPos::Center => -extents.width() / 2.0,
             };
             let dy = match style.anchor().v_pos {
-                VPos::Top => extents.height,
-                VPos::Center => extents.height / 2.0,
+                VPos::Top => extents.height(),
+                VPos::Center => extents.height() / 2.0,
                 VPos::Bottom => 0.0,
             };
             c.move_to(
-                f64::from(x) + dx - extents.x_bearing,
-                f64::from(y) + dy - extents.y_bearing - extents.height,
+                f64::from(x) + dx - extents.x_bearing(),
+                f64::from(y) + dy - extents.y_bearing() - extents.height(),
             );
             c.show_text(text)?;
             if degree != 0.0 {
