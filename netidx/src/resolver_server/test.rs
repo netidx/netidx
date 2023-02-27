@@ -4,9 +4,9 @@ use crate::{
     path::Path,
     protocol::resolver::{HashMethod, Publisher, PublisherId, PublisherRef, TargetAuth},
 };
-use fxhash::FxHashMap;
 use bytes::Bytes;
-use rand::{self, Rng, thread_rng};
+use fxhash::FxHashMap;
+use rand::{self, thread_rng, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
@@ -38,6 +38,7 @@ fn test_resolver_store() {
             hash_method: HashMethod::Sha3_512,
             resolver: addr,
             target_auth: TargetAuth::Anonymous,
+            user_info: None,
         });
         if thread_rng().gen() {
             let path = Path::from(String::from(Path::dirname(&parsed[0]).unwrap()));
