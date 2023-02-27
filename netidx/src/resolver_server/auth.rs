@@ -10,6 +10,7 @@ use fxhash::FxHashMap;
 use netidx_core::pool::Pool;
 use netidx_netproto::resolver;
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, Bound, HashMap},
     convert::TryFrom,
     iter,
@@ -166,11 +167,30 @@ impl UserDb {
     }
 }
 
+fn subst(expr: &str, dst: &mut String, sub: &str) {
+    dst.clear();
+    for c in expr.chars() {
+        if c == ']' {
+            if dst.ends_with("$[group") {
+                dst.replace_range(dst.len() - 7.., sub);
+            } else {
+                dst.push(c)
+            }
+        } else {
+            dst.push(c);
+        }
+    }
+}
+
+thread_local! {
+    static BUF: RefCell<String> = RefCell::new(String::new());
+}
+
 #[derive(Debug)]
 pub(super) struct PMap {
     normal: BTreeMap<Path, FxHashMap<Entity, Permissions>>,
     user_dynamic: BTreeMap<Path, Permissions>,
-    group_dynamic: BTreeMap<Path, Permissions>,
+    group_dynamic: BTreeMap<Path, Vec<(String, Permissions)>>,
 }
 
 impl PMap {
@@ -180,25 +200,6 @@ impl PMap {
         root: &str,
         children: &BTreeMap<Path, Referral>,
     ) -> Result<Self> {
-        fn build_dynamic(
-            store: &mut BTreeMap<Path, Permissions>,
-            tbl: &HashMap<String, String>,
-            path: &Path,
-            suffix: &'static str,
-        ) -> Result<()> {
-            let path = Path::from(ArcStr::from(Path::dirname(path).unwrap()));
-            let mut dynamic = Permissions::empty();
-            for (ent, perm) in tbl.iter() {
-                let p = Permissions::try_from(perm.as_str())?;
-                if ent == suffix {
-                    dynamic = p;
-                } else {
-                    bail!("dynamic permissions may only include the $[user] or $[group] permission set")
-                }
-            }
-            store.insert(path, dynamic);
-            Ok(())
-        }
         let mut normal = BTreeMap::new();
         let mut user_dynamic = BTreeMap::new();
         let mut group_dynamic = BTreeMap::new();
@@ -215,13 +216,40 @@ impl PMap {
             if path.contains("$[user]") && !path.ends_with("$[user]") {
                 bail!("user dynamic permissions must end in $[user]")
             }
-            if path.contains("$[group]") && !path.ends_with("$[group]") {
-                bail!("group dynamic permissions must end in $[group]")
+            if path.contains("$[group]") {
+                match Path::basename(&path) {
+                    None => bail!("$[group] with no parent"),
+                    Some(ent) => {
+                        if !ent.contains("$[group]") {
+                            bail!("group dynamic permissions basename must contain $[group]")
+                        }
+                    }
+                }
             }
             if path.ends_with("$[user]") {
-                build_dynamic(&mut user_dynamic, tbl, &path, "$[user]")?
+                let path = Path::from(ArcStr::from(Path::dirname(&path).unwrap()));
+                let mut dynamic = Permissions::empty();
+                for (ent, perm) in tbl.iter() {
+                    let p = Permissions::try_from(perm.as_str())?;
+                    if ent == "$[user]" {
+                        dynamic = p;
+                    } else {
+                        bail!("user dynamic permissions may only include the $[user] permission set")
+                    }
+                }
+                user_dynamic.insert(path, dynamic);
             } else if path.ends_with("$[group]") {
-                build_dynamic(&mut group_dynamic, tbl, &path, "$[group]")?
+                let path = Path::from(ArcStr::from(Path::dirname(&path).unwrap()));
+                let mut dynamic = Vec::new();
+                for (ent, perm) in tbl.iter() {
+                    let p = Permissions::try_from(perm.as_str())?;
+                    if ent.contains("$[group]") {
+                        dynamic.push((ent.clone(), p));
+                    } else {
+                        bail!("group dynamic permissions may only contain .*$[group].*")
+                    }
+                }
+                group_dynamic.insert(path, dynamic);
             } else {
                 let mut entry = HashMap::default();
                 for (ent, perm) in tbl.iter() {
@@ -300,16 +328,21 @@ impl PMap {
                         };
                         let p = match self.group_dynamic.get(parent) {
                             None => p,
-                            Some(gd)
-                                if uifo.groups.iter().find(|s| &**s == sub).is_some() =>
-                            {
-                                if gd.contains(Permissions::DENY) {
-                                    p & !*gd
-                                } else {
-                                    p | *gd
-                                }
-                            }
-                            Some(_) => p,
+                            Some(gd) => gd.iter().fold(p, |p, (expr, gd)| {
+                                BUF.with(|buf| {
+                                    let mut buf = buf.borrow_mut();
+                                    subst(&expr, &mut *buf, sub);
+                                    if uifo.groups.iter().find(|g| &**buf == &**g).is_some() {
+                                        if gd.contains(Permissions::DENY) {
+                                            p & !*gd
+                                        } else {
+                                            p | *gd
+                                        }
+                                    } else {
+                                        p
+                                    }
+                                })
+                            }),
                         };
                         p
                     }
