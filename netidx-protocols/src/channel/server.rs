@@ -1,9 +1,9 @@
 use anyhow::Result;
-use arcstr::ArcStr;
 use futures::{channel::mpsc, prelude::*};
 use netidx::{
     path::Path,
     pool::Pooled,
+    protocol::resolver::UserInfo,
     publisher::{ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest},
 };
 use std::{
@@ -277,7 +277,7 @@ impl Connection {
     }
 
     /// Return the user connected to this channel, if known
-    pub fn user(&self) -> Option<ArcStr> {
+    pub fn user(&self) -> Option<UserInfo> {
         self.publisher.user(&self.client)
     }
 }

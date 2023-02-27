@@ -1,10 +1,10 @@
 use crate::channel::server;
 use anyhow::Result;
-use arcstr::ArcStr;
 use bytes::{Buf, Bytes, BytesMut};
 use netidx::{
     pack::Pack,
     path::Path,
+    protocol::resolver::UserInfo,
     publisher::{Publisher, Value},
 };
 use parking_lot::Mutex;
@@ -150,7 +150,7 @@ impl Connection {
     }
 
     /// Return the user connected to this channel, if known
-    pub fn user(&self) -> Option<ArcStr> {
+    pub fn user(&self) -> Option<UserInfo> {
         self.inner.user()
     }
 }
