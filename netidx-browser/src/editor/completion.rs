@@ -2,7 +2,7 @@ use super::Scope;
 use glib::{prelude::*, subclass::prelude::*};
 use netidx::path::Path;
 use radix_trie::TrieCommon;
-use sourceview4_sc::{
+use sourceview4::{
     prelude::*, subclass::prelude::*, CompletionActivation, CompletionContext,
     CompletionItem, CompletionProvider,
 };
