@@ -10,7 +10,7 @@ use netidx_core::{
 use crate::resolver::UserInfo;
 use proptest::{prelude::*, string::string_regex, collection};
 use rust_decimal::Decimal;
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, sync::Arc, net::SocketAddr};
 
 fn check<T: Pack + Debug + PartialEq>(t: T) {
     let mut bytes = pack(&t).expect("encode failed");
@@ -47,11 +47,12 @@ fn path() -> impl Strategy<Value = Path> {
 }
 
 fn user_info() -> impl Strategy<Value = UserInfo> {
-    (arcstr(), arcstr(), collection::vec(arcstr(), (0, 20)), bytes()).prop_map(
-        |(name, primary_group, groups, token)| UserInfo {
+    (arcstr(), arcstr(), collection::vec(arcstr(), (0, 20)), any::<SocketAddr>(), bytes()).prop_map(
+        |(name, primary_group, groups, resolver, token)| UserInfo {
             name,
             primary_group,
-            groups,
+            groups: groups.into(),
+            resolver,
             token,
         },
     )
