@@ -1,11 +1,13 @@
-use netidx::{protocol::value::Value, publisher::Id as PubId, subscriber::SubId};
+use netidx::{
+    path::Path, protocol::value::Value, publisher::Id as PubId, subscriber::SubId,
+};
 use serde_derive::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ToWs {
     Subscribe {
-        path: String,
+        path: Path,
     },
     Unsubscribe {
         id: SubId,
@@ -15,7 +17,7 @@ pub enum ToWs {
         val: Value,
     },
     Publish {
-        path: String,
+        path: Path,
         init: Value,
     },
     Update {
@@ -26,7 +28,7 @@ pub enum ToWs {
         id: PubId,
     },
     Call {
-        path: String,
+        path: Path,
         args: Vec<(String, Value)>,
     },
     #[serde(other)]
@@ -36,15 +38,26 @@ pub enum ToWs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum FromWs {
-    Subscribed { id: SubId },
-    Update { id: SubId, val: Value },
+    Subscribed {
+        id: SubId,
+    },
+    Update {
+        id: SubId,
+        val: Value,
+    },
     Unsubscribed,
     Wrote,
-    Published { id: PubId },
+    Published {
+        id: PubId,
+    },
     Updated,
     Unpublished,
-    Called { result: Value },
-    Error { message: String },
+    Called {
+        result: Value,
+    },
+    Error {
+        error: String,
+    },
     #[serde(other)]
     Unknown,
 }
