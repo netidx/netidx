@@ -1,3 +1,16 @@
+* 0.17.1
+
+  - permissions now allow dynamic params. e.g.  { "/foo/bar/$[user]":
+    { "$[user]": swlpd } } would give user 'eric' swlpd in
+    /foo/bar/eric. { "/foo/bar/$[group]": { "$[group]-admin": swlpd,
+    "$[group]": sl } } would give members of group 'users' sl in
+    /foo/bar/users, and members of group 'users-admin' swlpd in
+    /foo/bar/users.
+
+  - add a new tool and library, netidx-wsproxy, a websocket proxy to
+    publisher, subscriber and rpcs. Including an example javascript
+    interface.
+
 * 0.17.0
   
   - netidx_derive::Pack implement #[pack(other)] attribute for
