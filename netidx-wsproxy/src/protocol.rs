@@ -1,5 +1,5 @@
 use netidx::{
-    path::Path, protocol::value::Value, publisher::Id as PubId, subscriber::SubId,
+    path::Path, protocol::value::Value, publisher::Id as PubId, subscriber::{SubId, Event},
 };
 use serde_derive::{Deserialize, Serialize};
 
@@ -43,7 +43,7 @@ pub enum FromWs {
     },
     Update {
         id: SubId,
-        val: Value,
+        event: Event,
     },
     Unsubscribed,
     Wrote,

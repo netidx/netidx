@@ -11,7 +11,7 @@ use netidx::{
     subscriber::{Dval as Sub, Event, SubId, Subscriber, UpdatesFlags},
     utils::{BatchItem, Batched},
 };
-use netidx_protocols::{rpc::client::Proc, call_rpc};
+use netidx_protocols::rpc::client::Proc;
 use std::{
     collections::{hash_map::Entry, HashMap},
     net::SocketAddr,
@@ -151,6 +151,17 @@ impl ClientCtx {
         }
     }
 
+    async fn call(&mut self, path: Path, args: Vec<(String, Value)>) -> Result<Value> {
+        let proc = match self.rpcs.entry(path) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let proc = Proc::new(&self.subscriber, e.key().clone()).await?;
+                e.insert(proc)
+            }
+        };
+        Ok(proc.call(args).await?)
+    }
+
     async fn process_from_client(
         &mut self,
         tx: &mut SplitSink<WebSocket, Message>,
@@ -189,7 +200,10 @@ impl ClientCtx {
                                 Ok(()) => reply(tx, FromWs::Updated).await?,
                             }
                         }
-                        ToWs::Call { path, args } => (),
+                        ToWs::Call { path, args } => match self.call(path, args).await {
+                            Err(e) => err(tx, e.to_string()).await?,
+                            Ok(result) => reply(tx, FromWs::Called { result }).await?,
+                        },
                         ToWs::Unknown => err(tx, "unknown request").await?,
                     },
                 },
@@ -217,11 +231,13 @@ async fn handle_client(
                     ctx.process_from_client(&mut tx_ws, &mut queued).await?
                 }
             },
-            r = rx_up.select_next_some() => {
+            mut updates = rx_up.select_next_some() => {
+                for (id, event) in updates.drain(..) {
+                    reply(&mut tx_ws, FromWs::Update {id, event}).await?
+                }
             },
         }
     }
-    bail!("not implemented")
 }
 
 /// This will not return unless the server crashes, you should
