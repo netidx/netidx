@@ -194,6 +194,7 @@ enum ToCon {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
 pub enum Event {
     Unsubscribed,
     Update(Value),
