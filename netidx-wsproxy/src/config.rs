@@ -4,7 +4,7 @@ use structopt::StructOpt;
 #[derive(Debug, Serialize, Deserialize, StructOpt)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    #[structopt(long = "bind", help = "the address to bind to")]
+    #[structopt(long = "listen", help = "the websocket address/port to listen on")]
     pub bind: String,
     #[serde(default)]
     #[structopt(long = "cert", help = "path to the tls certificate")]
