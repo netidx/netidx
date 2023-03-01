@@ -74,7 +74,7 @@ class Netidx {
 }
 
 nx = new Netidx("ws://127.0.0.1:4343/ws");
-nx.subscribe('/local/bench/0/0', (v) => {
+nx.subscribe('/local/test', (v) => {
      console.log(v);
      return true
 });
