@@ -247,27 +247,30 @@ pub async fn run(
     publisher: Publisher,
     subscriber: Subscriber,
 ) -> Result<()> {
-    let routes = warp::path("ws").and(warp::ws()).map(move |ws: Ws| {
-        let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
-        ws.on_upgrade(move |ws| {
+    let routes = warp::path("ws")
+        .and(warp::ws())
+        .map(move |ws: Ws| {
             let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
-            async move {
-                if let Err(e) = handle_client(publisher, subscriber, ws).await {
-                    warn!("client handler exited: {}", e)
+            ws.on_upgrade(move |ws| {
+                let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
+                async move {
+                    if let Err(e) = handle_client(publisher, subscriber, ws).await {
+                        warn!("client handler exited: {}", e)
+                    }
                 }
-            }
+            })
         })
-    });
+        .with(warp::trace::request());
     match (&config.cert, &config.key) {
         (_, None) | (None, _) => {
-            warp::serve(routes).run(config.bind.parse::<SocketAddr>()?).await
+            warp::serve(routes).run(config.listen.parse::<SocketAddr>()?).await
         }
         (Some(cert), Some(key)) => {
             warp::serve(routes)
                 .tls()
                 .cert_path(cert)
                 .key_path(key)
-                .run(config.bind.parse::<SocketAddr>()?)
+                .run(config.listen.parse::<SocketAddr>()?)
                 .await
         }
     }
