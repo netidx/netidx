@@ -25,18 +25,18 @@ use tokio::{
 };
 
 #[derive(StructOpt, Debug)]
-pub(super) struct Params {
+pub(crate) struct Params {
     #[structopt(
         short = "b",
         long = "bind",
         help = "configure the bind address e.g. local, 192.168.0.0/16"
     )]
-    bind: Option<BindCfg>,
+    pub(crate) bind: Option<BindCfg>,
     #[structopt(
         long = "timeout",
         help = "require subscribers to consume values before timeout (seconds)"
     )]
-    timeout: Option<u64>,
+    pub(crate) timeout: Option<u64>,
 }
 
 macro_rules! tryc {

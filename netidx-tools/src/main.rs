@@ -6,6 +6,7 @@ mod stress_channel_subscriber;
 mod stress_publisher;
 mod stress_subscriber;
 mod subscriber;
+mod wsproxy;
 
 #[cfg(unix)]
 mod activation;
@@ -96,6 +97,15 @@ enum Opt {
         #[structopt(subcommand)]
         cmd: Stress,
     },
+    #[structopt(name = "wsproxy", about = "websocket proxy")]
+    WsProxy {
+        #[structopt(flatten)]
+        common: ClientParams,
+        #[structopt(flatten)]
+        publisher: publisher::Params,
+        #[structopt(flatten)]
+        proxy: netidx_wsproxy::config::Config,
+    }
 }
 
 fn main() {
@@ -142,6 +152,10 @@ fn main() {
                     stress_channel_subscriber::run(cfg, auth, params)
                 }
             }
+        }
+        Opt::WsProxy { common, publisher, proxy } => {
+            let (cfg, auth) = common.load();
+            wsproxy::run(cfg, auth, publisher, proxy)
         }
     }
 }

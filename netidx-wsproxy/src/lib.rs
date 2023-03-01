@@ -22,7 +22,7 @@ use warp::{
     Filter,
 };
 
-mod config;
+pub mod config;
 mod protocol;
 
 struct SubEntry {
