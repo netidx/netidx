@@ -193,7 +193,8 @@ enum ToCon {
     Flush(oneshot::Sender<()>),
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
 pub enum Event {
     Unsubscribed,
     Update(Value),

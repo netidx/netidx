@@ -10,6 +10,7 @@ use fxhash::FxHashMap;
 use netidx_core::pool::Pool;
 use netidx_netproto::resolver;
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, Bound, HashMap},
     convert::TryFrom,
     iter,
@@ -166,8 +167,31 @@ impl UserDb {
     }
 }
 
+fn subst(expr: &str, dst: &mut String, sub: &str) {
+    dst.clear();
+    for c in expr.chars() {
+        if c == ']' {
+            if dst.ends_with("$[group") {
+                dst.replace_range(dst.len() - 7.., sub);
+            } else {
+                dst.push(c)
+            }
+        } else {
+            dst.push(c);
+        }
+    }
+}
+
+thread_local! {
+    static BUF: RefCell<String> = RefCell::new(String::new());
+}
+
 #[derive(Debug)]
-pub(super) struct PMap(BTreeMap<Path, HashMap<Entity, Permissions>>);
+pub(super) struct PMap {
+    normal: BTreeMap<Path, FxHashMap<Entity, Permissions>>,
+    user_dynamic: BTreeMap<Path, Permissions>,
+    group_dynamic: BTreeMap<Path, Vec<(String, Permissions)>>,
+}
 
 impl PMap {
     pub(super) fn from_file(
@@ -176,7 +200,9 @@ impl PMap {
         root: &str,
         children: &BTreeMap<Path, Referral>,
     ) -> Result<Self> {
-        let mut pmap = BTreeMap::new();
+        let mut normal = BTreeMap::new();
+        let mut user_dynamic = BTreeMap::new();
+        let mut group_dynamic = BTreeMap::new();
         for (path, tbl) in file.0.iter() {
             let path = Path::from(path);
             if !Path::is_parent(root, &path) {
@@ -187,14 +213,53 @@ impl PMap {
                     bail!("permission entry for child: {}, entry: {}", child, path)
                 }
             }
-            let mut entry = HashMap::with_capacity(tbl.len());
-            for (ent, perm) in tbl.iter() {
-                let entity = if ent == "" { ANONYMOUS.id } else { db.entity(ent) };
-                entry.insert(entity, Permissions::try_from(perm.as_str())?);
+            if path.contains("$[user]") && !path.ends_with("$[user]") {
+                bail!("user dynamic permissions must end in $[user]")
             }
-            pmap.insert(path, entry);
+            if path.contains("$[group]") {
+                match Path::basename(&path) {
+                    None => bail!("$[group] with no parent"),
+                    Some(ent) => {
+                        if !ent.contains("$[group]") {
+                            bail!("group dynamic permissions basename must contain $[group]")
+                        }
+                    }
+                }
+            }
+            if path.ends_with("$[user]") {
+                let path = Path::from(ArcStr::from(Path::dirname(&path).unwrap()));
+                let mut dynamic = Permissions::empty();
+                for (ent, perm) in tbl.iter() {
+                    let p = Permissions::try_from(perm.as_str())?;
+                    if ent == "$[user]" {
+                        dynamic = p;
+                    } else {
+                        bail!("user dynamic permissions may only include the $[user] permission set")
+                    }
+                }
+                user_dynamic.insert(path, dynamic);
+            } else if path.ends_with("$[group]") {
+                let path = Path::from(ArcStr::from(Path::dirname(&path).unwrap()));
+                let mut dynamic = Vec::new();
+                for (ent, perm) in tbl.iter() {
+                    let p = Permissions::try_from(perm.as_str())?;
+                    if ent.contains("$[group]") {
+                        dynamic.push((ent.clone(), p));
+                    } else {
+                        bail!("group dynamic permissions may only contain .*$[group].*")
+                    }
+                }
+                group_dynamic.insert(path, dynamic);
+            } else {
+                let mut entry = HashMap::default();
+                for (ent, perm) in tbl.iter() {
+                    let entity = if ent == "" { ANONYMOUS.id } else { db.entity(ent) };
+                    entry.insert(entity, Permissions::try_from(perm.as_str())?);
+                }
+                normal.insert(path, entry);
+            }
         }
-        Ok(PMap(pmap))
+        Ok(PMap { normal, user_dynamic, group_dynamic })
     }
 
     pub(crate) fn allowed(
@@ -207,6 +272,7 @@ impl PMap {
         actual_rights & desired_rights == desired_rights
     }
 
+    // should only be used by list_matching
     pub(crate) fn allowed_in_scope(
         &self,
         base_path: &str,
@@ -216,7 +282,7 @@ impl PMap {
     ) -> bool {
         let rights_at_base = self.permissions(base_path, user);
         let mut rights = rights_at_base;
-        let mut iter = self.0.range::<str, (Bound<&str>, Bound<&str>)>((
+        let mut iter = self.normal.range::<str, (Bound<&str>, Bound<&str>)>((
             Bound::Excluded(base_path),
             Bound::Unbounded,
         ));
@@ -242,23 +308,65 @@ impl PMap {
     }
 
     pub(crate) fn permissions(&self, path: &str, user: &UserInfo) -> Permissions {
-        Path::dirnames(path).fold(Permissions::empty(), |p, s| match self.0.get(s) {
-            None => p,
-            Some(set) => {
-                let init = (p, Permissions::empty());
-                let (ap, dp) =
-                    user.entities().fold(init, |(ap, dp), e| match set.get(e) {
-                        None => (ap, dp),
-                        Some(p_) => {
-                            if p_.contains(Permissions::DENY) {
-                                (ap, dp | *p_)
-                            } else {
-                                (ap | *p_, dp)
+        Path::dirnames(path).fold(Permissions::empty(), |p, s| {
+            let (basename, dirname) = (Path::basename(s), Path::dirname(s));
+            let uifo = user.user_info.as_ref();
+            let p = {
+                match (basename, dirname, uifo) {
+                    (_, _, None) | (_, None, _) | (None, _, _) => p,
+                    (Some(sub), Some(parent), Some(uifo)) => {
+                        let p = match self.user_dynamic.get(parent) {
+                            None => p,
+                            Some(ud) if sub == uifo.name => {
+                                if ud.contains(Permissions::DENY) {
+                                    p & !*ud
+                                } else {
+                                    p | *ud
+                                }
                             }
-                        }
-                    });
-                ap & !dp
-            }
+                            Some(_) => p,
+                        };
+                        let p = match self.group_dynamic.get(parent) {
+                            None => p,
+                            Some(gd) => gd.iter().fold(p, |p, (expr, gd)| {
+                                BUF.with(|buf| {
+                                    let mut buf = buf.borrow_mut();
+                                    subst(&expr, &mut *buf, sub);
+                                    if uifo.groups.iter().find(|g| &**buf == &**g).is_some() {
+                                        if gd.contains(Permissions::DENY) {
+                                            p & !*gd
+                                        } else {
+                                            p | *gd
+                                        }
+                                    } else {
+                                        p
+                                    }
+                                })
+                            }),
+                        };
+                        p
+                    }
+                }
+            };
+            let p = match self.normal.get(s) {
+                None => p,
+                Some(set) => {
+                    let init = (p, Permissions::empty());
+                    let (ap, dp) =
+                        user.entities().fold(init, |(ap, dp), e| match set.get(e) {
+                            None => (ap, dp),
+                            Some(p_) => {
+                                if p_.contains(Permissions::DENY) {
+                                    (ap, dp | *p_)
+                                } else {
+                                    (ap | *p_, dp)
+                                }
+                            }
+                        });
+                    ap & !dp
+                }
+            };
+            p
         })
     }
 }

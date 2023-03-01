@@ -1,9 +1,10 @@
 use crate::pack::{Pack, PackError};
-use bytes::{Bytes, Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
+use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
+    borrow::Borrow,
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
     convert::AsRef,
-    borrow::Borrow,
     fmt,
     hash::{Hash, Hasher},
     ops::Deref,
@@ -12,7 +13,7 @@ use std::{
 
 /// This is a thin wrapper around a Bytes that guarantees that it's contents are
 /// well formed unicode.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct Chars(Bytes);
 
 impl Chars {
@@ -28,7 +29,7 @@ impl Chars {
     pub unsafe fn from_bytes_unchecked(bytes: Bytes) -> Chars {
         Chars(bytes)
     }
-    
+
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -39,6 +40,40 @@ impl Chars {
 
     pub fn to_vec(&self) -> Vec<u8> {
         self.0.to_vec()
+    }
+}
+
+impl Serialize for Chars {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&**self)
+    }
+}
+
+struct CharsVis;
+
+impl<'de> Visitor<'de> for CharsVis {
+    type Value = Chars;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "expected a string")
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Chars::from(v))
+    }
+}
+
+impl<'de> Deserialize<'de> for Chars {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de> {
+        deserializer.deserialize_string(CharsVis)
     }
 }
 
