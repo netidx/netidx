@@ -2387,3 +2387,22 @@ where
         v.bits().into()
     }
 }
+
+impl convert::From<uuid::Uuid> for Value {
+    fn from(id: uuid::Uuid) -> Self {
+        Value::from(id.to_string())
+    }
+}
+
+impl FromValue for uuid::Uuid {
+    fn from_value(v: Value) -> Res<Self> {
+        match v {
+            Value::String(v) => Ok(v.parse::<uuid::Uuid>()?),
+            _ => bail!("can't cast"),
+        }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        <uuid::Uuid as FromValue>::from_value(v).ok()
+    }
+}
