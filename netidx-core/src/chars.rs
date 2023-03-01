@@ -67,12 +67,20 @@ impl<'de> Visitor<'de> for CharsVis {
     {
         Ok(Chars::from(v))
     }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Chars::from(String::from(v)))
+    }
 }
 
 impl<'de> Deserialize<'de> for Chars {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de> {
+        D: Deserializer<'de>,
+    {
         deserializer.deserialize_string(CharsVis)
     }
 }
