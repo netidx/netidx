@@ -2,12 +2,19 @@ class Netidx {
     con = null;
     subs = new Map();
     pending_subs = [];
+    pending_calls = [];
+    pending_replies = [];
 
     constructor(url) {
         this.con = new WebSocket(url);
         this.con.addEventListener('open', (event) => {
             for (let sub of this.pending_subs) {
                 this.con.send(JSON.stringify({'type': 'Subscribe', 'path': sub[0]}));
+            }
+            this.pending_subs = [];
+            for (let call of this.pending_calls) {
+                this.con.send(JSON.stringify(call[0]));
+                this.pending_replies.push(call[1]);
             }
         });
         this.con.addEventListener('message', (event) => {
@@ -36,6 +43,11 @@ class Netidx {
                         this.con.send(JSON.stringify({'type': 'Unsubscribe', 'id': ev.id }))
                     }
                 }
+            } else if (ev.type == "Called") {
+                let resolve = this.pending_replies.unshift();
+                if (resolve != undefined) {
+                    resolve(ev.result);
+                }
             }
         });
     }
@@ -46,6 +58,18 @@ class Netidx {
             this.con.send(JSON.stringify({ 'type': 'Subscribe', 'path': path }));
         }
     }
+
+    call(path, args) {
+        new Promise((reply, reject) => {
+            let call = {'type': 'Call', 'path': path, 'args': args};
+            if (this.con.readyState == 1) {
+                this.con.send(JSON.stringify(call));
+                pending_replies.push(reply);
+            } else {
+                pending_calls.push([call, reply]);
+            }
+        })
+    }
 }
 
 nx = new Netidx("ws://127.0.0.1:4343/ws");
@@ -53,3 +77,5 @@ nx.subscribe('/local/bench/0/0', (v) => {
     console.log(v);
     return true
 });
+nx.call('/local/test-rpc', ['echo': {'type': 'U32', 'value': 42}])
+    .then((v) => console.log(v));
