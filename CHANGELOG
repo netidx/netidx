@@ -1,3 +1,11 @@
+* 0.17.2
+
+  - change the websocket proxy protocol a bit to make it possible to
+    have multiple in flight rpcs.
+
+  - Allow rpcs to complete out of order, and don't wait for them to
+    move on
+
 * 0.17.1
 
   - permissions now allow dynamic params. e.g.  { "/foo/bar/$[user]":
