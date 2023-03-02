@@ -1,6 +1,12 @@
-use crate::protocol::{FromWs, ToWs};
+use crate::protocol::{Request, Response};
 use anyhow::{bail, Result};
-use futures::{channel::mpsc, prelude::*, select_biased, stream::SplitSink, StreamExt};
+use futures::{
+    channel::mpsc,
+    prelude::*,
+    select_biased,
+    stream::{FuturesUnordered, SplitSink},
+    StreamExt,
+};
 use fxhash::FxHashMap;
 use log::warn;
 use netidx::{
@@ -15,6 +21,7 @@ use netidx_protocols::rpc::client::Proc;
 use std::{
     collections::{hash_map::Entry, HashMap},
     net::SocketAddr,
+    pin::Pin,
     result,
 };
 use warp::{
@@ -36,7 +43,10 @@ struct PubEntry {
     val: Pub,
 }
 
-async fn reply(tx: &mut SplitSink<WebSocket, Message>, m: FromWs) -> Result<()> {
+type PendingCall =
+    Pin<Box<dyn Future<Output = (u64, Result<Value>)> + Send + Sync + 'static>>;
+
+async fn reply(tx: &mut SplitSink<WebSocket, Message>, m: Response) -> Result<()> {
     let s = serde_json::to_string(&m)?;
     Ok(tx.send(Message::text(s)).await?)
 }
@@ -44,7 +54,7 @@ async fn err(
     tx: &mut SplitSink<WebSocket, Message>,
     message: impl Into<String>,
 ) -> Result<()> {
-    reply(tx, FromWs::Error { error: message.into() }).await
+    reply(tx, Response::Error { error: message.into() }).await
 }
 
 struct ClientCtx {
@@ -151,60 +161,73 @@ impl ClientCtx {
         }
     }
 
-    async fn call(&mut self, path: Path, args: Vec<(String, Value)>) -> Result<Value> {
+    async fn call(
+        &mut self,
+        id: u64,
+        path: Path,
+        args: Vec<(String, Value)>,
+    ) -> Result<PendingCall> {
         let proc = match self.rpcs.entry(path) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
                 let proc = Proc::new(&self.subscriber, e.key().clone()).await?;
                 e.insert(proc)
             }
-        };
-        Ok(proc.call(args).await?)
+        }
+        .clone();
+        Ok(Box::pin(async move { (id, proc.call(args).await) }) as PendingCall)
     }
 
     async fn process_from_client(
         &mut self,
         tx: &mut SplitSink<WebSocket, Message>,
         queued: &mut Vec<result::Result<Message, warp::Error>>,
+        calls_pending: &mut FuturesUnordered<PendingCall>,
     ) -> Result<()> {
         let mut batch = self.publisher.start_batch();
         for r in queued.drain(..) {
             match r?.to_str() {
                 Err(_) => err(tx, "expected text").await?,
-                Ok(txt) => match serde_json::from_str::<ToWs>(txt) {
+                Ok(txt) => match serde_json::from_str::<Request>(txt) {
                     Err(e) => err(tx, format!("could not parse message {}", e)).await?,
                     Ok(req) => match req {
-                        ToWs::Subscribe { path } => {
+                        Request::Subscribe { path } => {
                             let id = self.subscribe(path);
-                            reply(tx, FromWs::Subscribed { id }).await?
+                            reply(tx, Response::Subscribed { id }).await?
                         }
-                        ToWs::Unsubscribe { id } => match self.unsubscribe(id) {
+                        Request::Unsubscribe { id } => match self.unsubscribe(id) {
                             Err(e) => err(tx, e.to_string()).await?,
-                            Ok(()) => reply(tx, FromWs::Unsubscribed).await?,
+                            Ok(()) => reply(tx, Response::Unsubscribed).await?,
                         },
-                        ToWs::Write { id, val } => match self.write(id, val) {
+                        Request::Write { id, val } => match self.write(id, val) {
                             Err(e) => err(tx, e.to_string()).await?,
-                            Ok(()) => reply(tx, FromWs::Wrote).await?,
+                            Ok(()) => reply(tx, Response::Wrote).await?,
                         },
-                        ToWs::Publish { path, init } => match self.publish(path, init) {
+                        Request::Publish { path, init } => match self.publish(path, init)
+                        {
                             Err(e) => err(tx, e.to_string()).await?,
-                            Ok(id) => reply(tx, FromWs::Published { id }).await?,
+                            Ok(id) => reply(tx, Response::Published { id }).await?,
                         },
-                        ToWs::Unpublish { id } => match self.unpublish(id) {
+                        Request::Unpublish { id } => match self.unpublish(id) {
                             Err(e) => err(tx, e.to_string()).await?,
-                            Ok(()) => reply(tx, FromWs::Unpublished).await?,
+                            Ok(()) => reply(tx, Response::Unpublished).await?,
                         },
-                        ToWs::Update { id, val } => {
+                        Request::Update { id, val } => {
                             match self.update(&mut batch, id, val) {
                                 Err(e) => err(tx, e.to_string()).await?,
-                                Ok(()) => reply(tx, FromWs::Updated).await?,
+                                Ok(()) => reply(tx, Response::Updated).await?,
                             }
                         }
-                        ToWs::Call { path, args } => match self.call(path, args).await {
-                            Err(e) => err(tx, e.to_string()).await?,
-                            Ok(result) => reply(tx, FromWs::Called { result }).await?,
-                        },
-                        ToWs::Unknown => err(tx, "unknown request").await?,
+                        Request::Call { id, path, args } => {
+                            match self.call(id, path, args).await {
+                                Ok(pending) => calls_pending.push(pending),
+                                Err(e) => {
+                                    let error = format!("rpc call failed {}", e);
+                                    reply(tx, Response::CallFailed { id, error }).await?
+                                }
+                            }
+                        }
+                        Request::Unknown => err(tx, "unknown request").await?,
                     },
                 },
             }
@@ -223,17 +246,32 @@ async fn handle_client(
     let (mut tx_ws, rx_ws) = ws.split();
     let mut queued: Vec<result::Result<Message, warp::Error>> = Vec::new();
     let mut rx_ws = Batched::new(rx_ws.fuse(), 10_000);
+    let mut calls_pending: FuturesUnordered<PendingCall> = FuturesUnordered::new();
+    calls_pending.push(Box::pin(async { future::pending().await }) as PendingCall);
     loop {
         select_biased! {
+            (id, res) = calls_pending.select_next_some() => match res {
+                Ok(result) => {
+                    reply(&mut tx_ws, Response::CallSuccess { id, result }).await?
+                }
+                Err(e) => {
+                    let error = format!("rpc call failed {}", e);
+                    reply(&mut tx_ws, Response::CallFailed { id, error }).await?
+                }
+            },
             r = rx_ws.select_next_some() => match r {
                 BatchItem::InBatch(r) => queued.push(r),
                 BatchItem::EndBatch => {
-                    ctx.process_from_client(&mut tx_ws, &mut queued).await?
+                    ctx.process_from_client(
+                        &mut tx_ws,
+                        &mut queued,
+                        &mut calls_pending
+                    ).await?
                 }
             },
             mut updates = rx_up.select_next_some() => {
                 for (id, event) in updates.drain(..) {
-                    reply(&mut tx_ws, FromWs::Update {id, event}).await?
+                    reply(&mut tx_ws, Response::Update {id, event}).await?
                 }
             },
         }

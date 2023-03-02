@@ -5,7 +5,7 @@ use serde_derive::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum ToWs {
+pub enum Request {
     Subscribe {
         path: Path,
     },
@@ -28,6 +28,7 @@ pub enum ToWs {
         id: PubId,
     },
     Call {
+        id: u64,
         path: Path,
         args: Vec<(String, Value)>,
     },
@@ -37,7 +38,7 @@ pub enum ToWs {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum FromWs {
+pub enum Response {
     Subscribed {
         id: SubId,
     },
@@ -52,8 +53,13 @@ pub enum FromWs {
     },
     Updated,
     Unpublished,
-    Called {
+    CallSuccess {
+        id: u64,
         result: Value,
+    },
+    CallFailed {
+        id: u64,
+        error: String,
     },
     Error {
         error: String,
