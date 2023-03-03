@@ -2,16 +2,20 @@ use anyhow::{bail, Result as Res};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::{Buf, BufMut, Bytes};
 use chrono::{naive::NaiveDateTime, prelude::*};
+use fxhash::FxHashMap;
 use indexmap::{IndexMap, IndexSet};
 use netidx_core::{
     chars::Chars,
     pack::{self, Pack, PackError},
     path::Path,
+    pool::{Pool, Pooled},
     utils,
 };
 use rust_decimal::Decimal;
 use smallvec::SmallVec;
 use std::{
+    any::{Any, TypeId},
+    cell::RefCell,
     cmp::{Ordering, PartialEq, PartialOrd},
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     convert, fmt,
@@ -2070,6 +2074,15 @@ impl<T: convert::Into<Value>> convert::From<Vec<T>> for Value {
     }
 }
 
+impl<T: convert::Into<Value> + Clone + Send + Sync> convert::From<Pooled<Vec<T>>>
+    for Value
+{
+    fn from(v: Pooled<Vec<T>>) -> Value {
+        let v = v.iter().map(|e| e.clone().into()).collect::<Vec<Value>>();
+        Value::Array(Arc::from(v))
+    }
+}
+
 impl<A> FromValue for SmallVec<A>
 where
     A: smallvec::Array,
@@ -2404,5 +2417,37 @@ impl FromValue for uuid::Uuid {
 
     fn get(v: Value) -> Option<Self> {
         <uuid::Uuid as FromValue>::from_value(v).ok()
+    }
+}
+
+thread_local! {
+    static POOLS: RefCell<FxHashMap<TypeId, Box<dyn Any>>> =
+        RefCell::new(HashMap::default());
+}
+
+impl<T: FromValue + Send + Sync> FromValue for Pooled<Vec<T>> {
+    fn from_value(v: Value) -> Res<Self> {
+        match v {
+            Value::Array(elts) => {
+                let mut t = POOLS.with(|pools| {
+                    let mut pools = pools.borrow_mut();
+                    let pool: &mut Pool<Vec<T>> = pools
+                        .entry(TypeId::of::<Vec<T>>())
+                        .or_insert_with(|| Box::new(Pool::<Vec<T>>::new(10000, 10000)))
+                        .downcast_mut()
+                        .unwrap();
+                    pool.take()
+                });
+                for elt in elts.iter() {
+                    t.push(elt.clone().cast_to::<T>()?)
+                }
+                Ok(t)
+            }
+            _ => bail!("expected an array"),
+        }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        <Pooled<Vec<T>> as FromValue>::from_value(v).ok()
     }
 }
