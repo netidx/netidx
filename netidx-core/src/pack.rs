@@ -728,7 +728,7 @@ impl<T: Pack> Pack for Vec<T> {
 impl<K, V, R> Pack for HashMap<K, V, R>
 where
     K: Pack + Hash + Eq,
-    V: Pack + Hash + Eq,
+    V: Pack,
     R: Default + BuildHasher,
 {
     fn encoded_len(&self) -> usize {
