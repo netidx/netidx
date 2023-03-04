@@ -5,6 +5,8 @@
 
   - Allow rpcs to complete out of order, and don't wait for them to
     move on
+  
+  - Fix trait requirements for Packing HashMap
 
 * 0.17.1
 
