@@ -29,7 +29,7 @@ fn is_attr(att: &Attribute, s: &str) -> bool {
     }
 }
 
-fn encoded_len(input: &Data) -> TokenStream {
+fn encoded_len(no_wrap: bool, input: &Data) -> TokenStream {
     match input {
         Data::Struct(st) => match &st.fields {
             Fields::Named(fields) => {
@@ -43,8 +43,14 @@ fn encoded_len(input: &Data) -> TokenStream {
                             netidx_core::pack::Pack::encoded_len(&self.#name)
                         }
                     });
-                quote! {
-                    netidx_core::pack::len_wrapped_len(0 #(+ #fields)*)
+                if no_wrap {
+                    quote! {
+                        0 #(+ #fields)*
+                    }
+                } else {
+                    quote! {
+                        netidx_core::pack::len_wrapped_len(0 #(+ #fields)*)
+                    }
                 }
             }
             Fields::Unnamed(fields) => {
@@ -59,8 +65,14 @@ fn encoded_len(input: &Data) -> TokenStream {
                             netidx_core::pack::Pack::encoded_len(&self.#index)
                         }
                     });
-                quote! {
-                    netidx_core::pack::len_wrapped_len(0 #(+ #fields)*)
+                if no_wrap {
+                    quote! {
+                        0 #(+ #fields)*
+                    }
+                } else {
+                    quote! {
+                        netidx_core::pack::len_wrapped_len(0 #(+ #fields)*)
+                    }
                 }
             }
             Fields::Unit => panic!("unit structs are not supported by Pack"),
@@ -118,17 +130,25 @@ fn encoded_len(input: &Data) -> TokenStream {
                     quote! { Self::#tag => 0 }
                 }
             });
-            quote! {
-                netidx_core::pack::len_wrapped_len(1 + match self {
-                    #(#cases),*
-                })
+            if no_wrap {
+                quote! {
+                    1 + match self {
+                        #(#cases),*
+                    }
+                }
+            } else {
+                quote! {
+                    netidx_core::pack::len_wrapped_len(1 + match self {
+                        #(#cases),*
+                    })
+                }
             }
         }
         Data::Union(_) => panic!("unions are not supported by Pack"),
     }
 }
 
-fn encode(input: &Data) -> TokenStream {
+fn encode(no_wrap: bool, input: &Data) -> TokenStream {
     match input {
         Data::Struct(st) => match &st.fields {
             Fields::Named(fields) => {
@@ -142,11 +162,18 @@ fn encode(input: &Data) -> TokenStream {
                             netidx_core::pack::Pack::encode(&self.#name, buf)?
                         }
                     });
-                quote! {
-                    netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
+                if no_wrap {
+                    quote! {
                         #(#fields);*;
                         Ok(())
-                    })
+                    }
+                } else {
+                    quote! {
+                        netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
+                            #(#fields);*;
+                            Ok(())
+                        })
+                    }
                 }
             }
             Fields::Unnamed(fields) => {
@@ -161,11 +188,18 @@ fn encode(input: &Data) -> TokenStream {
                             netidx_core::pack::Pack::encode(&self.#index, buf)?
                         }
                     });
-                quote! {
-                    netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
+                if no_wrap {
+                    quote! {
                         #(#fields);*;
                         Ok(())
-                    })
+                    }
+                } else {
+                    quote! {
+                        netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
+                            #(#fields);*;
+                            Ok(())
+                        })
+                    }
                 }
             }
             Fields::Unit => panic!("unit structs are not supported by Pack"),
@@ -235,12 +269,20 @@ fn encode(input: &Data) -> TokenStream {
                     }
                 }
             });
-            quote! {
-                netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
+            if no_wrap {
+                quote! {
                     match self {
                         #(#cases)*
                     }
-                })
+                }
+            } else {
+                quote! {
+                    netidx_core::pack::len_wrapped_encode(buf, self, |buf| {
+                        match self {
+                            #(#cases)*
+                        }
+                    })
+                }
             }
         }
         Data::Union(_) => panic!("unions are not supported by Pack"),
@@ -296,17 +338,24 @@ fn decode_unnamed_field(f: &Field, i: usize) -> TokenStream {
     }
 }
 
-fn decode(input: &Data) -> TokenStream {
+fn decode(no_wrap: bool, input: &Data) -> TokenStream {
     match input {
         Data::Struct(st) => match &st.fields {
             Fields::Named(fields) => {
                 let name_fields = fields.named.iter().map(|f| &f.ident);
                 let decode_fields = fields.named.iter().map(decode_named_field);
-                quote! {
-                    netidx_core::pack::len_wrapped_decode(buf, |buf| {
+                if no_wrap {
+                    quote! {
                         #(#decode_fields);*;
                         Ok(Self { #(#name_fields),* })
-                    })
+                    }
+                } else {
+                    quote! {
+                        netidx_core::pack::len_wrapped_decode(buf, |buf| {
+                            #(#decode_fields);*;
+                            Ok(Self { #(#name_fields),* })
+                        })
+                    }
                 }
             }
             Fields::Unnamed(fields) => {
@@ -320,84 +369,113 @@ fn decode(input: &Data) -> TokenStream {
                     .iter()
                     .enumerate()
                     .map(|(i, f)| decode_unnamed_field(f, i));
-                quote! {
-                    netidx_core::pack::len_wrapped_decode(buf, |buf| {
+                if no_wrap {
+                    quote! {
                         #(#decode_fields);*;
                         Ok(Self(#(#name_fields),*))
-                    })
+                    }
+                } else {
+                    quote! {
+                        netidx_core::pack::len_wrapped_decode(buf, |buf| {
+                            #(#decode_fields);*;
+                            Ok(Self(#(#name_fields),*))
+                        })
+                    }
                 }
             }
             Fields::Unit => panic!("unit structs are not supported by Pack"),
         },
         Data::Enum(en) => {
             let mut other: Option<TokenStream> = None;
-            let cases = en.variants.iter().enumerate().map(|(i, v)| match &v.fields {
-                Fields::Named(f) => {
-                    if v.attrs.iter().any(|a| is_attr(a, "other")) {
-                        panic!("other attribute must be applied to a unit variant")
-                    }
-                    let name_fields = f.named.iter().map(|f| &f.ident);
-                    let decode_fields = f.named.iter().map(decode_named_field);
-                    let tag = &v.ident;
-                    let i = Index::from(i);
-                    quote! {
-                        #i => {
-                            #(#decode_fields);*;
-                            Ok(Self::#tag { #(#name_fields),* })
+            let cases = en
+                .variants
+                .iter()
+                .enumerate()
+                .map(|(i, v)| match &v.fields {
+                    Fields::Named(f) => {
+                        if v.attrs.iter().any(|a| is_attr(a, "other")) {
+                            panic!("other attribute must be applied to a unit variant")
+                        }
+                        let name_fields = f.named.iter().map(|f| &f.ident);
+                        let decode_fields = f.named.iter().map(decode_named_field);
+                        let tag = &v.ident;
+                        let i = Index::from(i);
+                        quote! {
+                            #i => {
+                                #(#decode_fields);*;
+                                Ok(Self::#tag { #(#name_fields),* })
+                            }
                         }
                     }
-                }
-                Fields::Unnamed(f) => {
-                    if v.attrs.iter().any(|a| is_attr(a, "other")) {
-                        panic!("other attribute must be applied to a unit variant")
-                    }
-                    let name_fields = f
-                        .unnamed
-                        .iter()
-                        .enumerate()
-                        .map(|(i, _)| format_ident!("field{}", i));
-                    let decode_fields = f
-                        .unnamed
-                        .iter()
-                        .enumerate()
-                        .map(|(i, f)| decode_unnamed_field(f, i));
-                    let tag = &v.ident;
-                    let i = Index::from(i);
-                    quote! {
-                        #i => {
-                            #(#decode_fields);*;
-                            Ok(Self::#tag(#(#name_fields),*))
+                    Fields::Unnamed(f) => {
+                        if v.attrs.iter().any(|a| is_attr(a, "other")) {
+                            panic!("other attribute must be applied to a unit variant")
+                        }
+                        let name_fields = f
+                            .unnamed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, _)| format_ident!("field{}", i));
+                        let decode_fields = f
+                            .unnamed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, f)| decode_unnamed_field(f, i));
+                        let tag = &v.ident;
+                        let i = Index::from(i);
+                        quote! {
+                            #i => {
+                                #(#decode_fields);*;
+                                Ok(Self::#tag(#(#name_fields),*))
+                            }
                         }
                     }
-                }
-                Fields::Unit => {
-                    let tag = &v.ident;
-                    let i = Index::from(i);
-                    if v.attrs.iter().any(|a| is_attr(a, "other")) {
-                        if other.is_some() {
-                            panic!("other attribute may be specified at most once")
+                    Fields::Unit => {
+                        let tag = &v.ident;
+                        let i = Index::from(i);
+                        if v.attrs.iter().any(|a| is_attr(a, "other")) {
+                            if other.is_some() {
+                                panic!("other attribute may be specified at most once")
+                            }
+                            other = Some(quote! { _ => Ok(Self::#tag) })
                         }
-                        other = Some(quote! { _ => Ok(Self::#tag) })
+                        quote! { #i => Ok(Self::#tag), }
                     }
-                    quote! { #i => Ok(Self::#tag), }
-                }
-            }).collect::<Vec<_>>();
-            match other {
-                Some(other) => quote! {
-                    netidx_core::pack::len_wrapped_decode(buf, |buf| {
+                })
+                .collect::<Vec<_>>();
+            if no_wrap {
+                match other {
+                    Some(other) => quote! {
                         match <u8 as netidx_core::pack::Pack>::decode(buf)? {
                             #(#cases)*
                             #other
                         }
-                    })
-                },
-                None => quote! {
-                    netidx_core::pack::len_wrapped_decode(buf, |buf| {
+                    },
+                    None => quote! {
                         match <u8 as netidx_core::pack::Pack>::decode(buf)? {
                             #(#cases)*
                             _ => Err(netidx_core::pack::PackError::UnknownTag)
                         }
-                    })
+                    },
+                }
+            } else {
+                match other {
+                    Some(other) => quote! {
+                        netidx_core::pack::len_wrapped_decode(buf, |buf| {
+                            match <u8 as netidx_core::pack::Pack>::decode(buf)? {
+                                #(#cases)*
+                                #other
+                            }
+                        })
+                    },
+                    None => quote! {
+                        netidx_core::pack::len_wrapped_decode(buf, |buf| {
+                            match <u8 as netidx_core::pack::Pack>::decode(buf)? {
+                                #(#cases)*
+                                _ => Err(netidx_core::pack::PackError::UnknownTag)
+                            }
+                        })
+                    },
                 }
             }
         }
@@ -408,6 +486,7 @@ fn decode(input: &Data) -> TokenStream {
 #[proc_macro_derive(Pack, attributes(pack))]
 pub fn derive_pack(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut input = parse_macro_input!(input as DeriveInput);
+    let no_wrap = input.attrs.iter().any(|a| is_attr(a, "unwrapped"));
     let name = input.ident;
     for param in &mut input.generics.params {
         if let GenericParam::Type(typ) = param {
@@ -415,9 +494,9 @@ pub fn derive_pack(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         }
     }
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let encoded_len = encoded_len(&input.data);
-    let encode = encode(&input.data);
-    let decode = decode(&input.data);
+    let encoded_len = encoded_len(no_wrap, &input.data);
+    let encode = encode(no_wrap, &input.data);
+    let decode = decode(no_wrap, &input.data);
     let expanded = quote! {
         impl #impl_generics netidx_core::pack::Pack for #name #ty_generics #where_clause {
             fn encoded_len(&self) -> usize {
