@@ -5,7 +5,10 @@ use syn::{
     Fields, GenericParam, Ident, Index,
 };
 
-fn is_attr(att: &Attribute, s: &str) -> bool {
+fn is_attr(att: &Attribute, allowed: &[&str], s: &str) -> bool {
+    if !allowed.contains(&s) {
+        panic!("BUG: attribute '{}' is not included in '{:?}'", s, allowed);
+    }
     match att.style {
         AttrStyle::Inner(_) => false,
         AttrStyle::Outer => {
@@ -16,7 +19,13 @@ fn is_attr(att: &Attribute, s: &str) -> bool {
                         Some(TokenTree::Group(g)) => {
                             match g.stream().into_iter().next() {
                                 None => false,
-                                Some(TokenTree::Ident(i)) => i.to_string() == s,
+                                Some(TokenTree::Ident(i)) => {
+                                    let attr = i.to_string();
+                                    if !allowed.contains(&attr.as_str()) {
+                                        panic!("invalid attribute '{}'", attr);
+                                    }
+                                    attr == s
+                                }
                                 Some(_) => false,
                             }
                         }
@@ -29,6 +38,8 @@ fn is_attr(att: &Attribute, s: &str) -> bool {
     }
 }
 
+static FIELD_ATTRS: [&'static str; 3] = ["skip", "default", "other"];
+
 fn encoded_len(no_wrap: bool, input: &Data) -> TokenStream {
     match input {
         Data::Struct(st) => match &st.fields {
@@ -36,7 +47,7 @@ fn encoded_len(no_wrap: bool, input: &Data) -> TokenStream {
                 let fields = fields
                     .named
                     .iter()
-                    .filter(|f| !f.attrs.iter().any(|f| is_attr(f, "skip")))
+                    .filter(|f| !f.attrs.iter().any(|f| is_attr(f, &FIELD_ATTRS, "skip")))
                     .map(|f| {
                         let name = &f.ident;
                         quote! {
@@ -58,7 +69,9 @@ fn encoded_len(no_wrap: bool, input: &Data) -> TokenStream {
                     .unnamed
                     .iter()
                     .enumerate()
-                    .filter(|(_, f)| !f.attrs.iter().any(|f| is_attr(f, "skip")))
+                    .filter(|(_, f)| {
+                        !f.attrs.iter().any(|f| is_attr(f, &FIELD_ATTRS, "skip"))
+                    })
                     .map(|(i, _)| {
                         let index = Index::from(i);
                         quote! {
@@ -83,12 +96,16 @@ fn encoded_len(no_wrap: bool, input: &Data) -> TokenStream {
                     let match_fields = f
                         .named
                         .iter()
-                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .filter(|f| {
+                            !f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"))
+                        })
                         .map(|f| &f.ident);
                     let size_fields = f
                         .named
                         .iter()
-                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .filter(|f| {
+                            !f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"))
+                        })
                         .map(|f| {
                             let name = &f.ident;
                             quote! {
@@ -102,7 +119,8 @@ fn encoded_len(no_wrap: bool, input: &Data) -> TokenStream {
                 }
                 Fields::Unnamed(f) => {
                     let match_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
-                        let skip = f.attrs.iter().any(|a| is_attr(a, "skip"));
+                        let skip =
+                            f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"));
                         if skip {
                             format_ident!("_")
                         } else {
@@ -113,7 +131,9 @@ fn encoded_len(no_wrap: bool, input: &Data) -> TokenStream {
                         .unnamed
                         .iter()
                         .enumerate()
-                        .filter(|(_, f)| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .filter(|(_, f)| {
+                            !f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"))
+                        })
                         .map(|(i, _)| {
                             let name = format_ident!("field{}", i);
                             quote! {
@@ -155,7 +175,7 @@ fn encode(no_wrap: bool, input: &Data) -> TokenStream {
                 let fields = fields
                     .named
                     .iter()
-                    .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                    .filter(|f| !f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip")))
                     .map(|f| {
                         let name = &f.ident;
                         quote! {
@@ -181,7 +201,9 @@ fn encode(no_wrap: bool, input: &Data) -> TokenStream {
                     .unnamed
                     .iter()
                     .enumerate()
-                    .filter(|(_, f)| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                    .filter(|(_, f)| {
+                        !f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"))
+                    })
                     .map(|(i, _)| {
                         let index = Index::from(i);
                         quote! {
@@ -210,12 +232,16 @@ fn encode(no_wrap: bool, input: &Data) -> TokenStream {
                     let match_fields = f
                         .named
                         .iter()
-                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .filter(|f| {
+                            !f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"))
+                        })
                         .map(|f| &f.ident);
                     let pack_fields = f
                         .named
                         .iter()
-                        .filter(|f| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .filter(|f| {
+                            !f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"))
+                        })
                         .map(|f| {
                             let name = &f.ident;
                             quote! {
@@ -234,7 +260,7 @@ fn encode(no_wrap: bool, input: &Data) -> TokenStream {
                 }
                 Fields::Unnamed(f) => {
                     let match_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
-                        if f.attrs.iter().any(|a| is_attr(a, "skip")) {
+                        if f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip")) {
                             format_ident!("_")
                         } else {
                             format_ident!("field{}", i)
@@ -244,7 +270,9 @@ fn encode(no_wrap: bool, input: &Data) -> TokenStream {
                         .unnamed
                         .iter()
                         .enumerate()
-                        .filter(|(_, f)| !f.attrs.iter().any(|a| is_attr(a, "skip")))
+                        .filter(|(_, f)| {
+                            !f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"))
+                        })
                         .map(|(i, _)| {
                             let name = format_ident!("field{}", i);
                             quote! {
@@ -314,8 +342,8 @@ fn decode_normal(name: &Option<Ident>) -> TokenStream {
 
 fn decode_named_field(f: &Field) -> TokenStream {
     let name = &f.ident;
-    let is_skipped = f.attrs.iter().any(|a| is_attr(a, "skip"));
-    let is_default = f.attrs.iter().any(|a| is_attr(a, "default"));
+    let is_skipped = f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"));
+    let is_default = f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "default"));
     if is_skipped {
         decode_default(name)
     } else if is_default {
@@ -327,8 +355,8 @@ fn decode_named_field(f: &Field) -> TokenStream {
 
 fn decode_unnamed_field(f: &Field, i: usize) -> TokenStream {
     let name = Some(format_ident!("field{}", i));
-    let is_skipped = f.attrs.iter().any(|a| is_attr(a, "skip"));
-    let is_default = f.attrs.iter().any(|a| is_attr(a, "default"));
+    let is_skipped = f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"));
+    let is_default = f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "default"));
     if is_skipped {
         decode_default(&name)
     } else if is_default {
@@ -393,7 +421,7 @@ fn decode(no_wrap: bool, input: &Data) -> TokenStream {
                 .enumerate()
                 .map(|(i, v)| match &v.fields {
                     Fields::Named(f) => {
-                        if v.attrs.iter().any(|a| is_attr(a, "other")) {
+                        if v.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "other")) {
                             panic!("other attribute must be applied to a unit variant")
                         }
                         let name_fields = f.named.iter().map(|f| &f.ident);
@@ -408,7 +436,7 @@ fn decode(no_wrap: bool, input: &Data) -> TokenStream {
                         }
                     }
                     Fields::Unnamed(f) => {
-                        if v.attrs.iter().any(|a| is_attr(a, "other")) {
+                        if v.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "other")) {
                             panic!("other attribute must be applied to a unit variant")
                         }
                         let name_fields = f
@@ -433,7 +461,7 @@ fn decode(no_wrap: bool, input: &Data) -> TokenStream {
                     Fields::Unit => {
                         let tag = &v.ident;
                         let i = Index::from(i);
-                        if v.attrs.iter().any(|a| is_attr(a, "other")) {
+                        if v.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "other")) {
                             if other.is_some() {
                                 panic!("other attribute may be specified at most once")
                             }
@@ -486,7 +514,7 @@ fn decode(no_wrap: bool, input: &Data) -> TokenStream {
 #[proc_macro_derive(Pack, attributes(pack))]
 pub fn derive_pack(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut input = parse_macro_input!(input as DeriveInput);
-    let no_wrap = input.attrs.iter().any(|a| is_attr(a, "unwrapped"));
+    let no_wrap = input.attrs.iter().any(|a| is_attr(a, &["unwrapped"], "unwrapped"));
     let name = input.ident;
     for param in &mut input.generics.params {
         if let GenericParam::Type(typ) = param {

@@ -1,6 +1,6 @@
 [package]
 name = "netidx-derive"
-version = "0.17.1"
+version = "0.17.2"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
