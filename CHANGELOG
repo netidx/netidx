@@ -10,6 +10,9 @@
   
   - implement a new toplevel Pack directive #[pack(unwrapped)]
     which prevents length wrapping the type it is applied to.
+    
+  - websocket-proxy; expose the warp filter that runs the proxy so
+    it can be combined into a bigger warp api if desired.
 
 * 0.17.1
 

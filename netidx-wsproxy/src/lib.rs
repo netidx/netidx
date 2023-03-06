@@ -26,7 +26,7 @@ use std::{
 };
 use warp::{
     ws::{Message, WebSocket, Ws},
-    Filter,
+    Filter, Reply,
 };
 
 pub mod config;
@@ -278,6 +278,29 @@ async fn handle_client(
     }
 }
 
+/// If you want to integrate the netidx api server into your own warp project
+/// this will return the filter path will be the http path where the websocket
+/// lives
+pub fn filter(
+    publisher: Publisher,
+    subscriber: Subscriber,
+    path: &'static str,
+) -> impl Filter<Extract = (impl Reply + Send + Sync,)> + Clone + Send + Sync {
+    warp::path(path).and(warp::ws()).map(move |ws: Ws| {
+        let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
+        ws.on_upgrade(move |ws| {
+            let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
+            async move {
+                if let Err(e) = handle_client(publisher, subscriber, ws).await {
+                    warn!("client handler exited: {}", e)
+                }
+            }
+        })
+    })
+}
+
+/// If you want to embed the websocket api in your own process, but you don't
+/// want to serve any other warp filters then you can just call this in a task.
 /// This will not return unless the server crashes, you should
 /// probably run it in a task.
 pub async fn run(
@@ -285,20 +308,7 @@ pub async fn run(
     publisher: Publisher,
     subscriber: Subscriber,
 ) -> Result<()> {
-    let routes = warp::path("ws")
-        .and(warp::ws())
-        .map(move |ws: Ws| {
-            let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
-            ws.on_upgrade(move |ws| {
-                let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
-                async move {
-                    if let Err(e) = handle_client(publisher, subscriber, ws).await {
-                        warn!("client handler exited: {}", e)
-                    }
-                }
-            })
-        })
-        .with(warp::trace::request());
+    let routes = filter(publisher, subscriber, "ws");
     match (&config.cert, &config.key) {
         (_, None) | (None, _) => {
             warp::serve(routes).run(config.listen.parse::<SocketAddr>()?).await
