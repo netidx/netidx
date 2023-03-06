@@ -7,6 +7,9 @@
     move on
   
   - Fix trait requirements for Packing HashMap
+  
+  - implement a new toplevel Pack directive #[pack(unwrapped)]
+    which prevents length wrapping the type it is applied to.
 
 * 0.17.1
 
