@@ -25,6 +25,7 @@ use std::{
     result,
 };
 use warp::{
+    filters::BoxedFilter,
     ws::{Message, WebSocket, Ws},
     Filter, Reply,
 };
@@ -285,18 +286,21 @@ pub fn filter(
     publisher: Publisher,
     subscriber: Subscriber,
     path: &'static str,
-) -> impl Filter<Extract = (impl Reply + Send + Sync,)> + Clone + Send + Sync {
-    warp::path(path).and(warp::ws()).map(move |ws: Ws| {
-        let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
-        ws.on_upgrade(move |ws| {
+) -> BoxedFilter<(impl Reply,)> {
+    warp::path(path)
+        .and(warp::ws())
+        .map(move |ws: Ws| {
             let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
-            async move {
-                if let Err(e) = handle_client(publisher, subscriber, ws).await {
-                    warn!("client handler exited: {}", e)
+            ws.on_upgrade(move |ws| {
+                let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
+                async move {
+                    if let Err(e) = handle_client(publisher, subscriber, ws).await {
+                        warn!("client handler exited: {}", e)
+                    }
                 }
-            }
+            })
         })
-    })
+        .boxed()
 }
 
 /// If you want to embed the websocket api in your own process, but you don't
