@@ -20,7 +20,7 @@ netidx = { path = "../netidx", version = "^0.17", default_features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"] }
 bytes = "1"
 fs3 = "0.5"
-mapr = "0.8"
+memmap2 = "0.5"
 fxhash = "0.2"
 lazy_static = "1"
 packed_struct = "0.10"

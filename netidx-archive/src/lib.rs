@@ -12,7 +12,7 @@ use fs3::{allocation_granularity, FileExt};
 use fxhash::FxBuildHasher;
 use indexmap::IndexMap;
 use log::warn;
-use mapr::{Mmap, MmapMut};
+use memmap2::{Mmap, MmapMut};
 use netidx::{
     chars::Chars,
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
