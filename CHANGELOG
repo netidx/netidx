@@ -15,6 +15,9 @@
   - websocket-proxy; expose the warp filter that runs the proxy so
     it can be combined into a bigger warp api if desired.
 
+  - change netidx-archive to use the better maintained memmap2 crate
+    instead of mapr
+
 * 0.17.1
 
   - permissions now allow dynamic params. e.g.  { "/foo/bar/$[user]":

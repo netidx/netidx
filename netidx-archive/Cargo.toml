@@ -1,6 +1,6 @@
 [package]
 name = "netidx-archive"
-version = "0.17.0"
+version = "0.17.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 homepage = "https://netidx.github.io/netidx-book/"
