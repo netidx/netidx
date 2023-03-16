@@ -9,7 +9,7 @@ use std::{
     boxed::Box,
     cell::RefCell,
     cmp::Eq,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     default::Default,
     error, fmt,
     hash::{BuildHasher, Hash},
@@ -774,6 +774,52 @@ where
             let k = <K as Pack>::decode(buf)?;
             let v = <V as Pack>::decode(buf)?;
             self.insert(k, v);
+        }
+        Ok(())
+    }
+}
+
+impl<K, R> Pack for HashSet<K, R>
+where
+    K: Pack + Hash + Eq,
+    R: Default + BuildHasher,
+{
+    fn encoded_len(&self) -> usize {
+        self.iter().fold(varint_len(self.len() as u64), |len, k| {
+            len + <K as Pack>::encoded_len(k)
+        })
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(self.len() as u64, buf);
+        for k in self {
+            <K as Pack>::encode(k, buf)?;
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC || elts * mem::size_of::<K>() > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
+        let mut data = HashSet::with_capacity_and_hasher(elts, R::default());
+        for _ in 0..elts {
+            data.insert(<K as Pack>::decode(buf)?);
+        }
+        Ok(data)
+    }
+
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
+        let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC || elts * mem::size_of::<K>() > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
+        if elts > self.capacity() {
+            self.reserve(elts - self.capacity());
+        }
+        for _ in 0..elts {
+            self.insert(<K as Pack>::decode(buf)?);
         }
         Ok(())
     }
