@@ -163,7 +163,10 @@ impl<T: Poolable + Sync + Send + 'static + Ord> Ord for Pooled<T> {
 }
 
 impl<T: Poolable + Sync + Send + 'static + Hash> Hash for Pooled<T> {
-    fn hash<H>(&self, state: &mut H) where H: Hasher {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: Hasher,
+    {
         Hash::hash(&self.object, state)
     }
 }
@@ -203,7 +206,8 @@ impl<T: Poolable + Sync + Send + 'static> DerefMut for Pooled<T> {
 impl<T: Poolable + Sync + Send + 'static> Drop for Pooled<T> {
     fn drop(&mut self) {
         if let Some(inner) = self.pool.upgrade() {
-            if self.object.capacity() <= inner.max_elt_capacity {
+            let cap = self.object.capacity();
+            if cap > 0 && cap <= inner.max_elt_capacity {
                 let mut object = mem::replace(&mut self.object, Poolable::empty());
                 object.reset();
                 inner.pool.push(object).ok();

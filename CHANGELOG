@@ -1,6 +1,8 @@
 * 0.17.3
 
   - add a pack implementation for HashSet
+  
+  - don't put empty objects back in pools
 
 * 0.17.2
 
