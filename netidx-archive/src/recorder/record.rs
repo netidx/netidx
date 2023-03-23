@@ -1,9 +1,11 @@
-use super::BCastMsg;
+use super::{BCastMsg, Config, RecordConfig};
 use crate::logfile::{
-    ArchiveWriter, BatchItem, Id, MonotonicTimestamper, RecordTooLarge, BATCH_POOL,
+    ArchiveWriter, BatchItem, Id, MonotonicTimestamper, RecordTooLarge, Timestamp,
+    BATCH_POOL,
 };
 use anyhow::Result;
 use arcstr::ArcStr;
+use chrono::prelude::*;
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Fuse},
@@ -13,17 +15,17 @@ use futures::{
 use fxhash::FxHashMap;
 use log::{error, info, warn};
 use netidx::{
-    config::Config,
     path::Path,
     pool::Pooled,
     protocol::glob::{Glob, GlobSet},
-    resolver_client::{ChangeTracker, DesiredAuth, ResolverRead},
+    resolver_client::{ChangeTracker, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
     utils,
 };
 use std::{
     collections::{BTreeMap, HashMap},
     ops::Bound,
+    path::PathBuf,
     sync::Arc,
 };
 use tokio::{sync::broadcast, task, time};
@@ -131,16 +133,57 @@ async fn wait_list(pending: &mut Option<Fuse<oneshot::Receiver<Lst>>>) -> Lst {
     }
 }
 
+fn rotate_log_file(
+    archive: ArchiveWriter,
+    path: &PathBuf,
+    now: DateTime<Utc>,
+) -> Result<ArchiveWriter> {
+    use std::fs;
+    drop(archive); // ensure the current file is closed
+    let current_name = path.join("current");
+    let new_name = path.join(now.to_rfc3339());
+    fs::rename(&current_name, &new_name)?;
+    ArchiveWriter::open(current_name)
+}
+
+fn write_pathmap(
+    archive: &mut ArchiveWriter,
+    to_add: &mut Vec<(Path, SubId)>,
+    by_subid: &mut FxHashMap<SubId, Id>,
+) -> Result<()> {
+    task::block_in_place(|| {
+        let i = to_add.iter().map(|(ref p, _)| p);
+        archive.add_paths(i)
+    })?;
+    for (path, subid) in to_add.drain(..) {
+        if !by_subid.contains_key(&subid) {
+            let id = archive.id_for_path(&path).unwrap();
+            by_subid.insert(subid, id);
+        }
+    }
+    Ok(())
+}
+
+fn write_image(
+    archive: &mut ArchiveWriter,
+    by_subid: &FxHashMap<SubId, Id>,
+    image: &FxHashMap<SubId, Event>,
+    ts: Timestamp,
+) -> Result<()> {
+    let mut b = BATCH_POOL.take();
+    for (id, ev) in image.iter() {
+        b.push(BatchItem(by_subid[id], ev.clone()));
+    }
+    archive.add_batch(true, ts, &b)?;
+    Ok(())
+}
+
 pub(super) async fn run(
     bcast: broadcast::Sender<BCastMsg>,
-    mut archive: ArchiveWriter,
-    resolver: Config,
-    desired_auth: DesiredAuth,
-    poll_interval: Option<time::Duration>,
-    image_frequency: Option<usize>,
-    flush_frequency: Option<usize>,
-    flush_interval: Option<time::Duration>,
-    spec: Vec<Glob>,
+    mut bcast_rx: broadcast::Receiver<BCastMsg>,
+    subscriber: Subscriber,
+    config: Arc<Config>,
+    record_config: Arc<RecordConfig>,
 ) -> Result<()> {
     let (tx_batch, rx_batch) = mpsc::channel(10);
     let (tx_list, rx_list) = mpsc::unbounded();
@@ -148,23 +191,30 @@ pub(super) async fn run(
     let mut by_subid: FxHashMap<SubId, Id> = HashMap::default();
     let mut image: FxHashMap<SubId, Event> = HashMap::default();
     let mut subscribed: HashMap<Path, Dval> = HashMap::new();
-    let subscriber = Subscriber::new(resolver, desired_auth)?;
-    let flush_frequency = flush_frequency.map(|f| archive.block_size() * f);
-    let mut bcast_rx = bcast.subscribe();
-    let mut poll = poll_interval.map(time::interval);
-    let mut flush = flush_interval.map(time::interval);
-    let mut to_add = Vec::new();
+    let mut archive = task::block_in_place(|| {
+        ArchiveWriter::open(config.archive_directory.join("current"))
+    })?;
+    let _ = bcast.send(BCastMsg::NewCurrent(archive.reader()?));
+    let flush_frequency = record_config.flush_frequency.map(|f| archive.block_size() * f);
+    let mut poll = record_config.poll_interval.map(time::interval);
+    let mut flush = record_config.flush_interval.map(time::interval);
+    let mut rotate = record_config.rotate_interval.map(time::interval);
+    let mut to_add: Vec<(Path, SubId)> = Vec::new();
     let mut timest = MonotonicTimestamper::new();
     let mut last_image = archive.len();
     let mut last_flush = archive.len();
     let mut pending_list: Option<Fuse<oneshot::Receiver<Lst>>> = None;
     let mut pending_batches: Vec<Pooled<Vec<(SubId, Event)>>> = Vec::new();
-    start_list_task(rx_list, subscriber.resolver(), spec);
+    start_list_task(rx_list, subscriber.resolver(), record_config.spec.clone());
     loop {
         select_biased! {
             m = bcast_rx.recv().fuse() => match m {
-                Err(_) | Ok(BCastMsg::Batch(_, _)) => (),
                 Ok(BCastMsg::Stop) => break,
+                Err(_)
+                    | Ok(BCastMsg::Batch(_, _))
+                    | Ok(BCastMsg::LogRotated(_))
+                    | Ok(BCastMsg::NewCurrent(_))
+                    | Ok(BCastMsg::RequestHistorical(_, _)) => (),
             },
             _ = maybe_interval(&mut poll).fuse() => {
                 if pending_list.is_none() {
@@ -180,7 +230,24 @@ pub(super) async fn run(
                         Ok(last_flush = archive.len())
                     })?;
                 }
-            }
+            },
+            _ = maybe_interval(&mut rotate).fuse() => {
+                let ts = timest.timestamp();
+                let now = ts.datetime();
+                archive = task::block_in_place(|| {
+                    rotate_log_file(archive, &config.archive_directory, now)
+                })?;
+                for (p, dv) in &subscribed {
+                    to_add.push((p.clone(), dv.id()));
+                }
+                by_subid.clear();
+                task::block_in_place(|| {
+                    write_pathmap(&mut archive, &mut to_add, &mut by_subid)?;
+                    write_image(&mut archive, &by_subid, &image, ts)
+                })?;
+                let _ = bcast.send(BCastMsg::LogRotated(now));
+                let _ = bcast.send(BCastMsg::NewCurrent(archive.reader()?));
+            },
             r = wait_list(&mut pending_list).fuse() => {
                 pending_list = None;
                 if let Some(mut batches) = r {
@@ -199,16 +266,7 @@ pub(super) async fn run(
                             }
                         }
                     }
-                    task::block_in_place(|| {
-                        let i = to_add.iter().map(|(ref p, _)| p);
-                        archive.add_paths(i)
-                    })?;
-                    for (path, subid) in to_add.drain(..) {
-                        if !by_subid.contains_key(&subid) {
-                            let id = archive.id_for_path(&path).unwrap();
-                            by_subid.insert(subid, id);
-                        }
-                    }
+                    write_pathmap(&mut archive, &mut to_add, &mut by_subid)?
                 }
             },
             batch = rx_batch.next() => match batch {
@@ -222,7 +280,7 @@ pub(super) async fn run(
                     task::block_in_place(|| -> Result<()> {
                         for mut batch in pending_batches.drain(..) {
                             for (subid, ev) in batch.drain(..) {
-                                if image_frequency.is_some() {
+                                if record_config.image_frequency.is_some() {
                                     image.insert(subid, ev.clone());
                                 }
                                 tbatch.push(BatchItem(by_subid[&subid], ev));
@@ -246,16 +304,11 @@ pub(super) async fn run(
                                 }
                             }
                         }
-                        match image_frequency {
+                        match record_config.image_frequency {
                             None => (),
                             Some(freq) if archive.len() - last_image < freq => (),
                             Some(_) => {
-                                let mut b = BATCH_POOL.take();
-                                let ts = timest.timestamp();
-                                for (id, ev) in image.iter() {
-                                    b.push(BatchItem(by_subid[id], ev.clone()));
-                                }
-                                archive.add_batch(true, ts, &b)?;
+                                write_image(&mut archive, &by_subid, &image, timest.timestamp())?;
                                 last_image = archive.len();
                             }
                         }

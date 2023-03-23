@@ -1,37 +1,23 @@
 use crate::{
-    logfile::{
-        ArchiveReader, ArchiveWriter, BatchItem, Cursor, Id, MonotonicTimestamper,
-        RecordTooLarge, Seek, Timestamp, BATCH_POOL,
-    },
-    record::BCastMsg,
+    logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek},
+    recorder::{BCastMsg, Config, PublishConfig},
 };
 use anyhow::{Error, Result};
 use arcstr::ArcStr;
 use chrono::prelude::*;
-use futures::{
-    channel::{mpsc, oneshot},
-    future::{self, Fuse},
-    prelude::*,
-    select_biased,
-};
+use futures::{channel::mpsc, future, prelude::*, select_biased};
 use fxhash::{FxHashMap, FxHashSet};
 use log::{error, info, warn};
 use netidx::{
     chars::Chars,
-    config::Config,
     path::Path,
     pool::Pooled,
-    protocol::{
-        glob::{Glob, GlobSet},
-        value::FromValue,
-    },
+    protocol::value::FromValue,
     publisher::{
-        self, BindCfg, ClId, PublishFlags, Publisher, PublisherBuilder, UpdateBatch, Val,
-        Value, WriteRequest,
+        self, ClId, PublishFlags, Publisher, PublisherBuilder, UpdateBatch, Val, Value,
+        WriteRequest,
     },
-    resolver_client::{ChangeTracker, DesiredAuth, ResolverRead},
-    subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
-    utils,
+    subscriber::{Event, Subscriber},
 };
 use netidx_protocols::rpc::server::{RpcCall, RpcReply};
 use netidx_protocols::{
@@ -43,16 +29,14 @@ use netidx_protocols::{
 use parking_lot::Mutex;
 use serde_derive::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     mem,
     ops::Bound,
-    path::PathBuf,
     str::FromStr,
     sync::Arc,
     time::Duration,
 };
-use structopt::StructOpt;
-use tokio::{runtime::Runtime, sync::broadcast, task, time};
+use tokio::{sync::broadcast, task, time};
 use uuid::Uuid;
 
 static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
@@ -312,7 +296,7 @@ impl NewSessionConfig {
     }
 }
 
-struct T {
+struct Session {
     controls: Controls,
     publisher: Publisher,
     published: FxHashMap<Id, Val>,
@@ -324,15 +308,15 @@ struct T {
     data_base: Path,
 }
 
-impl T {
+impl Session {
     async fn new(
         publisher: Publisher,
         archive: ArchiveReader,
         session_base: Path,
         control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
-    ) -> Result<T> {
+    ) -> Result<Self> {
         let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
-        Ok(T {
+        Ok(Self {
             controls,
             publisher,
             published: HashMap::default(),
@@ -754,7 +738,8 @@ async fn session(
         Cluster::new(&publisher, subscriber, session_base.append("cluster"), shards)
             .await?;
     archive.check_remap_rescan()?;
-    let mut t = T::new(publisher.clone(), archive, session_base, &control_tx).await?;
+    let mut t =
+        Session::new(publisher.clone(), archive, session_base, &control_tx).await?;
     let mut batch = publisher.start_batch();
     t.seek(&mut batch, Seek::Beginning)?;
     if let Some(cfg) = cfg {
@@ -813,7 +798,7 @@ async fn session(
     }
 }
 
-struct SessionsInner {
+struct SessionIdsInner {
     max_total: usize,
     max_by_client: usize,
     total: usize,
@@ -821,11 +806,11 @@ struct SessionsInner {
 }
 
 #[derive(Clone)]
-struct Sessions(Arc<Mutex<SessionsInner>>);
+struct SessionIds(Arc<Mutex<SessionIdsInner>>);
 
-impl Sessions {
+impl SessionIds {
     fn new(max_total: usize, max_by_client: usize) -> Self {
-        Sessions(Arc::new(Mutex::new(SessionsInner {
+        Self(Arc::new(Mutex::new(SessionIdsInner {
             max_total,
             max_by_client,
             total: 0,
@@ -833,20 +818,20 @@ impl Sessions {
         })))
     }
 
-    fn add_session(&self, client: ClId) -> Option<Session> {
+    fn add_session(&self, client: ClId) -> Option<SessionId> {
         let mut inner = self.0.lock();
         let inner = &mut *inner;
         let by_client = inner.by_client.entry(client).or_insert(0);
         if inner.total < inner.max_total && *by_client < inner.max_by_client {
             inner.total += 1;
             *by_client += 1;
-            Some(Session(self.clone(), client))
+            Some(SessionId(self.clone(), client))
         } else {
             None
         }
     }
 
-    fn delete_session(&self, session: &Session) {
+    fn delete_session(&self, session: &SessionId) {
         let mut inner = self.0.lock();
         if let Some(c) = inner.by_client.get_mut(&session.1) {
             *c -= 1;
@@ -855,9 +840,9 @@ impl Sessions {
     }
 }
 
-struct Session(Sessions, ClId);
+struct SessionId(SessionIds, ClId);
 
-impl Drop for Session {
+impl Drop for SessionId {
     fn drop(&mut self) {
         self.0.delete_session(self)
     }
@@ -866,7 +851,7 @@ impl Drop for Session {
 async fn start_session(
     publisher: Publisher,
     session_id: Uuid,
-    session_token: Session,
+    session_token: SessionId,
     bcast: &broadcast::Sender<BCastMsg>,
     subscriber: &Subscriber,
     archive: &ArchiveReader,
@@ -906,27 +891,25 @@ async fn start_session(
 
 pub(super) async fn run(
     bcast: broadcast::Sender<BCastMsg>,
-    archive: ArchiveReader,
-    resolver: Config,
-    desired_auth: DesiredAuth,
-    bind_cfg: Option<BindCfg>,
-    publish_base: Path,
-    shards: usize,
-    max_sessions: usize,
-    max_sessions_per_client: usize,
+    mut bcast_rx: broadcast::Receiver<BCastMsg>,
+    subscriber: Subscriber,
+    config: Config,
+    publish_config: PublishConfig,
 ) -> Result<()> {
-    let sessions: Sessions = Sessions::new(max_sessions, max_sessions_per_client);
-    let subscriber = Subscriber::new(resolver.clone(), desired_auth.clone())?;
-    let mut builder = PublisherBuilder::new();
-    builder.config(resolver.clone()).desired_auth(desired_auth.clone());
-    if let Some(b) = bind_cfg {
-        builder.bind_cfg(b);
-    }
-    let publisher = builder.build().await?;
+    let sessions = SessionIds::new(
+        publish_config.max_sessions,
+        publish_config.max_sessions_per_client,
+    );
+    let publisher = PublisherBuilder::new()
+        .config(config.netidx_config.clone())
+        .desired_auth(config.desired_auth.clone())
+        .bind_cfg(publish_config.bind.clone())
+        .build()
+        .await?;
     let (control_tx, control_rx) = mpsc::channel(3);
     let _new_session: Result<Proc> = define_rpc!(
         &publisher,
-        publish_base.append("session"),
+        publish_config.base.append("session"),
         "create a new playback session",
         NewSessionConfig::new,
         Some(control_tx.clone()),
@@ -941,18 +924,22 @@ pub(super) async fn run(
     let mut cluster = Cluster::<(ClId, Uuid)>::new(
         &publisher,
         subscriber.clone(),
-        publish_base.append("cluster"),
-        shards,
+        publish_config.base.append("cluster"),
+        publish_config.shards.unwrap_or(0),
     )
     .await?;
     let mut control_rx = control_rx.fuse();
-    let mut bcast_rx = bcast.subscribe();
     let mut poll_members = time::interval(std::time::Duration::from_secs(30));
+    let mut archive = None;
     loop {
         select_biased! {
             m = bcast_rx.recv().fuse() => match m {
-                Err(_) | Ok(BCastMsg::Batch(_, _)) => (),
-                Ok(BCastMsg::Stop) => break Ok(()),
+                Err(_) => (),
+                Ok(m) => match m {
+                    BCastMsg::Batch(_, _) | BCastMsg::RequestHistorical(_, _) | BCastMsg::LogRotated(_) => (),
+                    BCastMsg::NewCurrent(rdr) => archive = Some(rdr),
+                    BCastMsg::Stop => break Ok(())
+                }
             },
             _ = poll_members.tick().fuse() => {
                 if let Err(e) = cluster.poll_members().await {
