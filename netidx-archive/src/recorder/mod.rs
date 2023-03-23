@@ -15,6 +15,7 @@ use tokio::{
     task, time,
 };
 
+mod logfile_collection;
 mod publish;
 mod record;
 

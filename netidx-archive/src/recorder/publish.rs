@@ -1,6 +1,9 @@
 use crate::{
     logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek},
-    recorder::{BCastMsg, Config, PublishConfig},
+    recorder::{
+        logfile_collection::{File, LogfileCollection},
+        BCastMsg, Config, PublishConfig,
+    },
 };
 use anyhow::{Error, Result};
 use arcstr::ArcStr;
@@ -32,6 +35,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     mem,
     ops::Bound,
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -296,102 +300,271 @@ impl NewSessionConfig {
     }
 }
 
+struct DataSource {
+    file: File,
+    archive: ArchiveReader,
+    cursor: Cursor,
+}
+
+impl DataSource {
+    fn new(
+        archive_dir: &PathBuf,
+        file: File,
+        start: Bound<DateTime<Utc>>,
+        end: Bound<DateTime<Utc>>,
+    ) -> Result<Self> {
+        let path = file.path(archive_dir);
+        let archive = task::block_in_place(|| ArchiveReader::open(path))?;
+        let mut cursor = Cursor::new();
+        cursor.set_start(start);
+        cursor.set_end(end);
+        Ok(Self { file, archive, cursor })
+    }
+
+    fn from_head(
+        head: ArchiveReader,
+        start: Bound<DateTime<Utc>>,
+        end: Bound<DateTime<Utc>>,
+    ) -> Self {
+        let mut cursor = Cursor::new();
+        cursor.set_start(start);
+        cursor.set_end(end);
+        Self { file: File::Head, archive: head, cursor }
+    }
+}
+
 struct Session {
     controls: Controls,
     publisher: Publisher,
     published: FxHashMap<Id, Val>,
     published_ids: FxHashSet<publisher::Id>,
-    cursor: Cursor,
     speed: Speed,
     state: State,
-    archive: ArchiveReader,
+    start: Bound<DateTime<Utc>>,
+    end: Bound<DateTime<Utc>>,
     data_base: Path,
+    archive_dir: PathBuf,
+    files: LogfileCollection,
+    source: Option<DataSource>,
+    head: Option<ArchiveReader>,
 }
 
 impl Session {
     async fn new(
+        archive_dir: PathBuf,
         publisher: Publisher,
-        archive: ArchiveReader,
+        head: Option<ArchiveReader>,
         session_base: Path,
         control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     ) -> Result<Self> {
         let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
+        let files = LogfileCollection::new(&archive_dir).await?;
         Ok(Self {
             controls,
             publisher,
             published: HashMap::default(),
             published_ids: HashSet::default(),
-            cursor: Cursor::new(),
             speed: Speed::Limited {
                 rate: 1.,
                 next: time::Instant::now(),
                 current: Pooled::orphan(VecDeque::new()),
             },
+            start: Bound::Unbounded,
+            end: Bound::Unbounded,
             state: State::Pause,
-            archive,
             data_base: session_base.append("data"),
+            source: None,
+            files,
+            archive_dir,
+            head,
         })
     }
 
-    async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
-        if !self.state.play() {
-            future::pending().await
+    fn source(
+        files: &LogfileCollection,
+        source: &mut Option<DataSource>,
+        head: &Option<ArchiveReader>,
+        archive_dir: &PathBuf,
+        start: Bound<DateTime<Utc>>,
+        end: Bound<DateTime<Utc>>,
+    ) -> Result<bool> {
+        if source.is_some() {
+            Ok(true)
         } else {
-            match &mut self.speed {
-                Speed::Unlimited(batches) => match batches.pop_front() {
-                    Some(batch) => Ok(batch),
-                    None => {
-                        let archive = &self.archive;
-                        let cursor = &mut self.cursor;
-                        *batches =
-                            task::block_in_place(|| archive.read_deltas(cursor, 3))?;
-                        match batches.pop_front() {
-                            Some(batch) => Ok(batch),
-                            None => {
-                                let mut cbatch = self.publisher.start_batch();
-                                self.set_state(&mut cbatch, State::Tail);
-                                cbatch.commit(None).await;
-                                future::pending().await
+            *source = match files.first() {
+                File::Head => head.clone().map(|h| DataSource::from_head(h, start, end)),
+                f => Some(DataSource::new(archive_dir, f, start, end)?),
+            };
+            Ok(source.is_some())
+        }
+    }
+
+    fn next_source(
+        files: &LogfileCollection,
+        source: &mut Option<DataSource>,
+        head: &Option<ArchiveReader>,
+        archive_dir: &PathBuf,
+        start: Bound<DateTime<Utc>>,
+        end: Bound<DateTime<Utc>>,
+    ) -> Result<bool> {
+        if source.is_none() {
+            Self::source(files, source, head, archive_dir, start, end)
+        } else {
+            match source.as_ref().unwrap().file {
+                File::Head => Ok(true),
+                f => {
+                    *source = match files.next(f) {
+                        File::Head => {
+                            head.clone().map(|h| DataSource::from_head(h, start, end))
+                        }
+                        f => Some(DataSource::new(&archive_dir, f, start, end)?),
+                    };
+                    Ok(source.is_some())
+                }
+            }
+        }
+    }
+
+    fn find_source(
+        files: &LogfileCollection,
+        source: &mut Option<DataSource>,
+        head: &Option<ArchiveReader>,
+        archive_dir: &PathBuf,
+        start: Bound<DateTime<Utc>>,
+        end: Bound<DateTime<Utc>>,
+        ts: DateTime<Utc>,
+    ) -> Result<bool> {
+        let file = files.find(ts);
+        if source.is_some() && source.as_ref().unwrap().file == file {
+            Ok(source.is_some())
+        } else {
+            *source = match file {
+                File::Head => head.clone().map(|h| DataSource::from_head(h, start, end)),
+                f => Some(DataSource::new(archive_dir, f, start, end)?),
+            };
+            Ok(source.is_some())
+        }
+    }
+
+    async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
+        macro_rules! set_state {
+            ($st:expr) => {
+                let mut cbatch = self.publisher.start_batch();
+                self.set_state(&mut cbatch, $st);
+                cbatch.commit(None).await;
+                break future::pending().await
+            };
+        }
+        loop {
+            if !self.state.play() {
+                break future::pending().await;
+            } else {
+                match &mut self.speed {
+                    Speed::Unlimited(batches) => match batches.pop_front() {
+                        Some(batch) => break Ok(batch),
+                        None => {
+                            if Self::source(
+                                &self.files,
+                                &mut self.source,
+                                &self.head,
+                                &self.archive_dir,
+                                self.start,
+                                self.end,
+                            )? {
+                                time::sleep(Duration::from_secs(1)).await;
+                                continue;
+                            } else {
+                                let ds = self.source.as_mut().unwrap();
+                                let archive = &ds.archive;
+                                let cursor = &mut ds.cursor;
+                                *batches = task::block_in_place(|| {
+                                    archive.read_deltas(cursor, 3)
+                                })?;
+                                match batches.pop_front() {
+                                    Some(batch) => break Ok(batch),
+                                    None => match ds.file {
+                                        File::Head => {
+                                            set_state!(State::Tail);
+                                        }
+                                        File::Historical(ts) => {
+                                            Self::next_source(
+                                                &self.files,
+                                                &mut self.source,
+                                                &self.head,
+                                                &self.archive_dir,
+                                                self.start,
+                                                self.end,
+                                            )?;
+                                            continue;
+                                        }
+                                    },
+                                }
                             }
                         }
-                    }
-                },
-                Speed::Limited { rate, next, current } => {
-                    use tokio::time::Instant;
-                    if current.len() < 2 {
-                        let archive = &self.archive;
-                        let cursor = &mut self.cursor;
-                        let mut cur =
-                            task::block_in_place(|| archive.read_deltas(cursor, 3))?;
-                        for v in current.drain(..) {
-                            cur.push_front(v);
+                    },
+                    Speed::Limited { rate, next, current } => {
+                        use tokio::time::Instant;
+                        if current.len() < 2 {
+                            if Self::source(
+                                &self.files,
+                                &mut self.source,
+                                &self.head,
+                                &self.archive_dir,
+                                self.start,
+                                self.end,
+                            )? {
+                                let ds = self.source.as_mut().unwrap();
+                                let archive = &ds.archive;
+                                let cursor = &mut ds.cursor;
+                                let mut cur = task::block_in_place(|| {
+                                    archive.read_deltas(cursor, 3)
+                                })?;
+                                for v in current.drain(..) {
+                                    cur.push_front(v);
+                                }
+                                *current = cur;
+                                if current.is_empty() {
+                                    match ds.file {
+                                        File::Head => {
+                                            set_state!(State::Tail);
+                                        }
+                                        f => {
+                                            Self::next_source(
+                                                &self.files,
+                                                &mut self.source,
+                                                &self.head,
+                                                &self.archive_dir,
+                                                self.start,
+                                                self.end,
+                                            )?;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            } else if current.is_empty() {
+                                time::sleep(Duration::from_secs(1)).await;
+                                continue;
+                            }
                         }
-                        *current = cur;
+                        let (ts, batch) = current.pop_front().unwrap();
+                        let mut now = Instant::now();
+                        if *next >= now {
+                            time::sleep_until(*next).await;
+                            now = Instant::now();
+                        }
                         if current.is_empty() {
                             let mut cbatch = self.publisher.start_batch();
                             self.set_state(&mut cbatch, State::Tail);
                             cbatch.commit(None).await;
-                            return future::pending().await;
+                        } else {
+                            let wait = {
+                                let ms = (current[0].0 - ts).num_milliseconds() as f64;
+                                (ms / *rate).trunc() as u64
+                            };
+                            *next = now + Duration::from_millis(wait);
                         }
+                        break Ok((ts, batch));
                     }
-                    let (ts, batch) = current.pop_front().unwrap();
-                    let mut now = Instant::now();
-                    if *next >= now {
-                        time::sleep_until(*next).await;
-                        now = Instant::now();
-                    }
-                    if current.is_empty() {
-                        let mut cbatch = self.publisher.start_batch();
-                        self.set_state(&mut cbatch, State::Tail);
-                        cbatch.commit(None).await;
-                    } else {
-                        let wait = {
-                            let ms = (current[0].0 - ts).num_milliseconds() as f64;
-                            (ms / *rate).trunc() as u64
-                        };
-                        *next = now + Duration::from_millis(wait);
-                    }
-                    Ok((ts, batch))
                 }
             }
         }
@@ -401,27 +574,45 @@ impl Session {
         &mut self,
         batch: (DateTime<Utc>, &mut Vec<BatchItem>),
     ) -> Result<()> {
-        let mut pbatch = self.publisher.start_batch();
-        for BatchItem(id, ev) in batch.1.drain(..) {
-            let v = match ev {
-                Event::Unsubscribed => Value::Null,
-                Event::Update(v) => v,
-            };
-            match self.published.get(&id) {
-                Some(val) => {
-                    val.update(&mut pbatch, v);
-                }
-                None => {
-                    let path = self.archive.path_for_id(&id).unwrap();
-                    let path = self.data_base.append(&path);
-                    let val = self.publisher.publish(path, v)?;
-                    self.published_ids.insert(val.id());
-                    self.published.insert(id, val);
+        let pause = match self.end {
+            Bound::Unbounded => false,
+            Bound::Excluded(dt) => batch.0 >= dt,
+            Bound::Included(dt) => batch.0 > dt,
+        };
+        if pause {
+            let mut cbatch = self.publisher.start_batch();
+            self.set_state(&mut cbatch, State::Pause);
+            cbatch.commit(None).await;
+            Ok(())
+        } else {
+            let mut pbatch = self.publisher.start_batch();
+            for BatchItem(id, ev) in batch.1.drain(..) {
+                let v = match ev {
+                    Event::Unsubscribed => Value::Null,
+                    Event::Update(v) => v,
+                };
+                match self.published.get(&id) {
+                    Some(val) => {
+                        val.update(&mut pbatch, v);
+                    }
+                    None => {
+                        let path = self
+                            .source
+                            .as_ref()
+                            .unwrap()
+                            .archive
+                            .path_for_id(&id)
+                            .unwrap();
+                        let path = self.data_base.append(&path);
+                        let val = self.publisher.publish(path, v)?;
+                        self.published_ids.insert(val.id());
+                        self.published.insert(id, val);
+                    }
                 }
             }
+            self.controls.pos_ctl.update(&mut pbatch, Value::DateTime(batch.0));
+            Ok(pbatch.commit(None).await)
         }
-        self.controls.pos_ctl.update(&mut pbatch, Value::DateTime(batch.0));
-        Ok(pbatch.commit(None).await)
     }
 
     async fn process_bcast(
@@ -435,14 +626,17 @@ impl Session {
             Err(broadcast::error::RecvError::Lagged(missed)) => match self.state {
                 State::Play | State::Pause => Ok(()),
                 State::Tail => {
-                    let archive = &self.archive;
-                    let cursor = &mut self.cursor;
+                    // safe because it's impossible to get into state
+                    // Tail without an archive.
+                    let ds = self.source.as_mut().unwrap();
+                    let archive = &ds.archive;
+                    let cursor = &mut ds.cursor;
                     let mut batches = task::block_in_place(|| {
                         archive.read_deltas(cursor, missed as usize)
                     })?;
                     for (ts, mut batch) in batches.drain(..) {
                         self.process_batch((ts, &mut *batch)).await?;
-                        self.cursor.set_current(ts);
+                        self.source.as_mut().unwrap().cursor.set_current(ts);
                     }
                     Ok(())
                 }
@@ -450,17 +644,34 @@ impl Session {
             Ok(BCastMsg::Batch(ts, batch)) => match self.state {
                 State::Play | State::Pause => Ok(()),
                 State::Tail => {
+                    let ds = self.source.as_mut().unwrap();
                     let dt = ts.datetime();
-                    let pos = self.cursor.current().unwrap_or(DateTime::<Utc>::MIN_UTC);
-                    if self.cursor.contains(&dt) && pos < dt {
+                    let pos = ds.cursor.current().unwrap_or(DateTime::<Utc>::MIN_UTC);
+                    if ds.cursor.contains(&dt) && pos < dt {
                         let mut batch = (*batch).clone();
                         self.process_batch((dt, &mut batch)).await?;
-                        self.cursor.set_current(dt);
+                        self.source.as_mut().unwrap().cursor.set_current(dt);
                     }
                     Ok(())
                 }
             },
+            Ok(BCastMsg::LogRotated(ts)) => {
+                let mut files = LogfileCollection::new(&self.archive_dir).await?;
+                files.set_current(self.source.as_mut().map(|d| {
+                    if d.file == File::Head {
+                        d.file = File::Historical(ts);
+                    }
+                    d.file
+                }));
+                self.files = files;
+                Ok(())
+            }
+            Ok(BCastMsg::NewCurrent(head)) => {
+                self.head = Some(head);
+                Ok(())
+            }
             Ok(BCastMsg::Stop) => bail!("stop signal"),
+            Ok(BCastMsg::RequestHistorical(_, _)) => Ok(()),
         }
     }
 
@@ -470,9 +681,9 @@ impl Session {
         new_start: Bound<DateTime<Utc>>,
     ) -> Result<()> {
         self.controls.start_ctl.update(cbatch, bound_to_val(new_start));
-        self.cursor.set_start(new_start);
-        if self.cursor.current().is_none() {
-            self.seek(cbatch, Seek::Beginning)?;
+        self.start = new_start;
+        if let Some(ds) = self.source.as_mut() {
+            ds.cursor.set_start(new_start);
         }
         Ok(())
     }
@@ -483,9 +694,9 @@ impl Session {
         new_end: Bound<DateTime<Utc>>,
     ) -> Result<()> {
         self.controls.end_ctl.update(cbatch, bound_to_val(new_end));
-        self.cursor.set_end(new_end);
-        if self.cursor.current().is_none() {
-            self.seek(cbatch, Seek::Beginning)?;
+        self.end = new_end;
+        if let Some(ds) = self.source.as_mut() {
+            ds.cursor.set_end(new_end);
         }
         Ok(())
     }
