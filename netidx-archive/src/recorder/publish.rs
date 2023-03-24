@@ -131,7 +131,7 @@ impl FromStr for State {
         if s.as_str() == "play" {
             Ok(State::Play)
         } else if s.as_str() == "pause" {
-            Ok(State::Play)
+            Ok(State::Pause)
         } else if s.as_str() == "tail" {
             Ok(State::Tail)
         } else {
@@ -164,7 +164,8 @@ enum Speed {
     Unlimited(Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>),
     Limited {
         rate: f64,
-        next: time::Instant,
+        last: time::Instant,
+        next_after: Duration,
         current: Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
     },
 }
@@ -326,7 +327,7 @@ impl DataSource {
             },
             File::Historical(ts) => {
                 if let Some(cmds) = &config.archive_cmds {
-                    use std::{process::Command, iter};
+                    use std::{iter, process::Command};
                     let out = task::block_in_place(|| {
                         let now = ts.to_rfc3339();
                         Command::new(&cmds.get.0)
@@ -389,7 +390,8 @@ impl Session {
             published_ids: HashSet::default(),
             speed: Speed::Limited {
                 rate: 1.,
-                next: time::Instant::now(),
+                last: time::Instant::now(),
+                next_after: Duration::from_secs(0),
                 current: Pooled::orphan(VecDeque::new()),
             },
             start: Bound::Unbounded,
@@ -457,14 +459,15 @@ impl Session {
                     Speed::Unlimited(batches) => match batches.pop_front() {
                         Some(batch) => break Ok(batch),
                         None => {
-                            if Self::source(
+                            let ds_ok = Self::source(
                                 &self.files,
                                 &mut self.source,
                                 &self.head,
                                 &self.config,
                                 self.start,
                                 self.end,
-                            )? {
+                            )?;
+                            if !ds_ok {
                                 time::sleep(Duration::from_secs(1)).await;
                                 continue;
                             } else {
@@ -496,30 +499,33 @@ impl Session {
                             }
                         }
                     },
-                    Speed::Limited { rate, next, current } => {
+                    Speed::Limited { rate, last, next_after, current } => {
                         use tokio::time::Instant;
+                        dbg!(());
                         if current.len() < 2 {
-                            if Self::source(
+                            let ds_ok = Self::source(
                                 &self.files,
                                 &mut self.source,
                                 &self.head,
                                 &self.config,
                                 self.start,
                                 self.end,
-                            )? {
+                            )?;
+                            if ds_ok {
                                 let ds = self.source.as_mut().unwrap();
                                 let archive = &ds.archive;
                                 let cursor = &mut ds.cursor;
                                 let mut cur = task::block_in_place(|| {
                                     archive.read_deltas(cursor, 3)
                                 })?;
-                                for v in current.drain(..) {
+                                while let Some(v) = current.pop_back() {
                                     cur.push_front(v);
                                 }
                                 *current = cur;
                                 if current.is_empty() {
-                                    match ds.file {
+                                    match dbg!(ds.file) {
                                         File::Head => {
+                                            dbg!(());
                                             set_state!(State::Tail);
                                         }
                                         _ => {
@@ -536,26 +542,30 @@ impl Session {
                                     }
                                 }
                             } else if current.is_empty() {
+                                dbg!(());
                                 time::sleep(Duration::from_secs(1)).await;
                                 continue;
                             }
                         }
                         let (ts, batch) = current.pop_front().unwrap();
-                        let mut now = Instant::now();
-                        if *next >= now {
-                            time::sleep_until(*next).await;
-                            now = Instant::now();
+                        let mut elapsed = last.elapsed();
+                        while elapsed < *next_after {
+                            dbg!(());
+                            time::sleep(*next_after - elapsed).await;
+                            elapsed = last.elapsed();
                         }
                         if current.is_empty() {
-                            let mut cbatch = self.publisher.start_batch();
-                            self.set_state(&mut cbatch, State::Tail);
-                            cbatch.commit(None).await;
+                            dbg!(());
+                            continue
                         } else {
                             let wait = {
                                 let ms = (current[0].0 - ts).num_milliseconds() as f64;
-                                (ms / *rate).trunc() as u64
+                                (ms / *rate).trunc() as i64
                             };
-                            *next = now + Duration::from_millis(wait);
+                            if wait > 0 {
+                                *next_after = Duration::from_millis(wait as u64);
+                                *last = Instant::now();
+                            }
                         }
                         break Ok((ts, batch));
                     }
@@ -993,8 +1003,8 @@ impl Session {
         }
         let current = match &mut self.speed {
             Speed::Unlimited(v) => v,
-            Speed::Limited { current, next, .. } => {
-                *next = time::Instant::now();
+            Speed::Limited { current, next_after, .. } => {
+                *next_after = Duration::from_secs(0);
                 current
             }
         };
@@ -1035,7 +1045,8 @@ impl Session {
                     let v = mem::replace(v, Pooled::orphan(VecDeque::new()));
                     self.speed = Speed::Limited {
                         rate: new_rate,
-                        next: time::Instant::now(),
+                        last: time::Instant::now(),
+                        next_after: Duration::from_secs(0),
                         current: v,
                     };
                 }
