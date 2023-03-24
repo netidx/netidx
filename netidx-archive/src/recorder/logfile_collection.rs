@@ -53,51 +53,42 @@ impl File {
     }
 }
 
-pub(super) struct LogfileCollection {
-    files: Vec<File>,
-    current: Option<usize>,
-}
+pub(super) struct LogfileCollection(Vec<File>);
 
 impl LogfileCollection {
     pub(super) async fn new<P: AsRef<std::path::Path>>(archive_path: P) -> Result<Self> {
-        Ok(Self { files: File::read(archive_path).await?, current: None })
+        Ok(Self(File::read(archive_path).await?))
     }
 
-    pub(super) fn set_current(&mut self, file: Option<File>) {
-        match file {
-            None => self.current = None,
-            Some(file) => {
-                let i = self.files.iter().enumerate().find_map(|(i, f)| if file == *f { Some(i) } else { None });
-                self.current = i;
-            }
-        }
+    pub(super) fn len(&self) -> usize {
+        self.0.len()
     }
 
     pub(super) fn first(&self) -> File {
-        if self.files.len() == 0 {
+        if self.0.len() == 0 {
             File::Head
         } else {
-            *self.files.first().unwrap()
+            *self.0.first().unwrap()
         }
     }
 
     pub(super) fn last(&self) -> File {
-        if self.files.len() == 0 {
+        if self.0.len() == 0 {
             File::Head
         } else {
-            *self.files.last().unwrap()
+            *self.0.last().unwrap()
         }
     }
 
     pub(super) fn find(&self, ts: DateTime<Utc>) -> File {
-        if self.files.len() == 0 {
+        if self.0.len() == 0 {
             File::Head
         } else {
-            match self.files.binary_search(&File::Historical(ts)) {
-                Err(i) => self.files[i],
+            match self.0.binary_search(&File::Historical(ts)) {
+                Err(i) => self.0[i],
                 Ok(i) => {
-                    if i + 1 < self.files.len() {
-                        self.files[i + 1]
+                    if i + 1 < self.0.len() {
+                        self.0[i + 1]
                     } else {
                         File::Head
                     }
@@ -107,14 +98,14 @@ impl LogfileCollection {
     }
 
     pub(super) fn next(&self, cur: File) -> File {
-        if self.files.len() == 0 {
+        if self.0.len() == 0 {
             File::Head
         } else {
-            match self.files.binary_search(&cur) {
-                Err(i) => self.files[i],
+            match self.0.binary_search(&cur) {
+                Err(i) => self.0[i],
                 Ok(i) => {
-                    if i + 1 < self.files.len() {
-                        self.files[i + 1]
+                    if i + 1 < self.0.len() {
+                        self.0[i + 1]
                     } else {
                         File::Head
                     }
@@ -124,20 +115,20 @@ impl LogfileCollection {
     }
 
     pub(super) fn prev(&self, cur: File) -> File {
-        if self.files.len() == 0 {
+        if self.0.len() == 0 {
             File::Head
         } else {
-            match self.files.binary_search(&cur) {
+            match self.0.binary_search(&cur) {
                 Err(i) => {
                     if i > 0 {
-                        self.files[i - 1]
+                        self.0[i - 1]
                     } else {
-                        self.files[i]
+                        self.0[i]
                     }
                 }
                 Ok(i) => {
-                    if i + 1 < self.files.len() {
-                        self.files[i + 1]
+                    if i + 1 < self.0.len() {
+                        self.0[i + 1]
                     } else {
                         File::Head
                     }

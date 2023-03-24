@@ -656,13 +656,12 @@ impl Session {
                 }
             },
             Ok(BCastMsg::LogRotated(ts)) => {
-                let mut files = LogfileCollection::new(&self.archive_dir).await?;
-                files.set_current(self.source.as_mut().map(|d| {
+                let files = LogfileCollection::new(&self.archive_dir).await?;
+                if let Some(d) = self.source.as_mut() {
                     if d.file == File::Head {
                         d.file = File::Historical(ts);
                     }
-                    d.file
-                }));
+                }
                 self.files = files;
                 Ok(())
             }
@@ -876,6 +875,70 @@ impl Session {
     }
 
     fn seek(&mut self, pbatch: &mut UpdateBatch, seek: Seek) -> Result<()> {
+        match seek {
+            Seek::Beginning => {
+                let file = self.files.first();
+                match self.source.as_ref() {
+                    Some(ds) if ds.file == file => (),
+                    Some(_) | None => {
+                        self.source = Some(DataSource::new(
+                            &self.archive_dir,
+                            file,
+                            self.start,
+                            self.end,
+                        )?);
+                    }
+                }
+            }
+            Seek::End => match self.source.as_ref() {
+                Some(ds) if ds.file == File::Head => (),
+                Some(_) | None => {
+                    self.source = self
+                        .head
+                        .clone()
+                        .map(|h| DataSource::from_head(h, self.start, self.end));
+                }
+            },
+            Seek::BatchRelative(i) => match self.source.as_ref() {
+                None => {
+                    let file = self.files.first();
+                    self.source = Some(DataSource::new(
+                        &self.archive_dir,
+                        file,
+                        self.start,
+                        self.end,
+                    )?);
+                }
+                Some(ds) => {
+                    let mut cursor = ds.cursor;
+                    cursor.set_start(Bound::Unbounded);
+                    cursor.set_end(Bound::Unbounded);
+                    if !ds.archive.index().seek_steps(&mut cursor, i) {
+                        if i < 0 {
+                            let file = self.files.prev(ds.file);
+                            if file != ds.file {
+                                self.source = Some(DataSource::new(
+                                    &self.archive_dir,
+                                    file,
+                                    self.start,
+                                    self.end,
+                                )?);
+                            }
+                        } else {
+                            let file = self.files.next(ds.file);
+                            if file != ds.file {
+                                self.source = Some(DataSource::new(
+                                    &self.archive_dir,
+                                    file,
+                                    self.start,
+                                    self.end,
+                                )?);
+                            }
+                        }
+                    }
+                }
+            },
+        }
         let current = match &mut self.speed {
             Speed::Unlimited(v) => v,
             Speed::Limited { current, next, .. } => {

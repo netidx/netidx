@@ -16,7 +16,7 @@ use netidx::{
 use packed_struct::PackedStruct;
 use parking_lot::{
     lock_api::{RwLockUpgradableReadGuard, RwLockWriteGuard},
-    RwLock,
+    RwLock, RwLockReadGuard,
 };
 use std::{
     self,
@@ -928,7 +928,7 @@ impl ArchiveWriter {
 }
 
 #[derive(Debug)]
-struct ArchiveIndex {
+pub struct ArchiveIndex {
     path_by_id: IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: HashMap<Path, Id>,
     imagemap: BTreeMap<DateTime<Utc>, usize>,
@@ -946,6 +946,116 @@ impl ArchiveIndex {
             deltamap: BTreeMap::new(),
             time_basis: DateTime::<Utc>::MIN_UTC,
             end: <FileHeader as Pack>::const_encoded_len().unwrap(),
+        }
+    }
+
+    pub fn deltamap(&self) -> &BTreeMap<DateTime<Utc>, usize> {
+        &self.deltamap
+    }
+
+    /// check if the specifed timestamp could be in the file, meaning
+    /// it is equal or after the start and before or equal to the end
+    pub fn check_in_file(&self, ts: DateTime<Utc>) -> bool {
+        match (self.deltamap.first_key_value(), self.deltamap.last_key_value()) {
+            (Some((fst, _)), Some((lst, _))) => *fst <= ts && ts <= *lst,
+            (_, _) => false,
+        }
+    }
+
+    /// seek the specified number of batches forward or back in the
+    /// file. Return true if it was possible, false otherwise. If
+    /// false, the cursor is moved as far as possible.
+    pub fn seek_steps(&self, cursor: &mut Cursor, steps: i8) -> bool {
+        let mut success = true;
+        if steps >= 0 {
+            let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.start);
+            let mut iter = self.deltamap.range((init, cursor.end));
+            for _ in 0..steps as usize {
+                match iter.next() {
+                    None => {
+                        success = false;
+                        break;
+                    }
+                    Some((ts, _)) => {
+                        cursor.current = Some(*ts);
+                    }
+                }
+            }
+        } else {
+            let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.end);
+            let mut iter = self.deltamap.range((cursor.start, init));
+            for _ in 0..steps.abs() as usize {
+                match iter.next_back() {
+                    None => {
+                        success = false;
+                        break;
+                    }
+                    Some((ts, _)) => {
+                        cursor.current = Some(*ts);
+                    }
+                }
+            }
+        }
+        success
+    }
+
+    /// Seek relative to the current position
+    pub fn seek_time_relative(
+        &self,
+        cursor: &mut Cursor,
+        offset: chrono::Duration,
+    ) -> (bool, DateTime<Utc>) {
+        match cursor.current() {
+            Some(ts) => {
+                let new_ts = ts + offset;
+                cursor.set_current(new_ts);
+                (self.check_in_file(new_ts), new_ts)
+            }
+            None => {
+                if offset >= chrono::Duration::microseconds(0) {
+                    match cursor.start() {
+                        Bound::Included(ts) => {
+                            let new_ts = ts + offset;
+                            cursor.set_current(new_ts);
+                            (self.check_in_file(new_ts), new_ts)
+                        }
+                        Bound::Excluded(ts) => {
+                            let new_ts = ts + *EPSILON + offset;
+                            cursor.set_current(new_ts);
+                            (self.check_in_file(new_ts), new_ts)
+                        }
+                        Bound::Unbounded => match self.deltamap.keys().next() {
+                            None => (false, DateTime::<Utc>::MAX_UTC),
+                            Some(ts) => {
+                                let new_ts = *ts + offset;
+                                cursor.set_current(new_ts);
+                                (self.check_in_file(new_ts), new_ts)
+                            }
+                        },
+                    }
+                } else {
+                    match cursor.end() {
+                        Bound::Included(ts) => {
+                            let new_ts = ts + offset;
+                            cursor.set_current(new_ts);
+                            (self.check_in_file(new_ts), new_ts)
+                        }
+                        Bound::Excluded(ts) => {
+                            let new_ts = ts - *EPSILON + offset;
+                            cursor.set_current(new_ts);
+                            (self.check_in_file(new_ts), new_ts)
+                        }
+                        Bound::Unbounded => match self.deltamap.keys().next_back() {
+                            None => (false, DateTime::<Utc>::MIN_UTC),
+                            Some(ts) => {
+                                let new_ts = *ts + offset;
+                                cursor.set_current(new_ts);
+                                (self.check_in_file(new_ts), new_ts)
+                            }
+                        },
+                    }
+                }
+            }
         }
     }
 }
@@ -986,6 +1096,10 @@ impl ArchiveReader {
             end: Arc::new(AtomicUsize::new(end)),
             mmap: Arc::new(RwLock::new(mmap)),
         })
+    }
+
+    pub fn index(&self) -> RwLockReadGuard<ArchiveIndex> {
+        self.index.read()
     }
 
     pub fn capacity(&self) -> usize {
@@ -1069,64 +1183,11 @@ impl ArchiveReader {
             Seek::Absolute(ts) => {
                 cursor.set_current(ts);
             }
-            Seek::TimeRelative(offset) => match cursor.current() {
-                Some(ts) => cursor.set_current(ts + offset),
-                None => {
-                    if offset >= chrono::Duration::microseconds(0) {
-                        match cursor.start() {
-                            Bound::Included(ts) => cursor.set_current(ts + offset),
-                            Bound::Excluded(ts) => {
-                                cursor.set_current(ts + *EPSILON + offset)
-                            }
-                            Bound::Unbounded => {
-                                match self.index.read().deltamap.keys().next() {
-                                    None => (),
-                                    Some(ts) => cursor.set_current(*ts + offset),
-                                }
-                            }
-                        };
-                    } else {
-                        match cursor.end() {
-                            Bound::Included(ts) => cursor.set_current(ts + offset),
-                            Bound::Excluded(ts) => {
-                                cursor.set_current(ts - *EPSILON + offset)
-                            }
-                            Bound::Unbounded => {
-                                match self.index.read().deltamap.keys().next_back() {
-                                    None => (),
-                                    Some(ts) => cursor.set_current(*ts + offset),
-                                }
-                            }
-                        }
-                    }
-                }
-            },
+            Seek::TimeRelative(offset) => {
+                self.index.read().seek_time_relative(cursor, offset);
+            }
             Seek::BatchRelative(steps) => {
-                let index = self.index.read();
-                if steps >= 0 {
-                    let init =
-                        cursor.current.map(Bound::Excluded).unwrap_or(cursor.start);
-                    let mut iter = index.deltamap.range((init, cursor.end));
-                    for _ in 0..steps as usize {
-                        match iter.next() {
-                            None => break,
-                            Some((ts, _)) => {
-                                cursor.current = Some(*ts);
-                            }
-                        }
-                    }
-                } else {
-                    let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.end);
-                    let mut iter = index.deltamap.range((cursor.start, init));
-                    for _ in 0..steps.abs() as usize {
-                        match iter.next_back() {
-                            None => break,
-                            Some((ts, _)) => {
-                                cursor.current = Some(*ts);
-                            }
-                        }
-                    }
-                }
+                self.index.read().seek_steps(cursor, steps);
             }
         }
     }
