@@ -37,7 +37,10 @@ use std::{
     ops::Bound,
     pin::Pin,
     str::FromStr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tokio::{sync::broadcast, task, time};
@@ -118,10 +121,32 @@ enum ClusterCmd {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
 enum State {
-    Play,
-    Pause,
-    Tail,
+    Play = 0,
+    Pause = 1,
+    Tail = 2,
+}
+
+struct AtomicState(AtomicU8);
+
+impl AtomicState {
+    fn new(s: State) -> Self {
+        Self(AtomicU8::new(s as u8))
+    }
+
+    fn load(&self) -> State {
+        match self.0.load(Ordering::Relaxed) {
+            0 => State::Play,
+            1 => State::Pause,
+            2 => State::Tail,
+            _ => unreachable!(),
+        }
+    }
+
+    fn store(&self, s: State) {
+        self.0.store(s as u8, Ordering::Relaxed)
+    }
 }
 
 impl FromStr for State {
@@ -364,7 +389,7 @@ struct Session {
     published: FxHashMap<Id, Val>,
     published_ids: FxHashSet<publisher::Id>,
     speed: Speed,
-    state: State,
+    state: Arc<AtomicState>,
     start: Bound<DateTime<Utc>>,
     end: Bound<DateTime<Utc>>,
     data_base: Path,
@@ -397,7 +422,7 @@ impl Session {
             },
             start: Bound::Unbounded,
             end: Bound::Unbounded,
-            state: State::Pause,
+            state: Arc::new(AtomicState::new(State::Pause)),
             data_base: session_base.append("data"),
             source: None,
             files,
@@ -444,16 +469,16 @@ impl Session {
     }
 
     async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
-        macro_rules! set_state {
-            ($st:expr) => {
+        macro_rules! set_tail {
+            () => {
                 let mut cbatch = self.publisher.start_batch();
-                self.set_state(&mut cbatch, $st);
+                self.set_state(&mut cbatch, State::Tail);
                 cbatch.commit(None).await;
-                break future::pending().await
+                break future::pending().await;
             };
         }
         loop {
-            if !self.state.play() {
+            if !self.state.load().play() {
                 break future::pending().await;
             } else {
                 match &mut self.speed {
@@ -482,7 +507,7 @@ impl Session {
                                     Some(batch) => break Ok(batch),
                                     None => match ds.file {
                                         File::Head => {
-                                            set_state!(State::Tail);
+                                            set_tail!();
                                         }
                                         File::Historical(_) => {
                                             Self::next_source(
@@ -525,7 +550,7 @@ impl Session {
                                 if current.is_empty() {
                                     match ds.file {
                                         File::Head => {
-                                            set_state!(State::Tail);
+                                            set_tail!();
                                         }
                                         _ => {
                                             Self::next_source(
@@ -622,7 +647,7 @@ impl Session {
             Err(broadcast::error::RecvError::Closed) => {
                 bail!("broadcast channel closed")
             }
-            Err(broadcast::error::RecvError::Lagged(missed)) => match self.state {
+            Err(broadcast::error::RecvError::Lagged(missed)) => match self.state.load() {
                 State::Play | State::Pause => Ok(()),
                 State::Tail => {
                     // safe because it's impossible to get into state
@@ -640,7 +665,7 @@ impl Session {
                     Ok(())
                 }
             },
-            Ok(BCastMsg::Batch(ts, batch)) => match self.state {
+            Ok(BCastMsg::Batch(ts, batch)) => match self.state.load() {
                 State::Play | State::Pause => Ok(()),
                 State::Tail => {
                     let ds = self.source.as_mut().unwrap();
@@ -698,11 +723,11 @@ impl Session {
     }
 
     fn set_state(&mut self, cbatch: &mut UpdateBatch, state: State) {
-        match (self.state, state) {
+        match (self.state.load(), state) {
             (State::Tail, State::Play) => (),
             (s0, s1) if s0 == s1 => (),
             (_, state) => {
-                self.state = state;
+                self.state.store(state);
                 self.controls.state_ctl.update(
                     cbatch,
                     Value::from(match state {
@@ -798,7 +823,7 @@ impl Session {
                 match req.value.cast_to::<Seek>() {
                     Ok(pos) => {
                         self.seek(&mut cbatch, pos)?;
-                        match self.state {
+                        match self.state.load() {
                             State::Pause | State::Play => (),
                             State::Tail => {
                                 self.set_state(&mut cbatch, State::Play);
@@ -995,6 +1020,10 @@ impl Session {
                 }
             }
         }
+        match self.state.load() {
+            State::Tail => self.set_state(pbatch, State::Play),
+            State::Pause | State::Play => ()
+        }
         let current = match &mut self.speed {
             Speed::Unlimited(v) => v,
             Speed::Limited { current, next_after, .. } => {
@@ -1054,6 +1083,27 @@ fn not_idle(idle: &mut bool, cluster: &Cluster<ClusterCmd>) {
     cluster.send_cmd(&ClusterCmd::NotIdle);
 }
 
+async fn read_bcast(
+    bcast: &mut broadcast::Receiver<BCastMsg>,
+    state: &Arc<AtomicState>,
+) -> std::result::Result<BCastMsg, broadcast::error::RecvError> {
+    loop {
+        let m = bcast.recv().await;
+        match m {
+            Err(e) => break Err(e),
+            Ok(m) => match m {
+                BCastMsg::Batch(_, _) => match state.load() {
+                    State::Pause | State::Play => (),
+                    State::Tail => break Ok(m),
+                },
+                BCastMsg::LogRotated(_) | BCastMsg::NewCurrent(_) | BCastMsg::Stop => {
+                    break Ok(m)
+                }
+            },
+        }
+    }
+}
+
 async fn session(
     mut bcast: broadcast::Receiver<BCastMsg>,
     head: Option<ArchiveReader>,
@@ -1079,6 +1129,7 @@ async fn session(
     let mut t =
         Session::new(config.clone(), publisher.clone(), head, session_base, &control_tx)
             .await?;
+    let state = t.state.clone();
     let mut batch = publisher.start_batch();
     t.seek(&mut batch, Seek::End)?;
     if let Some(cfg) = cfg {
@@ -1121,7 +1172,7 @@ async fn session(
                     not_idle(&mut idle, &cluster)
                 }
             },
-            m = bcast.recv().fuse() => t.process_bcast(m).await?,
+            m = read_bcast(&mut bcast, &state).fuse() => t.process_bcast(m).await?,
             cmds = cluster.wait_cmds().fuse() => {
                 let mut cbatch = publisher.start_batch();
                 for cmd in cmds? {

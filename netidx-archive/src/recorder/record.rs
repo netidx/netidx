@@ -300,6 +300,7 @@ pub(super) async fn run(
                             tbatch.push(BatchItem(by_subid[&subid], ev));
                         }
                         archive.add_batch(false, now, &tbatch)?;
+                        let _ = bcast.send(BCastMsg::Batch(now, Arc::new(tbatch)));
                         match record_config.image_frequency {
                             None => (),
                             Some(freq) if archive.len() - last_image < freq => (),

@@ -1123,7 +1123,7 @@ impl ArchiveReader {
     /// was created from an `ArchiveWriter`, this method is called
     /// automatically by `read_deltas` and `build_image`.
     pub fn check_remap_rescan(&self) -> Result<()> {
-        let end = self.end.load(Ordering::Acquire);
+        let end = self.end.load(Ordering::Relaxed);
         let mmap = self.mmap.upgradable_read();
         let mmap = if end > mmap.len() {
             let mut mmap = RwLockUpgradableReadGuard::upgrade(mmap);
