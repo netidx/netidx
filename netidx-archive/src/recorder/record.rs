@@ -213,8 +213,7 @@ pub(super) async fn run(
                 Err(_)
                     | Ok(BCastMsg::Batch(_, _))
                     | Ok(BCastMsg::LogRotated(_))
-                    | Ok(BCastMsg::NewCurrent(_))
-                    | Ok(BCastMsg::RequestHistorical(_, _)) => (),
+                    | Ok(BCastMsg::NewCurrent(_)) => (),
             },
             _ = maybe_interval(&mut poll).fuse() => {
                 if pending_list.is_none() {

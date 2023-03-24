@@ -60,10 +60,6 @@ impl LogfileCollection {
         Ok(Self(File::read(archive_path).await?))
     }
 
-    pub(super) fn len(&self) -> usize {
-        self.0.len()
-    }
-
     pub(super) fn first(&self) -> File {
         if self.0.len() == 0 {
             File::Head

@@ -1,8 +1,8 @@
-use crate::logfile::{ArchiveReader, ArchiveWriter, BatchItem, Timestamp};
+use crate::logfile::{ArchiveReader, BatchItem, Timestamp};
 use anyhow::Result;
 use chrono::prelude::*;
 use futures::future;
-use log::{error, info};
+use log::error;
 use netidx::{
     chars::Chars, config::Config as NetIdxCfg, path::Path, pool::Pooled,
     protocol::glob::Glob, publisher::BindCfg, resolver_client::DesiredAuth,
@@ -109,7 +109,7 @@ impl PublishConfig {
     /// all other parameters set to the default values.
     pub fn new(netidx_cfg: &NetIdxCfg, base: Path) -> Self {
         Self {
-            base: Path::from("/example/recorder"),
+            base,
             bind: netidx_cfg.default_bind_config.clone(),
             max_sessions: file::default_max_sessions(),
             max_sessions_per_client: file::default_max_sessions_per_client(),
@@ -243,7 +243,7 @@ pub enum BCastMsg {
     Stop,
 }
 
-struct Recorder(broadcast::Sender<BCastMsg>);
+pub struct Recorder(broadcast::Sender<BCastMsg>);
 
 impl Drop for Recorder {
     fn drop(&mut self) {

@@ -310,26 +310,30 @@ impl DataSource {
     fn new(
         archive_dir: &PathBuf,
         file: File,
+        head: &Option<ArchiveReader>,
         start: Bound<DateTime<Utc>>,
         end: Bound<DateTime<Utc>>,
-    ) -> Result<Self> {
-        let path = file.path(archive_dir);
-        let archive = task::block_in_place(|| ArchiveReader::open(path))?;
-        let mut cursor = Cursor::new();
-        cursor.set_start(start);
-        cursor.set_end(end);
-        Ok(Self { file, archive, cursor })
-    }
-
-    fn from_head(
-        head: ArchiveReader,
-        start: Bound<DateTime<Utc>>,
-        end: Bound<DateTime<Utc>>,
-    ) -> Self {
-        let mut cursor = Cursor::new();
-        cursor.set_start(start);
-        cursor.set_end(end);
-        Self { file: File::Head, archive: head, cursor }
+    ) -> Result<Option<Self>> {
+        match file {
+            File::Head => match head.as_ref() {
+                None => Ok(None),
+                Some(head) => {
+                    let mut cursor = Cursor::new();
+                    cursor.set_start(start);
+                    cursor.set_end(end);
+                    let head = head.clone();
+                    Ok(Some(Self { file: File::Head, archive: head, cursor }))
+                }
+            },
+            File::Historical(_) => {
+                let path = file.path(archive_dir);
+                let archive = task::block_in_place(|| ArchiveReader::open(path))?;
+                let mut cursor = Cursor::new();
+                cursor.set_start(start);
+                cursor.set_end(end);
+                Ok(Some(Self { file, archive, cursor }))
+            }
+        }
     }
 }
 
@@ -391,10 +395,7 @@ impl Session {
         if source.is_some() {
             Ok(true)
         } else {
-            *source = match files.first() {
-                File::Head => head.clone().map(|h| DataSource::from_head(h, start, end)),
-                f => Some(DataSource::new(archive_dir, f, start, end)?),
-            };
+            *source = DataSource::new(archive_dir, files.first(), head, start, end)?;
             Ok(source.is_some())
         }
     }
@@ -413,36 +414,11 @@ impl Session {
             match source.as_ref().unwrap().file {
                 File::Head => Ok(true),
                 f => {
-                    *source = match files.next(f) {
-                        File::Head => {
-                            head.clone().map(|h| DataSource::from_head(h, start, end))
-                        }
-                        f => Some(DataSource::new(&archive_dir, f, start, end)?),
-                    };
+                    *source =
+                        DataSource::new(&archive_dir, files.next(f), head, start, end)?;
                     Ok(source.is_some())
                 }
             }
-        }
-    }
-
-    fn find_source(
-        files: &LogfileCollection,
-        source: &mut Option<DataSource>,
-        head: &Option<ArchiveReader>,
-        archive_dir: &PathBuf,
-        start: Bound<DateTime<Utc>>,
-        end: Bound<DateTime<Utc>>,
-        ts: DateTime<Utc>,
-    ) -> Result<bool> {
-        let file = files.find(ts);
-        if source.is_some() && source.as_ref().unwrap().file == file {
-            Ok(source.is_some())
-        } else {
-            *source = match file {
-                File::Head => head.clone().map(|h| DataSource::from_head(h, start, end)),
-                f => Some(DataSource::new(archive_dir, f, start, end)?),
-            };
-            Ok(source.is_some())
         }
     }
 
@@ -486,7 +462,7 @@ impl Session {
                                         File::Head => {
                                             set_state!(State::Tail);
                                         }
-                                        File::Historical(ts) => {
+                                        File::Historical(_) => {
                                             Self::next_source(
                                                 &self.files,
                                                 &mut self.source,
@@ -528,7 +504,7 @@ impl Session {
                                         File::Head => {
                                             set_state!(State::Tail);
                                         }
-                                        f => {
+                                        _ => {
                                             Self::next_source(
                                                 &self.files,
                                                 &mut self.source,
@@ -669,7 +645,7 @@ impl Session {
                 self.head = Some(head);
                 Ok(())
             }
-            Ok(BCastMsg::Stop) => bail!("stop signal")
+            Ok(BCastMsg::Stop) => bail!("stop signal"),
         }
     }
 
@@ -882,33 +858,41 @@ impl Session {
                 match self.source.as_ref() {
                     Some(ds) if ds.file == file => (),
                     Some(_) | None => {
-                        self.source = Some(DataSource::new(
+                        self.source = DataSource::new(
                             &self.archive_dir,
                             file,
+                            &self.head,
                             self.start,
                             self.end,
-                        )?);
+                        )?;
                     }
                 }
             }
-            Seek::End => match self.source.as_ref() {
-                Some(ds) if ds.file == File::Head => (),
-                Some(_) | None => {
-                    self.source = self
-                        .head
-                        .clone()
-                        .map(|h| DataSource::from_head(h, self.start, self.end));
+            Seek::End => {
+                let file = self.files.last();
+                match self.source.as_ref() {
+                    Some(ds) if ds.file == file => (),
+                    Some(_) | None => {
+                        self.source = DataSource::new(
+                            &self.archive_dir,
+                            File::Head,
+                            &self.head,
+                            self.start,
+                            self.end,
+                        )?;
+                    }
                 }
-            },
+            }
             Seek::BatchRelative(i) => match self.source.as_ref() {
                 None => {
                     let file = self.files.first();
-                    self.source = Some(DataSource::new(
+                    self.source = DataSource::new(
                         &self.archive_dir,
                         file,
+                        &self.head,
                         self.start,
                         self.end,
-                    )?);
+                    )?;
                 }
                 Some(ds) => {
                     let mut cursor = ds.cursor;
@@ -918,36 +902,39 @@ impl Session {
                         if i < 0 {
                             let file = self.files.prev(ds.file);
                             if file != ds.file {
-                                self.source = Some(DataSource::new(
+                                self.source = DataSource::new(
                                     &self.archive_dir,
                                     file,
+                                    &self.head,
                                     self.start,
                                     self.end,
-                                )?);
+                                )?;
                             }
                         } else {
                             let file = self.files.next(ds.file);
                             if file != ds.file {
-                                self.source = Some(DataSource::new(
+                                self.source = DataSource::new(
                                     &self.archive_dir,
                                     file,
+                                    &self.head,
                                     self.start,
                                     self.end,
-                                )?);
+                                )?;
                             }
                         }
                     }
                 }
             },
-            Seek::TimeRelative(offset) => match self.source {
+            Seek::TimeRelative(offset) => match self.source.as_ref() {
                 None => {
                     let file = self.files.first();
-                    self.source = Some(DataSource::new(
+                    self.source = DataSource::new(
                         &self.archive_dir,
                         file,
+                        &self.head,
                         self.start,
                         self.end,
-                    )?);
+                    )?;
                 }
                 Some(ds) => {
                     let mut cursor = ds.cursor;
@@ -958,29 +945,31 @@ impl Session {
                     if !ok {
                         let file = self.files.find(ts);
                         if ds.file != file {
-                            self.source = Some(DataSource::new(
+                            self.source = DataSource::new(
                                 &self.archive_dir,
                                 file,
+                                &self.head,
                                 self.start,
                                 self.end,
-                            )?);
+                            )?;
                         }
                     }
                 }
             },
             Seek::Absolute(ts) => {
                 let file = self.files.find(ts);
-                let cur_ok = match self.source {
+                let cur_ok = match self.source.as_ref() {
                     None => false,
                     Some(ds) => ds.file == file,
                 };
                 if !cur_ok {
-                    self.source = Some(DataSource::new(
+                    self.source = DataSource::new(
                         &self.archive_dir,
                         file,
+                        &self.head,
                         self.start,
                         self.end,
-                    )?);
+                    )?;
                 }
             }
         }
@@ -1193,7 +1182,6 @@ async fn start_session(
 ) -> Result<()> {
     let bcast = bcast.subscribe();
     let head = head.clone();
-    let publish_base = publish_config.base.clone();
     let subscriber = subscriber.clone();
     let publisher_cl = publisher.clone();
     task::spawn(async move {
