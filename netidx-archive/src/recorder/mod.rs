@@ -240,10 +240,6 @@ impl Config {
 
 #[derive(Debug, Clone)]
 pub enum BCastMsg {
-    RequestHistorical(
-        DateTime<Utc>,
-        Arc<Mutex<Option<oneshot::Sender<Result<PathBuf>>>>>,
-    ),
     LogRotated(DateTime<Utc>),
     NewCurrent(ArchiveReader),
     Batch(Timestamp, Arc<Pooled<Vec<BatchItem>>>),

@@ -669,8 +669,7 @@ impl Session {
                 self.head = Some(head);
                 Ok(())
             }
-            Ok(BCastMsg::Stop) => bail!("stop signal"),
-            Ok(BCastMsg::RequestHistorical(_, _)) => Ok(()),
+            Ok(BCastMsg::Stop) => bail!("stop signal")
         }
     }
 
@@ -842,32 +841,34 @@ impl Session {
     }
 
     fn reimage(&mut self, pbatch: &mut UpdateBatch) -> Result<()> {
-        let mut img = task::block_in_place(|| self.archive.build_image(&self.cursor))?;
-        let mut idx = task::block_in_place(|| self.archive.get_index());
-        self.controls.pos_ctl.update(
-            pbatch,
-            match self.cursor.current() {
-                Some(ts) => Value::DateTime(ts),
-                None => match self.cursor.start() {
-                    Bound::Unbounded => Value::Null,
-                    Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+        if let Some(ds) = self.source.as_mut() {
+            let mut img = task::block_in_place(|| ds.archive.build_image(&ds.cursor))?;
+            let mut idx = task::block_in_place(|| ds.archive.get_index());
+            self.controls.pos_ctl.update(
+                pbatch,
+                match ds.cursor.current() {
+                    Some(ts) => Value::DateTime(ts),
+                    None => match ds.cursor.start() {
+                        Bound::Unbounded => Value::Null,
+                        Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+                    },
                 },
-            },
-        );
-        for (id, path) in idx.drain(..) {
-            let v = match img.remove(&id) {
-                None | Some(Event::Unsubscribed) => Value::Null,
-                Some(Event::Update(v)) => v,
-            };
-            match self.published.get(&id) {
-                Some(val) => {
-                    val.update(pbatch, v);
-                }
-                None => {
-                    let path = self.data_base.append(path.as_ref());
-                    let val = self.publisher.publish(path, v)?;
-                    self.published_ids.insert(val.id());
-                    self.published.insert(id, val);
+            );
+            for (id, path) in idx.drain(..) {
+                let v = match img.remove(&id) {
+                    None | Some(Event::Unsubscribed) => Value::Null,
+                    Some(Event::Update(v)) => v,
+                };
+                match self.published.get(&id) {
+                    Some(val) => {
+                        val.update(pbatch, v);
+                    }
+                    None => {
+                        let path = self.data_base.append(path.as_ref());
+                        let val = self.publisher.publish(path, v)?;
+                        self.published_ids.insert(val.id());
+                        self.published.insert(id, val);
+                    }
                 }
             }
         }
@@ -938,6 +939,50 @@ impl Session {
                     }
                 }
             },
+            Seek::TimeRelative(offset) => match self.source {
+                None => {
+                    let file = self.files.first();
+                    self.source = Some(DataSource::new(
+                        &self.archive_dir,
+                        file,
+                        self.start,
+                        self.end,
+                    )?);
+                }
+                Some(ds) => {
+                    let mut cursor = ds.cursor;
+                    cursor.set_start(Bound::Unbounded);
+                    cursor.set_end(Bound::Unbounded);
+                    let (ok, ts) =
+                        ds.archive.index().seek_time_relative(&mut cursor, offset);
+                    if !ok {
+                        let file = self.files.find(ts);
+                        if ds.file != file {
+                            self.source = Some(DataSource::new(
+                                &self.archive_dir,
+                                file,
+                                self.start,
+                                self.end,
+                            )?);
+                        }
+                    }
+                }
+            },
+            Seek::Absolute(ts) => {
+                let file = self.files.find(ts);
+                let cur_ok = match self.source {
+                    None => false,
+                    Some(ds) => ds.file == file,
+                };
+                if !cur_ok {
+                    self.source = Some(DataSource::new(
+                        &self.archive_dir,
+                        file,
+                        self.start,
+                        self.end,
+                    )?);
+                }
+            }
         }
         let current = match &mut self.speed {
             Speed::Unlimited(v) => v,
@@ -947,11 +992,14 @@ impl Session {
             }
         };
         if let Some((ts, _)) = current.pop_front() {
-            self.cursor.set_current(ts);
+            self.source.iter_mut().for_each(|ds| ds.cursor.set_current(ts));
             current.clear()
         }
-        self.archive.seek(&mut self.cursor, seek);
-        self.reimage(pbatch)
+        if let Some(ds) = self.source.as_mut() {
+            ds.archive.seek(&mut ds.cursor, seek);
+            self.reimage(pbatch)?
+        }
+        Ok(())
     }
 
     fn set_speed(&mut self, cbatch: &mut UpdateBatch, new_rate: Option<f64>) {
@@ -996,26 +1044,36 @@ fn not_idle(idle: &mut bool, cluster: &Cluster<ClusterCmd>) {
 
 async fn session(
     mut bcast: broadcast::Receiver<BCastMsg>,
-    archive: ArchiveReader,
+    head: Option<ArchiveReader>,
     subscriber: Subscriber,
     publisher: Publisher,
-    publish_base: Path,
     session_id: Uuid,
-    shards: usize,
+    config: Arc<Config>,
+    publish_config: Arc<PublishConfig>,
     cfg: Option<NewSessionConfig>,
 ) -> Result<()> {
     let (control_tx, control_rx) = mpsc::channel(3);
     let (events_tx, mut events_rx) = mpsc::unbounded();
     publisher.events(events_tx);
-    let session_base = session_base(&publish_base, session_id);
-    let mut cluster =
-        Cluster::new(&publisher, subscriber, session_base.append("cluster"), shards)
-            .await?;
-    archive.check_remap_rescan()?;
-    let mut t =
-        Session::new(publisher.clone(), archive, session_base, &control_tx).await?;
+    let session_base = session_base(&publish_config.base, session_id);
+    let mut cluster = Cluster::new(
+        &publisher,
+        subscriber,
+        session_base.append("cluster"),
+        publish_config.shards.unwrap_or(0),
+    )
+    .await?;
+    head.as_ref().map(|a| a.check_remap_rescan()).transpose()?;
+    let mut t = Session::new(
+        config.archive_directory.clone(),
+        publisher.clone(),
+        head,
+        session_base,
+        &control_tx,
+    )
+    .await?;
     let mut batch = publisher.start_batch();
-    t.seek(&mut batch, Seek::Beginning)?;
+    t.seek(&mut batch, Seek::End)?;
     if let Some(cfg) = cfg {
         t.apply_config(&mut batch, &cluster, cfg).await?
     }
@@ -1128,25 +1186,25 @@ async fn start_session(
     session_token: SessionId,
     bcast: &broadcast::Sender<BCastMsg>,
     subscriber: &Subscriber,
-    archive: &ArchiveReader,
-    shards: usize,
-    publish_base: &Path,
+    head: &Option<ArchiveReader>,
+    config: Arc<Config>,
+    publish_config: Arc<PublishConfig>,
     cfg: Option<NewSessionConfig>,
 ) -> Result<()> {
     let bcast = bcast.subscribe();
-    let archive = archive.clone();
-    let publish_base = publish_base.clone();
+    let head = head.clone();
+    let publish_base = publish_config.base.clone();
     let subscriber = subscriber.clone();
     let publisher_cl = publisher.clone();
     task::spawn(async move {
         let res = session(
             bcast,
-            archive,
+            head,
             subscriber,
             publisher_cl,
-            publish_base,
             session_id,
-            shards,
+            config.clone(),
+            publish_config.clone(),
             cfg,
         )
         .await;
@@ -1167,8 +1225,8 @@ pub(super) async fn run(
     bcast: broadcast::Sender<BCastMsg>,
     mut bcast_rx: broadcast::Receiver<BCastMsg>,
     subscriber: Subscriber,
-    config: Config,
-    publish_config: PublishConfig,
+    config: Arc<Config>,
+    publish_config: Arc<PublishConfig>,
 ) -> Result<()> {
     let sessions = SessionIds::new(
         publish_config.max_sessions,
@@ -1210,7 +1268,7 @@ pub(super) async fn run(
             m = bcast_rx.recv().fuse() => match m {
                 Err(_) => (),
                 Ok(m) => match m {
-                    BCastMsg::Batch(_, _) | BCastMsg::RequestHistorical(_, _) | BCastMsg::LogRotated(_) => (),
+                    BCastMsg::Batch(_, _) | BCastMsg::LogRotated(_) => (),
                     BCastMsg::NewCurrent(rdr) => archive = Some(rdr),
                     BCastMsg::Stop => break Ok(())
                 }
@@ -1237,8 +1295,8 @@ pub(super) async fn run(
                                 &bcast,
                                 &subscriber,
                                 &archive,
-                                shards,
-                                &publish_base,
+                                config.clone(),
+                                publish_config.clone(),
                                 None
                             ).await;
                             if let Err(e) = r {
@@ -1267,8 +1325,8 @@ pub(super) async fn run(
                                 &bcast,
                                 &subscriber,
                                 &archive,
-                                shards,
-                                &publish_base,
+                                config.clone(),
+                                publish_config.clone(),
                                 Some(cfg)
                             ).await;
                             match r {
