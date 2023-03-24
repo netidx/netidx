@@ -6,14 +6,11 @@ use log::{error, info};
 use netidx::{
     chars::Chars, config::Config as NetIdxCfg, path::Path, pool::Pooled,
     protocol::glob::Glob, publisher::BindCfg, resolver_client::DesiredAuth,
+    subscriber::Subscriber,
 };
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::{
-    sync::{broadcast, oneshot},
-    task,
-};
+use tokio::{sync::broadcast, task};
 
 mod logfile_collection;
 mod publish;
@@ -259,62 +256,40 @@ impl Recorder {
     pub async fn start(config: Config) -> Result<Self> {
         let config = Arc::new(config);
         let mut wait = Vec::new();
-        let (bcast_tx, bcast_rx) = broadcast::channel(100);
-        drop(bcast_rx);
-        let writer = if spec.is_empty() {
-            None
-        } else {
-            Some(ArchiveWriter::open(archive.as_str()).unwrap())
-        };
-        if let Some((bind_cfg, publish_base)) = publish_args {
-            let reader = writer
-                .as_ref()
-                .map(|w| w.reader().unwrap())
-                .unwrap_or_else(|| ArchiveReader::open(archive.as_str()).unwrap());
-            let bcast_tx = bcast_tx.clone();
+        let (bcast_tx, _) = broadcast::channel(100);
+        let subscriber =
+            Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
+        if let Some(publish_config) = config.publish.as_ref() {
+            let publish_config = Arc::new(publish_config.clone());
+            let subscriber = subscriber.clone();
             let config = config.clone();
-            let auth = auth.clone();
-            wait.push(task::spawn(async move {
-                let res = publish::run(
-                    bcast_tx,
-                    reader,
-                    config,
-                    auth,
-                    bind_cfg,
-                    publish_base,
-                    shards,
-                    max_sessions,
-                    max_sessions_per_client,
-                )
-                .await;
-                match res {
-                    Ok(()) => info!("archive publisher exited"),
-                    Err(e) => error!("archive publisher exited with error: {}", e),
+            let bcast_tx = bcast_tx.clone();
+            let bcast_rx = bcast_tx.subscribe();
+            wait.push(task::spawn(async {
+                if let Err(e) =
+                    publish::run(bcast_tx, bcast_rx, subscriber, config, publish_config)
+                        .await
+                {
+                    error!("publisher stopped on error {}", e)
                 }
             }));
         }
-        if !spec.is_empty() {
+        if let Some(record_config) = config.record.as_ref() {
+            let record_config = Arc::new(record_config.clone());
+            let subscriber = subscriber.clone();
+            let config = config.clone();
             let bcast_tx = bcast_tx.clone();
+            let bcast_rx = bcast_tx.subscribe();
             wait.push(task::spawn(async move {
-                let res = record::run(
-                    bcast_tx,
-                    writer.unwrap(),
-                    config,
-                    auth,
-                    poll_interval,
-                    image_frequency,
-                    flush_frequency,
-                    flush_interval,
-                    spec,
-                )
-                .await;
-                match res {
-                    Ok(()) => info!("archive writer exited"),
-                    Err(e) => error!("archive writer exited with error: {}", e),
+                if let Err(e) =
+                    record::run(bcast_tx, bcast_rx, subscriber, config, record_config)
+                        .await
+                {
+                    error!("recorder stopped on error {}", e);
                 }
-            }));
+            }))
         }
         future::join_all(wait).await;
-        Ok(())
+        Ok(Self(bcast_tx))
     }
 }
