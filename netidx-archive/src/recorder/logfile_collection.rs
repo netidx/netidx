@@ -2,7 +2,7 @@ use super::Config;
 use anyhow::Result;
 use chrono::prelude::*;
 use log::warn;
-use std::{cmp::Ordering, path::PathBuf, sync::Arc};
+use std::{cmp::Ordering, path::PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum File {

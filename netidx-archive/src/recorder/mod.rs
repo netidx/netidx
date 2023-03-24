@@ -1,19 +1,19 @@
 use crate::logfile::{ArchiveReader, BatchItem, Timestamp};
 use anyhow::Result;
 use chrono::prelude::*;
-use futures::future;
-use log::{error, warn};
+use futures::{
+    future::{self, Shared},
+    FutureExt,
+};
+use log::error;
 use netidx::{
     chars::Chars, config::Config as NetIdxCfg, path::Path, pool::Pooled,
     protocol::glob::Glob, publisher::BindCfg, resolver_client::DesiredAuth,
     subscriber::Subscriber,
 };
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::{
-    sync::broadcast,
-    task::{self, JoinHandle},
-};
+use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
+use tokio::{sync::broadcast, task};
 
 mod logfile_collection;
 mod publish;
@@ -123,15 +123,9 @@ mod file {
             serde_json::to_string_pretty(&Self {
                 archive_directory: PathBuf::from("/foo/bar"),
                 archive_cmds: Some(ArchiveCmds {
-                    list: vec!["cmd_to_list_dates_in_archive".into()],
-                    get: vec![
-                        "cmd_to_fetch_file_from_archive".into(),
-                        "<datetime in rfc3339>".into(),
-                    ],
-                    put: vec![
-                        "cmd_to_put_file_into_archive".into(),
-                        "<datetime in rfc3339>".into(),
-                    ],
+                    list: ("cmd_to_list_dates_in_archive".into(), vec![]),
+                    get: ("cmd_to_fetch_file_from_archive".into(), vec![]),
+                    put: ("cmd_to_put_file_into_archive".into(), vec![]),
                 }),
                 netidx_config: None,
                 desired_auth: None,
@@ -312,7 +306,7 @@ enum BCastMsg {
 
 pub struct Recorder {
     tx: broadcast::Sender<BCastMsg>,
-    wait: JoinHandle<()>,
+    wait: Shared<Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>>,
 }
 
 impl Recorder {
@@ -358,20 +352,35 @@ impl Recorder {
     }
 
     /// Start the recorder
-    pub async fn start(config: Config) -> Self {
+    pub fn start(config: Config) -> Self {
         let config = Arc::new(config);
         let (bcast_tx, _) = broadcast::channel(100);
         let tx = bcast_tx.clone();
-        let wait = task::spawn(async move {
-            if let Err(e) = Self::run(config, bcast_tx).await {
-                warn!("recorder shutdown with {}", e)
+        let wait = (Box::pin(async {
+            let r = task::spawn(async move {
+                if let Err(e) = Self::run(config, bcast_tx).await {
+                    error!("recorder shutdown with {}", e)
+                }
+            })
+            .await;
+            if let Err(e) = r {
+                error!("failed to join {}", e)
             }
-        });
+        })
+            as Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>)
+            .shared();
         Self { tx, wait }
     }
 
-    pub async fn shutdown(self) {
+    /// This will return when the recorder has shutdown, either
+    /// gracefully or not.
+    pub async fn wait_shutdown(&self) {
+        let _ = self.wait.clone().await;
+    }
+
+    /// Initiate a clean recorder shutdown. To wait for it to complete
+    /// you should call wait_shutdown
+    pub fn shutdown(&self) {
         let _ = self.tx.send(BCastMsg::Stop);
-        let _ = self.wait.await;
     }
 }
