@@ -261,6 +261,8 @@ pub(super) async fn run(
                         archive, &config.archive_directory, &config.archive_cmds, now
                     )
                 })?;
+                last_image = 0;
+                last_flush = 0;
                 for (p, dv) in &subscribed {
                     to_add.push((p.clone(), dv.id()));
                 }
