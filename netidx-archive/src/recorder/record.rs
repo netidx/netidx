@@ -1,4 +1,4 @@
-use super::{BCastMsg, Config, RecordConfig};
+use super::{ArchiveCmds, BCastMsg, Config, RecordConfig};
 use crate::logfile::{
     ArchiveWriter, BatchItem, Id, MonotonicTimestamper, RecordTooLarge, Timestamp,
     BATCH_POOL,
@@ -136,13 +136,29 @@ async fn wait_list(pending: &mut Option<Fuse<oneshot::Receiver<Lst>>>) -> Lst {
 fn rotate_log_file(
     archive: ArchiveWriter,
     path: &PathBuf,
+    cmds: &Option<ArchiveCmds>,
     now: DateTime<Utc>,
 ) -> Result<ArchiveWriter> {
-    use std::fs;
+    use std::{fs, iter};
     drop(archive); // ensure the current file is closed
     let current_name = path.join("current");
     let new_name = path.join(now.to_rfc3339());
     fs::rename(&current_name, &new_name)?;
+    if let Some(cmds) = cmds {
+        use std::process::Command;
+        let now = now.to_rfc3339();
+        let out = Command::new(&cmds.put.0)
+            .args(cmds.put.1.iter().chain(iter::once(&now)))
+            .output();
+        match out {
+            Err(e) => warn!("archive put failed for {}, {}", now, e),
+            Ok(out) => {
+                if out.stderr.len() > 0 {
+                    warn!("archive put stderr {}", String::from_utf8_lossy(&out.stderr));
+                }
+            }
+        }
+    }
     ArchiveWriter::open(current_name)
 }
 
@@ -234,7 +250,9 @@ pub(super) async fn run(
                 let ts = timest.timestamp();
                 let now = ts.datetime();
                 archive = task::block_in_place(|| {
-                    rotate_log_file(archive, &config.archive_directory, now)
+                    rotate_log_file(
+                        archive, &config.archive_directory, &config.archive_cmds, now
+                    )
                 })?;
                 for (p, dv) in &subscribed {
                     to_add.push((p.clone(), dv.id()));

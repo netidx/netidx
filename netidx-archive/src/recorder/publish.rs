@@ -35,7 +35,6 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     mem,
     ops::Bound,
-    path::PathBuf,
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -308,7 +307,7 @@ struct DataSource {
 
 impl DataSource {
     fn new(
-        archive_dir: &PathBuf,
+        config: &Config,
         file: File,
         head: &Option<ArchiveReader>,
         start: Bound<DateTime<Utc>>,
@@ -325,8 +324,28 @@ impl DataSource {
                     Ok(Some(Self { file: File::Head, archive: head, cursor }))
                 }
             },
-            File::Historical(_) => {
-                let path = file.path(archive_dir);
+            File::Historical(ts) => {
+                if let Some(cmds) = &config.archive_cmds {
+                    use std::{process::Command, iter};
+                    let out = task::block_in_place(|| {
+                        let now = ts.to_rfc3339();
+                        Command::new(&cmds.get.0)
+                            .args(cmds.get.1.iter().chain(iter::once(&now)))
+                            .output()
+                    });
+                    match out {
+                        Err(e) => warn!("get command failed {}", e),
+                        Ok(out) => {
+                            if out.stderr.len() > 0 {
+                                warn!(
+                                    "get command stderr {}",
+                                    String::from_utf8_lossy(&out.stderr)
+                                );
+                            }
+                        }
+                    }
+                }
+                let path = file.path(&config.archive_directory);
                 let archive = task::block_in_place(|| ArchiveReader::open(path))?;
                 let mut cursor = Cursor::new();
                 cursor.set_start(start);
@@ -347,7 +366,7 @@ struct Session {
     start: Bound<DateTime<Utc>>,
     end: Bound<DateTime<Utc>>,
     data_base: Path,
-    archive_dir: PathBuf,
+    config: Arc<Config>,
     files: LogfileCollection,
     source: Option<DataSource>,
     head: Option<ArchiveReader>,
@@ -355,14 +374,14 @@ struct Session {
 
 impl Session {
     async fn new(
-        archive_dir: PathBuf,
+        config: Arc<Config>,
         publisher: Publisher,
         head: Option<ArchiveReader>,
         session_base: Path,
         control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     ) -> Result<Self> {
         let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
-        let files = LogfileCollection::new(&archive_dir).await?;
+        let files = LogfileCollection::new(&config).await?;
         Ok(Self {
             controls,
             publisher,
@@ -379,7 +398,7 @@ impl Session {
             data_base: session_base.append("data"),
             source: None,
             files,
-            archive_dir,
+            config,
             head,
         })
     }
@@ -388,14 +407,14 @@ impl Session {
         files: &LogfileCollection,
         source: &mut Option<DataSource>,
         head: &Option<ArchiveReader>,
-        archive_dir: &PathBuf,
+        config: &Config,
         start: Bound<DateTime<Utc>>,
         end: Bound<DateTime<Utc>>,
     ) -> Result<bool> {
         if source.is_some() {
             Ok(true)
         } else {
-            *source = DataSource::new(archive_dir, files.first(), head, start, end)?;
+            *source = DataSource::new(config, files.first(), head, start, end)?;
             Ok(source.is_some())
         }
     }
@@ -404,18 +423,17 @@ impl Session {
         files: &LogfileCollection,
         source: &mut Option<DataSource>,
         head: &Option<ArchiveReader>,
-        archive_dir: &PathBuf,
+        config: &Config,
         start: Bound<DateTime<Utc>>,
         end: Bound<DateTime<Utc>>,
     ) -> Result<bool> {
         if source.is_none() {
-            Self::source(files, source, head, archive_dir, start, end)
+            Self::source(files, source, head, config, start, end)
         } else {
             match source.as_ref().unwrap().file {
                 File::Head => Ok(true),
                 f => {
-                    *source =
-                        DataSource::new(&archive_dir, files.next(f), head, start, end)?;
+                    *source = DataSource::new(&config, files.next(f), head, start, end)?;
                     Ok(source.is_some())
                 }
             }
@@ -443,7 +461,7 @@ impl Session {
                                 &self.files,
                                 &mut self.source,
                                 &self.head,
-                                &self.archive_dir,
+                                &self.config,
                                 self.start,
                                 self.end,
                             )? {
@@ -467,7 +485,7 @@ impl Session {
                                                 &self.files,
                                                 &mut self.source,
                                                 &self.head,
-                                                &self.archive_dir,
+                                                &self.config,
                                                 self.start,
                                                 self.end,
                                             )?;
@@ -485,7 +503,7 @@ impl Session {
                                 &self.files,
                                 &mut self.source,
                                 &self.head,
-                                &self.archive_dir,
+                                &self.config,
                                 self.start,
                                 self.end,
                             )? {
@@ -509,7 +527,7 @@ impl Session {
                                                 &self.files,
                                                 &mut self.source,
                                                 &self.head,
-                                                &self.archive_dir,
+                                                &self.config,
                                                 self.start,
                                                 self.end,
                                             )?;
@@ -632,7 +650,7 @@ impl Session {
                 }
             },
             Ok(BCastMsg::LogRotated(ts)) => {
-                let files = LogfileCollection::new(&self.archive_dir).await?;
+                let files = LogfileCollection::new(&self.config).await?;
                 if let Some(d) = self.source.as_mut() {
                     if d.file == File::Head {
                         d.file = File::Historical(ts);
@@ -859,7 +877,7 @@ impl Session {
                     Some(ds) if ds.file == file => (),
                     Some(_) | None => {
                         self.source = DataSource::new(
-                            &self.archive_dir,
+                            &self.config,
                             file,
                             &self.head,
                             self.start,
@@ -874,7 +892,7 @@ impl Session {
                     Some(ds) if ds.file == file => (),
                     Some(_) | None => {
                         self.source = DataSource::new(
-                            &self.archive_dir,
+                            &self.config,
                             File::Head,
                             &self.head,
                             self.start,
@@ -887,7 +905,7 @@ impl Session {
                 None => {
                     let file = self.files.first();
                     self.source = DataSource::new(
-                        &self.archive_dir,
+                        &self.config,
                         file,
                         &self.head,
                         self.start,
@@ -903,7 +921,7 @@ impl Session {
                             let file = self.files.prev(ds.file);
                             if file != ds.file {
                                 self.source = DataSource::new(
-                                    &self.archive_dir,
+                                    &self.config,
                                     file,
                                     &self.head,
                                     self.start,
@@ -914,7 +932,7 @@ impl Session {
                             let file = self.files.next(ds.file);
                             if file != ds.file {
                                 self.source = DataSource::new(
-                                    &self.archive_dir,
+                                    &self.config,
                                     file,
                                     &self.head,
                                     self.start,
@@ -929,7 +947,7 @@ impl Session {
                 None => {
                     let file = self.files.first();
                     self.source = DataSource::new(
-                        &self.archive_dir,
+                        &self.config,
                         file,
                         &self.head,
                         self.start,
@@ -946,7 +964,7 @@ impl Session {
                         let file = self.files.find(ts);
                         if ds.file != file {
                             self.source = DataSource::new(
-                                &self.archive_dir,
+                                &self.config,
                                 file,
                                 &self.head,
                                 self.start,
@@ -964,7 +982,7 @@ impl Session {
                 };
                 if !cur_ok {
                     self.source = DataSource::new(
-                        &self.archive_dir,
+                        &self.config,
                         file,
                         &self.head,
                         self.start,
@@ -1053,14 +1071,9 @@ async fn session(
     )
     .await?;
     head.as_ref().map(|a| a.check_remap_rescan()).transpose()?;
-    let mut t = Session::new(
-        config.archive_directory.clone(),
-        publisher.clone(),
-        head,
-        session_base,
-        &control_tx,
-    )
-    .await?;
+    let mut t =
+        Session::new(config.clone(), publisher.clone(), head, session_base, &control_tx)
+            .await?;
     let mut batch = publisher.start_batch();
     t.seek(&mut batch, Seek::End)?;
     if let Some(cfg) = cfg {

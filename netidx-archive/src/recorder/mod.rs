@@ -2,7 +2,7 @@ use crate::logfile::{ArchiveReader, BatchItem, Timestamp};
 use anyhow::Result;
 use chrono::prelude::*;
 use futures::future;
-use log::error;
+use log::{error, warn};
 use netidx::{
     chars::Chars, config::Config as NetIdxCfg, path::Path, pool::Pooled,
     protocol::glob::Glob, publisher::BindCfg, resolver_client::DesiredAuth,
@@ -10,7 +10,10 @@ use netidx::{
 };
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::{sync::broadcast, task};
+use tokio::{
+    sync::broadcast,
+    task::{self, JoinHandle},
+};
 
 mod logfile_collection;
 mod publish;
@@ -104,6 +107,8 @@ mod file {
     pub(super) struct Config {
         pub(super) archive_directory: PathBuf,
         #[serde(default)]
+        pub(super) archive_cmds: Option<ArchiveCmds>,
+        #[serde(default)]
         pub(super) netidx_config: Option<PathBuf>,
         #[serde(default)]
         pub(super) desired_auth: Option<DesiredAuth>,
@@ -117,11 +122,23 @@ mod file {
         pub(super) fn example() -> String {
             serde_json::to_string_pretty(&Self {
                 archive_directory: PathBuf::from("/foo/bar"),
+                archive_cmds: Some(ArchiveCmds {
+                    list: vec!["cmd_to_list_dates_in_archive".into()],
+                    get: vec![
+                        "cmd_to_fetch_file_from_archive".into(),
+                        "<datetime in rfc3339>".into(),
+                    ],
+                    put: vec![
+                        "cmd_to_put_file_into_archive".into(),
+                        "<datetime in rfc3339>".into(),
+                    ],
+                }),
                 netidx_config: None,
                 desired_auth: None,
                 record: Some(RecordConfig::example()),
                 publish: Some(PublishConfig::example()),
-            }).unwrap()
+            })
+            .unwrap()
         }
     }
 }
@@ -220,6 +237,13 @@ impl TryFrom<file::RecordConfig> for RecordConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveCmds {
+    pub list: (String, Vec<String>),
+    pub get: (String, Vec<String>),
+    pub put: (String, Vec<String>),
+}
+
 /// Configuration of the recorder
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -228,6 +252,7 @@ pub struct Config {
     /// files will be named with the rfc3339 timestamp that specifies
     /// when they were rotated (and thus when they ended).
     pub archive_directory: PathBuf,
+    pub archive_cmds: Option<ArchiveCmds>,
     /// The netidx config to use
     pub netidx_config: NetIdxCfg,
     /// The netidx desired authentication mechanism to use
@@ -255,6 +280,7 @@ impl TryFrom<file::Config> for Config {
             f.publish.map(|f| PublishConfig::from_file(&netidx_config, f)).transpose()?;
         Ok(Self {
             archive_directory: f.archive_directory,
+            archive_cmds: f.archive_cmds,
             netidx_config,
             desired_auth,
             record: f.record.map(RecordConfig::try_from).transpose()?,
@@ -277,27 +303,24 @@ impl Config {
 }
 
 #[derive(Debug, Clone)]
-pub enum BCastMsg {
+enum BCastMsg {
     LogRotated(DateTime<Utc>),
     NewCurrent(ArchiveReader),
     Batch(Timestamp, Arc<Pooled<Vec<BatchItem>>>),
     Stop,
 }
 
-pub struct Recorder(broadcast::Sender<BCastMsg>);
-
-impl Drop for Recorder {
-    fn drop(&mut self) {
-        let _ = self.0.send(BCastMsg::Stop);
-    }
+pub struct Recorder {
+    tx: broadcast::Sender<BCastMsg>,
+    wait: JoinHandle<()>,
 }
 
 impl Recorder {
-    /// Start the recorder
-    pub async fn start(config: Config) -> Result<Self> {
-        let config = Arc::new(config);
+    async fn run(
+        config: Arc<Config>,
+        bcast_tx: broadcast::Sender<BCastMsg>,
+    ) -> Result<()> {
         let mut wait = Vec::new();
-        let (bcast_tx, _) = broadcast::channel(100);
         let subscriber =
             Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
         if let Some(publish_config) = config.publish.as_ref() {
@@ -331,6 +354,24 @@ impl Recorder {
             }))
         }
         future::join_all(wait).await;
-        Ok(Self(bcast_tx))
+        Ok(())
+    }
+
+    /// Start the recorder
+    pub async fn start(config: Config) -> Self {
+        let config = Arc::new(config);
+        let (bcast_tx, _) = broadcast::channel(100);
+        let tx = bcast_tx.clone();
+        let wait = task::spawn(async move {
+            if let Err(e) = Self::run(config, bcast_tx).await {
+                warn!("recorder shutdown with {}", e)
+            }
+        });
+        Self { tx, wait }
+    }
+
+    pub async fn shutdown(self) {
+        let _ = self.tx.send(BCastMsg::Stop);
+        let _ = self.wait.await;
     }
 }

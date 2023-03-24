@@ -1,6 +1,8 @@
+use super::Config;
 use anyhow::Result;
 use chrono::prelude::*;
-use std::{cmp::Ordering, path::PathBuf};
+use log::warn;
+use std::{cmp::Ordering, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum File {
@@ -26,9 +28,9 @@ impl Ord for File {
 }
 
 impl File {
-    async fn read<P: AsRef<std::path::Path>>(archive: P) -> Result<Vec<File>> {
+    async fn read(config: &Config) -> Result<Vec<File>> {
         let mut files = vec![];
-        let mut reader = tokio::fs::read_dir(archive).await?;
+        let mut reader = tokio::fs::read_dir(&config.archive_directory).await?;
         while let Some(dir) = reader.next_entry().await? {
             let typ = dir.file_type().await?;
             if typ.is_file() {
@@ -41,7 +43,27 @@ impl File {
                 }
             }
         }
+        if let Some(cmds) = &config.archive_cmds {
+            use tokio::process::Command;
+            match Command::new(&cmds.list.0).args(cmds.list.1.iter()).output().await {
+                Err(e) => warn!("list command failed {}", e),
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if stderr.len() > 0 {
+                        warn!("list stderr {}", stderr);
+                    }
+                    for name in stdout.split("\n") {
+                        match name.parse::<DateTime<Utc>>() {
+                            Err(e) => warn!("failed to parse list ts {}", e),
+                            Ok(ts) => files.push(File::Historical(ts)),
+                        }
+                    }
+                }
+            };
+        }
         files.sort();
+        files.dedup();
         Ok(files)
     }
 
@@ -56,8 +78,8 @@ impl File {
 pub(super) struct LogfileCollection(Vec<File>);
 
 impl LogfileCollection {
-    pub(super) async fn new<P: AsRef<std::path::Path>>(archive_path: P) -> Result<Self> {
-        Ok(Self(File::read(archive_path).await?))
+    pub(super) async fn new(config: &Config) -> Result<Self> {
+        Ok(Self(File::read(&config).await?))
     }
 
     pub(super) fn first(&self) -> File {
