@@ -35,10 +35,10 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     mem,
     ops::Bound,
+    pin::Pin,
     str::FromStr,
     sync::Arc,
     time::Duration,
-    pin::Pin,
 };
 use tokio::{sync::broadcast, task, time};
 use uuid::Uuid;
@@ -502,9 +502,7 @@ impl Session {
                     },
                     Speed::Limited { rate, last, next_after, current } => {
                         use tokio::time::Instant;
-                        dbg!(());
                         if current.len() < 2 {
-                            dbg!(());
                             let ds_ok = Self::source(
                                 &self.files,
                                 &mut self.source,
@@ -514,7 +512,6 @@ impl Session {
                                 self.end,
                             )?;
                             if ds_ok {
-                                dbg!(());
                                 let ds = self.source.as_mut().unwrap();
                                 let archive = &ds.archive;
                                 let cursor = &mut ds.cursor;
@@ -526,9 +523,8 @@ impl Session {
                                 }
                                 *current = cur;
                                 if current.is_empty() {
-                                    match dbg!(ds.file) {
+                                    match ds.file {
                                         File::Head => {
-                                            dbg!(());
                                             set_state!(State::Tail);
                                         }
                                         _ => {
@@ -545,32 +541,28 @@ impl Session {
                                     }
                                 }
                             } else if current.is_empty() {
-                                dbg!(());
                                 time::sleep(Duration::from_secs(1)).await;
                                 continue;
                             }
                         }
                         let (ts, batch) = current.pop_front().unwrap();
                         let elapsed = last.elapsed();
-                        if elapsed < dbg!(*next_after) {
-                            dbg!(());
+                        if elapsed < *next_after {
                             time::sleep(*next_after - elapsed).await;
                         }
                         if current.is_empty() {
-                            dbg!(());
-                            continue
+                            continue;
                         } else {
                             let wait = {
                                 let ms = (current[0].0 - ts).num_milliseconds() as f64;
                                 (ms / *rate).trunc() as i64
                             };
-                            dbg!(wait);
                             if wait > 0 {
                                 *next_after = Duration::from_millis(wait as u64);
                                 *last = Instant::now();
                             }
                         }
-                        break Ok((dbg!(ts), batch));
+                        break Ok((ts, batch));
                     }
                 }
             }
@@ -652,12 +644,11 @@ impl Session {
                 State::Play | State::Pause => Ok(()),
                 State::Tail => {
                     let ds = self.source.as_mut().unwrap();
-                    let dt = ts.datetime();
                     let pos = ds.cursor.current().unwrap_or(DateTime::<Utc>::MIN_UTC);
-                    if ds.cursor.contains(&dt) && pos < dt {
+                    if ds.cursor.contains(&ts) && pos < ts {
                         let mut batch = (*batch).clone();
-                        self.process_batch((dt, &mut batch)).await?;
-                        self.source.as_mut().unwrap().cursor.set_current(dt);
+                        self.process_batch((ts, &mut batch)).await?;
+                        self.source.as_mut().unwrap().cursor.set_current(ts);
                     }
                     Ok(())
                 }
@@ -1102,6 +1093,10 @@ async fn session(
     let mut used = 0;
     loop {
         select_biased! {
+            r = t.next().fuse() => match r {
+                Err(e) => break Err(e),
+                Ok((ts, mut batch)) => { t.process_batch((ts, &mut *batch)).await?; }
+            },
             e = events_rx.select_next_some() => match e {
                 publisher::Event::Subscribe(id, _) => if t.published_ids.contains(&id) {
                     used += 1;
@@ -1139,10 +1134,6 @@ async fn session(
                 Some(batch) => {
                     t.process_control_batch(session_id, &cluster, batch).await?
                 }
-            },
-            r = t.next().fuse() => match r {
-                Err(e) => break Err(e),
-                Ok((ts, mut batch)) => { t.process_batch((ts, &mut *batch)).await?; }
             },
         }
     }

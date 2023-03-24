@@ -84,16 +84,23 @@ impl LogfileCollection {
     }
 
     pub(super) fn first(&self) -> File {
-        dbg!(if self.0.len() == 0 { File::Head } else { *self.0.first().unwrap() })
+        if self.0.len() == 0 {
+            File::Head
+        } else {
+            *self.0.first().unwrap()
+        }
     }
 
     pub(super) fn last(&self) -> File {
-        dbg!(if self.0.len() == 0 { File::Head } else { *self.0.last().unwrap() })
+        if self.0.len() == 0 {
+            File::Head
+        } else {
+            *self.0.last().unwrap()
+        }
     }
 
     pub(super) fn find(&self, ts: DateTime<Utc>) -> File {
-        dbg!(ts);
-        dbg!(if self.0.len() == 0 {
+        if self.0.len() == 0 {
             File::Head
         } else {
             match self.0.binary_search(&File::Historical(ts)) {
@@ -106,12 +113,11 @@ impl LogfileCollection {
                     }
                 }
             }
-        })
+        }
     }
 
     pub(super) fn next(&self, cur: File) -> File {
-        dbg!(cur);
-        dbg!(if self.0.len() == 0 {
+        if self.0.len() == 0 {
             File::Head
         } else {
             match self.0.binary_search(&cur) {
@@ -124,12 +130,11 @@ impl LogfileCollection {
                     }
                 }
             }
-        })
+        }
     }
 
     pub(super) fn prev(&self, cur: File) -> File {
-        dbg!(cur);
-        dbg!(if self.0.len() == 0 {
+        if self.0.len() == 0 {
             File::Head
         } else {
             match self.0.binary_search(&cur) {
@@ -148,6 +153,6 @@ impl LogfileCollection {
                     }
                 }
             }
-        })
+        }
     }
 }

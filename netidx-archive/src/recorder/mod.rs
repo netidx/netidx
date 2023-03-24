@@ -1,4 +1,4 @@
-use crate::logfile::{ArchiveReader, BatchItem, Timestamp};
+use crate::logfile::{ArchiveReader, BatchItem};
 use anyhow::Result;
 use chrono::prelude::*;
 use futures::{
@@ -300,7 +300,7 @@ impl Config {
 enum BCastMsg {
     LogRotated(DateTime<Utc>),
     NewCurrent(ArchiveReader),
-    Batch(Timestamp, Arc<Pooled<Vec<BatchItem>>>),
+    Batch(DateTime<Utc>, Arc<Pooled<Vec<BatchItem>>>),
     Stop,
 }
 

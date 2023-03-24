@@ -297,15 +297,6 @@ enum Timestamp {
 }
 
 impl Timestamp {
-    pub fn datetime(&self) -> DateTime<Utc> {
-        match self {
-            Timestamp::NewBasis(ts) => *ts,
-            Timestamp::Offset(ts, off) => {
-                *ts + chrono::Duration::microseconds(*off as i64)
-            }
-        }
-    }
-
     pub fn offset(&self) -> u32 {
         match self {
             Timestamp::NewBasis(_) => 0,
