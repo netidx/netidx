@@ -28,7 +28,11 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use tokio::{sync::broadcast, task, time};
+use tokio::{
+    sync::broadcast,
+    task,
+    time::{self, Instant},
+};
 
 #[derive(Debug)]
 struct CTS(BTreeMap<Path, ChangeTracker>);
@@ -140,6 +144,7 @@ fn rotate_log_file(
     now: DateTime<Utc>,
 ) -> Result<ArchiveWriter> {
     use std::{fs, iter};
+    info!("rotating log file {}", now);
     drop(archive); // ensure the current file is closed
     let current_name = path.join("current");
     let new_name = path.join(now.to_rfc3339());
@@ -213,8 +218,10 @@ pub(super) async fn run(
     let _ = bcast.send(BCastMsg::NewCurrent(archive.reader()?));
     let flush_frequency = record_config.flush_frequency.map(|f| archive.block_size() * f);
     let mut poll = record_config.poll_interval.map(time::interval);
-    let mut flush = record_config.flush_interval.map(time::interval);
-    let mut rotate = record_config.rotate_interval.map(time::interval);
+    let mut flush =
+        record_config.flush_interval.map(|d| time::interval_at(Instant::now() + d, d));
+    let mut rotate =
+        record_config.rotate_interval.map(|d| time::interval_at(Instant::now() + d, d));
     let mut to_add: Vec<(Path, SubId)> = Vec::new();
     let mut timest = MonotonicTimestamper::new();
     let mut last_image = archive.len();

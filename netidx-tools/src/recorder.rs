@@ -6,10 +6,11 @@ use std::{
 };
 use tokio::{runtime::Runtime, signal::ctrl_c};
 
-pub fn run(config: PathBuf, example: bool) {
+pub fn run(config: Option<PathBuf>, example: bool) {
     if example {
         println!("{}", Config::example());
     } else {
+        let config = config.expect("config is required");
         Runtime::new().expect("failed to create runtime").block_on(async move {
             let config = Config::load(&config).await.expect("failed to read config file");
             if !path::Path::exists(&config.archive_directory) {

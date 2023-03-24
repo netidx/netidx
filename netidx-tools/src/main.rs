@@ -76,7 +76,7 @@ enum Opt {
     #[structopt(name = "record", about = "record and republish archives")]
     Record {
         #[structopt(short = "c", long = "config", help = "recorder config file")]
-        config: PathBuf,
+        config: Option<PathBuf>,
         #[structopt(short = "e", long = "example", help = "print an example config file")]
         example: bool,
     },
