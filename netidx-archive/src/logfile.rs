@@ -291,7 +291,7 @@ lazy_static! {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum Timestamp {
+enum Timestamp {
     NewBasis(DateTime<Utc>),
     Offset(DateTime<Utc>, u32),
 }
@@ -325,14 +325,14 @@ impl Timestamp {
 /// awful some careful and elaborate logic is required in order to
 /// meet the above goals.
 #[derive(Debug, Clone, Copy)]
-pub struct MonotonicTimestamper {
+struct MonotonicTimestamper {
     prev: DateTime<Utc>,
     basis: Option<DateTime<Utc>>,
     offset: u32,
 }
 
 impl MonotonicTimestamper {
-    pub fn new() -> Self {
+    fn new() -> Self {
         MonotonicTimestamper { prev: Utc::now(), basis: None, offset: 0 }
     }
 
@@ -359,9 +359,8 @@ impl MonotonicTimestamper {
         }
     }
 
-    pub fn timestamp(&mut self) -> Timestamp {
+    fn timestamp(&mut self, now: DateTime<Utc>) -> Timestamp {
         use chrono::Duration;
-        let now = Utc::now();
         let ts = match self.basis {
             None => Timestamp::NewBasis(self.update_basis(now)),
             Some(basis) => match (now - self.prev).num_microseconds() {
@@ -679,6 +678,7 @@ fn scan_file(
 /// ---------------------
 /// 1289 bytes (264 bytes of overhead 20%)
 pub struct ArchiveWriter {
+    time: MonotonicTimestamper,
     path_by_id: IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: HashMap<Path, Id>,
     file: Arc<File>,
@@ -703,13 +703,15 @@ impl ArchiveWriter {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
             warn!("archive file size is limited to 4 GiB on this platform")
         }
-        let mut time_basis = DateTime::<Utc>::MIN_UTC;
+        let time = MonotonicTimestamper::new();
         if FilePath::is_file(path.as_ref()) {
+            let mut time_basis = DateTime::<Utc>::MIN_UTC;
             let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
             file.try_lock_exclusive()?;
             let block_size = allocation_granularity(path)? as usize;
             let mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut t = ArchiveWriter {
+                time,
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
                 file: Arc::new(file),
@@ -749,6 +751,7 @@ impl ArchiveWriter {
             <FileHeader as Pack>::encode(&fh, &mut buf)?;
             mmap.flush()?;
             Ok(ArchiveWriter {
+                time,
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
                 file: Arc::new(file),
@@ -844,10 +847,11 @@ impl ArchiveWriter {
     pub fn add_batch(
         &mut self,
         image: bool,
-        timestamp: Timestamp,
+        timestamp: DateTime<Utc>,
         batch: &Pooled<Vec<BatchItem>>,
     ) -> Result<()> {
         if batch.len() > 0 {
+            let timestamp = self.time.timestamp(timestamp);
             for BatchItem(id, _) in batch.iter() {
                 if !self.path_by_id.contains_key(id) {
                     bail!("unknown id: {:?} in batch", id)
@@ -1346,7 +1350,6 @@ mod test {
     fn basic_test() {
         let file = FilePath::new("test-data");
         let paths = [Path::from("/foo/bar"), Path::from("/foo/baz")];
-        let mut timestamper = MonotonicTimestamper::new();
         if FilePath::is_file(&file) {
             fs::remove_file(file).unwrap();
         }
@@ -1358,7 +1361,7 @@ mod test {
             batch.extend(paths.iter().map(|p| {
                 BatchItem(t.id_for_path(p).unwrap(), Event::Update(Value::U64(42)))
             }));
-            t.add_batch(false, timestamper.timestamp(), &batch).unwrap();
+            t.add_batch(false, Utc::now(), &batch).unwrap();
             t.flush().unwrap();
             check_contents(&t.reader().unwrap(), &paths, 1);
             t.capacity()
@@ -1371,7 +1374,7 @@ mod test {
         {
             // check that we can reopen, and add to an archive
             let mut t = ArchiveWriter::open(&file).unwrap();
-            t.add_batch(false, timestamper.timestamp(), &batch).unwrap();
+            t.add_batch(false, Utc::now(), &batch).unwrap();
             t.flush().unwrap();
             check_contents(&t.reader().unwrap(), &paths, 2);
         }
@@ -1386,7 +1389,7 @@ mod test {
             let r = t.reader().unwrap();
             let mut n = 2;
             while t.capacity() == initial_size {
-                t.add_batch(false, timestamper.timestamp(), &batch).unwrap();
+                t.add_batch(false, Utc::now(), &batch).unwrap();
                 n += 1;
                 check_contents(&r, &paths, n);
             }

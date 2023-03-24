@@ -1,8 +1,5 @@
 use super::{ArchiveCmds, BCastMsg, Config, RecordConfig};
-use crate::logfile::{
-    ArchiveWriter, BatchItem, Id, MonotonicTimestamper, RecordTooLarge, Timestamp,
-    BATCH_POOL,
-};
+use crate::logfile::{ArchiveWriter, BatchItem, Id, RecordTooLarge, BATCH_POOL};
 use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
@@ -189,7 +186,7 @@ fn write_image(
     archive: &mut ArchiveWriter,
     by_subid: &FxHashMap<SubId, Id>,
     image: &FxHashMap<SubId, Event>,
-    ts: Timestamp,
+    ts: DateTime<Utc>,
 ) -> Result<()> {
     let mut b = BATCH_POOL.take();
     for (id, ev) in image.iter() {
@@ -223,7 +220,6 @@ pub(super) async fn run(
     let mut rotate =
         record_config.rotate_interval.map(|d| time::interval_at(Instant::now() + d, d));
     let mut to_add: Vec<(Path, SubId)> = Vec::new();
-    let mut timest = MonotonicTimestamper::new();
     let mut last_image = archive.len();
     let mut last_flush = archive.len();
     let mut pending_list: Option<Fuse<oneshot::Receiver<Lst>>> = None;
@@ -254,8 +250,7 @@ pub(super) async fn run(
                 }
             },
             _ = maybe_interval(&mut rotate).fuse() => {
-                let ts = timest.timestamp();
-                let now = ts.datetime();
+                let now = Utc::now();
                 archive = task::block_in_place(|| {
                     rotate_log_file(
                         archive, &config.archive_directory, &config.archive_cmds, now
@@ -269,7 +264,7 @@ pub(super) async fn run(
                 by_subid.clear();
                 task::block_in_place(|| {
                     write_pathmap(&mut archive, &mut to_add, &mut by_subid)?;
-                    write_image(&mut archive, &by_subid, &image, ts)
+                    write_image(&mut archive, &by_subid, &image, now)
                 })?;
                 let _ = bcast.send(BCastMsg::LogRotated(now));
                 let _ = bcast.send(BCastMsg::NewCurrent(archive.reader()?));
@@ -313,7 +308,7 @@ pub(super) async fn run(
                             }
                         }
                         loop { // handle batches >4 GiB
-                            let ts = timest.timestamp();
+                            let ts = Utc::now();
                             match archive.add_batch(false, ts, &tbatch) {
                                 Err(e) if e.is::<RecordTooLarge>() => {
                                     let at = tbatch.len() >> 1;
@@ -334,7 +329,7 @@ pub(super) async fn run(
                             None => (),
                             Some(freq) if archive.len() - last_image < freq => (),
                             Some(_) => {
-                                write_image(&mut archive, &by_subid, &image, timest.timestamp())?;
+                                write_image(&mut archive, &by_subid, &image, Utc::now())?;
                                 last_image = archive.len();
                             }
                         }

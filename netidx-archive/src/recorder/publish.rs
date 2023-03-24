@@ -38,6 +38,7 @@ use std::{
     str::FromStr,
     sync::Arc,
     time::Duration,
+    pin::Pin,
 };
 use tokio::{sync::broadcast, task, time};
 use uuid::Uuid;
@@ -503,6 +504,7 @@ impl Session {
                         use tokio::time::Instant;
                         dbg!(());
                         if current.len() < 2 {
+                            dbg!(());
                             let ds_ok = Self::source(
                                 &self.files,
                                 &mut self.source,
@@ -512,6 +514,7 @@ impl Session {
                                 self.end,
                             )?;
                             if ds_ok {
+                                dbg!(());
                                 let ds = self.source.as_mut().unwrap();
                                 let archive = &ds.archive;
                                 let cursor = &mut ds.cursor;
@@ -548,11 +551,10 @@ impl Session {
                             }
                         }
                         let (ts, batch) = current.pop_front().unwrap();
-                        let mut elapsed = last.elapsed();
-                        while elapsed < *next_after {
+                        let elapsed = last.elapsed();
+                        if elapsed < dbg!(*next_after) {
                             dbg!(());
                             time::sleep(*next_after - elapsed).await;
-                            elapsed = last.elapsed();
                         }
                         if current.is_empty() {
                             dbg!(());
@@ -562,12 +564,13 @@ impl Session {
                                 let ms = (current[0].0 - ts).num_milliseconds() as f64;
                                 (ms / *rate).trunc() as i64
                             };
+                            dbg!(wait);
                             if wait > 0 {
                                 *next_after = Duration::from_millis(wait as u64);
                                 *last = Instant::now();
                             }
                         }
-                        break Ok((ts, batch));
+                        break Ok((dbg!(ts), batch));
                     }
                 }
             }
@@ -1091,6 +1094,8 @@ async fn session(
         t.apply_config(&mut batch, &cluster, cfg).await?
     }
     batch.commit(None).await;
+    type NextRes = Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>;
+    type Next = Pin<Box<dyn Future<Output = NextRes> + Send + Sync>>;
     let mut control_rx = control_rx.fuse();
     let mut idle_check = time::interval(std::time::Duration::from_secs(30));
     let mut idle = false;
@@ -1138,7 +1143,7 @@ async fn session(
             r = t.next().fuse() => match r {
                 Err(e) => break Err(e),
                 Ok((ts, mut batch)) => { t.process_batch((ts, &mut *batch)).await?; }
-            }
+            },
         }
     }
 }
