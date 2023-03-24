@@ -1,5 +1,5 @@
 use super::{ArchiveCmds, BCastMsg, Config, RecordConfig};
-use crate::logfile::{ArchiveWriter, BatchItem, Id, RecordTooLarge, BATCH_POOL};
+use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL};
 use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
@@ -17,7 +17,6 @@ use netidx::{
     protocol::glob::{Glob, GlobSet},
     resolver_client::{ChangeTracker, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
-    utils,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -203,9 +202,8 @@ pub(super) async fn run(
     config: Arc<Config>,
     record_config: Arc<RecordConfig>,
 ) -> Result<()> {
-    let (tx_batch, rx_batch) = mpsc::channel(10);
+    let (tx_batch, mut rx_batch) = mpsc::channel(10);
     let (tx_list, rx_list) = mpsc::unbounded();
-    let mut rx_batch = utils::Batched::new(rx_batch.fuse(), 10);
     let mut by_subid: FxHashMap<SubId, Id> = HashMap::default();
     let mut image: FxHashMap<SubId, Event> = HashMap::default();
     let mut subscribed: HashMap<Path, Dval> = HashMap::new();
@@ -223,7 +221,6 @@ pub(super) async fn run(
     let mut last_image = archive.len();
     let mut last_flush = archive.len();
     let mut pending_list: Option<Fuse<oneshot::Receiver<Lst>>> = None;
-    let mut pending_batches: Vec<Pooled<Vec<(SubId, Event)>>> = Vec::new();
     start_list_task(rx_list, subscriber.resolver(), record_config.spec.clone());
     loop {
         select_biased! {
@@ -292,39 +289,17 @@ pub(super) async fn run(
             },
             batch = rx_batch.next() => match batch {
                 None => break,
-                Some(utils::BatchItem::InBatch(batch)) => {
-                    pending_batches.push(batch);
-                },
-                Some(utils::BatchItem::EndBatch) => {
-                    let mut overflow = Vec::new();
+                Some(mut batch) => {
+                    let now = Utc::now();
                     let mut tbatch = BATCH_POOL.take();
                     task::block_in_place(|| -> Result<()> {
-                        for mut batch in pending_batches.drain(..) {
-                            for (subid, ev) in batch.drain(..) {
-                                if record_config.image_frequency.is_some() {
-                                    image.insert(subid, ev.clone());
-                                }
-                                tbatch.push(BatchItem(by_subid[&subid], ev));
+                        for (subid, ev) in batch.drain(..) {
+                            if record_config.image_frequency.is_some() {
+                                image.insert(subid, ev.clone());
                             }
+                            tbatch.push(BatchItem(by_subid[&subid], ev));
                         }
-                        loop { // handle batches >4 GiB
-                            let ts = Utc::now();
-                            match archive.add_batch(false, ts, &tbatch) {
-                                Err(e) if e.is::<RecordTooLarge>() => {
-                                    let at = tbatch.len() >> 1;
-                                    overflow.push(tbatch.split_off(at));
-                                }
-                                Err(e) => bail!(e),
-                                Ok(()) => {
-                                    let m = BCastMsg::Batch(ts, Arc::new(tbatch));
-                                    let _ = bcast.send(m);
-                                    match overflow.pop() {
-                                        None => break,
-                                        Some(b) => { tbatch = Pooled::orphan(b); }
-                                    }
-                                }
-                            }
-                        }
+                        archive.add_batch(false, now, &tbatch)?;
                         match record_config.image_frequency {
                             None => (),
                             Some(freq) if archive.len() - last_image < freq => (),

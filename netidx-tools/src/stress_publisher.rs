@@ -4,10 +4,7 @@ use netidx::{
     path::Path,
     publisher::{BindCfg, DesiredAuth, PublisherBuilder, Value},
 };
-use std::{
-    mem,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use structopt::StructOpt;
 use tokio::{runtime::Runtime, signal, time};
 
@@ -54,22 +51,13 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) {
         published
     };
     let mut last_stat = Instant::now();
-    let mut batch: usize = 0;
     let one_second = Duration::from_secs(1);
     loop {
         let mut updates = publisher.start_batch();
         v += 1;
-        for (i, p) in published.iter().enumerate() {
-            p.update(&mut updates, Value::V64(v + i as u64));
+        for p in published.iter() {
+            p.update(&mut updates, Value::V64(v as u64));
             sent += 1;
-            batch += 1;
-            if batch > 10000 {
-                batch = 0;
-                mem::replace(&mut updates, publisher.start_batch()).commit(None).await;
-                if let Some(delay) = delay {
-                    time::sleep(delay).await;
-                }
-            }
         }
         updates.commit(None).await;
         if let Some(delay) = delay {
