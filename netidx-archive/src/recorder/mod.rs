@@ -40,6 +40,18 @@ mod file {
         pub(super) shards: Option<usize>,
     }
 
+    impl PublishConfig {
+        fn example() -> Self {
+            Self {
+                base: Path::from("/archive"),
+                bind: None,
+                max_sessions: default_max_sessions(),
+                max_sessions_per_client: default_max_sessions_per_client(),
+                shards: Some(0),
+            }
+        }
+    }
+
     pub(super) fn default_poll_interval() -> Option<Duration> {
         Some(Duration::from_secs(5))
     }
@@ -75,6 +87,19 @@ mod file {
         pub(super) rotate_interval: Option<Duration>,
     }
 
+    impl RecordConfig {
+        fn example() -> Self {
+            Self {
+                spec: vec![Chars::from("/tmp/**")],
+                poll_interval: default_poll_interval(),
+                image_frequency: default_image_frequency(),
+                flush_frequency: default_flush_frequency(),
+                flush_interval: default_flush_interval(),
+                rotate_interval: default_rotate_interval(),
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) struct Config {
         pub(super) archive_directory: PathBuf,
@@ -86,6 +111,18 @@ mod file {
         pub(super) record: Option<RecordConfig>,
         #[serde(default)]
         pub(super) publish: Option<PublishConfig>,
+    }
+
+    impl Config {
+        pub(super) fn example() -> String {
+            serde_json::to_string_pretty(&Self {
+                archive_directory: PathBuf::from("/foo/bar"),
+                netidx_config: None,
+                desired_auth: None,
+                record: Some(RecordConfig::example()),
+                publish: Some(PublishConfig::example()),
+            }).unwrap()
+        }
     }
 }
 
@@ -232,6 +269,10 @@ impl Config {
         let s = tokio::fs::read(file).await?;
         let f = serde_json::from_slice::<file::Config>(&s)?;
         Config::try_from(f)
+    }
+
+    pub fn example() -> String {
+        file::Config::example()
     }
 }
 

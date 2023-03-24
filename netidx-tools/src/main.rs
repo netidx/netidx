@@ -20,10 +20,8 @@ mod resolver_server;
 #[macro_use]
 extern crate anyhow;
 #[cfg(unix)]
-#[macro_use]
-extern crate serde_derive;
-#[macro_use]
-extern crate netidx_protocols;
+use std::path::PathBuf;
+
 use netidx_tools_core::ClientParams;
 use structopt::StructOpt;
 
@@ -77,10 +75,10 @@ enum Opt {
     #[cfg(unix)]
     #[structopt(name = "record", about = "record and republish archives")]
     Record {
-        #[structopt(flatten)]
-        common: ClientParams,
-        #[structopt(flatten)]
-        params: recorder::Params,
+        #[structopt(short = "c", long = "config", help = "recorder config file")]
+        config: PathBuf,
+        #[structopt(short = "e", long = "example", help = "print an example config file")]
+        example: bool,
     },
     #[cfg(unix)]
     #[structopt(name = "activation", about = "manage netidx processes")]
@@ -131,9 +129,8 @@ fn main() {
             container::run(cfg, auth, params)
         }
         #[cfg(unix)]
-        Opt::Record { common, params } => {
-            let (cfg, auth) = common.load();
-            recorder::run(cfg, auth, params)
+        Opt::Record { config, example } => {
+            recorder::run(config, example)
         }
         #[cfg(unix)]
         Opt::Activation { common, params } => {
