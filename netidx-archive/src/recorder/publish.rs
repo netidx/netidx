@@ -610,30 +610,33 @@ impl Session {
             Ok(())
         } else {
             let mut pbatch = self.publisher.start_batch();
-            for BatchItem(id, ev) in batch.1.drain(..) {
-                let v = match ev {
-                    Event::Unsubscribed => Value::Null,
-                    Event::Update(v) => v,
-                };
-                match self.published.get(&id) {
-                    Some(val) => {
-                        val.update(&mut pbatch, v);
-                    }
-                    None => {
-                        let path = self
-                            .source
-                            .as_ref()
-                            .unwrap()
-                            .archive
-                            .path_for_id(&id)
-                            .unwrap();
-                        let path = self.data_base.append(&path);
-                        let val = self.publisher.publish(path, v)?;
-                        self.published_ids.insert(val.id());
-                        self.published.insert(id, val);
+            task::block_in_place(|| {
+                for BatchItem(id, ev) in batch.1.drain(..) {
+                    let v = match ev {
+                        Event::Unsubscribed => Value::Null,
+                        Event::Update(v) => v,
+                    };
+                    match self.published.get(&id) {
+                        Some(val) => {
+                            val.update(&mut pbatch, v);
+                        }
+                        None => {
+                            let path = self
+                                .source
+                                .as_ref()
+                                .unwrap()
+                                .archive
+                                .path_for_id(&id)
+                                .unwrap();
+                            let path = self.data_base.append(&path);
+                            let val = self.publisher.publish(path, v)?;
+                            self.published_ids.insert(val.id());
+                            self.published.insert(id, val);
+                        }
                     }
                 }
-            }
+                Ok::<(), anyhow::Error>(())
+            })?;
             self.controls.pos_ctl.update(&mut pbatch, Value::DateTime(batch.0));
             Ok(pbatch.commit(None).await)
         }
