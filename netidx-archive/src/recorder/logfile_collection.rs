@@ -30,16 +30,18 @@ impl Ord for File {
 impl File {
     async fn read(config: &Config) -> Result<Vec<File>> {
         let mut files = vec![];
-        let mut reader = tokio::fs::read_dir(&config.archive_directory).await?;
-        while let Some(dir) = reader.next_entry().await? {
-            let typ = dir.file_type().await?;
-            if typ.is_file() {
-                let name = dir.file_name();
-                let name = name.to_string_lossy();
-                if name == "current" {
-                    files.push(File::Head);
-                } else if let Ok(ts) = name.parse::<DateTime<Utc>>() {
-                    files.push(File::Historical(ts));
+        {
+            let mut reader = tokio::fs::read_dir(&config.archive_directory).await?;
+            while let Some(dir) = reader.next_entry().await? {
+                let typ = dir.file_type().await?;
+                if typ.is_file() {
+                    let name = dir.file_name();
+                    let name = name.to_string_lossy();
+                    if name == "current" {
+                        files.push(File::Head);
+                    } else if let Ok(ts) = name.parse::<DateTime<Utc>>() {
+                        files.push(File::Historical(ts));
+                    }
                 }
             }
         }
