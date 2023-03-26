@@ -187,7 +187,11 @@ impl ClientCtx {
     ) -> Result<()> {
         let mut batch = self.publisher.start_batch();
         for r in queued.drain(..) {
-            match r?.to_str() {
+            let m = r?;
+            if m.is_ping() {
+                continue
+            }
+            match m.to_str() {
                 Err(_) => err(tx, "expected text").await?,
                 Ok(txt) => match serde_json::from_str::<Request>(txt) {
                     Err(e) => err(tx, format!("could not parse message {}", e)).await?,

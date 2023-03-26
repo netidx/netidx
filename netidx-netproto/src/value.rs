@@ -34,7 +34,7 @@ use crate::value_parser;
 
 type Result<T> = result::Result<T, PackError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Typ {
     U32,
     V32,

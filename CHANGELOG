@@ -19,6 +19,12 @@
     "current". Historical log files are called the rfc3339 timestamp
     when they ended. Again sorry for the breakage.
 
+* 0.17.4
+
+  - ignore pings in netidx-wsproxy
+
+  - add serialize/deserialize to netidx-netproto::value::Typ 
+
 * 0.17.3
 
   - add a pack implementation for HashSet
