@@ -693,12 +693,14 @@ impl UpdateBatch {
     }
 }
 
+#[derive(Debug)]
 struct Client {
     msg_queue: MsgQ,
     subscribed: FxHashMap<Id, Permissions>,
     user: Option<UserInfo>,
 }
 
+#[derive(Debug)]
 pub struct Published {
     current: Value,
     subscribed: Subscribed,
@@ -720,6 +722,7 @@ impl Published {
     }
 }
 
+#[derive(Debug)]
 struct PublisherInner {
     addr: SocketAddr,
     stop: Option<oneshot::Sender<()>>,
@@ -909,7 +912,7 @@ impl PublisherBuilder {
 /// cloning it is virtually free. When all references to to the
 /// publisher have been dropped the publisher will shutdown the
 /// listener, and remove all published paths from the resolver server.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Publisher(Arc<Mutex<PublisherInner>>);
 
 impl Publisher {

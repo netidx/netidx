@@ -32,6 +32,8 @@
   - don't put empty objects back in pools
 
 * 0.17.2
+  
+  - implement debug on Publisher
 
   - change the websocket proxy protocol a bit to make it possible to
     have multiple in flight rpcs.
