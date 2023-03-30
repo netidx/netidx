@@ -12,25 +12,21 @@ fn is_attr(att: &Attribute, allowed: &[&str], s: &str) -> bool {
     match att.style {
         AttrStyle::Inner(_) => false,
         AttrStyle::Outer => {
-            if let Some(seg) = att.path.segments.iter().next() {
-                seg.ident.to_string() == "pack"
-                    && match att.tokens.clone().into_iter().next() {
+            if let Some(seg) = att.path().segments.iter().next() {
+                seg.ident.to_string() == "pack" && {
+                    let tokens = att.meta.require_list().unwrap().tokens.clone();
+                    match tokens.into_iter().next() {
                         None => false,
-                        Some(TokenTree::Group(g)) => {
-                            match g.stream().into_iter().next() {
-                                None => false,
-                                Some(TokenTree::Ident(i)) => {
-                                    let attr = i.to_string();
-                                    if !allowed.contains(&attr.as_str()) {
-                                        panic!("invalid attribute '{}'", attr);
-                                    }
-                                    attr == s
-                                }
-                                Some(_) => false,
+                        Some(TokenTree::Ident(i)) => {
+                            let attr = i.to_string();
+                            if !allowed.contains(&attr.as_str()) {
+                                panic!("invalid attribute '{}'", attr);
                             }
+                            attr == s
                         }
                         Some(_) => false,
                     }
+                }
             } else {
                 false
             }

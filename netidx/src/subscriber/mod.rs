@@ -142,6 +142,7 @@ atomic_id!(SubscriberId);
 atomic_id!(ConId);
 
 bitflags! {
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
     pub struct UpdatesFlags: u32 {
         /// if set, then an immediate update will be sent consisting
         /// of the last value received from the publisher. If you

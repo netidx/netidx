@@ -229,6 +229,7 @@ lazy_static! {
 }
 
 bitflags! {
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
     pub struct PublishFlags: u32 {
         /// if set, then subscribers will be forced to use an existing
         /// connection, if it exists, when subscribing to this value.
@@ -515,7 +516,7 @@ impl DefaultHandle {
             };
             if inserted && !pbl.by_path.contains_key(&path) {
                 flags.remove(PublishFlags::DESTROY_ON_IDLE);
-                let flags = if flags.is_empty() { None } else { Some(flags.bits) };
+                let flags = if flags.is_empty() { None } else { Some(flags.bits()) };
                 pbl.to_unpublish.remove(&path);
                 pbl.to_publish.insert(path, flags);
                 pbl.trigger_publish()
@@ -780,7 +781,7 @@ impl PublisherInner {
         self.by_path.insert(path.clone(), id);
         self.to_unpublish.remove(&path);
         self.to_publish
-            .insert(path.clone(), if flags.is_empty() { None } else { Some(flags.bits) });
+            .insert(path.clone(), if flags.is_empty() { None } else { Some(flags.bits()) });
         self.trigger_publish();
         Ok(())
     }
@@ -1196,7 +1197,7 @@ impl Publisher {
         }
         pb.to_unpublish.remove(base.as_ref());
         pb.to_publish_default
-            .insert(base.clone(), if flags.is_empty() { None } else { Some(flags.bits) });
+            .insert(base.clone(), if flags.is_empty() { None } else { Some(flags.bits()) });
         pb.default.insert(base.clone(), tx);
         pb.trigger_publish();
         Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })

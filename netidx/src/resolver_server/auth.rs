@@ -19,6 +19,7 @@ use std::{
 };
 
 bitflags! {
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
     pub struct Permissions: u32 {
         const DENY             = 0x01;
         const SUBSCRIBE        = 0x02;

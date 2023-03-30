@@ -19,6 +19,12 @@
     "current". Historical log files are called the rfc3339 timestamp
     when they ended. Again sorry for the breakage.
 
+  - update to biflags 2.0.
+
+  - implement serialize and deserialize for pooled
+
+  - change the websocket proxy protocol to expose batching
+
 * 0.17.4
 
   - ignore pings in netidx-wsproxy

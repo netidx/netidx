@@ -1,6 +1,6 @@
 [package]
 name = "netidx-derive"
-version = "0.17.2"
+version = "0.18.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -16,6 +16,6 @@ categories = ["network-programming"]
 proc-macro = true
 
 [dependencies]
-syn = "1"
+syn = "2"
 quote = "1"
 proc-macro2 = "1"

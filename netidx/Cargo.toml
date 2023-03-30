@@ -1,6 +1,6 @@
 [package]
 name = "netidx"
-version = "0.17.2"
+version = "0.18.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -17,8 +17,8 @@ default = []
 krb5_iov = ["cross-krb5/iov"]
 
 [dependencies]
-netidx-core = { version = "^0.17", path = "../netidx-core" }
-netidx-netproto = { version = "^0.17", path = "../netidx-netproto" }
+netidx-core = { version = "^0.18", path = "../netidx-core" }
+netidx-netproto = { version = "^0.18", path = "../netidx-netproto" }
 cross-krb5 = { version = "0.3", default_features = false }
 log = "0.4"
 anyhow = "1"
@@ -35,9 +35,9 @@ bytes = { version = "1", features = ["serde"] }
 byteorder = "1"
 crossbeam = "0.8"
 parking_lot = "0.12"
-bitflags = "1"
+bitflags = "2"
 get_if_addrs = "0.5"
-dirs = "4"
+dirs = "5"
 num_cpus = "1"
 triomphe = "0.1"
 arcstr = { version = "1", features = ["serde"] }
@@ -45,7 +45,7 @@ rustls-pemfile = "1"
 rustls = "0.20"
 tokio-rustls = "0.23"
 webpki = "0.22"
-x509-parser = "0.14"
+x509-parser = "0.15"
 pkcs8 = { version = "0.9", features = ["pem", "encryption"] }
 keyring = "2"
 smallvec = { version = "1", features = ["const_generics", "union"] }
