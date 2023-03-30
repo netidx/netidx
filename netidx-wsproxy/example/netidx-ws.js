@@ -33,7 +33,7 @@ class Netidx {
                     w.push(handler);
                 }
             } else if (ev.type == "Update") {
-                for(up in ev.updates) {
+                for(let up in ev.updates) {
                     let w = this.subs.get(up.id);
                     if (w != undefined) {
                         let i = 0;
