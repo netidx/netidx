@@ -33,18 +33,20 @@ class Netidx {
                     w.push(handler);
                 }
             } else if (ev.type == "Update") {
-                let w = this.subs.get(ev.id);
-                if (w != undefined) {
-                    let i = 0;
-                    while (i < w.length) {
-                        if (!w[i](ev.event)) {
-                            w.splice(i, 1);
-                        } else {
-                            i = i + 1;
+                for(up in ev.updates) {
+                    let w = this.subs.get(up.id);
+                    if (w != undefined) {
+                        let i = 0;
+                        while (i < w.length) {
+                            if (!w[i](up.event)) {
+                                w.splice(i, 1);
+                            } else {
+                                i = i + 1;
+                            }
                         }
-                    }
-                    if (w.length == 0) {
-                        this.con.send(JSON.stringify({'type': 'Unsubscribe', 'id': ev.id }))
+                        if (w.length == 0) {
+                            this.con.send(JSON.stringify({'type': 'Unsubscribe', 'id': up.id }))
+                        }
                     }
                 }
             } else if (ev.type == "CallSuccess") {
@@ -91,9 +93,7 @@ class Netidx {
 }
 
 nx = new Netidx("ws://127.0.0.1:4343/ws");
-// nx.subscribe('/local/bench/0/0', (v) => {
-//      console.log(v);
-//      return true
-// });
-nx.call('/local/test-rpc', [['echo', {'type': 'U32', 'value': 42}]])
-    .then((v) => console.log(v));
+nx.subscribe('/local/bench/0/0', (v) => {
+     console.log(v);
+     return true
+});
