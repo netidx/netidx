@@ -39,4 +39,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 lazy_static = "1"
 arcstr = { version = "1", features = ["serde"] }
 rayon = "1"
-dirs = "4"
+dirs = "5"
