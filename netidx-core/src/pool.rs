@@ -1,7 +1,10 @@
 /// This is shamelessly based on the dynamic-pool crate, with
 /// modifications
+use crate::utils::take_t;
 use crossbeam::queue::ArrayQueue;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
+    borrow::Borrow,
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
     collections::{HashMap, HashSet, VecDeque},
     default::Default,
@@ -142,6 +145,18 @@ pub struct Pooled<T: Poolable + Sync + Send + 'static> {
     object: T,
 }
 
+impl<T: Poolable + Sync + Send + 'static> Borrow<T> for Pooled<T> {
+    fn borrow(&self) -> &T {
+        &self.object
+    }
+}
+
+impl Borrow<str> for Pooled<String> {
+    fn borrow(&self) -> &str {
+        self.object.borrow()
+    }
+}
+
 impl<T: Poolable + Sync + Send + 'static + PartialEq> PartialEq for Pooled<T> {
     fn eq(&self, other: &Pooled<T>) -> bool {
         self.object.eq(&other.object)
@@ -213,5 +228,34 @@ impl<T: Poolable + Sync + Send + 'static> Drop for Pooled<T> {
                 inner.pool.push(object).ok();
             }
         }
+    }
+}
+
+impl<T: Poolable + Sync + Send + 'static + Serialize> Serialize for Pooled<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.object.serialize(serializer)
+    }
+}
+
+impl<'de, T: Poolable + Sync + Send + 'static + DeserializeOwned> Deserialize<'de>
+    for Pooled<T>
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut t = take_t::<T>(10000, 10000);
+        Self::deserialize_in_place(deserializer, &mut t)?;
+        Ok(t)
+    }
+
+    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        <T as Deserialize>::deserialize_in_place(deserializer, &mut place.object)
     }
 }

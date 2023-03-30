@@ -1,9 +1,19 @@
 use netidx::{
-    path::Path, protocol::value::Value, publisher::Id as PubId, subscriber::{SubId, Event},
+    path::Path,
+    pool::Pooled,
+    protocol::value::Value,
+    publisher::Id as PubId,
+    subscriber::{Event, SubId},
 };
 use serde_derive::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchItem {
+    pub id: PubId,
+    pub data: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
     Subscribe {
@@ -21,8 +31,7 @@ pub enum Request {
         init: Value,
     },
     Update {
-        id: PubId,
-        val: Value,
+        updates: Pooled<Vec<BatchItem>>,
     },
     Unpublish {
         id: PubId,
@@ -30,40 +39,29 @@ pub enum Request {
     Call {
         id: u64,
         path: Path,
-        args: Vec<(String, Value)>,
+        args: Pooled<Vec<(Pooled<String>, Value)>>,
     },
     #[serde(other)]
     Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Update {
+    pub id: SubId,
+    pub event: Event,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum Response {
-    Subscribed {
-        id: SubId,
-    },
-    Update {
-        id: SubId,
-        event: Event,
-    },
+    Subscribed { id: SubId },
+    Update { updates: Pooled<Vec<Update>> },
     Unsubscribed,
     Wrote,
-    Published {
-        id: PubId,
-    },
+    Published { id: PubId },
     Updated,
     Unpublished,
-    CallSuccess {
-        id: u64,
-        result: Value,
-    },
-    CallFailed {
-        id: u64,
-        error: String,
-    },
-    Error {
-        error: String,
-    },
-    #[serde(other)]
-    Unknown,
+    CallSuccess { id: u64, result: Value },
+    CallFailed { id: u64, error: String },
+    Error { error: String },
 }

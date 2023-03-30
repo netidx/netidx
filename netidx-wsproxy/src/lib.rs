@@ -1,4 +1,4 @@
-use crate::protocol::{Request, Response};
+use crate::protocol::{Request, Response, Update};
 use anyhow::{bail, Result};
 use futures::{
     channel::mpsc,
@@ -11,13 +11,14 @@ use fxhash::FxHashMap;
 use log::warn;
 use netidx::{
     path::Path,
-    pool::Pooled,
+    pool::{Pool, Pooled},
     protocol::value::Value,
     publisher::{Id as PubId, Publisher, UpdateBatch, Val as Pub},
     subscriber::{Dval as Sub, Event, SubId, Subscriber, UpdatesFlags},
     utils::{BatchItem, Batched},
 };
 use netidx_protocols::rpc::client::Proc;
+use once_cell::sync::Lazy;
 use std::{
     collections::{hash_map::Entry, HashMap},
     net::SocketAddr,
@@ -47,15 +48,15 @@ struct PubEntry {
 type PendingCall =
     Pin<Box<dyn Future<Output = (u64, Result<Value>)> + Send + Sync + 'static>>;
 
-async fn reply(tx: &mut SplitSink<WebSocket, Message>, m: Response) -> Result<()> {
-    let s = serde_json::to_string(&m)?;
+async fn reply<'a>(tx: &mut SplitSink<WebSocket, Message>, m: &Response) -> Result<()> {
+    let s = serde_json::to_string(m)?;
     Ok(tx.send(Message::text(s)).await?)
 }
 async fn err(
     tx: &mut SplitSink<WebSocket, Message>,
     message: impl Into<String>,
 ) -> Result<()> {
-    reply(tx, Response::Error { error: message.into() }).await
+    reply(tx, &Response::Error { error: message.into() }).await
 }
 
 struct ClientCtx {
@@ -155,18 +156,25 @@ impl ClientCtx {
         }
     }
 
-    fn update(&mut self, batch: &mut UpdateBatch, id: PubId, value: Value) -> Result<()> {
-        match self.pubs.get(&id) {
-            None => bail!("not published"),
-            Some(pe) => Ok(pe.val.update(batch, value)),
+    fn update(
+        &mut self,
+        batch: &mut UpdateBatch,
+        mut updates: Pooled<Vec<protocol::BatchItem>>,
+    ) -> Result<()> {
+        for up in updates.drain(..) {
+            match self.pubs.get(&up.id) {
+                None => bail!("not published"),
+                Some(pe) => pe.val.update(batch, up.data),
+            }
         }
+        Ok(())
     }
 
     async fn call(
         &mut self,
         id: u64,
         path: Path,
-        args: Vec<(String, Value)>,
+        mut args: Pooled<Vec<(Pooled<String>, Value)>>,
     ) -> Result<PendingCall> {
         let proc = match self.rpcs.entry(path) {
             Entry::Occupied(e) => e.into_mut(),
@@ -176,7 +184,7 @@ impl ClientCtx {
             }
         }
         .clone();
-        Ok(Box::pin(async move { (id, proc.call(args).await) }) as PendingCall)
+        Ok(Box::pin(async move { (id, proc.call(args.drain(..)).await) }) as PendingCall)
     }
 
     async fn process_from_client(
@@ -189,7 +197,7 @@ impl ClientCtx {
         for r in queued.drain(..) {
             let m = r?;
             if m.is_ping() {
-                continue
+                continue;
             }
             match m.to_str() {
                 Err(_) => err(tx, "expected text").await?,
@@ -198,29 +206,29 @@ impl ClientCtx {
                     Ok(req) => match req {
                         Request::Subscribe { path } => {
                             let id = self.subscribe(path);
-                            reply(tx, Response::Subscribed { id }).await?
+                            reply(tx, &Response::Subscribed { id }).await?
                         }
                         Request::Unsubscribe { id } => match self.unsubscribe(id) {
                             Err(e) => err(tx, e.to_string()).await?,
-                            Ok(()) => reply(tx, Response::Unsubscribed).await?,
+                            Ok(()) => reply(tx, &Response::Unsubscribed).await?,
                         },
                         Request::Write { id, val } => match self.write(id, val) {
                             Err(e) => err(tx, e.to_string()).await?,
-                            Ok(()) => reply(tx, Response::Wrote).await?,
+                            Ok(()) => reply(tx, &Response::Wrote).await?,
                         },
                         Request::Publish { path, init } => match self.publish(path, init)
                         {
                             Err(e) => err(tx, e.to_string()).await?,
-                            Ok(id) => reply(tx, Response::Published { id }).await?,
+                            Ok(id) => reply(tx, &Response::Published { id }).await?,
                         },
                         Request::Unpublish { id } => match self.unpublish(id) {
                             Err(e) => err(tx, e.to_string()).await?,
-                            Ok(()) => reply(tx, Response::Unpublished).await?,
+                            Ok(()) => reply(tx, &Response::Unpublished).await?,
                         },
-                        Request::Update { id, val } => {
-                            match self.update(&mut batch, id, val) {
+                        Request::Update { updates } => {
+                            match self.update(&mut batch, updates) {
                                 Err(e) => err(tx, e.to_string()).await?,
-                                Ok(()) => reply(tx, Response::Updated).await?,
+                                Ok(()) => reply(tx, &Response::Updated).await?,
                             }
                         }
                         Request::Call { id, path, args } => {
@@ -228,7 +236,7 @@ impl ClientCtx {
                                 Ok(pending) => calls_pending.push(pending),
                                 Err(e) => {
                                     let error = format!("rpc call failed {}", e);
-                                    reply(tx, Response::CallFailed { id, error }).await?
+                                    reply(tx, &Response::CallFailed { id, error }).await?
                                 }
                             }
                         }
@@ -246,6 +254,7 @@ async fn handle_client(
     subscriber: Subscriber,
     ws: WebSocket,
 ) -> Result<()> {
+    static UPDATES: Lazy<Pool<Vec<Update>>> = Lazy::new(|| Pool::new(50, 10000));
     let (tx_up, mut rx_up) = mpsc::channel::<Pooled<Vec<(SubId, Event)>>>(3);
     let mut ctx = ClientCtx::new(publisher, subscriber, tx_up);
     let (mut tx_ws, rx_ws) = ws.split();
@@ -257,11 +266,11 @@ async fn handle_client(
         select_biased! {
             (id, res) = calls_pending.select_next_some() => match res {
                 Ok(result) => {
-                    reply(&mut tx_ws, Response::CallSuccess { id, result }).await?
+                    reply(&mut tx_ws, &Response::CallSuccess { id, result }).await?
                 }
                 Err(e) => {
                     let error = format!("rpc call failed {}", e);
-                    reply(&mut tx_ws, Response::CallFailed { id, error }).await?
+                    reply(&mut tx_ws, &Response::CallFailed { id, error }).await?
                 }
             },
             r = rx_ws.select_next_some() => match r {
@@ -274,10 +283,12 @@ async fn handle_client(
                     ).await?
                 }
             },
-            mut updates = rx_up.select_next_some() => {
-                for (id, event) in updates.drain(..) {
-                    reply(&mut tx_ws, Response::Update {id, event}).await?
+            mut batch = rx_up.select_next_some() => {
+                let mut updates = UPDATES.take();
+                for (id, event) in batch.drain(..) {
+                    updates.push(Update {id, event});
                 }
+                reply(&mut tx_ws, &Response::Update { updates }).await?
             },
         }
     }

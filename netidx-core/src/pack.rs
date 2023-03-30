@@ -1,11 +1,10 @@
-use crate::pool::{Pool, Poolable, Pooled};
+use crate::{pool::{Poolable, Pooled}, utils::take_t};
 use arcstr::ArcStr;
 use bytes::{buf, Buf, BufMut, Bytes, BytesMut};
 use chrono::{naive::NaiveDateTime, prelude::*};
-use fxhash::FxBuildHasher;
 use rust_decimal::Decimal;
 use std::{
-    any::{Any, TypeId},
+    any::Any,
     boxed::Box,
     cell::RefCell,
     cmp::Eq,
@@ -55,11 +54,6 @@ pub trait Pack {
     }
 }
 
-thread_local! {
-    static POOLS: RefCell<HashMap<TypeId, Box<dyn Any>, FxBuildHasher>> =
-        RefCell::new(HashMap::default());
-}
-
 impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
     fn encoded_len(&self) -> usize {
         <T as Pack>::encoded_len(&**self)
@@ -70,15 +64,7 @@ impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        let mut t = POOLS.with(|pools| {
-            let mut pools = pools.borrow_mut();
-            let pool: &mut Pool<T> = pools
-                .entry(TypeId::of::<T>())
-                .or_insert_with(|| Box::new(Pool::<T>::new(10000, 10000)))
-                .downcast_mut()
-                .unwrap();
-            pool.take()
-        });
+        let mut t = take_t::<T>(10000, 10000);
         <T as Pack>::decode_into(&mut *t, buf)?;
         Ok(t)
     }
