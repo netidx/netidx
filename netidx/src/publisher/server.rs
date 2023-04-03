@@ -698,7 +698,7 @@ pub(super) async fn start(
         select_biased! {
             _ = stop => break,
             cl = serv.accept().fuse() => match cl {
-                Err(e) => info!("accept error {}", e),
+                Err(e) => info!("accept error {}", e), // CR estokes: Handle this
                 Ok((s, addr)) => {
                     debug!("accepted client {:?}", addr);
                     let clid = ClId::new();

@@ -1,4 +1,6 @@
 * 0.18.0
+  - Change pre allocated packed data structures to avoid TooBig errors 
+    and still allocate safe quantities of memory.
 
   - change move the core of the recorder to netidx-archive
 
