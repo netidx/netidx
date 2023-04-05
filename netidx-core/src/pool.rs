@@ -10,15 +10,19 @@ use std::{
     default::Default,
     fmt::Debug,
     hash::{BuildHasher, Hash, Hasher},
-    mem,
     ops::{Deref, DerefMut},
     sync::{Arc, Weak},
 };
+use triomphe::Arc as TArc;
 
 pub trait Poolable {
     fn empty() -> Self;
     fn reset(&mut self);
     fn capacity(&self) -> usize;
+    /// in case you are pooling something ref counted e.g. arc
+    fn really_dropped(&self) -> bool {
+        true
+    }
 }
 
 impl<K, V, R> Poolable for HashMap<K, V, R>
@@ -99,6 +103,26 @@ impl Poolable for String {
     }
 }
 
+impl<T: Poolable> Poolable for TArc<T> {
+    fn empty() -> Self {
+        TArc::new(T::empty())
+    }
+
+    fn reset(&mut self) {
+        if let Some(inner) = TArc::get_mut(self) {
+            inner.reset()
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        1
+    }
+
+    fn really_dropped(&self) -> bool {
+        TArc::is_unique(&self)
+    }
+}
+
 #[derive(Debug)]
 struct PoolInner<T: Poolable + Send + Sync + 'static> {
     pool: ArrayQueue<T>,
@@ -134,7 +158,7 @@ impl<T: Poolable + Sync + Send + 'static> Pool<T> {
     /// takes an item from the pool, creating one if none are available.
     pub fn take(&self) -> Pooled<T> {
         let object = self.0.pool.pop().unwrap_or_else(Poolable::empty);
-        Pooled { pool: Arc::downgrade(&self.0), object }
+        Pooled { pool: Arc::downgrade(&self.0), object: Some(object) }
     }
 }
 
@@ -142,24 +166,44 @@ impl<T: Poolable + Sync + Send + 'static> Pool<T> {
 #[derive(Debug, Clone)]
 pub struct Pooled<T: Poolable + Sync + Send + 'static> {
     pool: Weak<PoolInner<T>>,
-    object: T,
+    // Safety invariant. This will always be Some unless the
+    // pooled has been dropped
+    object: Option<T>,
+}
+
+impl<T: Poolable + Sync + Send + 'static> Pooled<T> {
+    #[inline(always)]
+    fn get(&self) -> &T {
+        match &self.object {
+            Some(ref t) => t,
+            None => unreachable!()
+        }
+    }
+
+    #[inline(always)]
+    fn get_mut(&mut self) -> &mut T {
+        match &mut self.object {
+            Some(ref mut t) => t,
+            None => unreachable!(),
+        }
+    }
 }
 
 impl<T: Poolable + Sync + Send + 'static> Borrow<T> for Pooled<T> {
     fn borrow(&self) -> &T {
-        &self.object
+        self.get()
     }
 }
 
 impl Borrow<str> for Pooled<String> {
     fn borrow(&self) -> &str {
-        self.object.borrow()
+        self.get().borrow()
     }
 }
 
 impl<T: Poolable + Sync + Send + 'static + PartialEq> PartialEq for Pooled<T> {
     fn eq(&self, other: &Pooled<T>) -> bool {
-        self.object.eq(&other.object)
+        self.get().eq(other.get())
     }
 }
 
@@ -167,13 +211,13 @@ impl<T: Poolable + Sync + Send + 'static + Eq> Eq for Pooled<T> {}
 
 impl<T: Poolable + Sync + Send + 'static + PartialOrd> PartialOrd for Pooled<T> {
     fn partial_cmp(&self, other: &Pooled<T>) -> Option<Ordering> {
-        self.object.partial_cmp(&other.object)
+        self.get().partial_cmp(other.get())
     }
 }
 
 impl<T: Poolable + Sync + Send + 'static + Ord> Ord for Pooled<T> {
     fn cmp(&self, other: &Pooled<T>) -> Ordering {
-        self.object.cmp(&other.object)
+        self.get().cmp(other.get())
     }
 }
 
@@ -182,7 +226,7 @@ impl<T: Poolable + Sync + Send + 'static + Hash> Hash for Pooled<T> {
     where
         H: Hasher,
     {
-        Hash::hash(&self.object, state)
+        Hash::hash(self.get(), state)
     }
 }
 
@@ -190,17 +234,17 @@ impl<T: Poolable + Sync + Send + 'static> Pooled<T> {
     /// Creates a `Pooled` that isn't connected to any pool. E.G. for
     /// branches where you know a given `Pooled` will always be empty.
     pub fn orphan(t: T) -> Self {
-        Pooled { pool: Weak::new(), object: t }
+        Pooled { pool: Weak::new(), object: Some(t) }
     }
 
     pub fn detach(mut self) -> T {
-        mem::replace(&mut self.object, Poolable::empty())
+        self.object.take().unwrap()
     }
 }
 
 impl<T: Poolable + Sync + Send + 'static> AsRef<T> for Pooled<T> {
     fn as_ref(&self) -> &T {
-        &self.object
+        self.get()
     }
 }
 
@@ -208,24 +252,26 @@ impl<T: Poolable + Sync + Send + 'static> Deref for Pooled<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        &self.object
+        self.get()
     }
 }
 
 impl<T: Poolable + Sync + Send + 'static> DerefMut for Pooled<T> {
     fn deref_mut(&mut self) -> &mut T {
-        &mut self.object
+        self.get_mut()
     }
 }
 
 impl<T: Poolable + Sync + Send + 'static> Drop for Pooled<T> {
     fn drop(&mut self) {
-        if let Some(inner) = self.pool.upgrade() {
-            let cap = self.object.capacity();
-            if cap > 0 && cap <= inner.max_elt_capacity {
-                let mut object = mem::replace(&mut self.object, Poolable::empty());
-                object.reset();
-                inner.pool.push(object).ok();
+        if self.get().really_dropped() {
+            if let Some(inner) = self.pool.upgrade() {
+                let cap = self.get().capacity();
+                if cap > 0 && cap <= inner.max_elt_capacity {
+                    let mut object = self.object.take().unwrap();
+                    object.reset();
+                    inner.pool.push(object).ok();
+                }
             }
         }
     }
@@ -236,7 +282,7 @@ impl<T: Poolable + Sync + Send + 'static + Serialize> Serialize for Pooled<T> {
     where
         S: serde::Serializer,
     {
-        self.object.serialize(serializer)
+        self.get().serialize(serializer)
     }
 }
 
@@ -256,6 +302,6 @@ impl<'de, T: Poolable + Sync + Send + 'static + DeserializeOwned> Deserialize<'d
     where
         D: serde::Deserializer<'de>,
     {
-        <T as Deserialize>::deserialize_in_place(deserializer, &mut place.object)
+        <T as Deserialize>::deserialize_in_place(deserializer, place.get_mut())
     }
 }

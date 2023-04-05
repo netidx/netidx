@@ -27,6 +27,10 @@
 
   - change the websocket proxy protocol to expose batching
 
+  - implement poolable for triomphe::Arc
+
+  - fix overflow in pack decoding found in fuzz testing
+
 * 0.17.4
 
   - ignore pings in netidx-wsproxy

@@ -689,6 +689,9 @@ impl<T: Pack> Pack for Vec<T> {
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
         let pre = if elts * mem::size_of::<T>() > MAX_VEC {
             MAX_VEC / mem::size_of::<T>()
         } else {
@@ -703,6 +706,9 @@ impl<T: Pack> Pack for Vec<T> {
 
     fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
         let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
         let pre = if elts * mem::size_of::<T>() > MAX_VEC {
             MAX_VEC / mem::size_of::<T>()
         } else {
@@ -741,6 +747,9 @@ where
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
         let pre = if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC {
             MAX_VEC / (mem::size_of::<K>() + mem::size_of::<V>())
         } else {
@@ -757,6 +766,9 @@ where
 
     fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
         let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
         let pre = if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC {
             MAX_VEC / (mem::size_of::<K>() + mem::size_of::<V>())
         } else {
@@ -795,6 +807,9 @@ where
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
         let pre = if elts * mem::size_of::<K>() > MAX_VEC {
             MAX_VEC / mem::size_of::<K>()
         } else {
@@ -809,6 +824,9 @@ where
 
     fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
         let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
         let pre = if elts * mem::size_of::<K>() > MAX_VEC {
             MAX_VEC / mem::size_of::<K>()
         } else {
