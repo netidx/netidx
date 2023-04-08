@@ -44,9 +44,16 @@ type ArcBatch =
     (Arc<Pooled<Vec<(usize, ToWrite)>>>, oneshot::Sender<Response<FromWrite>>);
 
 macro_rules! wt {
-    ($e:expr) => {
-        time::timeout(HELLO_TO, $e).await
-    };
+    ($loc:expr, $e:expr) => {{
+        let r = time::timeout(HELLO_TO, $e).await;
+        match r {
+            Err(_) => {
+                warn!("timeout while attempting {}", $loc);
+            }
+            Ok(_) => (),
+        }
+        r
+    }};
 }
 
 const HB: Duration = Duration::from_secs(TTL / 2);
@@ -134,13 +141,13 @@ impl Connection {
             Ok(con.send_one(&answer).await?)
         }
         info!("write_con connecting to resolver {:?}", self.resolver_addr);
-        let mut con = wt!(TcpStream::connect(&self.resolver_addr))??;
+        let mut con = wt!("connect", TcpStream::connect(&self.resolver_addr))??;
         debug!("setting no delay = true");
         con.set_nodelay(true)?;
-        debug!("writing protocol version 2");
-        wt!(channel::write_raw(&mut con, &3u64))??;
+        debug!("writing protocol version 3");
+        wt!("write version", channel::write_raw(&mut con, &3u64))??;
         debug!("reading protocol version");
-        if wt!(channel::read_raw::<u64, _>(&mut con))?? != 3 {
+        if wt!("read version", channel::read_raw::<u64, _>(&mut con))?? != 3 {
             bail!("incompatible protocol version")
         }
         let sec = Duration::from_secs(1);
@@ -156,8 +163,14 @@ impl Connection {
             match (&self.desired_auth, &self.resolver_auth) {
                 (DesiredAuth::Anonymous, _) => {
                     debug!("sending anymous auth hello");
-                    wt!(channel::write_raw(&mut con, &hello(AuthWrite::Anonymous)))??;
-                    let r = wt!(channel::read_raw::<ServerHelloWrite, _>(&mut con))??;
+                    wt!(
+                        "write anonymous",
+                        channel::write_raw(&mut con, &hello(AuthWrite::Anonymous))
+                    )??;
+                    let r = wt!(
+                        "read anonymous",
+                        channel::read_raw::<ServerHelloWrite, _>(&mut con)
+                    )??;
                     (Channel::new::<ClientCtx, TcpStream>(None, con), r, false)
                 }
                 (
@@ -180,17 +193,29 @@ impl Connection {
                     match secret {
                         Some(secret) => {
                             debug!("reusing existing session");
-                            wt!(con.send_one(&hello(AuthWrite::Reuse)))??;
-                            wt!(auth_challenge(&mut con, secret))??;
-                            let r = wt!(con.receive::<ServerHelloWrite>())??;
+                            wt!(
+                                "write local reuse",
+                                con.send_one(&hello(AuthWrite::Reuse))
+                            )??;
+                            wt!("auth challenge", auth_challenge(&mut con, secret))??;
+                            let r = wt!(
+                                "recv local hello",
+                                con.receive::<ServerHelloWrite>()
+                            )??;
                             (con, r, false)
                         }
                         None => {
                             debug!("starting a new local auth session");
-                            let tok = wt!(AuthClient::token(&*path))??;
-                            wt!(con.send_one(&hello(AuthWrite::Local)))??;
-                            wt!(con.send_one(&tok))??;
-                            let r = wt!(con.receive::<ServerHelloWrite>())??;
+                            let tok = wt!("get local token", AuthClient::token(&*path))??;
+                            wt!(
+                                "send local hello",
+                                con.send_one(&hello(AuthWrite::Local))
+                            )??;
+                            wt!("send local token", con.send_one(&tok))??;
+                            let r = wt!(
+                                "recv local hello",
+                                con.receive::<ServerHelloWrite>()
+                            )??;
                             (con, r, true)
                         }
                     }
@@ -211,10 +236,17 @@ impl Connection {
                                 > sec =>
                         {
                             debug!("reusing existing session");
-                            wt!(channel::write_raw(&mut con, &hello(AuthWrite::Reuse)))??;
+                            wt!(
+                                "write krb5 reuse",
+                                channel::write_raw(&mut con, &hello(AuthWrite::Reuse))
+                            )??;
                             let mut con = Channel::new(Some(ctx.clone()), con);
-                            wt!(auth_challenge(&mut con, secret))??;
-                            let r: ServerHelloWrite = wt!(con.receive())??;
+                            wt!(
+                                "krb5 auth challenge",
+                                auth_challenge(&mut con, secret)
+                            )??;
+                            let r: ServerHelloWrite =
+                                wt!("recv krb5 hello", con.receive())??;
                             (con, r, false)
                         }
                         (None | Some(_), _) => {
@@ -224,15 +256,19 @@ impl Connection {
                                 Chars::from(spn.clone().ok_or_else(|| {
                                     anyhow!("spn is required for writers")
                                 })?);
-                            wt!(channel::write_raw(
-                                &mut con,
-                                &hello(AuthWrite::Krb5 { spn })
-                            ))??;
+                            wt!(
+                                "write krb5 hello",
+                                channel::write_raw(
+                                    &mut con,
+                                    &hello(AuthWrite::Krb5 { spn })
+                                )
+                            )??;
                             let ctx =
                                 krb5_authentication(upn, &*target_spn, &mut con).await?;
                             let ctx = K5CtxWrap::new(ctx);
                             let mut con = Channel::new(Some(ctx.clone()), con);
-                            let r: ServerHelloWrite = wt!(con.receive())??;
+                            let r: ServerHelloWrite =
+                                wt!("recv krb5 hello", con.receive())??;
                             self.security_context = Some(ctx);
                             (con, r, true)
                         }
@@ -250,14 +286,18 @@ impl Connection {
                     match secret {
                         Some(secret) => {
                             debug!("reusing existing tls session");
-                            wt!(channel::write_raw(&mut con, &hello(AuthWrite::Reuse)))??;
+                            wt!(
+                                "write tls hello reuse",
+                                channel::write_raw(&mut con, &hello(AuthWrite::Reuse))
+                            )??;
                             let tls = ctx.connect(name, con).await?;
                             let mut con = Channel::new::<
                                 ClientCtx,
                                 tokio_rustls::client::TlsStream<TcpStream>,
                             >(None, tls);
-                            wt!(auth_challenge(&mut con, secret))??;
-                            let r: ServerHelloWrite = wt!(con.receive())??;
+                            wt!("tls auth challenge", auth_challenge(&mut con, secret))??;
+                            let r: ServerHelloWrite =
+                                wt!("recv tls hello", con.receive())??;
                             (con, r, false)
                         }
                         None => {
@@ -270,13 +310,14 @@ impl Connection {
                             });
                             debug!("starting a new tls session for {}", publisher_name);
                             let h = hello(AuthWrite::Tls { name: publisher_name });
-                            wt!(channel::write_raw(&mut con, &h))??;
+                            wt!("write tls hello", channel::write_raw(&mut con, &h))??;
                             let tls = ctx.connect(name, con).await?;
                             let mut con = Channel::new::<
                                 ClientCtx,
                                 tokio_rustls::client::TlsStream<TcpStream>,
                             >(None, tls);
-                            let r: ServerHelloWrite = wt!(con.receive())??;
+                            let r: ServerHelloWrite =
+                                wt!("recv tls hello", con.receive())??;
                             (con, r, true)
                         }
                     }
@@ -284,13 +325,16 @@ impl Connection {
             };
         debug!("write_con resolver hello {:?}", r);
         if ownership_check {
-            let secret: Secret = wt!(con.receive())??;
+            let secret: Secret = wt!("recv secret", con.receive())??;
             {
                 let mut secrets = self.secrets.write();
                 secrets.insert(self.resolver_addr, secret.0);
                 secrets.insert(r.resolver_id, secret.0);
             }
-            wt!(con.send_one(&ReadyForOwnershipCheck))??;
+            wt!(
+                "send ready for ownership check",
+                con.send_one(&ReadyForOwnershipCheck)
+            )??;
         }
         if !r.ttl_expired && !self.degraded {
             info!("connected to resolver {:?} for write", self.resolver_addr);
