@@ -18,9 +18,13 @@ use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
 };
+use fxhash::FxHashSet;
 use log::{info, warn};
 use rand::{seq::SliceRandom, thread_rng, Rng};
-use std::{cmp::max, fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    cmp::max, collections::HashSet, fmt::Debug, net::SocketAddr, sync::Arc,
+    time::Duration,
+};
 use tokio::{net::TcpStream, task, time};
 
 // continue with timeout
@@ -35,6 +39,7 @@ macro_rules! cwt {
 }
 
 async fn connect(
+    bad_addrs: &mut FxHashSet<SocketAddr>,
     resolver: &Referral,
     desired_auth: &DesiredAuth,
     tls: &Option<tls::CachedConnector>,
@@ -48,12 +53,33 @@ async fn connect(
         if tries >= 3 {
             bail!("can't connect to any resolver servers");
         }
+        if tries == 0 && bad_addrs.contains(&addr) {
+            n += 1;
+            continue;
+        } else {
+            bad_addrs.clear()
+        }
         if n % addrs.len() == 0 && tries > 0 {
             let wait = thread_rng().gen_range(1..12);
             time::sleep(Duration::from_secs(wait)).await;
         }
         n += 1;
-        let mut con = cwt!("connect", TcpStream::connect(&addr));
+        let mut con = match time::timeout(HELLO_TO, TcpStream::connect(&addr)).await {
+            Ok(Ok(con)) => con,
+            Err(_) => {
+                warn!(
+                    "failed to connect to resolver server {} connection timed out",
+                    addr
+                );
+                bad_addrs.insert(*addr);
+                continue;
+            }
+            Ok(Err(e)) => {
+                warn!("failed to connect to resolver server {} error: {}", addr, e);
+                bad_addrs.insert(*addr);
+                continue;
+            }
+        };
         try_cf!("no delay", con.set_nodelay(true));
         cwt!("send version", channel::write_raw(&mut con, &3u64));
         if cwt!("recv version", channel::read_raw::<u64, _>(&mut con)) != 3 {
@@ -160,6 +186,7 @@ async fn connection(
     tls: Option<tls::CachedConnector>,
 ) {
     let mut con: Option<Channel> = None;
+    let mut bad_addrs: FxHashSet<SocketAddr> = HashSet::default();
     'main: loop {
         match receiver.next().await {
             None => break,
@@ -176,17 +203,21 @@ async fn connection(
                     tries += 1;
                     let c = match con {
                         Some(ref mut c) => c,
-                        None => match connect(&resolver, &desired_auth, &tls).await {
-                            Ok(c) => {
-                                con = Some(c);
-                                con.as_mut().unwrap()
+                        None => {
+                            match connect(&mut bad_addrs, &resolver, &desired_auth, &tls)
+                                .await
+                            {
+                                Ok(c) => {
+                                    con = Some(c);
+                                    con.as_mut().unwrap()
+                                }
+                                Err(e) => {
+                                    con = None;
+                                    warn!("connect_read failed: {}", e);
+                                    continue;
+                                }
                             }
-                            Err(e) => {
-                                con = None;
-                                warn!("connect_read failed: {}", e);
-                                continue;
-                            }
-                        },
+                        }
                     };
                     let mut timeout =
                         max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 50));
