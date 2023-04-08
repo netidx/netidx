@@ -505,6 +505,7 @@ mod test {
 
     #[test]
     fn call_proc() {
+        let _ = env_logger::try_init();
         Runtime::new().unwrap().block_on(async move {
             let ctx = Ctx::new().await;
             let proc_name = Path::from("/rpc/procedure");

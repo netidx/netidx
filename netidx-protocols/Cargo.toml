@@ -34,3 +34,4 @@ arcstr = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 proptest = "1"
+env_logger = "0.10"

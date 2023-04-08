@@ -16,7 +16,7 @@ use std::{
     convert::Into,
     default::Default,
     fs::read_to_string,
-    net::SocketAddr,
+    net::{SocketAddr, IpAddr},
     path::Path as FsPath,
     time::Duration,
 };
@@ -105,7 +105,7 @@ pub(crate) mod file {
     use super::{super::config::check_addrs, resolver, Chars, PMap};
     use crate::{path::Path, pool::Pooled};
     use anyhow::Result;
-    use std::net::SocketAddr;
+    use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -188,10 +188,16 @@ pub(crate) mod file {
         }
     }
 
+    fn default_bind_addr() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct MemberServer {
         pub(super) addr: SocketAddr,
+        #[serde(default = "default_bind_addr")]
+        pub(super) bind_addr: IpAddr,
         pub(super) auth: Auth,
         pub(super) hello_timeout: u64,
         pub(super) max_connections: usize,
@@ -214,6 +220,7 @@ pub(crate) mod file {
 #[derive(Debug, Clone)]
 pub struct MemberServer {
     pub(super) addr: SocketAddr,
+    pub(super) bind_addr: IpAddr,
     pub(super) auth: Auth,
     pub(super) hello_timeout: Duration,
     pub(super) max_connections: usize,
@@ -342,6 +349,7 @@ impl Config {
                 Ok(MemberServer {
                     pid_file: m.pid_file,
                     addr: m.addr,
+                    bind_addr: m.bind_addr,
                     auth: m.auth.into(),
                     hello_timeout: Duration::from_secs(m.hello_timeout),
                     max_connections: m.max_connections,

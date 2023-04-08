@@ -86,6 +86,22 @@ pub enum BindCfg {
     /// ```
     Match { addr: IpAddr, netmask: IpAddr },
 
+    /// If you have a public ip that will always route traffic to the machine
+    /// the publisher is running on, but isn't actually visible on that machine.
+    /// This is more or less `BindCfg::TrustMe`
+    ///
+    /// `54.32.224.1@172.23.112.0/24`
+    ///
+    /// will bind the listener to any address in the 172.23.112.* subnet, but will
+    /// tell the resolver server that it's address is 54.32.224.1.
+    ///
+    /// # Examples
+    /// ```
+    /// use netidx::publisher::BindCfg;
+    /// "54.32.224.1@172.23.112.0/24".parse::<BindCfg>().unwrap();
+    /// ```
+    Elastic { public: IpAddr, private: IpAddr, netmask: IpAddr },
+
     /// Bind to the specifed `SocketAddr`, error if it is in use. If
     /// you want to OS to pick a port for you, use Exact with port
     /// 0. The ip address you specify must obey all the rules, and
@@ -110,90 +126,116 @@ impl Default for BindCfg {
 impl FromStr for BindCfg {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        fn addr_and_netmask(s: &str) -> Result<(IpAddr, IpAddr)> {
+            let mut parts = s.splitn(2, '/');
+            let addr: IpAddr =
+                parts.next().ok_or_else(|| anyhow!("expected ip"))?.parse()?;
+            let bits: u32 =
+                parts.next().ok_or_else(|| anyhow!("expected netmask"))?.parse()?;
+            if parts.next().is_some() {
+                bail!("parse error, trailing garbage after netmask")
+            }
+            let netmask = match addr {
+                IpAddr::V4(_) => {
+                    if bits > 32 {
+                        bail!("invalid netmask");
+                    }
+                    IpAddr::V4(Ipv4Addr::from(u32::MAX.wrapping_shl(32 - bits)))
+                }
+                IpAddr::V6(_) => {
+                    if bits > 128 {
+                        bail!("invalid netmask");
+                    }
+                    IpAddr::V6(Ipv6Addr::from(u128::MAX.wrapping_shl(128 - bits)))
+                }
+            };
+            Ok((addr, netmask))
+        }
         if s.trim() == "local" {
             Ok(BindCfg::Local)
         } else {
             match s.find("/") {
                 None => Ok(BindCfg::Exact(s.parse()?)),
-                Some(_) => {
-                    let mut parts = s.splitn(2, '/');
-                    let addr: IpAddr =
-                        parts.next().ok_or_else(|| anyhow!("expected ip"))?.parse()?;
-                    let bits: u32 = parts
-                        .next()
-                        .ok_or_else(|| anyhow!("expected netmask"))?
-                        .parse()?;
-                    if parts.next().is_some() {
-                        bail!("parse error, trailing garbage after netmask")
+                Some(_) => match s.find("@") {
+                    Some(_) => {
+                        let mut parts = s.splitn(2, '@');
+                        let public = parts
+                            .next()
+                            .ok_or_else(|| anyhow!("expected a public ip"))?
+                            .parse::<IpAddr>()?;
+                        let (private, netmask) =
+                            addr_and_netmask(parts.next().ok_or_else(|| {
+                                anyhow!("expected private addr/netmask")
+                            })?)?;
+                        Ok(BindCfg::Elastic { public, private, netmask })
                     }
-                    let netmask = match addr {
-                        IpAddr::V4(_) => {
-                            if bits > 32 {
-                                bail!("invalid netmask");
-                            }
-                            IpAddr::V4(Ipv4Addr::from(u32::MAX.wrapping_shl(32 - bits)))
-                        }
-                        IpAddr::V6(_) => {
-                            if bits > 128 {
-                                bail!("invalid netmask");
-                            }
-                            IpAddr::V6(Ipv6Addr::from(u128::MAX.wrapping_shl(128 - bits)))
-                        }
-                    };
-                    Ok(BindCfg::Match { addr, netmask })
-                }
+                    None => {
+                        let (addr, netmask) = addr_and_netmask(s)?;
+                        Ok(BindCfg::Match { addr, netmask })
+                    }
+                },
             }
         }
     }
 }
 
 impl BindCfg {
-    fn select(&self) -> Result<IpAddr> {
+    fn select_local_ip(&self, addr: &IpAddr, netmask: &IpAddr) -> Result<IpAddr> {
+        let selected = get_if_addrs()?
+            .iter()
+            .filter_map(|i| match (i.ip(), addr, netmask) {
+                (IpAddr::V4(ip), IpAddr::V4(addr), IpAddr::V4(nm)) => {
+                    let masked = Ipv4Addr::from(
+                        u32::from_be_bytes(ip.octets()) & u32::from_be_bytes(nm.octets()),
+                    );
+                    if &masked == addr {
+                        Some(IpAddr::V4(ip))
+                    } else {
+                        None
+                    }
+                }
+                (IpAddr::V6(ip), IpAddr::V6(addr), IpAddr::V6(nm)) => {
+                    let masked = Ipv6Addr::from(
+                        u128::from_be_bytes(ip.octets())
+                            & u128::from_be_bytes(nm.octets()),
+                    );
+                    if &masked == addr {
+                        Some(IpAddr::V6(ip))
+                    } else {
+                        None
+                    }
+                }
+                (_, _, _) => None,
+            })
+            .collect::<Vec<_>>();
+        if selected.len() == 1 {
+            Ok(selected[0])
+        } else if selected.len() == 0 {
+            bail!("no interface matches {:?}", self);
+        } else {
+            bail!("ambigous specification {:?} matches {:?}", self, selected);
+        }
+    }
+
+    fn select(&self) -> Result<(IpAddr, IpAddr)> {
         match self {
-            BindCfg::Local => Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            BindCfg::Local => {
+                Ok((IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V4(Ipv4Addr::LOCALHOST)))
+            }
             BindCfg::Exact(addr) => {
                 if get_if_addrs()?.iter().any(|i| i.ip() == addr.ip()) {
-                    Ok(addr.ip())
+                    Ok((addr.ip(), addr.ip()))
                 } else {
                     bail!("no interface matches the bind address {:?}", addr);
                 }
             }
+            BindCfg::Elastic { public, private, netmask } => {
+                let private = self.select_local_ip(private, netmask)?;
+                Ok((*public, private))
+            }
             BindCfg::Match { addr, netmask } => {
-                let selected = get_if_addrs()?
-                    .iter()
-                    .filter_map(|i| match (i.ip(), addr, netmask) {
-                        (IpAddr::V4(ip), IpAddr::V4(addr), IpAddr::V4(nm)) => {
-                            let masked = Ipv4Addr::from(
-                                u32::from_be_bytes(ip.octets())
-                                    & u32::from_be_bytes(nm.octets()),
-                            );
-                            if &masked == addr {
-                                Some(IpAddr::V4(ip))
-                            } else {
-                                None
-                            }
-                        }
-                        (IpAddr::V6(ip), IpAddr::V6(addr), IpAddr::V6(nm)) => {
-                            let masked = Ipv6Addr::from(
-                                u128::from_be_bytes(ip.octets())
-                                    & u128::from_be_bytes(nm.octets()),
-                            );
-                            if &masked == addr {
-                                Some(IpAddr::V6(ip))
-                            } else {
-                                None
-                            }
-                        }
-                        (_, _, _) => None,
-                    })
-                    .collect::<Vec<_>>();
-                if selected.len() == 1 {
-                    Ok(selected[0])
-                } else if selected.len() == 0 {
-                    bail!("no interface matches {:?}", self);
-                } else {
-                    bail!("ambigous specification {:?} matches {:?}", self, selected);
-                }
+                let private = self.select_local_ip(addr, netmask)?;
+                Ok((private, private))
             }
         }
     }
@@ -780,8 +822,10 @@ impl PublisherInner {
         }
         self.by_path.insert(path.clone(), id);
         self.to_unpublish.remove(&path);
-        self.to_publish
-            .insert(path.clone(), if flags.is_empty() { None } else { Some(flags.bits()) });
+        self.to_publish.insert(
+            path.clone(),
+            if flags.is_empty() { None } else { Some(flags.bits()) },
+        );
         self.trigger_publish();
         Ok(())
     }
@@ -929,14 +973,14 @@ impl Publisher {
         bind_cfg: BindCfg,
         max_clients: usize,
     ) -> Result<Publisher> {
-        let ip = bind_cfg.select()?;
-        utils::check_addr(ip, &resolver.addrs)?;
+        let (public, private) = bind_cfg.select()?;
+        utils::check_addr(public, &resolver.addrs)?;
         let (addr, listener) = match bind_cfg {
             BindCfg::Exact(addr) => {
                 let l = TcpListener::bind(&addr).await?;
                 (l.local_addr()?, l)
             }
-            BindCfg::Match { .. } | BindCfg::Local => {
+            BindCfg::Match { .. } | BindCfg::Local | BindCfg::Elastic { .. } => {
                 let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr> {
                     Ok((ip, port)
                         .to_socket_addrs()?
@@ -949,9 +993,9 @@ impl Publisher {
                         bail!("couldn't allocate a port");
                     }
                     port = rand_port(port);
-                    let addr = mkaddr(ip, port)?;
+                    let addr = mkaddr(private, port)?;
                     match TcpListener::bind(&addr).await {
-                        Ok(l) => break (l.local_addr()?, l),
+                        Ok(l) => break (mkaddr(public, port)?, l),
                         Err(e) => {
                             if e.kind() != std::io::ErrorKind::AddrInUse {
                                 bail!(e)
@@ -1196,8 +1240,10 @@ impl Publisher {
             bail!("publisher is dead")
         }
         pb.to_unpublish.remove(base.as_ref());
-        pb.to_publish_default
-            .insert(base.clone(), if flags.is_empty() { None } else { Some(flags.bits()) });
+        pb.to_publish_default.insert(
+            base.clone(),
+            if flags.is_empty() { None } else { Some(flags.bits()) },
+        );
         pb.default.insert(base.clone(), tx);
         pb.trigger_publish();
         Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })

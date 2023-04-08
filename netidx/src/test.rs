@@ -54,6 +54,7 @@ mod resolver {
 
     #[test]
     fn publish_default() {
+        let _ = env_logger::try_init();
         Runtime::new().unwrap().block_on(async {
             let server_cfg = ServerConfig::load("../cfg/simple-server.json")
                 .expect("load simple server config");
@@ -365,6 +366,7 @@ mod resolver {
 
     #[test]
     fn publish_resolve_complex() {
+        let _ = env_logger::try_init();
         Runtime::new().unwrap().block_on(run_publish_resolve_complex())
     }
 }
@@ -390,6 +392,7 @@ mod publisher {
 
     #[test]
     fn bindcfg() {
+        let _ = env_logger::try_init();
         let addr: IpAddr = "192.168.0.0".parse().unwrap();
         let netmask: IpAddr = "255.255.0.0".parse().unwrap();
         assert_eq!(BindCfg::Match { addr, netmask }, "192.168.0.0/16".parse().unwrap());
@@ -527,6 +530,7 @@ mod publisher {
 
     #[test]
     fn publish_subscribe() {
+        let _ = env_logger::try_init();
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
             let server_cfg = ServerConfig::load("../cfg/simple-server.json")
@@ -551,6 +555,7 @@ mod publisher {
 
     #[test]
     fn publish_subscribe_tls() {
+        let _ = env_logger::try_init();
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
             let server_cfg = ServerConfig::load("../cfg/tls/resolver/resolver.json")

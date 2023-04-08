@@ -213,7 +213,6 @@ struct Ctx {
     secctx: SecCtx,
     cfg: MemberServer,
     id: SocketAddr,
-    listen_addr: SocketAddr,
     store: Store,
     delay_reads: Option<Instant>,
 }
@@ -648,7 +647,7 @@ async fn hello_client_write(
     static NO: &str = "authentication mechanism not supported";
     info!("hello_write starting negotiation");
     debug!("hello_write client_hello: {:?}", hello);
-    utils::check_addr(hello.write_addr.ip(), &[(ctx.listen_addr, ())])?;
+    utils::check_addr(hello.write_addr.ip(), &[(ctx.id, ())])?;
     let (con, uifo, publisher, rx_stop) = match hello.auth {
         AuthWrite::Anonymous => write_client_anonymous_auth(&ctx, con, &hello).await?,
         AuthWrite::Local => match &ctx.secctx {
@@ -815,10 +814,9 @@ async fn server_loop(
         secctx.clone(),
         id,
     );
-    debug!("creating tcp listener on {:?}", id);
-    let listener = TcpListener::bind(id).await?;
-    let listen_addr = listener.local_addr()?;
-    debug!("my listen addr is {:?}", listen_addr);
+    let listen_addr = SocketAddr::new(member.bind_addr, id.port());
+    debug!("creating tcp listener on {:?}", listen_addr);
+    let listener = TcpListener::bind(listen_addr).await?;
     let ctx = Arc::new(Ctx {
         cfg: member,
         secctx,
@@ -826,14 +824,15 @@ async fn server_loop(
         ctracker: CTracker::new(),
         id,
         delay_reads,
-        listen_addr,
         store,
     });
     let mut stop = stop.fuse();
     let mut client_stops: Vec<oneshot::Sender<()>> = Vec::new();
     let max_connections = ctx.cfg.max_connections;
     debug!("signaling ready");
-    let _ = ready.send(ctx.listen_addr);
+    let mut listen_addr = listener.local_addr()?;
+    listen_addr.set_ip(id.ip());
+    let _ = ready.send(listen_addr);
     loop {
         select_biased! {
             _ = stop => {
