@@ -181,6 +181,15 @@ impl FromStr for BindCfg {
 
 impl BindCfg {
     fn select_local_ip(&self, addr: &IpAddr, netmask: &IpAddr) -> Result<IpAddr> {
+        // this may or may not be allowed, that will be checked later
+        match addr {
+            IpAddr::V4(a) => if a.is_unspecified() {
+                return Ok(*addr)
+            }
+            IpAddr::V6(a) => if a.is_unspecified() {
+                return Ok(*addr)
+            }
+        }
         let selected = get_if_addrs()?
             .iter()
             .filter_map(|i| match (i.ip(), addr, netmask) {
