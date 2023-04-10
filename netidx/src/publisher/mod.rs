@@ -88,7 +88,8 @@ pub enum BindCfg {
 
     /// If you have a public ip that will always route traffic to the machine
     /// the publisher is running on, but isn't actually visible on that machine.
-    /// This is more or less `BindCfg::TrustMe`
+    /// The publisher will put the public ip in the resolver server, but will bind
+    /// to the matching private ip.
     ///
     /// `54.32.224.1@172.23.112.0/24`
     ///
@@ -99,8 +100,21 @@ pub enum BindCfg {
     /// ```
     /// use netidx::publisher::BindCfg;
     /// "54.32.224.1@172.23.112.0/24".parse::<BindCfg>().unwrap();
+    /// "54.32.224.1@0.0.0.0/32".parse::<BindCfg>().unwrap();
     /// ```
     Elastic { public: IpAddr, private: IpAddr, netmask: IpAddr },
+
+    /// If you have a public ip and port that are set up to forward to
+    /// a private ip and port (e.g. you have a NAT of some kind). Then
+    /// you can use this directive to ensure the publisher puts the public
+    /// ip and port in the resolver, but binds to the private ip and port.
+    ///
+    /// # Examples
+    /// ```
+    /// use netidx::publisher::BindCfg;
+    /// "54.32.224.1:1234@172.31.224.4:5001".parse::<BindCfg>().unwrap();
+    /// ```
+    ElasticExact { public: SocketAddr, private: SocketAddr },
 
     /// Bind to the specifed `SocketAddr`, error if it is in use. If
     /// you want to OS to pick a port for you, use Exact with port
@@ -157,21 +171,32 @@ impl FromStr for BindCfg {
             match s.find("/") {
                 None => Ok(BindCfg::Exact(s.parse()?)),
                 Some(_) => match s.find("@") {
+                    None => {
+                        let (addr, netmask) = addr_and_netmask(s)?;
+                        Ok(BindCfg::Match { addr, netmask })
+                    }
                     Some(_) => {
                         let mut parts = s.splitn(2, '@');
                         let public = parts
                             .next()
-                            .ok_or_else(|| anyhow!("expected a public ip"))?
-                            .parse::<IpAddr>()?;
-                        let (private, netmask) =
-                            addr_and_netmask(parts.next().ok_or_else(|| {
-                                anyhow!("expected private addr/netmask")
-                            })?)?;
-                        Ok(BindCfg::Elastic { public, private, netmask })
-                    }
-                    None => {
-                        let (addr, netmask) = addr_and_netmask(s)?;
-                        Ok(BindCfg::Match { addr, netmask })
+                            .ok_or_else(|| anyhow!("expected a public ip"))?;
+                        match public.parse::<SocketAddr>() {
+                            Ok(public) => {
+                                let private = parts
+                                    .next()
+                                    .ok_or_else(|| anyhow!("expected private ip:port"))?
+                                    .parse::<SocketAddr>()?;
+                                Ok(BindCfg::ElasticExact { public, private })
+                            }
+                            Err(_) => {
+                                let public = public.parse::<IpAddr>()?;
+                                let (private, netmask) =
+                                    addr_and_netmask(parts.next().ok_or_else(|| {
+                                        anyhow!("expected private addr/netmask")
+                                    })?)?;
+                                Ok(BindCfg::Elastic { public, private, netmask })
+                            }
+                        }
                     }
                 },
             }
@@ -183,11 +208,15 @@ impl BindCfg {
     fn select_local_ip(&self, addr: &IpAddr, netmask: &IpAddr) -> Result<IpAddr> {
         // this may or may not be allowed, that will be checked later
         match addr {
-            IpAddr::V4(a) => if a.is_unspecified() {
-                return Ok(*addr)
+            IpAddr::V4(a) => {
+                if a.is_unspecified() {
+                    return Ok(*addr);
+                }
             }
-            IpAddr::V6(a) => if a.is_unspecified() {
-                return Ok(*addr)
+            IpAddr::V6(a) => {
+                if a.is_unspecified() {
+                    return Ok(*addr);
+                }
             }
         }
         let selected = get_if_addrs()?
@@ -242,6 +271,7 @@ impl BindCfg {
                 let private = self.select_local_ip(private, netmask)?;
                 Ok((*public, private))
             }
+            BindCfg::ElasticExact { public, private } => Ok((public.ip(), private.ip())),
             BindCfg::Match { addr, netmask } => {
                 let private = self.select_local_ip(addr, netmask)?;
                 Ok((private, private))
@@ -988,6 +1018,10 @@ impl Publisher {
             BindCfg::Exact(addr) => {
                 let l = TcpListener::bind(&addr).await?;
                 (l.local_addr()?, l)
+            }
+            BindCfg::ElasticExact { public, private } => {
+                let l = TcpListener::bind(&private).await?;
+                (public, l)
             }
             BindCfg::Match { .. } | BindCfg::Local | BindCfg::Elastic { .. } => {
                 let mkaddr = |ip: IpAddr, port: u16| -> Result<SocketAddr> {
