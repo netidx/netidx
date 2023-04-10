@@ -99,7 +99,7 @@ pub(crate) fn create_tls_connector(
         .with_safe_defaults()
         .with_root_certificates(root_store)
         .with_single_cert(certs, private_key)?;
-    config.session_storage = rustls::client::ClientSessionMemoryCache::new(256);
+    config.resumption = rustls::client::Resumption::in_memory_sessions(256);
     Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
 }
 
@@ -116,7 +116,7 @@ pub(crate) fn create_tls_acceptor(
         for cert in load_certs(root_certificates)? {
             root_store.add(&cert)?;
         }
-        rustls::server::AllowAnyAnonymousOrAuthenticatedClient::new(root_store)
+        rustls::server::AllowAnyAuthenticatedClient::new(root_store).boxed()
     };
     debug!("loading server certificate");
     let certs = load_certs(certificate)?;

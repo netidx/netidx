@@ -139,7 +139,16 @@ impl Default for BindCfg {
 
 impl FromStr for BindCfg {
     type Err = Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
+        match Self::parse_str(s) {
+            Ok(t) => Ok(t),
+            Err(e) => bail!("failed to parse '{}', {}", s, e),
+        }
+    }
+}
+
+impl BindCfg {
+    fn parse_str(s: &str) -> Result<Self> {
         fn addr_and_netmask(s: &str) -> Result<(IpAddr, IpAddr)> {
             let mut parts = s.splitn(2, '/');
             let addr: IpAddr =
@@ -165,46 +174,47 @@ impl FromStr for BindCfg {
             };
             Ok((addr, netmask))
         }
+        fn parse_elastic(s: &str) -> Result<BindCfg> {
+            let mut parts = s.splitn(2, '@');
+            let public =
+                dbg!(parts.next()).ok_or_else(|| anyhow!("expected a public ip"))?;
+            match dbg!(public.parse::<SocketAddr>()) {
+                Ok(public) => {
+                    let private = dbg!(parts.next())
+                        .ok_or_else(|| anyhow!("expected private ip:port"))?
+                        .parse::<SocketAddr>()?;
+                    Ok(BindCfg::ElasticExact { public, private })
+                }
+                Err(_) => {
+                    let public = public.parse::<IpAddr>()?;
+                    let (private, netmask) = addr_and_netmask(
+                        parts
+                            .next()
+                            .ok_or_else(|| anyhow!("expected private addr/netmask"))?,
+                    )?;
+                    Ok(BindCfg::Elastic { public, private, netmask })
+                }
+            }
+        }
         if s.trim() == "local" {
             Ok(BindCfg::Local)
         } else {
             match s.find("/") {
-                None => Ok(BindCfg::Exact(s.parse()?)),
+                None => match s.find("@") {
+                    None => Ok(BindCfg::Exact(s.parse()?)),
+                    Some(_) => parse_elastic(s),
+                },
                 Some(_) => match s.find("@") {
                     None => {
                         let (addr, netmask) = addr_and_netmask(s)?;
                         Ok(BindCfg::Match { addr, netmask })
                     }
-                    Some(_) => {
-                        let mut parts = s.splitn(2, '@');
-                        let public = parts
-                            .next()
-                            .ok_or_else(|| anyhow!("expected a public ip"))?;
-                        match public.parse::<SocketAddr>() {
-                            Ok(public) => {
-                                let private = parts
-                                    .next()
-                                    .ok_or_else(|| anyhow!("expected private ip:port"))?
-                                    .parse::<SocketAddr>()?;
-                                Ok(BindCfg::ElasticExact { public, private })
-                            }
-                            Err(_) => {
-                                let public = public.parse::<IpAddr>()?;
-                                let (private, netmask) =
-                                    addr_and_netmask(parts.next().ok_or_else(|| {
-                                        anyhow!("expected private addr/netmask")
-                                    })?)?;
-                                Ok(BindCfg::Elastic { public, private, netmask })
-                            }
-                        }
-                    }
+                    Some(_) => parse_elastic(s),
                 },
             }
         }
     }
-}
 
-impl BindCfg {
     fn select_local_ip(&self, addr: &IpAddr, netmask: &IpAddr) -> Result<IpAddr> {
         // this may or may not be allowed, that will be checked later
         match addr {
