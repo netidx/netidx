@@ -66,6 +66,7 @@ pub(crate) async fn write_raw<T: Pack, S: AsyncWrite + Unpin>(
     while buf.has_remaining() {
         socket.write_buf(&mut buf).await?;
     }
+    socket.flush().await?;
     Ok(())
 }
 
@@ -108,6 +109,7 @@ async fn flush_buf<B: Buf, S: AsyncWrite + Send + 'static>(
     while buf.has_remaining() {
         soc.write_buf(&mut buf).await?;
     }
+    soc.flush().await?;
     Ok(())
 }
 
