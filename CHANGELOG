@@ -1,3 +1,11 @@
+* 0.18.1
+  - add features to BindCfg for NAT traversal. You can now run publishers 
+    and resolver servers behind a NAT and DNAT forward the port.
+
+  - Fix a bug in TLS, sometimes (rarely) it is required to call flush on
+    tls wrapped sockets, because they are after all buffer io. Oops. Thank
+    you weird aws nat thing for helping to find this bug :-)
+
 * 0.18.0
   - Change pre allocated packed data structures to avoid TooBig errors 
     and still allocate safe quantities of memory.
