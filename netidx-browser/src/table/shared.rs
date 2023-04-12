@@ -741,7 +741,13 @@ impl SharedState {
             &*self.original_descriptor.borrow(),
         );
         descriptor.cols.sort_by(|p0, _, p1, _| p0.cmp(p1));
-        descriptor.rows.sort();
+        descriptor.rows.sort_by(|r0, r1| match (Path::basename(r0), Path::basename(r1)) {
+            (Some(r0), Some(r1)) => match (r0.parse::<i64>(), r1.parse::<i64>()) {
+                (Ok(r0), Ok(r1)) => r0.cmp(&r1),
+                (Err(_), _) | (_, Err(_)) => r0.cmp(r1),
+            },
+            (None, _) | (_, None) => r0.cmp(r1),
+        });
         {
             let mut i = 0;
             let row_filter = self.row_filter.borrow();
