@@ -1,6 +1,6 @@
 [package]
 name = "netidx-browser"
-version = "0.18.1"
+version = "0.18.2"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"

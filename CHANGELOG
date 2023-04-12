@@ -8,6 +8,9 @@
 
   - 0.18.2 just removes some dbg statements I left in. Sorry!
 
+  - browser sort table rows and columns by their numeric value if they parse
+    as integers.
+
 * 0.18.0
   - Change pre allocated packed data structures to avoid TooBig errors 
     and still allocate safe quantities of memory.
