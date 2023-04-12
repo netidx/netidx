@@ -176,11 +176,11 @@ impl BindCfg {
         }
         fn parse_elastic(s: &str) -> Result<BindCfg> {
             let mut parts = s.splitn(2, '@');
-            let public =
-                dbg!(parts.next()).ok_or_else(|| anyhow!("expected a public ip"))?;
-            match dbg!(public.parse::<SocketAddr>()) {
+            let public = parts.next().ok_or_else(|| anyhow!("expected a public ip"))?;
+            match public.parse::<SocketAddr>() {
                 Ok(public) => {
-                    let private = dbg!(parts.next())
+                    let private = parts
+                        .next()
                         .ok_or_else(|| anyhow!("expected private ip:port"))?
                         .parse::<SocketAddr>()?;
                     Ok(BindCfg::ElasticExact { public, private })
