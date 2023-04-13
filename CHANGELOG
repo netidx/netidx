@@ -11,6 +11,9 @@
   - browser sort table rows and columns by their numeric value if they parse
     as integers.
 
+  - recorder, stop polling dead subscriptions after trying for a while, increase
+    the batch buffer size in case the recorder thread is temporarially delayed.
+
 * 0.18.0
   - Change pre allocated packed data structures to avoid TooBig errors 
     and still allocate safe quantities of memory.
