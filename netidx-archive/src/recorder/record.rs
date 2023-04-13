@@ -9,7 +9,7 @@ use futures::{
     prelude::*,
     select_biased,
 };
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{error, info, warn};
 use netidx::{
     path::Path,
@@ -19,7 +19,7 @@ use netidx::{
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Bound,
     path::PathBuf,
     sync::Arc,
@@ -218,6 +218,8 @@ pub(super) async fn run(
     let mut rotate =
         record_config.rotate_interval.map(|d| time::interval_at(Instant::now() + d, d));
     let mut to_add: Vec<(Path, SubId)> = Vec::new();
+    let mut all_paths: FxHashSet<Path> = HashSet::default();
+    let mut remove_paths: Vec<Path> = vec![];
     let mut last_image = archive.len();
     let mut last_flush = archive.len();
     let mut pending_list: Option<Fuse<oneshot::Receiver<Lst>>> = None;
@@ -271,6 +273,7 @@ pub(super) async fn run(
                 if let Some(mut batches) = r {
                     for mut batch in batches.drain(..) {
                         for path in batch.drain(..) {
+                            all_paths.insert(path.clone());
                             if !subscribed.contains_key(&path) {
                                 let dv = subscriber.subscribe(path.clone());
                                 let id = dv.id();
@@ -283,6 +286,15 @@ pub(super) async fn run(
                                 to_add.push((path, id));
                             }
                         }
+                    }
+                    for path in subscribed.keys() {
+                        if !all_paths.contains(path) {
+                            remove_paths.push(path.clone());
+                        }
+                    }
+                    all_paths.clear();
+                    for path in remove_paths.drain(..) {
+                        subscribed.remove(&path);
                     }
                     write_pathmap(&mut archive, &mut to_add, &mut by_subid)?
                 }
