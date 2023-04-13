@@ -202,7 +202,7 @@ pub(super) async fn run(
     config: Arc<Config>,
     record_config: Arc<RecordConfig>,
 ) -> Result<()> {
-    let (tx_batch, mut rx_batch) = mpsc::channel(10);
+    let (tx_batch, mut rx_batch) = mpsc::channel(10000);
     let (tx_list, rx_list) = mpsc::unbounded();
     let mut by_subid: FxHashMap<SubId, Id> = HashMap::default();
     let mut image: FxHashMap<SubId, Event> = HashMap::default();
