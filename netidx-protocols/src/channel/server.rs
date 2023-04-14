@@ -106,13 +106,14 @@ pub struct Singleton {
 /// this connection, further connection attempts will be ignored. This
 /// is useful for example for returning a channel from an rpc call, in
 /// that case there is no need for a listener.
-pub async fn singleton(
+pub async fn singleton_with_flags(
     publisher: &Publisher,
+    flags: PublishFlags,
     timeout: Option<Duration>,
     path: Path,
 ) -> Result<Singleton> {
     let val = publisher.publish_with_flags(
-        PublishFlags::ISOLATED,
+        flags | PublishFlags::ISOLATED,
         path.clone(),
         Value::from("connection"),
     )?;
@@ -125,6 +126,14 @@ pub async fn singleton(
         anchor: Arc::new(val),
         writes: rx,
     })
+}
+
+pub async fn singleton(
+    publisher: &Publisher,
+    timeout: Option<Duration>,
+    path: Path,
+) -> Result<Singleton> {
+    singleton_with_flags(publisher, PublishFlags::empty(), timeout, path).await
 }
 
 impl Singleton {
@@ -291,19 +300,20 @@ pub struct Listener {
     queued: Pooled<Vec<WriteRequest>>,
     base: Path,
     timeout: Option<Duration>,
+    flags: PublishFlags,
 }
 
 impl Listener {
-    /// Create a new listener at the specified path. The actual
-    /// connections will be randomly generated uuids under the
-    /// specified path.
-    pub async fn new(
+    /// just like new, but with publish flags
+    pub async fn new_with_flags(
         publisher: &Publisher,
+        flags: PublishFlags,
         timeout: Option<Duration>,
         path: Path,
     ) -> Result<Listener> {
         let publisher = publisher.clone();
-        let listener = publisher.publish(path.clone(), Value::from("channel"))?;
+        let listener =
+            publisher.publish_with_flags(flags, path.clone(), Value::from("channel"))?;
         let (tx_waiting, rx_waiting) = mpsc::channel(50);
         publisher.writes(listener.id(), tx_waiting);
         publisher.flushed().await;
@@ -314,7 +324,19 @@ impl Listener {
             queued: Pooled::orphan(Vec::new()),
             base: path,
             timeout,
+            flags,
         })
+    }
+
+    /// Create a new listener at the specified path. The actual
+    /// connections will be randomly generated uuids under the
+    /// specified path.
+    pub async fn new(
+        publisher: &Publisher,
+        timeout: Option<Duration>,
+        path: Path,
+    ) -> Result<Listener> {
+        Self::new_with_flags(publisher, PublishFlags::empty(), timeout, path).await
     }
 
     /// Wait for a client to connect, and return a singleton
@@ -340,6 +362,7 @@ impl Listener {
         };
         let session = session(&self.base);
         send_result.send(Value::from(session.clone()));
-        Ok(singleton(&self.publisher, self.timeout, session).await?)
+        Ok(singleton_with_flags(&self.publisher, self.flags, self.timeout, session)
+            .await?)
     }
 }

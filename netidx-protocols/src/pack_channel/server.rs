@@ -5,7 +5,7 @@ use netidx::{
     pack::Pack,
     path::Path,
     protocol::resolver::UserInfo,
-    publisher::{Publisher, Value},
+    publisher::{PublishFlags, Publisher, Value},
 };
 use parking_lot::Mutex;
 use std::{mem, time::Duration};
@@ -181,6 +181,15 @@ pub async fn singleton(
     Ok(Singleton(server::singleton(publisher, timeout, path).await?))
 }
 
+pub async fn singleton_with_flags(
+    publisher: &Publisher,
+    flags: PublishFlags,
+    timeout: Option<Duration>,
+    path: Path,
+) -> Result<Singleton> {
+    Ok(Singleton(server::singleton_with_flags(publisher, flags, timeout, path).await?))
+}
+
 /// A listener can accept connections from muliple clients and produce
 /// a channel to talk to each one.
 pub struct Listener(server::Listener);
@@ -192,6 +201,17 @@ impl Listener {
         path: Path,
     ) -> Result<Self> {
         let inner = server::Listener::new(publisher, timeout, path).await?;
+        Ok(Self(inner))
+    }
+
+    pub async fn new_with_flags(
+        publisher: &Publisher,
+        flags: PublishFlags,
+        timeout: Option<Duration>,
+        path: Path,
+    ) -> Result<Self> {
+        let inner =
+            server::Listener::new_with_flags(publisher, flags, timeout, path).await?;
         Ok(Self(inner))
     }
 

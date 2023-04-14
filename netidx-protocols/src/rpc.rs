@@ -58,6 +58,25 @@ pub mod server {
             $map:expr,
             $tx:expr,
             $($arg:ident: $typ:ty = $default:expr; $doc:expr),*
+        ) => { 
+            define_rpc!(
+                $publisher, 
+                netidx::publisher::PublishFlags::empty(), 
+                $path, 
+                $topdoc, 
+                $map, 
+                $tx, 
+                $($arg: $typ = $default; $doc),*
+            ) 
+        };
+        (
+            $publisher:expr,
+            $flags:expr,
+            $path:expr,
+            $topdoc:expr,
+            $map:expr,
+            $tx:expr,
+            $($arg:ident: $typ:ty = $default:expr; $doc:expr),*
         ) => {{
             let map = move |mut c: RpcCall| {
                 $(
@@ -75,7 +94,7 @@ pub mod server {
             let args = [
                 $(ArgSpec {name: ArcStr::from(stringify!($arg)), default_value: Value::from($default), doc: Value::from($doc)}),*
             ];
-            Proc::new($publisher, $path, Value::from($topdoc), args, map, $tx)
+            Proc::new_with_flags($publisher, $flags, $path, Value::from($topdoc), args, map, $tx)
         }}
     }
 
@@ -283,16 +302,39 @@ pub mod server {
             map: F,
             handler: Option<mpsc::Sender<T>>,
         ) -> Result<Proc> {
+            Self::new_with_flags(
+                publisher,
+                PublishFlags::empty(),
+                name,
+                doc,
+                args,
+                map,
+                handler,
+            )
+        }
+
+        pub fn new_with_flags<
+            T: Send + 'static,
+            F: FnMut(RpcCall) -> Option<T> + Send + 'static,
+        >(
+            publisher: &Publisher,
+            flags: PublishFlags,
+            name: Path,
+            doc: Value,
+            args: impl IntoIterator<Item = ArgSpec>,
+            map: F,
+            handler: Option<mpsc::Sender<T>>,
+        ) -> Result<Proc> {
             let id = ProcId::new();
             let (tx_ev, rx_ev) = mpsc::channel(3);
             let (tx_stop, rx_stop) = oneshot::channel();
             let call = Arc::new(publisher.publish_with_flags(
-                PublishFlags::USE_EXISTING,
+                flags | PublishFlags::USE_EXISTING,
                 name.clone(),
                 Value::Null,
             )?);
             let _doc = publisher.publish_with_flags(
-                PublishFlags::USE_EXISTING,
+                flags | PublishFlags::USE_EXISTING,
                 name.append("doc"),
                 doc,
             )?;
@@ -303,7 +345,7 @@ pub mod server {
                     let base = name.append(&*arg);
                     let _value = publisher
                         .publish_with_flags(
-                            PublishFlags::USE_EXISTING,
+                            flags | PublishFlags::USE_EXISTING,
                             base.append("val"),
                             default_value,
                         )
@@ -312,7 +354,7 @@ pub mod server {
                             val
                         })?;
                     let _doc = publisher.publish_with_flags(
-                        PublishFlags::USE_EXISTING,
+                        flags | PublishFlags::USE_EXISTING,
                         base.append("doc"),
                         doc,
                     )?;
@@ -506,39 +548,42 @@ mod test {
     #[test]
     fn call_proc() {
         let _ = env_logger::try_init();
-        Runtime::new().unwrap().block_on(async move {
-            let ctx = Ctx::new().await;
-            let proc_name = Path::from("/rpc/procedure");
-            let (tx, mut rx) = mpsc::channel(10);
-            let _server_proc = define_rpc!(
-                &ctx.publisher,
-                proc_name.clone(),
-                "test rpc procedure",
-                |c, a| Some((c, a)),
-                Some(tx),
-                arg1: Value = Value::Null; "arg1 doc"
-            )
-            .unwrap();
-            task::spawn(async move {
-                while let Some((mut c, a)) = rx.next().await {
-                    assert_eq!(a, Value::from("hello rpc"));
-                    c.reply.send(Value::U32(42))
-                }
-            });
-            time::sleep(Duration::from_millis(100)).await;
-            let proc: client::Proc =
-                client::Proc::new(&ctx.subscriber, proc_name.clone()).await.unwrap();
-            let res = call_rpc!(proc, arg1: "hello rpc").await.unwrap();
-            assert_eq!(res, Value::U32(42));
-            let args: Vec<(Arc<str>, Value)> = vec![];
-            let res = proc.call(args.into_iter()).await.unwrap();
-            assert!(match res {
-                Value::Error(_) => true,
-                _ => false,
-            });
-            let args = vec![("arg2", Value::from("hello rpc"))];
-            assert!(proc.call(args.into_iter()).await.is_err());
-            Ok::<(), anyhow::Error>(())
-        }).unwrap()
+        Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                let ctx = Ctx::new().await;
+                let proc_name = Path::from("/rpc/procedure");
+                let (tx, mut rx) = mpsc::channel(10);
+                let _server_proc = define_rpc!(
+                    &ctx.publisher,
+                    proc_name.clone(),
+                    "test rpc procedure",
+                    |c, a| Some((c, a)),
+                    Some(tx),
+                    arg1: Value = Value::Null; "arg1 doc"
+                )
+                .unwrap();
+                task::spawn(async move {
+                    while let Some((mut c, a)) = rx.next().await {
+                        assert_eq!(a, Value::from("hello rpc"));
+                        c.reply.send(Value::U32(42))
+                    }
+                });
+                time::sleep(Duration::from_millis(100)).await;
+                let proc: client::Proc =
+                    client::Proc::new(&ctx.subscriber, proc_name.clone()).await.unwrap();
+                let res = call_rpc!(proc, arg1: "hello rpc").await.unwrap();
+                assert_eq!(res, Value::U32(42));
+                let args: Vec<(Arc<str>, Value)> = vec![];
+                let res = proc.call(args.into_iter()).await.unwrap();
+                assert!(match res {
+                    Value::Error(_) => true,
+                    _ => false,
+                });
+                let args = vec![("arg2", Value::from("hello rpc"))];
+                assert!(proc.call(args.into_iter()).await.is_err());
+                Ok::<(), anyhow::Error>(())
+            })
+            .unwrap()
     }
 }
