@@ -375,15 +375,15 @@ bitflags! {
         /// This flag is mutually exclusive with USE_EXISTING, and if
         /// both are set then USE_EXISTING will override.
         const ISOLATED = 0x04;
-    
+
         /// If the subscriber has a choice between publishers, it will
         /// choose the one "closest" to it first before trying any others.
         /// In this context "closest" means, in order of closeness
-        /// 
+        ///
         /// - on the same host
         /// - in the same subnet
         /// - any
-        /// 
+        ///
         /// Meaning a subsciber with this flag set will first try the
         /// publisher on the local machine, and if that fails, then it
         /// will try the publisher in the same subnet with it, and only
@@ -973,25 +973,26 @@ pub struct PublisherBuilder {
     desired_auth: Option<DesiredAuth>,
     bind_cfg: Option<BindCfg>,
     max_clients: usize,
+    slack: usize,
 }
 
 impl PublisherBuilder {
-    pub fn new() -> Self {
-        Self { config: None, desired_auth: None, bind_cfg: None, max_clients: 768 }
+    pub fn new(config: Config) -> Self {
+        Self {
+            config: Some(config),
+            desired_auth: None,
+            bind_cfg: None,
+            max_clients: 768,
+            slack: 3,
+        }
     }
 
     pub async fn build(&mut self) -> Result<Publisher> {
-        let cfg = self.config.take().ok_or_else(|| anyhow!("config is required"))?;
+        let cfg = self.config.take().unwrap();
         let desired_auth = self.desired_auth.take().unwrap_or_else(|| cfg.default_auth());
         let bind_cfg =
             self.bind_cfg.take().unwrap_or_else(|| cfg.default_bind_config.clone());
-        Publisher::new(cfg, desired_auth, bind_cfg, self.max_clients).await
-    }
-
-    /// The netidx config to use
-    pub fn config(&mut self, cfg: Config) -> &mut Self {
-        self.config = Some(cfg);
-        self
+        Publisher::new(cfg, desired_auth, bind_cfg, self.max_clients, self.slack).await
     }
 
     /// The desired authentication mechanism you want to use. If not
@@ -1004,14 +1005,22 @@ impl PublisherBuilder {
 
     /// The speficiation for the ip you want to bind to. If not
     /// specified then the config default will be used.
-    pub fn bind_cfg(&mut self, bind: BindCfg) -> &mut Self {
-        self.bind_cfg = Some(bind);
+    pub fn bind_cfg(&mut self, bind: Option<BindCfg>) -> &mut Self {
+        self.bind_cfg = bind;
         self
     }
 
     /// The maximum number of simultaneous subscribers. default 768.
     pub fn max_clients(&mut self, max_clients: usize) -> &mut Self {
         self.max_clients = max_clients;
+        self
+    }
+
+    /// The maximum number of queued batches for a client before
+    /// there is pushback. Calibrate this with your flush timeout to deal
+    /// with slow consumers.
+    pub fn slack(&mut self, slack: usize) -> &mut Self {
+        self.slack = slack;
         self
     }
 }
@@ -1035,6 +1044,7 @@ impl Publisher {
         desired_auth: DesiredAuth,
         bind_cfg: BindCfg,
         max_clients: usize,
+        slack: usize,
     ) -> Result<Publisher> {
         let (public, private) = bind_cfg.select()?;
         utils::check_addr(public, &resolver.addrs)?;
@@ -1110,6 +1120,7 @@ impl Publisher {
                     desired_auth,
                     tls_ctx,
                     max_clients,
+                    slack,
                 )
                 .await;
                 info!("accept loop shutdown");

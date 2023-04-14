@@ -1294,10 +1294,9 @@ pub(super) async fn run(
         publish_config.max_sessions,
         publish_config.max_sessions_per_client,
     );
-    let publisher = PublisherBuilder::new()
-        .config(config.netidx_config.clone())
+    let publisher = PublisherBuilder::new(config.netidx_config.clone())
         .desired_auth(config.desired_auth.clone())
-        .bind_cfg(publish_config.bind.clone())
+        .bind_cfg(Some(publish_config.bind.clone()))
         .build()
         .await?;
     let (control_tx, control_rx) = mpsc::channel(3);

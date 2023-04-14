@@ -692,6 +692,7 @@ pub(super) async fn start(
     desired_auth: DesiredAuth,
     tls_ctx: Option<tls::CachedAcceptor>,
     max_clients: usize,
+    slack: usize,
 ) {
     let mut stop = stop.fuse();
     loop {
@@ -709,7 +710,7 @@ pub(super) async fn start(
                     };
                     let mut pb = t.0.lock();
                     let secrets = pb.resolver.secrets();
-                    let (tx, rx) = channel(3);
+                    let (tx, rx) = channel(slack);
                     try_cf!("nodelay", continue, s.set_nodelay(true));
                     if pb.clients.len() < max_clients {
                         pb.clients.insert(clid, Client {

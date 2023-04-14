@@ -24,10 +24,9 @@
 //! let cfg = Config::load_default()?;
 //!
 //! // listen on any unique address matching 192.168.0.0/16
-//! let publisher = PublisherBuilder::new()
-//!     .config(cfg)
+//! let publisher = PublisherBuilder::new(cfg)
 //!     .desired_auth(DesiredAuth::Anonymous)
-//!     .bind_cfg("192.168.0.0/16".parse()?)
+//!     .bind_cfg(Some("192.168.0.0/16".parse()?))
 //!     .build()
 //!     .await?;
 //!

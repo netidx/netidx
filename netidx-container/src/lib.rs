@@ -829,12 +829,11 @@ struct ContainerInner {
 impl ContainerInner {
     async fn new(cfg: Config, auth: DesiredAuth, params: Params) -> Result<Self> {
         let (publish_events_tx, publish_events) = mpsc::unbounded();
-        let mut builder = PublisherBuilder::new();
-        builder.config(cfg.clone()).desired_auth(auth.clone());
-        if let Some(b) = params.bind {
-            builder.bind_cfg(b);
-        }
-        let publisher = builder.build().await?;
+        let publisher = PublisherBuilder::new(cfg.clone())
+            .desired_auth(auth.clone())
+            .bind_cfg(params.bind)
+            .build()
+            .await?;
         publisher.events(publish_events_tx);
         let (db, db_updates) =
             Db::new(&params, publisher.clone(), params.api_path.clone())?;

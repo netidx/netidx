@@ -80,12 +80,12 @@ async fn handle_client(con: Connection) -> Result<()> {
 }
 
 async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {
-    let mut builder = PublisherBuilder::new();
-    builder.config(config).desired_auth(auth);
-    if let Some(b) = p.bind {
-        builder.bind_cfg(b);
-    }
-    let publisher = builder.build().await.expect("failed to create publisher");
+    let publisher = PublisherBuilder::new(config)
+        .desired_auth(auth)
+        .bind_cfg(p.bind)
+        .build()
+        .await
+        .expect("failed to create publisher");
     let mut listener = Listener::new(&publisher, None, p.base.clone()).await?;
     loop {
         let acceptor = listener.accept().await?;

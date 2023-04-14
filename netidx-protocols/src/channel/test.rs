@@ -31,6 +31,7 @@ impl Ctx {
             DesiredAuth::Anonymous,
             "127.0.0.1/32".parse().unwrap(),
             768,
+            3
         )
         .await
         .unwrap();
