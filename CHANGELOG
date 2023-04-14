@@ -1,3 +1,12 @@
+* 0.18.3
+  - add new publish flag PREFER_LOCAL, which will cause subscribers to
+    try addresses in the following order.
+    - 1st addresses that are on the local computer
+    - 2nd addresses that are on the same subnet as the local computer
+    - 3rd all other addresses
+  
+  - swap out get_if_addrs crate for the maintained if-addrs crate
+
 * 0.18.1-2
   - add features to BindCfg for NAT traversal. You can now run publishers 
     and resolver servers behind a NAT and DNAT forward the port.
