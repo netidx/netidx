@@ -375,6 +375,20 @@ bitflags! {
         /// This flag is mutually exclusive with USE_EXISTING, and if
         /// both are set then USE_EXISTING will override.
         const ISOLATED = 0x04;
+    
+        /// If the subscriber has a choice between publishers, it will
+        /// choose the one "closest" to it first before trying any others.
+        /// In this context "closest" means, in order of closeness
+        /// 
+        /// - on the same host
+        /// - in the same subnet
+        /// - any
+        /// 
+        /// Meaning a subsciber with this flag set will first try the
+        /// publisher on the local machine, and if that fails, then it
+        /// will try the publisher in the same subnet with it, and only
+        /// if that fails will it try all the other publishers.
+        const PREFER_LOCAL = 0x08;
     }
 }
 

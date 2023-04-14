@@ -294,7 +294,11 @@ pub(super) async fn run(
                     }
                     all_paths.clear();
                     for path in remove_paths.drain(..) {
-                        subscribed.remove(&path);
+                        if let Some(dv) = subscribed.remove(&path) {
+                            let id = dv.id();
+                            image.remove(&id);
+                            by_subid.remove(&id);
+                        }
                     }
                     write_pathmap(&mut archive, &mut to_add, &mut by_subid)?
                 }

@@ -27,6 +27,7 @@ use futures::{
     select_biased,
     stream::FuturesUnordered,
 };
+use get_if_addrs::{get_if_addrs, Interface as NetworkInterface};
 use fxhash::FxHashMap;
 use log::{info, warn};
 use netidx_netproto::resolver::UserInfo;
