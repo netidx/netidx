@@ -189,7 +189,9 @@ fn write_image(
 ) -> Result<()> {
     let mut b = BATCH_POOL.take();
     for (id, ev) in image.iter() {
-        b.push(BatchItem(by_subid[id], ev.clone()));
+        if let Some(id) = by_subid.get(id) {
+            b.push(BatchItem(*id, ev.clone()));
+        }
     }
     archive.add_batch(true, ts, &b)?;
     Ok(())
@@ -295,9 +297,8 @@ pub(super) async fn run(
                     all_paths.clear();
                     for path in remove_paths.drain(..) {
                         if let Some(dv) = subscribed.remove(&path) {
-                            let id = dv.id();
-                            image.remove(&id);
-                            by_subid.remove(&id);
+                            image.remove(&dv.id());
+                            by_subid.remove(&dv.id());
                         }
                     }
                     write_pathmap(&mut archive, &mut to_add, &mut by_subid)?
@@ -313,7 +314,9 @@ pub(super) async fn run(
                             if record_config.image_frequency.is_some() {
                                 image.insert(subid, ev.clone());
                             }
-                            tbatch.push(BatchItem(by_subid[&subid], ev));
+                            if let Some(id) = by_subid.get(&subid) {
+                                tbatch.push(BatchItem(*id, ev));
+                            }
                         }
                         archive.add_batch(false, now, &tbatch)?;
                         let _ = bcast.send(BCastMsg::Batch(now, Arc::new(tbatch)));
