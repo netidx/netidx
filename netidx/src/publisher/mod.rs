@@ -24,7 +24,7 @@ use futures::{
     stream::FusedStream,
 };
 use fxhash::{FxHashMap, FxHashSet};
-use get_if_addrs::get_if_addrs;
+use if_addrs::get_if_addrs;
 use log::{error, info};
 use parking_lot::Mutex;
 use rand::{self, Rng};

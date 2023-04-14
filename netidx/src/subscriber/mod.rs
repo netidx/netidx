@@ -27,12 +27,13 @@ use futures::{
     select_biased,
     stream::FuturesUnordered,
 };
-use get_if_addrs::{get_if_addrs, Interface as NetworkInterface};
 use fxhash::FxHashMap;
+use if_addrs::{get_if_addrs, IfAddr, Interface as NetworkInterface};
 use log::{info, warn};
-use netidx_netproto::resolver::UserInfo;
+use netidx_netproto::resolver::{PublisherRef, UserInfo};
 use parking_lot::Mutex;
 use rand::Rng;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::{
     cmp::{max, Eq, PartialEq},
     collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
@@ -593,6 +594,7 @@ struct SubscriberInner {
     trigger_resub: UnboundedSender<()>,
     desired_auth: DesiredAuth,
     tls_ctx: Option<tls::CachedConnector>,
+    interfaces: Vec<NetworkInterface>,
 }
 
 impl SubscriberInner {
@@ -605,29 +607,13 @@ impl SubscriberInner {
             .map(|d| d.id())
     }
 
-    fn choose_addr(
+    fn choose_random_addr(
         &mut self,
         publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
         resolved: &Resolved,
+        flags: PublishFlags,
     ) -> Option<Chosen> {
         use rand::seq::IteratorRandom;
-        let mut flags = PublishFlags::from_bits(resolved.flags)?;
-        if flags.contains(PublishFlags::USE_EXISTING) {
-            flags = flags & !PublishFlags::ISOLATED;
-            for pref in &*resolved.publishers {
-                if let Some(pb) = publishers.get(&pref.id) {
-                    if self.connections.contains_key(&pb.addr) {
-                        return Some(Chosen {
-                            addr: pb.addr,
-                            target_auth: pb.target_auth.clone(),
-                            token: pref.token.clone(),
-                            uifo: pb.user_info.clone(),
-                            flags,
-                        });
-                    }
-                }
-            }
-        }
         let res = resolved
             .publishers
             .iter()
@@ -660,6 +646,125 @@ impl SubscriberInner {
                     uifo: pb.user_info.clone(),
                     flags,
                 })
+        }
+    }
+
+    fn choose_existing_addr(
+        &mut self,
+        publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
+        resolved: &Resolved,
+        mut flags: PublishFlags,
+    ) -> Option<Chosen> {
+        flags = flags & !PublishFlags::ISOLATED;
+        for pref in &*resolved.publishers {
+            if let Some(pb) = publishers.get(&pref.id) {
+                if self.connections.contains_key(&pb.addr) {
+                    return Some(Chosen {
+                        addr: pb.addr,
+                        target_auth: pb.target_auth.clone(),
+                        token: pref.token.clone(),
+                        uifo: pb.user_info.clone(),
+                        flags,
+                    });
+                }
+            }
+        }
+        self.choose_random_addr(publishers, resolved, flags)
+    }
+
+    fn choose_local_addr(
+        &mut self,
+        publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
+        resolved: &Resolved,
+        flags: PublishFlags,
+    ) -> Option<Chosen> {
+        use smallvec::SmallVec;
+        use std::{cmp::min, net::IpAddr};
+        fn mv4(ip: Ipv4Addr, mask: Ipv4Addr) -> Ipv4Addr {
+            let mut masked = [0u8; 4];
+            let ip = ip.octets();
+            let mask = mask.octets();
+            for i in 0..4 {
+                masked[i] = ip[i] & mask[i];
+            }
+            masked.into()
+        }
+        fn mv6(ip: Ipv6Addr, mask: Ipv6Addr) -> Ipv6Addr {
+            let mut masked = [0u8; 16];
+            let ip = ip.octets();
+            let mask = mask.octets();
+            for i in 0..16 {
+                masked[i] = ip[i] & mask[i];
+            }
+            masked.into()
+        }
+        let mut buf = SmallVec::<[(&PublisherRef, &Publisher); 16]>::new();
+        buf.extend(
+            resolved
+                .publishers
+                .iter()
+                .filter_map(|r| publishers.get(&r.id).map(|pb| (r, pb)))
+                .filter(|(_, p)| !self.recently_failed.contains_key(&p.addr)),
+        );
+        let mut all_far = true;
+        buf.sort_by_key(|(_, pb): &(&PublisherRef, &Publisher)| {
+            let ip = pb.addr.ip();
+            let pri = self.interfaces.iter().fold(2, |cur, i| match &i.addr {
+                IfAddr::V4(ifv4) => match ip {
+                    IpAddr::V6(_) => cur,
+                    IpAddr::V4(ipv4) => {
+                        if ipv4 == ifv4.ip {
+                            0
+                        } else if mv4(ifv4.ip, ifv4.netmask) == mv4(ipv4, ifv4.netmask) {
+                            min(cur, 1)
+                        } else {
+                            min(cur, 2)
+                        }
+                    }
+                },
+                IfAddr::V6(ifv6) => match ip {
+                    IpAddr::V4(_) => cur,
+                    IpAddr::V6(ipv6) => {
+                        if ipv6 == ifv6.ip {
+                            0
+                        } else if mv6(ifv6.ip, ifv6.netmask) == mv6(ipv6, ifv6.netmask) {
+                            min(cur, 1)
+                        } else {
+                            min(cur, 2)
+                        }
+                    }
+                },
+            });
+            if pri < 2 {
+                all_far = false;
+            }
+            pri
+        });
+        if all_far {
+            self.choose_random_addr(publishers, resolved, flags)
+        } else {
+            buf.first().map(|(pref, pb)| Chosen {
+                addr: pb.addr,
+                target_auth: pb.target_auth.clone(),
+                token: pref.token.clone(),
+                uifo: pb.user_info.clone(),
+                flags,
+            })
+        }
+    }
+
+    fn choose_addr(
+        &mut self,
+        publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
+        resolved: &Resolved,
+    ) -> Option<Chosen> {
+        let flags = PublishFlags::from_bits(resolved.flags)?;
+        if flags.contains(PublishFlags::USE_EXISTING) {
+            self.choose_existing_addr(publishers, resolved, flags)
+        } else if flags.contains(PublishFlags::PREFER_LOCAL) {
+            self.choose_local_addr(publishers, resolved, flags)
+        } else {
+            self.choose_random_addr(publishers, resolved, flags)
         }
     }
 
@@ -734,6 +839,7 @@ impl Subscriber {
             durable_alive: HashMap::default(),
             trigger_resub: tx,
             tls_ctx,
+            interfaces: get_if_addrs()?,
         })));
         t.start_resub_task(rx);
         Ok(t)
