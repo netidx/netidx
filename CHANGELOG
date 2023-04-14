@@ -1,3 +1,9 @@
+* 0.19.0
+  - fix PublisherBuilder to be more ergonomic, sorry for the churn
+
+  - add a parameter `slack` that together with the flush timeout can
+    be used to properly manage the slow client problem.
+
 * 0.18.3
   - add new publish flag PREFER_LOCAL, which will cause subscribers to
     try addresses in the following order.
