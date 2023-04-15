@@ -753,8 +753,6 @@ impl SubscriberInner {
             }
             pri
         });
-        dbg!(all_far);
-        dbg!(&buf);
         if all_far {
             self.choose_random_addr(publishers, resolved, flags)
         } else {
