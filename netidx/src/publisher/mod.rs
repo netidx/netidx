@@ -389,6 +389,13 @@ bitflags! {
         /// will try the publisher in the same subnet with it, and only
         /// if that fails will it try all the other publishers.
         const PREFER_LOCAL = 0x08;
+
+        /// This is the same as PREFER_LOCAL except when mixed with
+        /// USE_EXISTING. In that case it will override USE_EXISTING.
+        /// If your publisher semantics rely on all clients talking
+        /// to the same publisher then do not use this flag. e.g. do
+        /// not use this flag for rpcs.
+        const FORCE_LOCAL = 0x10;
     }
 }
 

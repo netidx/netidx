@@ -754,7 +754,11 @@ impl SubscriberInner {
             pri
         });
         if all_far {
-            self.choose_random_addr(publishers, resolved, flags)
+            if flags.contains(PublishFlags::USE_EXISTING) {
+                self.choose_existing_addr(publishers, resolved, flags)
+            } else {
+                self.choose_random_addr(publishers, resolved, flags)
+            }
         } else {
             buf.first().map(|(pref, pb)| Chosen {
                 addr: pb.addr,
@@ -772,7 +776,9 @@ impl SubscriberInner {
         resolved: &Resolved,
     ) -> Option<Chosen> {
         let flags = PublishFlags::from_bits(resolved.flags)?;
-        if flags.contains(PublishFlags::USE_EXISTING) {
+        if flags.contains(PublishFlags::FORCE_LOCAL) {
+            self.choose_local_addr(publishers, resolved, flags)
+        } else if flags.contains(PublishFlags::USE_EXISTING) {
             self.choose_existing_addr(publishers, resolved, flags)
         } else if flags.contains(PublishFlags::PREFER_LOCAL) {
             self.choose_local_addr(publishers, resolved, flags)

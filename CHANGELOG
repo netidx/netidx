@@ -1,3 +1,7 @@
+* 0.19.2
+  - implement new publish flag FORCE_LOCAL, which overrides USE_EXISTING
+    but is otherwise the same as PREFER_LOCAL.
+
 * 0.19.1
   - fix a bug in PREFER_LOCAL
 
