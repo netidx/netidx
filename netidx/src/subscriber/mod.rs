@@ -669,7 +669,11 @@ impl SubscriberInner {
                 }
             }
         }
-        self.choose_random_addr(publishers, resolved, flags)
+        if flags.contains(PublishFlags::PREFER_LOCAL) {
+            self.choose_local_addr(publishers, resolved, flags)
+        } else {
+            self.choose_random_addr(publishers, resolved, flags)
+        }
     }
 
     fn choose_local_addr(
@@ -740,6 +744,8 @@ impl SubscriberInner {
             }
             pri
         });
+        dbg!(all_far);
+        dbg!(&buf);
         if all_far {
             self.choose_random_addr(publishers, resolved, flags)
         } else {

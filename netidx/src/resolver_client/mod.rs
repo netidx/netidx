@@ -336,7 +336,6 @@ where
                 (inner.fi_pool.take(), inner.f_pool.take())
             };
             let mut referral = false;
-            //: Option<Pooled<FxHashMap<PublisherId, Publisher>>>
             let mut publishers = None;
             for r in future::join_all(waiters).await {
                 let (mut p, mut r) = r?;
