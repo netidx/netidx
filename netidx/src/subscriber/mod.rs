@@ -710,6 +710,15 @@ impl SubscriberInner {
                 .filter_map(|r| publishers.get(&r.id).map(|pb| (r, pb)))
                 .filter(|(_, p)| !self.recently_failed.contains_key(&p.addr)),
         );
+        if buf.len() <= 1 {
+            return buf.first().map(|(pref, pb)| Chosen {
+                addr: pb.addr,
+                target_auth: pb.target_auth.clone(),
+                token: pref.token.clone(),
+                uifo: pb.user_info.clone(),
+                flags,
+            });
+        }
         let mut all_far = true;
         buf.sort_by_key(|(_, pb): &(&PublisherRef, &Publisher)| {
             let ip = pb.addr.ip();
