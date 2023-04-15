@@ -1,3 +1,6 @@
+* 0.19.1
+  - fix a bug in PREFER_LOCAL
+
 * 0.19.0
   - fix PublisherBuilder to be more ergonomic, sorry for the churn
 
