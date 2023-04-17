@@ -710,15 +710,6 @@ impl SubscriberInner {
                 .filter_map(|r| publishers.get(&r.id).map(|pb| (r, pb)))
                 .filter(|(_, p)| !self.recently_failed.contains_key(&p.addr)),
         );
-        if buf.len() <= 1 {
-            return buf.first().map(|(pref, pb)| Chosen {
-                addr: pb.addr,
-                target_auth: pb.target_auth.clone(),
-                token: pref.token.clone(),
-                uifo: pb.user_info.clone(),
-                flags,
-            });
-        }
         let mut all_far = true;
         buf.sort_by_key(|(_, pb): &(&PublisherRef, &Publisher)| {
             let ip = pb.addr.ip();
@@ -753,7 +744,7 @@ impl SubscriberInner {
             }
             pri
         });
-        if all_far {
+        if all_far || buf.len() == 0 {
             if flags.contains(PublishFlags::USE_EXISTING) {
                 self.choose_existing_addr(publishers, resolved, flags)
             } else {
@@ -775,7 +766,12 @@ impl SubscriberInner {
         publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
         resolved: &Resolved,
     ) -> Option<Chosen> {
-        let flags = PublishFlags::from_bits(resolved.flags)?;
+        let mut flags = PublishFlags::from_bits(resolved.flags)?;
+        if flags.contains(PublishFlags::FORCE_LOCAL)
+            && flags.contains(PublishFlags::PREFER_LOCAL)
+        {
+            flags &= !PublishFlags::PREFER_LOCAL;
+        }
         if flags.contains(PublishFlags::FORCE_LOCAL) {
             self.choose_local_addr(publishers, resolved, flags)
         } else if flags.contains(PublishFlags::USE_EXISTING) {
