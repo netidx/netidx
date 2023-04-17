@@ -1,6 +1,6 @@
 [package]
 name = "netidx-tools"
-version = "0.19.1"
+version = "0.19.2"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -35,7 +35,7 @@ fxhash = "0.2"
 log = "0.4"
 netidx-tools-core = { path = "../netidx-tools-core", version = "^0.19", default_features = false }
 netidx-archive = { path = "../netidx-archive", version = "^0.19", default_features = false }
-netidx = { path = "../netidx", version = "^0.19.2", default_features = false }
+netidx = { path = "../netidx", version = "^0.19.3", default_features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "^0.19", default_features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "^0.19", default_features = false }
 netidx-container = { path = "../netidx-container", version = "^0.19", default_features = false }
