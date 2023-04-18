@@ -16,6 +16,7 @@ use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 use tokio::{sync::broadcast, task};
 
 mod logfile_collection;
+mod logfile_index;
 mod publish;
 mod record;
 

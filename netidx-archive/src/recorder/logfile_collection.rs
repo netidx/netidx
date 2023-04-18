@@ -1,157 +1,194 @@
-use super::Config;
-use anyhow::Result;
+use crate::{
+    logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek},
+    recorder::{
+        logfile_index::{File, LogfileIndex},
+        BCastMsg, Config, PublishConfig,
+    },
+};
+use anyhow::{Error, Result};
+use arcstr::ArcStr;
 use chrono::prelude::*;
-use log::warn;
-use std::{cmp::Ordering, path::PathBuf};
+use futures::{channel::mpsc, future, prelude::*, select_biased};
+use fxhash::{FxHashMap, FxHashSet};
+use log::{error, info, warn};
+use netidx::{
+    chars::Chars,
+    path::Path,
+    pool::Pooled,
+    protocol::value::FromValue,
+    publisher::{
+        self, ClId, PublishFlags, Publisher, PublisherBuilder, UpdateBatch, Val, Value,
+        WriteRequest,
+    },
+    resolver_client::{Glob, GlobSet},
+    subscriber::{Event, Subscriber},
+};
+use netidx_protocols::rpc::server::{RpcCall, RpcReply};
+use netidx_protocols::{
+    cluster::{uuid_string, Cluster},
+    define_rpc,
+    rpc::server::{ArgSpec, Proc},
+    rpc_err,
+};
+use parking_lot::Mutex;
+use serde_derive::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    mem,
+    ops::Bound,
+    pin::Pin,
+    str::FromStr,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tokio::{sync::broadcast, task, time};
+use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum File {
-    Head,
-    Historical(DateTime<Utc>),
+struct DataSource {
+    file: File,
+    archive: ArchiveReader,
+    cursor: Cursor,
 }
 
-impl PartialOrd for File {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match (self, other) {
-            (File::Head, File::Head) => Some(Ordering::Equal),
-            (File::Head, File::Historical(_)) => Some(Ordering::Greater),
-            (File::Historical(_), File::Head) => Some(Ordering::Less),
-            (File::Historical(d0), File::Historical(d1)) => d0.partial_cmp(d1),
-        }
-    }
-}
-
-impl Ord for File {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
-    }
-}
-
-impl File {
-    async fn read(config: &Config) -> Result<Vec<File>> {
-        let mut files = vec![];
-        {
-            let mut reader = tokio::fs::read_dir(&config.archive_directory).await?;
-            while let Some(dir) = reader.next_entry().await? {
-                let typ = dir.file_type().await?;
-                if typ.is_file() {
-                    let name = dir.file_name();
-                    let name = name.to_string_lossy();
-                    if name == "current" {
-                        files.push(File::Head);
-                    } else if let Ok(ts) = name.parse::<DateTime<Utc>>() {
-                        files.push(File::Historical(ts));
-                    }
+impl DataSource {
+    fn new(
+        config: &Config,
+        file: File,
+        head: &Option<ArchiveReader>,
+        start: Bound<DateTime<Utc>>,
+        end: Bound<DateTime<Utc>>,
+    ) -> Result<Option<Self>> {
+        match file {
+            File::Head => match head.as_ref() {
+                None => Ok(None),
+                Some(head) => {
+                    let mut cursor = Cursor::new();
+                    cursor.set_start(start);
+                    cursor.set_end(end);
+                    let head = head.clone();
+                    Ok(Some(Self { file: File::Head, archive: head, cursor }))
                 }
-            }
-        }
-        if let Some(cmds) = &config.archive_cmds {
-            use tokio::process::Command;
-            match Command::new(&cmds.list.0).args(cmds.list.1.iter()).output().await {
-                Err(e) => warn!("list command failed {}", e),
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    if stderr.len() > 0 {
-                        warn!("list stderr {}", stderr);
-                    }
-                    for name in stdout.split("\n") {
-                        match name.parse::<DateTime<Utc>>() {
-                            Err(e) => warn!("failed to parse list ts {}", e),
-                            Ok(ts) => files.push(File::Historical(ts)),
+            },
+            File::Historical(ts) => {
+                if let Some(cmds) = &config.archive_cmds {
+                    use std::{iter, process::Command};
+                    let out = task::block_in_place(|| {
+                        let now = ts.to_rfc3339();
+                        Command::new(&cmds.get.0)
+                            .args(cmds.get.1.iter().chain(iter::once(&now)))
+                            .output()
+                    });
+                    match out {
+                        Err(e) => warn!("get command failed {}", e),
+                        Ok(out) => {
+                            if out.stderr.len() > 0 {
+                                warn!(
+                                    "get command stderr {}",
+                                    String::from_utf8_lossy(&out.stderr)
+                                );
+                            }
                         }
                     }
                 }
-            };
-        }
-        files.sort();
-        files.dedup();
-        Ok(files)
-    }
-
-    pub(super) fn path(&self, base: &PathBuf) -> PathBuf {
-        match self {
-            File::Head => base.join("current"),
-            File::Historical(h) => base.join(h.to_rfc3339()),
+                let path = file.path(&config.archive_directory);
+                let archive = task::block_in_place(|| ArchiveReader::open(path))?;
+                let mut cursor = Cursor::new();
+                cursor.set_start(start);
+                cursor.set_end(end);
+                Ok(Some(Self { file, archive, cursor }))
+            }
         }
     }
 }
 
-#[derive(Debug)]
-pub(super) struct LogfileCollection(Vec<File>);
+pub struct LogfileCollection {
+    index: LogfileIndex,
+    source: Option<DataSource>,
+    head: Option<ArchiveReader>,
+    start: Bound<DateTime<Utc>>,
+    end: Bound<DateTime<Utc>>,
+    config: Arc<Config>,
+}
 
 impl LogfileCollection {
-    pub(super) async fn new(config: &Config) -> Result<Self> {
-        Ok(Self(File::read(&config).await?))
+    pub fn new(
+        config: Arc<Config>,
+        head: Option<ArchiveReader>,
+        start: Bound<DateTime<Utc>>,
+        end: Bound<DateTime<Utc>>,
+    ) -> Result<Self> {
+        unimplemented!()
     }
 
-    pub(super) fn first(&self) -> File {
-        if self.0.len() == 0 {
-            File::Head
+    /// Attempt to open a source if we don't already have one, return true
+    /// on success. If the source is already open, just return true
+    fn source(&mut self) -> Result<bool> {
+        if self.source.is_some() {
+            Ok(true)
         } else {
-            *self.0.first().unwrap()
+            self.source = DataSource::new(
+                &self.config,
+                self.index.first(),
+                &self.head,
+                self.start,
+                self.end,
+            )?;
+            Ok(self.source.is_some())
         }
     }
 
-    pub(super) fn last(&self) -> File {
-        if self.0.len() == 0 {
-            File::Head
+    /// move to the next source if possible. Return true if there is a valid source.
+    /// if no source is currently open then the first source will be opened
+    fn next_source(&mut self) -> Result<bool> {
+        if self.source.is_none() {
+            self.source()
         } else {
-            *self.0.last().unwrap()
-        }
-    }
-
-    pub(super) fn find(&self, ts: DateTime<Utc>) -> File {
-        if self.0.len() == 0 {
-            File::Head
-        } else {
-            match self.0.binary_search(&File::Historical(ts)) {
-                Err(i) => self.0[i],
-                Ok(i) => {
-                    if i + 1 < self.0.len() {
-                        self.0[i + 1]
-                    } else {
-                        File::Head
-                    }
+            match self.source.as_ref().unwrap().file {
+                File::Head => Ok(true),
+                f => {
+                    self.source = DataSource::new(
+                        &self.config,
+                        self.index.next(f),
+                        &self.head,
+                        self.start,
+                        self.end,
+                    )?;
+                    Ok(self.source.is_some())
                 }
             }
         }
     }
 
-    pub(super) fn next(&self, cur: File) -> File {
-        if self.0.len() == 0 {
-            File::Head
+    /// read a batch of deltas from the current data source, if it exists. If no data source can be opened
+    /// then the outer result will be error. If reading the current data source fails then the inner result
+    /// will be error.
+    ///
+    /// This function will automatically move to the next file in the collection as long as it's timestamp is
+    /// within the bounds.
+    pub fn read_deltas(
+        &mut self,
+        read_count: usize,
+    ) -> Result<Result<Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>>> {
+        if !self.source()? {
+            bail!("no data source available")
         } else {
-            match self.0.binary_search(&cur) {
-                Err(i) => self.0[i],
-                Ok(i) => {
-                    if i + 1 < self.0.len() {
-                        self.0[i + 1]
-                    } else {
-                        File::Head
-                    }
-                }
-            }
-        }
-    }
-
-    pub(super) fn prev(&self, cur: File) -> File {
-        if self.0.len() == 0 {
-            File::Head
-        } else {
-            match self.0.binary_search(&cur) {
-                Err(i) => {
-                    if i > 0 {
-                        self.0[i - 1]
-                    } else {
-                        self.0[i]
-                    }
-                }
-                Ok(i) => {
-                    if i + 1 < self.0.len() {
-                        self.0[i + 1]
-                    } else {
-                        File::Head
+            let ds = self.source.as_mut().unwrap();
+            let archive = &ds.archive;
+            let cursor = &mut ds.cursor;
+            let batches = archive.read_deltas(cursor, read_count)?;
+            loop {
+                if batches.front().is_some() {
+                    break Ok(Ok(batches));
+                } else {
+                    match ds.file {
+                        File::Historical(_) => self.next_source()?,
+                        File::Head => { 
+                            // this is the end. my only friend. the end.
+                            break Ok(Ok(Pooled::orphan(VecDeque::new()))) 
+                        }
                     }
                 }
             }

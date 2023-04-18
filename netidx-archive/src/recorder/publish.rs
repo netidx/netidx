@@ -1,7 +1,7 @@
 use crate::{
     logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek},
     recorder::{
-        logfile_collection::{File, LogfileCollection},
+        logfile_index::{File, LogfileIndex},
         BCastMsg, Config, PublishConfig,
     },
 };
@@ -46,6 +46,8 @@ use std::{
 };
 use tokio::{sync::broadcast, task, time};
 use uuid::Uuid;
+
+use super::logfile_collection::LogfileCollection;
 
 static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
 static END_DOC: &'static str = "Time timestamp you want to replay end at, or Unbounded for the end of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. default Unbounded";
@@ -340,62 +342,6 @@ impl NewSessionConfig {
     }
 }
 
-struct DataSource {
-    file: File,
-    archive: ArchiveReader,
-    cursor: Cursor,
-}
-
-impl DataSource {
-    fn new(
-        config: &Config,
-        file: File,
-        head: &Option<ArchiveReader>,
-        start: Bound<DateTime<Utc>>,
-        end: Bound<DateTime<Utc>>,
-    ) -> Result<Option<Self>> {
-        match file {
-            File::Head => match head.as_ref() {
-                None => Ok(None),
-                Some(head) => {
-                    let mut cursor = Cursor::new();
-                    cursor.set_start(start);
-                    cursor.set_end(end);
-                    let head = head.clone();
-                    Ok(Some(Self { file: File::Head, archive: head, cursor }))
-                }
-            },
-            File::Historical(ts) => {
-                if let Some(cmds) = &config.archive_cmds {
-                    use std::{iter, process::Command};
-                    let out = task::block_in_place(|| {
-                        let now = ts.to_rfc3339();
-                        Command::new(&cmds.get.0)
-                            .args(cmds.get.1.iter().chain(iter::once(&now)))
-                            .output()
-                    });
-                    match out {
-                        Err(e) => warn!("get command failed {}", e),
-                        Ok(out) => {
-                            if out.stderr.len() > 0 {
-                                warn!(
-                                    "get command stderr {}",
-                                    String::from_utf8_lossy(&out.stderr)
-                                );
-                            }
-                        }
-                    }
-                }
-                let path = file.path(&config.archive_directory);
-                let archive = task::block_in_place(|| ArchiveReader::open(path))?;
-                let mut cursor = Cursor::new();
-                cursor.set_start(start);
-                cursor.set_end(end);
-                Ok(Some(Self { file, archive, cursor }))
-            }
-        }
-    }
-}
 
 struct Session {
     controls: Controls,
@@ -409,10 +355,8 @@ struct Session {
     end: Bound<DateTime<Utc>>,
     data_base: Path,
     config: Arc<Config>,
-    files: LogfileCollection,
-    source: Option<DataSource>,
-    head: Option<ArchiveReader>,
     new_pos_ctl: Option<DateTime<Utc>>,
+    log: LogfileCollection,
 }
 
 impl Session {
@@ -425,7 +369,7 @@ impl Session {
         control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     ) -> Result<Self> {
         let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
-        let files = LogfileCollection::new(&config).await?;
+        let files = LogfileIndex::new(&config).await?;
         Ok(Self {
             controls,
             publisher,
@@ -448,43 +392,6 @@ impl Session {
             head,
             new_pos_ctl: None,
         })
-    }
-
-    fn source(
-        files: &LogfileCollection,
-        source: &mut Option<DataSource>,
-        head: &Option<ArchiveReader>,
-        config: &Config,
-        start: Bound<DateTime<Utc>>,
-        end: Bound<DateTime<Utc>>,
-    ) -> Result<bool> {
-        if source.is_some() {
-            Ok(true)
-        } else {
-            *source = DataSource::new(config, files.first(), head, start, end)?;
-            Ok(source.is_some())
-        }
-    }
-
-    fn next_source(
-        files: &LogfileCollection,
-        source: &mut Option<DataSource>,
-        head: &Option<ArchiveReader>,
-        config: &Config,
-        start: Bound<DateTime<Utc>>,
-        end: Bound<DateTime<Utc>>,
-    ) -> Result<bool> {
-        if source.is_none() {
-            Self::source(files, source, head, config, start, end)
-        } else {
-            match source.as_ref().unwrap().file {
-                File::Head => Ok(true),
-                f => {
-                    *source = DataSource::new(&config, files.next(f), head, start, end)?;
-                    Ok(source.is_some())
-                }
-            }
-        }
     }
 
     async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
@@ -703,7 +610,7 @@ impl Session {
                 }
             },
             Ok(BCastMsg::LogRotated(ts)) => {
-                let files = LogfileCollection::new(&self.config).await?;
+                let files = LogfileIndex::new(&self.config).await?;
                 if let Some(d) = self.source.as_mut() {
                     if d.file == File::Head {
                         d.file = File::Historical(ts);
