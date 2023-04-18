@@ -7,3 +7,4 @@ extern crate anyhow;
 
 pub mod logfile;
 pub mod recorder;
+pub mod recorder_client;

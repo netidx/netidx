@@ -20,6 +20,7 @@ use netidx::{
         self, ClId, PublishFlags, Publisher, PublisherBuilder, UpdateBatch, Val, Value,
         WriteRequest,
     },
+    resolver_client::{Glob, GlobSet},
     subscriber::{Event, Subscriber},
 };
 use netidx_protocols::rpc::server::{RpcCall, RpcReply};
@@ -52,6 +53,7 @@ static SPEED_DOC: &'static str = "How fast you want playback to run, e.g 1 = rea
 static STATE_DOC: &'static str = "The current state of playback, {pause, play, tail}. Tail, seek to the end of the archive and play any new messages that arrive. Default pause.";
 static POS_DOC: &'static str = "The current playback position. Null if the archive is empty, or the timestamp of the current record. Set to any timestamp where start <= t <= end to seek. Set to [+-][0-9]+ to seek a specific number of batches, e.g. +1 to single step forward -1 to single step back. Set to [+-][0-9]+[yMdhmsu] to step forward or back that amount of time, e.g. -1y step back 1 year. -1u to step back 1 microsecond. set to 'beginning' to seek to the beginning and 'end' to seek to the end. By default the initial position is set to 'beginning' when opening the archive.";
 static PLAY_AFTER_DOC: &'static str = "Start playing after waiting the specified timeout";
+static FILTER_DOC: &'static str = "Only publish paths matching the specified filter";
 
 fn session_base(publish_base: &Path, id: Uuid) -> Path {
     use uuid::fmt::Simple;
@@ -281,6 +283,12 @@ impl Controls {
     }
 }
 
+fn parse_filter(globs: Vec<Chars>) -> Result<GlobSet> {
+    let globs: Vec<Glob> =
+        globs.into_iter().map(|s| Glob::new(s)).collect::<Result<_>>()?;
+    Ok(GlobSet::new(true, globs)?)
+}
+
 struct NewSessionConfig {
     client: ClId,
     start: Bound<DateTime<Utc>>,
@@ -289,6 +297,7 @@ struct NewSessionConfig {
     pos: Option<Seek>,
     state: Option<State>,
     play_after: Option<Duration>,
+    filter: Vec<Chars>,
 }
 
 impl NewSessionConfig {
@@ -300,6 +309,7 @@ impl NewSessionConfig {
         pos: Option<Seek>,
         state: Option<State>,
         play_after: Option<Duration>,
+        filter: Vec<Chars>,
     ) -> Option<(NewSessionConfig, RpcReply)> {
         let start = match parse_bound(start) {
             Ok(s) => s,
@@ -313,6 +323,9 @@ impl NewSessionConfig {
             Ok(s) => s,
             Err(e) => rpc_err!(req.reply, format!("invalid speed {}", e)),
         };
+        if let Err(e) = parse_filter(filter.clone()) {
+            rpc_err!(req.reply, format!("could not parse filter {}", e))
+        }
         let s = NewSessionConfig {
             client: req.client,
             start,
@@ -321,6 +334,7 @@ impl NewSessionConfig {
             pos,
             state,
             play_after,
+            filter,
         };
         Some((s, req.reply))
     }
@@ -388,6 +402,7 @@ struct Session {
     publisher: Publisher,
     published: FxHashMap<Id, Val>,
     published_ids: FxHashSet<publisher::Id>,
+    filter: GlobSet,
     speed: Speed,
     state: Arc<AtomicState>,
     start: Bound<DateTime<Utc>>,
@@ -397,6 +412,7 @@ struct Session {
     files: LogfileCollection,
     source: Option<DataSource>,
     head: Option<ArchiveReader>,
+    new_pos_ctl: Option<DateTime<Utc>>,
 }
 
 impl Session {
@@ -405,6 +421,7 @@ impl Session {
         publisher: Publisher,
         head: Option<ArchiveReader>,
         session_base: Path,
+        filter: GlobSet,
         control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     ) -> Result<Self> {
         let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
@@ -420,6 +437,7 @@ impl Session {
                 next_after: Duration::from_secs(0),
                 current: Pooled::orphan(VecDeque::new()),
             },
+            filter,
             start: Bound::Unbounded,
             end: Bound::Unbounded,
             state: Arc::new(AtomicState::new(State::Pause)),
@@ -428,6 +446,7 @@ impl Session {
             files,
             config,
             head,
+            new_pos_ctl: None,
         })
     }
 
@@ -628,16 +647,18 @@ impl Session {
                                 .archive
                                 .path_for_id(&id)
                                 .unwrap();
-                            let path = self.data_base.append(&path);
-                            let val = self.publisher.publish(path, v)?;
-                            self.published_ids.insert(val.id());
-                            self.published.insert(id, val);
+                            if self.filter.is_match(&path) {
+                                let path = self.data_base.append(&path);
+                                let val = self.publisher.publish(path, v)?;
+                                self.published_ids.insert(val.id());
+                                self.published.insert(id, val);
+                            }
                         }
                     }
                 }
                 Ok::<(), anyhow::Error>(())
             })?;
-            self.controls.pos_ctl.update(&mut pbatch, Value::DateTime(batch.0));
+            self.new_pos_ctl = Some(batch.0);
             Ok(pbatch.commit(None).await)
         }
     }
@@ -1025,7 +1046,7 @@ impl Session {
         }
         match self.state.load() {
             State::Tail => self.set_state(pbatch, State::Play),
-            State::Pause | State::Play => ()
+            State::Pause | State::Play => (),
         }
         let current = match &mut self.speed {
             Speed::Unlimited(v) => v,
@@ -1042,6 +1063,7 @@ impl Session {
             ds.archive.seek(&mut ds.cursor, seek);
             self.reimage(pbatch)?
         }
+        self.new_pos_ctl = None;
         Ok(())
     }
 
@@ -1079,6 +1101,14 @@ impl Session {
             }
         }
     }
+
+    async fn update_new_pos(&mut self) {
+        if let Some(pos) = self.new_pos_ctl {
+            let mut batch = self.publisher.start_batch();
+            self.controls.pos_ctl.update(&mut batch, pos);
+            batch.commit(None).await;
+        }
+    }
 }
 
 fn not_idle(idle: &mut bool, cluster: &Cluster<ClusterCmd>) {
@@ -1107,6 +1137,14 @@ async fn read_bcast(
     }
 }
 
+async fn maybe_update_pos(interval: &mut time::Interval, new_pos: bool) {
+    if new_pos {
+        interval.tick().await;
+    } else {
+        future::pending::<()>().await;
+    }
+}
+
 async fn session(
     mut bcast: broadcast::Receiver<BCastMsg>,
     head: Option<ArchiveReader>,
@@ -1115,6 +1153,7 @@ async fn session(
     session_id: Uuid,
     config: Arc<Config>,
     publish_config: Arc<PublishConfig>,
+    filter: GlobSet,
     cfg: Option<NewSessionConfig>,
 ) -> Result<()> {
     let (control_tx, control_rx) = mpsc::channel(3);
@@ -1129,9 +1168,15 @@ async fn session(
     )
     .await?;
     head.as_ref().map(|a| a.check_remap_rescan()).transpose()?;
-    let mut t =
-        Session::new(config.clone(), publisher.clone(), head, session_base, &control_tx)
-            .await?;
+    let mut t = Session::new(
+        config.clone(),
+        publisher.clone(),
+        head,
+        session_base,
+        filter,
+        &control_tx,
+    )
+    .await?;
     let state = t.state.clone();
     let mut batch = publisher.start_batch();
     t.seek(&mut batch, Seek::End)?;
@@ -1143,9 +1188,11 @@ async fn session(
     type Next = Pin<Box<dyn Future<Output = NextRes> + Send + Sync>>;
     let mut control_rx = control_rx.fuse();
     let mut idle_check = time::interval(std::time::Duration::from_secs(30));
+    let mut update_pos = time::interval(std::time::Duration::from_millis(250));
     let mut idle = false;
     let mut used = 0;
     loop {
+        let new_pos = t.new_pos_ctl.is_some();
         select_biased! {
             r = t.next().fuse() => match r {
                 Err(e) => break Err(e),
@@ -1159,6 +1206,9 @@ async fn session(
                     used -= 1;
                 },
                 publisher::Event::Destroyed(_) => (),
+            },
+            _ = maybe_update_pos(&mut update_pos, new_pos).fuse() => {
+                t.update_new_pos().await;
             },
             _ = idle_check.tick().fuse() => {
                 let has_clients = used > 0;
@@ -1252,6 +1302,7 @@ async fn start_session(
     head: &Option<ArchiveReader>,
     config: Arc<Config>,
     publish_config: Arc<PublishConfig>,
+    filter: GlobSet,
     cfg: Option<NewSessionConfig>,
 ) -> Result<()> {
     let bcast = bcast.subscribe();
@@ -1267,6 +1318,7 @@ async fn start_session(
             session_id,
             config.clone(),
             publish_config.clone(),
+            filter,
             cfg,
         )
         .await;
@@ -1311,10 +1363,11 @@ pub(super) async fn run(
         speed: Value = "1."; SPEED_DOC,
         pos: Option<Seek> = Value::Null; POS_DOC,
         state: Option<State> = Value::Null; STATE_DOC,
-        play_after: Option<Duration> = None::<Duration>; PLAY_AFTER_DOC
+        play_after: Option<Duration> = None::<Duration>; PLAY_AFTER_DOC,
+        filter: Vec<Chars> = vec![Chars::from("/**")]; FILTER_DOC
     );
     let _new_session = _new_session?;
-    let mut cluster = Cluster::<(ClId, Uuid)>::new(
+    let mut cluster = Cluster::<(ClId, Uuid, Vec<Chars>)>::new(
         &publisher,
         subscriber.clone(),
         publish_config.base.append("cluster"),
@@ -1343,7 +1396,14 @@ pub(super) async fn run(
                 Err(e) => {
                     error!("received unparsable cluster commands {}", e)
                 }
-                Ok(cmds) => for (client, session_id) in cmds {
+                Ok(cmds) => for (client, session_id, filter) in cmds {
+                    let filter = match parse_filter(filter) {
+                        Ok(filter) => filter,
+                        Err(e) => {
+                            error!("can't parse filter from cluster {}", e);
+                            continue
+                        }
+                    };
                     match sessions.add_session(client) {
                         None => {
                             error!("can't start session requested by cluster member, too many sessions")
@@ -1358,6 +1418,7 @@ pub(super) async fn run(
                                 &archive,
                                 config.clone(),
                                 publish_config.clone(),
+                                filter,
                                 None
                             ).await;
                             if let Err(e) = r {
@@ -1376,6 +1437,14 @@ pub(super) async fn run(
                             reply.send(Value::Error(Chars::from(m)));
                         },
                         Some(session_token) => {
+                            let filter_txt = cfg.filter.clone();
+                            let filter = match parse_filter(cfg.filter.clone()) {
+                                Ok(filter) => filter,
+                                Err(e) => {
+                                    warn!("failed to parse filters {}", e);
+                                    continue
+                                }
+                            };
                             let session_id = Uuid::new_v4();
                             let client = cfg.client;
                             info!("start session {}", session_id);
@@ -1388,6 +1457,7 @@ pub(super) async fn run(
                                 &archive,
                                 config.clone(),
                                 publish_config.clone(),
+                                filter,
                                 Some(cfg)
                             ).await;
                             match r {
@@ -1397,7 +1467,7 @@ pub(super) async fn run(
                                     reply.send(Value::Error(e));
                                 }
                                 Ok(()) => {
-                                    cluster.send_cmd(&(client, session_id));
+                                    cluster.send_cmd(&(client, session_id, filter_txt));
                                     reply.send(Value::from(uuid_string(session_id)));
                                 }
                             }
