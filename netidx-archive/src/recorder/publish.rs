@@ -47,7 +47,7 @@ use std::{
 use tokio::{sync::broadcast, task, time};
 use uuid::Uuid;
 
-use super::logfile_collection::LogfileCollection;
+use super::logfile_collection::{LogfileCollection, Image};
 
 static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
 static END_DOC: &'static str = "Time timestamp you want to replay end at, or Unbounded for the end of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. default Unbounded";
@@ -342,7 +342,6 @@ impl NewSessionConfig {
     }
 }
 
-
 struct Session {
     controls: Controls,
     publisher: Publisher,
@@ -370,6 +369,12 @@ impl Session {
     ) -> Result<Self> {
         let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
         let files = LogfileIndex::new(&config).await?;
+        let log = LogfileCollection::new(
+            config.clone(),
+            head,
+            Bound::Unbounded,
+            Bound::Unbounded,
+        ).await?;
         Ok(Self {
             controls,
             publisher,
@@ -386,11 +391,9 @@ impl Session {
             end: Bound::Unbounded,
             state: Arc::new(AtomicState::new(State::Pause)),
             data_base: session_base.append("data"),
-            source: None,
-            files,
             config,
-            head,
             new_pos_ctl: None,
+            log,
         })
     }
 
@@ -411,42 +414,18 @@ impl Session {
                     Speed::Unlimited(batches) => match batches.pop_front() {
                         Some(batch) => break Ok(batch),
                         None => {
-                            let ds_ok = Self::source(
-                                &self.files,
-                                &mut self.source,
-                                &self.head,
-                                &self.config,
-                                self.start,
-                                self.end,
-                            )?;
-                            if !ds_ok {
-                                time::sleep(Duration::from_secs(1)).await;
-                                continue;
-                            } else {
-                                let ds = self.source.as_mut().unwrap();
-                                let archive = &ds.archive;
-                                let cursor = &mut ds.cursor;
-                                *batches = task::block_in_place(|| {
-                                    archive.read_deltas(cursor, 3)
-                                })?;
-                                match batches.pop_front() {
-                                    Some(batch) => break Ok(batch),
-                                    None => match ds.file {
-                                        File::Head => {
-                                            set_tail!();
-                                        }
-                                        File::Historical(_) => {
-                                            Self::next_source(
-                                                &self.files,
-                                                &mut self.source,
-                                                &self.head,
-                                                &self.config,
-                                                self.start,
-                                                self.end,
-                                            )?;
-                                            continue;
-                                        }
-                                    },
+                            *batches =
+                                match self.log.read_deltas(3) {
+                                    Ok(batches) => batches?,
+                                    Err(_) => {
+                                        time::sleep(Duration::from_secs(1)).await;
+                                        continue;
+                                    }
+                                };
+                            match batches.pop_front() {
+                                Some(batch) => break Ok(batch),
+                                None => {
+                                    set_tail!();
                                 }
                             }
                         }
@@ -454,46 +433,17 @@ impl Session {
                     Speed::Limited { rate, last, next_after, current } => {
                         use tokio::time::Instant;
                         if current.len() < 2 {
-                            let ds_ok = Self::source(
-                                &self.files,
-                                &mut self.source,
-                                &self.head,
-                                &self.config,
-                                self.start,
-                                self.end,
-                            )?;
-                            if ds_ok {
-                                let ds = self.source.as_mut().unwrap();
-                                let archive = &ds.archive;
-                                let cursor = &mut ds.cursor;
-                                let mut cur = task::block_in_place(|| {
-                                    archive.read_deltas(cursor, 3)
-                                })?;
-                                while let Some(v) = current.pop_back() {
-                                    cur.push_front(v);
-                                }
-                                *current = cur;
-                                if current.is_empty() {
-                                    match ds.file {
-                                        File::Head => {
-                                            set_tail!();
-                                        }
-                                        _ => {
-                                            Self::next_source(
-                                                &self.files,
-                                                &mut self.source,
-                                                &self.head,
-                                                &self.config,
-                                                self.start,
-                                                self.end,
-                                            )?;
-                                            continue;
-                                        }
+                            let mut cur =
+                                match self.log.read_deltas(3) {
+                                    Ok(batch) => batch?,
+                                    Err(_) => {
+                                        time::sleep(Duration::from_secs(1)).await;
+                                        continue;
                                     }
-                                }
-                            } else if current.is_empty() {
-                                time::sleep(Duration::from_secs(1)).await;
-                                continue;
+                                };
+                            current.extend(cur.drain(..));
+                            if current.is_empty() {
+                                set_tail!();
                             }
                         }
                         let (ts, batch) = current.pop_front().unwrap();
@@ -547,18 +497,13 @@ impl Session {
                             val.update(&mut pbatch, v);
                         }
                         None => {
-                            let path = self
-                                .source
-                                .as_ref()
-                                .unwrap()
-                                .archive
-                                .path_for_id(&id)
-                                .unwrap();
-                            if self.filter.is_match(&path) {
-                                let path = self.data_base.append(&path);
-                                let val = self.publisher.publish(path, v)?;
-                                self.published_ids.insert(val.id());
-                                self.published.insert(id, val);
+                            if let Some(path) = self.log.path_for_id(&id) {
+                                if self.filter.is_match(&path) {
+                                    let path = self.data_base.append(&path);
+                                    let val = self.publisher.publish(path, v)?;
+                                    self.published_ids.insert(val.id());
+                                    self.published.insert(id, val);
+                                }
                             }
                         }
                     }
@@ -583,15 +528,10 @@ impl Session {
                 State::Tail => {
                     // safe because it's impossible to get into state
                     // Tail without an archive.
-                    let ds = self.source.as_mut().unwrap();
-                    let archive = &ds.archive;
-                    let cursor = &mut ds.cursor;
-                    let mut batches = task::block_in_place(|| {
-                        archive.read_deltas(cursor, missed as usize)
-                    })?;
+                    let mut batches =
+                        self.log.read_deltas(missed as usize)??;
                     for (ts, mut batch) in batches.drain(..) {
                         self.process_batch((ts, &mut *batch)).await?;
-                        self.source.as_mut().unwrap().cursor.set_current(ts);
                     }
                     Ok(())
                 }
@@ -599,28 +539,25 @@ impl Session {
             Ok(BCastMsg::Batch(ts, batch)) => match self.state.load() {
                 State::Play | State::Pause => Ok(()),
                 State::Tail => {
-                    let ds = self.source.as_mut().unwrap();
-                    let pos = ds.cursor.current().unwrap_or(DateTime::<Utc>::MIN_UTC);
-                    if ds.cursor.contains(&ts) && pos < ts {
-                        let mut batch = (*batch).clone();
-                        self.process_batch((ts, &mut batch)).await?;
-                        self.source.as_mut().unwrap().cursor.set_current(ts);
+                    if let Some(cursor) = self.log.position() {
+                        let pos = cursor.current().unwrap_or(DateTime::<Utc>::MIN_UTC);
+                        if cursor.contains(&ts) && pos < ts {
+                            let mut batch = (*batch).clone();
+                            self.process_batch((ts, &mut batch)).await?;
+                            if let Some(cursor) = self.log.position_mut() {
+                                cursor.set_current(ts);
+                            }
+                        }
                     }
                     Ok(())
                 }
             },
             Ok(BCastMsg::LogRotated(ts)) => {
-                let files = LogfileIndex::new(&self.config).await?;
-                if let Some(d) = self.source.as_mut() {
-                    if d.file == File::Head {
-                        d.file = File::Historical(ts);
-                    }
-                }
-                self.files = files;
+                self.log.log_rotated(ts).await?;
                 Ok(())
             }
             Ok(BCastMsg::NewCurrent(head)) => {
-                self.head = Some(head);
+                self.log.set_head(head);
                 Ok(())
             }
             Ok(BCastMsg::Stop) => bail!("stop signal"),
@@ -633,10 +570,7 @@ impl Session {
         new_start: Bound<DateTime<Utc>>,
     ) -> Result<()> {
         self.controls.start_ctl.update(cbatch, bound_to_val(new_start));
-        self.start = new_start;
-        if let Some(ds) = self.source.as_mut() {
-            ds.cursor.set_start(new_start);
-        }
+        self.log.set_start(new_start);
         Ok(())
     }
 
@@ -646,10 +580,7 @@ impl Session {
         new_end: Bound<DateTime<Utc>>,
     ) -> Result<()> {
         self.controls.end_ctl.update(cbatch, bound_to_val(new_end));
-        self.end = new_end;
-        if let Some(ds) = self.source.as_mut() {
-            ds.cursor.set_end(new_end);
-        }
+        self.log.set_end(new_end);
         Ok(())
     }
 
@@ -795,19 +726,20 @@ impl Session {
     }
 
     fn reimage(&mut self, pbatch: &mut UpdateBatch) -> Result<()> {
-        if let Some(ds) = self.source.as_mut() {
-            let mut img = task::block_in_place(|| ds.archive.build_image(&ds.cursor))?;
-            let mut idx = task::block_in_place(|| ds.archive.get_index());
-            self.controls.pos_ctl.update(
-                pbatch,
-                match ds.cursor.current() {
-                    Some(ts) => Value::DateTime(ts),
-                    None => match ds.cursor.start() {
-                        Bound::Unbounded => Value::Null,
-                        Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+        if let Some(r) = self.log.reimage() {
+            let Image { mut idx, mut img } = r?;
+            if let Some(cursor) = self.log.position() {
+                self.controls.pos_ctl.update(
+                    pbatch,
+                    match cursor.current() {
+                        Some(ts) => Value::DateTime(ts),
+                        None => match cursor.start() {
+                            Bound::Unbounded => Value::Null,
+                            Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+                        },
                     },
-                },
-            );
+                );
+            }
             for (id, path) in idx.drain(..) {
                 let v = match img.remove(&id) {
                     None | Some(Event::Unsubscribed) => Value::Null,
@@ -830,146 +762,19 @@ impl Session {
     }
 
     fn seek(&mut self, pbatch: &mut UpdateBatch, seek: Seek) -> Result<()> {
-        match seek {
-            Seek::Beginning => {
-                let file = self.files.first();
-                match self.source.as_ref() {
-                    Some(ds) if ds.file == file => (),
-                    Some(_) | None => {
-                        self.source = DataSource::new(
-                            &self.config,
-                            file,
-                            &self.head,
-                            self.start,
-                            self.end,
-                        )?;
-                    }
-                }
-            }
-            Seek::End => {
-                let file = self.files.last();
-                match self.source.as_ref() {
-                    Some(ds) if ds.file == file => (),
-                    Some(_) | None => {
-                        self.source = DataSource::new(
-                            &self.config,
-                            File::Head,
-                            &self.head,
-                            self.start,
-                            self.end,
-                        )?;
-                    }
-                }
-            }
-            Seek::BatchRelative(i) => match self.source.as_ref() {
-                None => {
-                    let file = self.files.first();
-                    self.source = DataSource::new(
-                        &self.config,
-                        file,
-                        &self.head,
-                        self.start,
-                        self.end,
-                    )?;
-                }
-                Some(ds) => {
-                    let mut cursor = ds.cursor;
-                    cursor.set_start(Bound::Unbounded);
-                    cursor.set_end(Bound::Unbounded);
-                    if !ds.archive.index().seek_steps(&mut cursor, i) {
-                        if i < 0 {
-                            let file = self.files.prev(ds.file);
-                            if file != ds.file {
-                                self.source = DataSource::new(
-                                    &self.config,
-                                    file,
-                                    &self.head,
-                                    self.start,
-                                    self.end,
-                                )?;
-                            }
-                        } else {
-                            let file = self.files.next(ds.file);
-                            if file != ds.file {
-                                self.source = DataSource::new(
-                                    &self.config,
-                                    file,
-                                    &self.head,
-                                    self.start,
-                                    self.end,
-                                )?;
-                            }
-                        }
-                    }
-                }
-            },
-            Seek::TimeRelative(offset) => match self.source.as_ref() {
-                None => {
-                    let file = self.files.first();
-                    self.source = DataSource::new(
-                        &self.config,
-                        file,
-                        &self.head,
-                        self.start,
-                        self.end,
-                    )?;
-                }
-                Some(ds) => {
-                    let mut cursor = ds.cursor;
-                    cursor.set_start(Bound::Unbounded);
-                    cursor.set_end(Bound::Unbounded);
-                    let (ok, ts) =
-                        ds.archive.index().seek_time_relative(&mut cursor, offset);
-                    if !ok {
-                        let file = self.files.find(ts);
-                        if ds.file != file {
-                            self.source = DataSource::new(
-                                &self.config,
-                                file,
-                                &self.head,
-                                self.start,
-                                self.end,
-                            )?;
-                        }
-                    }
-                }
-            },
-            Seek::Absolute(ts) => {
-                let file = self.files.find(ts);
-                let cur_ok = match self.source.as_ref() {
-                    None => false,
-                    Some(ds) => ds.file == file,
-                };
-                if !cur_ok {
-                    self.source = DataSource::new(
-                        &self.config,
-                        file,
-                        &self.head,
-                        self.start,
-                        self.end,
-                    )?;
-                }
-            }
-        }
+        self.log.seek(seek)?;
         match self.state.load() {
             State::Tail => self.set_state(pbatch, State::Play),
             State::Pause | State::Play => (),
         }
-        let current = match &mut self.speed {
-            Speed::Unlimited(v) => v,
+        match &mut self.speed {
+            Speed::Unlimited(v) => v.clear(),
             Speed::Limited { current, next_after, .. } => {
                 *next_after = Duration::from_secs(0);
-                current
+                current.clear()
             }
         };
-        if let Some((ts, _)) = current.pop_front() {
-            self.source.iter_mut().for_each(|ds| ds.cursor.set_current(ts));
-            current.clear()
-        }
-        if let Some(ds) = self.source.as_mut() {
-            ds.archive.seek(&mut ds.cursor, seek);
-            self.reimage(pbatch)?
-        }
+        self.reimage(pbatch)?;
         self.new_pos_ctl = None;
         Ok(())
     }
