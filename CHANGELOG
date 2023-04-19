@@ -1,3 +1,7 @@
+* 0.19.5
+  - fix a bug in subscriber that could cause the last messages from
+    a disconnected publisher to be lost
+
 * 0.19.4
   - fix a bug in subscriber that caused voluntary shutdowns
     to add the ip to the recently failed list.
