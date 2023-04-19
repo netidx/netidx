@@ -1,54 +1,35 @@
 use super::{
-    logfile_collection::{Image, LogfileCollection},
+    logfile_collection::LogfileCollection,
     publish::{parse_bound, parse_filter},
 };
 use crate::{
-    logfile::{ArchiveReader, BatchItem, Id, Seek},
+    logfile::{ArchiveReader, BatchItem, Id, Seek, CURSOR_BATCH_POOL},
     recorder::{
         publish::{END_DOC, FILTER_DOC, START_DOC},
         BCastMsg, Config, PublishConfig,
     },
+    recorder_client::OneshotReply,
 };
-use anyhow::{Error, Result};
+use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
-use futures::{channel::mpsc, future, prelude::*, select_biased, stream::FuturesOrdered};
-use fxhash::{FxHashMap, FxHashSet};
-use log::{error, info, warn};
+use futures::{channel::mpsc, future, prelude::*, select_biased};
+use fxhash::FxHashMap;
 use netidx::{
     chars::Chars,
+    pack::Pack,
     path::Path,
-    pool::Pooled,
-    protocol::value::FromValue,
-    publisher::{
-        self, ClId, PublishFlags, Publisher, PublisherBuilder, UpdateBatch, Val, Value,
-        WriteRequest,
-    },
-    resolver_client::{Glob, GlobSet},
-    subscriber::{Event, Subscriber},
+    publisher::{Publisher, Value},
+    resolver_client::GlobSet,
 };
+use netidx_core::utils::pack;
 use netidx_protocols::{
     define_rpc,
-    pack_channel::server::Singleton,
     rpc::server::{ArgSpec, Proc, RpcCall, RpcReply},
     rpc_err,
 };
-use parking_lot::Mutex;
-use serde_derive::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    mem,
-    ops::Bound,
-    pin::Pin,
-    str::FromStr,
-    sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
-use tokio::{sync::broadcast, task, time};
-use uuid::Uuid;
+use std::{ops::Bound, sync::Arc};
+use tokio::{sync::broadcast, task::JoinSet};
 
 struct OneshotConfig {
     start: Bound<DateTime<Utc>>,
@@ -82,16 +63,49 @@ impl OneshotConfig {
 async fn do_oneshot(
     head: Option<ArchiveReader>,
     config: Arc<Config>,
+    limit: usize,
     args: OneshotConfig,
     reply: &mut RpcReply,
 ) -> Result<()> {
     let mut log = LogfileCollection::new(config, head, args.start, args.end).await?;
-    let mut total = 0;
     log.seek(Seek::Beginning)?;
     let img = log.reimage().ok_or_else(|| anyhow!("no data source"))??;
-    let mut data = vec![];
-
+    let path_by_id: FxHashMap<Id, Path> =
+        img.idx.iter().map(|(id, path)| (*id, path.clone())).collect();
+    let mut data = OneshotReply {
+        pathmap: img.idx,
+        image: img.img,
+        deltas: CURSOR_BATCH_POOL.take(),
+    };
+    loop {
+        let mut batches = log.read_deltas(100)??;
+        if batches.is_empty() {
+            reply.send(Value::Bytes(pack(&data)?.freeze()));
+            break;
+        } else {
+            batches.retain_mut(|(_, batch)| {
+                batch.retain(|BatchItem(id, _)| match path_by_id.get(id) {
+                    None => false,
+                    Some(path) => args.filter.is_match(path),
+                });
+                !batch.is_empty()
+            });
+            data.deltas.extend(batches.drain(..));
+            if data.encoded_len() > limit {
+                reply.send(Value::Error(Chars::from("data is too large")));
+                break;
+            }
+        }
+    }
     Ok(())
+}
+
+async fn wait_complete(set: &mut JoinSet<()>) {
+    if set.is_empty() {
+        future::pending().await
+    } else {
+        let _ = set.join_next().await;
+    }
 }
 
 pub(super) async fn run(
@@ -102,9 +116,7 @@ pub(super) async fn run(
 ) -> Result<()> {
     let (control_tx, mut control_rx) = mpsc::channel(3);
     let mut archive: Option<ArchiveReader> = None;
-    let mut pending: FuturesOrdered<Pin<Box<dyn Future<Output = ()>>>> =
-        FuturesOrdered::new();
-    pending.push_back(Box::pin(async { future::pending().await }));
+    let mut pending: JoinSet<()> = JoinSet::new();
     let _proc = define_rpc!(
         &publisher,
         publish_config.base.append("oneshot"),
@@ -117,7 +129,7 @@ pub(super) async fn run(
     )?;
     loop {
         select_biased! {
-            _ = pending.select_next_some() => (),
+            _ = wait_complete(&mut pending).fuse() => (),
             m = bcast_rx.recv().fuse() => match m {
                 Err(_) => (),
                 Ok(m) => match m {
@@ -128,16 +140,26 @@ pub(super) async fn run(
             },
             (args, mut reply) = control_rx.select_next_some() => {
                 if pending.len() > publish_config.max_sessions {
-                    reply.send(Value::Error(Chars::from("servie busy")));
+                    // your call is important to us. please stay on the line
+                    // until the next available representive is available to
+                    // assist you.
+                    reply.send(Value::Error(Chars::from("busy")));
                 } else {
                     let archive = archive.clone();
                     let config = config.clone();
-                    pending.push_back(Box::pin(async move {
-                        let r = do_oneshot(archive.clone(), config.clone(), args, &mut reply).await;
+                    let limit = publish_config.oneshot_data_limit;
+                    pending.spawn(async move {
+                        let r = do_oneshot(
+                            archive.clone(),
+                            config.clone(),
+                            limit,
+                            args,
+                            &mut reply
+                        ).await;
                         if let Err(e) = r {
                             reply.send(Value::Error(Chars::from(format!("internal error {}", e))));
                         }
-                    }));
+                    });
                 }
             }
         }

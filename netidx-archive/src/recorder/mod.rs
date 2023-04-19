@@ -37,6 +37,10 @@ mod file {
         64
     }
 
+    pub(super) fn default_oneshot_data_limit() -> usize {
+        104857600
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub(super) struct PublishConfig {
         pub(super) base: Path,
@@ -46,6 +50,8 @@ mod file {
         pub(super) max_sessions: usize,
         #[serde(default = "default_max_sessions_per_client")]
         pub(super) max_sessions_per_client: usize,
+        #[serde(default = "default_oneshot_data_limit")]
+        pub(super) oneshot_data_limit: usize,
         #[serde(default)]
         pub(super) shards: Option<usize>,
     }
@@ -57,6 +63,7 @@ mod file {
                 bind: None,
                 max_sessions: default_max_sessions(),
                 max_sessions_per_client: default_max_sessions_per_client(),
+                oneshot_data_limit: default_oneshot_data_limit(),
                 shards: Some(0),
             }
         }
@@ -155,6 +162,8 @@ pub struct PublishConfig {
     pub max_sessions: usize,
     /// The maximum number of sessions per unique client
     pub max_sessions_per_client: usize,
+    /// The maximum number of bytes a oneshot will return
+    pub oneshot_data_limit: usize,
     /// How many shards this recorder instance is divided into
     pub shards: Option<usize>,
 }
@@ -168,6 +177,7 @@ impl PublishConfig {
             bind: netidx_cfg.default_bind_config.clone(),
             max_sessions: file::default_max_sessions(),
             max_sessions_per_client: file::default_max_sessions_per_client(),
+            oneshot_data_limit: file::default_oneshot_data_limit(),
             shards: None,
         }
     }
@@ -181,6 +191,7 @@ impl PublishConfig {
                 .unwrap_or_else(|| Ok(netidx_cfg.default_bind_config.clone()))?,
             max_sessions: f.max_sessions,
             max_sessions_per_client: f.max_sessions_per_client,
+            oneshot_data_limit: f.oneshot_data_limit,
             shards: f.shards,
         })
     }
@@ -359,13 +370,8 @@ impl Recorder {
                 let bcast_rx = bcast_tx.subscribe();
                 let publisher = publisher.clone();
                 async move {
-                    let r = oneshot::run(
-                        bcast_rx,
-                        config,
-                        publish_config,
-                        publisher,
-                    )
-                    .await;
+                    let r =
+                        oneshot::run(bcast_rx, config, publish_config, publisher).await;
                     if let Err(e) = r {
                         error!("publisher oneshot stopped on error {}", e)
                     }

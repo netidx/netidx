@@ -14,7 +14,7 @@ use netidx::{
     pool::Pooled,
     protocol::value::FromValue,
     publisher::{
-        self, ClId, PublishFlags, Publisher, PublisherBuilder, UpdateBatch, Val, Value,
+        self, ClId, PublishFlags, Publisher, UpdateBatch, Val, Value,
         WriteRequest,
     },
     resolver_client::{Glob, GlobSet},

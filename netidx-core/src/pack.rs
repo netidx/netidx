@@ -11,7 +11,7 @@ use std::{
     boxed::Box,
     cell::RefCell,
     cmp::Eq,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     default::Default,
     error, fmt,
     hash::{BuildHasher, Hash},
@@ -719,6 +719,58 @@ impl<T: Pack> Pack for Vec<T> {
         }
         for _ in 0..elts {
             self.push(<T as Pack>::decode(buf)?);
+        }
+        Ok(())
+    }
+}
+
+impl<T: Pack> Pack for VecDeque<T> {
+    fn encoded_len(&self) -> usize {
+        self.iter().fold(varint_len(VecDeque::len(self) as u64), |len, t| {
+            len + <T as Pack>::encoded_len(t)
+        })
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(VecDeque::len(self) as u64, buf);
+        for t in self {
+            <T as Pack>::encode(t, buf)?
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
+        let pre = if elts * mem::size_of::<T>() > MAX_VEC {
+            MAX_VEC / mem::size_of::<T>()
+        } else {
+            elts
+        };
+        let mut data = VecDeque::with_capacity(pre);
+        for _ in 0..elts {
+            data.push_back(<T as Pack>::decode(buf)?);
+        }
+        Ok(data)
+    }
+
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
+        let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
+        let pre = if elts * mem::size_of::<T>() > MAX_VEC {
+            MAX_VEC / mem::size_of::<T>()
+        } else {
+            elts
+        };
+        if pre > self.capacity() {
+            self.reserve(pre - self.capacity());
+        }
+        for _ in 0..elts {
+            self.push_back(<T as Pack>::decode(buf)?);
         }
         Ok(())
     }
