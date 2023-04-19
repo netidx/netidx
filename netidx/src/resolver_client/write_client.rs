@@ -41,7 +41,7 @@ use tokio::{
 const TTL: u64 = 120;
 
 lazy_static! {
-    static ref REPUB: Pool<Vec<ToWrite>> = Pool::new(100, 1_000_000);
+    static ref REPUB: Pool<Vec<ToWrite>> = Pool::new(100, 10_000_000);
 }
 
 type Batch = (Pooled<Vec<(usize, ToWrite)>>, oneshot::Sender<Response<FromWrite>>);

@@ -1,3 +1,8 @@
+* 0.19.6
+  - don't spam info messages when republish fails
+
+  - pool the republish Vec
+
 * 0.19.5
   - fix a bug in subscriber that could cause the last messages from
     a disconnected publisher to be lost
