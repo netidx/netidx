@@ -1,9 +1,6 @@
 use crate::{
-    logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek},
-    recorder::{
-        logfile_index::{File, LogfileIndex},
-        BCastMsg, Config, PublishConfig,
-    },
+    logfile::{ArchiveReader, BatchItem, Id, Seek},
+    recorder::{BCastMsg, Config, PublishConfig},
 };
 use anyhow::{Error, Result};
 use arcstr::ArcStr;
@@ -47,7 +44,7 @@ use std::{
 use tokio::{sync::broadcast, task, time};
 use uuid::Uuid;
 
-use super::logfile_collection::{LogfileCollection, Image};
+use super::logfile_collection::{Image, LogfileCollection};
 
 static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
 static END_DOC: &'static str = "Time timestamp you want to replay end at, or Unbounded for the end of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. default Unbounded";
@@ -350,10 +347,7 @@ struct Session {
     filter: GlobSet,
     speed: Speed,
     state: Arc<AtomicState>,
-    start: Bound<DateTime<Utc>>,
-    end: Bound<DateTime<Utc>>,
     data_base: Path,
-    config: Arc<Config>,
     new_pos_ctl: Option<DateTime<Utc>>,
     log: LogfileCollection,
 }
@@ -368,13 +362,13 @@ impl Session {
         control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     ) -> Result<Self> {
         let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
-        let files = LogfileIndex::new(&config).await?;
         let log = LogfileCollection::new(
-            config.clone(),
+            config,
             head,
             Bound::Unbounded,
             Bound::Unbounded,
-        ).await?;
+        )
+        .await?;
         Ok(Self {
             controls,
             publisher,
@@ -387,11 +381,8 @@ impl Session {
                 current: Pooled::orphan(VecDeque::new()),
             },
             filter,
-            start: Bound::Unbounded,
-            end: Bound::Unbounded,
             state: Arc::new(AtomicState::new(State::Pause)),
             data_base: session_base.append("data"),
-            config,
             new_pos_ctl: None,
             log,
         })
@@ -414,14 +405,13 @@ impl Session {
                     Speed::Unlimited(batches) => match batches.pop_front() {
                         Some(batch) => break Ok(batch),
                         None => {
-                            *batches =
-                                match self.log.read_deltas(3) {
-                                    Ok(batches) => batches?,
-                                    Err(_) => {
-                                        time::sleep(Duration::from_secs(1)).await;
-                                        continue;
-                                    }
-                                };
+                            *batches = match self.log.read_deltas(3) {
+                                Ok(batches) => batches?,
+                                Err(_) => {
+                                    time::sleep(Duration::from_secs(1)).await;
+                                    continue;
+                                }
+                            };
                             match batches.pop_front() {
                                 Some(batch) => break Ok(batch),
                                 None => {
@@ -433,14 +423,13 @@ impl Session {
                     Speed::Limited { rate, last, next_after, current } => {
                         use tokio::time::Instant;
                         if current.len() < 2 {
-                            let mut cur =
-                                match self.log.read_deltas(3) {
-                                    Ok(batch) => batch?,
-                                    Err(_) => {
-                                        time::sleep(Duration::from_secs(1)).await;
-                                        continue;
-                                    }
-                                };
+                            let mut cur = match self.log.read_deltas(3) {
+                                Ok(batch) => batch?,
+                                Err(_) => {
+                                    time::sleep(Duration::from_secs(1)).await;
+                                    continue;
+                                }
+                            };
                             current.extend(cur.drain(..));
                             if current.is_empty() {
                                 set_tail!();
@@ -474,10 +463,10 @@ impl Session {
         &mut self,
         batch: (DateTime<Utc>, &mut Vec<BatchItem>),
     ) -> Result<()> {
-        let pause = match self.end {
+        let pause = match self.log.end() {
             Bound::Unbounded => false,
-            Bound::Excluded(dt) => batch.0 >= dt,
-            Bound::Included(dt) => batch.0 > dt,
+            Bound::Excluded(dt) => &batch.0 >= dt,
+            Bound::Included(dt) => &batch.0 > dt,
         };
         if pause {
             let mut cbatch = self.publisher.start_batch();
@@ -528,8 +517,7 @@ impl Session {
                 State::Tail => {
                     // safe because it's impossible to get into state
                     // Tail without an archive.
-                    let mut batches =
-                        self.log.read_deltas(missed as usize)??;
+                    let mut batches = self.log.read_deltas(missed as usize)??;
                     for (ts, mut batch) in batches.drain(..) {
                         self.process_batch((ts, &mut *batch)).await?;
                     }
@@ -735,7 +723,9 @@ impl Session {
                         Some(ts) => Value::DateTime(ts),
                         None => match cursor.start() {
                             Bound::Unbounded => Value::Null,
-                            Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+                            Bound::Included(ts) | Bound::Excluded(ts) => {
+                                Value::DateTime(ts)
+                            }
                         },
                     },
                 );
@@ -751,9 +741,11 @@ impl Session {
                     }
                     None => {
                         let path = self.data_base.append(path.as_ref());
-                        let val = self.publisher.publish(path, v)?;
-                        self.published_ids.insert(val.id());
-                        self.published.insert(id, val);
+                        if self.filter.is_match(&path) {
+                            let val = self.publisher.publish(path, v)?;
+                            self.published_ids.insert(val.id());
+                            self.published.insert(id, val);
+                        }
                     }
                 }
             }

@@ -2,50 +2,19 @@ use crate::{
     logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek},
     recorder::{
         logfile_index::{File, LogfileIndex},
-        Config, PublishConfig,
+        Config,
     },
 };
-use anyhow::{Error, Result};
-use arcstr::ArcStr;
+use anyhow::Result;
 use chrono::prelude::*;
-use futures::{channel::mpsc, future, prelude::*, select_biased};
-use fxhash::{FxHashMap, FxHashSet};
-use log::{error, info, warn};
-use netidx::{
-    chars::Chars,
-    path::Path,
-    pool::Pooled,
-    protocol::value::FromValue,
-    publisher::{
-        self, ClId, PublishFlags, Publisher, PublisherBuilder, UpdateBatch, Val, Value,
-        WriteRequest,
-    },
-    resolver_client::{Glob, GlobSet},
-    subscriber::{Event, Subscriber},
-};
-use netidx_protocols::rpc::server::{RpcCall, RpcReply};
-use netidx_protocols::{
-    cluster::{uuid_string, Cluster},
-    define_rpc,
-    rpc::server::{ArgSpec, Proc},
-    rpc_err,
-};
-use parking_lot::Mutex;
-use serde_derive::{Deserialize, Serialize};
+use log::warn;
+use netidx::{path::Path, pool::Pooled, subscriber::Event};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    mem,
+    collections::{HashMap, VecDeque},
     ops::Bound,
-    pin::Pin,
-    str::FromStr,
-    sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc,
-    },
-    time::Duration,
+    sync::Arc,
 };
-use tokio::{sync::broadcast, task, time};
-use uuid::Uuid;
+use tokio::task;
 
 struct DataSource {
     file: File,
@@ -213,6 +182,11 @@ impl LogfileCollection {
         self.source.as_ref().and_then(|ds| ds.archive.path_for_id(id))
     }
 
+    /// look up the id for a given path
+    pub fn id_for_path(&self, path: &Path) -> Option<Id> {
+        self.source.as_ref().and_then(|ds| ds.archive.id_for_path(path))
+    }
+
     /// look up the position in the archive, if any
     pub fn position(&self) -> Option<&Cursor> {
         self.source.as_ref().map(|ds| &ds.cursor)
@@ -241,6 +215,14 @@ impl LogfileCollection {
         if let Some(ds) = self.source.as_mut() {
             ds.cursor.set_end(end);
         }
+    }
+
+    pub fn start(&self) -> &Bound<DateTime<Utc>> {
+        &self.start
+    }
+
+    pub fn end(&self) -> &Bound<DateTime<Utc>> {
+        &self.end
     }
 
     /// reimage the file at the current cursor position, returning the path map and the image
