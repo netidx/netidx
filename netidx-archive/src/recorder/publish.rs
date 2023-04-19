@@ -739,8 +739,8 @@ impl Session {
                         val.update(pbatch, v);
                     }
                     None => {
-                        let path = self.data_base.append(path.as_ref());
                         if self.filter.is_match(&path) {
+                            let path = self.data_base.append(path.as_ref());
                             let val = self.publisher.publish(path, v)?;
                             self.published_ids.insert(val.id());
                             self.published.insert(id, val);

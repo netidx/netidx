@@ -126,6 +126,10 @@ impl Glob {
     pub fn into_glob(self) -> globset::Glob {
         self.glob
     }
+
+    pub fn raw(&self) -> &Chars {
+        &self.raw
+    }
 }
 
 impl Pack for Glob {
