@@ -7,8 +7,13 @@ use futures::{
 };
 use log::error;
 use netidx::{
-    chars::Chars, config::Config as NetIdxCfg, path::Path, pool::Pooled,
-    protocol::glob::Glob, publisher::BindCfg, resolver_client::DesiredAuth,
+    chars::Chars,
+    config::Config as NetIdxCfg,
+    path::Path,
+    pool::Pooled,
+    protocol::glob::Glob,
+    publisher::{BindCfg, PublisherBuilder},
+    resolver_client::DesiredAuth,
     subscriber::Subscriber,
 };
 use serde::{Deserialize, Serialize};
@@ -17,6 +22,7 @@ use tokio::{sync::broadcast, task};
 
 pub mod logfile_collection;
 mod logfile_index;
+mod oneshot;
 mod publish;
 mod record;
 
@@ -320,18 +326,51 @@ impl Recorder {
             Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
         if let Some(publish_config) = config.publish.as_ref() {
             let publish_config = Arc::new(publish_config.clone());
-            let subscriber = subscriber.clone();
-            let config = config.clone();
-            let bcast_tx = bcast_tx.clone();
-            let bcast_rx = bcast_tx.subscribe();
-            wait.push(task::spawn(async {
-                if let Err(e) =
-                    publish::run(bcast_tx, bcast_rx, subscriber, config, publish_config)
-                        .await
-                {
-                    error!("publisher stopped on error {}", e)
+            let publisher = PublisherBuilder::new(config.netidx_config.clone())
+                .desired_auth(config.desired_auth.clone())
+                .bind_cfg(Some(publish_config.bind.clone()))
+                .build()
+                .await?;
+            wait.push(task::spawn({
+                let publish_config = publish_config.clone();
+                let subscriber = subscriber.clone();
+                let config = config.clone();
+                let bcast_tx = bcast_tx.clone();
+                let bcast_rx = bcast_tx.subscribe();
+                let publisher = publisher.clone();
+                async move {
+                    let r = publish::run(
+                        bcast_tx,
+                        bcast_rx,
+                        subscriber,
+                        config,
+                        publish_config,
+                        publisher,
+                    )
+                    .await;
+                    if let Err(e) = r {
+                        error!("publisher stopped on error {}", e)
+                    }
                 }
             }));
+            wait.push(task::spawn({
+                let publish_config = publish_config.clone();
+                let config = config.clone();
+                let bcast_rx = bcast_tx.subscribe();
+                let publisher = publisher.clone();
+                async move {
+                    let r = oneshot::run(
+                        bcast_rx,
+                        config,
+                        publish_config,
+                        publisher,
+                    )
+                    .await;
+                    if let Err(e) = r {
+                        error!("publisher oneshot stopped on error {}", e)
+                    }
+                }
+            }))
         }
         if let Some(record_config) = config.record.as_ref() {
             let record_config = Arc::new(record_config.clone());

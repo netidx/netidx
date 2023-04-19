@@ -43,16 +43,15 @@ use std::{
 };
 use tokio::{sync::broadcast, task, time};
 use uuid::Uuid;
-
 use super::logfile_collection::{Image, LogfileCollection};
 
-static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
-static END_DOC: &'static str = "Time timestamp you want to replay end at, or Unbounded for the end of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. default Unbounded";
+pub(crate) static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
+pub(crate) static END_DOC: &'static str = "Time timestamp you want to replay end at, or Unbounded for the end of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. default Unbounded";
 static SPEED_DOC: &'static str = "How fast you want playback to run, e.g 1 = realtime speed, 10 = 10x realtime, 0.5 = 1/2 realtime, Unlimited = as fast as data can be read and sent. Default is 1";
 static STATE_DOC: &'static str = "The current state of playback, {pause, play, tail}. Tail, seek to the end of the archive and play any new messages that arrive. Default pause.";
 static POS_DOC: &'static str = "The current playback position. Null if the archive is empty, or the timestamp of the current record. Set to any timestamp where start <= t <= end to seek. Set to [+-][0-9]+ to seek a specific number of batches, e.g. +1 to single step forward -1 to single step back. Set to [+-][0-9]+[yMdhmsu] to step forward or back that amount of time, e.g. -1y step back 1 year. -1u to step back 1 microsecond. set to 'beginning' to seek to the beginning and 'end' to seek to the end. By default the initial position is set to 'beginning' when opening the archive.";
 static PLAY_AFTER_DOC: &'static str = "Start playing after waiting the specified timeout";
-static FILTER_DOC: &'static str = "Only publish paths matching the specified filter";
+pub(crate) static FILTER_DOC: &'static str = "Only publish paths matching the specified filter. e.g. [\"/**\"] would match everything";
 
 fn session_base(publish_base: &Path, id: Uuid) -> Path {
     use uuid::fmt::Simple;
@@ -76,7 +75,7 @@ fn parse_speed(v: Value) -> Result<Option<f64>> {
     }
 }
 
-fn parse_bound(v: Value) -> Result<Bound<DateTime<Utc>>> {
+pub(super) fn parse_bound(v: Value) -> Result<Bound<DateTime<Utc>>> {
     match v {
         Value::DateTime(ts) => Ok(Bound::Included(ts)),
         Value::String(c) if c.trim().to_lowercase().as_str() == "unbounded" => {
@@ -282,7 +281,7 @@ impl Controls {
     }
 }
 
-fn parse_filter(globs: Vec<Chars>) -> Result<GlobSet> {
+pub(super) fn parse_filter(globs: Vec<Chars>) -> Result<GlobSet> {
     let globs: Vec<Glob> =
         globs.into_iter().map(|s| Glob::new(s)).collect::<Result<_>>()?;
     Ok(GlobSet::new(true, globs)?)
@@ -1045,16 +1044,12 @@ pub(super) async fn run(
     subscriber: Subscriber,
     config: Arc<Config>,
     publish_config: Arc<PublishConfig>,
+    publisher: Publisher,
 ) -> Result<()> {
     let sessions = SessionIds::new(
         publish_config.max_sessions,
         publish_config.max_sessions_per_client,
     );
-    let publisher = PublisherBuilder::new(config.netidx_config.clone())
-        .desired_auth(config.desired_auth.clone())
-        .bind_cfg(Some(publish_config.bind.clone()))
-        .build()
-        .await?;
     let (control_tx, control_rx) = mpsc::channel(3);
     let _new_session: Result<Proc> = define_rpc!(
         &publisher,
