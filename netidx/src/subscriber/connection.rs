@@ -546,7 +546,7 @@ impl ConnectionCtx {
         &mut self,
         write_con: &mut WriteChannel,
         batch: Pooled<Vec<From>>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if let Some(subscriber) = self.subscriber.upgrade() {
             self.msg_recvd = true;
             self.process_batch(batch, write_con, &subscriber)?;
@@ -563,11 +563,11 @@ impl ConnectionCtx {
                             e.remove();
                         }
                     }
-                    bail!("shutting down")
+                    return Ok(false)
                 }
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn run(
@@ -622,8 +622,11 @@ impl ConnectionCtx {
                         self.msg_recvd = true;
                         self.process_updates_batch(batch);
                     },
-                    Some(Ok((batch, false))) =>
-                        self.handle_updates(write_con, batch)?,
+                    Some(Ok((batch, false))) => {
+                        if !self.handle_updates(write_con, batch)? {
+                            break Ok(())
+                        }
+                    },
                     Some(Err(e)) => break Err(Error::from(e)),
                     None => break Err(anyhow!("EOF")),
                 }
