@@ -47,6 +47,9 @@ impl Receiver {
     async fn fill_queue(&mut self, dead: &AtomicBool) -> Result<()> {
         self.try_fill_queue(dead)?;
         if self.queued.len() == 0 {
+            if dead.load(Ordering::Relaxed) {
+                bail!("connection is dead")
+            }
             let r = self.updates.next().await;
             self.fill_from_channel(dead, r)?
         }

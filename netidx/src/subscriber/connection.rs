@@ -167,7 +167,7 @@ async fn hello_publisher(
             let mut con = Channel::new(Some(K5CtxWrap::new(ctx)), con);
             match con.receive::<Hello>().await? {
                 Hello::Krb5(_) => (),
-                _ => bail!("protocol error")
+                _ => bail!("protocol error"),
             }
             Ok(con)
         }
@@ -186,7 +186,7 @@ async fn hello_publisher(
             >(None, tls);
             match con.receive::<Hello>().await? {
                 Hello::Tls(_) => (),
-                _ => bail!("protocol error")
+                _ => bail!("protocol error"),
             }
             Ok(con)
         }
@@ -542,15 +542,13 @@ impl ConnectionCtx {
         }
     }
 
-    fn handle_updates(
-        &mut self,
-        write_con: &mut WriteChannel,
-        batch: Pooled<Vec<From>>,
-    ) -> Result<bool> {
+    // return true if we should keep running, false if we are idle
+    fn maybe_disconnect_idle(&mut self) -> bool {
         if let Some(subscriber) = self.subscriber.upgrade() {
-            self.msg_recvd = true;
-            self.process_batch(batch, write_con, &subscriber)?;
-            if self.subscriptions.is_empty() && self.pending.is_empty() {
+            if self.subscriptions.is_empty()
+                && self.pending.is_empty()
+                && self.blocked_channels.is_empty()
+            {
                 let mut inner = subscriber.0.lock();
                 if self.from_sub.len() == 0 {
                     // we do this here the make sure we
@@ -563,11 +561,23 @@ impl ConnectionCtx {
                             e.remove();
                         }
                     }
-                    return Ok(false)
+                    return false
                 }
             }
         }
-        Ok(true)
+        true
+    }
+
+    fn handle_updates(
+        &mut self,
+        write_con: &mut WriteChannel,
+        batch: Pooled<Vec<From>>,
+    ) -> Result<bool> {
+        if let Some(subscriber) = self.subscriber.upgrade() {
+            self.msg_recvd = true;
+            self.process_batch(batch, write_con, &subscriber)?;
+        }
+        Ok(self.maybe_disconnect_idle())
     }
 
     async fn run(
@@ -609,7 +619,12 @@ impl ConnectionCtx {
         loop {
             select_biased! {
                 r = flush(write_con, &mut self.pending_flushes).fuse() => r?,
-                now = periodic.tick().fuse() => self.handle_heartbeat(now)?,
+                now = periodic.tick().fuse() => {
+                    self.handle_heartbeat(now)?;
+                    if !self.maybe_disconnect_idle() {
+                        break Ok(())
+                    }
+                },
                 batch = self.from_sub.recv().fuse() => match batch {
                     Some(batch) => self.handle_from_sub(write_con, batch)?,
                     None => bail!("dropped"),
