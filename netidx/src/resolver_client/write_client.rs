@@ -25,6 +25,7 @@ use futures::{
 };
 use fxhash::FxHashMap;
 use log::{debug, info, warn};
+use netidx_core::pool::Pool;
 use parking_lot::RwLock;
 use rand::{thread_rng, Rng};
 use std::{
@@ -38,6 +39,10 @@ use tokio::{
 };
 
 const TTL: u64 = 120;
+
+lazy_static! {
+    static ref REPUB: Pool<Vec<ToWrite>> = Pool::new(100, 1_000_000);
+}
 
 type Batch = (Pooled<Vec<(usize, ToWrite)>>, oneshot::Sender<Response<FromWrite>>);
 type ArcBatch =
@@ -85,7 +90,8 @@ impl Connection {
     }
 
     async fn republish(&mut self, con: &mut Channel, ttl_expired: bool) -> Result<()> {
-        let names = self.published.read().values().cloned().collect::<Vec<ToWrite>>();
+        let mut names = REPUB.take();
+        names.extend(self.published.read().values().cloned());
         let len = names.len();
         if len == 0 {
             info!("connected to resolver {:?} for write", self.resolver_addr);
@@ -103,13 +109,13 @@ impl Connection {
                 "write_con ttl: {} degraded: {}, republishing: {}",
                 len, ttl_expired, self.degraded
             );
-            for msg in &names {
+            for msg in &*names {
                 con.queue_send(msg)?
             }
             con.flush().await?;
             let mut success = 0;
-            for msg in &names {
-                match try_cf!("replublish reply", continue, con.receive().await) {
+            for msg in &*names {
+                match con.receive().await? {
                     FromWrite::Published => {
                         success += 1;
                     }
