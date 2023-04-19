@@ -1,3 +1,7 @@
+* 0.19.4
+  - fix a bug in subscriber that caused voluntary shutdowns
+    to add the ip to the recently failed list.
+
 * 0.19.3
   - fix a bug in PREFER_LOCAL that could prevent subscribing
 
