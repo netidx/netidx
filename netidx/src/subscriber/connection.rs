@@ -544,28 +544,32 @@ impl ConnectionCtx {
 
     // return true if we should keep running, false if we are idle
     fn maybe_disconnect_idle(&mut self) -> bool {
-        if let Some(subscriber) = self.subscriber.upgrade() {
-            if self.subscriptions.is_empty()
-                && self.pending.is_empty()
-                && self.blocked_channels.is_empty()
-            {
-                let mut inner = subscriber.0.lock();
-                if self.from_sub.len() == 0 {
-                    // we do this here the make sure we
-                    // hold the lock and there can be no
-                    // subscriptions while we clean up.
-                    if let Entry::Occupied(mut e) = inner.connections.entry(self.addr) {
-                        let c = e.get_mut();
-                        c.remove(self.conid);
-                        if c.is_empty() {
-                            e.remove();
+        match self.subscriber.upgrade() {
+            None => false,
+            Some(subscriber) => {
+                if self.subscriptions.is_empty()
+                    && self.pending.is_empty()
+                    && self.blocked_channels.is_empty()
+                {
+                    let mut inner = subscriber.0.lock();
+                    if self.from_sub.len() == 0 {
+                        // we do this here the make sure we
+                        // hold the lock and there can be no
+                        // subscriptions while we clean up.
+                        if let Entry::Occupied(mut e) = inner.connections.entry(self.addr)
+                        {
+                            let c = e.get_mut();
+                            c.remove(self.conid);
+                            if c.is_empty() {
+                                e.remove();
+                            }
                         }
+                        return false;
                     }
-                    return false
                 }
+                true
             }
         }
-        true
     }
 
     fn handle_updates(
@@ -627,7 +631,7 @@ impl ConnectionCtx {
                 },
                 batch = self.from_sub.recv().fuse() => match batch {
                     Some(batch) => self.handle_from_sub(write_con, batch)?,
-                    None => bail!("dropped"),
+                    None => break Ok(()),
                 },
                 r = read_batch(
                     &mut batches,
