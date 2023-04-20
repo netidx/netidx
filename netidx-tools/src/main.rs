@@ -1,5 +1,6 @@
 #![recursion_limit = "2048"]
 mod publisher;
+mod record_client;
 mod resolver;
 mod stress_channel_publisher;
 mod stress_channel_subscriber;
@@ -22,19 +23,40 @@ extern crate anyhow;
 #[cfg(unix)]
 use std::path::PathBuf;
 
+use anyhow::Result;
 use netidx_tools_core::ClientParams;
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug)]
 enum Stress {
     #[structopt(name = "publisher", about = "run a stress test publisher")]
-    Publisher(stress_publisher::Params),
+    Publisher {
+        #[structopt(flatten)]
+        common: ClientParams,
+        #[structopt(flatten)]
+        params: stress_publisher::Params,
+    },
     #[structopt(name = "subscriber", about = "run a stress test subscriber")]
-    Subscriber(stress_subscriber::Params),
+    Subscriber {
+        #[structopt(flatten)]
+        common: ClientParams,
+        #[structopt(flatten)]
+        params: stress_subscriber::Params,
+    },
     #[structopt(name = "channel_publisher", about = "run a stress channel publisher")]
-    ChannelPublisher(stress_channel_publisher::Params),
+    ChannelPublisher {
+        #[structopt(flatten)]
+        common: ClientParams,
+        #[structopt(flatten)]
+        params: stress_channel_publisher::Params,
+    },
     #[structopt(name = "channel_subscriber", about = "run a stress channel subscriber")]
-    ChannelSubscriber(stress_channel_subscriber::Params),
+    ChannelSubscriber {
+        #[structopt(flatten)]
+        common: ClientParams,
+        #[structopt(flatten)]
+        params: stress_channel_subscriber::Params,
+    },
 }
 
 #[derive(StructOpt, Debug)]
@@ -77,8 +99,17 @@ enum Opt {
     Record {
         #[structopt(short = "c", long = "config", help = "recorder config file")]
         config: Option<PathBuf>,
-        #[structopt(short = "e", long = "example", help = "print an example config file")]
+        #[structopt(
+            short = "e",
+            long = "example",
+            help = "print an example config file"
+        )]
         example: bool,
+    },
+    #[structopt(name = "record-client", about = "control the recorder")]
+    RecordClient {
+        #[structopt(subcommand)]
+        cmd: record_client::Cmd,
     },
     #[cfg(unix)]
     #[structopt(name = "activation", about = "manage netidx processes")]
@@ -90,8 +121,6 @@ enum Opt {
     },
     #[structopt(name = "stress", about = "stress test")]
     Stress {
-        #[structopt(flatten)]
-        common: ClientParams,
         #[structopt(subcommand)]
         cmd: Stress,
     },
@@ -103,56 +132,63 @@ enum Opt {
         publisher: publisher::Params,
         #[structopt(flatten)]
         proxy: netidx_wsproxy::config::Config,
-    }
+    },
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<()> {
     env_logger::init();
     match Opt::from_args() {
         #[cfg(unix)]
-        Opt::ResolverServer(p) => resolver_server::run(p),
+        Opt::ResolverServer(p) => resolver_server::run(p).await,
         Opt::Resolver { common, cmd } => {
             let (cfg, auth) = common.load();
-            resolver::run(cfg, auth, cmd)
+            resolver::run(cfg, auth, cmd).await
         }
         Opt::Publisher { common, params } => {
             let (cfg, auth) = common.load();
-            publisher::run(cfg, auth, params)
+            publisher::run(cfg, auth, params).await
         }
         Opt::Subscriber { common, params } => {
             let (cfg, auth) = common.load();
-            subscriber::run(cfg, auth, params)
+            subscriber::run(cfg, auth, params).await
         }
         #[cfg(unix)]
         Opt::Container { common, params } => {
             let (cfg, auth) = common.load();
-            container::run(cfg, auth, params)
+            container::run(cfg, auth, params).await
         }
+        Opt::RecordClient { cmd } => {
+            record_client::run(cmd).await
+        },
         #[cfg(unix)]
-        Opt::Record { config, example } => {
-            recorder::run(config, example)
-        }
+        Opt::Record { config, example } => recorder::run(config, example).await,
         #[cfg(unix)]
         Opt::Activation { common, params } => {
             let (cfg, auth) = common.load();
-            activation::run(cfg, auth, params)
+            activation::run(cfg, auth, params).await
         }
-        Opt::Stress { common, cmd } => {
-            let (cfg, auth) = common.load();
-            match cmd {
-                Stress::Subscriber(params) => stress_subscriber::run(cfg, auth, params),
-                Stress::Publisher(params) => stress_publisher::run(cfg, auth, params),
-                Stress::ChannelPublisher(params) => {
-                    stress_channel_publisher::run(cfg, auth, params)
-                }
-                Stress::ChannelSubscriber(params) => {
-                    stress_channel_subscriber::run(cfg, auth, params)
-                }
+        Opt::Stress { cmd } => match cmd {
+            Stress::Subscriber { common, params } => {
+                let (cfg, auth) = common.load();
+                stress_subscriber::run(cfg, auth, params).await
             }
-        }
+            Stress::Publisher { common, params } => {
+                let (cfg, auth) = common.load();
+                stress_publisher::run(cfg, auth, params).await
+            }
+            Stress::ChannelPublisher { common, params } => {
+                let (cfg, auth) = common.load();
+                stress_channel_publisher::run(cfg, auth, params).await
+            }
+            Stress::ChannelSubscriber { common, params } => {
+                let (cfg, auth) = common.load();
+                stress_channel_subscriber::run(cfg, auth, params).await
+            }
+        },
         Opt::WsProxy { common, publisher, proxy } => {
             let (cfg, auth) = common.load();
-            wsproxy::run(cfg, auth, publisher, proxy)
+            wsproxy::run(cfg, auth, publisher, proxy).await
         }
     }
 }

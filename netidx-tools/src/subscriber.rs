@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use arcstr::ArcStr;
 use bytes::BytesMut;
 use combine::{
@@ -33,7 +33,6 @@ use std::{
 use structopt::StructOpt;
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
-    runtime::Runtime,
     time,
 };
 
@@ -154,7 +153,7 @@ struct Out<'a> {
 }
 
 impl<'a> Out<'a> {
-    fn write(&self, to_stdout: &mut BytesMut) {
+    fn write(&self, to_stdout: &mut BytesMut) -> Result<()> {
         match &self.value {
             Event::Unsubscribed => {
                 if !self.raw {
@@ -167,17 +166,18 @@ impl<'a> Out<'a> {
             Event::Update(v) => {
                 if self.raw {
                     let w = &mut BytesWriter(to_stdout);
-                    writeln!(w, "{}", WVal(v)).unwrap()
+                    writeln!(w, "{}", WVal(v)).context("write raw line")?
                 } else {
                     to_stdout.extend_from_slice(self.path.as_bytes());
                     to_stdout.extend_from_slice(b"|");
                     let typ = Typ::get(v);
                     let w = &mut BytesWriter(to_stdout);
-                    write!(w, "{}|", typ).unwrap();
-                    writeln!(w, "{}", WVal(v)).unwrap()
+                    write!(w, "{}|", typ).context("write line")?;
+                    writeln!(w, "{}", WVal(v)).context("finish write line")?
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -383,7 +383,7 @@ impl Ctx {
                             self.subscribe_ts.remove(path);
                         }
                         Out { raw: self.raw, path: &**path, value }
-                            .write(&mut self.to_stdout);
+                            .write(&mut self.to_stdout)?;
                         if self.oneshot {
                             if let Some(path) = self.paths.get(&id).cloned() {
                                 self.remove_subscription(&path);
@@ -400,8 +400,8 @@ impl Ctx {
     }
 }
 
-async fn subscribe(cfg: Config, auth: DesiredAuth, p: Params) {
-    let subscriber = Subscriber::new(cfg, auth).expect("create subscriber");
+pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()> {
+    let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
     let mut ctx = Ctx::new(subscriber, p);
     let mut tick = time::interval(Duration::from_secs(1));
     loop {
@@ -422,9 +422,5 @@ async fn subscribe(cfg: Config, auth: DesiredAuth, p: Params) {
             },
         }
     }
-}
-
-pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) {
-    let rt = Runtime::new().expect("failed to init runtime");
-    rt.block_on(subscribe(cfg, auth, params));
+    Ok(())
 }

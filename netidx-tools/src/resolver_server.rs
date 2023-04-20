@@ -1,8 +1,8 @@
+use anyhow::{Context, Result};
 use daemonize::Daemonize;
 use futures::future;
 use netidx::resolver_server::{config::Config, Server};
 use structopt::StructOpt;
-use tokio::runtime::Runtime;
 
 #[derive(StructOpt, Debug)]
 pub(crate) struct Params {
@@ -23,21 +23,17 @@ pub(crate) struct Params {
     id: usize,
 }
 
-pub(crate) fn run(params: Params) {
+pub(crate) async fn run(params: Params) -> Result<()> {
     let config =
-        Config::load(params.config).expect("failed to load resolver server config");
+        Config::load(params.config).context("failed to load resolver server config")?;
     let member = &config.member_servers[params.id];
     if !params.foreground {
         let mut file = member.pid_file.clone();
         file.push_str(&format!("{}.pid", params.id));
-        Daemonize::new().pid_file(file).start().expect("failed to daemonize");
+        Daemonize::new().pid_file(file).start().context("failed to daemonize")?;
     }
-    let rt = Runtime::new().expect("failed to init runtime");
-    rt.block_on(async {
-        let server = Server::new(config, params.delay_reads, params.id)
-            .await
-            .expect("starting server");
-        future::pending::<()>().await;
-        drop(server)
-    });
+    let server = Server::new(config, params.delay_reads, params.id)
+        .await
+        .context("starting server")?;
+    future::pending::<Result<()>>().await
 }

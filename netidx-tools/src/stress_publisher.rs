@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use futures::{prelude::*, select};
 use netidx::{
     config::Config,
@@ -6,7 +7,7 @@ use netidx::{
 };
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
-use tokio::{runtime::Runtime, signal, time};
+use tokio::{signal, time};
 
 #[derive(StructOpt, Debug)]
 pub(super) struct Params {
@@ -30,14 +31,14 @@ pub(super) struct Params {
     cols: usize,
 }
 
-async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) {
+async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {
     let delay = if p.delay == 0 { None } else { Some(Duration::from_millis(p.delay)) };
     let publisher = PublisherBuilder::new(config)
         .desired_auth(auth)
         .bind_cfg(p.bind)
         .build()
         .await
-        .expect("failed to create publisher");
+        .context("failed to create publisher")?;
     let mut sent: usize = 0;
     let mut v = 0u64;
     let published = {
@@ -45,7 +46,8 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) {
         for row in 0..p.rows {
             for col in 0..p.cols {
                 let path = Path::from(format!("{}/{}/{}", p.base, row, col));
-                published.push(publisher.publish(path, Value::V64(v)).expect("encode"))
+                published
+                    .push(publisher.publish(path, Value::V64(v)).context("encode value")?)
             }
         }
         published
@@ -68,20 +70,19 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) {
         if elapsed > one_second {
             select! {
                 _ = publisher.wait_any_client().fuse() => (),
-                _ = signal::ctrl_c().fuse() => break,
+                _ = signal::ctrl_c().fuse() => {
+                    publisher.shutdown().await;
+                    break
+                },
             }
             last_stat = now;
             println!("tx: {:.0}", sent as f64 / elapsed.as_secs_f64());
             sent = 0;
         }
     }
+    Ok(())
 }
 
-pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
-    let rt = Runtime::new().expect("failed to init runtime");
-    rt.block_on(async {
-        run_publisher(config, auth, params).await;
-        // Allow the publisher time to send the clear message
-        time::sleep(Duration::from_secs(1)).await;
-    });
+pub(super) async fn run(config: Config, auth: DesiredAuth, params: Params) -> Result<()> {
+    run_publisher(config, auth, params).await
 }

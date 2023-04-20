@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, Context};
 use daemonize::Daemonize;
 use futures::{future::join_all, prelude::*, select_biased, stream::SelectAll};
 use log::{error, info, warn};
@@ -19,7 +19,6 @@ use structopt::StructOpt;
 use tokio::{
     fs,
     process::{Child, Command},
-    runtime::Runtime,
     signal::unix::{signal, SignalKind},
     sync::mpsc,
     task,
@@ -482,17 +481,13 @@ async fn run_server(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()
     Ok(())
 }
 
-pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) {
+pub(super) async fn run(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
     if !params.foreground {
         let mut d = Daemonize::new();
         if let Some(pid_file) = params.pid_file.as_ref() {
             d = d.pid_file(pid_file);
         }
-        d.start().expect("failed to daemonize")
+        d.start().context("failed to daemonize")?
     }
-    Runtime::new().expect("failed to init runtime").block_on(async move {
-        if let Err(e) = run_server(cfg, auth, params).await {
-            error!("server task shutdown: {}", e)
-        }
-    });
+    run_server(cfg, auth, params).await.context("activation")
 }

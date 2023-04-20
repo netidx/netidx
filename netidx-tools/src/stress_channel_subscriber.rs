@@ -11,10 +11,7 @@ use netidx::{
 use netidx_protocols::pack_channel::client::Connection;
 use std::{sync::Arc, time::Duration};
 use structopt::StructOpt;
-use tokio::{
-    runtime::Runtime,
-    time::{self, Instant},
-};
+use tokio::time::{self, Instant};
 
 #[derive(StructOpt, Debug)]
 pub(super) struct Params {
@@ -138,11 +135,6 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
     }
 }
 
-pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
-    let rt = Runtime::new().expect("failed to init runtime");
-    rt.block_on(async {
-        if let Err(e) = run_client(config, auth, params).await {
-            eprintln!("client stopped with error {}", e);
-        }
-    });
+pub(super) async fn run(config: Config, auth: DesiredAuth, params: Params) -> Result<()> {
+    run_client(config, auth, params).await
 }

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, Context};
 use bytes::{Buf, BufMut};
 use chrono::prelude::*;
 use netidx::{
@@ -8,9 +8,8 @@ use netidx::{
     publisher::{BindCfg, DesiredAuth, PublisherBuilder},
 };
 use netidx_protocols::pack_channel::server::{Connection, Listener};
-use std::time::Duration;
 use structopt::StructOpt;
-use tokio::{runtime::Runtime, task, time};
+use tokio::task;
 
 #[derive(StructOpt, Debug)]
 pub(super) struct Params {
@@ -85,7 +84,7 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
         .bind_cfg(p.bind)
         .build()
         .await
-        .expect("failed to create publisher");
+        .context("create publisher")?;
     let mut listener = Listener::new(&publisher, None, p.base.clone()).await?;
     loop {
         let acceptor = listener.accept().await?;
@@ -101,11 +100,6 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
     }
 }
 
-pub(super) fn run(config: Config, auth: DesiredAuth, params: Params) {
-    let rt = Runtime::new().expect("failed to init runtime");
-    rt.block_on(async {
-        run_publisher(config, auth, params).await.unwrap();
-        // Allow the publisher time to send the clear message
-        time::sleep(Duration::from_secs(1)).await;
-    });
+pub(crate) async fn run(config: Config, auth: DesiredAuth, params: Params) -> Result<()> {
+    run_publisher(config, auth, params).await
 }

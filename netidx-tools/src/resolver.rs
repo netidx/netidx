@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use netidx::{
     chars::Chars,
@@ -8,7 +9,7 @@ use netidx::{
 };
 use std::{collections::HashSet, iter, net::SocketAddr, time::Duration};
 use structopt::StructOpt;
-use tokio::{runtime::Runtime, time};
+use tokio::time;
 
 #[derive(StructOpt, Debug)]
 pub(super) enum ResolverCmd {
@@ -52,83 +53,88 @@ pub(super) enum ResolverCmd {
     },
 }
 
-pub(super) fn run(config: Config, auth: DesiredAuth, cmd: ResolverCmd) {
-    let rt = Runtime::new().expect("failed to init runtime");
-    rt.block_on(async {
-        match cmd {
-            ResolverCmd::Resolve { path } => {
-                let resolver = ResolverRead::new(config, auth);
-                let (publishers, resolved) = resolver.resolve(path).await.unwrap();
-                if publishers.len() > 0 {
-                    for pb in publishers.values() {
-                        println!("publisher: {:?}", pb);
-                    }
-                    for res in resolved.iter() {
-                        for i in 0..res.publishers.len() {
-                            if i < res.publishers.len() - 1 {
-                                print!("{:?}, ", res.publishers[i].id);
-                            } else {
-                                print!("{:?}", res.publishers[i].id);
-                            }
-                        }
-                        println!("");
-                    }
+pub(super) async fn run(
+    config: Config,
+    auth: DesiredAuth,
+    cmd: ResolverCmd,
+) -> Result<()> {
+    match cmd {
+        ResolverCmd::Resolve { path } => {
+            let resolver = ResolverRead::new(config, auth);
+            let (publishers, resolved) =
+                resolver.resolve(path).await.context("resolve")?;
+            if publishers.len() > 0 {
+                for pb in publishers.values() {
+                    println!("publisher: {:?}", pb);
                 }
-            }
-            ResolverCmd::List { watch, no_structure, path } => {
-                let resolver = ResolverRead::new(config, auth);
-                let pat = {
-                    let path =
-                        path.map(|p| Path::from(ArcStr::from(p))).unwrap_or(Path::root());
-                    if !Glob::is_glob(&*path) {
-                        path.append("*")
-                    } else {
-                        path
-                    }
-                };
-                let glob = Glob::new(Chars::from(String::from(&*pat))).unwrap();
-                let mut ct = ChangeTracker::new(Path::from(ArcStr::from(glob.base())));
-                let globs = GlobSet::new(no_structure, iter::once(glob)).unwrap();
-                let mut paths = HashSet::new();
-                loop {
-                    if resolver.check_changed(&mut ct).await.unwrap() {
-                        for b in resolver.list_matching(&globs).await.unwrap().iter() {
-                            for p in b.iter() {
-                                if !paths.contains(p) {
-                                    paths.insert(p.clone());
-                                    println!("{}", p);
-                                }
-                            }
+                for res in resolved.iter() {
+                    for i in 0..res.publishers.len() {
+                        if i < res.publishers.len() - 1 {
+                            print!("{:?}, ", res.publishers[i].id);
+                        } else {
+                            print!("{:?}", res.publishers[i].id);
                         }
                     }
-                    if watch {
-                        time::sleep(Duration::from_secs(5)).await
-                    } else {
-                        break;
-                    }
+                    println!("");
                 }
-            }
-            ResolverCmd::Table { path } => {
-                let resolver = ResolverRead::new(config, auth);
-                let path = path.unwrap_or_else(|| Path::from("/"));
-                let desc = resolver.table(path).await.unwrap();
-                println!("columns:");
-                for (name, count) in desc.cols.iter() {
-                    println!("{}: {}", name, count.0)
-                }
-                println!("rows:");
-                for row in desc.rows.iter() {
-                    println!("{}", row);
-                }
-            }
-            ResolverCmd::Add { path, socketaddr } => {
-                let resolver = ResolverWrite::new(config, auth, socketaddr).unwrap();
-                resolver.publish(vec![path]).await.unwrap();
-            }
-            ResolverCmd::Remove { path, socketaddr } => {
-                let resolver = ResolverWrite::new(config, auth, socketaddr).unwrap();
-                resolver.unpublish(vec![path]).await.unwrap();
             }
         }
-    });
+        ResolverCmd::List { watch, no_structure, path } => {
+            let resolver = ResolverRead::new(config, auth);
+            let pat = {
+                let path =
+                    path.map(|p| Path::from(ArcStr::from(p))).unwrap_or(Path::root());
+                if !Glob::is_glob(&*path) {
+                    path.append("*")
+                } else {
+                    path
+                }
+            };
+            let glob = Glob::new(Chars::from(String::from(&*pat))).unwrap();
+            let mut ct = ChangeTracker::new(Path::from(ArcStr::from(glob.base())));
+            let globs = GlobSet::new(no_structure, iter::once(glob)).unwrap();
+            let mut paths = HashSet::new();
+            loop {
+                if resolver.check_changed(&mut ct).await.context("check changed")? {
+                    for b in resolver.list_matching(&globs).await.unwrap().iter() {
+                        for p in b.iter() {
+                            if !paths.contains(p) {
+                                paths.insert(p.clone());
+                                println!("{}", p);
+                            }
+                        }
+                    }
+                }
+                if watch {
+                    time::sleep(Duration::from_secs(5)).await
+                } else {
+                    break;
+                }
+            }
+        }
+        ResolverCmd::Table { path } => {
+            let resolver = ResolverRead::new(config, auth);
+            let path = path.unwrap_or_else(|| Path::from("/"));
+            let desc = resolver.table(path).await.context("resove table")?;
+            println!("columns:");
+            for (name, count) in desc.cols.iter() {
+                println!("{}: {}", name, count.0)
+            }
+            println!("rows:");
+            for row in desc.rows.iter() {
+                println!("{}", row);
+            }
+        }
+        ResolverCmd::Add { path, socketaddr } => {
+            let resolver = ResolverWrite::new(config, auth, socketaddr)
+                .context("create resolver write")?;
+            resolver.publish(vec![path]).await.context("add publisher")?;
+        }
+        ResolverCmd::Remove { path, socketaddr } => {
+            let resolver = ResolverWrite::new(config, auth, socketaddr)
+                .context("create resolver write")?;
+            resolver.unpublish(vec![path]).await.context("remove publisher")?;
+        }
+    }
+    Ok(())
 }
