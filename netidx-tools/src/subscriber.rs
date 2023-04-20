@@ -146,14 +146,14 @@ impl<'a> fmt::Display for WVal<'a> {
 }
 
 #[derive(Debug, Clone)]
-struct Out<'a> {
-    raw: bool,
-    path: &'a str,
-    value: Event,
+pub(crate) struct Out<'a> {
+    pub(crate) raw: bool,
+    pub(crate) path: &'a str,
+    pub(crate) value: Event,
 }
 
 impl<'a> Out<'a> {
-    fn write(&self, to_stdout: &mut BytesMut) -> Result<()> {
+    pub(crate) fn write(&self, to_stdout: &mut BytesMut) -> Result<()> {
         match &self.value {
             Event::Unsubscribed => {
                 if !self.raw {

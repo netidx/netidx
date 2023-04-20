@@ -32,7 +32,7 @@ pub(crate) async fn run(params: Params) -> Result<()> {
         file.push_str(&format!("{}.pid", params.id));
         Daemonize::new().pid_file(file).start().context("failed to daemonize")?;
     }
-    let server = Server::new(config, params.delay_reads, params.id)
+    let _server = Server::new(config, params.delay_reads, params.id)
         .await
         .context("starting server")?;
     future::pending::<Result<()>>().await
