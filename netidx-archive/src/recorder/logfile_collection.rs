@@ -7,14 +7,21 @@ use crate::{
 };
 use anyhow::Result;
 use chrono::prelude::*;
+use fxhash::FxHashMap;
 use log::warn;
 use netidx::{path::Path, pool::Pooled, subscriber::Event};
+use parking_lot::Mutex;
 use std::{
     collections::{HashMap, VecDeque},
     ops::Bound,
-    sync::Arc,
+    sync::Arc, path::PathBuf,
 };
 use tokio::task;
+
+lazy_static! {
+    static ref ARCHIVE_READERS: Mutex<FxHashMap<PathBuf, ArchiveReader>> =
+        Mutex::new(HashMap::default());
+}
 
 struct DataSource {
     file: File,
@@ -63,7 +70,18 @@ impl DataSource {
                     }
                 }
                 let path = file.path(&config.archive_directory);
-                let archive = task::block_in_place(|| ArchiveReader::open(path))?;
+                let archive = {
+                    let mut readers = ARCHIVE_READERS.lock();
+                    match readers.get(&path) {
+                        Some(reader) => reader.clone(),
+                        None => {
+                            readers.retain(|_, r| r.strong_count() > 1);
+                            let rd = task::block_in_place(|| ArchiveReader::open(&path))?;
+                            readers.insert(path, rd.clone());
+                            rd
+                        }
+                    }
+                };
                 let mut cursor = Cursor::new();
                 cursor.set_start(start);
                 cursor.set_end(end);
@@ -85,6 +103,14 @@ pub struct LogfileCollection {
     start: Bound<DateTime<Utc>>,
     end: Bound<DateTime<Utc>>,
     config: Arc<Config>,
+}
+
+impl Drop for LogfileCollection {
+    fn drop(&mut self) {
+        self.source = None;
+        self.head = None;
+        ARCHIVE_READERS.lock().retain(|_, r| r.strong_count() > 1);
+    }
 }
 
 impl LogfileCollection {

@@ -20,13 +20,13 @@ use crate::subscriber::Out;
 
 #[derive(StructOpt, Debug)]
 pub(crate) struct OneshotParams {
-    #[structopt(name = "base", help = "the base path of the recorder instance")]
+    #[structopt(long = "base", help = "the base path of the recorder instance")]
     base: Path,
-    #[structopt(name = "start", help = "the time to start the recording at")]
+    #[structopt(long = "start", help = "the time to start the recording at")]
     start: Option<String>,
-    #[structopt(name = "end", help = "the time to end the recording at")]
+    #[structopt(long = "end", help = "the time to end the recording at")]
     end: Option<String>,
-    #[structopt(name = "filter", help = "glob pattern(s) to include")]
+    #[structopt(short = "f", long = "filter", help = "glob pattern(s) to include")]
     filter: Vec<String>,
 }
 
@@ -46,14 +46,27 @@ fn parse_bound(s: Option<&str>) -> Result<Option<DateTime<Utc>>> {
         None => Ok(None),
         Some(s) => match s.parse::<DateTime<Utc>>() {
             Ok(dt) => Ok(Some(dt)),
-            Err(_) => match s.parse::<Seek>()? {
-                Seek::Absolute(dt) => Ok(Some(dt)),
-                Seek::TimeRelative(dur) => Ok(Some(Utc::now() + dur)),
-                Seek::BatchRelative(_) => {
+            Err(_) => match s.parse::<Seek>() {
+                Ok(Seek::TimeRelative(dur)) => Ok(Some(Utc::now() + dur)),
+                Ok(Seek::Absolute(dt)) => Ok(Some(dt)),
+                Ok(Seek::BatchRelative(_)) => {
                     bail!("batch relative seek isn't supported for oneshot")
                 }
-                Seek::Beginning => Ok(None),
-                Seek::End => Ok(None),
+                Ok(Seek::Beginning) => Ok(None),
+                Ok(Seek::End) => Ok(None),
+                Err(_) => {
+                    let mut buf = String::from("-");
+                    buf.push_str(s);
+                    match buf.parse::<Seek>()? {
+                        Seek::TimeRelative(dur) => Ok(Some(Utc::now() + dur)),
+                        Seek::Absolute(_)
+                        | Seek::BatchRelative(_)
+                        | Seek::Beginning
+                        | Seek::End => {
+                            bail!("batch relative seek isn't supported for oneshot")
+                        }
+                    }
+                }
             },
         },
     }

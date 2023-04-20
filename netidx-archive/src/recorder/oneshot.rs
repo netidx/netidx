@@ -69,9 +69,19 @@ async fn do_oneshot(
 ) -> Result<()> {
     let mut log = LogfileCollection::new(config, head, args.start, args.end).await?;
     log.seek(Seek::Beginning)?;
-    let img = log.reimage().ok_or_else(|| anyhow!("no data source"))??;
-    let path_by_id: FxHashMap<Id, Path> =
-        img.idx.iter().map(|(id, path)| (*id, path.clone())).collect();
+    let mut img = log.reimage().ok_or_else(|| anyhow!("no data source"))??;
+    let path_by_id: FxHashMap<Id, Path> = img
+        .idx
+        .iter()
+        .filter_map(|(id, path)| {
+            if args.filter.is_match(path) {
+                Some((*id, path.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    img.img.retain(|id, _| path_by_id.contains_key(id));
     let mut data = OneshotReply {
         pathmap: img.idx,
         image: img.img,

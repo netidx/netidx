@@ -1093,6 +1093,10 @@ impl ArchiveReader {
         })
     }
 
+    pub(crate) fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.index)
+    }
+
     pub fn index(&self) -> RwLockReadGuard<ArchiveIndex> {
         self.index.read()
     }
