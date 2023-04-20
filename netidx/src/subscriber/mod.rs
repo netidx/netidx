@@ -670,7 +670,7 @@ impl SubscriberInner {
             }
         }
         if flags.contains(PublishFlags::PREFER_LOCAL) {
-            self.choose_local_addr(publishers, resolved, flags)
+            self.choose_local_addr(true, publishers, resolved, flags)
         } else {
             self.choose_random_addr(publishers, resolved, flags)
         }
@@ -678,6 +678,7 @@ impl SubscriberInner {
 
     fn choose_local_addr(
         &mut self,
+        tried_existing: bool,
         publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
         resolved: &Resolved,
         flags: PublishFlags,
@@ -745,7 +746,7 @@ impl SubscriberInner {
             pri
         });
         if all_far || buf.len() == 0 {
-            if flags.contains(PublishFlags::USE_EXISTING) {
+            if !tried_existing && flags.contains(PublishFlags::USE_EXISTING) {
                 self.choose_existing_addr(publishers, resolved, flags)
             } else {
                 self.choose_random_addr(publishers, resolved, flags)
@@ -773,11 +774,11 @@ impl SubscriberInner {
             flags &= !PublishFlags::PREFER_LOCAL;
         }
         if flags.contains(PublishFlags::FORCE_LOCAL) {
-            self.choose_local_addr(publishers, resolved, flags)
+            self.choose_local_addr(false, publishers, resolved, flags)
         } else if flags.contains(PublishFlags::USE_EXISTING) {
             self.choose_existing_addr(publishers, resolved, flags)
         } else if flags.contains(PublishFlags::PREFER_LOCAL) {
-            self.choose_local_addr(publishers, resolved, flags)
+            self.choose_local_addr(false, publishers, resolved, flags)
         } else {
             self.choose_random_addr(publishers, resolved, flags)
         }
