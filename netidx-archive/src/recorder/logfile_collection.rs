@@ -8,7 +8,7 @@ use crate::{
 use anyhow::Result;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
-use log::{debug, info, warn, trace};
+use log::{debug, info, trace, warn};
 use netidx::{path::Path, pool::Pooled, subscriber::Event};
 use parking_lot::Mutex;
 use std::{
@@ -62,7 +62,9 @@ impl DataSource {
                     });
                     match out {
                         Err(e) => warn!("failed to execute get command {}", e),
-                        Ok(o) if !o.status.success() => warn!("get command failed {}", o),
+                        Ok(o) if !o.status.success() => {
+                            warn!("get command failed {:?}", o)
+                        }
                         Ok(out) => {
                             if out.stdout.len() > 0 {
                                 let out = String::from_utf8_lossy(&out.stdout);
@@ -198,7 +200,8 @@ impl LogfileCollection {
                     let file = ds.file;
                     trace!(
                         "reading up to {} batches from cursor {:?}",
-                        read_count, cursor
+                        read_count,
+                        cursor
                     );
                     let batches = archive.read_deltas(cursor, read_count)?;
                     trace!("read {} batches", batches.len());
