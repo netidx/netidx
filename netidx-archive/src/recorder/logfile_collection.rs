@@ -81,15 +81,15 @@ impl DataSource {
                     let mut readers = ARCHIVE_READERS.lock();
                     match readers.get(&path) {
                         Some(reader) => {
-                            dbg!("log file was cached");
+                            debug!("log file was cached");
                             reader.clone()
                         }
                         None => {
-                            dbg!("log file was not cached, opening");
+                            debug!("log file was not cached, opening");
                             readers.retain(|_, r| r.strong_count() > 1);
                             let rd = task::block_in_place(|| ArchiveReader::open(&path))?;
                             readers.insert(path, rd.clone());
-                            dbg!("log file opened successfully");
+                            debug!("log file opened successfully");
                             rd
                         }
                     }
@@ -195,12 +195,12 @@ impl LogfileCollection {
                     let archive = &ds.archive;
                     let cursor = &mut ds.cursor;
                     let file = ds.file;
-                    debug!(
+                    trace!(
                         "reading up to {} batches from cursor {:?}",
                         read_count, cursor
                     );
                     let batches = archive.read_deltas(cursor, read_count)?;
-                    debug!("read {} batches", batches.len());
+                    trace!("read {} batches", batches.len());
                     Ok::<_, anyhow::Error>((file, batches))
                 })?;
                 if batches.front().is_some() {
