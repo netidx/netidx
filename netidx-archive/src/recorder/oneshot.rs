@@ -15,6 +15,7 @@ use arcstr::ArcStr;
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
 use fxhash::FxHashMap;
+use log::debug;
 use netidx::{
     chars::Chars,
     pack::Pack,
@@ -67,8 +68,11 @@ async fn do_oneshot(
     args: OneshotConfig,
     reply: &mut RpcReply,
 ) -> Result<()> {
+    debug!("opening logfile collection");
     let mut log = LogfileCollection::new(config, head, args.start, args.end).await?;
+    debug!("seeking to the beginning");
     log.seek(Seek::Beginning)?;
+    debug!("reimaging");
     let mut img = log.reimage().ok_or_else(|| anyhow!("no data source"))??;
     let path_by_id: FxHashMap<Id, Path> = img
         .idx
@@ -88,6 +92,7 @@ async fn do_oneshot(
         deltas: CURSOR_BATCH_POOL.take(),
     };
     loop {
+        debug!("reading archive batch");
         let mut batches = log.read_deltas(100)??;
         if batches.is_empty() {
             reply.send(Value::Bytes(pack(&data)?.freeze()));

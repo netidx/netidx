@@ -388,8 +388,55 @@ impl Cursor {
         Cursor { start: Bound::Unbounded, end: Bound::Unbounded, current: None }
     }
 
+    /// create a cursor with pre initialized start, end, and pos. pos
+    /// will be adjusted so it falls within the bounds of start and
+    /// end.
+    pub fn create_from(
+        start: Bound<DateTime<Utc>>,
+        end: Bound<DateTime<Utc>>,
+        pos: Option<DateTime<Utc>>,
+    ) -> Self {
+        let mut t = Self::new();
+        t.set_start(start);
+        t.set_end(end);
+        if let Some(pos) = pos {
+            t.set_current(pos);
+        }
+        t
+    }
+
     pub fn reset(&mut self) {
         self.current = None;
+    }
+
+    /// return true if the cursor is at the start. If the start is
+    /// unbounded then this will always return true.
+    ///
+    /// if the cursor doesn't have a position then this method will
+    /// return false.
+    pub fn at_start(&self) -> bool {
+        match self.start {
+            Bound::Unbounded => true,
+            Bound::Excluded(st) => {
+                self.current.map(|pos| st + *EPSILON == pos).unwrap_or(false)
+            }
+            Bound::Included(st) => self.current.map(|pos| st == pos).unwrap_or(false),
+        }
+    }
+
+    /// return true if the cursor is at the end. If the end is
+    /// unbounded then this will always return true.
+    ///
+    /// if the cursor doesn't have a position then this method will
+    /// return false.
+    pub fn at_end(&self) -> bool {
+        match self.end {
+            Bound::Unbounded => true,
+            Bound::Excluded(en) => {
+                self.current.map(|pos| en - *EPSILON == pos).unwrap_or(false)
+            }
+            Bound::Included(en) => self.current.map(|pos| en == pos).unwrap_or(false),
+        }
     }
 
     /// Move the current to the specified position in the archive. If
