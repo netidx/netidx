@@ -1205,7 +1205,7 @@ fn add_local_options(application: &gtk::Application) {
         glib::OptionFlags::empty(),
         glib::OptionArg::String,
         "override the default auth mechanism (krb5)",
-        Some("[krb5, local, or anonymous]"),
+        Some("[tls, krb5, local, or anonymous]"),
     );
     application.add_main_option(
         "upn",
@@ -1233,9 +1233,9 @@ fn add_local_options(application: &gtk::Application) {
     );
 }
 
-fn parse_auth(opts: &glib::VariantDict) -> DesiredAuth {
+fn parse_auth(cfg: &Config, opts: &glib::VariantDict) -> DesiredAuth {
     match opts.lookup_value("auth", Some(&glib::VariantTy::STRING)) {
-        None => DesiredAuth::Krb5 { upn: None, spn: None },
+        None => cfg.default_auth(),
         Some(auth) => match auth
             .get::<String>()
             .unwrap()
@@ -1269,7 +1269,7 @@ fn main() {
             None => Config::load_default().unwrap(),
             Some(path) => Config::load(path.get::<String>().unwrap()).unwrap(),
         };
-        let auth = parse_auth(opts);
+        let auth = parse_auth(&cfg, opts);
         let default_loc = match opts.lookup_value("path", Some(&glib::VariantTy::STRING))
         {
             Some(path) => ViewLoc::Netidx(Path::from(path.get::<String>().unwrap())),
