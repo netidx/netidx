@@ -13,7 +13,7 @@ use netidx::{path::Path, pool::Pooled, subscriber::Event};
 use parking_lot::Mutex;
 use std::{
     collections::{HashMap, VecDeque},
-    ops::{Bound, RangeBounds},
+    ops::Bound,
     path::PathBuf,
     sync::Arc,
 };
