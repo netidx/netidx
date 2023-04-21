@@ -42,6 +42,7 @@ mod file {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) struct PublishConfig {
         pub(super) base: Path,
         #[serde(default)]
@@ -90,6 +91,7 @@ mod file {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) struct RecordConfig {
         pub(super) spec: Vec<Chars>,
         #[serde(default = "default_poll_interval")]
@@ -118,6 +120,7 @@ mod file {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) struct Config {
         pub(super) archive_directory: PathBuf,
         #[serde(default)]
