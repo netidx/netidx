@@ -61,7 +61,8 @@ impl DataSource {
                             .output()
                     });
                     match out {
-                        Err(e) => warn!("get command failed {}", e),
+                        Err(e) => warn!("failed to execute get command {}", e),
+                        Ok(o) if !o.status.success() => warn!("get command failed {}", o),
                         Ok(out) => {
                             if out.stdout.len() > 0 {
                                 let out = String::from_utf8_lossy(&out.stdout);

@@ -155,6 +155,7 @@ fn rotate_log_file(
             .output();
         match out {
             Err(e) => warn!("archive put failed for {}, {}", now, e),
+            Ok(o) if !o.status.success() => warn!("archive put failed for {}, {:?}", now, o),
             Ok(out) => {
                 if out.stdout.len() > 0 {
                     warn!("archive put stdout {}", String::from_utf8_lossy(&out.stdout));

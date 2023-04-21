@@ -50,7 +50,8 @@ impl File {
             use tokio::process::Command;
             info!("running list command");
             match Command::new(&cmds.list.0).args(cmds.list.1.iter()).output().await {
-                Err(e) => warn!("list command failed {}", e),
+                Err(e) => warn!("failed to run list command {}", e),
+                Ok(o) if !o.status.success() => warn!("list command failed {}", o),
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let stderr = String::from_utf8_lossy(&output.stderr);

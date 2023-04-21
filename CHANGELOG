@@ -5,6 +5,8 @@
 
   - the browser should take the configured default_auth into account
 
+  - properly check the exit status of commands in the recorder
+
 * 0.19.5
   - fix a bug in subscriber that could cause the last messages from
     a disconnected publisher to be lost
