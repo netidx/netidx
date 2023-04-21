@@ -8,7 +8,7 @@ use crate::{
 use anyhow::Result;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
-use log::{debug, info, warn};
+use log::{debug, info, warn, trace};
 use netidx::{path::Path, pool::Pooled, subscriber::Event};
 use parking_lot::Mutex;
 use std::{
