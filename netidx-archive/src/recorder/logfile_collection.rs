@@ -8,13 +8,14 @@ use crate::{
 use anyhow::Result;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
-use log::warn;
+use log::{info, warn, debug};
 use netidx::{path::Path, pool::Pooled, subscriber::Event};
 use parking_lot::Mutex;
 use std::{
     collections::{HashMap, VecDeque},
     ops::Bound,
-    sync::Arc, path::PathBuf,
+    path::PathBuf,
+    sync::Arc,
 };
 use tokio::task;
 
@@ -49,8 +50,10 @@ impl DataSource {
                 }
             },
             File::Historical(ts) => {
+                debug!("would run get, cmd config {:?}", &config.archive_cmds);
                 if let Some(cmds) = &config.archive_cmds {
                     use std::{iter, process::Command};
+                    info!("running get {:?}", &cmds.get);
                     let out = task::block_in_place(|| {
                         let now = ts.to_rfc3339();
                         Command::new(&cmds.get.0)
@@ -60,12 +63,15 @@ impl DataSource {
                     match out {
                         Err(e) => warn!("get command failed {}", e),
                         Ok(out) => {
-                            if out.stderr.len() > 0 {
-                                warn!(
-                                    "get command stderr {}",
-                                    String::from_utf8_lossy(&out.stderr)
-                                );
+                            if out.stdout.len() > 0 {
+                                let out = String::from_utf8_lossy(&out.stdout);
+                                warn!("get command stdout {}", out)
                             }
+                            if out.stderr.len() > 0 {
+                                let out = String::from_utf8_lossy(&out.stderr);
+                                warn!("get command stderr {}", out);
+                            }
+                            info!("get command succeeded");
                         }
                     }
                 }

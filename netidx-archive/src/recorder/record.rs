@@ -10,7 +10,7 @@ use futures::{
     select_biased,
 };
 use fxhash::{FxHashMap, FxHashSet};
-use log::{error, info, warn};
+use log::{error, info, warn, debug};
 use netidx::{
     path::Path,
     pool::Pooled,
@@ -145,18 +145,24 @@ fn rotate_log_file(
     let current_name = path.join("current");
     let new_name = path.join(now.to_rfc3339());
     fs::rename(&current_name, &new_name)?;
+    debug!("would run put, cmd config {:?}", cmds);
     if let Some(cmds) = cmds {
         use std::process::Command;
         let now = now.to_rfc3339();
+        info!("running put {:?}", &cmds.put);
         let out = Command::new(&cmds.put.0)
             .args(cmds.put.1.iter().chain(iter::once(&now)))
             .output();
         match out {
             Err(e) => warn!("archive put failed for {}, {}", now, e),
             Ok(out) => {
+                if out.stdout.len() > 0 {
+                    warn!("archive put stdout {}", String::from_utf8_lossy(&out.stdout));
+                }
                 if out.stderr.len() > 0 {
                     warn!("archive put stderr {}", String::from_utf8_lossy(&out.stderr));
                 }
+                info!("put completed successfully");
             }
         }
     }

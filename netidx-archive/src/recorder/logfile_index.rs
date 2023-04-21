@@ -1,7 +1,7 @@
 use super::Config;
 use anyhow::Result;
 use chrono::prelude::*;
-use log::warn;
+use log::{warn, info, debug};
 use std::{cmp::Ordering, path::PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,8 +45,10 @@ impl File {
                 }
             }
         }
+        debug!("would run list, cmd config {:?}", &config.archive_cmds);
         if let Some(cmds) = &config.archive_cmds {
             use tokio::process::Command;
+            info!("running list command");
             match Command::new(&cmds.list.0).args(cmds.list.1.iter()).output().await {
                 Err(e) => warn!("list command failed {}", e),
                 Ok(output) => {
@@ -55,6 +57,7 @@ impl File {
                     if stderr.len() > 0 {
                         warn!("list stderr {}", stderr);
                     }
+                    info!("list succeeded with {}", &stdout);
                     for name in stdout.split("\n") {
                         match name.parse::<DateTime<Utc>>() {
                             Err(e) => warn!("failed to parse list ts {}", e),
