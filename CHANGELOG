@@ -7,6 +7,10 @@
   - fix a bug in subscriber that could cause the last messages from
     a disconnected publisher to be lost
 
+  - browser force new netidx version
+
+  - add a command line tool to query the recorder's oneshot facility
+
 * 0.19.4
   - fix a bug in subscriber that caused voluntary shutdowns
     to add the ip to the recently failed list.
@@ -20,6 +24,9 @@
 
 * 0.19.1
   - fix a bug in PREFER_LOCAL
+
+  - introduce a new replay mode in the recorder "oneshot" that lets
+    you just call an rpc with a time range and get data.
 
 * 0.19.0
   - fix PublisherBuilder to be more ergonomic, sorry for the churn
