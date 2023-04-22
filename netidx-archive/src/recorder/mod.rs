@@ -1,4 +1,4 @@
-use crate::logfile::{ArchiveReader, BatchItem};
+use crate::logfile::{ArchiveReader, ArchiveWriter, BatchItem};
 use anyhow::Result;
 use chrono::prelude::*;
 use futures::{
@@ -338,6 +338,34 @@ impl Recorder {
         let mut wait = Vec::new();
         let subscriber =
             Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
+        let index_path = config.archive_directory.join("pathindex");
+        let pathindex = match config.record.as_ref() {
+            None => task::block_in_place(|| ArchiveReader::open(index_path))?,
+            Some(record_config) => {
+                let pathindex = task::block_in_place(|| ArchiveWriter::open(index_path))?;
+                let pathindex_reader = pathindex.reader()?;
+                let record_config = Arc::new(record_config.clone());
+                let subscriber = subscriber.clone();
+                let config = config.clone();
+                let bcast_tx = bcast_tx.clone();
+                let bcast_rx = bcast_tx.subscribe();
+                wait.push(task::spawn(async move {
+                    let r = record::run(
+                        bcast_tx,
+                        bcast_rx,
+                        pathindex,
+                        subscriber,
+                        config,
+                        record_config,
+                    )
+                    .await;
+                    if let Err(e) = r {
+                        error!("recorder stopped on error {}", e);
+                    }
+                }));
+                pathindex_reader
+            }
+        };
         if let Some(publish_config) = config.publish.as_ref() {
             let publish_config = Arc::new(publish_config.clone());
             let publisher = PublisherBuilder::new(config.netidx_config.clone())
@@ -356,6 +384,7 @@ impl Recorder {
                     let r = publish::run(
                         bcast_tx,
                         bcast_rx,
+                        pathindex,
                         subscriber,
                         config,
                         publish_config,
@@ -378,21 +407,6 @@ impl Recorder {
                     if let Err(e) = r {
                         error!("publisher oneshot stopped on error {}", e)
                     }
-                }
-            }))
-        }
-        if let Some(record_config) = config.record.as_ref() {
-            let record_config = Arc::new(record_config.clone());
-            let subscriber = subscriber.clone();
-            let config = config.clone();
-            let bcast_tx = bcast_tx.clone();
-            let bcast_rx = bcast_tx.subscribe();
-            wait.push(task::spawn(async move {
-                if let Err(e) =
-                    record::run(bcast_tx, bcast_rx, subscriber, config, record_config)
-                        .await
-                {
-                    error!("recorder stopped on error {}", e);
                 }
             }))
         }

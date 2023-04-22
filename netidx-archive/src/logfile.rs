@@ -1161,11 +1161,23 @@ impl ArchiveReader {
     }
 
     pub fn id_for_path(&self, path: &Path) -> Option<Id> {
-        self.index.read().id_by_path.get(path).copied()
+        match self.index.read().id_by_path.get(path).copied() {
+            Some(id) => Some(id),
+            None => {
+                let _ = self.check_remap_rescan();
+                self.index.read().id_by_path.get(path).copied()
+            }
+        }
     }
 
     pub fn path_for_id(&self, id: &Id) -> Option<Path> {
-        self.index.read().path_by_id.get(id).cloned()
+        match self.index.read().path_by_id.get(id).cloned() {
+            Some(path) => Some(path),
+            None => {
+                let _ = self.check_remap_rescan();
+                self.index.read().path_by_id.get(id).cloned()
+            }
+        }
     }
 
     /// Check if the memory map needs to be remapped due to growth,

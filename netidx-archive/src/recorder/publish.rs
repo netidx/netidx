@@ -1,3 +1,4 @@
+use super::logfile_collection::LogfileCollection;
 use crate::{
     logfile::{ArchiveReader, BatchItem, Id, Seek},
     recorder::{BCastMsg, Config, PublishConfig},
@@ -14,8 +15,7 @@ use netidx::{
     pool::Pooled,
     protocol::value::FromValue,
     publisher::{
-        self, ClId, PublishFlags, Publisher, UpdateBatch, Val, Value,
-        WriteRequest,
+        self, ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest,
     },
     resolver_client::{Glob, GlobSet},
     subscriber::{Event, Subscriber},
@@ -43,7 +43,6 @@ use std::{
 };
 use tokio::{sync::broadcast, task, time};
 use uuid::Uuid;
-use super::logfile_collection::{Image, LogfileCollection};
 
 pub(crate) static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
 pub(crate) static END_DOC: &'static str = "Time timestamp you want to replay end at, or Unbounded for the end of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. default Unbounded";
@@ -349,6 +348,7 @@ struct Session {
     data_base: Path,
     new_pos_ctl: Option<DateTime<Utc>>,
     log: LogfileCollection,
+    pathindex: ArchiveReader,
 }
 
 impl Session {
@@ -356,18 +356,15 @@ impl Session {
         config: Arc<Config>,
         publisher: Publisher,
         head: Option<ArchiveReader>,
+        pathindex: ArchiveReader,
         session_base: Path,
         filter: GlobSet,
         control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     ) -> Result<Self> {
         let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
-        let log = LogfileCollection::new(
-            config,
-            head,
-            Bound::Unbounded,
-            Bound::Unbounded,
-        )
-        .await?;
+        let log =
+            LogfileCollection::new(config, head, Bound::Unbounded, Bound::Unbounded)
+                .await?;
         Ok(Self {
             controls,
             publisher,
@@ -384,6 +381,7 @@ impl Session {
             data_base: session_base.append("data"),
             new_pos_ctl: None,
             log,
+            pathindex,
         })
     }
 
@@ -485,7 +483,7 @@ impl Session {
                             val.update(&mut pbatch, v);
                         }
                         None => {
-                            if let Some(path) = self.log.path_for_id(&id) {
+                            if let Some(path) = self.pathindex.path_for_id(&id) {
                                 if self.filter.is_match(&path) {
                                     let path = self.data_base.append(&path);
                                     let val = self.publisher.publish(path, v)?;
@@ -714,7 +712,7 @@ impl Session {
 
     fn reimage(&mut self, pbatch: &mut UpdateBatch) -> Result<()> {
         if let Some(r) = self.log.reimage() {
-            let Image { mut idx, mut img } = r?;
+            let mut idx = r?;
             if let Some(cursor) = self.log.position() {
                 self.controls.pos_ctl.update(
                     pbatch,
@@ -729,21 +727,21 @@ impl Session {
                     },
                 );
             }
-            for (id, path) in idx.drain(..) {
-                let v = match img.remove(&id) {
-                    None | Some(Event::Unsubscribed) => Value::Null,
-                    Some(Event::Update(v)) => v,
+            for (id, ev) in idx.drain() {
+                let v = match ev {
+                    Event::Unsubscribed => Value::Null,
+                    Event::Update(v) => v,
                 };
                 match self.published.get(&id) {
-                    Some(val) => {
-                        val.update(pbatch, v);
-                    }
+                    Some(val) => val.update(pbatch, v),
                     None => {
-                        if self.filter.is_match(&path) {
-                            let path = self.data_base.append(path.as_ref());
-                            let val = self.publisher.publish(path, v)?;
-                            self.published_ids.insert(val.id());
-                            self.published.insert(id, val);
+                        if let Some(path) = self.pathindex.path_for_id(&id) {
+                            if self.filter.is_match(&path) {
+                                let path = self.data_base.append(path.as_ref());
+                                let val = self.publisher.publish(path, v)?;
+                                self.published_ids.insert(val.id());
+                                self.published.insert(id, val);
+                            }
                         }
                     }
                 }
@@ -851,6 +849,7 @@ async fn maybe_update_pos(interval: &mut time::Interval, new_pos: bool) {
 async fn session(
     mut bcast: broadcast::Receiver<BCastMsg>,
     head: Option<ArchiveReader>,
+    pathindex: ArchiveReader,
     subscriber: Subscriber,
     publisher: Publisher,
     session_id: Uuid,
@@ -875,6 +874,7 @@ async fn session(
         config.clone(),
         publisher.clone(),
         head,
+        pathindex.clone(),
         session_base,
         filter,
         &control_tx,
@@ -1001,6 +1001,7 @@ async fn start_session(
     session_id: Uuid,
     session_token: SessionId,
     bcast: &broadcast::Sender<BCastMsg>,
+    pathindex: ArchiveReader,
     subscriber: &Subscriber,
     head: &Option<ArchiveReader>,
     config: Arc<Config>,
@@ -1012,10 +1013,12 @@ async fn start_session(
     let head = head.clone();
     let subscriber = subscriber.clone();
     let publisher_cl = publisher.clone();
+    let pathindex = pathindex.clone();
     task::spawn(async move {
         let res = session(
             bcast,
             head,
+            pathindex,
             subscriber,
             publisher_cl,
             session_id,
@@ -1041,6 +1044,7 @@ async fn start_session(
 pub(super) async fn run(
     bcast: broadcast::Sender<BCastMsg>,
     mut bcast_rx: broadcast::Receiver<BCastMsg>,
+    pathindex: ArchiveReader,
     subscriber: Subscriber,
     config: Arc<Config>,
     publish_config: Arc<PublishConfig>,
@@ -1113,6 +1117,7 @@ pub(super) async fn run(
                                 session_id,
                                 session_token,
                                 &bcast,
+                                pathindex.clone(),
                                 &subscriber,
                                 &archive,
                                 config.clone(),
@@ -1152,6 +1157,7 @@ pub(super) async fn run(
                                 session_id,
                                 session_token,
                                 &bcast,
+                                pathindex.clone(),
                                 &subscriber,
                                 &archive,
                                 config.clone(),

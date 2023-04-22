@@ -107,11 +107,6 @@ impl DataSource {
     }
 }
 
-pub struct Image {
-    pub idx: Pooled<Vec<(Id, Path)>>,
-    pub img: Pooled<HashMap<Id, Event>>,
-}
-
 pub struct LogfileCollection {
     index: LogfileIndex,
     source: Option<DataSource>,
@@ -227,16 +222,6 @@ impl LogfileCollection {
         }
     }
 
-    /// look up the path for a given id
-    pub fn path_for_id(&self, id: &Id) -> Option<Path> {
-        self.source.as_ref().and_then(|ds| ds.archive.path_for_id(id))
-    }
-
-    /// look up the id for a given path
-    pub fn id_for_path(&self, path: &Path) -> Option<Id> {
-        self.source.as_ref().and_then(|ds| ds.archive.id_for_path(path))
-    }
-
     /// look up the position in the archive, if any
     pub fn position(&self) -> Option<&Cursor> {
         self.source.as_ref().map(|ds| &ds.cursor)
@@ -276,13 +261,9 @@ impl LogfileCollection {
     }
 
     /// reimage the file at the current cursor position, returning the path map and the image
-    pub fn reimage(&mut self) -> Option<Result<Image>> {
+    pub fn reimage(&mut self) -> Option<Result<Pooled<HashMap<Id, Event>>>> {
         task::block_in_place(|| {
-            self.source.as_mut().map(|ds| {
-                let img = ds.archive.build_image(&ds.cursor)?;
-                let idx = ds.archive.get_index();
-                Ok(Image { idx, img })
-            })
+            self.source.as_mut().map(|ds| ds.archive.build_image(&ds.cursor))
         })
     }
 

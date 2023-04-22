@@ -1,5 +1,5 @@
 use super::{ArchiveCmds, BCastMsg, Config, RecordConfig};
-use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL};
+use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL, ArchiveReader};
 use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
@@ -171,17 +171,17 @@ fn rotate_log_file(
 }
 
 fn write_pathmap(
-    archive: &mut ArchiveWriter,
+    pathindex: &mut ArchiveWriter,
     to_add: &mut Vec<(Path, SubId)>,
     by_subid: &mut FxHashMap<SubId, Id>,
 ) -> Result<()> {
     task::block_in_place(|| {
         let i = to_add.iter().map(|(ref p, _)| p);
-        archive.add_paths(i)
+        pathindex.add_paths(i)
     })?;
     for (path, subid) in to_add.drain(..) {
         if !by_subid.contains_key(&subid) {
-            let id = archive.id_for_path(&path).unwrap();
+            let id = pathindex.id_for_path(&path).unwrap();
             by_subid.insert(subid, id);
         }
     }
@@ -207,6 +207,7 @@ fn write_image(
 pub(super) async fn run(
     bcast: broadcast::Sender<BCastMsg>,
     mut bcast_rx: broadcast::Receiver<BCastMsg>,
+    mut pathindex: ArchiveWriter,
     subscriber: Subscriber,
     config: Arc<Config>,
     record_config: Arc<RecordConfig>,
@@ -270,10 +271,7 @@ pub(super) async fn run(
                     to_add.push((p.clone(), dv.id()));
                 }
                 by_subid.clear();
-                task::block_in_place(|| {
-                    write_pathmap(&mut archive, &mut to_add, &mut by_subid)?;
-                    write_image(&mut archive, &by_subid, &image, now)
-                })?;
+                task::block_in_place(|| write_image(&mut archive, &by_subid, &image, now))?;
                 let _ = bcast.send(BCastMsg::LogRotated(now));
                 let _ = bcast.send(BCastMsg::NewCurrent(archive.reader()?));
             },
@@ -308,7 +306,7 @@ pub(super) async fn run(
                             by_subid.remove(&dv.id());
                         }
                     }
-                    write_pathmap(&mut archive, &mut to_add, &mut by_subid)?
+                    write_pathmap(&mut pathindex, &mut to_add, &mut by_subid)?
                 }
             },
             batch = rx_batch.next() => match batch {
