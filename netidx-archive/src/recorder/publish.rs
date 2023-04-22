@@ -471,7 +471,7 @@ impl Session {
         } else {
             let mut pbatch = self.publisher.start_batch();
             task::block_in_place(|| {
-                let _ = self.pathindex.check_remap_rescan();
+                self.pathindex.check_remap_rescan()?;
                 let index = self.pathindex.index();
                 for BatchItem(id, ev) in batch.1.drain(..) {
                     let v = match ev {
@@ -711,38 +711,37 @@ impl Session {
     }
 
     fn reimage(&mut self, pbatch: &mut UpdateBatch) -> Result<()> {
-        if let Some(r) = self.log.reimage() {
-            let mut idx = r?;
-            if let Some(cursor) = self.log.position() {
-                self.controls.pos_ctl.update(
-                    pbatch,
-                    match cursor.current() {
-                        Some(ts) => Value::DateTime(ts),
-                        None => match cursor.start() {
-                            Bound::Unbounded => Value::Null,
-                            Bound::Included(ts) | Bound::Excluded(ts) => {
-                                Value::DateTime(ts)
-                            }
-                        },
+        let mut idx = self.log.reimage()?;
+        if let Some(cursor) = self.log.position() {
+            self.controls.pos_ctl.update(
+                pbatch,
+                match cursor.current() {
+                    Some(ts) => Value::DateTime(ts),
+                    None => match cursor.start() {
+                        Bound::Unbounded => Value::Null,
+                        Bound::Included(ts) | Bound::Excluded(ts) => {
+                            Value::DateTime(ts)
+                        }
                     },
-                );
-            }
-            let index = self.pathindex.index();
-            for (id, ev) in idx.drain() {
-                let v = match ev {
-                    Event::Unsubscribed => Value::Null,
-                    Event::Update(v) => v,
-                };
-                match self.published.get(&id) {
-                    Some(val) => val.update(pbatch, v),
-                    None => {
-                        if let Some(path) = index.path_for_id(&id) {
-                            if self.filter.is_match(&path) {
-                                let path = self.data_base.append(path.as_ref());
-                                let val = self.publisher.publish(path, v)?;
-                                self.published_ids.insert(val.id());
-                                self.published.insert(id, val);
-                            }
+                },
+            );
+        }
+        self.pathindex.check_remap_rescan()?;
+        let index = self.pathindex.index();
+        for (id, ev) in idx.drain() {
+            let v = match ev {
+                Event::Unsubscribed => Value::Null,
+                Event::Update(v) => v,
+            };
+            match self.published.get(&id) {
+                Some(val) => val.update(pbatch, v),
+                None => {
+                    if let Some(path) = index.path_for_id(&id) {
+                        if self.filter.is_match(&path) {
+                            let path = self.data_base.append(path.as_ref());
+                            let val = self.publisher.publish(path, v)?;
+                            self.published_ids.insert(val.id());
+                            self.published.insert(id, val);
                         }
                     }
                 }

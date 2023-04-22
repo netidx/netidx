@@ -1,5 +1,5 @@
 use crate::{
-    logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek},
+    logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek, IMG_POOL},
     recorder::{
         logfile_index::{File, LogfileIndex},
         Config,
@@ -261,10 +261,15 @@ impl LogfileCollection {
     }
 
     /// reimage the file at the current cursor position, returning the path map and the image
-    pub fn reimage(&mut self) -> Option<Result<Pooled<HashMap<Id, Event>>>> {
-        task::block_in_place(|| {
-            self.source.as_mut().map(|ds| ds.archive.build_image(&ds.cursor))
-        })
+    pub fn reimage(&mut self) -> Result<Pooled<HashMap<Id, Event>>> {
+        if self.source()? {
+            task::block_in_place(|| {
+                let ds = self.source.as_mut().unwrap();
+                ds.archive.build_image(&ds.cursor)
+            })
+        } else {
+            Ok(IMG_POOL.take())
+        }
     }
 
     /// tell the collection that the log file has been rotated

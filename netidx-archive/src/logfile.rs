@@ -285,7 +285,7 @@ lazy_static! {
         Pool::new(100, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
     static ref IDX_POOL: Pool<Vec<(Id, Path)>> = Pool::new(10, 20_000_000);
-    static ref IMG_POOL: Pool<HashMap<Id, Event>> = Pool::new(10, 20_000_000);
+    pub(crate) static ref IMG_POOL: Pool<HashMap<Id, Event>> = Pool::new(10, 20_000_000);
     static ref EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
     static ref TO_READ_POOL: Pool<Vec<usize>> = Pool::new(10, 20_000_000);
 }
