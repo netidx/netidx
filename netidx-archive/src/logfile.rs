@@ -894,7 +894,7 @@ impl ArchiveWriter {
         batch: &Pooled<Vec<BatchItem>>,
     ) -> Result<()> {
         if batch.len() > 0 {
-            let timestamp = self.time.timestamp(timestamp);
+            let timestamp = self.time.timestamp(dbg!(timestamp));
             let record_length = <Pooled<Vec<BatchItem>> as Pack>::encoded_len(&batch);
             if record_length > MAX_RECORD_LEN as usize {
                 bail!(RecordTooLarge)

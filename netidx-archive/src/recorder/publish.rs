@@ -432,14 +432,14 @@ impl Session {
                         }
                         let (ts, batch) = current.pop_front().unwrap();
                         let elapsed = last.elapsed();
-                        if elapsed < *next_after {
+                        if elapsed < dbg!(*next_after) {
                             time::sleep(*next_after - elapsed).await;
                         }
                         if current.is_empty() {
                             continue;
                         } else {
                             let wait = {
-                                let ms = (current[0].0 - ts).num_milliseconds() as f64;
+                                let ms = (dbg!(current[0].0) - dbg!(ts)).num_milliseconds() as f64;
                                 (ms / *rate).trunc() as i64
                             };
                             if wait > 0 {

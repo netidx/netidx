@@ -339,31 +339,12 @@ impl Recorder {
         let subscriber =
             Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
         let index_path = config.archive_directory.join("pathindex");
-        let pathindex = match config.record.as_ref() {
-            None => task::block_in_place(|| ArchiveReader::open(index_path))?,
-            Some(record_config) => {
+        let (pathindex_reader, pathindex_writer) = match config.record.as_ref() {
+            None => (task::block_in_place(|| ArchiveReader::open(index_path))?, None),
+            Some(_) => {
                 let pathindex = task::block_in_place(|| ArchiveWriter::open(index_path))?;
                 let pathindex_reader = pathindex.reader()?;
-                let record_config = Arc::new(record_config.clone());
-                let subscriber = subscriber.clone();
-                let config = config.clone();
-                let bcast_tx = bcast_tx.clone();
-                let bcast_rx = bcast_tx.subscribe();
-                wait.push(task::spawn(async move {
-                    let r = record::run(
-                        bcast_tx,
-                        bcast_rx,
-                        pathindex,
-                        subscriber,
-                        config,
-                        record_config,
-                    )
-                    .await;
-                    if let Err(e) = r {
-                        error!("recorder stopped on error {}", e);
-                    }
-                }));
-                pathindex_reader
+                (pathindex_reader, Some(pathindex))
             }
         };
         if let Some(publish_config) = config.publish.as_ref() {
@@ -374,7 +355,7 @@ impl Recorder {
                 .build()
                 .await?;
             wait.push(task::spawn({
-                let pathindex = pathindex.clone();
+                let pathindex = pathindex_reader.clone();
                 let publish_config = publish_config.clone();
                 let subscriber = subscriber.clone();
                 let config = config.clone();
@@ -398,7 +379,7 @@ impl Recorder {
                 }
             }));
             wait.push(task::spawn({
-                let pathindex = pathindex.clone();
+                let pathindex = pathindex_reader.clone();
                 let publish_config = publish_config.clone();
                 let config = config.clone();
                 let bcast_rx = bcast_tx.subscribe();
@@ -418,6 +399,35 @@ impl Recorder {
                 }
             }))
         }
+        match config.record.as_ref() {
+            None => match task::block_in_place(|| {
+                ArchiveReader::open(config.archive_directory.join("current"))
+            }) {
+                Ok(head) => { let _ = bcast_tx.send(BCastMsg::NewCurrent(head)); },
+                Err(_) => (),
+            },
+            Some(record_config) => {
+                let record_config = Arc::new(record_config.clone());
+                let subscriber = subscriber.clone();
+                let config = config.clone();
+                let bcast_tx = bcast_tx.clone();
+                let bcast_rx = bcast_tx.subscribe();
+                wait.push(task::spawn(async move {
+                    let r = record::run(
+                        bcast_tx,
+                        bcast_rx,
+                        pathindex_writer.unwrap(),
+                        subscriber,
+                        config,
+                        record_config,
+                    )
+                    .await;
+                    if let Err(e) = r {
+                        error!("recorder stopped on error {}", e);
+                    }
+                }));
+            }
+        };
         future::join_all(wait).await;
         Ok(())
     }
