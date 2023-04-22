@@ -610,15 +610,7 @@ fn scan_records(
     }
 }
 
-fn scan_file(
-    path_by_id: &mut IndexMap<Id, Path, FxBuildHasher>,
-    id_by_path: &mut HashMap<Path, Id>,
-    imagemap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
-    deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
-    time_basis: &mut DateTime<Utc>,
-    max_id: &mut u64,
-    buf: &mut impl Buf,
-) -> Result<usize> {
+fn scan_header(buf: &mut impl Buf) -> Result<FileHeader> {
     let total_bytes = buf.remaining();
     // check the file header
     if buf.remaining() < <FileHeader as Pack>::const_encoded_len().unwrap() {
@@ -629,8 +621,22 @@ fn scan_file(
         .context("invalid file header")?;
     // this is the first version, so no upgrading can be done yet
     if header.version != FILE_VERSION {
-        bail!("file version is too new, can't read it")
+        bail!("file version mismatch, can't read it")
     }
+    Ok(header)
+}
+
+fn scan_file(
+    path_by_id: &mut IndexMap<Id, Path, FxBuildHasher>,
+    id_by_path: &mut HashMap<Path, Id>,
+    imagemap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
+    deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
+    time_basis: &mut DateTime<Utc>,
+    max_id: &mut u64,
+    buf: &mut impl Buf,
+) -> Result<usize> {
+    let total_bytes = buf.remaining();
+    let header = scan_header(buf)?;
     scan_records(
         path_by_id,
         id_by_path,
@@ -890,11 +896,6 @@ impl ArchiveWriter {
     ) -> Result<()> {
         if batch.len() > 0 {
             let timestamp = self.time.timestamp(timestamp);
-            for BatchItem(id, _) in batch.iter() {
-                if !self.path_by_id.contains_key(id) {
-                    bail!("unknown id: {:?} in batch", id)
-                }
-            }
             let record_length = <Pooled<Vec<BatchItem>> as Pack>::encoded_len(&batch);
             if record_length > MAX_RECORD_LEN as usize {
                 bail!(RecordTooLarge)
