@@ -8,7 +8,7 @@ use crate::{
         publish::{END_DOC, FILTER_DOC, START_DOC},
         BCastMsg, Config, PublishConfig,
     },
-    recorder_client::OneshotReply,
+    recorder_client::{OneshotReply, PATHMAPS},
 };
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -63,6 +63,7 @@ impl OneshotConfig {
 
 async fn do_oneshot(
     head: Option<ArchiveReader>,
+    pathindex: ArchiveReader,
     config: Arc<Config>,
     limit: usize,
     args: OneshotConfig,
@@ -73,22 +74,23 @@ async fn do_oneshot(
     debug!("seeking to the beginning");
     log.seek(Seek::Beginning)?;
     debug!("reimaging");
-    let mut img = log.reimage().ok_or_else(|| anyhow!("no data source"))??;
-    let path_by_id: FxHashMap<Id, Path> = img
-        .idx
-        .iter()
-        .filter_map(|(id, path)| {
+    let mut idx = log.reimage().ok_or_else(|| anyhow!("no data source"))??;
+    pathindex.check_remap_rescan()?;
+    let index = pathindex.index();
+    let mut path_by_id = PATHMAPS.take();
+    path_by_id.extend(idx.keys().filter_map(|id| {
+        index.path_for_id(id).and_then(|path| {
             if args.filter.is_match(path) {
                 Some((*id, path.clone()))
             } else {
                 None
             }
         })
-        .collect();
-    img.img.retain(|id, _| path_by_id.contains_key(id));
+    }));
+    idx.retain(|id, _| path_by_id.contains_key(id));
     let mut data = OneshotReply {
-        pathmap: img.idx,
-        image: img.img,
+        pathmap: path_by_id,
+        image: idx,
         deltas: CURSOR_BATCH_POOL.take(),
     };
     loop {
@@ -99,9 +101,11 @@ async fn do_oneshot(
             break;
         } else {
             batches.retain_mut(|(_, batch)| {
-                batch.retain(|BatchItem(id, _)| match path_by_id.get(id) {
-                    None => false,
-                    Some(path) => args.filter.is_match(path),
+                batch.retain(|BatchItem(id, _)| {
+                    data.pathmap
+                        .get(id)
+                        .map(|path| args.filter.is_match(path))
+                        .unwrap_or(false)
                 });
                 !batch.is_empty()
             });
@@ -125,6 +129,7 @@ async fn wait_complete(set: &mut JoinSet<()>) {
 
 pub(super) async fn run(
     mut bcast_rx: broadcast::Receiver<BCastMsg>,
+    pathindex: ArchiveReader,
     config: Arc<Config>,
     publish_config: Arc<PublishConfig>,
     publisher: Publisher,
@@ -160,13 +165,15 @@ pub(super) async fn run(
                     // assist you.
                     reply.send(Value::Error(Chars::from("busy")));
                 } else {
-                    let archive = archive.clone();
-                    let config = config.clone();
+                    let archive_ = archive.clone();
+                    let pathindex_ = pathindex.clone();
+                    let config_ = config.clone();
                     let limit = publish_config.oneshot_data_limit;
                     pending.spawn(async move {
                         let r = do_oneshot(
-                            archive.clone(),
-                            config.clone(),
+                            archive_,
+                            pathindex_,
+                            config_,
                             limit,
                             args,
                             &mut reply

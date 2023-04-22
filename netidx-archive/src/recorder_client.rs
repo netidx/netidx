@@ -1,11 +1,12 @@
 use crate::logfile::{BatchItem, Id};
 use anyhow::Result;
 use chrono::prelude::*;
+use fxhash::FxHashMap;
 use netidx::{
     chars::Chars,
     pack::Pack,
     path::Path,
-    pool::Pooled,
+    pool::{Pooled, Pool},
     resolver_client::GlobSet,
     subscriber::{Event, Subscriber, Value},
 };
@@ -16,9 +17,13 @@ use std::{
     sync::Arc,
 };
 
+lazy_static! {
+    pub(crate) static ref PATHMAPS: Pool<FxHashMap<Id, Path>> = Pool::new(100, 100_000);
+}
+
 #[derive(Debug, Clone, Pack)]
 pub struct OneshotReply {
-    pub pathmap: Pooled<Vec<(Id, Path)>>,
+    pub pathmap: Pooled<FxHashMap<Id, Path>>,
     pub image: Pooled<HashMap<Id, Event>>,
     pub deltas: Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
 }

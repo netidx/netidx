@@ -374,6 +374,7 @@ impl Recorder {
                 .build()
                 .await?;
             wait.push(task::spawn({
+                let pathindex = pathindex.clone();
                 let publish_config = publish_config.clone();
                 let subscriber = subscriber.clone();
                 let config = config.clone();
@@ -397,13 +398,20 @@ impl Recorder {
                 }
             }));
             wait.push(task::spawn({
+                let pathindex = pathindex.clone();
                 let publish_config = publish_config.clone();
                 let config = config.clone();
                 let bcast_rx = bcast_tx.subscribe();
                 let publisher = publisher.clone();
                 async move {
-                    let r =
-                        oneshot::run(bcast_rx, config, publish_config, publisher).await;
+                    let r = oneshot::run(
+                        bcast_rx,
+                        pathindex,
+                        config,
+                        publish_config,
+                        publisher,
+                    )
+                    .await;
                     if let Err(e) = r {
                         error!("publisher oneshot stopped on error {}", e)
                     }

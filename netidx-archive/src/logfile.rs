@@ -991,6 +991,16 @@ impl ArchiveIndex {
         }
     }
 
+    /// look up the path for a given id
+    pub fn path_for_id(&self, id: &Id) -> Option<&Path> {
+        self.path_by_id.get(id)
+    }
+
+    /// look up the id of a given path
+    pub fn id_for_path(&self, path: &Path) -> Option<&Id> {
+        self.id_by_path.get(path)
+    }
+    
     pub fn deltamap(&self) -> &BTreeMap<DateTime<Utc>, usize> {
         &self.deltamap
     }
@@ -1160,26 +1170,6 @@ impl ArchiveReader {
         self.index.read().imagemap.len()
     }
 
-    pub fn id_for_path(&self, path: &Path) -> Option<Id> {
-        match self.index.read().id_by_path.get(path).copied() {
-            Some(id) => Some(id),
-            None => {
-                let _ = self.check_remap_rescan();
-                self.index.read().id_by_path.get(path).copied()
-            }
-        }
-    }
-
-    pub fn path_for_id(&self, id: &Id) -> Option<Path> {
-        match self.index.read().path_by_id.get(id).cloned() {
-            Some(path) => Some(path),
-            None => {
-                let _ = self.check_remap_rescan();
-                self.index.read().path_by_id.get(id).cloned()
-            }
-        }
-    }
-
     /// Check if the memory map needs to be remapped due to growth,
     /// and check if additional records exist that need to be
     /// indexed. This method is only relevant if this `ArchiveReader`
@@ -1252,7 +1242,7 @@ impl ArchiveReader {
 
     /// Return a vector of all id/path pairs present in the
     /// archive. This may change if the archive is being written to.
-    pub fn get_index(&self) -> Pooled<Vec<(Id, Path)>> {
+    fn get_index(&self) -> Pooled<Vec<(Id, Path)>> {
         let mut idx = IDX_POOL.take();
         let mut i = 0;
         // we must ensure we don't hold the lock for too long in the
@@ -1394,7 +1384,7 @@ mod test {
             assert!(elapsed <= 10 && elapsed >= -10);
             assert_eq!(Vec::len(&b), paths.len());
             for (BatchItem(id, v), p) in b.iter().zip(paths.iter()) {
-                assert_eq!(Some(p), t.path_for_id(id).as_ref());
+                assert_eq!(Some(p), t.index().path_for_id(id));
                 assert_eq!(v, &Event::Update(Value::U64(42)))
             }
         }

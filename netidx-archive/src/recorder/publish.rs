@@ -473,6 +473,8 @@ impl Session {
         } else {
             let mut pbatch = self.publisher.start_batch();
             task::block_in_place(|| {
+                let _ = self.pathindex.check_remap_rescan();
+                let index = self.pathindex.index();
                 for BatchItem(id, ev) in batch.1.drain(..) {
                     let v = match ev {
                         Event::Unsubscribed => Value::Null,
@@ -483,7 +485,7 @@ impl Session {
                             val.update(&mut pbatch, v);
                         }
                         None => {
-                            if let Some(path) = self.pathindex.path_for_id(&id) {
+                            if let Some(path) = index.path_for_id(&id) {
                                 if self.filter.is_match(&path) {
                                     let path = self.data_base.append(&path);
                                     let val = self.publisher.publish(path, v)?;
@@ -727,6 +729,7 @@ impl Session {
                     },
                 );
             }
+            let index = self.pathindex.index();
             for (id, ev) in idx.drain() {
                 let v = match ev {
                     Event::Unsubscribed => Value::Null,
@@ -735,7 +738,7 @@ impl Session {
                 match self.published.get(&id) {
                     Some(val) => val.update(pbatch, v),
                     None => {
-                        if let Some(path) = self.pathindex.path_for_id(&id) {
+                        if let Some(path) = index.path_for_id(&id) {
                             if self.filter.is_match(&path) {
                                 let path = self.data_base.append(path.as_ref());
                                 let val = self.publisher.publish(path, v)?;
