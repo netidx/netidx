@@ -241,6 +241,8 @@ pub(super) async fn run(
     let mut last_image = archive.len();
     let mut last_flush = archive.len();
     let mut pending_list: Option<Fuse<oneshot::Receiver<Lst>>> = None;
+    let mut batches = 0;
+    let mut last_batches = Instant::now();
     start_list_task(rx_list, subscriber.resolver(), record_config.spec.clone());
     loop {
         select_biased! {
@@ -265,6 +267,11 @@ pub(super) async fn run(
                         Ok(last_flush = archive.len())
                     })?;
                 }
+                let now = Instant::now();
+                let elapsed = now - last_batches;
+                info!("recorded: {} batches/s", batches as f32 / elapsed.as_secs_f32());
+                last_batches = now;
+                batches = 0;
             },
             _ = maybe_interval(&mut rotate).fuse() => {
                 let now = Utc::now();
@@ -321,6 +328,7 @@ pub(super) async fn run(
             batch = rx_batch.next() => match batch {
                 None => break,
                 Some(mut batch) => {
+                    batches += 1;
                     let now = Utc::now();
                     let mut tbatch = BATCH_POOL.take();
                     task::block_in_place(|| -> Result<()> {
