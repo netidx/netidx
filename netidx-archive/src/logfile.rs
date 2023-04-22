@@ -611,7 +611,6 @@ fn scan_records(
 }
 
 fn scan_header(buf: &mut impl Buf) -> Result<FileHeader> {
-    let total_bytes = buf.remaining();
     // check the file header
     if buf.remaining() < <FileHeader as Pack>::const_encoded_len().unwrap() {
         bail!("invalid file header: too short")
