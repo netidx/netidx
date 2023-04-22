@@ -346,7 +346,6 @@ struct Session {
     speed: Speed,
     state: Arc<AtomicState>,
     data_base: Path,
-    new_pos_ctl: Option<DateTime<Utc>>,
     log: LogfileCollection,
     pathindex: ArchiveReader,
 }
@@ -379,7 +378,6 @@ impl Session {
             filter,
             state: Arc::new(AtomicState::new(State::Pause)),
             data_base: session_base.append("data"),
-            new_pos_ctl: None,
             log,
             pathindex,
         })
@@ -498,7 +496,7 @@ impl Session {
                 }
                 Ok::<(), anyhow::Error>(())
             })?;
-            self.new_pos_ctl = Some(batch.0);
+            self.controls.pos_ctl.update(&mut pbatch, batch.0);
             Ok(pbatch.commit(None).await)
         }
     }
@@ -767,7 +765,6 @@ impl Session {
             }
         };
         self.reimage(pbatch)?;
-        self.new_pos_ctl = None;
         Ok(())
     }
 
@@ -805,14 +802,6 @@ impl Session {
             }
         }
     }
-
-    async fn update_new_pos(&mut self) {
-        if let Some(pos) = self.new_pos_ctl {
-            let mut batch = self.publisher.start_batch();
-            self.controls.pos_ctl.update(&mut batch, pos);
-            batch.commit(None).await;
-        }
-    }
 }
 
 fn not_idle(idle: &mut bool, cluster: &Cluster<ClusterCmd>) {
@@ -838,14 +827,6 @@ async fn read_bcast(
                 }
             },
         }
-    }
-}
-
-async fn maybe_update_pos(interval: &mut time::Interval, new_pos: bool) {
-    if new_pos {
-        interval.tick().await;
-    } else {
-        future::pending::<()>().await;
     }
 }
 
@@ -894,11 +875,9 @@ async fn session(
     type Next = Pin<Box<dyn Future<Output = NextRes> + Send + Sync>>;
     let mut control_rx = control_rx.fuse();
     let mut idle_check = time::interval(std::time::Duration::from_secs(30));
-    let mut update_pos = time::interval(std::time::Duration::from_millis(250));
     let mut idle = false;
     let mut used = 0;
     loop {
-        let new_pos = t.new_pos_ctl.is_some();
         select_biased! {
             r = t.next().fuse() => match r {
                 Err(e) => break Err(e),
@@ -912,9 +891,6 @@ async fn session(
                     used -= 1;
                 },
                 publisher::Event::Destroyed(_) => (),
-            },
-            _ = maybe_update_pos(&mut update_pos, new_pos).fuse() => {
-                t.update_new_pos().await;
             },
             _ = idle_check.tick().fuse() => {
                 let has_clients = used > 0;
