@@ -9,7 +9,7 @@ use anyhow::Result;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
 use log::{debug, info, trace, warn};
-use netidx::{path::Path, pool::Pooled, subscriber::Event};
+use netidx::{pool::Pooled, subscriber::Event};
 use parking_lot::Mutex;
 use std::{
     collections::{HashMap, VecDeque},

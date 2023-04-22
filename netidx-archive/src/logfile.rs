@@ -1240,27 +1240,6 @@ impl ArchiveReader {
         }
     }
 
-    /// Return a vector of all id/path pairs present in the
-    /// archive. This may change if the archive is being written to.
-    fn get_index(&self) -> Pooled<Vec<(Id, Path)>> {
-        let mut idx = IDX_POOL.take();
-        let mut i = 0;
-        // we must ensure we don't hold the lock for too long in the
-        // case where the index is huge.
-        'main: loop {
-            let inner = self.index.read();
-            for _ in 0..1000 {
-                let (id, path) = inner.path_by_id.get_index(i).unwrap();
-                idx.push((*id, path.clone()));
-                i += 1;
-                if i >= inner.path_by_id.len() {
-                    break 'main;
-                }
-            }
-        }
-        idx
-    }
-
     fn get_batch_at(
         mmap: &Mmap,
         pos: usize,

@@ -3,7 +3,7 @@ use super::{
     publish::{parse_bound, parse_filter},
 };
 use crate::{
-    logfile::{ArchiveReader, BatchItem, Id, Seek, CURSOR_BATCH_POOL},
+    logfile::{ArchiveReader, BatchItem, Seek, CURSOR_BATCH_POOL},
     recorder::{
         publish::{END_DOC, FILTER_DOC, START_DOC},
         BCastMsg, Config, PublishConfig,
@@ -14,12 +14,10 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
-use fxhash::FxHashMap;
 use log::debug;
 use netidx::{
     chars::Chars,
     pack::Pack,
-    path::Path,
     publisher::{Publisher, Value},
     resolver_client::GlobSet,
 };

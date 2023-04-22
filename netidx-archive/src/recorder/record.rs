@@ -1,5 +1,5 @@
 use super::{ArchiveCmds, BCastMsg, Config, RecordConfig};
-use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL, ArchiveReader};
+use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL};
 use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;

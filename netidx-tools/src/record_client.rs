@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use bytes::BytesMut;
 use chrono::prelude::*;
-use fxhash::FxHashMap;
 use netidx::{
     chars::Chars,
     path::Path,
