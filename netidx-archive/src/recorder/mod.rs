@@ -90,14 +90,6 @@ mod file {
         Some(Duration::from_secs(86400))
     }
 
-    pub(super) fn default_compress() -> bool {
-        false
-    }
-    
-    pub(super) fn default_compress_level() -> u32 {
-        6
-    }
-
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct RecordConfig {
@@ -112,10 +104,6 @@ mod file {
         pub(super) flush_interval: Option<Duration>,
         #[serde(default = "default_rotate_interval")]
         pub(super) rotate_interval: Option<Duration>,
-        #[serde(default = "default_compress")]
-        pub(super) compress_batches: bool,
-        #[serde(default = "default_compress_level")]
-        pub(super) compress_level: u32
     }
 
     impl RecordConfig {
@@ -127,8 +115,6 @@ mod file {
                 flush_frequency: default_flush_frequency(),
                 flush_interval: default_flush_interval(),
                 rotate_interval: default_rotate_interval(),
-                compress_batches: default_compress(),
-                compress_level: default_compress_level(),
             }
         }
     }
@@ -234,10 +220,6 @@ pub struct RecordConfig {
     /// rotate the log file at the specified interval. None means
     /// never rotate the file.
     pub rotate_interval: Option<Duration>,
-    /// compress the encoded batches
-    pub compress_batches: bool,
-    /// the compression level to used
-    pub compress_level: u32,
 }
 
 impl RecordConfig {
@@ -251,8 +233,6 @@ impl RecordConfig {
             flush_frequency: file::default_flush_frequency(),
             flush_interval: file::default_flush_interval(),
             rotate_interval: file::default_rotate_interval(),
-            compress_batches: file::default_compress(),
-            compress_level: file::default_compress_level(),
         }
     }
 }
@@ -268,8 +248,6 @@ impl TryFrom<file::RecordConfig> for RecordConfig {
             flush_frequency: f.flush_frequency,
             flush_interval: f.flush_interval,
             rotate_interval: f.rotate_interval,
-            compress_batches: f.compress_batches,
-            compress_level: f.compress_level,
         })
     }
 }

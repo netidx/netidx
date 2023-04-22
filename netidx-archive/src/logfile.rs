@@ -1205,6 +1205,12 @@ pub struct ArchiveReader {
     mmap: Arc<RwLock<Mmap>>,
 }
 
+impl fmt::Debug for ArchiveReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ArchiveReader({:?})", &self.file)
+    }
+}
+
 impl ArchiveReader {
     /// Open the specified archive read only. Note, it is possible to
     /// read and write to an archive simultaneously, however to do so
