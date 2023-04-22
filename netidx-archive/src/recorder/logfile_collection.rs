@@ -206,15 +206,11 @@ impl LogfileCollection {
                     break Ok(Ok(batches));
                 } else {
                     match file {
+                        File::Head => break Ok(Ok(Pooled::orphan(VecDeque::new()))),
                         File::Historical(_) => {
-                            if self.next_source()? {}
                             if !self.next_source()? {
                                 bail!("no data source available")
                             }
-                        }
-                        File::Head => {
-                            // this is the end. my only friend. the end.
-                            break Ok(Ok(Pooled::orphan(VecDeque::new())));
                         }
                     }
                 }

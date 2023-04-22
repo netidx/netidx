@@ -37,8 +37,8 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub struct FileHeader {
-    version: u32,
-    committed: u64,
+    pub version: u32,
+    pub committed: u64,
 }
 
 static FILE_MAGIC: &'static [u8] = b"netidx archive";
@@ -74,7 +74,7 @@ impl Pack for FileHeader {
 }
 
 #[derive(PrimitiveEnum, Debug, Clone, Copy)]
-enum RecordTyp {
+pub enum RecordTyp {
     /// A time basis record
     Timestamp = 0,
     /// A record mapping paths to ids
@@ -94,13 +94,13 @@ const MAX_TIMESTAMP: u32 = 0x03FFFFFF;
 pub struct RecordHeader {
     // the record type
     #[packed_field(bits = "0:1", size_bits = "2", ty = "enum")]
-    record_type: RecordTyp,
+    pub record_type: RecordTyp,
     // the record length, up to MAX_RECORD_LEN, not including this header
     #[packed_field(bits = "2:33", size_bits = "32", endian = "msb")]
-    record_length: u32,
+    pub record_length: u32,
     // microsecond offset from last timestamp record, up to MAX_TIMESTAMP
     #[packed_field(bits = "34:63", size_bits = "30", endian = "msb")]
-    timestamp: u32,
+    pub timestamp: u32,
 }
 
 impl Pack for RecordHeader {
@@ -285,7 +285,8 @@ lazy_static! {
         Pool::new(100, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
     static ref IDX_POOL: Pool<Vec<(Id, Path)>> = Pool::new(10, 20_000_000);
-    pub(crate) static ref IMG_POOL: Pool<FxHashMap<Id, Event>> = Pool::new(10, 20_000_000);
+    pub(crate) static ref IMG_POOL: Pool<FxHashMap<Id, Event>> =
+        Pool::new(10, 20_000_000);
     static ref EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
     static ref TO_READ_POOL: Pool<Vec<usize>> = Pool::new(10, 20_000_000);
 }
@@ -894,7 +895,7 @@ impl ArchiveWriter {
         batch: &Pooled<Vec<BatchItem>>,
     ) -> Result<()> {
         if batch.len() > 0 {
-            let timestamp = self.time.timestamp(dbg!(timestamp));
+            let timestamp = self.time.timestamp(timestamp);
             let record_length = <Pooled<Vec<BatchItem>> as Pack>::encoded_len(&batch);
             if record_length > MAX_RECORD_LEN as usize {
                 bail!(RecordTooLarge)
@@ -1005,7 +1006,7 @@ impl ArchiveIndex {
     pub fn id_for_path(&self, path: &Path) -> Option<&Id> {
         self.id_by_path.get(path)
     }
-    
+
     pub fn deltamap(&self) -> &BTreeMap<DateTime<Utc>, usize> {
         &self.deltamap
     }
