@@ -571,7 +571,6 @@ impl Session {
 
     fn set_state(&mut self, cbatch: &mut UpdateBatch, state: State) {
         match (self.state.load(), state) {
-            (State::Tail, State::Play) => (),
             (s0, s1) if s0 == s1 => (),
             (_, state) => {
                 self.state.store(state);
@@ -656,7 +655,10 @@ impl Session {
                 info!("set state {}: {}", session_id, req.value);
                 match req.value.cast_to::<State>() {
                     Ok(state) => {
-                        self.set_state(&mut cbatch, state);
+                        match (state, self.state.load()) {
+                            (State::Play | State::Tail, State::Tail) => (),
+                            (_, _) => self.set_state(&mut cbatch, state),
+                        }
                         cluster.send_cmd(&ClusterCmd::SetState(state));
                     }
                     Err(e) => {
@@ -670,12 +672,6 @@ impl Session {
                 match req.value.cast_to::<Seek>() {
                     Ok(pos) => {
                         self.seek(&mut cbatch, pos)?;
-                        match self.state.load() {
-                            State::Pause | State::Play => (),
-                            State::Tail => {
-                                self.set_state(&mut cbatch, State::Play);
-                            }
-                        }
                         cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
                     }
                     Err(e) => {
