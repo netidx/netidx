@@ -719,30 +719,26 @@ impl Session {
                     Some(ts) => Value::DateTime(ts),
                     None => match cursor.start() {
                         Bound::Unbounded => Value::Null,
-                        Bound::Included(ts) | Bound::Excluded(ts) => {
-                            Value::DateTime(ts)
-                        }
+                        Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
                     },
                 },
             );
         }
         self.pathindex.check_remap_rescan()?;
         let index = self.pathindex.index();
-        for (id, ev) in idx.drain() {
-            let v = match ev {
-                Event::Unsubscribed => Value::Null,
-                Event::Update(v) => v,
+        for (id, path) in index.iter_pathmap() {
+            let v = match idx.remove(id) {
+                None | Some(Event::Unsubscribed) => Value::Null,
+                Some(Event::Update(v)) => v,
             };
             match self.published.get(&id) {
                 Some(val) => val.update(pbatch, v),
                 None => {
-                    if let Some(path) = index.path_for_id(&id) {
-                        if self.filter.is_match(&path) {
-                            let path = self.data_base.append(path.as_ref());
-                            let val = self.publisher.publish(path, v)?;
-                            self.published_ids.insert(val.id());
-                            self.published.insert(id, val);
-                        }
+                    if self.filter.is_match(&path) {
+                        let path = self.data_base.append(path.as_ref());
+                        let val = self.publisher.publish(path, v)?;
+                        self.published_ids.insert(val.id());
+                        self.published.insert(*id, val);
                     }
                 }
             }

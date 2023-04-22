@@ -6,16 +6,13 @@ use netidx::{
     chars::Chars,
     pack::Pack,
     path::Path,
-    pool::{Pooled, Pool},
+    pool::{Pool, Pooled},
     resolver_client::GlobSet,
     subscriber::{Event, Subscriber, Value},
 };
 use netidx_derive::Pack;
 use netidx_protocols::{call_rpc, rpc::client::Proc};
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::{collections::VecDeque, sync::Arc};
 
 lazy_static! {
     pub(crate) static ref PATHMAPS: Pool<FxHashMap<Id, Path>> = Pool::new(100, 100_000);
@@ -24,7 +21,7 @@ lazy_static! {
 #[derive(Debug, Clone, Pack)]
 pub struct OneshotReply {
     pub pathmap: Pooled<FxHashMap<Id, Path>>,
-    pub image: Pooled<HashMap<Id, Event>>,
+    pub image: Pooled<FxHashMap<Id, Event>>,
     pub deltas: Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
 }
 

@@ -2,7 +2,7 @@ use anyhow::{Context, Error, Result};
 use bytes::{Buf, BufMut};
 use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
-use fxhash::FxBuildHasher;
+use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
 use log::warn;
 use memmap2::{Mmap, MmapMut};
@@ -285,7 +285,7 @@ lazy_static! {
         Pool::new(100, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);
     static ref IDX_POOL: Pool<Vec<(Id, Path)>> = Pool::new(10, 20_000_000);
-    pub(crate) static ref IMG_POOL: Pool<HashMap<Id, Event>> = Pool::new(10, 20_000_000);
+    pub(crate) static ref IMG_POOL: Pool<FxHashMap<Id, Event>> = Pool::new(10, 20_000_000);
     static ref EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
     static ref TO_READ_POOL: Pool<Vec<usize>> = Pool::new(10, 20_000_000);
 }
@@ -991,6 +991,11 @@ impl ArchiveIndex {
         }
     }
 
+    /// iterate over the pathmap
+    pub fn iter_pathmap(&self) -> impl Iterator<Item = (&Id, &Path)> {
+        self.path_by_id.iter()
+    }
+
     /// look up the path for a given id
     pub fn path_for_id(&self, id: &Id) -> Option<&Path> {
         self.path_by_id.get(id)
@@ -1265,14 +1270,14 @@ impl ArchiveReader {
     /// beginning and the cursor position will be read, otherwise only
     /// the deltas between the closest image that is older, and the
     /// cursor start need to be read.
-    pub fn build_image(&self, cursor: &Cursor) -> Result<Pooled<HashMap<Id, Event>>> {
+    pub fn build_image(&self, cursor: &Cursor) -> Result<Pooled<FxHashMap<Id, Event>>> {
         self.check_remap_rescan()?;
         let pos = match cursor.current {
             None => cursor.start,
             Some(pos) => Bound::Included(pos),
         };
         match pos {
-            Bound::Unbounded => Ok(Pooled::orphan(HashMap::new())),
+            Bound::Unbounded => Ok(Pooled::orphan(HashMap::default())),
             _ => {
                 let (mut to_read, end) = {
                     // we need to invert the excluded/included to get
