@@ -1516,8 +1516,9 @@ impl ArchiveReader {
             let rh = RecordHeader::decode(&mut &mmap[*pos..end])?;
             let pos = *pos + rhl;
             let end = pos + rh.record_length as usize;
-            if cbuf.capacity() < end - pos * 2 {
-                cbuf.reserve((end - pos) * 2);
+            let max_len = (end - pos) * 2;
+            if cbuf.capacity() < max_len {
+                cbuf.reserve(max_len);
             }
             comp.compress_to_buffer(&mmap[pos..end], &mut cbuf)?;
             output.add_batch_raw(*image, *ts, &cbuf)?;
