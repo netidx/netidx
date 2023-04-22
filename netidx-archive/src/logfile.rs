@@ -12,6 +12,7 @@ use netidx::{
     path::Path,
     pool::{Pool, Pooled},
     subscriber::{Event, FromValue, Value},
+    utils,
 };
 use packed_struct::PackedStruct;
 use parking_lot::{
@@ -20,6 +21,7 @@ use parking_lot::{
 };
 use std::{
     self,
+    cell::RefCell,
     cmp::max,
     collections::{BTreeMap, HashMap, VecDeque},
     error, fmt,
@@ -34,9 +36,11 @@ use std::{
         Arc,
     },
 };
+use xz2::read::{XzDecoder, XzEncoder};
 
 #[derive(Debug, Clone)]
 pub struct FileHeader {
+    pub compressed: bool,
     pub version: u32,
     pub committed: u64,
 }
@@ -56,7 +60,7 @@ impl Pack for FileHeader {
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         buf.put_slice(FILE_MAGIC);
-        buf.put_u32(FILE_VERSION);
+        buf.put_u32(((self.compressed as u32) << 31) | FILE_VERSION);
         buf.put_u64(self.committed);
         Ok(())
     }
@@ -67,9 +71,11 @@ impl Pack for FileHeader {
                 return Err(PackError::InvalidFormat);
             }
         }
-        let version = buf.get_u32();
+        let v = buf.get_u32();
+        let version = v & 0x7FFF_FFFF;
+        let compressed = (v & 0x8000_0000) > 0;
         let committed = buf.get_u64();
-        Ok(FileHeader { version, committed })
+        Ok(FileHeader { compressed, version, committed })
     }
 }
 
@@ -627,6 +633,7 @@ fn scan_header(buf: &mut impl Buf) -> Result<FileHeader> {
 }
 
 fn scan_file(
+    compressed: &mut bool,
     path_by_id: &mut IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: &mut HashMap<Path, Id>,
     imagemap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
@@ -637,6 +644,7 @@ fn scan_file(
 ) -> Result<usize> {
     let total_bytes = buf.remaining();
     let header = scan_header(buf)?;
+    *compressed = header.compressed;
     scan_records(
         path_by_id,
         id_by_path,
@@ -722,6 +730,8 @@ fn scan_file(
 /// ---------------------
 /// 1289 bytes (264 bytes of overhead 20%)
 pub struct ArchiveWriter {
+    compressed: bool,
+    compress_buf: Vec<u8>,
     time: MonotonicTimestamper,
     path_by_id: IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: HashMap<Path, Id>,
@@ -743,7 +753,11 @@ impl Drop for ArchiveWriter {
 impl ArchiveWriter {
     /// Open the specified archive for read/write access, if the file
     /// does not exist then a new archive will be created.
-    pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
+    ///
+    /// if compressed is true, and the archive doesn't exist, or
+    /// exists but is already compressed, then image and delta batches
+    /// will be compressed before being written.
+    pub fn open_full(path: impl AsRef<FilePath>, compressed: bool) -> Result<Self> {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
             warn!("archive file size is limited to 4 GiB on this platform")
         }
@@ -755,6 +769,8 @@ impl ArchiveWriter {
             let block_size = allocation_granularity(path)? as usize;
             let mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut t = ArchiveWriter {
+                compressed,
+                compress_buf: Vec::new(),
                 time,
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
@@ -766,6 +782,7 @@ impl ArchiveWriter {
                 mmap,
             };
             let end = scan_file(
+                &mut t.compressed,
                 &mut t.path_by_id,
                 &mut t.id_by_path,
                 None,
@@ -791,10 +808,16 @@ impl ArchiveWriter {
             file.set_len(max(block_size, fh_len + rh_len) as u64)?;
             let mut mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut buf = &mut *mmap;
-            let fh = FileHeader { version: FILE_VERSION, committed: fh_len as u64 };
+            let fh = FileHeader {
+                compressed,
+                version: FILE_VERSION,
+                committed: fh_len as u64,
+            };
             <FileHeader as Pack>::encode(&fh, &mut buf)?;
             mmap.flush()?;
             Ok(ArchiveWriter {
+                compressed,
+                compress_buf: Vec::new(),
                 time,
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
@@ -806,6 +829,13 @@ impl ArchiveWriter {
                 mmap,
             })
         }
+    }
+
+    /// Open the specified archive for read/write access, if the file
+    /// does not exist then a new archive will be created. By default
+    /// data records will be compressed.
+    pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
+        Self::open_full(path, true)
     }
 
     // remap the file reserving space for at least additional_capacity bytes
@@ -894,42 +924,90 @@ impl ArchiveWriter {
         timestamp: DateTime<Utc>,
         batch: &Pooled<Vec<BatchItem>>,
     ) -> Result<()> {
+        if self.compressed {
+            self.add_batch_compressed(image, timestamp, batch)
+        } else {
+            self.add_batch_uncompressed(image, timestamp, batch)
+        }
+    }
+
+    fn add_batch_f<F: FnOnce(&mut &mut [u8]) -> Result<()>>(
+        &mut self,
+        image: bool,
+        timestamp: Timestamp,
+        record_length: usize,
+        f: F,
+    ) -> Result<()> {
+        if record_length > MAX_RECORD_LEN as usize {
+            bail!(RecordTooLarge)
+        }
+        match timestamp {
+            Timestamp::Offset(_, _) => (),
+            Timestamp::NewBasis(basis) => {
+                let record_length = <DateTime<Utc> as Pack>::encoded_len(&basis);
+                let rh = RecordHeader {
+                    record_type: RecordTyp::Timestamp,
+                    record_length: record_length as u32,
+                    timestamp: 0,
+                };
+                let len = self.check_reserve(record_length)?;
+                let mut buf = &mut self.mmap[self.end.load(Ordering::Relaxed)..];
+                <RecordHeader as Pack>::encode(&rh, &mut buf)?;
+                <DateTime<Utc> as Pack>::encode(&basis, &mut buf)?;
+                self.end.fetch_add(len, Ordering::AcqRel);
+            }
+        }
+        let len = self.check_reserve(record_length)?;
+        let mut buf = &mut self.mmap[self.end.load(Ordering::Relaxed)..];
+        let rh = RecordHeader {
+            record_type: if image {
+                RecordTyp::ImageBatch
+            } else {
+                RecordTyp::DeltaBatch
+            },
+            record_length: record_length as u32,
+            timestamp: timestamp.offset(),
+        };
+        <RecordHeader as Pack>::encode(&rh, &mut buf)?;
+        f(&mut buf)?;
+        self.end.fetch_add(len, Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn add_batch_uncompressed(
+        &mut self,
+        image: bool,
+        timestamp: DateTime<Utc>,
+        batch: &Pooled<Vec<BatchItem>>,
+    ) -> Result<()> {
         if batch.len() > 0 {
             let timestamp = self.time.timestamp(timestamp);
             let record_length = <Pooled<Vec<BatchItem>> as Pack>::encoded_len(&batch);
-            if record_length > MAX_RECORD_LEN as usize {
-                bail!(RecordTooLarge)
-            }
-            match timestamp {
-                Timestamp::Offset(_, _) => (),
-                Timestamp::NewBasis(basis) => {
-                    let record_length = <DateTime<Utc> as Pack>::encoded_len(&basis);
-                    let rh = RecordHeader {
-                        record_type: RecordTyp::Timestamp,
-                        record_length: record_length as u32,
-                        timestamp: 0,
-                    };
-                    let len = self.check_reserve(record_length)?;
-                    let mut buf = &mut self.mmap[self.end.load(Ordering::Relaxed)..];
-                    <RecordHeader as Pack>::encode(&rh, &mut buf)?;
-                    <DateTime<Utc> as Pack>::encode(&basis, &mut buf)?;
-                    self.end.fetch_add(len, Ordering::AcqRel);
-                }
-            }
-            let len = self.check_reserve(record_length)?;
-            let mut buf = &mut self.mmap[self.end.load(Ordering::Relaxed)..];
-            let rh = RecordHeader {
-                record_type: if image {
-                    RecordTyp::ImageBatch
-                } else {
-                    RecordTyp::DeltaBatch
-                },
-                record_length: record_length as u32,
-                timestamp: timestamp.offset(),
-            };
-            <RecordHeader as Pack>::encode(&rh, &mut buf)?;
-            <Pooled<Vec<BatchItem>> as Pack>::encode(&batch, &mut buf)?;
-            self.end.fetch_add(len, Ordering::AcqRel);
+            self.add_batch_f(image, timestamp, record_length, |buf| {
+                Ok(<Pooled<Vec<BatchItem>> as Pack>::encode(&batch, buf)?)
+            })?
+        }
+        Ok(())
+    }
+
+    fn add_batch_compressed(
+        &mut self,
+        image: bool,
+        timestamp: DateTime<Utc>,
+        batch: &Pooled<Vec<BatchItem>>,
+    ) -> Result<()> {
+        use std::io::{Read, Write};
+        if batch.len() > 0 {
+            self.compress_buf.clear();
+            let timestamp = self.time.timestamp(timestamp);
+            let packed = utils::pack(batch)?.freeze();
+            let mut enc = XzEncoder::new(&*packed, 9);
+            let record_length = enc.read_to_end(&mut self.compress_buf)?;
+            let compress_buf = mem::replace(&mut self.compress_buf, vec![]);
+            self.add_batch_f(image, timestamp, record_length, |buf| {
+                Ok(BufMut::writer(buf).write_all(&compress_buf)?)
+            })?;
+            self.compress_buf = compress_buf;
         }
         Ok(())
     }
@@ -963,6 +1041,7 @@ impl ArchiveWriter {
     pub fn reader(&self) -> Result<ArchiveReader> {
         Ok(ArchiveReader {
             index: Arc::new(RwLock::new(ArchiveIndex::new())),
+            compressed: self.compressed,
             file: self.file.clone(),
             end: self.end.clone(),
             mmap: Arc::new(RwLock::new(unsafe { Mmap::map(&self.file)? })),
@@ -1121,6 +1200,7 @@ impl ArchiveIndex {
 #[derive(Debug, Clone)]
 pub struct ArchiveReader {
     index: Arc<RwLock<ArchiveIndex>>,
+    compressed: bool,
     file: Arc<File>,
     end: Arc<AtomicUsize>,
     mmap: Arc<RwLock<Mmap>>,
@@ -1138,7 +1218,9 @@ impl ArchiveReader {
         let mmap = unsafe { Mmap::map(&file)? };
         let mut index = ArchiveIndex::new();
         let mut max_id = 0;
+        let mut compressed = false;
         let end = scan_file(
+            &mut compressed,
             &mut index.path_by_id,
             &mut index.id_by_path,
             Some(&mut index.imagemap),
@@ -1150,6 +1232,7 @@ impl ArchiveReader {
         index.end = end;
         Ok(ArchiveReader {
             index: Arc::new(RwLock::new(index)),
+            compressed,
             file: Arc::new(file),
             end: Arc::new(AtomicUsize::new(end)),
             mmap: Arc::new(RwLock::new(mmap)),
@@ -1247,10 +1330,15 @@ impl ArchiveReader {
     }
 
     fn get_batch_at(
+        compressed: bool,
         mmap: &Mmap,
         pos: usize,
         end: usize,
     ) -> Result<Pooled<Vec<BatchItem>>> {
+        use std::io::Read;
+        thread_local! {
+            static BUF: RefCell<Vec<u8>> = RefCell::new(vec![]);
+        }
         if pos >= end {
             bail!("record out of bounds")
         } else {
@@ -1259,7 +1347,22 @@ impl ArchiveReader {
             if pos + rh.record_length as usize > end {
                 bail!("get_batch: error truncated record at {}", pos);
             }
-            Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?)
+            if compressed {
+                BUF.with(|compression_buf| {
+                    let mut compression_buf = compression_buf.borrow_mut();
+                    compression_buf.clear();
+                    let pos = pos + <RecordHeader as Pack>::const_encoded_len().unwrap();
+                    let mut dec = XzDecoder::new_multi_decoder(
+                        &mmap[pos..pos + rh.record_length as usize],
+                    );
+                    dec.read_to_end(&mut compression_buf)?;
+                    Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(
+                        &mut &compression_buf[..],
+                    )?)
+                })
+            } else {
+                Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?)
+            }
         }
     }
 
@@ -1304,8 +1407,12 @@ impl ArchiveReader {
                 let mut image = IMG_POOL.take();
                 let mmap = self.mmap.read();
                 for pos in to_read.drain(..) {
-                    let mut batch =
-                        ArchiveReader::get_batch_at(&*mmap, pos as usize, end)?;
+                    let mut batch = ArchiveReader::get_batch_at(
+                        self.compressed,
+                        &*mmap,
+                        pos as usize,
+                        end,
+                    )?;
                     image.extend(batch.drain(..).map(|b| (b.0, b.1)));
                 }
                 Ok(image)
@@ -1343,7 +1450,8 @@ impl ArchiveReader {
         let mut current = cursor.current;
         let mmap = self.mmap.read();
         for (ts, pos) in idxs.drain(..) {
-            let batch = ArchiveReader::get_batch_at(&*mmap, pos as usize, end)?;
+            let batch =
+                ArchiveReader::get_batch_at(self.compressed, &*mmap, pos as usize, end)?;
             current = Some(ts);
             res.push_back((ts, batch));
         }
