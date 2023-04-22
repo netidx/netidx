@@ -72,7 +72,7 @@ async fn do_oneshot(
     debug!("seeking to the beginning");
     log.seek(Seek::Beginning)?;
     debug!("reimaging");
-    let mut idx = log.reimage().ok_or_else(|| anyhow!("no data source"))??;
+    let mut idx = log.reimage()?;
     pathindex.check_remap_rescan()?;
     let index = pathindex.index();
     let mut path_by_id = PATHMAPS.take();
