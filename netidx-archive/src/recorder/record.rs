@@ -134,6 +134,8 @@ async fn wait_list(pending: &mut Option<Fuse<oneshot::Receiver<Lst>>>) -> Lst {
 }
 
 fn rotate_log_file(
+    compress: bool,
+    compress_level: u32,
     archive: ArchiveWriter,
     path: &PathBuf,
     cmds: &Option<ArchiveCmds>,
@@ -169,7 +171,7 @@ fn rotate_log_file(
             }
         }
     }
-    ArchiveWriter::open(current_name)
+    ArchiveWriter::open_full(current_name, compress, compress_level)
 }
 
 fn write_pathmap(
@@ -220,7 +222,11 @@ pub(super) async fn run(
     let mut image: FxHashMap<SubId, Event> = HashMap::default();
     let mut subscribed: HashMap<Path, Dval> = HashMap::new();
     let mut archive = task::block_in_place(|| {
-        ArchiveWriter::open(config.archive_directory.join("current"))
+        ArchiveWriter::open_full(
+            config.archive_directory.join("current"),
+            record_config.compress_batches,
+            record_config.compress_level,
+        )
     })?;
     let _ = bcast.send(BCastMsg::NewCurrent(archive.reader()?));
     let flush_frequency = record_config.flush_frequency.map(|f| archive.block_size() * f);
@@ -264,7 +270,12 @@ pub(super) async fn run(
                 let now = Utc::now();
                 archive = task::block_in_place(|| {
                     rotate_log_file(
-                        archive, &config.archive_directory, &config.archive_cmds, now
+                        record_config.compress_batches,
+                        record_config.compress_level,
+                        archive,
+                        &config.archive_directory,
+                        &config.archive_cmds,
+                        now
                     )
                 })?;
                 last_image = 0;

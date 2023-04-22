@@ -730,7 +730,8 @@ fn scan_file(
 /// ---------------------
 /// 1289 bytes (264 bytes of overhead 20%)
 pub struct ArchiveWriter {
-    compressed: bool,
+    compress: bool,
+    compress_level: u32,
     compress_buf: Vec<u8>,
     time: MonotonicTimestamper,
     path_by_id: IndexMap<Id, Path, FxBuildHasher>,
@@ -757,7 +758,7 @@ impl ArchiveWriter {
     /// if compressed is true, and the archive doesn't exist, or
     /// exists but is already compressed, then image and delta batches
     /// will be compressed before being written.
-    pub fn open_full(path: impl AsRef<FilePath>, compressed: bool) -> Result<Self> {
+    pub fn open_full(path: impl AsRef<FilePath>, compress: bool, compress_level: u32) -> Result<Self> {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
             warn!("archive file size is limited to 4 GiB on this platform")
         }
@@ -769,7 +770,8 @@ impl ArchiveWriter {
             let block_size = allocation_granularity(path)? as usize;
             let mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut t = ArchiveWriter {
-                compressed,
+                compress,
+                compress_level,
                 compress_buf: Vec::new(),
                 time,
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
@@ -782,7 +784,7 @@ impl ArchiveWriter {
                 mmap,
             };
             let end = scan_file(
-                &mut t.compressed,
+                &mut t.compress,
                 &mut t.path_by_id,
                 &mut t.id_by_path,
                 None,
@@ -809,14 +811,15 @@ impl ArchiveWriter {
             let mut mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut buf = &mut *mmap;
             let fh = FileHeader {
-                compressed,
+                compressed: compress,
                 version: FILE_VERSION,
                 committed: fh_len as u64,
             };
             <FileHeader as Pack>::encode(&fh, &mut buf)?;
             mmap.flush()?;
             Ok(ArchiveWriter {
-                compressed,
+                compress,
+                compress_level,
                 compress_buf: Vec::new(),
                 time,
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
@@ -835,7 +838,7 @@ impl ArchiveWriter {
     /// does not exist then a new archive will be created. By default
     /// data records will be compressed.
     pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
-        Self::open_full(path, true)
+        Self::open_full(path, true, 9)
     }
 
     // remap the file reserving space for at least additional_capacity bytes
@@ -924,7 +927,7 @@ impl ArchiveWriter {
         timestamp: DateTime<Utc>,
         batch: &Pooled<Vec<BatchItem>>,
     ) -> Result<()> {
-        if self.compressed {
+        if self.compress {
             self.add_batch_compressed(image, timestamp, batch)
         } else {
             self.add_batch_uncompressed(image, timestamp, batch)
@@ -1001,7 +1004,7 @@ impl ArchiveWriter {
             self.compress_buf.clear();
             let timestamp = self.time.timestamp(timestamp);
             let packed = utils::pack(batch)?.freeze();
-            let mut enc = XzEncoder::new(&*packed, 9);
+            let mut enc = XzEncoder::new(&*packed, self.compress_level);
             let record_length = enc.read_to_end(&mut self.compress_buf)?;
             let compress_buf = mem::replace(&mut self.compress_buf, vec![]);
             self.add_batch_f(image, timestamp, record_length, |buf| {
@@ -1041,7 +1044,7 @@ impl ArchiveWriter {
     pub fn reader(&self) -> Result<ArchiveReader> {
         Ok(ArchiveReader {
             index: Arc::new(RwLock::new(ArchiveIndex::new())),
-            compressed: self.compressed,
+            compressed: self.compress,
             file: self.file.clone(),
             end: self.end.clone(),
             mmap: Arc::new(RwLock::new(unsafe { Mmap::map(&self.file)? })),
