@@ -87,16 +87,15 @@ async fn oneshot(subscriber: Subscriber, params: OneshotParams) -> Result<()> {
     )?;
     let client = Client::new(&subscriber, &params.base).await?;
     let mut res = client.oneshot(&start, &end, &filter).await?;
-    let paths = res.pathmap.drain(..).collect::<FxHashMap<_, _>>();
     for (id, value) in res.image.drain() {
-        Out { raw: false, path: &paths[&id], value }.write(&mut buf)?;
+        Out { raw: false, path: &res.pathmap[&id], value }.write(&mut buf)?;
     }
     stdout.write_all_buf(&mut buf).await?;
     for (ts, mut batch) in res.deltas.drain(..) {
         Out { raw: false, path: "timestamp", value: Event::Update(Value::DateTime(ts)) }
             .write(&mut buf)?;
         for BatchItem(id, value) in batch.drain(..) {
-            Out { raw: false, path: &paths[&id], value }.write(&mut buf)?;
+            Out { raw: false, path: &res.pathmap[&id], value }.write(&mut buf)?;
         }
         stdout.write_all_buf(&mut buf).await?;
     }
