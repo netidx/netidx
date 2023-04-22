@@ -1486,7 +1486,7 @@ impl ArchiveReader {
             lengths.push(len);
             pos += len;
         }
-        let max_len = end / 10;
+        let max_len = end / 100;
         let max_len = if max_len == 0 { end } else { max_len };
         info!("training dictionary on {} bytes", end);
         let dict = zstd::dict::from_continuous(&mmap[fhl..end], &lengths[..], max_len)?;

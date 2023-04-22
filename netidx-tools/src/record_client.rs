@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use bytes::BytesMut;
 use chrono::prelude::*;
@@ -8,7 +10,7 @@ use netidx::{
     subscriber::{Event, Subscriber, Value},
 };
 use netidx_archive::{
-    logfile::{BatchItem, Seek},
+    logfile::{BatchItem, Seek, ArchiveReader},
     recorder_client::Client,
 };
 use netidx_tools_core::ClientParams;
@@ -38,6 +40,11 @@ pub(crate) enum Cmd {
         #[structopt(flatten)]
         params: OneshotParams,
     },
+    #[structopt(name = "compress", about = "generate a compressed archive file")]
+    Compress {
+        file: PathBuf,
+        output: PathBuf,
+    }
 }
 
 fn parse_bound(s: Option<&str>) -> Result<Option<DateTime<Utc>>> {
@@ -101,12 +108,20 @@ async fn oneshot(subscriber: Subscriber, params: OneshotParams) -> Result<()> {
     Ok(())
 }
 
+fn compress(file: PathBuf, output: PathBuf) -> Result<()> {
+    let reader = ArchiveReader::open(file)?;
+    reader.compress(output)
+}
+
 pub(super) async fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Oneshot { common, params } => {
             let (cfg, auth) = common.load();
             let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
             oneshot(subscriber, params).await
+        }
+        Cmd::Compress { file, output } => {
+            compress(file, output)
         }
     }
 }
