@@ -4,7 +4,7 @@ use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
 use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
-use log::{warn, info};
+use log::{info, warn};
 use memmap2::{Mmap, MmapMut};
 use netidx::{
     chars::Chars,
@@ -738,7 +738,6 @@ fn scan_file(
 /// ---------------------
 /// 1289 bytes (264 bytes of overhead 20%)
 pub struct ArchiveWriter {
-    compress: bool,
     time: MonotonicTimestamper,
     path_by_id: IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: HashMap<Path, Id>,
@@ -772,9 +771,7 @@ impl ArchiveWriter {
             file.try_lock_exclusive()?;
             let block_size = allocation_granularity(path)? as usize;
             let mmap = unsafe { MmapMut::map_mut(&file)? };
-            let mut compress = false;
             let mut t = ArchiveWriter {
-                compress: false,
                 time,
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
@@ -827,7 +824,6 @@ impl ArchiveWriter {
             }
             mmap.flush()?;
             Ok(ArchiveWriter {
-                compress: compress.is_some(),
                 time,
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
@@ -1341,7 +1337,7 @@ impl ArchiveReader {
     }
 
     fn get_batch_at(
-        compressed: Option<Arc<Mutex<Decompressor>>>,
+        compressed: &Option<Arc<Mutex<Decompressor>>>,
         mmap: &Mmap,
         pos: usize,
         end: usize,
@@ -1421,7 +1417,7 @@ impl ArchiveReader {
                 let mmap = self.mmap.read();
                 for pos in to_read.drain(..) {
                     let mut batch = ArchiveReader::get_batch_at(
-                        self.compressed,
+                        &self.compressed,
                         &*mmap,
                         pos as usize,
                         end,
@@ -1464,7 +1460,7 @@ impl ArchiveReader {
         let mmap = self.mmap.read();
         for (ts, pos) in idxs.drain(..) {
             let batch =
-                ArchiveReader::get_batch_at(self.compressed, &*mmap, pos as usize, end)?;
+                ArchiveReader::get_batch_at(&self.compressed, &*mmap, pos as usize, end)?;
             current = Some(ts);
             res.push_back((ts, batch));
         }
@@ -1484,7 +1480,7 @@ impl ArchiveReader {
         let mut lengths: Vec<usize> = Vec::new();
         let fhl = FileHeader::const_encoded_len().unwrap();
         let rhl = RecordHeader::const_encoded_len().unwrap();
-        let pos = fhl;
+        let mut pos = fhl;
         let end = self.end.load(Ordering::Relaxed);
         while pos < end {
             let rh = RecordHeader::decode(&mut &mmap[pos..end])?;
