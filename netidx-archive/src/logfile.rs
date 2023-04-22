@@ -36,7 +36,10 @@ use std::{
         Arc,
     },
 };
-use xz2::{read::{XzDecoder, XzEncoder}, stream::MtStreamBuilder};
+use xz2::{
+    read::{XzDecoder, XzEncoder},
+    stream::MtStreamBuilder,
+};
 
 #[derive(Debug, Clone)]
 pub struct FileHeader {
@@ -733,7 +736,6 @@ pub struct ArchiveWriter {
     compress: bool,
     compress_level: u32,
     compress_buf: Vec<u8>,
-    compress_builder: MtStreamBuilder,
     time: MonotonicTimestamper,
     path_by_id: IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: HashMap<Path, Id>,
@@ -774,13 +776,10 @@ impl ArchiveWriter {
             file.try_lock_exclusive()?;
             let block_size = allocation_granularity(path)? as usize;
             let mmap = unsafe { MmapMut::map_mut(&file)? };
-            let mut compress_builder = MtStreamBuilder::new();
-            compress_builder.threads(num_cpus::get() as u32).preset(compress_level);
             let mut t = ArchiveWriter {
                 compress,
                 compress_level,
                 compress_buf: Vec::new(),
-                compress_builder,
                 time,
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
@@ -825,13 +824,10 @@ impl ArchiveWriter {
             };
             <FileHeader as Pack>::encode(&fh, &mut buf)?;
             mmap.flush()?;
-            let mut compress_builder = MtStreamBuilder::new();
-            compress_builder.threads(num_cpus::get() as u32).preset(compress_level);
             Ok(ArchiveWriter {
                 compress,
                 compress_level,
                 compress_buf: Vec::new(),
-                compress_builder,
                 time,
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
@@ -1015,7 +1011,11 @@ impl ArchiveWriter {
             self.compress_buf.clear();
             let timestamp = self.time.timestamp(timestamp);
             let packed = utils::pack(batch)?.freeze();
-            let mut enc = XzEncoder::new_stream(&*packed, self.compress_builder.encoder()?);
+            let stream = MtStreamBuilder::new()
+                .threads(num_cpus::get() as u32)
+                .preset(self.compress_level)
+                .encoder()?;
+            let mut enc = XzEncoder::new_stream(&*packed, stream);
             let record_length = enc.read_to_end(&mut self.compress_buf)?;
             let compress_buf = mem::replace(&mut self.compress_buf, vec![]);
             self.add_batch_f(image, timestamp, record_length, |buf| {
