@@ -1576,7 +1576,7 @@ impl ArchiveReader {
             .map(|_| {
                 Ok(CompJob {
                     ts: DateTime::<Utc>::MIN_UTC,
-                    cbuf: vec![0u8; max_len * 2],
+                    cbuf: vec![0u8; max_len],
                     comp: Compressor::with_dictionary(19, &dict)?,
                     image: false,
                     pos: 0,
