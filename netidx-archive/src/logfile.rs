@@ -1524,7 +1524,7 @@ impl ArchiveReader {
     /// This function will create an archive with compressed batches
     /// and images. Compressed archives can be read as normal, but can
     /// no longer be written.
-    pub async fn compress(&self, dest: impl AsRef<FilePath>) -> Result<()> {
+    pub async fn compress(&self, window: usize, dest: impl AsRef<FilePath>) -> Result<()> {
         struct CompJob {
             ts: DateTime<Utc>,
             image: bool,
@@ -1572,7 +1572,7 @@ impl ArchiveReader {
         }
         output.add_raw_pathmappings(pms)?;
         let ncpus = num_cpus::get();
-        let mut compjobs = (0..ncpus * 50)
+        let mut compjobs = (0..ncpus * window)
             .into_iter()
             .map(|_| {
                 Ok(CompJob {

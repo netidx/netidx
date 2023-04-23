@@ -10,7 +10,7 @@ use netidx::{
     subscriber::{Event, Subscriber, Value},
 };
 use netidx_archive::{
-    logfile::{ArchiveReader, BatchItem, Cursor, Seek, self},
+    logfile::{self, ArchiveReader, BatchItem, Cursor, Seek},
     recorder_client::Client,
 };
 use netidx_tools_core::ClientParams;
@@ -42,8 +42,14 @@ pub(crate) enum Cmd {
     },
     #[structopt(name = "compress", about = "generate a compressed archive file")]
     Compress {
-        #[structopt(long = "keep", about = "don't delete the input file")]
+        #[structopt(long = "keep", help = "don't delete the input file")]
         keep: bool,
+        #[structopt(
+            long = "window",
+            help = "how many batches to compress in parallel",
+            default_value = "50"
+        )]
+        window: usize,
         file: PathBuf,
     },
     #[structopt(name = "dump", about = "print the contents of an archive")]
@@ -136,11 +142,11 @@ fn verify(file: impl AsRef<std::path::Path>) -> Result<()> {
     Ok(())
 }
 
-async fn compress(file: PathBuf, keep: bool) -> Result<()> {
+async fn compress(file: PathBuf, keep: bool, window: usize) -> Result<()> {
     let reader = ArchiveReader::open(file.clone())?;
     let mut compressed = file.to_string_lossy().into_owned();
     compressed.push_str(".rz");
-    reader.compress(&compressed).await?;
+    reader.compress(window, &compressed).await?;
     if let Err(e) = verify(compressed.clone()) {
         std::fs::remove_file(&compressed)?;
         return Err(e).context("verifying contents");
@@ -197,7 +203,7 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
             let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
             oneshot(subscriber, params).await
         }
-        Cmd::Compress { file, keep } => compress(file, keep).await,
+        Cmd::Compress { file, window, keep } => compress(file, keep, window).await,
         Cmd::Dump { file, metadata } => dump(file, metadata),
         Cmd::Verify { file } => verify(file),
         Cmd::Compressed { file } => compressed(file),
