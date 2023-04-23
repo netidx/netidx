@@ -206,6 +206,7 @@ struct Controls {
     state_ctl: Val,
     _pos_doc: Val,
     pos_ctl: Val,
+    pos_rt: Val,
 }
 
 impl Controls {
@@ -263,6 +264,11 @@ impl Controls {
             session_base.append("control/pos/current"),
             Value::Null,
         )?;
+        let pos_rt = publisher.publish_with_flags(
+            PublishFlags::USE_EXISTING,
+            session_base.append("control/pos/current/rt"),
+            Value::Null,
+        )?;
         publisher.writes(pos_ctl.id(), control_tx.clone());
         publisher.flushed().await;
         Ok(Controls {
@@ -276,6 +282,7 @@ impl Controls {
             state_ctl,
             _pos_doc,
             pos_ctl,
+            pos_rt,
         })
     }
 }
@@ -348,6 +355,7 @@ struct Session {
     data_base: Path,
     log: LogfileCollection,
     pathindex: ArchiveReader,
+    pos_update: Option<DateTime<Utc>>,
 }
 
 impl Session {
@@ -380,20 +388,45 @@ impl Session {
             data_base: session_base.append("data"),
             log,
             pathindex,
+            pos_update: None,
         })
     }
 
+    async fn commit_pos_update(
+        pos_update: &mut Option<DateTime<Utc>>,
+        publisher: &Publisher,
+        pos_ctl: &Val,
+    ) {
+        if let Some(up) = pos_update.take() {
+            let mut batch = publisher.start_batch();
+            pos_ctl.update(&mut batch, up);
+            batch.commit(None).await
+        }
+    }
+
     async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
+        macro_rules! pos_update {
+            () => {
+                Self::commit_pos_update(
+                    &mut self.pos_update,
+                    &self.publisher,
+                    &self.controls.pos_ctl,
+                )
+                .await
+            };
+        }
         macro_rules! set_tail {
             () => {
                 let mut cbatch = self.publisher.start_batch();
                 self.set_state(&mut cbatch, State::Tail);
                 cbatch.commit(None).await;
+                pos_update!();
                 break future::pending().await;
             };
         }
         loop {
             if !self.state.load().play() {
+                pos_update!();
                 break future::pending().await;
             } else {
                 match &mut self.speed {
@@ -403,6 +436,7 @@ impl Session {
                             *batches = match self.log.read_deltas(3) {
                                 Ok(batches) => batches?,
                                 Err(_) => {
+                                    pos_update!();
                                     time::sleep(Duration::from_secs(1)).await;
                                     continue;
                                 }
@@ -433,7 +467,11 @@ impl Session {
                         let (ts, batch) = current.pop_front().unwrap();
                         let elapsed = last.elapsed();
                         if elapsed < *next_after {
-                            time::sleep(*next_after - elapsed).await;
+                            let naptime = *next_after - elapsed;
+                            if naptime > Duration::from_millis(10) {
+                                pos_update!();
+                            }
+                            time::sleep(naptime).await;
                         }
                         if current.is_empty() {
                             continue;
@@ -496,7 +534,8 @@ impl Session {
                 }
                 Ok::<(), anyhow::Error>(())
             })?;
-            self.controls.pos_ctl.update(&mut pbatch, batch.0);
+            self.pos_update = Some(batch.0);
+            self.controls.pos_rt.update(&mut pbatch, batch.0);
             Ok(pbatch.commit(None).await)
         }
     }
