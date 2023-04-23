@@ -638,6 +638,14 @@ fn scan_header(buf: &mut impl Buf) -> Result<FileHeader> {
     Ok(header)
 }
 
+/// just read the file header directly from the file, bypass locking,
+/// and don't touch any other part of the file.
+pub fn read_file_header(file: impl AsRef<FilePath>) -> Result<FileHeader> {
+    let file = OpenOptions::new().read(true).write(false).open(file.as_ref())?;
+    let mmap = unsafe { MmapMut::map_mut(&file)? };
+    scan_header(&mut &mmap[..])
+}
+
 fn scan_file(
     compressed: &mut Option<CompressionHeader>,
     path_by_id: &mut IndexMap<Id, Path, FxBuildHasher>,

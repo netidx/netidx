@@ -10,7 +10,7 @@ use netidx::{
     subscriber::{Event, Subscriber, Value},
 };
 use netidx_archive::{
-    logfile::{BatchItem, Seek, ArchiveReader, Cursor},
+    logfile::{ArchiveReader, BatchItem, Cursor, Seek, self},
     recorder_client::Client,
 };
 use netidx_tools_core::ClientParams;
@@ -53,9 +53,9 @@ pub(crate) enum Cmd {
         metadata: bool,
     },
     #[structopt(name = "verify", about = "verify that an archive can be read")]
-    Verify {
-        file: PathBuf
-    }
+    Verify { file: PathBuf },
+    #[structopt(name = "compressed", about = "if file compressed exit 0, 1 no")]
+    Compressed { file: PathBuf },
 }
 
 fn parse_bound(s: Option<&str>) -> Result<Option<DateTime<Utc>>> {
@@ -125,7 +125,7 @@ fn verify(file: PathBuf) -> Result<()> {
     loop {
         let batches = reader.read_deltas(&mut cursor, 100)?;
         if batches.is_empty() {
-            break
+            break;
         }
     }
     let mut cursor = Cursor::new();
@@ -146,7 +146,7 @@ fn compress(file: PathBuf, keep: bool) -> Result<()> {
         return Err(e).context("verifying contents");
     }
     if !keep {
-        std::fs::remove_file(file)?;
+        std::fs::rename(compressed, file)?
     }
     Ok(())
 }
@@ -169,7 +169,7 @@ fn dump(file: PathBuf, metadata: bool) -> Result<()> {
         loop {
             let batches = reader.read_deltas(&mut cursor, 100)?;
             if batches.is_empty() {
-                return Ok(())
+                return Ok(());
             }
             for (ts, batch) in batches.iter() {
                 for BatchItem(id, ev) in batch.iter() {
@@ -181,6 +181,15 @@ fn dump(file: PathBuf, metadata: bool) -> Result<()> {
     Ok(())
 }
 
+fn compressed(file: PathBuf) -> Result<()> {
+    let hdr = logfile::read_file_header(file)?;
+    if hdr.compressed {
+        std::process::exit(0)
+    } else {
+        std::process::exit(1)
+    }
+}
+
 pub(super) async fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Oneshot { common, params } => {
@@ -188,11 +197,9 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
             let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
             oneshot(subscriber, params).await
         }
-        Cmd::Compress { file, keep } => {
-            compress(file, keep)
-        }
-        Cmd::Dump {file, metadata} => {
-            dump(file, metadata)
-        }
+        Cmd::Compress { file, keep } => compress(file, keep),
+        Cmd::Dump { file, metadata } => dump(file, metadata),
+        Cmd::Verify { file } => verify(file),
+        Cmd::Compressed { file } => compressed(file),
     }
 }
