@@ -1587,7 +1587,7 @@ impl ArchiveReader {
         let mut commitq: BTreeMap<DateTime<Utc>, Option<CompJob>> = BTreeMap::new();
         let mut index_iter = unified_index.iter();
         'main: loop {
-            while running_jobs.len() >= ncpus || compjobs.is_empty() {
+            while compjobs.is_empty() {
                 let job: CompJob = match running_jobs.join_next().await {
                     None => break 'main,
                     Some(res) => res??,
