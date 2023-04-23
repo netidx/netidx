@@ -187,6 +187,7 @@ fn write_pathmap(
             by_subid.insert(subid, id);
         }
     }
+    pathindex.flush()?;
     Ok(())
 }
 
