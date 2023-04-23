@@ -816,10 +816,11 @@ impl ArchiveWriter {
             file.set_len(max(block_size, fh_len + rh_len + ch_len) as u64)?;
             let mut mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut buf = &mut *mmap;
+            let committed = (fh_len + ch_len) as u64;
             let fh = FileHeader {
                 compressed: comp_hdr.is_some(),
                 version: FILE_VERSION,
-                committed: fh_len as u64,
+                committed,
             };
             <FileHeader as Pack>::encode(&fh, &mut buf)?;
             if let Some(hdr) = comp_hdr {
@@ -831,8 +832,8 @@ impl ArchiveWriter {
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
                 file: Arc::new(file),
-                end: Arc::new(AtomicUsize::new(fh_len)),
-                committed: fh_len,
+                end: Arc::new(AtomicUsize::new(committed as usize)),
+                committed: committed as usize,
                 next_id: 0,
                 block_size,
                 mmap,
