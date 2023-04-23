@@ -1487,8 +1487,6 @@ impl Db {
                 anyhow!("db dir not specified and no default could be determined")
             })?;
         let db = sled::Config::default()
-            .use_compression(cfg.compress)
-            .compression_factor(cfg.compress_level.unwrap_or(5) as i32)
             .cache_capacity(cfg.cache_size.unwrap_or(16 * 1024 * 1024))
             .path(&path)
             .open()?;

@@ -1,3 +1,22 @@
+* 0.19.3 archive
+
+  - The container server lost the ability to compress it's
+    database. This is because sled hasn't been updated in ages and
+    depends on an ancient version of zstd. If it gets updated I will
+    readd that functionality.
+
+  - Add transparent zstd decompression to the recorder. The archive
+    files can now be compressed with netidx record-client compress and
+    it will decompress the data as needed.
+
+  - Add a bunch of command line tools for working with archive files
+    - netidx record-client dump
+    - netidx record-client verify
+    - netidx record-client compressed
+    - netidx record-client compress
+
+  - Fix a number of bugs in the recorders
+
 * 0.19.6
   - don't spam info messages when republish fails
 

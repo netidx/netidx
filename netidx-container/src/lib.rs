@@ -82,10 +82,6 @@ pub struct Params {
     pub api_path: Option<Path>,
     #[structopt(long = "db", help = "the db file")]
     pub db: Option<String>,
-    #[structopt(long = "compress", help = "use zstd compression")]
-    pub compress: bool,
-    #[structopt(long = "compress-level", help = "zstd compression level")]
-    pub compress_level: Option<u32>,
     #[structopt(long = "cache-size", help = "db page cache size in bytes")]
     pub cache_size: Option<u64>,
     #[structopt(long = "sparse", help = "don't even advertise the contents of the db")]
