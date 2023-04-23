@@ -1570,8 +1570,8 @@ impl ArchiveReader {
             pms.push(PathMapping(path.clone(), *id));
         }
         output.add_raw_pathmappings(pms)?;
-        let njobs = num_cpus::get() * 2;
-        let mut compjobs = (0..njobs)
+        let ncpus = num_cpus::get();
+        let mut compjobs = (0..ncpus * 10)
             .into_iter()
             .map(|_| {
                 Ok(CompJob {
