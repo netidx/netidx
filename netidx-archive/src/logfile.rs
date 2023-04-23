@@ -1371,12 +1371,14 @@ impl ArchiveReader {
                         let pos =
                             pos + <RecordHeader as Pack>::const_encoded_len().unwrap();
                         let uncomp_len = Buf::get_u32(&mut &mmap[pos..]) as usize;
+                        let pos = pos + 4;
                         if compression_buf.len() < uncomp_len {
                             compression_buf.resize(uncomp_len, 0u8);
                         }
+                        let comp_len = rh.record_length as usize - 4;
                         let len = dcm
                             .decompress_to_buffer(
-                                &mmap[pos + 4..pos + rh.record_length as usize],
+                                &mmap[pos..pos + comp_len],
                                 &mut *compression_buf,
                             )
                             .context("decompressing to buffer")?;
@@ -1535,7 +1537,9 @@ impl ArchiveReader {
             let len = comp
                 .compress_to_buffer(&mmap[pos..end], &mut cbuf[4..])
                 .context("compress to buffer")?;
-            output.add_batch_raw(*image, *ts, &cbuf[0..len]).context("add raw batch")?;
+            output
+                .add_batch_raw(*image, *ts, &cbuf[0..len + 4])
+                .context("add raw batch")?;
         }
         output.flush()?;
         Ok(())
