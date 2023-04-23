@@ -292,7 +292,7 @@ impl FromValue for Seek {
 
 lazy_static! {
     static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(10, 100000);
-    pub static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(100, 100000);
+    pub static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(100, 1000000);
     pub(crate) static ref CURSOR_BATCH_POOL: Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
         Pool::new(100, 100000);
     static ref POS_POOL: Pool<Vec<(DateTime<Utc>, usize)>> = Pool::new(10, 100000);

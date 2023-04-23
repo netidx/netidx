@@ -17,6 +17,7 @@ use netidx::{
     protocol::glob::{Glob, GlobSet},
     resolver_client::{ChangeTracker, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
+    utils::{Batched, self},
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -215,7 +216,8 @@ pub(super) async fn run(
     config: Arc<Config>,
     record_config: Arc<RecordConfig>,
 ) -> Result<()> {
-    let (tx_batch, mut rx_batch) = mpsc::channel(10000);
+    let (tx_batch, rx_batch) = mpsc::channel(10000);
+    let mut rx_batch = Batched::new(rx_batch, 10000);
     let (tx_list, rx_list) = mpsc::unbounded();
     let mut by_subid: FxHashMap<SubId, Id> = HashMap::default();
     let mut image: FxHashMap<SubId, Event> = HashMap::default();
@@ -238,6 +240,7 @@ pub(super) async fn run(
     let mut pending_list: Option<Fuse<oneshot::Receiver<Lst>>> = None;
     let mut batches = 0;
     let mut last_batches = Instant::now();
+    let mut queued = Vec::new();
     start_list_task(rx_list, subscriber.resolver(), record_config.spec.clone());
     loop {
         select_biased! {
@@ -320,17 +323,20 @@ pub(super) async fn run(
             },
             batch = rx_batch.next() => match batch {
                 None => break,
-                Some(mut batch) => {
+                Some(utils::BatchItem::InBatch(batch)) => queued.push(batch),
+                Some(utils::BatchItem::EndBatch) => {
                     batches += 1;
                     let now = Utc::now();
                     let mut tbatch = BATCH_POOL.take();
                     task::block_in_place(|| -> Result<()> {
-                        for (subid, ev) in batch.drain(..) {
-                            if record_config.image_frequency.is_some() {
-                                image.insert(subid, ev.clone());
-                            }
-                            if let Some(id) = by_subid.get(&subid) {
-                                tbatch.push(BatchItem(*id, ev));
+                        for mut batch in queued.drain(..) {
+                            for (subid, ev) in batch.drain(..) {
+                                if record_config.image_frequency.is_some() {
+                                    image.insert(subid, ev.clone());
+                                }
+                                if let Some(id) = by_subid.get(&subid) {
+                                    tbatch.push(BatchItem(*id, ev));
+                                }
                             }
                         }
                         archive.add_batch(false, now, &tbatch)?;
