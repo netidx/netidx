@@ -1571,7 +1571,7 @@ impl ArchiveReader {
         }
         output.add_raw_pathmappings(pms)?;
         let ncpus = num_cpus::get();
-        let mut compjobs = (0..ncpus * 10)
+        let mut compjobs = (0..ncpus * 2)
             .into_iter()
             .map(|_| {
                 Ok(CompJob {
@@ -1587,7 +1587,7 @@ impl ArchiveReader {
         let mut commitq: BTreeMap<DateTime<Utc>, Option<CompJob>> = BTreeMap::new();
         let mut index_iter = unified_index.iter();
         'main: loop {
-            while compjobs.is_empty() {
+            while running_jobs.len() >= ncpus {
                 let job: CompJob = match running_jobs.join_next().await {
                     None => break 'main,
                     Some(res) => res??
@@ -1607,7 +1607,7 @@ impl ArchiveReader {
                 }
             }
             match index_iter.next() {
-                None => compjobs.clear(),
+                None => (),
                 Some((ts, (image, pos))) => {
                     let mut job = compjobs.pop().unwrap();
                     job.ts = *ts;
