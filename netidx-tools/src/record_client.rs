@@ -10,7 +10,7 @@ use netidx::{
     subscriber::{Event, Subscriber, Value},
 };
 use netidx_archive::{
-    logfile::{BatchItem, Seek, ArchiveReader},
+    logfile::{BatchItem, Seek, ArchiveReader, Cursor},
     recorder_client::Client,
 };
 use netidx_tools_core::ClientParams;
@@ -44,6 +44,12 @@ pub(crate) enum Cmd {
     Compress {
         file: PathBuf,
         output: PathBuf,
+    },
+    #[structopt(name = "dump", about = "print the contents of an archive")]
+    Dump {
+        file: PathBuf,
+        #[structopt(long = "metadata-only", about = "don't print the data")]
+        metadata: bool,
     }
 }
 
@@ -113,6 +119,33 @@ fn compress(file: PathBuf, output: PathBuf) -> Result<()> {
     reader.compress(output)
 }
 
+fn dump(file: PathBuf, metadata: bool) -> Result<()> {
+    let reader = ArchiveReader::open(file)?;
+    reader.check_remap_rescan()?;
+    println!("---------------- pathmap --------------------");
+    for (id, path) in reader.index().iter_pathmap() {
+        println!("{:?}: {}", id, path);
+    }
+    println!("--------------- metadata --------------------");
+    println!("image batches: {}", reader.image_batches());
+    println!("delta batches: {}", reader.delta_batches());
+    if !metadata {
+        let mut cursor = Cursor::new();
+        loop {
+            let batches = reader.read_deltas(&mut cursor, 100)?;
+            if batches.is_empty() {
+                return Ok(())
+            }
+            for (ts, batch) in batches.iter() {
+                for BatchItem(id, ev) in batch.iter() {
+                    println!("{}: {:?} -> {:?}", ts, id, ev);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Oneshot { common, params } => {
@@ -122,6 +155,9 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
         }
         Cmd::Compress { file, output } => {
             compress(file, output)
+        }
+        Cmd::Dump {file, metadata} => {
+            dump(file, metadata)
         }
     }
 }
