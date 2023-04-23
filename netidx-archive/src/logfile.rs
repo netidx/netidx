@@ -1572,7 +1572,7 @@ impl ArchiveReader {
         }
         output.add_raw_pathmappings(pms)?;
         let ncpus = num_cpus::get();
-        let mut compjobs = (0..ncpus * 10)
+        let mut compjobs = (0..ncpus * 50)
             .into_iter()
             .map(|_| {
                 Ok(CompJob {
