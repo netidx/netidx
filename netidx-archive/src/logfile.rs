@@ -811,21 +811,19 @@ impl ArchiveWriter {
             let block_size = allocation_granularity(path.as_ref())? as usize;
             let fh_len = <FileHeader as Pack>::const_encoded_len().unwrap();
             let rh_len = <RecordHeader as Pack>::const_encoded_len().unwrap();
-            let dh_len = compress
-                .as_ref()
-                .map(|d| <CompressionHeader as Pack>::encoded_len(d))
-                .unwrap_or(0);
-            file.set_len(max(block_size, fh_len + rh_len + dh_len) as u64)?;
+            let comp_hdr = compress.map(|dictionary| CompressionHeader { dictionary });
+            let ch_len = comp_hdr.as_ref().map(|ch| ch.encoded_len()).unwrap_or(0);
+            file.set_len(max(block_size, fh_len + rh_len + ch_len) as u64)?;
             let mut mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut buf = &mut *mmap;
             let fh = FileHeader {
-                compressed: compress.is_some(),
+                compressed: comp_hdr.is_some(),
                 version: FILE_VERSION,
                 committed: fh_len as u64,
             };
             <FileHeader as Pack>::encode(&fh, &mut buf)?;
-            if let Some(dictionary) = compress {
-                CompressionHeader { dictionary }.encode(&mut buf)?;
+            if let Some(hdr) = comp_hdr {
+                hdr.encode(&mut buf)?;
             }
             mmap.flush()?;
             Ok(ArchiveWriter {
