@@ -1571,7 +1571,7 @@ impl ArchiveReader {
         }
         output.add_raw_pathmappings(pms)?;
         let ncpus = num_cpus::get();
-        let mut compjobs = (0..ncpus * 2)
+        let mut compjobs = (0..ncpus * 10)
             .into_iter()
             .map(|_| {
                 Ok(CompJob {
@@ -1587,19 +1587,23 @@ impl ArchiveReader {
         let mut commitq: BTreeMap<DateTime<Utc>, Option<CompJob>> = BTreeMap::new();
         let mut index_iter = unified_index.iter();
         'main: loop {
-            while running_jobs.len() >= ncpus {
+            while running_jobs.len() >= ncpus || compjobs.is_empty() {
                 let job: CompJob = match running_jobs.join_next().await {
                     None => break 'main,
-                    Some(res) => res??
+                    Some(res) => res??,
                 };
                 commitq.insert(job.ts, Some(job));
                 while let Some(mut ent) = commitq.first_entry() {
                     match ent.get_mut().take() {
                         None => break,
                         Some(job) => {
-                             ent.remove();
+                            ent.remove();
                             output
-                                .add_batch_raw(job.image, job.ts, &job.cbuf[0..job.pos + 4])
+                                .add_batch_raw(
+                                    job.image,
+                                    job.ts,
+                                    &job.cbuf[0..job.pos + 4],
+                                )
                                 .context("add raw batch")?;
                             compjobs.push(job);
                         }
@@ -1607,7 +1611,7 @@ impl ArchiveReader {
                 }
             }
             match index_iter.next() {
-                None => (),
+                None => compjobs.clear(),
                 Some((ts, (image, pos))) => {
                     let mut job = compjobs.pop().unwrap();
                     job.ts = *ts;
