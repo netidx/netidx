@@ -42,14 +42,19 @@ pub(crate) enum Cmd {
     },
     #[structopt(name = "compress", about = "generate a compressed archive file")]
     Compress {
+        #[structopt(long = "keep", about = "don't delete the input file")]
+        keep: bool,
         file: PathBuf,
-        output: PathBuf,
     },
     #[structopt(name = "dump", about = "print the contents of an archive")]
     Dump {
         file: PathBuf,
         #[structopt(long = "metadata-only", about = "don't print the data")]
         metadata: bool,
+    },
+    #[structopt(name = "verify", about = "verify that an archive can be read")]
+    Verify {
+        file: PathBuf
     }
 }
 
@@ -114,21 +119,51 @@ async fn oneshot(subscriber: Subscriber, params: OneshotParams) -> Result<()> {
     Ok(())
 }
 
-fn compress(file: PathBuf, output: PathBuf) -> Result<()> {
+fn verify(file: PathBuf) -> Result<()> {
     let reader = ArchiveReader::open(file)?;
-    reader.compress(output)
+    let mut cursor = Cursor::new();
+    loop {
+        let batches = reader.read_deltas(&mut cursor, 100)?;
+        if batches.is_empty() {
+            break
+        }
+    }
+    let mut cursor = Cursor::new();
+    reader.seek(&mut cursor, Seek::Beginning);
+    reader.build_image(&cursor)?;
+    reader.seek(&mut cursor, Seek::End);
+    reader.build_image(&cursor)?;
+    Ok(())
+}
+
+fn compress(file: PathBuf, keep: bool) -> Result<()> {
+    let reader = ArchiveReader::open(file.clone())?;
+    let mut compressed = file.clone();
+    compressed.set_extension("rz");
+    reader.compress(compressed.clone())?;
+    if let Err(e) = verify(compressed.clone()) {
+        std::fs::remove_file(&compressed)?;
+        return Err(e).context("verifying contents");
+    }
+    if !keep {
+        std::fs::remove_file(file)?;
+    }
+    Ok(())
 }
 
 fn dump(file: PathBuf, metadata: bool) -> Result<()> {
     let reader = ArchiveReader::open(file)?;
     reader.check_remap_rescan()?;
-    println!("---------------- pathmap --------------------");
-    for (id, path) in reader.index().iter_pathmap() {
-        println!("{:?}: {}", id, path);
+    if !metadata {
+        println!("---------------- pathmap --------------------");
+        for (id, path) in reader.index().iter_pathmap() {
+            println!("{:?}: {}", id, path);
+        }
     }
     println!("--------------- metadata --------------------");
     println!("image batches: {}", reader.image_batches());
     println!("delta batches: {}", reader.delta_batches());
+    println!("compressed: {}", reader.is_compressed());
     if !metadata {
         let mut cursor = Cursor::new();
         loop {
@@ -153,8 +188,8 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
             let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
             oneshot(subscriber, params).await
         }
-        Cmd::Compress { file, output } => {
-            compress(file, output)
+        Cmd::Compress { file, keep } => {
+            compress(file, keep)
         }
         Cmd::Dump {file, metadata} => {
             dump(file, metadata)

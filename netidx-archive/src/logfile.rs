@@ -1253,6 +1253,10 @@ impl ArchiveReader {
         })
     }
 
+    pub fn is_compressed(&self) -> bool {
+        self.compressed.is_some()
+    }
+
     pub(crate) fn strong_count(&self) -> usize {
         Arc::strong_count(&self.index)
     }
