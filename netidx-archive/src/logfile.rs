@@ -1556,6 +1556,7 @@ impl ArchiveReader {
         }
         self.check_remap_rescan()?;
         let (max_len, dict) = self.train()?;
+        let pdict = Box::leak(Box::new(zstd::dict::EncoderDictionary::copy(&dict, 19)));
         let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> = BTreeMap::new();
         let index = self.index.read();
         for (ts, pos) in index.deltamap.iter() {
@@ -1564,7 +1565,7 @@ impl ArchiveReader {
         for (ts, pos) in index.imagemap.iter() {
             unified_index.insert(*ts, (true, *pos));
         }
-        let mut output = ArchiveWriter::open_full(dest, Some(dict.clone()))?;
+        let mut output = ArchiveWriter::open_full(dest, Some(dict))?;
         let mut pms = PM_POOL.take();
         for (id, path) in index.path_by_id.iter() {
             pms.push(PathMapping(path.clone(), *id));
@@ -1577,7 +1578,7 @@ impl ArchiveReader {
                 Ok(CompJob {
                     ts: DateTime::<Utc>::MIN_UTC,
                     cbuf: vec![0u8; max_len],
-                    comp: Compressor::with_dictionary(19, &dict)?,
+                    comp: Compressor::with_prepared_dictionary(pdict)?,
                     image: false,
                     pos: 0,
                 })
