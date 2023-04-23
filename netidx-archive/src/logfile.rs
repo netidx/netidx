@@ -4,7 +4,7 @@ use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
 use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
-use log::{info, warn};
+use log::{debug, info, warn};
 use memmap2::{Mmap, MmapMut};
 use netidx::{
     chars::Chars,
@@ -576,7 +576,7 @@ fn scan_records(
         }
         let rh = RecordHeader::decode(buf)
             .map_err(Error::from)
-            .context("invalid record header")?;
+            .context("read record header")?;
         if buf.remaining() < rh.record_length as usize {
             warn!("truncated record at {}", pos);
             break Ok(pos);
@@ -630,7 +630,7 @@ fn scan_header(buf: &mut impl Buf) -> Result<FileHeader> {
     }
     let header = <FileHeader as Pack>::decode(buf)
         .map_err(Error::from)
-        .context("invalid file header")?;
+        .context("read file header")?;
     // this is the first version, so no upgrading can be done yet
     if header.version != FILE_VERSION {
         bail!("file version mismatch, can't read it")
@@ -649,9 +649,10 @@ fn scan_file(
     buf: &mut impl Buf,
 ) -> Result<usize> {
     let total_bytes = buf.remaining();
-    let header = scan_header(buf)?;
+    let header = scan_header(buf).context("scan header")?;
     if header.compressed {
-        *compressed = Some(CompressionHeader::decode(buf)?);
+        *compressed =
+            Some(CompressionHeader::decode(buf).context("read compression header")?);
     }
     scan_records(
         path_by_id,
@@ -810,7 +811,10 @@ impl ArchiveWriter {
             let block_size = allocation_granularity(path.as_ref())? as usize;
             let fh_len = <FileHeader as Pack>::const_encoded_len().unwrap();
             let rh_len = <RecordHeader as Pack>::const_encoded_len().unwrap();
-            let dh_len = compress.as_ref().map(|d| d.len()).unwrap_or(0);
+            let dh_len = compress
+                .as_ref()
+                .map(|d| <CompressionHeader as Pack>::encoded_len(d))
+                .unwrap_or(0);
             file.set_len(max(block_size, fh_len + rh_len + dh_len) as u64)?;
             let mut mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut buf = &mut *mmap;
@@ -1215,9 +1219,10 @@ impl ArchiveReader {
     /// the [ArchiveWriter::reader](ArchiveWriter::reader) method to
     /// get a reader.
     pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
-        let file = OpenOptions::new().read(true).open(path.as_ref())?;
+        let file =
+            OpenOptions::new().read(true).open(path.as_ref()).context("open file")?;
         file.try_lock_shared()?;
-        let mmap = unsafe { Mmap::map(&file)? };
+        let mmap = unsafe { Mmap::map(&file).context("mmap file")? };
         let mut index = ArchiveIndex::new();
         let mut max_id = 0;
         let mut compressed = None;
@@ -1230,11 +1235,13 @@ impl ArchiveReader {
             &mut index.time_basis,
             &mut max_id,
             &mut &*mmap,
-        )?;
+        )
+        .context("scan file")?;
         index.end = end;
         let compressed = compressed
             .map(|dict| {
-                let dc = Decompressor::with_dictionary(&dict.dictionary)?;
+                let dc = Decompressor::with_dictionary(&dict.dictionary)
+                    .context("create decompressor")?;
                 Ok::<_, anyhow::Error>(Arc::new(Mutex::new(dc)))
             })
             .transpose()?;
@@ -1350,25 +1357,33 @@ impl ArchiveReader {
             bail!("record out of bounds")
         } else {
             let mut buf = &mmap[pos..];
-            let rh = <RecordHeader as Pack>::decode(&mut buf)?;
+            let rh = <RecordHeader as Pack>::decode(&mut buf)
+                .context("reading record header")?;
             if pos + rh.record_length as usize > end {
                 bail!("get_batch: error truncated record at {}", pos);
             }
             match compressed {
-                None => Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)?),
+                None => Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)
+                    .context("decoding batch")?),
                 Some(dcm) => {
                     let mut dcm = dcm.lock();
                     BUF.with(|compression_buf| {
                         let mut compression_buf = compression_buf.borrow_mut();
-                        compression_buf.clear();
                         let pos =
                             pos + <RecordHeader as Pack>::const_encoded_len().unwrap();
-                        dcm.decompress_to_buffer(
-                            &mmap[pos..pos + rh.record_length as usize],
-                            &mut *compression_buf,
-                        )?;
+                        let uncomp_len = Buf::get_u32(&mut &mmap[pos..]) as usize;
+                        if compression_buf.len() < uncomp_len {
+                            compression_buf.resize(uncomp_len, 0u8);
+                        }
+                        let len = dcm
+                            .decompress_to_buffer(
+                                &mmap[pos + 4..pos + rh.record_length as usize],
+                                &mut *compression_buf,
+                            )
+                            .context("decompressing to buffer")?;
+                        debug!("decompressed {} bytes", len);
                         Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(
-                            &mut &compression_buf[..],
+                            &mut &compression_buf[..len],
                         )?)
                     })
                 }
@@ -1479,6 +1494,7 @@ impl ArchiveReader {
         self.check_remap_rescan()?;
         let mmap = self.mmap.read();
         let mut lengths: Vec<usize> = Vec::new();
+        let mut max_len = 0;
         let fhl = FileHeader::const_encoded_len().unwrap();
         let rhl = RecordHeader::const_encoded_len().unwrap();
         let mut pos = fhl;
@@ -1486,10 +1502,11 @@ impl ArchiveReader {
         while pos < end {
             let rh = RecordHeader::decode(&mut &mmap[pos..end])?;
             let len = rhl + rh.record_length as usize;
+            max_len = max(len, max_len);
             lengths.push(len);
             pos += len;
         }
-        let max_len = end / 100;
+        let max_len = end / 10;
         let max_len = if max_len == 0 { end } else { max_len };
         info!("training dictionary on {} bytes", end);
         let dict = zstd::dict::from_continuous(&mmap[fhl..end], &lengths[..], max_len)?;
@@ -1510,18 +1527,16 @@ impl ArchiveReader {
         output.add_raw_pathmappings(pms)?;
         let mut comp = Compressor::with_dictionary(19, &dict)?;
         comp.multithread(num_cpus::get() as u32)?;
-        let mut cbuf: Vec<u8> = Vec::new();
+        let mut cbuf = vec![0u8; max_len * 2];
         for (ts, (image, pos)) in unified_index.iter() {
-            cbuf.clear();
             let rh = RecordHeader::decode(&mut &mmap[*pos..end])?;
             let pos = *pos + rhl;
             let end = pos + rh.record_length as usize;
-            let max_len = (end - pos) * 2;
-            if cbuf.capacity() < max_len {
-                cbuf.reserve(max_len);
-            }
-            comp.compress_to_buffer(&mmap[pos..end], &mut cbuf)?;
-            output.add_batch_raw(*image, *ts, &cbuf)?;
+            (&mut cbuf[0..4]).put_u32(rh.record_length);
+            let len = comp
+                .compress_to_buffer(&mmap[pos..end], &mut cbuf[4..])
+                .context("compress to buffer")?;
+            output.add_batch_raw(*image, *ts, &cbuf[0..len]).context("add raw batch")?;
         }
         output.flush()?;
         Ok(())
