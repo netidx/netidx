@@ -119,7 +119,7 @@ async fn oneshot(subscriber: Subscriber, params: OneshotParams) -> Result<()> {
     Ok(())
 }
 
-fn verify(file: PathBuf) -> Result<()> {
+fn verify(file: impl AsRef<std::path::Path>) -> Result<()> {
     let reader = ArchiveReader::open(file)?;
     let mut cursor = Cursor::new();
     loop {
@@ -138,9 +138,9 @@ fn verify(file: PathBuf) -> Result<()> {
 
 async fn compress(file: PathBuf, keep: bool) -> Result<()> {
     let reader = ArchiveReader::open(file.clone())?;
-    let mut compressed = file.clone();
-    compressed.set_extension("rz");
-    reader.compress(compressed.clone()).await?;
+    let mut compressed = file.to_string_lossy().into_owned();
+    compressed.push_str(".rz");
+    reader.compress(&compressed).await?;
     if let Err(e) = verify(compressed.clone()) {
         std::fs::remove_file(&compressed)?;
         return Err(e).context("verifying contents");
