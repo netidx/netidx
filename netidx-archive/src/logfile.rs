@@ -36,6 +36,7 @@ use std::{
         Arc,
     },
 };
+use tokio::task::{self, JoinSet};
 use zstd::bulk::{Compressor, Decompressor};
 
 #[derive(Debug, Clone)]
@@ -1497,17 +1498,10 @@ impl ArchiveReader {
         Ok(res)
     }
 
-    /// This function will create an archive with compressed batches
-    /// and images. Compressed archives can be read as normal, but can
-    /// no longer be written.
-    pub fn compress(&self, dest: impl AsRef<FilePath>) -> Result<()> {
-        if self.compressed.is_some() {
-            bail!("archive is already compressed")
-        }
-        self.check_remap_rescan()?;
+    fn train(&self) -> Result<(usize, Vec<u8>)> {
         let mmap = self.mmap.read();
         let mut lengths: Vec<usize> = Vec::new();
-        let mut max_len = 0;
+        let mut max_rec_len = 0;
         let fhl = FileHeader::const_encoded_len().unwrap();
         let rhl = RecordHeader::const_encoded_len().unwrap();
         let mut pos = fhl;
@@ -1515,15 +1509,53 @@ impl ArchiveReader {
         while pos < end {
             let rh = RecordHeader::decode(&mut &mmap[pos..end])?;
             let len = rhl + rh.record_length as usize;
-            max_len = max(len, max_len);
+            max_rec_len = max(len, max_rec_len);
             lengths.push(len);
             pos += len;
         }
-        let max_len = end / 10;
-        let max_len = if max_len == 0 { end } else { max_len };
-        info!("training dictionary on {} bytes", end);
-        let dict = zstd::dict::from_continuous(&mmap[fhl..end], &lengths[..], max_len)?;
+        let max_dict_len = end / 10;
+        let max_dict_len = if max_dict_len == 0 { end } else { max_dict_len };
+        let dict =
+            zstd::dict::from_continuous(&mmap[fhl..end], &lengths[..], max_dict_len)?;
         info!("dictionary of size {} was trained", dict.len());
+        Ok((max_rec_len, dict))
+    }
+
+    /// This function will create an archive with compressed batches
+    /// and images. Compressed archives can be read as normal, but can
+    /// no longer be written.
+    pub async fn compress(&self, dest: impl AsRef<FilePath>) -> Result<()> {
+        struct CompJob {
+            ts: DateTime<Utc>,
+            image: bool,
+            comp: Compressor<'static>,
+            cbuf: Vec<u8>,
+            pos: usize,
+        }
+        async fn compress_task(
+            mmap: Arc<RwLock<Mmap>>,
+            mut job: CompJob,
+        ) -> Result<CompJob> {
+            task::block_in_place(|| {
+                let mmap = mmap.read();
+                let pos = job.pos;
+                let rh = RecordHeader::decode(&mut &mmap[pos..])?;
+                let pos = pos + RecordHeader::const_encoded_len().unwrap();
+                let end = pos + rh.record_length as usize;
+                (&mut job.cbuf[0..4]).put_u32(rh.record_length);
+                let len = job
+                    .comp
+                    .compress_to_buffer(&mmap[pos..end], &mut job.cbuf[4..])
+                    .context("compress to buffer")?;
+                job.pos = len;
+                Ok(job)
+            })
+        }
+        if self.compressed.is_some() {
+            bail!("archive is already compressed")
+        }
+        self.check_remap_rescan()?;
+        let (max_len, dict) = self.train()?;
         let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> = BTreeMap::new();
         let index = self.index.read();
         for (ts, pos) in index.deltamap.iter() {
@@ -1538,20 +1570,53 @@ impl ArchiveReader {
             pms.push(PathMapping(path.clone(), *id));
         }
         output.add_raw_pathmappings(pms)?;
-        let mut comp = Compressor::with_dictionary(19, &dict)?;
-        comp.multithread(num_cpus::get() as u32)?;
-        let mut cbuf = vec![0u8; max_len * 2];
-        for (ts, (image, pos)) in unified_index.iter() {
-            let rh = RecordHeader::decode(&mut &mmap[*pos..end])?;
-            let pos = *pos + rhl;
-            let end = pos + rh.record_length as usize;
-            (&mut cbuf[0..4]).put_u32(rh.record_length);
-            let len = comp
-                .compress_to_buffer(&mmap[pos..end], &mut cbuf[4..])
-                .context("compress to buffer")?;
-            output
-                .add_batch_raw(*image, *ts, &cbuf[0..len + 4])
-                .context("add raw batch")?;
+        let njobs = num_cpus::get() * 2;
+        let mut compjobs = (0..njobs)
+            .into_iter()
+            .map(|_| {
+                Ok(CompJob {
+                    ts: DateTime::<Utc>::MIN_UTC,
+                    cbuf: vec![0u8; max_len * 2],
+                    comp: Compressor::with_dictionary(19, &dict)?,
+                    image: false,
+                    pos: 0,
+                })
+            })
+            .collect::<Result<Vec<CompJob>>>()?;
+        let mut running_jobs: JoinSet<Result<CompJob>> = JoinSet::new();
+        let mut commitq: BTreeMap<DateTime<Utc>, Option<CompJob>> = BTreeMap::new();
+        let mut index_iter = unified_index.iter();
+        'main: loop {
+            while compjobs.is_empty() {
+                let job: CompJob = match running_jobs.join_next().await {
+                    None => break 'main,
+                    Some(res) => res??
+                };
+                commitq.insert(job.ts, Some(job));
+                while let Some(mut ent) = commitq.first_entry() {
+                    match ent.get_mut().take() {
+                        None => break,
+                        Some(job) => {
+                             ent.remove();
+                            output
+                                .add_batch_raw(job.image, job.ts, &job.cbuf[0..job.pos + 4])
+                                .context("add raw batch")?;
+                            compjobs.push(job);
+                        }
+                    }
+                }
+            }
+            match index_iter.next() {
+                None => compjobs.clear(),
+                Some((ts, (image, pos))) => {
+                    let mut job = compjobs.pop().unwrap();
+                    job.ts = *ts;
+                    job.image = *image;
+                    job.pos = *pos;
+                    commitq.insert(*ts, None);
+                    running_jobs.spawn(compress_task(Arc::clone(&self.mmap), job));
+                }
+            }
         }
         output.flush()?;
         Ok(())

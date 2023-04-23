@@ -136,11 +136,11 @@ fn verify(file: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn compress(file: PathBuf, keep: bool) -> Result<()> {
+async fn compress(file: PathBuf, keep: bool) -> Result<()> {
     let reader = ArchiveReader::open(file.clone())?;
     let mut compressed = file.clone();
     compressed.set_extension("rz");
-    reader.compress(compressed.clone())?;
+    reader.compress(compressed.clone()).await?;
     if let Err(e) = verify(compressed.clone()) {
         std::fs::remove_file(&compressed)?;
         return Err(e).context("verifying contents");
@@ -197,7 +197,7 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
             let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
             oneshot(subscriber, params).await
         }
-        Cmd::Compress { file, keep } => compress(file, keep),
+        Cmd::Compress { file, keep } => compress(file, keep).await,
         Cmd::Dump { file, metadata } => dump(file, metadata),
         Cmd::Verify { file } => verify(file),
         Cmd::Compressed { file } => compressed(file),
