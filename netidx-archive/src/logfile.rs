@@ -641,8 +641,8 @@ fn scan_header(buf: &mut impl Buf) -> Result<FileHeader> {
 
 /// just read the file header directly from the file, bypass locking,
 /// and don't touch any other part of the file.
-pub fn read_file_header(file: impl AsRef<FilePath>) -> Result<FileHeader> {
-    let file = OpenOptions::new().read(true).write(false).open(file.as_ref())?;
+pub fn read_file_header(path: impl AsRef<FilePath>) -> Result<FileHeader> {
+    let file = OpenOptions::new().read(true).open(path.as_ref()).context("open file")?;
     let mmap = unsafe { MmapMut::map_mut(&file)? };
     scan_header(&mut &mmap[..])
 }
