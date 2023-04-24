@@ -33,7 +33,6 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     mem,
     ops::Bound,
-    pin::Pin,
     str::FromStr,
     sync::{
         atomic::{AtomicU8, Ordering},
@@ -901,8 +900,6 @@ async fn session(
         t.apply_config(&mut batch, &cluster, cfg).await?
     }
     batch.commit(None).await;
-    type NextRes = Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>;
-    type Next = Pin<Box<dyn Future<Output = NextRes> + Send + Sync>>;
     let mut control_rx = control_rx.fuse();
     let mut idle_check = time::interval(std::time::Duration::from_secs(30));
     let mut idle = false;
