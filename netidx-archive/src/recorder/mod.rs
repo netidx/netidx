@@ -390,6 +390,7 @@ impl Recorder {
                 }
             }));
             wait.push(task::spawn({
+                let subscriber = subscriber.clone();
                 let pathindex = pathindex_reader.clone();
                 let publish_config = publish_config.clone();
                 let config = config.clone();
@@ -402,6 +403,7 @@ impl Recorder {
                         config,
                         publish_config,
                         publisher,
+                        subscriber,
                     )
                     .await;
                     if let Err(e) = r {
