@@ -192,13 +192,17 @@ pub struct Pool<T: Poolable + Send + Sync + 'static>(Arc<PoolInner<T>>);
 
 impl<T: Poolable + Send + Sync + 'static> Prune for Pool<T> {
     fn prune(&self) {
-        let slice = self.0.pool.capacity() / 10;
-        if self.0.pool.len() > slice {
-            for _ in 0..slice {
+        let len = self.0.pool.len();
+        let ten_percent = self.0.pool.capacity() / 10;
+        let one_percent = ten_percent / 10;
+        if len > ten_percent {
+            for _ in 0..ten_percent {
                 self.0.pool.pop();
             }
-        } else {
-            self.0.pool.pop();
+        } else if len > one_percent {
+            for _ in 0..one_percent {
+                self.0.pool.pop();
+            }
         }
     }
 }
