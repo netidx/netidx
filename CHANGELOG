@@ -1,3 +1,7 @@
+* 0.19.5 archive
+
+  - fix bug in load_file_header
+
 * 0.19.4 archive
 
   - allow tuning of the parallel window size
