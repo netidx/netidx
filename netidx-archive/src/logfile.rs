@@ -1524,7 +1524,16 @@ impl ArchiveReader {
     /// This function will create an archive with compressed batches
     /// and images. Compressed archives can be read as normal, but can
     /// no longer be written.
-    pub async fn compress(&self, window: usize, dest: impl AsRef<FilePath>) -> Result<()> {
+    ///
+    /// This function is only meant to be called by the command line
+    /// tool. It allocates static memory that will not be freed when
+    /// it returns. Do not call it directly unless you are ok with
+    /// this.
+    pub async fn compress(
+        &self,
+        window: usize,
+        dest: impl AsRef<FilePath>,
+    ) -> Result<()> {
         struct CompJob {
             ts: DateTime<Utc>,
             image: bool,

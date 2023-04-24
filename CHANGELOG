@@ -1,3 +1,7 @@
+* 0.19.4 archive
+
+  - allow tuning of the parallel window size
+
 * 0.19.3 archive
 
   - The container server lost the ability to compress it's
