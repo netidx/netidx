@@ -643,7 +643,7 @@ fn scan_header(buf: &mut impl Buf) -> Result<FileHeader> {
 /// and don't touch any other part of the file.
 pub fn read_file_header(path: impl AsRef<FilePath>) -> Result<FileHeader> {
     let file = OpenOptions::new().read(true).open(path.as_ref()).context("open file")?;
-    let mmap = unsafe { MmapMut::map_mut(&file)? };
+    let mmap = unsafe { Mmap::map(&file)? };
     scan_header(&mut &mmap[..])
 }
 
