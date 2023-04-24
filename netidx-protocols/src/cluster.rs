@@ -3,11 +3,13 @@ use bytes::Bytes;
 use futures::{channel::mpsc, prelude::*};
 use log::{info, warn};
 use netidx::{
+    pack::Pack,
     path::Path,
     pool::Pooled,
     publisher::{Publisher, Val, Value, WriteRequest},
     resolver_client::ChangeTracker,
-    subscriber::{Dval, Event, Subscriber}, pack::Pack, utils,
+    subscriber::{Dval, Event, Subscriber},
+    utils,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -86,6 +88,11 @@ impl<T: Pack> Cluster<T> {
         Ok(t)
     }
 
+    /// Return your own path
+    pub fn path(&self) -> Path {
+        self.our_path.clone()
+    }
+
     /// Returns true if this cluster member is the primary, false
     /// otherwise. May change after `poll_members`.
     pub fn primary(&self) -> bool {
@@ -154,6 +161,15 @@ impl<T: Pack> Cluster<T> {
             for other in self.others.values() {
                 other.write(cmd.clone());
             }
+        }
+    }
+
+    /// Send a command to just one other, identified by it's path.
+    pub fn send_cmd_to_one(&self, path: &Path, cmd: &T) {
+        if let Some(other) = self.others.get(path) {
+            let cmd = utils::pack(cmd).unwrap();
+            let cmd = Value::Bytes(Bytes::from(cmd));
+            other.write(cmd);
         }
     }
 }

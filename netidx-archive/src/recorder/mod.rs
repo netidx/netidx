@@ -42,7 +42,7 @@ mod file {
     }
 
     pub(super) fn default_cluster() -> String {
-        ".cluster".into()
+        "cluster".into()
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,7 +176,7 @@ pub struct PublishConfig {
     pub oneshot_data_limit: usize,
     /// How many shards this recorder instance is divided into
     pub shards: Option<usize>,
-    /// The cluster name to join, default is .cluster.
+    /// The cluster name to join, default is "cluster".
     pub cluster: String,
 }
 

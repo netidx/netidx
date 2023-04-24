@@ -119,7 +119,7 @@ enum ClusterCmd {
     SetState(State),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Pack)]
 #[repr(u8)]
 enum State {
     Play = 0,
@@ -356,6 +356,7 @@ struct Session {
     log: LogfileCollection,
     pathindex: ArchiveReader,
     pos_update: Option<DateTime<Utc>>,
+    used: bool,
 }
 
 impl Session {
@@ -369,6 +370,8 @@ impl Session {
         control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
     ) -> Result<Self> {
         let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
+        let used =
+            pathindex.index().iter_pathmap().any(|(_, path)| filter.is_match(path));
         let log =
             LogfileCollection::new(config, head, Bound::Unbounded, Bound::Unbounded)
                 .await?;
@@ -389,6 +392,7 @@ impl Session {
             log,
             pathindex,
             pos_update: None,
+            used,
         })
     }
 
@@ -423,6 +427,9 @@ impl Session {
                 pos_update!();
                 break future::pending().await;
             };
+        }
+        if !self.used {
+            return future::pending().await;
         }
         loop {
             if !self.state.load().play() {
@@ -523,6 +530,7 @@ impl Session {
                         None => {
                             if let Some(path) = index.path_for_id(&id) {
                                 if self.filter.is_match(&path) {
+                                    self.used = true;
                                     let path = self.data_base.append(&path);
                                     let val = self.publisher.publish(path, v)?;
                                     self.published_ids.insert(val.id());
@@ -726,6 +734,7 @@ impl Session {
 
     fn process_control_cmd(
         &mut self,
+        idle: &mut bool,
         cbatch: &mut UpdateBatch,
         cmd: ClusterCmd,
     ) -> Result<()> {
@@ -741,39 +750,43 @@ impl Session {
             ClusterCmd::SetEnd(new_end) => self.set_end(cbatch, new_end),
             ClusterCmd::SetSpeed(sp) => Ok(self.set_speed(cbatch, sp)),
             ClusterCmd::SetState(st) => Ok(self.set_state(cbatch, st)),
-            ClusterCmd::NotIdle => Ok(()),
+            ClusterCmd::NotIdle => Ok(*idle = false),
         }
     }
 
     fn reimage(&mut self, pbatch: &mut UpdateBatch) -> Result<()> {
-        let mut idx = self.log.reimage()?;
-        if let Some(cursor) = self.log.position() {
-            self.controls.pos_ctl.update(
-                pbatch,
-                match cursor.current() {
-                    Some(ts) => Value::DateTime(ts),
-                    None => match cursor.start() {
-                        Bound::Unbounded => Value::Null,
-                        Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+        if self.used {
+            let mut idx = self.log.reimage()?;
+            if let Some(cursor) = self.log.position() {
+                self.controls.pos_ctl.update(
+                    pbatch,
+                    match cursor.current() {
+                        Some(ts) => Value::DateTime(ts),
+                        None => match cursor.start() {
+                            Bound::Unbounded => Value::Null,
+                            Bound::Included(ts) | Bound::Excluded(ts) => {
+                                Value::DateTime(ts)
+                            }
+                        },
                     },
-                },
-            );
-        }
-        self.pathindex.check_remap_rescan()?;
-        let index = self.pathindex.index();
-        for (id, path) in index.iter_pathmap() {
-            let v = match idx.remove(id) {
-                None | Some(Event::Unsubscribed) => Value::Null,
-                Some(Event::Update(v)) => v,
-            };
-            match self.published.get(&id) {
-                Some(val) => val.update(pbatch, v),
-                None => {
-                    if self.filter.is_match(&path) {
-                        let path = self.data_base.append(path.as_ref());
-                        let val = self.publisher.publish(path, v)?;
-                        self.published_ids.insert(val.id());
-                        self.published.insert(*id, val);
+                );
+            }
+            self.pathindex.check_remap_rescan()?;
+            let index = self.pathindex.index();
+            for (id, path) in index.iter_pathmap() {
+                let v = match idx.remove(id) {
+                    None | Some(Event::Unsubscribed) => Value::Null,
+                    Some(Event::Update(v)) => v,
+                };
+                match self.published.get(&id) {
+                    Some(val) => val.update(pbatch, v),
+                    None => {
+                        if self.filter.is_match(&path) {
+                            let path = self.data_base.append(path.as_ref());
+                            let val = self.publisher.publish(path, v)?;
+                            self.published_ids.insert(val.id());
+                            self.published.insert(*id, val);
+                        }
                     }
                 }
             }
@@ -782,7 +795,9 @@ impl Session {
     }
 
     fn seek(&mut self, pbatch: &mut UpdateBatch, seek: Seek) -> Result<()> {
-        self.log.seek(seek)?;
+        if self.used {
+            self.log.seek(seek)?;
+        }
         match self.state.load() {
             State::Tail => self.set_state(pbatch, State::Play),
             State::Pause | State::Play => (),
@@ -939,7 +954,7 @@ async fn session(
             cmds = cluster.wait_cmds().fuse() => {
                 let mut cbatch = publisher.start_batch();
                 for cmd in cmds? {
-                    t.process_control_cmd(&mut cbatch, cmd)?
+                    t.process_control_cmd(&mut idle, &mut cbatch, cmd)?
                 }
                 cbatch.commit(None).await;
             },
@@ -1080,7 +1095,7 @@ pub(super) async fn run(
     let mut cluster = Cluster::<(ClId, Uuid, Vec<Chars>)>::new(
         &publisher,
         subscriber.clone(),
-        publish_config.base.append("cluster"),
+        publish_config.base.append(&publish_config.cluster).append("publish"),
         publish_config.shards.unwrap_or(0),
     )
     .await?;
