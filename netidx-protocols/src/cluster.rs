@@ -7,7 +7,7 @@ use netidx::{
     pool::Pooled,
     publisher::{Publisher, Val, Value, WriteRequest},
     resolver_client::ChangeTracker,
-    subscriber::{Dval, Event, Subscriber},
+    subscriber::{Dval, Event, Subscriber}, pack::Pack, utils,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
@@ -40,7 +40,7 @@ pub fn uuid_string(id: Uuid) -> String {
 /// algorithm, the primary may change as members join and leave the
 /// cluster, but with a stable member set all members will agree on
 /// which one is the primary.
-pub struct Cluster<T: Serialize + DeserializeOwned + 'static> {
+pub struct Cluster<T: Pack> {
     t: PhantomData<T>,
     ctrack: ChangeTracker,
     publisher: Publisher,
@@ -52,7 +52,7 @@ pub struct Cluster<T: Serialize + DeserializeOwned + 'static> {
     primary: bool,
 }
 
-impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
+impl<T: Pack> Cluster<T> {
     /// Create a new cluster directly under `base`. It's wise to
     /// ensure nothing else is publishing under `base`.
     pub async fn new(
@@ -138,7 +138,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
                 let mut cmds = Vec::new();
                 for req in reqs.drain(..) {
                     if let Value::Bytes(b) = &req.value {
-                        if let Ok(cmd) = serde_json::from_slice::<T>(&**b) {
+                        if let Ok(cmd) = <T as Pack>::decode(&mut &**b) {
                             cmds.push(cmd);
                             continue;
                         }
@@ -153,7 +153,7 @@ impl<T: Serialize + DeserializeOwned + 'static> Cluster<T> {
     /// Send a command out to other members of the cluster.
     pub fn send_cmd(&self, cmd: &T) {
         if self.others.len() > 0 {
-            let cmd = serde_json::to_vec(cmd).unwrap();
+            let cmd = utils::pack(cmd).unwrap();
             let cmd = Value::Bytes(Bytes::from(cmd));
             for other in self.others.values() {
                 other.write(cmd.clone());
