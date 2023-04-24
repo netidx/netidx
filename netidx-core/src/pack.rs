@@ -1274,3 +1274,37 @@ where
         Self::from_bits(bits).map_err(|_| PackError::InvalidFormat)
     }
 }
+
+use std::ops::Bound;
+
+impl<T: Pack> Pack for Bound<T> {
+    fn encoded_len(&self) -> usize {
+        1 + match self {
+            Bound::Excluded(t) | Bound::Included(t) => Pack::encoded_len(t),
+            Bound::Unbounded => 0,
+        }
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        match self {
+            Bound::Unbounded => <u8 as Pack>::encode(&0, buf),
+            Bound::Excluded(t) => {
+                <u8 as Pack>::encode(&1, buf)?;
+                Pack::encode(t, buf)
+            }
+            Bound::Included(t) => {
+                <u8 as Pack>::encode(&2, buf)?;
+                Pack::encode(t, buf)
+            }
+        }
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        match <u8 as Pack>::decode(buf)? {
+            0 => Ok(Bound::Unbounded),
+            1 => Ok(Bound::Excluded(Pack::decode(buf)?)),
+            2 => Ok(Bound::Included(Pack::decode(buf)?)),
+            _ => Err(PackError::UnknownTag),
+        }
+    }
+}

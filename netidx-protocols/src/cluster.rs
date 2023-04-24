@@ -9,7 +9,6 @@ use netidx::{
     resolver_client::ChangeTracker,
     subscriber::{Dval, Event, Subscriber}, pack::Pack, utils,
 };
-use serde::{de::DeserializeOwned, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     iter,
@@ -32,9 +31,6 @@ pub fn uuid_string(id: Uuid) -> String {
 /// operations. There can be more than `shards` members at any time,
 /// and members can enter and leave the cluster at will. It is up to
 /// the user to ensure state integrity under these constraints.
-///
-/// Messages are encoded to json, so don't expect fantastic
-/// performance.
 ///
 /// A random cluster member is elected 'primary' by an common
 /// algorithm, the primary may change as members join and leave the

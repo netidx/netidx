@@ -41,6 +41,10 @@ mod file {
         104857600
     }
 
+    pub(super) fn default_cluster() -> String {
+        ".cluster".into()
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct PublishConfig {
@@ -55,6 +59,8 @@ mod file {
         pub(super) oneshot_data_limit: usize,
         #[serde(default)]
         pub(super) shards: Option<usize>,
+        #[serde(default = "default_cluster")]
+        pub(super) cluster: String,
     }
 
     impl PublishConfig {
@@ -66,6 +72,7 @@ mod file {
                 max_sessions_per_client: default_max_sessions_per_client(),
                 oneshot_data_limit: default_oneshot_data_limit(),
                 shards: Some(0),
+                cluster: default_cluster(),
             }
         }
     }
@@ -169,6 +176,8 @@ pub struct PublishConfig {
     pub oneshot_data_limit: usize,
     /// How many shards this recorder instance is divided into
     pub shards: Option<usize>,
+    /// The cluster name to join, default is .cluster.
+    pub cluster: String,
 }
 
 impl PublishConfig {
@@ -182,6 +191,7 @@ impl PublishConfig {
             max_sessions_per_client: file::default_max_sessions_per_client(),
             oneshot_data_limit: file::default_oneshot_data_limit(),
             shards: None,
+            cluster: file::default_cluster(),
         }
     }
 
@@ -196,6 +206,7 @@ impl PublishConfig {
             max_sessions_per_client: f.max_sessions_per_client,
             oneshot_data_limit: f.oneshot_data_limit,
             shards: f.shards,
+            cluster: f.cluster,
         })
     }
 }

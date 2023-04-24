@@ -20,6 +20,7 @@ use netidx::{
     resolver_client::{Glob, GlobSet},
     subscriber::{Event, Subscriber},
 };
+use netidx_derive::Pack;
 use netidx_protocols::rpc::server::{RpcCall, RpcReply};
 use netidx_protocols::{
     cluster::{uuid_string, Cluster},
@@ -108,7 +109,7 @@ fn bound_to_val(b: Bound<DateTime<Utc>>) -> Value {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Pack)]
 enum ClusterCmd {
     NotIdle,
     SeekTo(String),

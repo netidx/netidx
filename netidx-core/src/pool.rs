@@ -203,6 +203,8 @@ impl<T: Poolable + Send + Sync + 'static> Prune for Pool<T> {
             for _ in 0..one_percent {
                 self.0.pool.pop();
             }
+        } else if len > 0 {
+            self.0.pool.pop();
         }
     }
 }
