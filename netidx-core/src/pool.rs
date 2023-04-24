@@ -2,6 +2,9 @@
 /// modifications
 use crate::utils::take_t;
 use crossbeam::queue::ArrayQueue;
+use fxhash::FxHashMap;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     borrow::Borrow,
@@ -123,19 +126,63 @@ impl<T: Poolable> Poolable for TArc<T> {
     }
 }
 
+trait Prune {
+    fn prune(&self);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Pid(u32);
+
+impl Pid {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static PID: AtomicU32 = AtomicU32::new(0);
+        Self(PID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+struct GlobalState {
+    pools: FxHashMap<Pid, Box<dyn Prune + Send + Sync + 'static>>,
+    pool_shark_running: bool,
+}
+
+static POOLS: Lazy<Mutex<GlobalState>> = Lazy::new(|| {
+    Mutex::new(GlobalState { pools: HashMap::default(), pool_shark_running: false })
+});
+
 #[derive(Debug)]
 struct PoolInner<T: Poolable + Send + Sync + 'static> {
     pool: ArrayQueue<T>,
     max_elt_capacity: usize,
+    id: Pid,
+}
+
+impl<T: Poolable + Send + Sync + 'static> Drop for PoolInner<T> {
+    fn drop(&mut self) {
+        POOLS.lock().pools.remove(&self.id);
+    }
+}
+
+fn pool_shark() {
+    use std::{
+        thread::{sleep, spawn},
+        time::Duration,
+    };
+    spawn(|| loop {
+        sleep(Duration::from_secs(300));
+        {
+            for p in POOLS.lock().pools.values() {
+                p.prune()
+            }
+        }
+    });
 }
 
 /// a lock-free, thread-safe, dynamically-sized object pool.
 ///
 /// this pool begins with an initial capacity and will continue
 /// creating new objects on request when none are available.  pooled
-/// objects are returned to the pool on destruction (with an extra
-/// provision to optionally "reset" the state of an object for
-/// re-use).
+/// objects are returned to the pool on destruction.
 ///
 /// if, during an attempted return, a pool already has
 /// `maximum_capacity` objects in the pool, the pool will throw away
@@ -143,16 +190,36 @@ struct PoolInner<T: Poolable + Send + Sync + 'static> {
 #[derive(Clone, Debug)]
 pub struct Pool<T: Poolable + Send + Sync + 'static>(Arc<PoolInner<T>>);
 
+impl<T: Poolable + Send + Sync + 'static> Prune for Pool<T> {
+    fn prune(&self) {
+        let slice = self.0.pool.capacity() / 10;
+        if self.0.pool.len() > slice {
+            for _ in 0..slice {
+                self.0.pool.pop();
+            }
+        }
+    }
+}
+
 impl<T: Poolable + Sync + Send + 'static> Pool<T> {
     /// creates a new `Pool<T>`. this pool will retain up to
     /// `max_capacity` objects of size less than or equal to
     /// max_elt_capacity. Objects larger than max_elt_capacity will be
     /// deallocated immediatly.
     pub fn new(max_capacity: usize, max_elt_capacity: usize) -> Pool<T> {
-        Pool(Arc::new(PoolInner {
+        let id = Pid::new();
+        let t = Pool(Arc::new(PoolInner {
             pool: ArrayQueue::new(max_capacity),
             max_elt_capacity,
-        }))
+            id,
+        }));
+        let mut gs = POOLS.lock();
+        gs.pools.insert(id, Box::new(Pool(Arc::clone(&t.0))));
+        if !gs.pool_shark_running {
+            gs.pool_shark_running = true;
+            pool_shark()
+        }
+        t
     }
 
     /// takes an item from the pool, creating one if none are available.
@@ -176,7 +243,7 @@ impl<T: Poolable + Sync + Send + 'static> Pooled<T> {
     fn get(&self) -> &T {
         match &self.object {
             Some(ref t) => t,
-            None => unreachable!()
+            None => unreachable!(),
         }
     }
 
