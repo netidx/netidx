@@ -47,7 +47,7 @@ pub(crate) enum Cmd {
         #[structopt(
             long = "window",
             help = "how many batches to compress in parallel",
-            default_value = "50"
+            default_value = "5"
         )]
         window: usize,
         file: PathBuf,
