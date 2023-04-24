@@ -197,6 +197,8 @@ impl<T: Poolable + Send + Sync + 'static> Prune for Pool<T> {
             for _ in 0..slice {
                 self.0.pool.pop();
             }
+        } else {
+            self.0.pool.pop();
         }
     }
 }
