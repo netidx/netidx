@@ -187,7 +187,7 @@ impl PendingOneshot {
                         image.extend(r.image.drain());
                         deltas.extend(r.deltas.drain(..));
                     }
-                    reply.deltas.make_contiguous().sort_by_key(|(ts, _)| ts);
+                    reply.deltas.make_contiguous().sort_by_key(|(ts, _)| *ts);
                     self.reply.send(Value::Bytes(pack(&reply)?.freeze()));
                 }
             }

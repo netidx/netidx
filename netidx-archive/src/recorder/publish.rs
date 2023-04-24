@@ -29,7 +29,6 @@ use netidx_protocols::{
     rpc_err,
 };
 use parking_lot::Mutex;
-use serde_derive::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     mem,
