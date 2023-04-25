@@ -506,12 +506,12 @@ impl Cursor {
         }
     }
 
-    pub fn start(&self) -> Bound<DateTime<Utc>> {
-        self.start
+    pub fn start(&self) -> &Bound<DateTime<Utc>> {
+        &self.start
     }
 
-    pub fn end(&self) -> Bound<DateTime<Utc>> {
-        self.end
+    pub fn end(&self) -> &Bound<DateTime<Utc>> {
+        &self.end
     }
 
     pub fn current(&self) -> Option<DateTime<Utc>> {
@@ -1119,7 +1119,7 @@ impl ArchiveIndex {
                     None => break,
                     Some((ts, _)) => {
                         moved += 1;
-                        cursor.set_current(*ts);
+                        cursor.set_current(dbg!(*ts));
                         if cursor.at_end() {
                             break;
                         }
@@ -1134,7 +1134,7 @@ impl ArchiveIndex {
                     None => break,
                     Some((ts, _)) => {
                         moved -= 1;
-                        cursor.current = Some(*ts);
+                        cursor.set_current(dbg!(*ts));
                         if cursor.at_start() {
                             break;
                         }

@@ -30,7 +30,6 @@ lazy_static! {
 struct DataSource {
     file: File,
     archive: ArchiveReader,
-    cursor: Cursor,
 }
 
 impl DataSource {
@@ -38,18 +37,13 @@ impl DataSource {
         config: &Config,
         file: File,
         head: &Option<ArchiveReader>,
-        start: Bound<DateTime<Utc>>,
-        end: Bound<DateTime<Utc>>,
     ) -> Result<Option<Self>> {
         match file {
             File::Head => match head.as_ref() {
                 None => Ok(None),
                 Some(head) => {
-                    let mut cursor = Cursor::new();
-                    cursor.set_start(start);
-                    cursor.set_end(end);
                     let head = head.clone();
-                    Ok(Some(Self { file: File::Head, archive: head, cursor }))
+                    Ok(Some(Self { file: File::Head, archive: head }))
                 }
             },
             File::Historical(ts) => {
@@ -104,13 +98,7 @@ impl DataSource {
                         }
                     }
                 };
-                let mut cursor = Cursor::new();
-                cursor.set_start(start);
-                cursor.set_end(end);
-                archive.check_remap_rescan()?;
-                archive.seek(&mut cursor, Seek::Beginning);
-                debug!("log file cursor set to start: {:?} end: {:?}", start, end);
-                Ok(Some(Self { file, archive, cursor }))
+                Ok(Some(Self { file, archive }))
             }
         }
     }
@@ -120,8 +108,7 @@ pub struct LogfileCollection {
     index: LogfileIndex,
     source: Option<DataSource>,
     head: Option<ArchiveReader>,
-    start: Bound<DateTime<Utc>>,
-    end: Bound<DateTime<Utc>>,
+    pos: Cursor,
     config: Arc<Config>,
 }
 
@@ -144,7 +131,8 @@ impl LogfileCollection {
         end: Bound<DateTime<Utc>>,
     ) -> Result<Self> {
         let index = LogfileIndex::new(&config).await?;
-        Ok(Self { index, source: None, head, start, end, config })
+        let pos = Cursor::create_from(start, end, None);
+        Ok(Self { index, source: None, head, pos, config })
     }
 
     /// Attempt to open a source if we don't already have one, return true
@@ -153,13 +141,7 @@ impl LogfileCollection {
         if self.source.is_some() {
             Ok(true)
         } else {
-            self.source = DataSource::new(
-                &self.config,
-                self.index.first(),
-                &self.head,
-                self.start,
-                self.end,
-            )?;
+            self.source = DataSource::new(&self.config, self.index.first(), &self.head)?;
             Ok(self.source.is_some())
         }
     }
@@ -173,13 +155,8 @@ impl LogfileCollection {
             match self.source.as_ref().unwrap().file {
                 File::Head => Ok(true),
                 f => {
-                    self.source = DataSource::new(
-                        &self.config,
-                        self.index.next(f),
-                        &self.head,
-                        self.start,
-                        self.end,
-                    )?;
+                    self.source =
+                        DataSource::new(&self.config, self.index.next(f), &self.head)?;
                     Ok(self.source.is_some())
                 }
             }
@@ -203,9 +180,8 @@ impl LogfileCollection {
                 let (file, result) = task::block_in_place(|| {
                     let ds = self.source.as_mut().unwrap();
                     let archive = &ds.archive;
-                    let cursor = &mut ds.cursor;
                     let file = ds.file;
-                    let result = f(archive, cursor)?;
+                    let result = f(archive, &mut self.pos)?;
                     Ok::<_, anyhow::Error>((file, result))
                 })?;
                 if s(&result) {
@@ -254,13 +230,13 @@ impl LogfileCollection {
     }
 
     /// look up the position in the archive, if any
-    pub fn position(&self) -> Option<&Cursor> {
-        self.source.as_ref().map(|ds| &ds.cursor)
+    pub fn position(&self) -> &Cursor {
+        &self.pos
     }
 
     /// get a mutable reference to the current position if it exists
-    pub fn position_mut(&mut self) -> Option<&mut Cursor> {
-        self.source.as_mut().map(|ds| &mut ds.cursor)
+    pub fn position_mut(&mut self) -> &mut Cursor {
+        &mut self.pos
     }
 
     /// set the head
@@ -270,25 +246,19 @@ impl LogfileCollection {
 
     /// set the start bound
     pub fn set_start(&mut self, start: Bound<DateTime<Utc>>) {
-        self.start = start;
-        if let Some(ds) = self.source.as_mut() {
-            ds.cursor.set_start(start);
-        }
+        self.pos.set_start(start);
     }
 
     pub fn set_end(&mut self, end: Bound<DateTime<Utc>>) {
-        self.end = end;
-        if let Some(ds) = self.source.as_mut() {
-            ds.cursor.set_end(end);
-        }
+        self.pos.set_end(end);
     }
 
     pub fn start(&self) -> &Bound<DateTime<Utc>> {
-        &self.start
+        self.pos.start()
     }
 
     pub fn end(&self) -> &Bound<DateTime<Utc>> {
-        &self.end
+        self.pos.end()
     }
 
     /// reimage the file at the current cursor position, returning the path map and the image
@@ -296,7 +266,7 @@ impl LogfileCollection {
         if self.source()? {
             task::block_in_place(|| {
                 let ds = self.source.as_mut().unwrap();
-                ds.archive.build_image(&ds.cursor)
+                ds.archive.build_image(&self.pos)
             })
         } else {
             Ok(IMG_POOL.take())
@@ -315,88 +285,78 @@ impl LogfileCollection {
         Ok(())
     }
 
+    /// seek n batches forward if n is positive or backward if n is negative
+    pub fn seek_n(&mut self, mut n: i8) -> Result<()> {
+        self.source()?;
+        loop {
+            match self.source.as_ref() {
+                None => break,
+                Some(ds) => {
+                    dbg!(self.pos);
+                    let moved =
+                        dbg!(ds.archive.index().seek_steps(&mut self.pos, dbg!(n)));
+                    dbg!(self.pos);
+                    if moved == n {
+                        break;
+                    }
+                    let file = if n < 0 {
+                        if self.pos.at_start() {
+                            break;
+                        } else {
+                            self.index.prev(ds.file)
+                        }
+                    } else {
+                        if self.pos.at_end() {
+                            break;
+                        } else {
+                            self.index.next(ds.file)
+                        }
+                    };
+                    if dbg!(file) == dbg!(ds.file) {
+                        break;
+                    }
+                    self.source = DataSource::new(&self.config, file, &self.head)?;
+                    n -= moved;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// seek to the position in the archive collection specified by the
     /// seek instruction. After seeking you may need to reimage.
     pub fn seek(&mut self, mut seek: Seek) -> Result<()> {
-        match &mut seek {
-            Seek::BatchRelative(i) => {
-                self.source()?;
-                loop {
-                    match self.source.as_ref() {
-                        None => break,
-                        Some(ds) => {
-                            let mut cursor = ds.cursor;
-                            cursor.set_start(self.start);
-                            cursor.set_end(self.end);
-                            let moved = dbg!(ds.archive.index().seek_steps(&mut cursor, dbg!(*i)));
-                            if moved == *i {
-                                break;
-                            }
-                            let file = if *i < 0 {
-                                if cursor.at_start() {
-                                    break;
-                                } else {
-                                    self.index.prev(ds.file)
-                                }
-                            } else {
-                                if cursor.at_end() {
-                                    break;
-                                } else {
-                                    self.index.next(ds.file)
-                                }
-                            };
-                            if dbg!(file) == dbg!(ds.file) {
-                                break;
-                            }
-                            self.source = DataSource::new(
-                                &self.config,
-                                file,
-                                &self.head,
-                                self.start,
-                                self.end,
-                            )?;
-                            if let Some(ds) = self.source.as_mut() {
-                                ds.cursor = cursor;
-                            }
-                            *i -= moved;
-                        }
-                    }
-                }
-            }
+        match seek {
+            Seek::BatchRelative(i) => self.seek_n(i)?,
             Seek::Beginning => {
-                let file = match &self.start {
+                let file = match &self.pos.start() {
                     Bound::Unbounded => self.index.first(),
                     Bound::Excluded(dt) | Bound::Included(dt) => self.index.find(*dt),
                 };
                 match self.source.as_ref() {
                     Some(ds) if ds.file == file => (),
                     Some(_) | None => {
-                        self.source = DataSource::new(
-                            &self.config,
-                            file,
-                            &self.head,
-                            self.start,
-                            self.end,
-                        )?;
+                        self.source = DataSource::new(&self.config, file, &self.head)?;
                     }
+                }
+                if let Some(ds) = self.source {
+                    ds.archive.seek(&mut self.pos, Seek::Beginning)
                 }
             }
             Seek::End => {
-                let file = match &self.end {
+                let file = match &self.pos.end() {
                     Bound::Unbounded => self.index.last(),
                     Bound::Excluded(dt) | Bound::Included(dt) => self.index.find(*dt),
                 };
                 match self.source.as_ref() {
                     Some(ds) if ds.file == file => (),
                     Some(_) | None => {
-                        self.source = DataSource::new(
-                            &self.config,
-                            File::Head,
-                            &self.head,
-                            self.start,
-                            self.end,
-                        )?;
+                        self.source =
+                            DataSource::new(&self.config, File::Head, &self.head)?;
                     }
+                }
+                if let Some(ds) = self.source {
+                    ds.archive.seek(&mut self.pos, Seek::End)
                 }
             }
             Seek::TimeRelative(offset) => {
@@ -404,45 +364,33 @@ impl LogfileCollection {
                     self.source()?;
                 }
                 if let Some(ds) = self.source.as_ref() {
-                    let mut cursor = ds.cursor;
-                    cursor.set_start(self.start);
-                    cursor.set_end(self.end);
                     let (ok, ts) =
-                        ds.archive.index().seek_time_relative(&mut cursor, *offset);
+                        ds.archive.index().seek_time_relative(&mut self.pos, offset);
                     if !ok {
                         let file = self.index.find(ts);
                         if ds.file != file {
-                            self.source = DataSource::new(
-                                &self.config,
-                                file,
-                                &self.head,
-                                self.start,
-                                self.end,
-                            )?;
+                            self.source =
+                                DataSource::new(&self.config, file, &self.head)?;
+                        }
+                        if let Some(ds) = self.source.as_ref() {
+                            ds.archive.seek(&mut self.pos, Seek::Absolute(ts));
                         }
                     }
-                    seek = Seek::Absolute(ts);
                 }
             }
             Seek::Absolute(ts) => {
-                let file = self.index.find(*ts);
+                let file = self.index.find(ts);
                 let cur_ok = match self.source.as_ref() {
                     None => false,
                     Some(ds) => ds.file == file,
                 };
                 if !cur_ok {
-                    self.source = DataSource::new(
-                        &self.config,
-                        file,
-                        &self.head,
-                        self.start,
-                        self.end,
-                    )?;
+                    self.source = DataSource::new(&self.config, file, &self.head)?;
+                }
+                if let Some(ds) = self.source.as_ref() {
+                    ds.archive.seek(&mut self.pos, Seek::Absolute(ts))
                 }
             }
-        }
-        if let Some(ds) = self.source.as_mut() {
-            ds.archive.seek(&mut ds.cursor, seek);
         }
         Ok(())
     }

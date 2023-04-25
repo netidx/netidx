@@ -873,8 +873,8 @@ async fn session(
     loop {
         select_biased! {
             r = t.next().fuse() => match r {
-                Err(e) => break Err(e),
                 Ok((ts, mut batch)) => { t.process_batch((ts, &mut *batch)).await?; }
+                Err(e) => break Err(e),
             },
             e = events_rx.select_next_some() => match e {
                 publisher::Event::Subscribe(id, _) => if t.published_ids.contains(&id) {
