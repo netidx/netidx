@@ -1017,7 +1017,7 @@ impl Drop for SessionId {
     }
 }
 
-async fn start_session(
+fn start_session(
     publisher: Publisher,
     session_id: Uuid,
     session_token: SessionId,
@@ -1029,7 +1029,7 @@ async fn start_session(
     publish_config: Arc<PublishConfig>,
     filter: GlobSet,
     cfg: Option<NewSessionConfig>,
-) -> Result<()> {
+) {
     let bcast = bcast.subscribe();
     let head = head.clone();
     let subscriber = subscriber.clone();
@@ -1059,7 +1059,6 @@ async fn start_session(
         }
         drop(session_token)
     });
-    Ok(())
 }
 
 pub(super) async fn run(
@@ -1133,7 +1132,7 @@ pub(super) async fn run(
                             error!("can't start session requested by cluster member, too many sessions")
                         },
                         Some(session_token) => {
-                            let r = start_session(
+                            start_session(
                                 publisher.clone(),
                                 session_id,
                                 session_token,
@@ -1145,10 +1144,7 @@ pub(super) async fn run(
                                 publish_config.clone(),
                                 filter,
                                 None
-                            ).await;
-                            if let Err(e) = r {
-                                warn!("failed to start session {}, {}", session_id, e)
-                            }
+                            );
                         }
                     }
                 }
@@ -1173,7 +1169,7 @@ pub(super) async fn run(
                             let session_id = Uuid::new_v4();
                             let client = cfg.client;
                             info!("start session {}", session_id);
-                            let r = start_session(
+                            start_session(
                                 publisher.clone(),
                                 session_id,
                                 session_token,
@@ -1185,18 +1181,9 @@ pub(super) async fn run(
                                 publish_config.clone(),
                                 filter,
                                 Some(cfg)
-                            ).await;
-                            match r {
-                                Err(e) => {
-                                    let e = Chars::from(format!("{}", e));
-                                    warn!("failed to start session {}, {}", session_id, e);
-                                    reply.send(Value::Error(e));
-                                }
-                                Ok(()) => {
-                                    cluster.send_cmd(&(client, session_id, filter_txt));
-                                    reply.send(Value::from(uuid_string(session_id)));
-                                }
-                            }
+                            );
+                            cluster.send_cmd(&(client, session_id, filter_txt));
+                            reply.send(Value::from(uuid_string(session_id)));
                         }
                     }
                 }
