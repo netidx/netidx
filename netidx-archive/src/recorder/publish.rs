@@ -383,18 +383,6 @@ impl Session {
         })
     }
 
-    async fn commit_pos_update(
-        pos_update: &mut Option<DateTime<Utc>>,
-        publisher: &Publisher,
-        pos_ctl: &Val,
-    ) {
-        if let Some(up) = pos_update.take() {
-            let mut batch = publisher.start_batch();
-            pos_ctl.update(&mut batch, up);
-            batch.commit(None).await
-        }
-    }
-
     async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
         macro_rules! set_tail {
             () => {
