@@ -1345,10 +1345,35 @@ impl ArchiveReader {
                 }
             },
             Seek::Absolute(ts) => {
-                cursor.set_current(ts);
+                let index = self.index.read();
+                let first = index.deltamap.keys().next();
+                let last = index.deltamap.keys().next_back();
+                match (first, last) {
+                    (Some(fst), Some(lst)) => if ts < *fst {
+                        cursor.set_current(*fst);
+                    } else if ts > *lst {
+                        cursor.set_current(*lst);
+                    } else {
+                        cursor.set_current(ts)
+                    }
+                    (_, _) => cursor.set_current(ts),
+                }
             }
             Seek::TimeRelative(offset) => {
-                self.index.read().seek_time_relative(cursor, offset);
+                let index = self.index.read();
+                let (ok, ts) = index.seek_time_relative(cursor, offset);
+                if !ok {
+                    let first = index.deltamap.keys().next();
+                    let last = index.deltamap.keys().next_back();
+                    match (first, last) {
+                        (Some(first), Some(last)) => if ts < *first {
+                            cursor.set_current(*first);
+                        } else {
+                            cursor.set_current(*last);
+                        }
+                        (None, _) | (_, None) => ()
+                    }
+                }
             }
             Seek::BatchRelative(steps) => {
                 self.index.read().seek_steps(cursor, steps);
