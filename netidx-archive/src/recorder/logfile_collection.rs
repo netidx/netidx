@@ -20,10 +20,8 @@ use std::{
 };
 use tokio::task;
 
-static RETAIN_TIME: Duration = Duration::from_secs(900);
-
 lazy_static! {
-    static ref ARCHIVE_READERS: Mutex<FxHashMap<PathBuf, (ArchiveReader, Instant)>> =
+    static ref ARCHIVE_READERS: Mutex<FxHashMap<PathBuf, ArchiveReader>> =
         Mutex::new(HashMap::default());
 }
 
@@ -80,19 +78,16 @@ impl DataSource {
                 let archive = {
                     let mut readers = ARCHIVE_READERS.lock();
                     match readers.get_mut(&path) {
-                        Some((reader, last)) => {
+                        Some(reader) => {
                             debug!("log file was cached");
-                            *last = Instant::now();
                             reader.clone()
                         }
                         None => {
                             debug!("log file was not cached, opening");
                             let now = Instant::now();
-                            readers.retain(|_, (r, last)| {
-                                r.strong_count() > 1 || (now - *last) < RETAIN_TIME
-                            });
+                            readers.retain(|_, r| r.strong_count() > 1);
                             let rd = task::block_in_place(|| ArchiveReader::open(&path))?;
-                            readers.insert(path, (rd.clone(), Instant::now()));
+                            readers.insert(path, rd.clone());
                             debug!("log file opened successfully");
                             rd
                         }
@@ -116,10 +111,7 @@ impl Drop for LogfileCollection {
     fn drop(&mut self) {
         self.source = None;
         self.head = None;
-        let now = Instant::now();
-        ARCHIVE_READERS
-            .lock()
-            .retain(|_, (r, last)| r.strong_count() > 1 || (now - *last) < RETAIN_TIME);
+        ARCHIVE_READERS.lock().retain(|_, r| r.strong_count() > 1);
     }
 }
 
