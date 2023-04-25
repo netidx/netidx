@@ -16,7 +16,6 @@ use std::{
     ops::Bound,
     path::PathBuf,
     sync::Arc,
-    time::Instant,
 };
 use tokio::task;
 
