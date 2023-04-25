@@ -320,51 +320,42 @@ impl LogfileCollection {
     pub fn seek(&mut self, mut seek: Seek) -> Result<()> {
         match &mut seek {
             Seek::BatchRelative(i) => {
-                if self.source.is_none() {
-                    self.source()?;
-                }
+                self.source()?;
                 loop {
-                    if let Some(ds) = self.source.as_ref() {
-                        let mut cursor = ds.cursor;
-                        cursor.set_start(dbg!(self.start));
-                        cursor.set_end(dbg!(self.end));
-                        debug!("attempting to move {}", *i);
-                        let moved = ds.archive.index().seek_steps(&mut cursor, *i);
-                        debug!("moved {}", moved);
-                        if moved == *i {
-                            break
-                        } else {
-                            if *i < 0 {
-                                if !dbg!(cursor.at_start()) {
-                                    let file = dbg!(self.index.prev(dbg!(ds.file)));
-                                    if file != ds.file {
-                                        self.source = DataSource::new(
-                                            &self.config,
-                                            file,
-                                            &self.head,
-                                            self.start,
-                                            self.end,
-                                        )?;
-                                    }
-                                    *i -= moved;
-                                    dbg!(*i);
+                    match self.source.as_ref() {
+                        None => break,
+                        Some(ds) => {
+                            let mut cursor = ds.cursor;
+                            cursor.set_start(self.start);
+                            cursor.set_end(self.end);
+                            let moved = ds.archive.index().seek_steps(&mut cursor, *i);
+                            if moved == *i {
+                                break;
+                            }
+                            let file = if *i < 0 {
+                                if cursor.at_start() {
+                                    break;
+                                } else {
+                                    self.index.prev(ds.file)
                                 }
                             } else {
-                                if !dbg!(cursor.at_end()) {
-                                    let file = dbg!(self.index.next(dbg!(ds.file)));
-                                    if file != ds.file {
-                                        self.source = DataSource::new(
-                                            &self.config,
-                                            file,
-                                            &self.head,
-                                            self.start,
-                                            self.end,
-                                        )?;
-                                    }
-                                    *i -= moved;
-                                    dbg!(*i);
+                                if cursor.at_end() {
+                                    break;
+                                } else {
+                                    self.index.next(ds.file)
                                 }
+                            };
+                            if file == ds.file {
+                                break;
                             }
+                            self.source = DataSource::new(
+                                &self.config,
+                                file,
+                                &self.head,
+                                self.start,
+                                self.end,
+                            )?;
+                            *i -= moved;
                         }
                     }
                 }
