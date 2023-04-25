@@ -8,7 +8,7 @@ use crate::{
 use anyhow::Result;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
-use log::{debug, info, trace, warn};
+use log::{debug, info, warn};
 use netidx::{pool::Pooled, subscriber::Event};
 use parking_lot::Mutex;
 use std::{
@@ -186,39 +186,33 @@ impl LogfileCollection {
         }
     }
 
-    /// read a batch of deltas from the current data source, if it exists. If no data source can be opened
-    /// then the outer result will be error. If reading the current data source fails then the inner result
-    /// will be error.
-    ///
-    /// This function will automatically move to the next file in the collection as long as it's timestamp is
-    /// within the bounds.
-    pub fn read_deltas(
+    fn apply_read<
+        R: 'static,
+        F: FnMut(&ArchiveReader, &mut Cursor) -> Result<R>,
+        S: Fn(&R) -> bool,
+    >(
         &mut self,
-        read_count: usize,
-    ) -> Result<Result<Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>>> {
+        mut f: F,
+        s: S,
+        empty: R,
+    ) -> Result<R> {
         if !self.source()? {
             bail!("no data source available")
         } else {
             loop {
-                let (file, batches) = task::block_in_place(|| {
+                let (file, result) = task::block_in_place(|| {
                     let ds = self.source.as_mut().unwrap();
                     let archive = &ds.archive;
                     let cursor = &mut ds.cursor;
                     let file = ds.file;
-                    trace!(
-                        "reading up to {} batches from cursor {:?}",
-                        read_count,
-                        cursor
-                    );
-                    let batches = archive.read_deltas(cursor, read_count)?;
-                    trace!("read {} batches", batches.len());
-                    Ok::<_, anyhow::Error>((file, batches))
+                    let result = f(archive, cursor)?;
+                    Ok::<_, anyhow::Error>((file, result))
                 })?;
-                if batches.front().is_some() {
-                    break Ok(Ok(batches));
+                if s(&result) {
+                    break Ok(result);
                 } else {
                     match file {
-                        File::Head => break Ok(Ok(Pooled::orphan(VecDeque::new()))),
+                        File::Head => break Ok(empty),
                         File::Historical(_) => {
                             if !self.next_source()? {
                                 bail!("no data source available")
@@ -228,6 +222,35 @@ impl LogfileCollection {
                 }
             }
         }
+    }
+
+    /// read a batch of deltas from the current data source, if it exists. If no data source can be opened
+    /// then the outer result will be error. If reading the current data source fails then the inner result
+    /// will be error.
+    ///
+    /// This function will automatically move to the next file in the collection as long as it's timestamp is
+    /// within the bounds.
+    pub fn read_deltas(
+        &mut self,
+        read_count: usize,
+    ) -> Result<Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
+        self.apply_read(
+            |archive, cursor| archive.read_deltas(cursor, read_count),
+            |batch| batch.is_empty(),
+            Pooled::orphan(VecDeque::new()),
+        )
+    }
+
+    /// read the next batch after the current cursor position, moving
+    /// to the next file if necessary.
+    pub fn read_next(
+        &mut self,
+    ) -> Result<Option<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
+        self.apply_read(
+            |archive, cursor| archive.read_next(cursor),
+            |batch| batch.is_some(),
+            None,
+        )
     }
 
     /// look up the position in the archive, if any
@@ -296,6 +319,52 @@ impl LogfileCollection {
     /// seek instruction. After seeking you may need to reimage.
     pub fn seek(&mut self, mut seek: Seek) -> Result<()> {
         match &mut seek {
+            Seek::BatchRelative(i) => {
+                if self.source.is_none() {
+                    self.source()?;
+                }
+                if let Some(ds) = self.source.as_ref() {
+                    let mut cursor = ds.cursor;
+                    cursor.set_start(dbg!(self.start));
+                    cursor.set_end(dbg!(self.end));
+                    debug!("attempting to move {}", *i);
+                    let moved = ds.archive.index().seek_steps(&mut cursor, *i);
+                    debug!("moved {}", moved);
+                    if moved != *i {
+                        if *i < 0 {
+                            if !dbg!(cursor.at_start()) {
+                                let file = dbg!(self.index.prev(dbg!(ds.file)));
+                                if file != ds.file {
+                                    self.source = DataSource::new(
+                                        &self.config,
+                                        file,
+                                        &self.head,
+                                        self.start,
+                                        self.end,
+                                    )?;
+                                }
+                                *i -= moved;
+                                dbg!(*i);
+                            }
+                        } else {
+                            if !dbg!(cursor.at_end()) {
+                                let file = dbg!(self.index.next(dbg!(ds.file)));
+                                if file != ds.file {
+                                    self.source = DataSource::new(
+                                        &self.config,
+                                        file,
+                                        &self.head,
+                                        self.start,
+                                        self.end,
+                                    )?;
+                                }
+                                *i -= moved;
+                                dbg!(*i);
+                            }
+                        }
+                    }
+                }
+            }
             Seek::Beginning => {
                 let file = match &self.start {
                     Bound::Unbounded => self.index.first(),
@@ -329,48 +398,6 @@ impl LogfileCollection {
                             self.start,
                             self.end,
                         )?;
-                    }
-                }
-            }
-            Seek::BatchRelative(i) => {
-                if self.source.is_none() {
-                    self.source()?;
-                }
-                if let Some(ds) = self.source.as_ref() {
-                    let mut cursor = ds.cursor;
-                    cursor.set_start(self.start);
-                    cursor.set_end(self.end);
-                    let moved = ds.archive.index().seek_steps(&mut cursor, *i);
-                    if moved != *i {
-                        if *i < 0 {
-                            if !cursor.at_start() {
-                                let file = self.index.prev(ds.file);
-                                if file != ds.file {
-                                    self.source = DataSource::new(
-                                        &self.config,
-                                        file,
-                                        &self.head,
-                                        self.start,
-                                        self.end,
-                                    )?;
-                                }
-                                *i -= moved;
-                            }
-                        } else {
-                            if !cursor.at_end() {
-                                let file = self.index.next(ds.file);
-                                if file != ds.file {
-                                    self.source = DataSource::new(
-                                        &self.config,
-                                        file,
-                                        &self.head,
-                                        self.start,
-                                        self.end,
-                                    )?;
-                                }
-                                *i -= moved;
-                            }
-                        }
                     }
                 }
             }

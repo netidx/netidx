@@ -424,13 +424,13 @@ impl Cursor {
     }
 
     /// return true if the cursor is at the start. If the start is
-    /// unbounded then this will always return true.
+    /// unbounded then this will always return false.
     ///
     /// if the cursor doesn't have a position then this method will
     /// return false.
     pub fn at_start(&self) -> bool {
         match self.start {
-            Bound::Unbounded => true,
+            Bound::Unbounded => false,
             Bound::Excluded(st) => {
                 self.current.map(|pos| st + *EPSILON == pos).unwrap_or(false)
             }
@@ -439,13 +439,13 @@ impl Cursor {
     }
 
     /// return true if the cursor is at the end. If the end is
-    /// unbounded then this will always return true.
+    /// unbounded then this will always return false.
     ///
     /// if the cursor doesn't have a position then this method will
     /// return false.
     pub fn at_end(&self) -> bool {
         match self.end {
-            Bound::Unbounded => true,
+            Bound::Unbounded => false,
             Bound::Excluded(en) => {
                 self.current.map(|pos| en - *EPSILON == pos).unwrap_or(false)
             }
@@ -1479,6 +1479,39 @@ impl ArchiveReader {
         }
         cursor.current = current;
         Ok(res)
+    }
+
+    /// Read the batch after the cursor position without changing the
+    /// cursor position.
+    pub fn read_next(
+        &self,
+        cursor: &Cursor,
+    ) -> Result<Option<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
+        self.check_remap_rescan()?;
+        let start = match cursor.current {
+            None => cursor.start,
+            Some(dt) => Bound::Excluded(dt),
+        };
+        let pos = {
+            let index = self.index.read();
+            index
+                .deltamap
+                .range((start, cursor.end))
+                .next()
+                .map(|(ts, pos)| (*ts, *pos, index.end))
+        };
+        match pos {
+            Some((ts, pos, end)) => {
+                let batch = ArchiveReader::get_batch_at(
+                    &self.compressed,
+                    &*self.mmap.read(),
+                    pos as usize,
+                    end,
+                )?;
+                Ok(Some((ts, batch)))
+            }
+            None => Ok(None),
+        }
     }
 
     fn train(&self) -> Result<(usize, Vec<u8>)> {

@@ -1,7 +1,7 @@
 use super::Config;
 use anyhow::Result;
 use chrono::prelude::*;
-use log::{warn, info, debug};
+use log::{debug, info, warn};
 use std::{cmp::Ordering, path::PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,12 +127,11 @@ impl LogfileIndex {
             File::Head
         } else {
             match self.0.binary_search(&cur) {
-                Err(i) => self.0[i],
-                Ok(i) => {
+                Err(i) | Ok(i) => {
                     if i + 1 < self.0.len() {
                         self.0[i + 1]
                     } else {
-                        File::Head
+                        self.0[i]
                     }
                 }
             }
@@ -144,18 +143,11 @@ impl LogfileIndex {
             File::Head
         } else {
             match self.0.binary_search(&cur) {
-                Err(i) => {
+                Err(i) | Ok(i) => {
                     if i > 0 {
                         self.0[i - 1]
                     } else {
                         self.0[i]
-                    }
-                }
-                Ok(i) => {
-                    if i + 1 < self.0.len() {
-                        self.0[i + 1]
-                    } else {
-                        File::Head
                     }
                 }
             }

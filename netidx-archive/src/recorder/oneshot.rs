@@ -133,7 +133,7 @@ async fn do_oneshot(
     };
     loop {
         debug!("reading archive batch");
-        let mut batches = log.read_deltas(100)??;
+        let mut batches = log.read_deltas(100)?;
         if batches.is_empty() {
             break Ok(data);
         } else {

@@ -8,7 +8,7 @@ use arcstr::ArcStr;
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
 use fxhash::{FxHashMap, FxHashSet};
-use log::{error, info, warn, debug, trace};
+use log::{debug, error, info, warn};
 use netidx::{
     chars::Chars,
     path::Path,
@@ -30,8 +30,7 @@ use netidx_protocols::{
 };
 use parking_lot::Mutex;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    mem,
+    collections::{HashMap, HashSet},
     ops::Bound,
     str::FromStr,
     sync::{
@@ -185,12 +184,11 @@ impl State {
 
 #[derive(Debug)]
 enum Speed {
-    Unlimited(Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>),
+    Unlimited,
     Limited {
         rate: f64,
-        last: time::Instant,
-        next_after: Duration,
-        current: Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
+        last_emitted: DateTime<Utc>,
+        last_batch_ts: Option<DateTime<Utc>>,
     },
 }
 
@@ -381,9 +379,8 @@ impl Session {
             published_ids: HashSet::default(),
             speed: Speed::Limited {
                 rate: 1.,
-                last: time::Instant::now(),
-                next_after: Duration::from_secs(0),
-                current: Pooled::orphan(VecDeque::new()),
+                last_emitted: DateTime::<Utc>::MIN_UTC,
+                last_batch_ts: None,
             },
             filter,
             state: Arc::new(AtomicState::new(State::Pause)),
@@ -436,64 +433,50 @@ impl Session {
                 break future::pending().await;
             } else {
                 match &mut self.speed {
-                    Speed::Unlimited(batches) => match batches.pop_front() {
-                        Some(batch) => break Ok(batch),
+                    Speed::Unlimited => match self.log.read_next()? {
                         None => {
-                            *batches = match self.log.read_deltas(3) {
-                                Ok(batches) => batches?,
-                                Err(_) => {
-                                    pos_update!();
-                                    time::sleep(Duration::from_secs(1)).await;
-                                    continue;
-                                }
-                            };
-                            match batches.pop_front() {
-                                Some(batch) => break Ok(batch),
-                                None => {
-                                    set_tail!();
-                                }
-                            }
+                            set_tail!();
+                        }
+                        Some((ts, batch)) => {
+                            self.log.seek(Seek::BatchRelative(1))?;
+                            break Ok((ts, batch));
                         }
                     },
-                    Speed::Limited { rate, last, next_after, current } => {
-                        use tokio::time::Instant;
-                        if current.len() < 3 {
-                            let mut cur = match self.log.read_deltas(3) {
-                                Ok(batch) => batch?,
-                                Err(e) => {
-                                    warn!("error reading batches {}", e);
-                                    time::sleep(Duration::from_secs(1)).await;
-                                    continue;
-                                }
-                            };
-                            current.extend(cur.drain(..));
-                            if current.is_empty() {
+                    Speed::Limited { rate, last_emitted, last_batch_ts } => {
+                        match self.log.read_next()? {
+                            None => {
                                 set_tail!();
                             }
+                            Some((ts, batch)) => match last_batch_ts {
+                                None => {
+                                    *last_batch_ts = Some(ts);
+                                    *last_emitted = Utc::now();
+                                    self.log.seek(Seek::BatchRelative(1))?;
+                                    break Ok((ts, batch));
+                                }
+                                Some(last_ts) => {
+                                    let now = Utc::now();
+                                    let total_wait = ts - *last_ts;
+                                    let since_emitted = now - *last_emitted;
+                                    if since_emitted < total_wait {
+                                        let naptime = (total_wait - since_emitted)
+                                            .to_std()
+                                            .unwrap()
+                                            .as_secs_f64();
+                                        let naptime =
+                                            Duration::from_secs_f64(naptime / *rate);
+                                        if naptime > Duration::from_millis(10) {
+                                            pos_update!()
+                                        }
+                                        time::sleep(naptime).await;
+                                    }
+                                    *last_batch_ts = Some(ts);
+                                    *last_emitted = Utc::now();
+                                    self.log.seek(Seek::BatchRelative(1))?;
+                                    break Ok((ts, batch));
+                                }
+                            },
                         }
-                        let (ts, batch) = current.pop_front().unwrap();
-                        trace!("{}: {:?}", ts, batch);
-                        let elapsed = last.elapsed();
-                        if elapsed < *next_after {
-                            let naptime = *next_after - elapsed;
-                            if naptime > Duration::from_millis(10) {
-                                pos_update!();
-                            }
-                            time::sleep(naptime).await;
-                        }
-                        if current.is_empty() {
-                            continue;
-                        } else {
-                            let wait = {
-                                let ms = (current[0].0 - ts).num_milliseconds() as f64;
-                                (ms / *rate).trunc() as i64
-                            };
-                            if wait > 0 {
-                                *next_after = Duration::from_millis(wait as u64);
-                                *last = Instant::now();
-                            }
-                        }
-                        break Ok((ts, batch));
                     }
                 }
             }
@@ -562,7 +545,7 @@ impl Session {
                 State::Tail => {
                     // safe because it's impossible to get into state
                     // Tail without an archive.
-                    let mut batches = self.log.read_deltas(missed as usize)??;
+                    let mut batches = self.log.read_deltas(missed as usize)?;
                     for (ts, mut batch) in batches.drain(..) {
                         self.process_batch((ts, &mut *batch)).await?;
                     }
@@ -805,10 +788,9 @@ impl Session {
             State::Pause | State::Play => (),
         }
         match &mut self.speed {
-            Speed::Unlimited(v) => v.clear(),
-            Speed::Limited { current, next_after, .. } => {
-                *next_after = Duration::from_secs(0);
-                current.clear()
+            Speed::Unlimited => (),
+            Speed::Limited { last_batch_ts, .. } => {
+                *last_batch_ts = None;
             }
         };
         self.reimage(pbatch)?;
@@ -827,23 +809,20 @@ impl Session {
             }
         };
         match &mut self.speed {
-            Speed::Limited { rate, current, .. } => match new_rate {
+            Speed::Limited { rate, .. } => match new_rate {
                 Some(new_rate) => {
                     *rate = new_rate;
                 }
                 None => {
-                    let c = mem::replace(current, Pooled::orphan(VecDeque::new()));
-                    self.speed = Speed::Unlimited(c);
+                    self.speed = Speed::Unlimited;
                 }
             },
-            Speed::Unlimited(v) => {
+            Speed::Unlimited => {
                 if let Some(new_rate) = new_rate {
-                    let v = mem::replace(v, Pooled::orphan(VecDeque::new()));
                     self.speed = Speed::Limited {
                         rate: new_rate,
-                        last: time::Instant::now(),
-                        next_after: Duration::from_secs(0),
-                        current: v,
+                        last_emitted: DateTime::<Utc>::MIN_UTC,
+                        last_batch_ts: None,
                     };
                 }
             }
