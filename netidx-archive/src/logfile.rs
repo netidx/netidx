@@ -1114,7 +1114,7 @@ impl ArchiveIndex {
         if steps >= 0 {
             let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.start);
             let mut iter = self.deltamap.range((init, cursor.end));
-            for _ in 0..steps as usize {
+            for _ in 0..steps {
                 match iter.next() {
                     None => break,
                     Some((ts, _)) => {
@@ -1129,7 +1129,7 @@ impl ArchiveIndex {
         } else {
             let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.end);
             let mut iter = self.deltamap.range((cursor.start, init));
-            for _ in 0..steps.abs() as usize {
+            for _ in 0..(steps as i16).abs() {
                 match iter.next_back() {
                     None => break,
                     Some((ts, _)) => {
