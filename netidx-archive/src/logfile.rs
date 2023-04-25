@@ -1133,7 +1133,7 @@ impl ArchiveIndex {
                 match iter.next_back() {
                     None => break,
                     Some((ts, _)) => {
-                        steps -= 1;
+                        moved -= 1;
                         cursor.current = Some(*ts);
                         if cursor.at_start() {
                             break;
