@@ -16,7 +16,7 @@ use std::{
     ops::Bound,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tokio::task;
 
@@ -84,7 +84,6 @@ impl DataSource {
                         }
                         None => {
                             debug!("log file was not cached, opening");
-                            let now = Instant::now();
                             readers.retain(|_, r| r.strong_count() > 1);
                             let rd = task::block_in_place(|| ArchiveReader::open(&path))?;
                             readers.insert(path, rd.clone());
