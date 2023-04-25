@@ -1108,21 +1108,21 @@ impl ArchiveIndex {
     }
 
     /// seek the specified number of batches forward or back in the
-    /// file. Return true if it was possible, false otherwise. If
-    /// false, the cursor is moved as far as possible.
-    pub fn seek_steps(&self, cursor: &mut Cursor, steps: i8) -> bool {
-        let mut success = true;
+    /// file. Return the number of batches moved.
+    pub fn seek_steps(&self, cursor: &mut Cursor, steps: i8) -> i8 {
+        let mut moved = 0;
         if steps >= 0 {
             let init = cursor.current.map(Bound::Excluded).unwrap_or(cursor.start);
             let mut iter = self.deltamap.range((init, cursor.end));
             for _ in 0..steps as usize {
                 match iter.next() {
-                    None => {
-                        success = false;
-                        break;
-                    }
+                    None => break,
                     Some((ts, _)) => {
-                        cursor.current = Some(*ts);
+                        moved += 1;
+                        cursor.set_current(*ts);
+                        if cursor.at_end() {
+                            break;
+                        }
                     }
                 }
             }
@@ -1131,17 +1131,18 @@ impl ArchiveIndex {
             let mut iter = self.deltamap.range((cursor.start, init));
             for _ in 0..steps.abs() as usize {
                 match iter.next_back() {
-                    None => {
-                        success = false;
-                        break;
-                    }
+                    None => break,
                     Some((ts, _)) => {
+                        steps -= 1;
                         cursor.current = Some(*ts);
+                        if cursor.at_start() {
+                            break;
+                        }
                     }
                 }
             }
         }
-        success
+        moved
     }
 
     /// Seek relative to the current position
@@ -1150,58 +1151,16 @@ impl ArchiveIndex {
         cursor: &mut Cursor,
         offset: chrono::Duration,
     ) -> (bool, DateTime<Utc>) {
-        match cursor.current() {
-            Some(ts) => {
-                let new_ts = ts + offset;
-                cursor.set_current(new_ts);
-                (self.check_in_file(new_ts), new_ts)
-            }
+        let ts = match cursor.current() {
+            Some(ts) => ts,
             None => {
-                if offset >= chrono::Duration::microseconds(0) {
-                    match cursor.start() {
-                        Bound::Included(ts) => {
-                            let new_ts = ts + offset;
-                            cursor.set_current(new_ts);
-                            (self.check_in_file(new_ts), new_ts)
-                        }
-                        Bound::Excluded(ts) => {
-                            let new_ts = ts + *EPSILON + offset;
-                            cursor.set_current(new_ts);
-                            (self.check_in_file(new_ts), new_ts)
-                        }
-                        Bound::Unbounded => match self.deltamap.keys().next() {
-                            None => (false, DateTime::<Utc>::MAX_UTC),
-                            Some(ts) => {
-                                let new_ts = *ts + offset;
-                                cursor.set_current(new_ts);
-                                (self.check_in_file(new_ts), new_ts)
-                            }
-                        },
-                    }
-                } else {
-                    match cursor.end() {
-                        Bound::Included(ts) => {
-                            let new_ts = ts + offset;
-                            cursor.set_current(new_ts);
-                            (self.check_in_file(new_ts), new_ts)
-                        }
-                        Bound::Excluded(ts) => {
-                            let new_ts = ts - *EPSILON + offset;
-                            cursor.set_current(new_ts);
-                            (self.check_in_file(new_ts), new_ts)
-                        }
-                        Bound::Unbounded => match self.deltamap.keys().next_back() {
-                            None => (false, DateTime::<Utc>::MIN_UTC),
-                            Some(ts) => {
-                                let new_ts = *ts + offset;
-                                cursor.set_current(new_ts);
-                                (self.check_in_file(new_ts), new_ts)
-                            }
-                        },
-                    }
-                }
+                self.deltamap.keys().next().copied().unwrap_or(DateTime::<Utc>::MIN_UTC)
             }
-        }
+        };
+        let new_ts = ts + offset;
+        cursor.set_current(new_ts);
+        let new_ts = cursor.current.unwrap();
+        (self.check_in_file(new_ts), new_ts)
     }
 }
 
@@ -1328,14 +1287,9 @@ impl ArchiveReader {
     /// bounds, then it will move to the closest in bounds position.
     pub fn seek(&self, cursor: &mut Cursor, seek: Seek) {
         match seek {
-            Seek::Beginning => match self.index.read().deltamap.keys().next() {
-                None => {
-                    cursor.current = None;
-                }
-                Some(ts) => {
-                    cursor.set_current(*ts);
-                }
-            },
+            Seek::Beginning => {
+                cursor.current = None;
+            }
             Seek::End => match self.index.read().deltamap.keys().next_back() {
                 None => {
                     cursor.current = None;
@@ -1349,12 +1303,14 @@ impl ArchiveReader {
                 let first = index.deltamap.keys().next();
                 let last = index.deltamap.keys().next_back();
                 match (first, last) {
-                    (Some(fst), Some(lst)) => if ts < *fst {
-                        cursor.set_current(*fst);
-                    } else if ts > *lst {
-                        cursor.set_current(*lst);
-                    } else {
-                        cursor.set_current(ts)
+                    (Some(fst), Some(lst)) => {
+                        if ts < *fst {
+                            cursor.set_current(*fst);
+                        } else if ts > *lst {
+                            cursor.set_current(*lst);
+                        } else {
+                            cursor.set_current(ts)
+                        }
                     }
                     (_, _) => cursor.set_current(ts),
                 }
@@ -1366,12 +1322,14 @@ impl ArchiveReader {
                     let first = index.deltamap.keys().next();
                     let last = index.deltamap.keys().next_back();
                     match (first, last) {
-                        (Some(first), Some(last)) => if ts < *first {
-                            cursor.set_current(*first);
-                        } else {
-                            cursor.set_current(*last);
+                        (Some(first), Some(last)) => {
+                            if ts < *first {
+                                cursor.set_current(*first);
+                            } else {
+                                cursor.set_current(*last);
+                            }
                         }
-                        (None, _) | (_, None) => ()
+                        (None, _) | (_, None) => (),
                     }
                 }
             }

@@ -8,7 +8,7 @@ use arcstr::ArcStr;
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
 use fxhash::{FxHashMap, FxHashSet};
-use log::{error, info, warn, debug};
+use log::{error, info, warn, debug, trace};
 use netidx::{
     chars::Chars,
     path::Path,
@@ -457,10 +457,11 @@ impl Session {
                     },
                     Speed::Limited { rate, last, next_after, current } => {
                         use tokio::time::Instant;
-                        if current.len() < 2 {
+                        if current.len() < 3 {
                             let mut cur = match self.log.read_deltas(3) {
                                 Ok(batch) => batch?,
-                                Err(_) => {
+                                Err(e) => {
+                                    warn!("error reading batches {}", e);
                                     time::sleep(Duration::from_secs(1)).await;
                                     continue;
                                 }
@@ -471,6 +472,7 @@ impl Session {
                             }
                         }
                         let (ts, batch) = current.pop_front().unwrap();
+                        trace!("{}: {:?}", ts, batch);
                         let elapsed = last.elapsed();
                         if elapsed < *next_after {
                             let naptime = *next_after - elapsed;
@@ -721,6 +723,7 @@ impl Session {
                         cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
                     }
                     Err(e) => {
+                        warn!("invalid set pos {}", e);
                         if let Some(reply) = req.send_result {
                             reply.send(Value::Error(Chars::from(format!("{}", e))))
                         }

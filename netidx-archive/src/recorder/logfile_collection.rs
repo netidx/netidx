@@ -107,6 +107,8 @@ impl DataSource {
                 let mut cursor = Cursor::new();
                 cursor.set_start(start);
                 cursor.set_end(end);
+                archive.check_remap_rescan()?;
+                archive.seek(&mut cursor, Seek::Beginning);
                 debug!("log file cursor set to start: {:?} end: {:?}", start, end);
                 Ok(Some(Self { file, archive, cursor }))
             }
@@ -292,8 +294,8 @@ impl LogfileCollection {
 
     /// seek to the position in the archive collection specified by the
     /// seek instruction. After seeking you may need to reimage.
-    pub fn seek(&mut self, seek: Seek) -> Result<()> {
-        match seek {
+    pub fn seek(&mut self, mut seek: Seek) -> Result<()> {
+        match &mut seek {
             Seek::Beginning => {
                 let file = match &self.start {
                     Bound::Unbounded => self.index.first(),
@@ -330,16 +332,17 @@ impl LogfileCollection {
                     }
                 }
             }
-            Seek::BatchRelative(i) => match self.source.as_ref() {
-                None => {
+            Seek::BatchRelative(i) => {
+                if self.source.is_none() {
                     self.source()?;
                 }
-                Some(ds) => {
+                if let Some(ds) = self.source.as_ref() {
                     let mut cursor = ds.cursor;
                     cursor.set_start(self.start);
                     cursor.set_end(self.end);
-                    if !ds.archive.index().seek_steps(&mut cursor, i) {
-                        if i < 0 {
+                    let moved = ds.archive.index().seek_steps(&mut cursor, *i);
+                    if moved != *i {
+                        if *i < 0 {
                             if !cursor.at_start() {
                                 let file = self.index.prev(ds.file);
                                 if file != ds.file {
@@ -351,6 +354,7 @@ impl LogfileCollection {
                                         self.end,
                                     )?;
                                 }
+                                *i -= moved;
                             }
                         } else {
                             if !cursor.at_end() {
@@ -364,54 +368,51 @@ impl LogfileCollection {
                                         self.end,
                                     )?;
                                 }
+                                *i -= moved;
                             }
                         }
                     }
                 }
-            },
-            Seek::TimeRelative(offset) => match self.source.as_ref() {
-                None => {
+            }
+            Seek::TimeRelative(offset) => {
+                if self.source.is_none() {
                     self.source()?;
                 }
-                Some(ds) => {
+                if let Some(ds) = self.source.as_ref() {
                     let mut cursor = ds.cursor;
                     cursor.set_start(self.start);
                     cursor.set_end(self.end);
                     let (ok, ts) =
-                        ds.archive.index().seek_time_relative(&mut cursor, offset);
+                        ds.archive.index().seek_time_relative(&mut cursor, *offset);
                     if !ok {
-                        if !cursor.at_start() && !cursor.at_end() {
-                            let file = self.index.find(ts);
-                            if ds.file != file {
-                                self.source = DataSource::new(
-                                    &self.config,
-                                    file,
-                                    &self.head,
-                                    self.start,
-                                    self.end,
-                                )?;
-                            }
+                        let file = self.index.find(ts);
+                        if ds.file != file {
+                            self.source = DataSource::new(
+                                &self.config,
+                                file,
+                                &self.head,
+                                self.start,
+                                self.end,
+                            )?;
                         }
                     }
+                    seek = Seek::Absolute(ts);
                 }
-            },
+            }
             Seek::Absolute(ts) => {
-                let ts = Cursor::create_from(self.start, self.end, Some(ts));
-                if let Some(ts) = ts.current() {
-                    let file = self.index.find(ts);
-                    let cur_ok = match self.source.as_ref() {
-                        None => false,
-                        Some(ds) => ds.file == file,
-                    };
-                    if !cur_ok {
-                        self.source = DataSource::new(
-                            &self.config,
-                            file,
-                            &self.head,
-                            self.start,
-                            self.end,
-                        )?;
-                    }
+                let file = self.index.find(*ts);
+                let cur_ok = match self.source.as_ref() {
+                    None => false,
+                    Some(ds) => ds.file == file,
+                };
+                if !cur_ok {
+                    self.source = DataSource::new(
+                        &self.config,
+                        file,
+                        &self.head,
+                        self.start,
+                        self.end,
+                    )?;
                 }
             }
         }
