@@ -292,10 +292,7 @@ impl LogfileCollection {
             match self.source.as_ref() {
                 None => break,
                 Some(ds) => {
-                    dbg!(self.pos);
-                    let moved =
-                        dbg!(ds.archive.index().seek_steps(&mut self.pos, dbg!(n)));
-                    dbg!(self.pos);
+                    let moved = ds.archive.index().seek_steps(&mut self.pos, n);
                     if moved == n {
                         break;
                     }
@@ -312,7 +309,7 @@ impl LogfileCollection {
                             self.index.next(ds.file)
                         }
                     };
-                    if dbg!(file) == dbg!(ds.file) {
+                    if file == ds.file {
                         break;
                     }
                     self.source = DataSource::new(&self.config, file, &self.head)?;

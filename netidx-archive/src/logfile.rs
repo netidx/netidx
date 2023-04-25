@@ -1119,7 +1119,7 @@ impl ArchiveIndex {
                     None => break,
                     Some((ts, _)) => {
                         moved += 1;
-                        cursor.set_current(dbg!(*ts));
+                        cursor.set_current(*ts);
                         if cursor.at_end() {
                             break;
                         }
@@ -1134,7 +1134,7 @@ impl ArchiveIndex {
                     None => break,
                     Some((ts, _)) => {
                         moved -= 1;
-                        cursor.set_current(dbg!(*ts));
+                        cursor.set_current(*ts);
                         if cursor.at_start() {
                             break;
                         }
@@ -1406,13 +1406,6 @@ impl ArchiveReader {
             Bound::Unbounded => Ok(Pooled::orphan(HashMap::default())),
             _ => {
                 let (mut to_read, end) = {
-                    // we need to invert the excluded/included to get
-                    // the correct initial state.
-                    let pos = match pos {
-                        Bound::Excluded(t) => Bound::Included(t),
-                        Bound::Included(t) => Bound::Excluded(t),
-                        Bound::Unbounded => unreachable!(),
-                    };
                     let index = self.index.read();
                     let mut to_read = TO_READ_POOL.take();
                     let mut iter = index.imagemap.range((Bound::Unbounded, pos));
