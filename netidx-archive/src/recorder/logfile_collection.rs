@@ -323,43 +323,47 @@ impl LogfileCollection {
                 if self.source.is_none() {
                     self.source()?;
                 }
-                if let Some(ds) = self.source.as_ref() {
-                    let mut cursor = ds.cursor;
-                    cursor.set_start(dbg!(self.start));
-                    cursor.set_end(dbg!(self.end));
-                    debug!("attempting to move {}", *i);
-                    let moved = ds.archive.index().seek_steps(&mut cursor, *i);
-                    debug!("moved {}", moved);
-                    if moved != *i {
-                        if *i < 0 {
-                            if !dbg!(cursor.at_start()) {
-                                let file = dbg!(self.index.prev(dbg!(ds.file)));
-                                if file != ds.file {
-                                    self.source = DataSource::new(
-                                        &self.config,
-                                        file,
-                                        &self.head,
-                                        self.start,
-                                        self.end,
-                                    )?;
-                                }
-                                *i -= moved;
-                                dbg!(*i);
-                            }
+                loop {
+                    if let Some(ds) = self.source.as_ref() {
+                        let mut cursor = ds.cursor;
+                        cursor.set_start(dbg!(self.start));
+                        cursor.set_end(dbg!(self.end));
+                        debug!("attempting to move {}", *i);
+                        let moved = ds.archive.index().seek_steps(&mut cursor, *i);
+                        debug!("moved {}", moved);
+                        if moved == *i {
+                            break
                         } else {
-                            if !dbg!(cursor.at_end()) {
-                                let file = dbg!(self.index.next(dbg!(ds.file)));
-                                if file != ds.file {
-                                    self.source = DataSource::new(
-                                        &self.config,
-                                        file,
-                                        &self.head,
-                                        self.start,
-                                        self.end,
-                                    )?;
+                            if *i < 0 {
+                                if !dbg!(cursor.at_start()) {
+                                    let file = dbg!(self.index.prev(dbg!(ds.file)));
+                                    if file != ds.file {
+                                        self.source = DataSource::new(
+                                            &self.config,
+                                            file,
+                                            &self.head,
+                                            self.start,
+                                            self.end,
+                                        )?;
+                                    }
+                                    *i -= moved;
+                                    dbg!(*i);
                                 }
-                                *i -= moved;
-                                dbg!(*i);
+                            } else {
+                                if !dbg!(cursor.at_end()) {
+                                    let file = dbg!(self.index.next(dbg!(ds.file)));
+                                    if file != ds.file {
+                                        self.source = DataSource::new(
+                                            &self.config,
+                                            file,
+                                            &self.head,
+                                            self.start,
+                                            self.end,
+                                        )?;
+                                    }
+                                    *i -= moved;
+                                    dbg!(*i);
+                                }
                             }
                         }
                     }
