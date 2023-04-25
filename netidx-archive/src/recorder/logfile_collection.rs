@@ -325,7 +325,7 @@ impl LogfileCollection {
 
     /// seek to the position in the archive collection specified by the
     /// seek instruction. After seeking you may need to reimage.
-    pub fn seek(&mut self, mut seek: Seek) -> Result<()> {
+    pub fn seek(&mut self, seek: Seek) -> Result<()> {
         match seek {
             Seek::BatchRelative(i) => self.seek_n(i)?,
             Seek::Beginning => {
@@ -339,7 +339,7 @@ impl LogfileCollection {
                         self.source = DataSource::new(&self.config, file, &self.head)?;
                     }
                 }
-                if let Some(ds) = self.source {
+                if let Some(ds) = self.source.as_ref() {
                     ds.archive.seek(&mut self.pos, Seek::Beginning)
                 }
             }
@@ -355,7 +355,7 @@ impl LogfileCollection {
                             DataSource::new(&self.config, File::Head, &self.head)?;
                     }
                 }
-                if let Some(ds) = self.source {
+                if let Some(ds) = self.source.as_ref() {
                     ds.archive.seek(&mut self.pos, Seek::End)
                 }
             }

@@ -405,7 +405,7 @@ impl Session {
                             set_tail!();
                         }
                         Some((ts, batch)) => {
-                            self.log.seek(Seek::BatchRelative(1))?;
+                            self.log.seek_n(1)?;
                             break Ok((ts, batch));
                         }
                     },
@@ -418,7 +418,7 @@ impl Session {
                                 None => {
                                     *last_batch_ts = Some(ts);
                                     *last_emitted = Utc::now();
-                                    self.log.seek(Seek::BatchRelative(1))?;
+                                    self.log.seek_n(1)?;
                                     break Ok((ts, batch));
                                 }
                                 Some(last_ts) => {
@@ -436,7 +436,7 @@ impl Session {
                                     }
                                     *last_batch_ts = Some(ts);
                                     *last_emitted = Utc::now();
-                                    self.log.seek(Seek::BatchRelative(1))?;
+                                    self.log.seek_n(1)?;
                                     break Ok((ts, batch));
                                 }
                             },
@@ -518,15 +518,12 @@ impl Session {
             Ok(BCastMsg::Batch(ts, batch)) => match self.state.load() {
                 State::Play | State::Pause => Ok(()),
                 State::Tail => {
-                    if let Some(cursor) = self.log.position() {
-                        let pos = cursor.current().unwrap_or(DateTime::<Utc>::MIN_UTC);
-                        if cursor.contains(&ts) && pos < ts {
-                            let mut batch = (*batch).clone();
-                            self.process_batch((ts, &mut batch)).await?;
-                            if let Some(cursor) = self.log.position_mut() {
-                                cursor.set_current(ts);
-                            }
-                        }
+                    let cursor = self.log.position();
+                    if cursor.contains(&ts) {
+                        let mut batch = (*batch).clone();
+                        self.process_batch((ts, &mut batch)).await?;
+                        let cursor = self.log.position_mut();
+                        cursor.set_current(ts);
                     }
                     Ok(())
                 }
@@ -707,20 +704,17 @@ impl Session {
     fn reimage(&mut self, pbatch: &mut UpdateBatch) -> Result<()> {
         if self.used {
             let mut idx = self.log.reimage()?;
-            if let Some(cursor) = self.log.position() {
-                self.controls.pos_ctl.update(
-                    pbatch,
-                    match cursor.current() {
-                        Some(ts) => Value::DateTime(ts),
-                        None => match cursor.start() {
-                            Bound::Unbounded => Value::Null,
-                            Bound::Included(ts) | Bound::Excluded(ts) => {
-                                Value::DateTime(ts)
-                            }
-                        },
+            let cursor = self.log.position();
+            self.controls.pos_ctl.update(
+                pbatch,
+                match cursor.current() {
+                    Some(ts) => Value::DateTime(ts),
+                    None => match cursor.start() {
+                        Bound::Unbounded => Value::Null,
+                        Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(*ts),
                     },
-                );
-            }
+                },
+            );
             self.pathindex.check_remap_rescan()?;
             let index = self.pathindex.index();
             for (id, path) in index.iter_pathmap() {
