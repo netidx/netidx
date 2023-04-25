@@ -328,7 +328,7 @@ impl LogfileCollection {
                             let mut cursor = ds.cursor;
                             cursor.set_start(self.start);
                             cursor.set_end(self.end);
-                            let moved = ds.archive.index().seek_steps(&mut cursor, *i);
+                            let moved = dbg!(ds.archive.index().seek_steps(&mut cursor, dbg!(*i)));
                             if moved == *i {
                                 break;
                             }
@@ -345,7 +345,7 @@ impl LogfileCollection {
                                     self.index.next(ds.file)
                                 }
                             };
-                            if file == ds.file {
+                            if dbg!(file) == dbg!(ds.file) {
                                 break;
                             }
                             self.source = DataSource::new(
@@ -355,6 +355,9 @@ impl LogfileCollection {
                                 self.start,
                                 self.end,
                             )?;
+                            if let Some(ds) = self.source.as_mut() {
+                                ds.cursor = cursor;
+                            }
                             *i -= moved;
                         }
                     }

@@ -203,7 +203,6 @@ struct Controls {
     state_ctl: Val,
     _pos_doc: Val,
     pos_ctl: Val,
-    pos_rt: Val,
 }
 
 impl Controls {
@@ -261,11 +260,6 @@ impl Controls {
             session_base.append("control/pos/current"),
             Value::Null,
         )?;
-        let pos_rt = publisher.publish_with_flags(
-            PublishFlags::USE_EXISTING,
-            session_base.append("control/pos/current/rt"),
-            Value::Null,
-        )?;
         publisher.writes(pos_ctl.id(), control_tx.clone());
         publisher.flushed().await;
         Ok(Controls {
@@ -279,7 +273,6 @@ impl Controls {
             state_ctl,
             _pos_doc,
             pos_ctl,
-            pos_rt,
         })
     }
 }
@@ -352,7 +345,6 @@ struct Session {
     data_base: Path,
     log: LogfileCollection,
     pathindex: ArchiveReader,
-    pos_update: Option<DateTime<Utc>>,
     used: bool,
 }
 
@@ -387,7 +379,6 @@ impl Session {
             data_base: session_base.append("data"),
             log,
             pathindex,
-            pos_update: None,
             used,
         })
     }
@@ -405,22 +396,11 @@ impl Session {
     }
 
     async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
-        macro_rules! pos_update {
-            () => {
-                Self::commit_pos_update(
-                    &mut self.pos_update,
-                    &self.publisher,
-                    &self.controls.pos_ctl,
-                )
-                .await
-            };
-        }
         macro_rules! set_tail {
             () => {
                 let mut cbatch = self.publisher.start_batch();
                 self.set_state(&mut cbatch, State::Tail);
                 cbatch.commit(None).await;
-                pos_update!();
                 break future::pending().await;
             };
         }
@@ -429,7 +409,6 @@ impl Session {
         }
         loop {
             if !self.state.load().play() {
-                pos_update!();
                 break future::pending().await;
             } else {
                 match &mut self.speed {
@@ -465,9 +444,6 @@ impl Session {
                                             .as_secs_f64();
                                         let naptime =
                                             Duration::from_secs_f64(naptime / *rate);
-                                        if naptime > Duration::from_millis(10) {
-                                            pos_update!()
-                                        }
                                         time::sleep(naptime).await;
                                     }
                                     *last_batch_ts = Some(ts);
@@ -526,8 +502,7 @@ impl Session {
                 }
                 Ok::<(), anyhow::Error>(())
             })?;
-            self.pos_update = Some(batch.0);
-            self.controls.pos_rt.update(&mut pbatch, batch.0);
+            self.controls.pos_ctl.update(&mut pbatch, batch.0);
             Ok(pbatch.commit(None).await)
         }
     }
@@ -677,6 +652,7 @@ impl Session {
                         cluster.send_cmd(&ClusterCmd::SetSpeed(speed));
                     }
                     Err(e) => {
+                        warn!("tried to set invalid speed {}", e);
                         if let Some(reply) = req.send_result {
                             reply.send(Value::Error(Chars::from(format!("{}", e))));
                         }
@@ -693,6 +669,7 @@ impl Session {
                         cluster.send_cmd(&ClusterCmd::SetState(state));
                     }
                     Err(e) => {
+                        warn!("tried to set invalid state {}", e);
                         if let Some(reply) = req.send_result {
                             reply.send(Value::Error(Chars::from(format!("{}", e))))
                         }
