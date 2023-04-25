@@ -8,7 +8,7 @@ use arcstr::ArcStr;
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
 use fxhash::{FxHashMap, FxHashSet};
-use log::{error, info, warn};
+use log::{error, info, warn, debug};
 use netidx::{
     chars::Chars,
     path::Path,
@@ -890,6 +890,7 @@ async fn session(
     let (events_tx, mut events_rx) = mpsc::unbounded();
     publisher.events(events_tx);
     let session_base = session_base(&publish_config.base, session_id);
+    debug!("new session base {}", session_base);
     let mut cluster = Cluster::new(
         &publisher,
         subscriber,
@@ -897,6 +898,8 @@ async fn session(
         publish_config.shards.unwrap_or(0),
     )
     .await?;
+    debug!("cluster established");
+    pathindex.check_remap_rescan()?;
     head.as_ref().map(|a| a.check_remap_rescan()).transpose()?;
     let mut t = Session::new(
         config.clone(),
@@ -910,6 +913,7 @@ async fn session(
     .await?;
     let state = t.state.clone();
     let mut batch = publisher.start_batch();
+    debug!("seeking to the end");
     t.seek(&mut batch, Seek::End)?;
     if let Some(cfg) = cfg {
         t.apply_config(&mut batch, &cluster, cfg).await?
