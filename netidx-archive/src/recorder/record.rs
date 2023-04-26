@@ -17,13 +17,13 @@ use netidx::{
     protocol::glob::{Glob, GlobSet},
     resolver_client::{ChangeTracker, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
-    utils::{Batched, self},
+    utils::{self, Batched},
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Bound,
     path::PathBuf,
-    sync::Arc,
+    sync::Arc, time::Duration,
 };
 use tokio::{
     sync::broadcast,
@@ -81,13 +81,18 @@ async fn maybe_interval(poll: &mut Option<time::Interval>) {
 type Lst = Option<Pooled<Vec<Pooled<Vec<Path>>>>>;
 
 async fn list_task(
+    interval: Duration,
     mut rx: mpsc::UnboundedReceiver<oneshot::Sender<Lst>>,
     resolver: ResolverRead,
     spec: Vec<Glob>,
 ) -> Result<()> {
+    use rand::{thread_rng, Rng};
     let mut cts = CTS::new(&spec);
     let spec = GlobSet::new(true, spec)?;
+    let max_jitter = interval.as_secs_f64() * 0.1;
     while let Some(reply) = rx.next().await {
+        let wait = thread_rng().gen_range(0. .. max_jitter);
+        time::sleep(Duration::from_secs_f64(wait)).await;
         match cts.changed(&resolver).await {
             Ok(true) => match resolver.list_matching(&spec).await {
                 Ok(lst) => {
@@ -111,12 +116,13 @@ async fn list_task(
 }
 
 fn start_list_task(
+    poll_interval: Duration,
     rx: mpsc::UnboundedReceiver<oneshot::Sender<Lst>>,
     resolver: ResolverRead,
     spec: Vec<Glob>,
 ) {
     task::spawn(async move {
-        let r = list_task(rx, resolver, spec).await;
+        let r = list_task(poll_interval, rx, resolver, spec).await;
         match r {
             Err(e) => error!("list task exited with error {}", e),
             Ok(()) => info!("list task exited"),
@@ -241,7 +247,14 @@ pub(super) async fn run(
     let mut batches = 0;
     let mut last_batches = Instant::now();
     let mut queued = Vec::new();
-    start_list_task(rx_list, subscriber.resolver(), record_config.spec.clone());
+    if let Some(interval) = record_config.poll_interval {
+        start_list_task(
+            interval,
+            rx_list,
+            subscriber.resolver(),
+            record_config.spec.clone(),
+        );
+    }
     loop {
         select_biased! {
             m = bcast_rx.recv().fuse() => match m {
