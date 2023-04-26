@@ -3,7 +3,7 @@ use super::{
     publish::{parse_bound, parse_filter},
 };
 use crate::{
-    logfile::{ArchiveReader, BatchItem, Id, Seek, CURSOR_BATCH_POOL, IMG_POOL},
+    logfile::{ArchiveReader, BatchItem, Seek, CURSOR_BATCH_POOL, IMG_POOL},
     recorder::{
         publish::{END_DOC, FILTER_DOC, START_DOC},
         BCastMsg, Config, PublishConfig,
@@ -14,13 +14,12 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
-use fxhash::{FxHashMap, FxHashSet};
+use fxhash::FxHashMap;
 use log::{debug, error};
 use netidx::{
     chars::Chars,
     pack::Pack,
     path::Path,
-    pool::Pool,
     publisher::{Publisher, Value},
     resolver_client::GlobSet,
     subscriber::Subscriber,
@@ -83,10 +82,6 @@ impl OneshotConfig {
     }
 }
 
-lazy_static! {
-    static ref MATCHING_IDS: Pool<FxHashSet<Id>> = Pool::new(1000, 1000000);
-}
-
 async fn do_oneshot(
     head: Option<ArchiveReader>,
     pathindex: ArchiveReader,
@@ -95,19 +90,19 @@ async fn do_oneshot(
     args: OneshotConfig,
 ) -> Result<OneshotReply> {
     pathindex.check_remap_rescan()?;
-    let mut matching_ids = MATCHING_IDS.take();
-    matching_ids.extend(pathindex.index().iter_pathmap().filter_map(|(id, path)| {
+    let mut pathmap = PATHMAPS.take();
+    pathmap.extend(pathindex.index().iter_pathmap().filter_map(|(id, path)| {
         if args.filter.is_match(path) {
-            Some(*id)
+            Some((*id, path.clone()))
         } else {
             None
         }
     }));
-    if matching_ids.is_empty() {
+    if pathmap.is_empty() {
         return Ok(OneshotReply {
             deltas: CURSOR_BATCH_POOL.take(),
             image: IMG_POOL.take(),
-            pathmap: PATHMAPS.take(),
+            pathmap,
         });
     }
     debug!("opening logfile collection");
@@ -116,21 +111,8 @@ async fn do_oneshot(
     log.seek(Seek::Beginning)?;
     debug!("reimaging");
     let mut idx = log.reimage()?;
-    let mut path_by_id = PATHMAPS.take();
-    let index = pathindex.index();
-    path_by_id.extend(idx.keys().filter_map(|id| {
-        if matching_ids.contains(id) {
-            index.path_for_id(id).map(|path| (*id, path.clone()))
-        } else {
-            None
-        }
-    }));
-    idx.retain(|id, _| path_by_id.contains_key(id));
-    let mut data = OneshotReply {
-        pathmap: path_by_id,
-        image: idx,
-        deltas: CURSOR_BATCH_POOL.take(),
-    };
+    idx.retain(|id, _| pathmap.contains_key(id));
+    let mut data = OneshotReply { pathmap, image: idx, deltas: CURSOR_BATCH_POOL.take() };
     loop {
         debug!("reading archive batch");
         let mut batches = log.read_deltas(100)?;
@@ -138,7 +120,7 @@ async fn do_oneshot(
             break Ok(data);
         } else {
             batches.retain_mut(|(_, batch)| {
-                batch.retain(|BatchItem(id, _)| matching_ids.contains(id));
+                batch.retain(|BatchItem(id, _)| data.pathmap.contains_key(id));
                 !batch.is_empty()
             });
             data.deltas.extend(batches.drain(..));
