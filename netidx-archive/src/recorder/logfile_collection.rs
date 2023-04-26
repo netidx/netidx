@@ -202,7 +202,7 @@ impl LogfileCollection {
     ) -> Result<Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
         self.apply_read(
             |archive, cursor| archive.read_deltas(cursor, read_count),
-            |batch| batch.is_empty(),
+            |batch| !batch.is_empty(),
             Pooled::orphan(VecDeque::new()),
         )
     }
