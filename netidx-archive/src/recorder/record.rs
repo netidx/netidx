@@ -248,8 +248,12 @@ pub(super) async fn run(
     let mut flush =
         record_config.flush_interval.map(|d| time::interval_at(Instant::now() + d, d));
     let mut rotate = match record_config.rotate_interval {
-        RotateDirective::Never | RotateDirective::Size(_) => None,
+        RotateDirective::Never => None,
         RotateDirective::Interval(d) => Some(time::interval_at(Instant::now() + d, d)),
+        RotateDirective::Size(_) => {
+            let d = Duration::from_secs(1);
+            Some(time::interval_at(Instant::now() + d, d))
+        }
     };
     let mut to_add: Vec<(Path, SubId)> = Vec::new();
     let mut all_paths: FxHashSet<Path> = HashSet::default();
@@ -300,21 +304,28 @@ pub(super) async fn run(
                 batches = 0;
             },
             _ = maybe_interval(&mut rotate).fuse() => {
-                let now = Utc::now();
-                archive = task::block_in_place(|| {
-                    rotate_log_file(
-                        archive,
-                        &config.archive_directory,
-                        &shard_name,
-                        &config.archive_cmds,
-                        now
-                    )
-                })?;
-                last_image = 0;
-                last_flush = 0;
-                task::block_in_place(|| write_image(&mut archive, &by_subid, &image, now))?;
-                let _ = bcast.send(BCastMsg::LogRotated(shard_id, now));
-                let _ = bcast.send(BCastMsg::NewCurrent(shard_id, archive.reader()?));
+                let rotate = match record_config.rotate_interval {
+                    RotateDirective::Never => false,
+                    RotateDirective::Size(sz) => archive.size() >= sz,
+                    RotateDirective::Interval(_) => true,
+                };
+                if rotate {
+                    let now = Utc::now();
+                    archive = task::block_in_place(|| {
+                        rotate_log_file(
+                            archive,
+                            &config.archive_directory,
+                            &shard_name,
+                            &config.archive_cmds,
+                            now
+                        )
+                    })?;
+                    last_image = 0;
+                    last_flush = 0;
+                    task::block_in_place(|| write_image(&mut archive, &by_subid, &image, now))?;
+                    let _ = bcast.send(BCastMsg::LogRotated(shard_id, now));
+                    let _ = bcast.send(BCastMsg::NewCurrent(shard_id, archive.reader()?));
+                }
             },
             r = wait_list(&mut pending_list).fuse() => {
                 pending_list = None;
