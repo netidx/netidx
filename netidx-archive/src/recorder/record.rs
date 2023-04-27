@@ -1,4 +1,6 @@
-use super::{ArchiveCmds, BCastMsg, Config, RecordConfig};
+use super::{
+    file::RotateDirective, ArchiveCmds, BCastMsg, Config, RecordConfig, ShardId,
+};
 use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL};
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -23,7 +25,8 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Bound,
     path::PathBuf,
-    sync::Arc, time::Duration,
+    sync::Arc,
+    time::Duration,
 };
 use tokio::{
     sync::broadcast,
@@ -91,7 +94,7 @@ async fn list_task(
     let spec = GlobSet::new(true, spec)?;
     let max_jitter = interval.as_secs_f64() * 0.1;
     while let Some(reply) = rx.next().await {
-        let wait = thread_rng().gen_range(0. .. max_jitter);
+        let wait = thread_rng().gen_range(0. ..max_jitter);
         time::sleep(Duration::from_secs_f64(wait)).await;
         match cts.changed(&resolver).await {
             Ok(true) => match resolver.list_matching(&spec).await {
@@ -143,23 +146,29 @@ async fn wait_list(pending: &mut Option<Fuse<oneshot::Receiver<Lst>>>) -> Lst {
 fn rotate_log_file(
     archive: ArchiveWriter,
     path: &PathBuf,
+    shard_name: &String,
     cmds: &Option<ArchiveCmds>,
     now: DateTime<Utc>,
 ) -> Result<ArchiveWriter> {
     use std::{fs, iter};
     info!("rotating log file {}", now);
     drop(archive); // ensure the current file is closed
-    let current_name = path.join("current");
-    let new_name = path.join(now.to_rfc3339());
+    let current_name = path.join(shard_name).join("current");
+    let new_name = path.join(shard_name).join(now.to_rfc3339());
     fs::rename(&current_name, &new_name)?;
     debug!("would run put, cmd config {:?}", cmds);
     if let Some(cmds) = cmds {
         use std::process::Command;
         let now = now.to_rfc3339();
         info!("running put {:?}", &cmds.put);
-        let out = Command::new(&cmds.put.0)
-            .args(cmds.put.1.iter().chain(iter::once(&now)))
-            .output();
+        let args = cmds.put.1.iter().cloned().map(|arg| {
+            if &arg == "$shard" {
+                shard_name.clone()
+            } else {
+                arg
+            }
+        });
+        let out = Command::new(&cmds.put.0).args(args.chain(iter::once(now))).output();
         match out {
             Err(e) => warn!("archive put failed for {}, {}", now, e),
             Ok(o) if !o.status.success() => {
@@ -221,6 +230,8 @@ pub(super) async fn run(
     subscriber: Subscriber,
     config: Arc<Config>,
     record_config: Arc<RecordConfig>,
+    shard_id: ShardId,
+    shard_name: String,
 ) -> Result<()> {
     let (tx_batch, rx_batch) = mpsc::channel(10000);
     let mut rx_batch = Batched::new(rx_batch, 10000);
@@ -229,15 +240,17 @@ pub(super) async fn run(
     let mut image: FxHashMap<SubId, Event> = HashMap::default();
     let mut subscribed: HashMap<Path, Dval> = HashMap::new();
     let mut archive = task::block_in_place(|| {
-        ArchiveWriter::open(config.archive_directory.join("current"))
+        ArchiveWriter::open(config.archive_directory.join(&shard_name).join("current"))
     })?;
-    let _ = bcast.send(BCastMsg::NewCurrent(archive.reader()?));
+    let _ = bcast.send(BCastMsg::NewCurrent(shard_id, archive.reader()?));
     let flush_frequency = record_config.flush_frequency.map(|f| archive.block_size() * f);
     let mut poll = record_config.poll_interval.map(time::interval);
     let mut flush =
         record_config.flush_interval.map(|d| time::interval_at(Instant::now() + d, d));
-    let mut rotate =
-        record_config.rotate_interval.map(|d| time::interval_at(Instant::now() + d, d));
+    let mut rotate = match record_config.rotate_interval {
+        RotateDirective::Never | RotateDirective::Size(_) => None,
+        RotateDirective::Interval(d) => Some(time::interval_at(Instant::now() + d, d)),
+    };
     let mut to_add: Vec<(Path, SubId)> = Vec::new();
     let mut all_paths: FxHashSet<Path> = HashSet::default();
     let mut remove_paths: Vec<Path> = vec![];
@@ -260,9 +273,11 @@ pub(super) async fn run(
             m = bcast_rx.recv().fuse() => match m {
                 Ok(BCastMsg::Stop) => break,
                 Err(_)
-                    | Ok(BCastMsg::Batch(_, _))
-                    | Ok(BCastMsg::LogRotated(_))
-                    | Ok(BCastMsg::NewCurrent(_)) => (),
+                    | Ok(BCastMsg::Batch(_, _, _))
+                    | Ok(BCastMsg::LogRotated(_, _))
+                    | Ok(BCastMsg::NewCurrent(_, _))
+                    | Ok(BCastMsg::NewPlaybackSession { .. })
+                    | Ok(BCastMsg::NewOneshotSession { .. }) => (),
             },
             _ = maybe_interval(&mut poll).fuse() => {
                 if pending_list.is_none() {
@@ -290,6 +305,7 @@ pub(super) async fn run(
                     rotate_log_file(
                         archive,
                         &config.archive_directory,
+                        &shard_name,
                         &config.archive_cmds,
                         now
                     )
@@ -297,8 +313,8 @@ pub(super) async fn run(
                 last_image = 0;
                 last_flush = 0;
                 task::block_in_place(|| write_image(&mut archive, &by_subid, &image, now))?;
-                let _ = bcast.send(BCastMsg::LogRotated(now));
-                let _ = bcast.send(BCastMsg::NewCurrent(archive.reader()?));
+                let _ = bcast.send(BCastMsg::LogRotated(shard_id, now));
+                let _ = bcast.send(BCastMsg::NewCurrent(shard_id, archive.reader()?));
             },
             r = wait_list(&mut pending_list).fuse() => {
                 pending_list = None;
@@ -353,7 +369,7 @@ pub(super) async fn run(
                             }
                         }
                         archive.add_batch(false, now, &tbatch)?;
-                        let _ = bcast.send(BCastMsg::Batch(now, Arc::new(tbatch)));
+                        let _ = bcast.send(BCastMsg::Batch(shard_id, now, Arc::new(tbatch)));
                         match record_config.image_frequency {
                             None => (),
                             Some(freq) if archive.len() - last_image < freq => (),

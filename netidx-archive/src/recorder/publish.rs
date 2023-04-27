@@ -108,7 +108,7 @@ fn bound_to_val(b: Bound<DateTime<Utc>>) -> Value {
 }
 
 #[derive(Debug, Clone, Pack)]
-enum ClusterCmd {
+pub(crate) enum ClusterCmd {
     NotIdle,
     SeekTo(String),
     SetStart(Bound<DateTime<Utc>>),

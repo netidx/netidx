@@ -45,10 +45,10 @@ use std::{
 use tokio::{sync::broadcast, task::JoinSet};
 
 #[derive(Debug, Clone, Pack)]
-struct OneshotConfig {
-    start: Bound<DateTime<Utc>>,
-    end: Bound<DateTime<Utc>>,
-    filter: GlobSet,
+pub(crate) struct OneshotConfig {
+    pub(crate) start: Bound<DateTime<Utc>>,
+    pub(crate) end: Bound<DateTime<Utc>>,
+    pub(crate) filter: Arc<GlobSet>,
 }
 
 atomic_id!(Oid);

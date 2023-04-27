@@ -5,6 +5,7 @@ use futures::{
     future::{self, Shared},
     FutureExt,
 };
+use fxhash::FxHashMap;
 use log::error;
 use netidx::{
     chars::Chars,
@@ -12,13 +13,28 @@ use netidx::{
     path::Path,
     pool::Pooled,
     protocol::glob::Glob,
-    publisher::{BindCfg, PublisherBuilder},
+    publisher::{BindCfg, ClId, PublisherBuilder},
     resolver_client::DesiredAuth,
     subscriber::Subscriber,
 };
+use netidx_core::atomic_id;
 use serde::{Deserialize, Serialize};
-use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    path::{Path as FilePath, PathBuf},
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{sync::broadcast, task};
+use uuid::Uuid;
+
+use self::{
+    file::RotateDirective,
+    oneshot::{Oid, OneshotConfig},
+    publish::ClusterCmd,
+};
 
 pub mod logfile_collection;
 mod logfile_index;
@@ -27,6 +43,8 @@ mod publish;
 mod record;
 
 mod file {
+    use std::collections::HashMap;
+
     use super::*;
 
     pub(super) fn default_max_sessions() -> usize {
@@ -58,7 +76,7 @@ mod file {
         #[serde(default = "default_oneshot_data_limit")]
         pub(super) oneshot_data_limit: usize,
         #[serde(default)]
-        pub(super) shards: Option<usize>,
+        pub(super) cluster_shards: Option<usize>,
         #[serde(default = "default_cluster")]
         pub(super) cluster: String,
     }
@@ -71,7 +89,7 @@ mod file {
                 max_sessions: default_max_sessions(),
                 max_sessions_per_client: default_max_sessions_per_client(),
                 oneshot_data_limit: default_oneshot_data_limit(),
-                shards: Some(0),
+                cluster_shards: Some(0),
                 cluster: default_cluster(),
             }
         }
@@ -93,8 +111,16 @@ mod file {
         Some(Duration::from_secs(30))
     }
 
-    pub(super) fn default_rotate_interval() -> Option<Duration> {
-        Some(Duration::from_secs(86400))
+    pub(super) fn default_rotate_interval() -> RotateDirective {
+        RotateDirective::Interval(Duration::from_secs(86400))
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) enum RotateDirective {
+        Interval(Duration),
+        Size(usize),
+        Never,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,7 +136,7 @@ mod file {
         #[serde(default = "default_flush_interval")]
         pub(super) flush_interval: Option<Duration>,
         #[serde(default = "default_rotate_interval")]
-        pub(super) rotate_interval: Option<Duration>,
+        pub(super) rotate_interval: RotateDirective,
     }
 
     impl RecordConfig {
@@ -137,7 +163,7 @@ mod file {
         #[serde(default)]
         pub(super) desired_auth: Option<DesiredAuth>,
         #[serde(default)]
-        pub(super) record: Option<RecordConfig>,
+        pub(super) record: HashMap<String, RecordConfig>,
         #[serde(default)]
         pub(super) publish: Option<PublishConfig>,
     }
@@ -147,13 +173,22 @@ mod file {
             serde_json::to_string_pretty(&Self {
                 archive_directory: PathBuf::from("/foo/bar"),
                 archive_cmds: Some(ArchiveCmds {
-                    list: ("cmd_to_list_dates_in_archive".into(), vec![]),
-                    get: ("cmd_to_fetch_file_from_archive".into(), vec![]),
-                    put: ("cmd_to_put_file_into_archive".into(), vec![]),
+                    list: (
+                        "cmd_to_list_dates_in_archive".into(),
+                        vec!["-s".into(), "$shard".into()],
+                    ),
+                    get: (
+                        "cmd_to_fetch_file_from_archive".into(),
+                        vec!["-s".into(), "$shard".into()],
+                    ),
+                    put: (
+                        "cmd_to_put_file_into_archive".into(),
+                        vec!["-s".into(), "$shard".into()],
+                    ),
                 }),
                 netidx_config: None,
                 desired_auth: None,
-                record: Some(RecordConfig::example()),
+                record: [("0".into(), RecordConfig::example())].into_iter().collect(),
                 publish: Some(PublishConfig::example()),
             })
             .unwrap()
@@ -174,8 +209,9 @@ pub struct PublishConfig {
     pub max_sessions_per_client: usize,
     /// The maximum number of bytes a oneshot will return
     pub oneshot_data_limit: usize,
-    /// How many shards this recorder instance is divided into
-    pub shards: Option<usize>,
+    /// How many external shards there are. e.g. instances on other
+    /// machines. This is used to sync up the cluster.
+    pub cluster_shards: Option<usize>,
     /// The cluster name to join, default is "cluster".
     pub cluster: String,
 }
@@ -190,7 +226,7 @@ impl PublishConfig {
             max_sessions: file::default_max_sessions(),
             max_sessions_per_client: file::default_max_sessions_per_client(),
             oneshot_data_limit: file::default_oneshot_data_limit(),
-            shards: None,
+            cluster_shards: None,
             cluster: file::default_cluster(),
         }
     }
@@ -205,7 +241,7 @@ impl PublishConfig {
             max_sessions: f.max_sessions,
             max_sessions_per_client: f.max_sessions_per_client,
             oneshot_data_limit: f.oneshot_data_limit,
-            shards: f.shards,
+            cluster_shards: f.cluster_shards,
             cluster: f.cluster,
         })
     }
@@ -228,9 +264,9 @@ pub struct RecordConfig {
     /// flush the file after the specified elapsed time. None means
     /// flush only on shutdown.
     pub flush_interval: Option<Duration>,
-    /// rotate the log file at the specified interval. None means
-    /// never rotate the file.
-    pub rotate_interval: Option<Duration>,
+    /// rotate the log file at the specified interval or file size or
+    /// never.
+    pub rotate_interval: RotateDirective,
 }
 
 impl RecordConfig {
@@ -283,10 +319,12 @@ pub struct Config {
     pub netidx_config: NetIdxCfg,
     /// The netidx desired authentication mechanism to use
     pub desired_auth: DesiredAuth,
-    /// If specifed this recorder will record to the archive
-    /// directory. It is possible for the same archiver to both record
-    /// and publish. One of record or publish must be specifed.
-    pub record: Option<RecordConfig>,
+    /// Record. Each entry in the HashMap is a shard, which will
+    /// record independently to an archive directory under the base
+    /// directory. E.G. a shard named "0" will record under
+    /// ${archive_base}/0. If publish is specified all configured
+    /// shards on this instance will be published.
+    pub record: HashMap<String, RecordConfig>,
     /// If specified this recorder will publish the archive
     /// directory. It is possible for the same archiver to both record
     /// and publish. One of record or publish must be specifed.
@@ -309,7 +347,11 @@ impl TryFrom<file::Config> for Config {
             archive_cmds: f.archive_cmds,
             netidx_config,
             desired_auth,
-            record: f.record.map(RecordConfig::try_from).transpose()?,
+            record: f
+                .record
+                .into_iter()
+                .map(|(k, v)| Ok((k, RecordConfig::try_from(v)?)))
+                .collect::<Result<_>>()?,
             publish,
         })
     }
@@ -328,16 +370,83 @@ impl Config {
     }
 }
 
+atomic_id!(ShardId);
+
 #[derive(Debug, Clone)]
 enum BCastMsg {
-    LogRotated(DateTime<Utc>),
-    NewCurrent(ArchiveReader),
-    Batch(DateTime<Utc>, Arc<Pooled<Vec<BatchItem>>>),
+    LogRotated(ShardId, DateTime<Utc>),
+    NewCurrent(ShardId, ArchiveReader),
+    Batch(ShardId, DateTime<Utc>, Arc<Pooled<Vec<BatchItem>>>),
+    NewPlaybackSession {
+        client: ClId,
+        sessionid: Uuid,
+        filter: Arc<Vec<Chars>>,
+        sender: broadcast::Sender<ClusterCmd>,
+    },
+    NewOneshotSession {
+        id: Oid,
+        cfg: OneshotConfig,
+    },
     Stop,
+}
+
+pub(crate) struct Shards {
+    by_id: FxHashMap<ShardId, String>,
+    by_name: FxHashMap<String, ShardId>,
+    pathindexes: FxHashMap<ShardId, ArchiveReader>,
+}
+
+impl Shards {
+    fn read(
+        path: impl AsRef<FilePath>,
+    ) -> Result<(FxHashMap<ShardId, ArchiveWriter>, Arc<Self>)> {
+        use std::fs;
+        let mut t = Self {
+            by_id: HashMap::default(),
+            by_name: HashMap::default(),
+            pathindexes: HashMap::default(),
+        };
+        for ent in fs::read_dir(path.as_ref())? {
+            let ent = ent?;
+            let name = ent.file_name().to_string_lossy().into_owned();
+            if ent.file_type()?.is_dir() && &name != ".." {
+                let id = ShardId::new();
+                t.by_id.insert(id, name.clone());
+                t.by_name.insert(name, id);
+                let indexpath = ent.path().join("pathindex");
+                t.pathindexes.insert(id, ArchiveReader::open(indexpath)?);
+            }
+        }
+        Ok((HashMap::default(), Arc::new(t)))
+    }
+
+    fn from_cfg(
+        archive_directory: &PathBuf,
+        cfg: &HashMap<String, RecordConfig>,
+    ) -> Result<(FxHashMap<ShardId, ArchiveWriter>, Arc<Self>)> {
+        let mut t = Self {
+            by_id: HashMap::default(),
+            by_name: HashMap::default(),
+            pathindexes: HashMap::default(),
+        };
+        let mut writers = HashMap::default();
+        for name in cfg.keys() {
+            let id = ShardId::new();
+            t.by_id.insert(id, name.clone());
+            t.by_name.insert(name.clone(), id);
+            let indexpath = archive_directory.join(name).join("pathindex");
+            let writer = ArchiveWriter::open(indexpath)?;
+            let reader = writer.reader()?;
+            t.pathindexes.insert(id, reader);
+            writers.insert(id, writer);
+        }
+        Ok((writers, Arc::new(t)))
+    }
 }
 
 pub struct Recorder {
     tx: broadcast::Sender<BCastMsg>,
+    shards_by_id: Arc<FxHashMap<ShardId, String>>,
     wait: Shared<Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>>,
 }
 
@@ -349,14 +458,10 @@ impl Recorder {
         let mut wait = Vec::new();
         let subscriber =
             Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
-        let index_path = config.archive_directory.join("pathindex");
-        let (pathindex_reader, pathindex_writer) = match config.record.as_ref() {
-            None => (task::block_in_place(|| ArchiveReader::open(index_path))?, None),
-            Some(_) => {
-                let pathindex = task::block_in_place(|| ArchiveWriter::open(index_path))?;
-                let pathindex_reader = pathindex.reader()?;
-                (pathindex_reader, Some(pathindex))
-            }
+        let (writers, shards) = if config.record.is_empty() {
+            Shards::read(&config.archive_directory)?
+        } else {
+            Shards::from_cfg(&config.archive_directory, &config.record)?
         };
         if let Some(publish_config) = config.publish.as_ref() {
             let publish_config = Arc::new(publish_config.clone());
@@ -366,7 +471,7 @@ impl Recorder {
                 .build()
                 .await?;
             wait.push(task::spawn({
-                let pathindex = pathindex_reader.clone();
+                let shards = shards.clone();
                 let publish_config = publish_config.clone();
                 let subscriber = subscriber.clone();
                 let config = config.clone();
@@ -412,15 +517,17 @@ impl Recorder {
                 }
             }))
         }
-        match config.record.as_ref() {
-            None => match task::block_in_place(|| {
-                ArchiveReader::open(config.archive_directory.join("current"))
-            }) {
-                Ok(head) => { let _ = bcast_tx.send(BCastMsg::NewCurrent(head)); },
-                Err(_) => (),
-            },
-            Some(record_config) => {
-                let record_config = Arc::new(record_config.clone());
+        if config.record.is_empty() {
+            for (id, name) in &shards.by_id {
+                let path = config.archive_directory.join(name).join("current");
+                let reader = ArchiveReader::open(path)?;
+                let _ = bcast_tx.send(BCastMsg::NewCurrent(*id, reader));
+            }
+        } else {
+            for (name, cfg) in config.record.iter() {
+                let id = shards.by_name[name];
+                let pathindex_writer = writers.remove(&id).unwrap();
+                let record_config = Arc::new(cfg.clone());
                 let subscriber = subscriber.clone();
                 let config = config.clone();
                 let bcast_tx = bcast_tx.clone();
@@ -429,10 +536,12 @@ impl Recorder {
                     let r = record::run(
                         bcast_tx,
                         bcast_rx,
-                        pathindex_writer.unwrap(),
+                        pathindex_writer,
                         subscriber,
                         config,
                         record_config,
+                        id,
+                        name.clone(),
                     )
                     .await;
                     if let Err(e) = r {
@@ -440,7 +549,7 @@ impl Recorder {
                     }
                 }));
             }
-        };
+        }
         future::join_all(wait).await;
         Ok(())
     }
