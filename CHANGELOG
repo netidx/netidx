@@ -1,6 +1,9 @@
-* 0.19.6 archive
+* 0.19.6 archive protocols
 
   - lots of fixes for timing and clustering
+
+  - cluster moved over to pack. technically this broke semantic
+    versioning.
 
 * 0.19.5 archive
 
