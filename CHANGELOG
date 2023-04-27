@@ -5,6 +5,8 @@
   - cluster moved over to pack. technically this broke semantic
     versioning.
 
+  - add a pack implementation for Bound
+
 * 0.19.5 archive
 
   - fix bug in load_file_header
