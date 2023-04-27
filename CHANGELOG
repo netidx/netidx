@@ -1,3 +1,7 @@
+* 0.19.6 archive
+
+  - lots of fixes for timing and clustering
+
 * 0.19.5 archive
 
   - fix bug in load_file_header
