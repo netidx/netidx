@@ -257,7 +257,7 @@ pub(super) async fn run(
     .await?;
     let our_path = cluster.path();
     let (control_tx, mut control_rx) = mpsc::channel(3);
-    let mut heads: Arc<Mutex<FxHashMap<ShardId, ArchiveReader>>> =
+    let heads: Arc<Mutex<FxHashMap<ShardId, ArchiveReader>>> =
         Arc::new(Mutex::new(HashMap::default()));
     let mut pending: JoinSet<(Oid, Path, Result<OneshotReply>)> = JoinSet::new();
     let mut we_initiated: FxHashMap<Oid, PendingOneshot> = HashMap::default();

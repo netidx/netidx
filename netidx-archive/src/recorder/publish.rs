@@ -105,7 +105,7 @@ fn get_bound(r: WriteRequest) -> Option<Bound<DateTime<Utc>>> {
 }
 
 #[derive(Debug, Clone, Copy, Pack)]
-pub(crate) enum ClusterCmd {
+enum ClusterCmd {
     NotIdle,
     SeekTo(Seek),
     SetStart(Bound<DateTime<Utc>>),
@@ -116,7 +116,7 @@ pub(crate) enum ClusterCmd {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum SessionUpdate {
+enum SessionUpdate {
     Pos(Option<DateTime<Utc>>),
     Start(Bound<DateTime<Utc>>),
     End(Bound<DateTime<Utc>>),
@@ -125,7 +125,7 @@ pub(crate) enum SessionUpdate {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum SessionBCastMsg {
+enum SessionBCastMsg {
     Command(ClusterCmd),
     Update(SessionUpdate),
 }
@@ -655,7 +655,9 @@ impl SessionShard {
                         {
                             break Ok(m)
                         }
-                        BCastMsg::LogRotated(_, _) | BCastMsg::NewCurrent(_, _) => (),
+                        BCastMsg::Batch(_, _, _)
+                        | BCastMsg::LogRotated(_, _)
+                        | BCastMsg::NewCurrent(_, _) => (),
                     },
                 }
             }
@@ -910,7 +912,7 @@ async fn session(
     cfg: Option<NewSessionConfig>,
 ) -> Result<()> {
     let (control_tx, control_rx) = mpsc::channel(3);
-    let (mut session_bcast, session_bcast_rx) = broadcast::channel(1000);
+    let (mut session_bcast, mut session_bcast_rx) = broadcast::channel(1000);
     let session_base = session_base(&publish_config.base, session_id);
     debug!("new session base {}", session_base);
     let mut cluster = Cluster::new(
@@ -922,7 +924,6 @@ async fn session(
     .await?;
     debug!("cluster established");
     let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
-    let mut session_bcast_rx = session_bcast.subscribe();
     let mut joinset: JoinSet<Result<()>> = JoinSet::new();
     for (id, pathindex) in shards.pathindexes.iter() {
         let pathindex = pathindex.clone();
@@ -1132,7 +1133,7 @@ pub(super) async fn run(
     .await?;
     let mut control_rx = control_rx.fuse();
     let mut poll_members = time::interval(std::time::Duration::from_secs(30));
-    let mut heads: Arc<Mutex<FxHashMap<ShardId, ArchiveReader>>> =
+    let heads: Arc<Mutex<FxHashMap<ShardId, ArchiveReader>>> =
         Arc::new(Mutex::new(HashMap::default()));
     loop {
         select_biased! {

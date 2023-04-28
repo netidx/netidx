@@ -1,6 +1,4 @@
-use super::{
-    file::RotateDirective, ArchiveCmds, BCastMsg, Config, RecordConfig, ShardId,
-};
+use super::{ArchiveCmds, BCastMsg, Config, RecordConfig, RotateDirective, ShardId};
 use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL};
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -168,7 +166,8 @@ fn rotate_log_file(
                 arg
             }
         });
-        let out = Command::new(&cmds.put.0).args(args.chain(iter::once(now))).output();
+        let out =
+            Command::new(&cmds.put.0).args(args.chain(iter::once(now.clone()))).output();
         match out {
             Err(e) => warn!("archive put failed for {}, {}", now, e),
             Ok(o) if !o.status.success() => {

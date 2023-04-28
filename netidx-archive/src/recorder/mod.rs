@@ -28,7 +28,6 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::broadcast, task};
-use self::file::RotateDirective;
 
 pub mod logfile_collection;
 mod logfile_index;
@@ -37,6 +36,7 @@ mod publish;
 mod record;
 
 mod file {
+    use super::RotateDirective;
     use std::collections::HashMap;
 
     use super::*;
@@ -107,14 +107,6 @@ mod file {
 
     pub(super) fn default_rotate_interval() -> RotateDirective {
         RotateDirective::Interval(Duration::from_secs(86400))
-    }
-
-    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub(super) enum RotateDirective {
-        Interval(Duration),
-        Size(usize),
-        Never,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +180,14 @@ mod file {
             .unwrap()
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum RotateDirective {
+    Interval(Duration),
+    Size(usize),
+    Never,
 }
 
 /// Configuration of the publish part of the recorder
@@ -430,7 +430,6 @@ impl Shards {
 
 pub struct Recorder {
     tx: broadcast::Sender<BCastMsg>,
-    shards_by_id: Arc<FxHashMap<ShardId, String>>,
     wait: Shared<Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>>,
 }
 
@@ -442,7 +441,7 @@ impl Recorder {
         let mut wait = Vec::new();
         let subscriber =
             Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
-        let (writers, shards) = if config.record.is_empty() {
+        let (mut writers, shards) = if config.record.is_empty() {
             Shards::read(&config.archive_directory)?
         } else {
             Shards::from_cfg(&config.archive_directory, &config.record)?
@@ -478,7 +477,7 @@ impl Recorder {
             }));
             wait.push(task::spawn({
                 let subscriber = subscriber.clone();
-                let pathindex = pathindex_reader.clone();
+                let shards = shards.clone();
                 let publish_config = publish_config.clone();
                 let config = config.clone();
                 let bcast_rx = bcast_tx.subscribe();
@@ -486,7 +485,7 @@ impl Recorder {
                 async move {
                     let r = oneshot::run(
                         bcast_rx,
-                        pathindex,
+                        shards,
                         config,
                         publish_config,
                         publisher,
@@ -507,7 +506,8 @@ impl Recorder {
             }
         } else {
             for (name, cfg) in config.record.iter() {
-                let id = shards.by_name[name];
+                let name = name.clone();
+                let id = shards.by_name[&name];
                 let pathindex_writer = writers.remove(&id).unwrap();
                 let record_config = Arc::new(cfg.clone());
                 let subscriber = subscriber.clone();
@@ -523,7 +523,7 @@ impl Recorder {
                         config,
                         record_config,
                         id,
-                        name.clone(),
+                        name,
                     )
                     .await;
                     if let Err(e) = r {
