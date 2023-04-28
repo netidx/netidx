@@ -297,7 +297,6 @@ pub(super) async fn run(
                 Ok(m) => match m {
                     BCastMsg::Batch(_, _, _) | BCastMsg::LogRotated(_, _) => (),
                     BCastMsg::NewCurrent(id, rdr) => { heads.lock().insert(id, rdr); },
-                    BCastMsg::Stop => break Ok(())
                 }
             },
             cmds = cluster.wait_cmds().fuse() => {

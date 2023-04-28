@@ -274,7 +274,6 @@ pub(super) async fn run(
     loop {
         select_biased! {
             m = bcast_rx.recv().fuse() => match m {
-                Ok(BCastMsg::Stop) => break,
                 Err(_)
                     | Ok(BCastMsg::Batch(_, _, _))
                     | Ok(BCastMsg::LogRotated(_, _))

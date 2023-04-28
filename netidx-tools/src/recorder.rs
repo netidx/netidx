@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use futures::{prelude::*, select_biased};
 use netidx_archive::recorder::{Config, Recorder};
 use std::{
     fs,

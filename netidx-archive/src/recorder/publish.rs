@@ -484,7 +484,6 @@ impl SessionShard {
                 self.log.set_head(head);
                 Ok(())
             }
-            Ok(BCastMsg::Stop) => bail!("stop signal"),
             Ok(BCastMsg::Batch(_, _, _))
             | Ok(BCastMsg::LogRotated(_, _))
             | Ok(BCastMsg::NewCurrent(_, _)) => Ok(()),
@@ -664,7 +663,6 @@ impl SessionShard {
                             State::Pause | State::Play => (),
                             State::Tail => break Ok(m),
                         },
-                        BCastMsg::Stop => break Ok(m),
                         BCastMsg::LogRotated(id, _) | BCastMsg::NewCurrent(id, _)
                             if id == shard_id =>
                         {
@@ -1161,7 +1159,6 @@ pub(super) async fn run(
                 Ok(m) => match m {
                     BCastMsg::Batch(_, _, _) | BCastMsg::LogRotated(_, _) => (),
                     BCastMsg::NewCurrent(id, rdr) => { heads.lock().insert(id, rdr); },
-                    BCastMsg::Stop => break Ok(()),
                 }
             },
             _ = poll_members.tick().fuse() => {

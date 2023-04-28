@@ -2,10 +2,6 @@ use crate::logfile::{ArchiveReader, ArchiveWriter, BatchItem};
 use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
-use futures::{
-    future::{self, Shared},
-    FutureExt,
-};
 use fxhash::FxHashMap;
 use log::error;
 use netidx::{
@@ -22,13 +18,11 @@ use netidx_core::atomic_id;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    future::Future,
     path::{Path as FilePath, PathBuf},
-    pin::Pin,
     sync::Arc,
     time::Duration,
 };
-use tokio::{sync::broadcast, task::{self, JoinSet}};
+use tokio::{sync::broadcast, task::JoinSet};
 
 use self::file::RecordShardConfig;
 
@@ -407,7 +401,6 @@ enum BCastMsg {
     LogRotated(ShardId, DateTime<Utc>),
     NewCurrent(ShardId, ArchiveReader),
     Batch(ShardId, DateTime<Utc>, Arc<Pooled<Vec<BatchItem>>>),
-    Stop,
 }
 
 pub(crate) struct Shards {
