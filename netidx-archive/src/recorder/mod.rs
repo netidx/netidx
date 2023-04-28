@@ -444,6 +444,7 @@ impl Shards {
         archive_directory: &PathBuf,
         cfg: &HashMap<ArcStr, RecordConfig>,
     ) -> Result<(FxHashMap<ShardId, ArchiveWriter>, Arc<Self>)> {
+        use std::fs;
         let mut t = Self {
             by_id: HashMap::default(),
             by_name: HashMap::default(),
@@ -455,6 +456,7 @@ impl Shards {
             t.by_id.insert(id, name.clone());
             t.by_name.insert(name.clone(), id);
             let indexpath = archive_directory.join(&**name).join("pathindex");
+            fs::create_dir_all(&indexpath)?;
             let writer = ArchiveWriter::open(indexpath)?;
             let reader = writer.reader()?;
             t.pathindexes.insert(id, reader);
