@@ -1,6 +1,7 @@
 use super::{
     logfile_collection::LogfileCollection,
     publish::{parse_bound, parse_filter},
+    ShardId, Shards,
 };
 use crate::{
     logfile::{ArchiveReader, BatchItem, Seek, CURSOR_BATCH_POOL, IMG_POOL},
@@ -32,6 +33,7 @@ use netidx_protocols::{
     rpc::server::{ArgSpec, Proc, RpcCall, RpcReply},
     rpc_err,
 };
+use parking_lot::Mutex;
 use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{
@@ -48,7 +50,7 @@ use tokio::{sync::broadcast, task::JoinSet};
 pub(crate) struct OneshotConfig {
     pub(crate) start: Bound<DateTime<Utc>>,
     pub(crate) end: Bound<DateTime<Utc>>,
-    pub(crate) filter: Arc<GlobSet>,
+    pub(crate) filter: GlobSet,
 }
 
 atomic_id!(Oid);
@@ -194,25 +196,69 @@ fn handle_reply_for_us(
     }
 }
 
+async fn start_oneshot(
+    shards: Arc<Shards>,
+    heads: Arc<Mutex<FxHashMap<ShardId, ArchiveReader>>>,
+    config: Arc<Config>,
+    limit: usize,
+    args: OneshotConfig,
+) -> Result<OneshotReply> {
+    let mut set = JoinSet::new();
+    for (id, pathindex) in shards.pathindexes.iter() {
+        let head = heads.lock().get(id).cloned();
+        let pathindex = pathindex.clone();
+        set.spawn(do_oneshot(head, pathindex, config.clone(), limit, args.clone()));
+    }
+    let mut res = OneshotReply {
+        deltas: CURSOR_BATCH_POOL.take(),
+        image: IMG_POOL.take(),
+        pathmap: PATHMAPS.take(),
+    };
+    loop {
+        match set.join_next().await {
+            None => return Ok(res),
+            Some(r) => {
+                let OneshotReply { mut pathmap, mut image, mut deltas } = r??;
+                if res.deltas.is_empty() {
+                    res.deltas = deltas;
+                } else {
+                    res.deltas.extend(deltas.drain(..));
+                }
+                if res.image.is_empty() {
+                    res.image = image;
+                } else {
+                    res.image.extend(image.drain());
+                }
+                if res.pathmap.is_empty() {
+                    res.pathmap = pathmap;
+                } else {
+                    res.pathmap.extend(pathmap.drain());
+                }
+            }
+        }
+    }
+}
+
 pub(super) async fn run(
-    mut bcast_rx: broadcast::Receiver<BCastMsg>,
-    pathindex: ArchiveReader,
+    mut bcast: broadcast::Receiver<BCastMsg>,
+    shards: Arc<Shards>,
     config: Arc<Config>,
     publish_config: Arc<PublishConfig>,
     publisher: Publisher,
     subscriber: Subscriber,
 ) -> Result<()> {
-    let shards = publish_config.shards.unwrap_or(0);
+    let cluster_shards = publish_config.cluster_shards.unwrap_or(0);
     let mut cluster: Cluster<ClusterCmd> = Cluster::new(
         &publisher,
         subscriber,
         publish_config.base.append(&publish_config.cluster).append("oneshot"),
-        shards,
+        cluster_shards,
     )
     .await?;
     let our_path = cluster.path();
     let (control_tx, mut control_rx) = mpsc::channel(3);
-    let mut archive: Option<ArchiveReader> = None;
+    let mut heads: Arc<Mutex<FxHashMap<ShardId, ArchiveReader>>> =
+        Arc::new(Mutex::new(HashMap::default()));
     let mut pending: JoinSet<(Oid, Path, Result<OneshotReply>)> = JoinSet::new();
     let mut we_initiated: FxHashMap<Oid, PendingOneshot> = HashMap::default();
     let _proc = define_rpc!(
@@ -236,11 +282,11 @@ pub(super) async fn run(
                     }
                 }
             },
-            m = bcast_rx.recv().fuse() => match m {
+            m = bcast.recv().fuse() => match m {
                 Err(_) => (),
                 Ok(m) => match m {
-                    BCastMsg::Batch(_, _) | BCastMsg::LogRotated(_) => (),
-                    BCastMsg::NewCurrent(rdr) => archive = Some(rdr),
+                    BCastMsg::Batch(_, _, _) | BCastMsg::LogRotated(_, _) => (),
+                    BCastMsg::NewCurrent(id, rdr) => { heads.lock().insert(id, rdr); },
                     BCastMsg::Stop => break Ok(())
                 }
             },
@@ -259,12 +305,12 @@ pub(super) async fn run(
                             Entry::Occupied(e) => handle_reply_for_us(e, res),
                         }
                         ClusterCmd::NewOneshot(id, path, args) => {
-                            let archive_ = archive.clone();
-                            let pathindex_ = pathindex.clone();
-                            let config_ = config.clone();
+                            let shards = shards.clone();
+                            let heads = heads.clone();
+                            let config = config.clone();
                             let limit = publish_config.oneshot_data_limit;
                             pending.spawn(async move {
-                                (id, path, do_oneshot(archive_, pathindex_, config_, limit, args).await)
+                                (id, path, start_oneshot(shards, heads, config, limit, args).await)
                             });
                         }
                     }
@@ -279,14 +325,14 @@ pub(super) async fn run(
                 } else {
                     let id = Oid::new();
                     let path = our_path.clone();
-                    we_initiated.insert(id, PendingOneshot::new(reply, shards + 1));
+                    we_initiated.insert(id, PendingOneshot::new(reply, cluster_shards + 1));
                     cluster.send_cmd(&ClusterCmd::NewOneshot(id, path.clone(), args.clone()));
-                    let archive_ = archive.clone();
-                    let pathindex_ = pathindex.clone();
-                    let config_ = config.clone();
+                    let shards = shards.clone();
+                    let heads = heads.clone();
+                    let config = config.clone();
                     let limit = publish_config.oneshot_data_limit;
                     pending.spawn(async move {
-                        (id, path, do_oneshot(archive_, pathindex_, config_, limit, args).await)
+                        (id, path, start_oneshot(shards, heads, config, limit, args).await)
                     });
                 }
             }

@@ -13,8 +13,8 @@ use netidx::{
     path::Path,
     pool::Pooled,
     protocol::glob::Glob,
-    publisher::{BindCfg, ClId, PublisherBuilder},
-    resolver_client::{DesiredAuth, GlobSet},
+    publisher::{BindCfg, PublisherBuilder},
+    resolver_client::DesiredAuth,
     subscriber::Subscriber,
 };
 use netidx_core::atomic_id;
@@ -28,13 +28,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::broadcast, task};
-use uuid::Uuid;
-
-use self::{
-    file::RotateDirective,
-    oneshot::{Oid, OneshotConfig},
-    publish::{ClusterCmd, SessionBCastMsg},
-};
+use self::file::RotateDirective;
 
 pub mod logfile_collection;
 mod logfile_index;

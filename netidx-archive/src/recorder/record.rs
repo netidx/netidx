@@ -279,9 +279,7 @@ pub(super) async fn run(
                 Err(_)
                     | Ok(BCastMsg::Batch(_, _, _))
                     | Ok(BCastMsg::LogRotated(_, _))
-                    | Ok(BCastMsg::NewCurrent(_, _))
-                    | Ok(BCastMsg::NewPlaybackSession { .. })
-                    | Ok(BCastMsg::NewOneshotSession { .. }) => (),
+                    | Ok(BCastMsg::NewCurrent(_, _)) => (),
             },
             _ = maybe_interval(&mut poll).fuse() => {
                 if pending_list.is_none() {
