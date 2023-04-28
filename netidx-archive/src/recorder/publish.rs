@@ -1,4 +1,4 @@
-use super::logfile_collection::LogfileCollection;
+use super::{logfile_collection::LogfileCollection, ShardId, Shards};
 use crate::{
     logfile::{ArchiveReader, BatchItem, Id, Seek},
     recorder::{BCastMsg, Config, PublishConfig},
@@ -39,7 +39,11 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{sync::broadcast, task, time};
+use tokio::{
+    sync::broadcast,
+    task::{self, JoinSet},
+    time,
+};
 use uuid::Uuid;
 
 pub(crate) static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
@@ -100,21 +104,29 @@ fn get_bound(r: WriteRequest) -> Option<Bound<DateTime<Utc>>> {
     }
 }
 
-fn bound_to_val(b: Bound<DateTime<Utc>>) -> Value {
-    match b {
-        Bound::Unbounded => Value::String(Chars::from("Unbounded")),
-        Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
-    }
-}
-
-#[derive(Debug, Clone, Pack)]
+#[derive(Debug, Clone, Copy, Pack)]
 pub(crate) enum ClusterCmd {
     NotIdle,
-    SeekTo(String),
+    SeekTo(Seek),
     SetStart(Bound<DateTime<Utc>>),
     SetEnd(Bound<DateTime<Utc>>),
     SetSpeed(Option<f64>),
     SetState(State),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SessionUpdate {
+    Pos(Option<DateTime<Utc>>),
+    Start(Bound<DateTime<Utc>>),
+    End(Bound<DateTime<Utc>>),
+    Speed(Option<f64>),
+    State(State),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SessionBCastMsg {
+    Command(ClusterCmd),
+    Update(SessionUpdate),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Pack)]
@@ -190,6 +202,497 @@ enum Speed {
         last_emitted: DateTime<Utc>,
         last_batch_ts: Option<DateTime<Utc>>,
     },
+}
+
+pub(super) fn parse_filter(globs: Vec<Chars>) -> Result<GlobSet> {
+    let globs: Vec<Glob> =
+        globs.into_iter().map(|s| Glob::new(s)).collect::<Result<_>>()?;
+    Ok(GlobSet::new(true, globs)?)
+}
+
+#[derive(Debug, Clone)]
+struct NewSessionConfig {
+    client: ClId,
+    start: Bound<DateTime<Utc>>,
+    end: Bound<DateTime<Utc>>,
+    speed: Option<f64>,
+    pos: Option<Seek>,
+    state: Option<State>,
+    play_after: Option<Duration>,
+    filter: Vec<Chars>,
+}
+
+impl NewSessionConfig {
+    fn new(
+        mut req: RpcCall,
+        start: Value,
+        end: Value,
+        speed: Value,
+        pos: Option<Seek>,
+        state: Option<State>,
+        play_after: Option<Duration>,
+        filter: Vec<Chars>,
+    ) -> Option<(NewSessionConfig, RpcReply)> {
+        let start = match parse_bound(start) {
+            Ok(s) => s,
+            Err(e) => rpc_err!(req.reply, format!("invalid start {}", e)),
+        };
+        let end = match parse_bound(end) {
+            Ok(s) => s,
+            Err(e) => rpc_err!(req.reply, format!("invalid end {}", e)),
+        };
+        let speed = match parse_speed(speed) {
+            Ok(s) => s,
+            Err(e) => rpc_err!(req.reply, format!("invalid speed {}", e)),
+        };
+        if let Err(e) = parse_filter(filter.clone()) {
+            rpc_err!(req.reply, format!("could not parse filter {}", e))
+        }
+        let s = NewSessionConfig {
+            client: req.client,
+            start,
+            end,
+            speed,
+            pos,
+            state,
+            play_after,
+            filter,
+        };
+        Some((s, req.reply))
+    }
+}
+
+struct SessionShard {
+    publisher: Publisher,
+    published: FxHashMap<Id, Val>,
+    published_ids: FxHashSet<publisher::Id>,
+    session_bcast: broadcast::Sender<SessionBCastMsg>,
+    shard_id: ShardId,
+    filter: GlobSet,
+    speed: Speed,
+    state: Arc<AtomicState>,
+    data_base: Path,
+    log: LogfileCollection,
+    pathindex: ArchiveReader,
+    used: bool,
+}
+
+impl SessionShard {
+    async fn new(
+        session_bcast: broadcast::Sender<SessionBCastMsg>,
+        shard_id: ShardId,
+        config: Arc<Config>,
+        publisher: Publisher,
+        head: Option<ArchiveReader>,
+        pathindex: ArchiveReader,
+        session_base: Path,
+        filter: GlobSet,
+    ) -> Result<Self> {
+        task::block_in_place(|| {
+            pathindex.check_remap_rescan()?;
+            head.as_ref().map(|a| a.check_remap_rescan()).transpose()?;
+            Ok::<_, anyhow::Error>(())
+        })?;
+        let used =
+            pathindex.index().iter_pathmap().any(|(_, path)| filter.is_match(path));
+        let log =
+            LogfileCollection::new(config, head, Bound::Unbounded, Bound::Unbounded)
+                .await?;
+        Ok(Self {
+            session_bcast,
+            shard_id,
+            publisher,
+            published: HashMap::default(),
+            published_ids: HashSet::default(),
+            speed: Speed::Limited {
+                rate: 1.,
+                last_emitted: DateTime::<Utc>::MIN_UTC,
+                last_batch_ts: None,
+            },
+            filter,
+            state: Arc::new(AtomicState::new(State::Pause)),
+            data_base: session_base.append("data"),
+            log,
+            pathindex,
+            used,
+        })
+    }
+
+    async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
+        macro_rules! set_tail {
+            () => {
+                self.session_bcast
+                    .send(SessionBCastMsg::Update(SessionUpdate::State(State::Tail)));
+                self.set_state(State::Tail);
+                break future::pending().await;
+            };
+        }
+        if !self.used {
+            return future::pending().await;
+        }
+        loop {
+            if !self.state.load().play() {
+                break future::pending().await;
+            } else {
+                match &mut self.speed {
+                    Speed::Unlimited => match self.log.read_next()? {
+                        None => {
+                            set_tail!();
+                        }
+                        Some((ts, batch)) => {
+                            self.log.seek_n(1)?;
+                            break Ok((ts, batch));
+                        }
+                    },
+                    Speed::Limited { rate, last_emitted, last_batch_ts } => {
+                        match self.log.read_next()? {
+                            None => {
+                                set_tail!();
+                            }
+                            Some((ts, batch)) => match last_batch_ts {
+                                None => {
+                                    *last_batch_ts = Some(ts);
+                                    *last_emitted = Utc::now();
+                                    self.log.seek_n(1)?;
+                                    break Ok((ts, batch));
+                                }
+                                Some(last_ts) => {
+                                    let now = Utc::now();
+                                    let total_wait = ts - *last_ts;
+                                    let since_emitted = now - *last_emitted;
+                                    if since_emitted < total_wait {
+                                        let naptime = (total_wait - since_emitted)
+                                            .to_std()
+                                            .unwrap()
+                                            .as_secs_f64();
+                                        let naptime =
+                                            Duration::from_secs_f64(naptime / *rate);
+                                        time::sleep(naptime).await;
+                                    }
+                                    *last_batch_ts = Some(ts);
+                                    *last_emitted = Utc::now();
+                                    self.log.seek_n(1)?;
+                                    break Ok((ts, batch));
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn process_batch(
+        &mut self,
+        batch: (DateTime<Utc>, &mut Vec<BatchItem>),
+    ) -> Result<()> {
+        let pause = match self.log.end() {
+            Bound::Unbounded => false,
+            Bound::Excluded(dt) => &batch.0 >= dt,
+            Bound::Included(dt) => &batch.0 > dt,
+        };
+        if pause {
+            self.session_bcast
+                .send(SessionBCastMsg::Update(SessionUpdate::State(State::Pause)));
+            self.set_state(State::Pause);
+            Ok(())
+        } else {
+            let mut pbatch = self.publisher.start_batch();
+            task::block_in_place(|| {
+                self.pathindex.check_remap_rescan()?;
+                let index = self.pathindex.index();
+                for BatchItem(id, ev) in batch.1.drain(..) {
+                    let v = match ev {
+                        Event::Unsubscribed => Value::Null,
+                        Event::Update(v) => v,
+                    };
+                    match self.published.get(&id) {
+                        Some(val) => {
+                            val.update(&mut pbatch, v);
+                        }
+                        None => {
+                            if let Some(path) = index.path_for_id(&id) {
+                                if self.filter.is_match(&path) {
+                                    self.used = true;
+                                    let path = self.data_base.append(&path);
+                                    let val = self.publisher.publish(path, v)?;
+                                    self.published_ids.insert(val.id());
+                                    self.published.insert(id, val);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            })?;
+            self.session_bcast
+                .send(SessionBCastMsg::Update(SessionUpdate::Pos(Some(batch.0))));
+            Ok(pbatch.commit(None).await)
+        }
+    }
+
+    async fn process_bcast(
+        &mut self,
+        msg: Result<BCastMsg, broadcast::error::RecvError>,
+    ) -> Result<()> {
+        match msg {
+            Err(broadcast::error::RecvError::Closed) => {
+                bail!("broadcast channel closed")
+            }
+            Err(broadcast::error::RecvError::Lagged(missed)) => match self.state.load() {
+                State::Play | State::Pause => Ok(()),
+                State::Tail => {
+                    // safe because it's impossible to get into state
+                    // Tail without an archive.
+                    let mut batches = self.log.read_deltas(missed as usize)?;
+                    for (ts, mut batch) in batches.drain(..) {
+                        self.process_batch((ts, &mut *batch)).await?;
+                    }
+                    Ok(())
+                }
+            },
+            Ok(BCastMsg::Batch(id, ts, batch)) if id == self.shard_id => {
+                match self.state.load() {
+                    State::Play | State::Pause => Ok(()),
+                    State::Tail => {
+                        let cursor = self.log.position();
+                        if cursor.contains(&ts) {
+                            let mut batch = (*batch).clone();
+                            self.process_batch((ts, &mut batch)).await?;
+                            let cursor = self.log.position_mut();
+                            cursor.set_current(ts);
+                        }
+                        Ok(())
+                    }
+                }
+            }
+            Ok(BCastMsg::LogRotated(id, ts)) if id == self.shard_id => {
+                self.log.log_rotated(ts).await?;
+                Ok(())
+            }
+            Ok(BCastMsg::NewCurrent(id, head)) if id == self.shard_id => {
+                self.log.set_head(head);
+                Ok(())
+            }
+            Ok(BCastMsg::Stop) => bail!("stop signal"),
+            Ok(BCastMsg::Batch(_, _, _))
+            | Ok(BCastMsg::LogRotated(_, _))
+            | Ok(BCastMsg::NewCurrent(_, _))
+            | Ok(BCastMsg::NewOneshotSession { .. })
+            | Ok(BCastMsg::NewPlaybackSession { .. }) => Ok(()),
+        }
+    }
+
+    async fn process_session_bcast(
+        &mut self,
+        m: Result<SessionBCastMsg, broadcast::error::RecvError>,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn set_start(&mut self, new_start: Bound<DateTime<Utc>>) -> Result<()> {
+        self.log.set_start(new_start);
+        Ok(())
+    }
+
+    fn set_end(&mut self, new_end: Bound<DateTime<Utc>>) -> Result<()> {
+        self.log.set_end(new_end);
+        Ok(())
+    }
+
+    fn set_state(&mut self, state: State) {
+        match (self.state.load(), state) {
+            (s0, s1) if s0 == s1 => (),
+            (_, state) => {
+                self.state.store(state);
+            }
+        }
+    }
+
+    async fn apply_config(
+        &mut self,
+        pbatch: &mut UpdateBatch,
+        cfg: NewSessionConfig,
+    ) -> Result<()> {
+        self.set_start(cfg.start)?;
+        self.set_end(cfg.end)?;
+        self.set_speed(cfg.speed);
+        if let Some(pos) = cfg.pos {
+            self.seek(pbatch, pos)?;
+        }
+        if let Some(state) = cfg.state {
+            self.set_state(state);
+        }
+        if let Some(play_after) = cfg.play_after {
+            time::sleep(play_after).await;
+            self.set_state(State::Play);
+        }
+        Ok(())
+    }
+
+    fn reimage(&mut self, pbatch: &mut UpdateBatch) -> Result<()> {
+        if self.used {
+            let mut idx = self.log.reimage()?;
+            let cursor = self.log.position();
+            self.session_bcast.send(SessionBCastMsg::Update(SessionUpdate::Pos(
+                match cursor.current() {
+                    Some(ts) => Some(ts),
+                    None => match cursor.start() {
+                        Bound::Unbounded => None,
+                        Bound::Included(ts) | Bound::Excluded(ts) => Some(*ts),
+                    },
+                },
+            )));
+            self.pathindex.check_remap_rescan()?;
+            let index = self.pathindex.index();
+            for (id, path) in index.iter_pathmap() {
+                let v = match idx.remove(id) {
+                    None | Some(Event::Unsubscribed) => Value::Null,
+                    Some(Event::Update(v)) => v,
+                };
+                match self.published.get(&id) {
+                    Some(val) => val.update(pbatch, v),
+                    None => {
+                        if self.filter.is_match(&path) {
+                            let path = self.data_base.append(path.as_ref());
+                            let val = self.publisher.publish(path, v)?;
+                            self.published_ids.insert(val.id());
+                            self.published.insert(*id, val);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn seek(&mut self, pbatch: &mut UpdateBatch, seek: Seek) -> Result<()> {
+        if self.used {
+            self.log.seek(seek)?;
+        }
+        match self.state.load() {
+            State::Tail => self.set_state(State::Play),
+            State::Pause | State::Play => (),
+        }
+        match &mut self.speed {
+            Speed::Unlimited => (),
+            Speed::Limited { last_batch_ts, .. } => {
+                *last_batch_ts = None;
+            }
+        };
+        self.reimage(pbatch)?;
+        Ok(())
+    }
+
+    fn set_speed(&mut self, new_rate: Option<f64>) {
+        match &mut self.speed {
+            Speed::Limited { rate, .. } => match new_rate {
+                Some(new_rate) => {
+                    *rate = new_rate;
+                }
+                None => {
+                    self.speed = Speed::Unlimited;
+                }
+            },
+            Speed::Unlimited => {
+                if let Some(new_rate) = new_rate {
+                    self.speed = Speed::Limited {
+                        rate: new_rate,
+                        last_emitted: DateTime::<Utc>::MIN_UTC,
+                        last_batch_ts: None,
+                    };
+                }
+            }
+        }
+    }
+
+    async fn run(
+        mut self,
+        mut bcast: broadcast::Receiver<BCastMsg>,
+        mut session_bcast_rx: broadcast::Receiver<SessionBCastMsg>,
+        cfg: Option<NewSessionConfig>,
+    ) -> Result<()> {
+        async fn read_bcast(
+            bcast: &mut broadcast::Receiver<BCastMsg>,
+            state: &Arc<AtomicState>,
+            shard_id: ShardId,
+        ) -> std::result::Result<BCastMsg, broadcast::error::RecvError> {
+            loop {
+                let m = bcast.recv().await;
+                match m {
+                    Err(e) => break Err(e),
+                    Ok(m) => match m {
+                        BCastMsg::Batch(id, _, _) if id == shard_id => match state.load()
+                        {
+                            State::Pause | State::Play => (),
+                            State::Tail => break Ok(m),
+                        },
+                        BCastMsg::Stop => break Ok(m),
+                        BCastMsg::LogRotated(id, _) | BCastMsg::NewCurrent(id, _)
+                            if id == shard_id =>
+                        {
+                            break Ok(m)
+                        }
+                        BCastMsg::LogRotated(_, _)
+                        | BCastMsg::NewCurrent(_, _)
+                        | BCastMsg::NewOneshotSession { .. }
+                        | BCastMsg::NewPlaybackSession { .. } => (),
+                    },
+                }
+            }
+        }
+        let (events_tx, mut events_rx) = mpsc::unbounded();
+        self.publisher.events(events_tx);
+        task::block_in_place(|| self.pathindex.check_remap_rescan())?;
+        let mut batch = self.publisher.start_batch();
+        debug!("seeking to the end");
+        self.seek(&mut batch, Seek::End)?;
+        if let Some(cfg) = cfg.clone() {
+            self.apply_config(&mut batch, cfg).await?
+        }
+        batch.commit(None).await;
+        let state = self.state.clone();
+        let shard_id = self.shard_id;
+        let mut idle_check = time::interval(std::time::Duration::from_secs(30));
+        let mut idle = false;
+        let mut used = 0;
+        loop {
+            select_biased! {
+                r = self.next().fuse() => match r {
+                    Ok((ts, mut batch)) => {
+                        self.process_batch((ts, &mut *batch)).await?;
+                    }
+                    Err(e) => break Err(e),
+                },
+                m = read_bcast(&mut bcast, &state, shard_id).fuse() => {
+                    self.process_bcast(m).await?
+                },
+                m = session_bcast_rx.recv().fuse() => {
+                    self.process_session_bcast(m).await?
+                }
+                e = events_rx.select_next_some() => match e {
+                    publisher::Event::Subscribe(id, _) => if self.published_ids.contains(&id) {
+                        used += 1;
+                    },
+                    publisher::Event::Unsubscribe(id, _) => if self.published_ids.contains(&id) {
+                        used -= 1;
+                    },
+                    publisher::Event::Destroyed(_) => (),
+                },
+                _ = idle_check.tick().fuse() => {
+                    let has_clients = used > 0;
+                    if !has_clients && idle {
+                        break Ok(())
+                    } else if has_clients {
+                        idle = false;
+                        self.session_bcast.send(SessionBCastMsg::Command(ClusterCmd::NotIdle));
+                    } else {
+                        idle = true;
+                    }
+                },
+            }
+        }
+    }
 }
 
 struct Controls {
@@ -275,366 +778,63 @@ impl Controls {
             pos_ctl,
         })
     }
-}
 
-pub(super) fn parse_filter(globs: Vec<Chars>) -> Result<GlobSet> {
-    let globs: Vec<Glob> =
-        globs.into_iter().map(|s| Glob::new(s)).collect::<Result<_>>()?;
-    Ok(GlobSet::new(true, globs)?)
-}
-
-struct NewSessionConfig {
-    client: ClId,
-    start: Bound<DateTime<Utc>>,
-    end: Bound<DateTime<Utc>>,
-    speed: Option<f64>,
-    pos: Option<Seek>,
-    state: Option<State>,
-    play_after: Option<Duration>,
-    filter: Vec<Chars>,
-}
-
-impl NewSessionConfig {
-    fn new(
-        mut req: RpcCall,
-        start: Value,
-        end: Value,
-        speed: Value,
-        pos: Option<Seek>,
-        state: Option<State>,
-        play_after: Option<Duration>,
-        filter: Vec<Chars>,
-    ) -> Option<(NewSessionConfig, RpcReply)> {
-        let start = match parse_bound(start) {
-            Ok(s) => s,
-            Err(e) => rpc_err!(req.reply, format!("invalid start {}", e)),
-        };
-        let end = match parse_bound(end) {
-            Ok(s) => s,
-            Err(e) => rpc_err!(req.reply, format!("invalid end {}", e)),
-        };
-        let speed = match parse_speed(speed) {
-            Ok(s) => s,
-            Err(e) => rpc_err!(req.reply, format!("invalid speed {}", e)),
-        };
-        if let Err(e) = parse_filter(filter.clone()) {
-            rpc_err!(req.reply, format!("could not parse filter {}", e))
-        }
-        let s = NewSessionConfig {
-            client: req.client,
-            start,
-            end,
-            speed,
-            pos,
-            state,
-            play_after,
-            filter,
-        };
-        Some((s, req.reply))
-    }
-}
-
-struct Session {
-    controls: Controls,
-    publisher: Publisher,
-    published: FxHashMap<Id, Val>,
-    published_ids: FxHashSet<publisher::Id>,
-    filter: GlobSet,
-    speed: Speed,
-    state: Arc<AtomicState>,
-    data_base: Path,
-    log: LogfileCollection,
-    pathindex: ArchiveReader,
-    used: bool,
-}
-
-impl Session {
-    async fn new(
-        config: Arc<Config>,
-        publisher: Publisher,
-        head: Option<ArchiveReader>,
-        pathindex: ArchiveReader,
-        session_base: Path,
-        filter: GlobSet,
-        control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
-    ) -> Result<Self> {
-        let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
-        let used =
-            pathindex.index().iter_pathmap().any(|(_, path)| filter.is_match(path));
-        let log =
-            LogfileCollection::new(config, head, Bound::Unbounded, Bound::Unbounded)
-                .await?;
-        Ok(Self {
-            controls,
-            publisher,
-            published: HashMap::default(),
-            published_ids: HashSet::default(),
-            speed: Speed::Limited {
-                rate: 1.,
-                last_emitted: DateTime::<Utc>::MIN_UTC,
-                last_batch_ts: None,
-            },
-            filter,
-            state: Arc::new(AtomicState::new(State::Pause)),
-            data_base: session_base.append("data"),
-            log,
-            pathindex,
-            used,
-        })
-    }
-
-    async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
-        macro_rules! set_tail {
-            () => {
-                let mut cbatch = self.publisher.start_batch();
-                self.set_state(&mut cbatch, State::Tail);
-                cbatch.commit(None).await;
-                break future::pending().await;
-            };
-        }
-        if !self.used {
-            return future::pending().await;
-        }
-        loop {
-            if !self.state.load().play() {
-                break future::pending().await;
-            } else {
-                match &mut self.speed {
-                    Speed::Unlimited => match self.log.read_next()? {
-                        None => {
-                            set_tail!();
-                        }
-                        Some((ts, batch)) => {
-                            self.log.seek_n(1)?;
-                            break Ok((ts, batch));
-                        }
-                    },
-                    Speed::Limited { rate, last_emitted, last_batch_ts } => {
-                        match self.log.read_next()? {
-                            None => {
-                                set_tail!();
-                            }
-                            Some((ts, batch)) => match last_batch_ts {
-                                None => {
-                                    *last_batch_ts = Some(ts);
-                                    *last_emitted = Utc::now();
-                                    self.log.seek_n(1)?;
-                                    break Ok((ts, batch));
-                                }
-                                Some(last_ts) => {
-                                    let now = Utc::now();
-                                    let total_wait = ts - *last_ts;
-                                    let since_emitted = now - *last_emitted;
-                                    if since_emitted < total_wait {
-                                        let naptime = (total_wait - since_emitted)
-                                            .to_std()
-                                            .unwrap()
-                                            .as_secs_f64();
-                                        let naptime =
-                                            Duration::from_secs_f64(naptime / *rate);
-                                        time::sleep(naptime).await;
-                                    }
-                                    *last_batch_ts = Some(ts);
-                                    *last_emitted = Utc::now();
-                                    self.log.seek_n(1)?;
-                                    break Ok((ts, batch));
-                                }
-                            },
-                        }
-                    }
-                }
+    fn process_update(&self, batch: &mut UpdateBatch, m: SessionUpdate) {
+        fn bound_to_val(b: Bound<DateTime<Utc>>) -> Value {
+            match b {
+                Bound::Unbounded => Value::String(Chars::from("Unbounded")),
+                Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
             }
         }
-    }
-
-    async fn process_batch(
-        &mut self,
-        batch: (DateTime<Utc>, &mut Vec<BatchItem>),
-    ) -> Result<()> {
-        let pause = match self.log.end() {
-            Bound::Unbounded => false,
-            Bound::Excluded(dt) => &batch.0 >= dt,
-            Bound::Included(dt) => &batch.0 > dt,
-        };
-        if pause {
-            let mut cbatch = self.publisher.start_batch();
-            self.set_state(&mut cbatch, State::Pause);
-            cbatch.commit(None).await;
-            Ok(())
-        } else {
-            let mut pbatch = self.publisher.start_batch();
-            task::block_in_place(|| {
-                self.pathindex.check_remap_rescan()?;
-                let index = self.pathindex.index();
-                for BatchItem(id, ev) in batch.1.drain(..) {
-                    let v = match ev {
-                        Event::Unsubscribed => Value::Null,
-                        Event::Update(v) => v,
-                    };
-                    match self.published.get(&id) {
-                        Some(val) => {
-                            val.update(&mut pbatch, v);
-                        }
-                        None => {
-                            if let Some(path) = index.path_for_id(&id) {
-                                if self.filter.is_match(&path) {
-                                    self.used = true;
-                                    let path = self.data_base.append(&path);
-                                    let val = self.publisher.publish(path, v)?;
-                                    self.published_ids.insert(val.id());
-                                    self.published.insert(id, val);
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok::<(), anyhow::Error>(())
-            })?;
-            self.controls.pos_ctl.update(&mut pbatch, batch.0);
-            Ok(pbatch.commit(None).await)
-        }
-    }
-
-    async fn process_bcast(
-        &mut self,
-        msg: Result<BCastMsg, broadcast::error::RecvError>,
-    ) -> Result<()> {
-        match msg {
-            Err(broadcast::error::RecvError::Closed) => {
-                bail!("broadcast channel closed")
+        match m {
+            SessionUpdate::Pos(pos) => self.pos_ctl.update_changed(batch, pos),
+            SessionUpdate::End(e) => self.end_ctl.update_changed(batch, bound_to_val(e)),
+            SessionUpdate::Start(s) => {
+                self.start_ctl.update_changed(batch, bound_to_val(s))
             }
-            Err(broadcast::error::RecvError::Lagged(missed)) => match self.state.load() {
-                State::Play | State::Pause => Ok(()),
-                State::Tail => {
-                    // safe because it's impossible to get into state
-                    // Tail without an archive.
-                    let mut batches = self.log.read_deltas(missed as usize)?;
-                    for (ts, mut batch) in batches.drain(..) {
-                        self.process_batch((ts, &mut *batch)).await?;
-                    }
-                    Ok(())
-                }
-            },
-            Ok(BCastMsg::Batch(ts, batch)) => match self.state.load() {
-                State::Play | State::Pause => Ok(()),
-                State::Tail => {
-                    let cursor = self.log.position();
-                    if cursor.contains(&ts) {
-                        let mut batch = (*batch).clone();
-                        self.process_batch((ts, &mut batch)).await?;
-                        let cursor = self.log.position_mut();
-                        cursor.set_current(ts);
-                    }
-                    Ok(())
-                }
-            },
-            Ok(BCastMsg::LogRotated(ts)) => {
-                self.log.log_rotated(ts).await?;
-                Ok(())
-            }
-            Ok(BCastMsg::NewCurrent(head)) => {
-                self.log.set_head(head);
-                Ok(())
-            }
-            Ok(BCastMsg::Stop) => bail!("stop signal"),
-        }
-    }
-
-    fn set_start(
-        &mut self,
-        cbatch: &mut UpdateBatch,
-        new_start: Bound<DateTime<Utc>>,
-    ) -> Result<()> {
-        self.controls.start_ctl.update(cbatch, bound_to_val(new_start));
-        self.log.set_start(new_start);
-        Ok(())
-    }
-
-    fn set_end(
-        &mut self,
-        cbatch: &mut UpdateBatch,
-        new_end: Bound<DateTime<Utc>>,
-    ) -> Result<()> {
-        self.controls.end_ctl.update(cbatch, bound_to_val(new_end));
-        self.log.set_end(new_end);
-        Ok(())
-    }
-
-    fn set_state(&mut self, cbatch: &mut UpdateBatch, state: State) {
-        match (self.state.load(), state) {
-            (s0, s1) if s0 == s1 => (),
-            (_, state) => {
-                self.state.store(state);
-                self.controls.state_ctl.update(
-                    cbatch,
-                    Value::from(match state {
-                        State::Play => "play",
+            SessionUpdate::State(st) => {
+                self.state_ctl.update_changed(
+                    batch,
+                    match st {
                         State::Pause => "pause",
+                        State::Play => "play",
                         State::Tail => "tail",
-                    }),
+                    },
                 );
             }
+            SessionUpdate::Speed(sp) => self.state_ctl.update_changed(batch, sp),
         }
     }
 
-    async fn apply_config(
-        &mut self,
-        cbatch: &mut UpdateBatch,
-        cluster: &Cluster<ClusterCmd>,
-        cfg: NewSessionConfig,
-    ) -> Result<()> {
-        self.set_start(cbatch, cfg.start)?;
-        cluster.send_cmd(&ClusterCmd::SetStart(cfg.start));
-        self.set_end(cbatch, cfg.end)?;
-        cluster.send_cmd(&ClusterCmd::SetEnd(cfg.end));
-        self.set_speed(cbatch, cfg.speed);
-        cluster.send_cmd(&ClusterCmd::SetSpeed(cfg.speed));
-        if let Some(pos) = cfg.pos {
-            self.seek(cbatch, pos)?;
-            cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
-        }
-        if let Some(state) = cfg.state {
-            self.set_state(cbatch, state);
-            cluster.send_cmd(&ClusterCmd::SetState(state));
-        }
-        if let Some(play_after) = cfg.play_after {
-            time::sleep(play_after).await;
-            self.set_state(cbatch, State::Play);
-            cluster.send_cmd(&ClusterCmd::SetState(State::Play));
-        }
-        Ok(())
-    }
-
-    async fn process_control_batch(
-        &mut self,
+    fn process_writes(
+        &self,
+        session_bcast: &mut broadcast::Sender<SessionBCastMsg>,
         session_id: Uuid,
-        cluster: &Cluster<ClusterCmd>,
         mut batch: Pooled<Vec<WriteRequest>>,
-    ) -> Result<()> {
+    ) {
         let mut inst = HashMap::new();
-        let mut cbatch = self.publisher.start_batch();
         for req in batch.drain(..) {
             inst.insert(req.id, req);
         }
         for (_, req) in inst {
-            if req.id == self.controls.start_ctl.id() {
+            if req.id == self.start_ctl.id() {
                 info!("set start {}: {}", session_id, req.value);
                 if let Some(new_start) = get_bound(req) {
-                    self.set_start(&mut cbatch, new_start)?;
-                    cluster.send_cmd(&ClusterCmd::SetStart(new_start));
+                    session_bcast
+                        .send(SessionBCastMsg::Command(ClusterCmd::SetStart(new_start)));
                 }
-            } else if req.id == self.controls.end_ctl.id() {
+            } else if req.id == self.end_ctl.id() {
                 info!("set end {}: {}", session_id, req.value);
                 if let Some(new_end) = get_bound(req) {
-                    self.set_end(&mut cbatch, new_end)?;
-                    cluster.send_cmd(&ClusterCmd::SetEnd(new_end));
+                    session_bcast
+                        .send(SessionBCastMsg::Command(ClusterCmd::SetEnd(new_end)));
                 }
-            } else if req.id == self.controls.speed_ctl.id() {
+            } else if req.id == self.speed_ctl.id() {
                 info!("set speed {}: {}", session_id, req.value);
                 match parse_speed(req.value) {
                     Ok(speed) => {
-                        self.set_speed(&mut cbatch, speed);
-                        cluster.send_cmd(&ClusterCmd::SetSpeed(speed));
+                        session_bcast
+                            .send(SessionBCastMsg::Command(ClusterCmd::SetSpeed(speed)));
                     }
                     Err(e) => {
                         warn!("tried to set invalid speed {}", e);
@@ -643,15 +843,12 @@ impl Session {
                         }
                     }
                 }
-            } else if req.id == self.controls.state_ctl.id() {
+            } else if req.id == self.state_ctl.id() {
                 info!("set state {}: {}", session_id, req.value);
                 match req.value.cast_to::<State>() {
                     Ok(state) => {
-                        match (state, self.state.load()) {
-                            (State::Play | State::Tail, State::Tail) => (),
-                            (_, _) => self.set_state(&mut cbatch, state),
-                        }
-                        cluster.send_cmd(&ClusterCmd::SetState(state));
+                        session_bcast
+                            .send(SessionBCastMsg::Command(ClusterCmd::SetState(state)));
                     }
                     Err(e) => {
                         warn!("tried to set invalid state {}", e);
@@ -660,12 +857,12 @@ impl Session {
                         }
                     }
                 }
-            } else if req.id == self.controls.pos_ctl.id() {
+            } else if req.id == self.pos_ctl.id() {
                 info!("set pos {}: {}", session_id, req.value);
                 match req.value.cast_to::<Seek>() {
                     Ok(pos) => {
-                        self.seek(&mut cbatch, pos)?;
-                        cluster.send_cmd(&ClusterCmd::SeekTo(pos.to_string()));
+                        session_bcast
+                            .send(SessionBCastMsg::Command(ClusterCmd::SeekTo(pos)));
                     }
                     Err(e) => {
                         warn!("invalid set pos {}", e);
@@ -676,149 +873,13 @@ impl Session {
                 }
             }
         }
-        Ok(cbatch.commit(None).await)
-    }
-
-    fn process_control_cmd(
-        &mut self,
-        idle: &mut bool,
-        cbatch: &mut UpdateBatch,
-        cmd: ClusterCmd,
-    ) -> Result<()> {
-        match cmd {
-            ClusterCmd::SeekTo(s) => match s.parse::<Seek>() {
-                Ok(pos) => self.seek(cbatch, pos),
-                Err(e) => {
-                    warn!("invalid seek from cluster {}, {}", s, e);
-                    Ok(())
-                }
-            },
-            ClusterCmd::SetStart(new_start) => self.set_start(cbatch, new_start),
-            ClusterCmd::SetEnd(new_end) => self.set_end(cbatch, new_end),
-            ClusterCmd::SetSpeed(sp) => Ok(self.set_speed(cbatch, sp)),
-            ClusterCmd::SetState(st) => Ok(self.set_state(cbatch, st)),
-            ClusterCmd::NotIdle => Ok(*idle = false),
-        }
-    }
-
-    fn reimage(&mut self, pbatch: &mut UpdateBatch) -> Result<()> {
-        if self.used {
-            let mut idx = self.log.reimage()?;
-            let cursor = self.log.position();
-            self.controls.pos_ctl.update(
-                pbatch,
-                match cursor.current() {
-                    Some(ts) => Value::DateTime(ts),
-                    None => match cursor.start() {
-                        Bound::Unbounded => Value::Null,
-                        Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(*ts),
-                    },
-                },
-            );
-            self.pathindex.check_remap_rescan()?;
-            let index = self.pathindex.index();
-            for (id, path) in index.iter_pathmap() {
-                let v = match idx.remove(id) {
-                    None | Some(Event::Unsubscribed) => Value::Null,
-                    Some(Event::Update(v)) => v,
-                };
-                match self.published.get(&id) {
-                    Some(val) => val.update(pbatch, v),
-                    None => {
-                        if self.filter.is_match(&path) {
-                            let path = self.data_base.append(path.as_ref());
-                            let val = self.publisher.publish(path, v)?;
-                            self.published_ids.insert(val.id());
-                            self.published.insert(*id, val);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn seek(&mut self, pbatch: &mut UpdateBatch, seek: Seek) -> Result<()> {
-        if self.used {
-            self.log.seek(seek)?;
-        }
-        match self.state.load() {
-            State::Tail => self.set_state(pbatch, State::Play),
-            State::Pause | State::Play => (),
-        }
-        match &mut self.speed {
-            Speed::Unlimited => (),
-            Speed::Limited { last_batch_ts, .. } => {
-                *last_batch_ts = None;
-            }
-        };
-        self.reimage(pbatch)?;
-        Ok(())
-    }
-
-    fn set_speed(&mut self, cbatch: &mut UpdateBatch, new_rate: Option<f64>) {
-        match new_rate {
-            None => {
-                self.controls
-                    .speed_ctl
-                    .update(cbatch, Value::String(Chars::from("unlimited")));
-            }
-            Some(new_rate) => {
-                self.controls.speed_ctl.update(cbatch, Value::F64(new_rate));
-            }
-        };
-        match &mut self.speed {
-            Speed::Limited { rate, .. } => match new_rate {
-                Some(new_rate) => {
-                    *rate = new_rate;
-                }
-                None => {
-                    self.speed = Speed::Unlimited;
-                }
-            },
-            Speed::Unlimited => {
-                if let Some(new_rate) = new_rate {
-                    self.speed = Speed::Limited {
-                        rate: new_rate,
-                        last_emitted: DateTime::<Utc>::MIN_UTC,
-                        last_batch_ts: None,
-                    };
-                }
-            }
-        }
-    }
-}
-
-fn not_idle(idle: &mut bool, cluster: &Cluster<ClusterCmd>) {
-    *idle = false;
-    cluster.send_cmd(&ClusterCmd::NotIdle);
-}
-
-async fn read_bcast(
-    bcast: &mut broadcast::Receiver<BCastMsg>,
-    state: &Arc<AtomicState>,
-) -> std::result::Result<BCastMsg, broadcast::error::RecvError> {
-    loop {
-        let m = bcast.recv().await;
-        match m {
-            Err(e) => break Err(e),
-            Ok(m) => match m {
-                BCastMsg::Batch(_, _) => match state.load() {
-                    State::Pause | State::Play => (),
-                    State::Tail => break Ok(m),
-                },
-                BCastMsg::LogRotated(_) | BCastMsg::NewCurrent(_) | BCastMsg::Stop => {
-                    break Ok(m)
-                }
-            },
-        }
     }
 }
 
 async fn session(
-    mut bcast: broadcast::Receiver<BCastMsg>,
-    head: Option<ArchiveReader>,
-    pathindex: ArchiveReader,
+    bcast: broadcast::Receiver<BCastMsg>,
+    heads: &FxHashMap<ShardId, ArchiveReader>,
+    shards: &Arc<Shards>,
     subscriber: Subscriber,
     publisher: Publisher,
     session_id: Uuid,
@@ -828,86 +889,95 @@ async fn session(
     cfg: Option<NewSessionConfig>,
 ) -> Result<()> {
     let (control_tx, control_rx) = mpsc::channel(3);
-    let (events_tx, mut events_rx) = mpsc::unbounded();
-    publisher.events(events_tx);
+    let (mut session_bcast, session_bcast_rx) = broadcast::channel(10000);
     let session_base = session_base(&publish_config.base, session_id);
     debug!("new session base {}", session_base);
     let mut cluster = Cluster::new(
         &publisher,
         subscriber,
         session_base.append("cluster"),
-        publish_config.shards.unwrap_or(0),
+        publish_config.cluster_shards.unwrap_or(0),
     )
     .await?;
     debug!("cluster established");
-    pathindex.check_remap_rescan()?;
-    head.as_ref().map(|a| a.check_remap_rescan()).transpose()?;
-    let mut t = Session::new(
-        config.clone(),
-        publisher.clone(),
-        head,
-        pathindex.clone(),
-        session_base,
-        filter,
-        &control_tx,
-    )
-    .await?;
-    let state = t.state.clone();
-    let mut batch = publisher.start_batch();
-    debug!("seeking to the end");
-    t.seek(&mut batch, Seek::End)?;
-    if let Some(cfg) = cfg {
-        t.apply_config(&mut batch, &cluster, cfg).await?
+    let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
+    let mut session_bcast_rx = session_bcast.subscribe();
+    let mut joinset: JoinSet<Result<()>> = JoinSet::new();
+    for (id, pathindex) in shards.pathindexes.iter() {
+        let pathindex = pathindex.clone();
+        let publisher = publisher.clone();
+        let config = config.clone();
+        let session_bcast = session_bcast.clone();
+        let session_bcast_rx = session_bcast.subscribe();
+        let bcast = bcast.resubscribe();
+        let head = heads.get(id).cloned();
+        let session_base = session_base.clone();
+        let filter = filter.clone();
+        let cfg = cfg.clone();
+        let id = *id;
+        joinset.spawn(async move {
+            let t = SessionShard::new(
+                session_bcast.clone(),
+                id,
+                config,
+                publisher,
+                head,
+                pathindex,
+                session_base,
+                filter,
+            )
+            .await?;
+            t.run(bcast, session_bcast_rx, cfg).await?;
+            Ok::<(), anyhow::Error>(())
+        });
     }
-    batch.commit(None).await;
     let mut control_rx = control_rx.fuse();
-    let mut idle_check = time::interval(std::time::Duration::from_secs(30));
-    let mut idle = false;
-    let mut used = 0;
     loop {
         select_biased! {
-            r = t.next().fuse() => match r {
-                Ok((ts, mut batch)) => { t.process_batch((ts, &mut *batch)).await?; }
-                Err(e) => break Err(e),
-            },
-            e = events_rx.select_next_some() => match e {
-                publisher::Event::Subscribe(id, _) => if t.published_ids.contains(&id) {
-                    used += 1;
-                },
-                publisher::Event::Unsubscribe(id, _) => if t.published_ids.contains(&id) {
-                    used -= 1;
-                },
-                publisher::Event::Destroyed(_) => (),
-            },
-            _ = idle_check.tick().fuse() => {
-                let has_clients = used > 0;
-                if !has_clients && idle {
+            r = joinset.join_next().fuse() => match r {
+                Some(Ok(Ok(()))) => (),
+                None => {
+                    info!("session id {} shutting down", session_id);
                     break Ok(())
-                } else if has_clients {
-                    not_idle(&mut idle, &cluster)
-                } else {
-                    idle = true;
+                }
+                Some(Ok(Err(e))) => {
+                    error!("shard of session {} failed {}", session_id, e)
+                }
+                Some(Err(e)) => {
+                    error!("session {} failed to join shard {}", session_id, e);
+                    bail!("join error")
                 }
             },
-            _ = publisher.wait_any_new_client().fuse() => {
-                if publisher.clients() > cluster.others() {
-                    not_idle(&mut idle, &cluster)
-                }
-            },
-            m = read_bcast(&mut bcast, &state).fuse() => t.process_bcast(m).await?,
             cmds = cluster.wait_cmds().fuse() => {
-                let mut cbatch = publisher.start_batch();
                 for cmd in cmds? {
-                    t.process_control_cmd(&mut idle, &mut cbatch, cmd)?
+                    session_bcast.send(SessionBCastMsg::Command(cmd));
                 }
-                cbatch.commit(None).await;
             },
             r = control_rx.next() => match r {
                 None => break Ok(()),
                 Some(batch) => {
-                    t.process_control_batch(session_id, &cluster, batch).await?
+                    controls.process_writes(&mut session_bcast, session_id, batch)
                 }
             },
+            mut m = session_bcast_rx.recv().fuse() => {
+                let mut batch = publisher.start_batch();
+                loop {
+                    match m {
+                        Ok(m) => match m {
+                            SessionBCastMsg::Command(c) => cluster.send_cmd(&c),
+                            SessionBCastMsg::Update(u) => controls.process_update(&mut batch, u),
+                        }
+                        Err(e) => error!("session bcast for session {} error {}", session_id, e),
+                    }
+                    match session_bcast_rx.try_recv() {
+                        Ok(new_m) => { m = Ok(new_m); }
+                        Err(_) => {
+                            batch.commit(None).await;
+                            break
+                        },
+                    }
+                }
+            }
         }
     }
 }
@@ -1009,7 +1079,7 @@ fn start_session(
 pub(super) async fn run(
     bcast: broadcast::Sender<BCastMsg>,
     mut bcast_rx: broadcast::Receiver<BCastMsg>,
-    pathindex: ArchiveReader,
+    shards: &Arc<Shards>,
     subscriber: Subscriber,
     config: Arc<Config>,
     publish_config: Arc<PublishConfig>,
@@ -1039,7 +1109,7 @@ pub(super) async fn run(
         &publisher,
         subscriber.clone(),
         publish_config.base.append(&publish_config.cluster).append("publish"),
-        publish_config.shards.unwrap_or(0),
+        publish_config.cluster_shards.unwrap_or(0),
     )
     .await?;
     let mut control_rx = control_rx.fuse();

@@ -193,7 +193,7 @@ impl Pack for BatchItem {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Pack)]
 pub enum Seek {
     Beginning,
     End,
