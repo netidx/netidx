@@ -112,6 +112,7 @@ pub(crate) enum ClusterCmd {
     SetEnd(Bound<DateTime<Utc>>),
     SetSpeed(Option<f64>),
     SetState(State),
+    Terminate,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -477,9 +478,7 @@ impl SessionShard {
             Ok(BCastMsg::Stop) => bail!("stop signal"),
             Ok(BCastMsg::Batch(_, _, _))
             | Ok(BCastMsg::LogRotated(_, _))
-            | Ok(BCastMsg::NewCurrent(_, _))
-            | Ok(BCastMsg::NewOneshotSession { .. })
-            | Ok(BCastMsg::NewPlaybackSession { .. }) => Ok(()),
+            | Ok(BCastMsg::NewCurrent(_, _)) => Ok(()),
         }
     }
 
@@ -502,6 +501,7 @@ impl SessionShard {
                 ClusterCmd::SetStart(s) => self.set_start(s)?,
                 ClusterCmd::SetState(s) => self.set_state(s),
                 ClusterCmd::SetSpeed(s) => self.set_speed(s),
+                ClusterCmd::Terminate => bail!("terminated"),
             },
         }
         Ok(())
@@ -655,10 +655,7 @@ impl SessionShard {
                         {
                             break Ok(m)
                         }
-                        BCastMsg::LogRotated(_, _)
-                        | BCastMsg::NewCurrent(_, _)
-                        | BCastMsg::NewOneshotSession { .. }
-                        | BCastMsg::NewPlaybackSession { .. } => (),
+                        BCastMsg::LogRotated(_, _) | BCastMsg::NewCurrent(_, _) => (),
                     },
                 }
             }
@@ -902,8 +899,8 @@ impl Controls {
 
 async fn session(
     bcast: broadcast::Receiver<BCastMsg>,
-    heads: &FxHashMap<ShardId, ArchiveReader>,
-    shards: &Arc<Shards>,
+    heads: Arc<Mutex<FxHashMap<ShardId, ArchiveReader>>>,
+    shards: Arc<Shards>,
     subscriber: Subscriber,
     publisher: Publisher,
     session_id: Uuid,
@@ -934,7 +931,7 @@ async fn session(
         let session_bcast = session_bcast.clone();
         let session_bcast_rx = session_bcast.subscribe();
         let bcast = bcast.resubscribe();
-        let head = heads.get(id).cloned();
+        let head = heads.lock().get(id).cloned();
         let session_base = session_base.clone();
         let filter = filter.clone();
         let cfg = cfg.clone();
@@ -958,29 +955,15 @@ async fn session(
     let mut control_rx = control_rx.fuse();
     loop {
         select_biased! {
-            r = joinset.join_next().fuse() => match r {
-                Some(Ok(Ok(()))) => (),
-                None => {
-                    info!("session id {} shutting down", session_id);
-                    break Ok(())
-                }
-                Some(Ok(Err(e))) => {
-                    error!("shard of session {} failed {}", session_id, e)
-                }
-                Some(Err(e)) => {
-                    error!("session {} failed to join shard {}", session_id, e);
-                    bail!("join error")
+            r = control_rx.next() => match r {
+                None => break Ok(()),
+                Some(batch) => {
+                    controls.process_writes(&mut session_bcast, session_id, batch)
                 }
             },
             cmds = cluster.wait_cmds().fuse() => {
                 for cmd in cmds? {
                     session_bcast.send(SessionBCastMsg::Command(cmd));
-                }
-            },
-            r = control_rx.next() => match r {
-                None => break Ok(()),
-                Some(batch) => {
-                    controls.process_writes(&mut session_bcast, session_id, batch)
                 }
             },
             mut m = session_bcast_rx.recv().fuse() => {
@@ -1002,6 +985,21 @@ async fn session(
                     }
                 }
             }
+            r = joinset.join_next().fuse() => match r {
+                Some(Ok(Ok(()))) => (),
+                None => {
+                    info!("session id {} shutting down", session_id);
+                    break Ok(())
+                }
+                Some(Ok(Err(e))) => {
+                    error!("shard of session {} failed {}", session_id, e);
+                    session_bcast.send(SessionBCastMsg::Command(ClusterCmd::Terminate));
+                }
+                Some(Err(e)) => {
+                    error!("session {} failed to join shard {}", session_id, e);
+                    bail!("join error")
+                }
+            },
         }
     }
 }
@@ -1060,25 +1058,22 @@ fn start_session(
     publisher: Publisher,
     session_id: Uuid,
     session_token: SessionId,
-    bcast: &broadcast::Sender<BCastMsg>,
-    pathindex: ArchiveReader,
+    bcast: broadcast::Receiver<BCastMsg>,
+    shards: Arc<Shards>,
     subscriber: &Subscriber,
-    head: &Option<ArchiveReader>,
+    heads: Arc<Mutex<FxHashMap<ShardId, ArchiveReader>>>,
     config: Arc<Config>,
     publish_config: Arc<PublishConfig>,
     filter: GlobSet,
     cfg: Option<NewSessionConfig>,
 ) {
-    let bcast = bcast.subscribe();
-    let head = head.clone();
     let subscriber = subscriber.clone();
     let publisher_cl = publisher.clone();
-    let pathindex = pathindex.clone();
     task::spawn(async move {
         let res = session(
             bcast,
-            head,
-            pathindex,
+            heads,
+            shards,
             subscriber,
             publisher_cl,
             session_id,
@@ -1090,7 +1085,7 @@ fn start_session(
         .await;
         match res {
             Ok(()) => {
-                info!("session {} existed", session_id)
+                info!("session {} exited", session_id)
             }
             Err(e) => {
                 error!("session {} exited {}", session_id, e)
@@ -1101,8 +1096,7 @@ fn start_session(
 }
 
 pub(super) async fn run(
-    bcast: broadcast::Sender<BCastMsg>,
-    mut bcast_rx: broadcast::Receiver<BCastMsg>,
+    mut bcast: broadcast::Receiver<BCastMsg>,
     shards: &Arc<Shards>,
     subscriber: Subscriber,
     config: Arc<Config>,
@@ -1138,15 +1132,16 @@ pub(super) async fn run(
     .await?;
     let mut control_rx = control_rx.fuse();
     let mut poll_members = time::interval(std::time::Duration::from_secs(30));
-    let mut archive = None;
+    let mut heads: Arc<Mutex<FxHashMap<ShardId, ArchiveReader>>> =
+        Arc::new(Mutex::new(HashMap::default()));
     loop {
         select_biased! {
-            m = bcast_rx.recv().fuse() => match m {
+            m = bcast.recv().fuse() => match m {
                 Err(_) => (),
                 Ok(m) => match m {
-                    BCastMsg::Batch(_, _) | BCastMsg::LogRotated(_) => (),
-                    BCastMsg::NewCurrent(rdr) => archive = Some(rdr),
-                    BCastMsg::Stop => break Ok(())
+                    BCastMsg::Batch(_, _, _) | BCastMsg::LogRotated(_, _) => (),
+                    BCastMsg::NewCurrent(id, rdr) => { heads.lock().insert(id, rdr); },
+                    BCastMsg::Stop => break Ok(()),
                 }
             },
             _ = poll_members.tick().fuse() => {
@@ -1171,14 +1166,15 @@ pub(super) async fn run(
                             error!("can't start session requested by cluster member, too many sessions")
                         },
                         Some(session_token) => {
+                            let bcast = bcast.resubscribe();
                             start_session(
                                 publisher.clone(),
                                 session_id,
                                 session_token,
-                                &bcast,
-                                pathindex.clone(),
+                                bcast,
+                                shards.clone(),
                                 &subscriber,
-                                &archive,
+                                heads.clone(),
                                 config.clone(),
                                 publish_config.clone(),
                                 filter,
@@ -1208,14 +1204,15 @@ pub(super) async fn run(
                             let session_id = Uuid::new_v4();
                             let client = cfg.client;
                             info!("start session {}", session_id);
+                            let bcast = bcast.resubscribe();
                             start_session(
                                 publisher.clone(),
                                 session_id,
                                 session_token,
-                                &bcast,
-                                pathindex.clone(),
+                                bcast,
+                                shards.clone(),
                                 &subscriber,
-                                &archive,
+                                heads.clone(),
                                 config.clone(),
                                 publish_config.clone(),
                                 filter,

@@ -14,7 +14,7 @@ use netidx::{
     pool::Pooled,
     protocol::glob::Glob,
     publisher::{BindCfg, ClId, PublisherBuilder},
-    resolver_client::DesiredAuth,
+    resolver_client::{DesiredAuth, GlobSet},
     subscriber::Subscriber,
 };
 use netidx_core::atomic_id;
@@ -33,7 +33,7 @@ use uuid::Uuid;
 use self::{
     file::RotateDirective,
     oneshot::{Oid, OneshotConfig},
-    publish::ClusterCmd,
+    publish::{ClusterCmd, SessionBCastMsg},
 };
 
 pub mod logfile_collection;
@@ -377,16 +377,6 @@ enum BCastMsg {
     LogRotated(ShardId, DateTime<Utc>),
     NewCurrent(ShardId, ArchiveReader),
     Batch(ShardId, DateTime<Utc>, Arc<Pooled<Vec<BatchItem>>>),
-    NewPlaybackSession {
-        client: ClId,
-        sessionid: Uuid,
-        filter: Arc<Vec<Chars>>,
-        sender: broadcast::Sender<ClusterCmd>,
-    },
-    NewOneshotSession {
-        id: Oid,
-        cfg: OneshotConfig,
-    },
     Stop,
 }
 
