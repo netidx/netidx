@@ -1,13 +1,13 @@
 use super::{
     logfile_collection::LogfileCollection,
     publish::{parse_bound, parse_filter},
-    ShardId, Shards,
+    Shards,
 };
 use crate::{
     logfile::{ArchiveReader, BatchItem, Seek, CURSOR_BATCH_POOL, IMG_POOL},
     recorder::{
         publish::{END_DOC, FILTER_DOC, START_DOC},
-        BCastMsg, Config, PublishConfig,
+        Config, PublishConfig,
     },
     recorder_client::{OneshotReply, PATHMAPS},
 };
@@ -33,7 +33,6 @@ use netidx_protocols::{
     rpc::server::{ArgSpec, Proc, RpcCall, RpcReply},
     rpc_err,
 };
-use parking_lot::Mutex;
 use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{
@@ -44,7 +43,7 @@ use std::{
     ops::Bound,
     sync::Arc,
 };
-use tokio::{sync::broadcast, task::JoinSet};
+use tokio::task::JoinSet;
 
 #[derive(Debug, Clone, Pack)]
 pub(crate) struct OneshotConfig {
@@ -200,7 +199,6 @@ fn handle_reply_for_us(
 
 async fn start_oneshot(
     shards: Arc<Shards>,
-    heads: Arc<Mutex<FxHashMap<ShardId, ArchiveReader>>>,
     config: Arc<Config>,
     limit: usize,
     args: OneshotConfig,
@@ -208,7 +206,7 @@ async fn start_oneshot(
     let mut set = JoinSet::new();
     for (id, pathindex) in shards.pathindexes.iter() {
         let shard = shards.by_id[id].clone();
-        let head = heads.lock().get(id).cloned();
+        let head = shards.heads.read().get(id).cloned();
         let pathindex = pathindex.clone();
         set.spawn(do_oneshot(
             shard,
@@ -250,7 +248,6 @@ async fn start_oneshot(
 }
 
 pub(super) async fn run(
-    mut bcast: broadcast::Receiver<BCastMsg>,
     shards: Arc<Shards>,
     config: Arc<Config>,
     publish_config: Arc<PublishConfig>,
@@ -267,8 +264,6 @@ pub(super) async fn run(
     .await?;
     let our_path = cluster.path();
     let (control_tx, mut control_rx) = mpsc::channel(3);
-    let heads: Arc<Mutex<FxHashMap<ShardId, ArchiveReader>>> =
-        Arc::new(Mutex::new(HashMap::default()));
     let mut pending: JoinSet<(Oid, Path, Result<OneshotReply>)> = JoinSet::new();
     let mut we_initiated: FxHashMap<Oid, PendingOneshot> = HashMap::default();
     let _proc = define_rpc!(
@@ -292,13 +287,6 @@ pub(super) async fn run(
                     }
                 }
             },
-            m = bcast.recv().fuse() => match m {
-                Err(_) => (),
-                Ok(m) => match m {
-                    BCastMsg::Batch(_, _, _) | BCastMsg::LogRotated(_, _) => (),
-                    BCastMsg::NewCurrent(id, rdr) => { heads.lock().insert(id, rdr); },
-                }
-            },
             cmds = cluster.wait_cmds().fuse() => {
                 let cmds = match cmds {
                     Ok(cmds) => cmds,
@@ -315,11 +303,10 @@ pub(super) async fn run(
                         }
                         ClusterCmd::NewOneshot(id, path, args) => {
                             let shards = shards.clone();
-                            let heads = heads.clone();
                             let config = config.clone();
                             let limit = publish_config.oneshot_data_limit;
                             pending.spawn(async move {
-                                (id, path, start_oneshot(shards, heads, config, limit, args).await)
+                                (id, path, start_oneshot(shards, config, limit, args).await)
                             });
                         }
                     }
@@ -337,11 +324,10 @@ pub(super) async fn run(
                     we_initiated.insert(id, PendingOneshot::new(reply, cluster_shards + 1));
                     cluster.send_cmd(&ClusterCmd::NewOneshot(id, path.clone(), args.clone()));
                     let shards = shards.clone();
-                    let heads = heads.clone();
                     let config = config.clone();
                     let limit = publish_config.oneshot_data_limit;
                     pending.spawn(async move {
-                        (id, path, start_oneshot(shards, heads, config, limit, args).await)
+                        (id, path, start_oneshot(shards, config, limit, args).await)
                     });
                 }
             }

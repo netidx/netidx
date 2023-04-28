@@ -1,4 +1,4 @@
-use super::{ArchiveCmds, BCastMsg, Config, RecordConfig, RotateDirective, ShardId};
+use super::{ArchiveCmds, BCastMsg, Config, RecordConfig, RotateDirective, ShardId, Shards};
 use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL};
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -27,7 +27,6 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::broadcast,
     task,
     time::{self, Instant},
 };
@@ -223,8 +222,7 @@ fn write_image(
 }
 
 pub(super) async fn run(
-    bcast: broadcast::Sender<BCastMsg>,
-    mut bcast_rx: broadcast::Receiver<BCastMsg>,
+    shards: Arc<Shards>,
     mut pathindex: ArchiveWriter,
     subscriber: Subscriber,
     config: Arc<Config>,
@@ -238,10 +236,15 @@ pub(super) async fn run(
     let mut by_subid: FxHashMap<SubId, Id> = HashMap::default();
     let mut image: FxHashMap<SubId, Event> = HashMap::default();
     let mut subscribed: HashMap<Path, Dval> = HashMap::new();
+    let bcast = shards.bcast[&shard_id].clone();
     let mut archive = task::block_in_place(|| {
         ArchiveWriter::open(config.archive_directory.join(&*shard_name).join("current"))
     })?;
-    let _ = bcast.send(BCastMsg::NewCurrent(shard_id, archive.reader()?));
+    {
+        let reader = archive.reader()?;
+        shards.heads.write().insert(shard_id, reader.clone());
+        let _ = bcast.send(BCastMsg::NewCurrent(reader));
+    }
     let flush_frequency = record_config.flush_frequency.map(|f| archive.block_size() * f);
     let mut poll = record_config.poll_interval.map(time::interval);
     let mut flush =
@@ -273,12 +276,6 @@ pub(super) async fn run(
     }
     loop {
         select_biased! {
-            m = bcast_rx.recv().fuse() => match m {
-                Err(_)
-                    | Ok(BCastMsg::Batch(_, _, _))
-                    | Ok(BCastMsg::LogRotated(_, _))
-                    | Ok(BCastMsg::NewCurrent(_, _)) => (),
-            },
             _ = maybe_interval(&mut poll).fuse() => {
                 if pending_list.is_none() {
                     let (tx, rx) = oneshot::channel();
@@ -319,8 +316,10 @@ pub(super) async fn run(
                     last_image = 0;
                     last_flush = 0;
                     task::block_in_place(|| write_image(&mut archive, &by_subid, &image, now))?;
-                    let _ = bcast.send(BCastMsg::LogRotated(shard_id, now));
-                    let _ = bcast.send(BCastMsg::NewCurrent(shard_id, archive.reader()?));
+                    let _ = bcast.send(BCastMsg::LogRotated(now));
+                    let reader = archive.reader()?;
+                    shards.heads.write().insert(shard_id, reader.clone());
+                    let _ = bcast.send(BCastMsg::NewCurrent(reader));
                 }
             },
             r = wait_list(&mut pending_list).fuse() => {
@@ -376,7 +375,7 @@ pub(super) async fn run(
                             }
                         }
                         archive.add_batch(false, now, &tbatch)?;
-                        let _ = bcast.send(BCastMsg::Batch(shard_id, now, Arc::new(tbatch)));
+                        let _ = bcast.send(BCastMsg::Batch(now, Arc::new(tbatch)));
                         match record_config.image_frequency {
                             None => (),
                             Some(freq) if archive.len() - last_image < freq => (),

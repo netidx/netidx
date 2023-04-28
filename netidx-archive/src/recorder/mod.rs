@@ -15,6 +15,7 @@ use netidx::{
     subscriber::Subscriber,
 };
 use netidx_core::atomic_id;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -398,15 +399,17 @@ atomic_id!(ShardId);
 
 #[derive(Debug, Clone)]
 enum BCastMsg {
-    LogRotated(ShardId, DateTime<Utc>),
-    NewCurrent(ShardId, ArchiveReader),
-    Batch(ShardId, DateTime<Utc>, Arc<Pooled<Vec<BatchItem>>>),
+    LogRotated(DateTime<Utc>),
+    NewCurrent(ArchiveReader),
+    Batch(DateTime<Utc>, Arc<Pooled<Vec<BatchItem>>>),
 }
 
 pub(crate) struct Shards {
     by_id: FxHashMap<ShardId, ArcStr>,
     by_name: FxHashMap<ArcStr, ShardId>,
     pathindexes: FxHashMap<ShardId, ArchiveReader>,
+    heads: RwLock<FxHashMap<ShardId, ArchiveReader>>,
+    bcast: FxHashMap<ShardId, broadcast::Sender<BCastMsg>>,
 }
 
 impl Shards {
@@ -418,6 +421,8 @@ impl Shards {
             by_id: HashMap::default(),
             by_name: HashMap::default(),
             pathindexes: HashMap::default(),
+            heads: RwLock::new(HashMap::default()),
+            bcast: HashMap::default(),
         };
         for ent in fs::read_dir(path.as_ref())? {
             let ent = ent?;
@@ -428,6 +433,11 @@ impl Shards {
                 t.by_name.insert(name, id);
                 let indexpath = ent.path().join("pathindex");
                 t.pathindexes.insert(id, ArchiveReader::open(indexpath)?);
+                if let Ok(head) = ArchiveReader::open(ent.path().join("current")) {
+                    t.heads.write().insert(id, head);
+                }
+                let (tx, _) = broadcast::channel(1000);
+                t.bcast.insert(id, tx);
             }
         }
         Ok((HashMap::default(), Arc::new(t)))
@@ -442,6 +452,8 @@ impl Shards {
             by_id: HashMap::default(),
             by_name: HashMap::default(),
             pathindexes: HashMap::default(),
+            heads: RwLock::new(HashMap::default()),
+            bcast: HashMap::default(),
         };
         let mut writers = HashMap::default();
         for name in cfg.keys() {
@@ -454,13 +466,14 @@ impl Shards {
             let reader = writer.reader()?;
             t.pathindexes.insert(id, reader);
             writers.insert(id, writer);
+            let (tx, _) = broadcast::channel(1000);
+            t.bcast.insert(id, tx);
         }
         Ok((writers, Arc::new(t)))
     }
 }
 
 pub struct Recorder {
-    tx: broadcast::Sender<BCastMsg>,
     config: Arc<Config>,
     wait: JoinSet<()>,
 }
@@ -468,7 +481,6 @@ pub struct Recorder {
 impl Recorder {
     async fn start_jobs(&mut self) -> Result<()> {
         let config = self.config.clone();
-        let bcast_tx = self.tx.clone();
         let subscriber =
             Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
         let (mut writers, shards) = if config.record.is_empty() {
@@ -488,11 +500,9 @@ impl Recorder {
                 let publish_config = publish_config.clone();
                 let subscriber = subscriber.clone();
                 let config = config.clone();
-                let bcast = bcast_tx.subscribe();
                 let publisher = publisher.clone();
                 async move {
                     let r = publish::run(
-                        bcast,
                         shards,
                         subscriber,
                         config,
@@ -510,11 +520,9 @@ impl Recorder {
                 let shards = shards.clone();
                 let publish_config = publish_config.clone();
                 let config = config.clone();
-                let bcast_rx = bcast_tx.subscribe();
                 let publisher = publisher.clone();
                 async move {
                     let r = oneshot::run(
-                        bcast_rx,
                         shards,
                         config,
                         publish_config,
@@ -528,39 +536,29 @@ impl Recorder {
                 }
             });
         }
-        if config.record.is_empty() {
-            for (id, name) in &shards.by_id {
-                let path = config.archive_directory.join(&**name).join("current");
-                let reader = ArchiveReader::open(path)?;
-                let _ = bcast_tx.send(BCastMsg::NewCurrent(*id, reader));
-            }
-        } else {
-            for (name, cfg) in config.record.iter() {
-                let name = name.clone();
-                let id = shards.by_name[&name];
-                let pathindex_writer = writers.remove(&id).unwrap();
-                let record_config = Arc::new(cfg.clone());
-                let subscriber = subscriber.clone();
-                let config = config.clone();
-                let bcast_tx = bcast_tx.clone();
-                let bcast_rx = bcast_tx.subscribe();
-                self.wait.spawn(async move {
-                    let r = record::run(
-                        bcast_tx,
-                        bcast_rx,
-                        pathindex_writer,
-                        subscriber,
-                        config,
-                        record_config,
-                        id,
-                        name,
-                    )
+        for (name, cfg) in config.record.iter() {
+            let name = name.clone();
+            let id = shards.by_name[&name];
+            let pathindex_writer = writers.remove(&id).unwrap();
+            let record_config = Arc::new(cfg.clone());
+            let subscriber = subscriber.clone();
+            let config = config.clone();
+            let shards = shards.clone();
+            self.wait.spawn(async move {
+                let r = record::run(
+                    shards,
+                    pathindex_writer,
+                    subscriber,
+                    config,
+                    record_config,
+                    id,
+                    name,
+                )
                     .await;
-                    if let Err(e) = r {
-                        error!("recorder stopped on error {}", e);
-                    }
-                });
-            }
+                if let Err(e) = r {
+                    error!("recorder stopped on error {}", e);
+                }
+            });
         }
         Ok(())
     }
@@ -568,9 +566,7 @@ impl Recorder {
     /// Start the recorder
     pub async fn start(config: Config) -> Result<Self> {
         let config = Arc::new(config);
-        let (bcast_tx, _) = broadcast::channel(100);
-        let tx = bcast_tx.clone();
-        let mut t = Self { tx, wait: JoinSet::new(), config };
+        let mut t = Self { wait: JoinSet::new(), config };
         t.start_jobs().await?;
         Ok(t)
     }
