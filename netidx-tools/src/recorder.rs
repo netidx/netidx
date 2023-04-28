@@ -20,13 +20,11 @@ pub(crate) async fn run(config: Option<PathBuf>, example: bool) -> Result<()> {
         } else if !path::Path::is_dir(&config.archive_directory) {
             panic!("archive_directory must be a directory")
         }
-        let recorder = Recorder::start(config);
+        let _recorder = Recorder::start(config).await?;
         loop {
-            select_biased! {
-                _ = recorder.wait_shutdown().fuse() => break,
-                r = ctrl_c().fuse() => if let Ok(()) = r {
-                    recorder.shutdown()
-                },
+            match ctrl_c().await {
+                Ok(()) => break,
+                Err(_) => (),
             }
         }
         Ok(())

@@ -28,7 +28,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{sync::broadcast, task};
+use tokio::{sync::broadcast, task::{self, JoinSet}};
 
 use self::file::RecordShardConfig;
 
@@ -468,15 +468,14 @@ impl Shards {
 
 pub struct Recorder {
     tx: broadcast::Sender<BCastMsg>,
-    wait: Shared<Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>>,
+    config: Arc<Config>,
+    wait: JoinSet<()>,
 }
 
 impl Recorder {
-    async fn run(
-        config: Arc<Config>,
-        bcast_tx: broadcast::Sender<BCastMsg>,
-    ) -> Result<()> {
-        let mut wait = Vec::new();
+    async fn start_jobs(&mut self) -> Result<()> {
+        let config = self.config.clone();
+        let bcast_tx = self.tx.clone();
         let subscriber =
             Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
         let (mut writers, shards) = if config.record.is_empty() {
@@ -491,7 +490,7 @@ impl Recorder {
                 .bind_cfg(Some(publish_config.bind.clone()))
                 .build()
                 .await?;
-            wait.push(task::spawn({
+            self.wait.spawn({
                 let shards = shards.clone();
                 let publish_config = publish_config.clone();
                 let subscriber = subscriber.clone();
@@ -512,8 +511,8 @@ impl Recorder {
                         error!("publisher stopped on error {}", e)
                     }
                 }
-            }));
-            wait.push(task::spawn({
+            });
+            self.wait.spawn({
                 let subscriber = subscriber.clone();
                 let shards = shards.clone();
                 let publish_config = publish_config.clone();
@@ -534,7 +533,7 @@ impl Recorder {
                         error!("publisher oneshot stopped on error {}", e)
                     }
                 }
-            }))
+            });
         }
         if config.record.is_empty() {
             for (id, name) in &shards.by_id {
@@ -552,7 +551,7 @@ impl Recorder {
                 let config = config.clone();
                 let bcast_tx = bcast_tx.clone();
                 let bcast_rx = bcast_tx.subscribe();
-                wait.push(task::spawn(async move {
+                self.wait.spawn(async move {
                     let r = record::run(
                         bcast_tx,
                         bcast_rx,
@@ -567,43 +566,19 @@ impl Recorder {
                     if let Err(e) = r {
                         error!("recorder stopped on error {}", e);
                     }
-                }));
+                });
             }
         }
-        future::join_all(wait).await;
         Ok(())
     }
 
     /// Start the recorder
-    pub fn start(config: Config) -> Self {
+    pub async fn start(config: Config) -> Result<Self> {
         let config = Arc::new(config);
         let (bcast_tx, _) = broadcast::channel(100);
         let tx = bcast_tx.clone();
-        let wait = (Box::pin(async {
-            let r = task::spawn(async move {
-                if let Err(e) = Self::run(config, bcast_tx).await {
-                    error!("recorder shutdown with {}", e)
-                }
-            })
-            .await;
-            if let Err(e) = r {
-                error!("failed to join {}", e)
-            }
-        })
-            as Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>)
-            .shared();
-        Self { tx, wait }
-    }
-
-    /// This will return when the recorder has shutdown, either
-    /// gracefully or not.
-    pub async fn wait_shutdown(&self) {
-        let _ = self.wait.clone().await;
-    }
-
-    /// Initiate a clean recorder shutdown. To wait for it to complete
-    /// you should call wait_shutdown
-    pub fn shutdown(&self) {
-        let _ = self.tx.send(BCastMsg::Stop);
+        let mut t = Self { tx, wait: JoinSet::new(), config };
+        t.start_jobs().await?;
+        Ok(t)
     }
 }
