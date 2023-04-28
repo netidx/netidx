@@ -485,18 +485,37 @@ impl SessionShard {
 
     async fn process_session_bcast(
         &mut self,
+        idle: &mut bool,
+        batch: &mut UpdateBatch,
         m: Result<SessionBCastMsg, broadcast::error::RecvError>,
     ) -> Result<()> {
-        unimplemented!()
+        match m {
+            Err(broadcast::error::RecvError::Closed) => bail!("closed"),
+            Err(broadcast::error::RecvError::Lagged(_)) => warn!("shard missed messages"),
+            Ok(SessionBCastMsg::Update(_)) => (),
+            Ok(SessionBCastMsg::Command(c)) => match c {
+                ClusterCmd::NotIdle => {
+                    *idle = false;
+                }
+                ClusterCmd::SeekTo(s) => self.seek(batch, s)?,
+                ClusterCmd::SetEnd(e) => self.set_end(e)?,
+                ClusterCmd::SetStart(s) => self.set_start(s)?,
+                ClusterCmd::SetState(s) => self.set_state(s),
+                ClusterCmd::SetSpeed(s) => self.set_speed(s),
+            },
+        }
+        Ok(())
     }
 
     fn set_start(&mut self, new_start: Bound<DateTime<Utc>>) -> Result<()> {
         self.log.set_start(new_start);
+        self.session_bcast.send(SessionBCastMsg::Update(SessionUpdate::Start(new_start)));
         Ok(())
     }
 
     fn set_end(&mut self, new_end: Bound<DateTime<Utc>>) -> Result<()> {
         self.log.set_end(new_end);
+        self.session_bcast.send(SessionBCastMsg::Update(SessionUpdate::End(new_end)));
         Ok(())
     }
 
@@ -505,6 +524,8 @@ impl SessionShard {
             (s0, s1) if s0 == s1 => (),
             (_, state) => {
                 self.state.store(state);
+                self.session_bcast
+                    .send(SessionBCastMsg::Update(SessionUpdate::State(state)));
             }
         }
     }
@@ -585,6 +606,7 @@ impl SessionShard {
     }
 
     fn set_speed(&mut self, new_rate: Option<f64>) {
+        self.session_bcast.send(SessionBCastMsg::Update(SessionUpdate::Speed(new_rate)));
         match &mut self.speed {
             Speed::Limited { rate, .. } => match new_rate {
                 Some(new_rate) => {
@@ -668,7 +690,9 @@ impl SessionShard {
                     self.process_bcast(m).await?
                 },
                 m = session_bcast_rx.recv().fuse() => {
-                    self.process_session_bcast(m).await?
+                    let mut batch = self.publisher.start_batch();
+                    self.process_session_bcast(&mut idle, &mut batch, m).await?;
+                    batch.commit(None).await
                 }
                 e = events_rx.select_next_some() => match e {
                     publisher::Event::Subscribe(id, _) => if self.published_ids.contains(&id) {
