@@ -322,7 +322,8 @@ impl SessionShard {
     async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
         macro_rules! set_tail {
             () => {
-                self.session_bcast
+                let _ = self
+                    .session_bcast
                     .send(SessionBCastMsg::Update(SessionUpdate::State(State::Tail)));
                 self.set_state(State::Tail);
                 break future::pending().await;
@@ -393,7 +394,8 @@ impl SessionShard {
             Bound::Included(dt) => &batch.0 > dt,
         };
         if pause {
-            self.session_bcast
+            let _ = self
+                .session_bcast
                 .send(SessionBCastMsg::Update(SessionUpdate::State(State::Pause)));
             self.set_state(State::Pause);
             Ok(())
@@ -426,7 +428,8 @@ impl SessionShard {
                 }
                 Ok::<(), anyhow::Error>(())
             })?;
-            self.session_bcast
+            let _ = self
+                .session_bcast
                 .send(SessionBCastMsg::Update(SessionUpdate::Pos(Some(batch.0))));
             Ok(pbatch.commit(None).await)
         }
@@ -509,13 +512,16 @@ impl SessionShard {
 
     fn set_start(&mut self, new_start: Bound<DateTime<Utc>>) -> Result<()> {
         self.log.set_start(new_start);
-        self.session_bcast.send(SessionBCastMsg::Update(SessionUpdate::Start(new_start)));
+        let _ = self
+            .session_bcast
+            .send(SessionBCastMsg::Update(SessionUpdate::Start(new_start)));
         Ok(())
     }
 
     fn set_end(&mut self, new_end: Bound<DateTime<Utc>>) -> Result<()> {
         self.log.set_end(new_end);
-        self.session_bcast.send(SessionBCastMsg::Update(SessionUpdate::End(new_end)));
+        let _ =
+            self.session_bcast.send(SessionBCastMsg::Update(SessionUpdate::End(new_end)));
         Ok(())
     }
 
@@ -524,7 +530,8 @@ impl SessionShard {
             (s0, s1) if s0 == s1 => (),
             (_, state) => {
                 self.state.store(state);
-                self.session_bcast
+                let _ = self
+                    .session_bcast
                     .send(SessionBCastMsg::Update(SessionUpdate::State(state)));
             }
         }
@@ -555,7 +562,7 @@ impl SessionShard {
         if self.used {
             let mut idx = self.log.reimage()?;
             let cursor = self.log.position();
-            self.session_bcast.send(SessionBCastMsg::Update(SessionUpdate::Pos(
+            let _ = self.session_bcast.send(SessionBCastMsg::Update(SessionUpdate::Pos(
                 match cursor.current() {
                     Some(ts) => Some(ts),
                     None => match cursor.start() {
@@ -606,7 +613,9 @@ impl SessionShard {
     }
 
     fn set_speed(&mut self, new_rate: Option<f64>) {
-        self.session_bcast.send(SessionBCastMsg::Update(SessionUpdate::Speed(new_rate)));
+        let _ = self
+            .session_bcast
+            .send(SessionBCastMsg::Update(SessionUpdate::Speed(new_rate)));
         match &mut self.speed {
             Speed::Limited { rate, .. } => match new_rate {
                 Some(new_rate) => {
@@ -708,7 +717,9 @@ impl SessionShard {
                         break Ok(())
                     } else if has_clients {
                         idle = false;
-                        self.session_bcast.send(SessionBCastMsg::Command(ClusterCmd::NotIdle));
+                        let _ = self.session_bcast.send(
+                            SessionBCastMsg::Command(ClusterCmd::NotIdle)
+                        );
                     } else {
                         idle = true;
                     }
@@ -843,20 +854,20 @@ impl Controls {
             if req.id == self.start_ctl.id() {
                 info!("set start {}: {}", session_id, req.value);
                 if let Some(new_start) = get_bound(req) {
-                    session_bcast
+                    let _ = session_bcast
                         .send(SessionBCastMsg::Command(ClusterCmd::SetStart(new_start)));
                 }
             } else if req.id == self.end_ctl.id() {
                 info!("set end {}: {}", session_id, req.value);
                 if let Some(new_end) = get_bound(req) {
-                    session_bcast
+                    let _ = session_bcast
                         .send(SessionBCastMsg::Command(ClusterCmd::SetEnd(new_end)));
                 }
             } else if req.id == self.speed_ctl.id() {
                 info!("set speed {}: {}", session_id, req.value);
                 match parse_speed(req.value) {
                     Ok(speed) => {
-                        session_bcast
+                        let _ = session_bcast
                             .send(SessionBCastMsg::Command(ClusterCmd::SetSpeed(speed)));
                     }
                     Err(e) => {
@@ -870,7 +881,7 @@ impl Controls {
                 info!("set state {}: {}", session_id, req.value);
                 match req.value.cast_to::<State>() {
                     Ok(state) => {
-                        session_bcast
+                        let _ = session_bcast
                             .send(SessionBCastMsg::Command(ClusterCmd::SetState(state)));
                     }
                     Err(e) => {
@@ -884,7 +895,7 @@ impl Controls {
                 info!("set pos {}: {}", session_id, req.value);
                 match req.value.cast_to::<Seek>() {
                     Ok(pos) => {
-                        session_bcast
+                        let _ = session_bcast
                             .send(SessionBCastMsg::Command(ClusterCmd::SeekTo(pos)));
                     }
                     Err(e) => {
@@ -964,7 +975,7 @@ async fn session(
             },
             cmds = cluster.wait_cmds().fuse() => {
                 for cmd in cmds? {
-                    session_bcast.send(SessionBCastMsg::Command(cmd));
+                    let _ = session_bcast.send(SessionBCastMsg::Command(cmd));
                 }
             },
             mut m = session_bcast_rx.recv().fuse() => {
@@ -994,7 +1005,7 @@ async fn session(
                 }
                 Some(Ok(Err(e))) => {
                     error!("shard of session {} failed {}", session_id, e);
-                    session_bcast.send(SessionBCastMsg::Command(ClusterCmd::Terminate));
+                    let _ = session_bcast.send(SessionBCastMsg::Command(ClusterCmd::Terminate));
                 }
                 Some(Err(e)) => {
                     error!("session {} failed to join shard {}", session_id, e);
