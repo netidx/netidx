@@ -1,3 +1,13 @@
+* 0.19.7 archive
+
+  - big netidx-archive refactor. now shards can be represented
+    internally as well as across processes. There are a lot more
+    reasons to shard than record performance (e.g. playback latency is
+    a big one), so it makes sense that the recorder should be able to
+    shard using internal tasks on a single machine. The cluster
+    mechanism is still available, but is meant to be used when you are
+    sharding across multiple machines.
+
 * 0.19.6 archive protocols
 
   - lots of fixes for timing and clustering
