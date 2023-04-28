@@ -850,11 +850,6 @@ impl ArchiveWriter {
         }
     }
 
-    /// Return the size of the archive in bytes
-    pub fn size(&self) -> usize {
-        self.end.load(Ordering::Relaxed)
-    }
-
     /// Open the specified archive for read/write access, if the file
     /// does not exist then a new archive will be created.
     pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {

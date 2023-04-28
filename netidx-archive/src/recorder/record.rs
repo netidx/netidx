@@ -303,7 +303,7 @@ pub(super) async fn run(
             _ = maybe_interval(&mut rotate).fuse() => {
                 let rotate = match record_config.rotate_interval {
                     RotateDirective::Never => false,
-                    RotateDirective::Size(sz) => archive.size() >= sz,
+                    RotateDirective::Size(sz) => archive.len() >= sz,
                     RotateDirective::Interval(_) => true,
                 };
                 if rotate {
