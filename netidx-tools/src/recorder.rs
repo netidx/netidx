@@ -3,7 +3,7 @@ use futures::{prelude::*, select_biased};
 use netidx_archive::recorder::{Config, Recorder};
 use std::{
     fs,
-    path::{self, PathBuf},
+    path::{self, PathBuf}, time::Duration,
 };
 use tokio::signal::ctrl_c;
 
@@ -20,13 +20,15 @@ pub(crate) async fn run(config: Option<PathBuf>, example: bool) -> Result<()> {
         } else if !path::Path::is_dir(&config.archive_directory) {
             panic!("archive_directory must be a directory")
         }
-        let _recorder = Recorder::start(config).await?;
+        let recorder = Recorder::start(config).await?;
         loop {
             match ctrl_c().await {
-                Ok(()) => break,
                 Err(_) => (),
+                Ok(()) => break,
             }
         }
+        drop(recorder);
+        tokio::time::sleep(Duration::from_secs(10)).await;
         Ok(())
     }
 }
