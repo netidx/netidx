@@ -910,7 +910,7 @@ async fn session(
     cfg: Option<NewSessionConfig>,
 ) -> Result<()> {
     let (control_tx, control_rx) = mpsc::channel(3);
-    let (mut session_bcast, session_bcast_rx) = broadcast::channel(10000);
+    let (mut session_bcast, session_bcast_rx) = broadcast::channel(1000);
     let session_base = session_base(&publish_config.base, session_id);
     debug!("new session base {}", session_base);
     let mut cluster = Cluster::new(
@@ -1097,7 +1097,7 @@ fn start_session(
 
 pub(super) async fn run(
     mut bcast: broadcast::Receiver<BCastMsg>,
-    shards: &Arc<Shards>,
+    shards: Arc<Shards>,
     subscriber: Subscriber,
     config: Arc<Config>,
     publish_config: Arc<PublishConfig>,

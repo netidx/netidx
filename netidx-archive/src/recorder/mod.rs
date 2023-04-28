@@ -465,14 +465,12 @@ impl Recorder {
                 let publish_config = publish_config.clone();
                 let subscriber = subscriber.clone();
                 let config = config.clone();
-                let bcast_tx = bcast_tx.clone();
-                let bcast_rx = bcast_tx.subscribe();
+                let bcast = bcast_tx.subscribe();
                 let publisher = publisher.clone();
                 async move {
                     let r = publish::run(
-                        bcast_tx,
-                        bcast_rx,
-                        pathindex,
+                        bcast,
+                        shards,
                         subscriber,
                         config,
                         publish_config,
