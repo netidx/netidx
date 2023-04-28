@@ -842,7 +842,7 @@ impl Controls {
                     },
                 );
             }
-            SessionUpdate::Speed(sp) => self.state_ctl.update_changed(batch, sp),
+            SessionUpdate::Speed(sp) => self.speed_ctl.update_changed(batch, sp),
         }
     }
 
