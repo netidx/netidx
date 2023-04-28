@@ -1,6 +1,6 @@
 use crate::logfile::{ArchiveReader, ArchiveWriter, BatchItem};
-use arcstr::ArcStr;
 use anyhow::Result;
+use arcstr::ArcStr;
 use chrono::prelude::*;
 use futures::{
     future::{self, Shared},
@@ -30,54 +30,56 @@ use std::{
 };
 use tokio::{sync::broadcast, task};
 
+use self::file::RecordShardConfig;
+
 pub mod logfile_collection;
 mod logfile_index;
 mod oneshot;
 mod publish;
 mod record;
 
-mod file {
+pub mod file {
     use super::RotateDirective;
     use std::collections::HashMap;
 
     use super::*;
 
-    pub(super) fn default_max_sessions() -> usize {
+    pub fn default_max_sessions() -> usize {
         512
     }
 
-    pub(super) fn default_max_sessions_per_client() -> usize {
+    pub fn default_max_sessions_per_client() -> usize {
         64
     }
 
-    pub(super) fn default_oneshot_data_limit() -> usize {
+    pub fn default_oneshot_data_limit() -> usize {
         104857600
     }
 
-    pub(super) fn default_cluster() -> String {
+    pub fn default_cluster() -> String {
         "cluster".into()
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct PublishConfig {
-        pub(super) base: Path,
+    pub struct PublishConfig {
+        pub base: Path,
         #[serde(default)]
-        pub(super) bind: Option<String>,
+        pub bind: Option<String>,
         #[serde(default = "default_max_sessions")]
-        pub(super) max_sessions: usize,
+        pub max_sessions: usize,
         #[serde(default = "default_max_sessions_per_client")]
-        pub(super) max_sessions_per_client: usize,
+        pub max_sessions_per_client: usize,
         #[serde(default = "default_oneshot_data_limit")]
-        pub(super) oneshot_data_limit: usize,
+        pub oneshot_data_limit: usize,
         #[serde(default)]
-        pub(super) cluster_shards: Option<usize>,
+        pub cluster_shards: Option<usize>,
         #[serde(default = "default_cluster")]
-        pub(super) cluster: String,
+        pub cluster: String,
     }
 
     impl PublishConfig {
-        fn example() -> Self {
+        pub fn example() -> Self {
             Self {
                 base: Path::from("/archive"),
                 bind: None,
@@ -90,73 +92,97 @@ mod file {
         }
     }
 
-    pub(super) fn default_poll_interval() -> Option<Duration> {
+    pub fn default_poll_interval() -> Option<Duration> {
         Some(Duration::from_secs(5))
     }
 
-    pub(super) fn default_image_frequency() -> Option<usize> {
+    pub fn default_image_frequency() -> Option<usize> {
         Some(67108864)
     }
 
-    pub(super) fn default_flush_frequency() -> Option<usize> {
+    pub fn default_flush_frequency() -> Option<usize> {
         Some(65534)
     }
 
-    pub(super) fn default_flush_interval() -> Option<Duration> {
+    pub fn default_flush_interval() -> Option<Duration> {
         Some(Duration::from_secs(30))
     }
 
-    pub(super) fn default_rotate_interval() -> RotateDirective {
+    pub fn default_rotate_interval() -> RotateDirective {
         RotateDirective::Interval(Duration::from_secs(86400))
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct RecordConfig {
-        pub(super) spec: Vec<Chars>,
-        #[serde(default = "default_poll_interval")]
-        pub(super) poll_interval: Option<Duration>,
-        #[serde(default = "default_image_frequency")]
-        pub(super) image_frequency: Option<usize>,
-        #[serde(default = "default_flush_frequency")]
-        pub(super) flush_frequency: Option<usize>,
-        #[serde(default = "default_flush_interval")]
-        pub(super) flush_interval: Option<Duration>,
-        #[serde(default = "default_rotate_interval")]
-        pub(super) rotate_interval: RotateDirective,
+    pub struct RecordShardConfig {
+        pub spec: Vec<Chars>,
+        pub poll_interval: Option<Duration>,
+        pub image_frequency: Option<usize>,
+        pub flush_frequency: Option<usize>,
+        pub flush_interval: Option<Duration>,
+        pub rotate_interval: Option<RotateDirective>,
     }
 
-    impl RecordConfig {
-        fn example() -> Self {
+    impl RecordShardConfig {
+        pub fn example() -> Self {
             Self {
                 spec: vec![Chars::from("/tmp/**")],
-                poll_interval: default_poll_interval(),
-                image_frequency: default_image_frequency(),
-                flush_frequency: default_flush_frequency(),
-                flush_interval: default_flush_interval(),
-                rotate_interval: default_rotate_interval(),
+                poll_interval: None,
+                image_frequency: None,
+                flush_frequency: None,
+                flush_interval: None,
+                rotate_interval: None,
             }
         }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct Config {
-        pub(super) archive_directory: PathBuf,
+    pub struct RecordConfig {
+        #[serde(default = "default_poll_interval")]
+        pub poll_interval: Option<Duration>,
+        #[serde(default = "default_image_frequency")]
+        pub image_frequency: Option<usize>,
+        #[serde(default = "default_flush_frequency")]
+        pub flush_frequency: Option<usize>,
+        #[serde(default = "default_flush_interval")]
+        pub flush_interval: Option<Duration>,
+        #[serde(default = "default_rotate_interval")]
+        pub rotate_interval: RotateDirective,
+        pub shards: HashMap<ArcStr, RecordShardConfig>,
+    }
+
+    impl RecordConfig {
+        pub fn example() -> Self {
+            Self {
+                poll_interval: default_poll_interval(),
+                image_frequency: default_image_frequency(),
+                flush_frequency: default_flush_frequency(),
+                flush_interval: default_flush_interval(),
+                rotate_interval: default_rotate_interval(),
+                shards: HashMap::from([("0".into(), RecordShardConfig::example())]),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Config {
+        pub archive_directory: PathBuf,
         #[serde(default)]
-        pub(super) archive_cmds: Option<ArchiveCmds>,
+        pub archive_cmds: Option<ArchiveCmds>,
         #[serde(default)]
-        pub(super) netidx_config: Option<PathBuf>,
+        pub netidx_config: Option<PathBuf>,
         #[serde(default)]
-        pub(super) desired_auth: Option<DesiredAuth>,
+        pub desired_auth: Option<DesiredAuth>,
         #[serde(default)]
-        pub(super) record: HashMap<ArcStr, RecordConfig>,
+        pub record: Option<RecordConfig>,
         #[serde(default)]
-        pub(super) publish: Option<PublishConfig>,
+        pub publish: Option<PublishConfig>,
     }
 
     impl Config {
-        pub(super) fn example() -> String {
+        pub fn example() -> String {
             serde_json::to_string_pretty(&Self {
                 archive_directory: PathBuf::from("/foo/bar"),
                 archive_cmds: Some(ArchiveCmds {
@@ -175,7 +201,7 @@ mod file {
                 }),
                 netidx_config: None,
                 desired_auth: None,
-                record: [("0".into(), RecordConfig::example())].into_iter().collect(),
+                record: Some(RecordConfig::example()),
                 publish: Some(PublishConfig::example()),
             })
             .unwrap()
@@ -277,20 +303,29 @@ impl RecordConfig {
             rotate_interval: file::default_rotate_interval(),
         }
     }
-}
 
-impl TryFrom<file::RecordConfig> for RecordConfig {
-    type Error = anyhow::Error;
-
-    fn try_from(f: file::RecordConfig) -> Result<Self> {
-        Ok(Self {
-            spec: f.spec.into_iter().map(Glob::new).collect::<Result<Vec<_>>>()?,
-            poll_interval: f.poll_interval,
-            image_frequency: f.image_frequency,
-            flush_frequency: f.flush_frequency,
-            flush_interval: f.flush_interval,
-            rotate_interval: f.rotate_interval,
-        })
+    fn from_file(f: file::RecordConfig) -> Result<HashMap<ArcStr, RecordConfig>> {
+        let mut shards = HashMap::default();
+        for (name, c) in f.shards {
+            let RecordShardConfig {
+                spec,
+                poll_interval,
+                image_frequency,
+                flush_frequency,
+                flush_interval,
+                rotate_interval,
+            } = c;
+            let res = RecordConfig {
+                spec: spec.into_iter().map(Glob::new).collect::<Result<Vec<_>>>()?,
+                poll_interval: poll_interval.or(f.poll_interval),
+                image_frequency: image_frequency.or(f.image_frequency),
+                flush_frequency: flush_frequency.or(f.flush_frequency),
+                flush_interval: flush_interval.or(f.flush_interval),
+                rotate_interval: rotate_interval.unwrap_or(f.rotate_interval),
+            };
+            shards.insert(name, res);
+        }
+        Ok(shards)
     }
 }
 
@@ -344,9 +379,9 @@ impl TryFrom<file::Config> for Config {
             desired_auth,
             record: f
                 .record
-                .into_iter()
-                .map(|(k, v)| Ok((k, RecordConfig::try_from(v)?)))
-                .collect::<Result<_>>()?,
+                .map(|r| RecordConfig::from_file(r))
+                .transpose()?
+                .unwrap_or(HashMap::default()),
             publish,
         })
     }
