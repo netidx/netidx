@@ -455,9 +455,9 @@ impl Shards {
             let id = ShardId::new();
             t.by_id.insert(id, name.clone());
             t.by_name.insert(name.clone(), id);
-            let indexpath = archive_directory.join(&**name).join("pathindex");
-            fs::create_dir_all(&indexpath)?;
-            let writer = ArchiveWriter::open(indexpath)?;
+            let dir = archive_directory.join(&**name);
+            fs::create_dir_all(&dir)?;
+            let writer = ArchiveWriter::open(dir.join("pathindex"))?;
             let reader = writer.reader()?;
             t.pathindexes.insert(id, reader);
             writers.insert(id, writer);
