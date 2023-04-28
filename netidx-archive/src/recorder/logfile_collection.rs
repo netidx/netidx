@@ -57,7 +57,7 @@ impl DataSource {
                             .1
                             .iter()
                             .cloned()
-                            .map(|a| if &a == "$shard" { shard.into() } else { a })
+                            .map(|a| if &a == "{shard}" { shard.into() } else { a })
                             .chain(iter::once(now));
                         Command::new(&cmds.get.0).args(args).output()
                     });

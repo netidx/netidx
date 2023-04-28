@@ -51,7 +51,7 @@ impl File {
             use tokio::process::Command;
             info!("running list command");
             let args = cmds.list.1.iter().cloned().map(|s| {
-                if &s == "$shard" {
+                if &s == "{shard}" {
                     shard.into()
                 } else {
                     s

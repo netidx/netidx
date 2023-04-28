@@ -160,7 +160,7 @@ fn rotate_log_file(
         let now = now.to_rfc3339();
         info!("running put {:?}", &cmds.put);
         let args = cmds.put.1.iter().cloned().map(|arg| {
-            if &arg == "$shard" {
+            if &arg == "{shard}" {
                 String::from(&**shard_name)
             } else {
                 arg

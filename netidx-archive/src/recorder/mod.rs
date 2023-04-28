@@ -188,15 +188,15 @@ pub mod file {
                 archive_cmds: Some(ArchiveCmds {
                     list: (
                         "cmd_to_list_dates_in_archive".into(),
-                        vec!["-s".into(), "$shard".into()],
+                        vec!["-s".into(), "{shard}".into()],
                     ),
                     get: (
                         "cmd_to_fetch_file_from_archive".into(),
-                        vec!["-s".into(), "$shard".into()],
+                        vec!["-s".into(), "{shard}".into()],
                     ),
                     put: (
                         "cmd_to_put_file_into_archive".into(),
-                        vec!["-s".into(), "$shard".into()],
+                        vec!["-s".into(), "{shard}".into()],
                     ),
                 }),
                 netidx_config: None,
