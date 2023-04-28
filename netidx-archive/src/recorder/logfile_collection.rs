@@ -6,6 +6,7 @@ use crate::{
     },
 };
 use anyhow::Result;
+use arcstr::ArcStr;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
 use log::{debug, info, warn};
@@ -32,6 +33,7 @@ struct DataSource {
 impl DataSource {
     fn new(
         config: &Config,
+        shard: &str,
         file: File,
         head: &Option<ArchiveReader>,
     ) -> Result<Option<Self>> {
@@ -50,9 +52,14 @@ impl DataSource {
                     info!("running get {:?}", &cmds.get);
                     let out = task::block_in_place(|| {
                         let now = ts.to_rfc3339();
-                        Command::new(&cmds.get.0)
-                            .args(cmds.get.1.iter().chain(iter::once(&now)))
-                            .output()
+                        let args = cmds
+                            .get
+                            .1
+                            .iter()
+                            .cloned()
+                            .map(|a| if &a == "$shard" { shard.into() } else { a })
+                            .chain(iter::once(now));
+                        Command::new(&cmds.get.0).args(args).output()
                     });
                     match out {
                         Err(e) => warn!("failed to execute get command {}", e),
@@ -72,7 +79,7 @@ impl DataSource {
                         }
                     }
                 }
-                let path = file.path(&config.archive_directory);
+                let path = file.path(&config.archive_directory, shard);
                 debug!("opening log file {:?}", &path);
                 let archive = {
                     let mut readers = ARCHIVE_READERS.lock();
@@ -103,6 +110,7 @@ pub struct LogfileCollection {
     head: Option<ArchiveReader>,
     pos: Cursor,
     config: Arc<Config>,
+    shard: ArcStr,
 }
 
 impl Drop for LogfileCollection {
@@ -116,13 +124,14 @@ impl Drop for LogfileCollection {
 impl LogfileCollection {
     pub async fn new(
         config: Arc<Config>,
+        shard: ArcStr,
         head: Option<ArchiveReader>,
         start: Bound<DateTime<Utc>>,
         end: Bound<DateTime<Utc>>,
     ) -> Result<Self> {
-        let index = LogfileIndex::new(&config).await?;
+        let index = LogfileIndex::new(&config, &shard).await?;
         let pos = Cursor::create_from(start, end, None);
-        Ok(Self { index, source: None, head, pos, config })
+        Ok(Self { index, source: None, head, pos, config, shard })
     }
 
     /// Attempt to open a source if we don't already have one, return true
@@ -131,7 +140,12 @@ impl LogfileCollection {
         if self.source.is_some() {
             Ok(true)
         } else {
-            self.source = DataSource::new(&self.config, self.index.first(), &self.head)?;
+            self.source = DataSource::new(
+                &self.config,
+                &self.shard,
+                self.index.first(),
+                &self.head,
+            )?;
             Ok(self.source.is_some())
         }
     }
@@ -145,8 +159,12 @@ impl LogfileCollection {
             match self.source.as_ref().unwrap().file {
                 File::Head => Ok(true),
                 f => {
-                    self.source =
-                        DataSource::new(&self.config, self.index.next(f), &self.head)?;
+                    self.source = DataSource::new(
+                        &self.config,
+                        &self.shard,
+                        self.index.next(f),
+                        &self.head,
+                    )?;
                     Ok(self.source.is_some())
                 }
             }
@@ -265,7 +283,7 @@ impl LogfileCollection {
 
     /// tell the collection that the log file has been rotated
     pub async fn log_rotated(&mut self, ts: DateTime<Utc>) -> Result<()> {
-        let files = LogfileIndex::new(&self.config).await?;
+        let files = LogfileIndex::new(&self.config, &self.shard).await?;
         if let Some(d) = self.source.as_mut() {
             if d.file == File::Head {
                 d.file = File::Historical(ts);
@@ -302,7 +320,8 @@ impl LogfileCollection {
                     if file == ds.file {
                         break;
                     }
-                    self.source = DataSource::new(&self.config, file, &self.head)?;
+                    self.source =
+                        DataSource::new(&self.config, &self.shard, file, &self.head)?;
                     n -= moved;
                 }
             }
@@ -323,7 +342,8 @@ impl LogfileCollection {
                 match self.source.as_ref() {
                     Some(ds) if ds.file == file => (),
                     Some(_) | None => {
-                        self.source = DataSource::new(&self.config, file, &self.head)?;
+                        self.source =
+                            DataSource::new(&self.config, &self.shard, file, &self.head)?;
                     }
                 }
                 if let Some(ds) = self.source.as_ref() {
@@ -338,8 +358,12 @@ impl LogfileCollection {
                 match self.source.as_ref() {
                     Some(ds) if ds.file == file => (),
                     Some(_) | None => {
-                        self.source =
-                            DataSource::new(&self.config, File::Head, &self.head)?;
+                        self.source = DataSource::new(
+                            &self.config,
+                            &self.shard,
+                            File::Head,
+                            &self.head,
+                        )?;
                     }
                 }
                 if let Some(ds) = self.source.as_ref() {
@@ -356,8 +380,12 @@ impl LogfileCollection {
                     if !ok {
                         let file = self.index.find(ts);
                         if ds.file != file {
-                            self.source =
-                                DataSource::new(&self.config, file, &self.head)?;
+                            self.source = DataSource::new(
+                                &self.config,
+                                &self.shard,
+                                file,
+                                &self.head,
+                            )?;
                         }
                         if let Some(ds) = self.source.as_ref() {
                             ds.archive.seek(&mut self.pos, Seek::Absolute(ts));
@@ -372,7 +400,8 @@ impl LogfileCollection {
                     Some(ds) => ds.file == file,
                 };
                 if !cur_ok {
-                    self.source = DataSource::new(&self.config, file, &self.head)?;
+                    self.source =
+                        DataSource::new(&self.config, &self.shard, file, &self.head)?;
                 }
                 if let Some(ds) = self.source.as_ref() {
                     ds.archive.seek(&mut self.pos, Seek::Absolute(ts))

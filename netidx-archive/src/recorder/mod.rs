@@ -1,4 +1,5 @@
 use crate::logfile::{ArchiveReader, ArchiveWriter, BatchItem};
+use arcstr::ArcStr;
 use anyhow::Result;
 use chrono::prelude::*;
 use futures::{
@@ -149,7 +150,7 @@ mod file {
         #[serde(default)]
         pub(super) desired_auth: Option<DesiredAuth>,
         #[serde(default)]
-        pub(super) record: HashMap<String, RecordConfig>,
+        pub(super) record: HashMap<ArcStr, RecordConfig>,
         #[serde(default)]
         pub(super) publish: Option<PublishConfig>,
     }
@@ -318,7 +319,7 @@ pub struct Config {
     /// directory. E.G. a shard named "0" will record under
     /// ${archive_base}/0. If publish is specified all configured
     /// shards on this instance will be published.
-    pub record: HashMap<String, RecordConfig>,
+    pub record: HashMap<ArcStr, RecordConfig>,
     /// If specified this recorder will publish the archive
     /// directory. It is possible for the same archiver to both record
     /// and publish. One of record or publish must be specifed.
@@ -375,8 +376,8 @@ enum BCastMsg {
 }
 
 pub(crate) struct Shards {
-    by_id: FxHashMap<ShardId, String>,
-    by_name: FxHashMap<String, ShardId>,
+    by_id: FxHashMap<ShardId, ArcStr>,
+    by_name: FxHashMap<ArcStr, ShardId>,
     pathindexes: FxHashMap<ShardId, ArchiveReader>,
 }
 
@@ -392,7 +393,7 @@ impl Shards {
         };
         for ent in fs::read_dir(path.as_ref())? {
             let ent = ent?;
-            let name = ent.file_name().to_string_lossy().into_owned();
+            let name = ArcStr::from(ent.file_name().to_string_lossy());
             if ent.file_type()?.is_dir() && &name != ".." {
                 let id = ShardId::new();
                 t.by_id.insert(id, name.clone());
@@ -406,7 +407,7 @@ impl Shards {
 
     fn from_cfg(
         archive_directory: &PathBuf,
-        cfg: &HashMap<String, RecordConfig>,
+        cfg: &HashMap<ArcStr, RecordConfig>,
     ) -> Result<(FxHashMap<ShardId, ArchiveWriter>, Arc<Self>)> {
         let mut t = Self {
             by_id: HashMap::default(),
@@ -418,7 +419,7 @@ impl Shards {
             let id = ShardId::new();
             t.by_id.insert(id, name.clone());
             t.by_name.insert(name.clone(), id);
-            let indexpath = archive_directory.join(name).join("pathindex");
+            let indexpath = archive_directory.join(&**name).join("pathindex");
             let writer = ArchiveWriter::open(indexpath)?;
             let reader = writer.reader()?;
             t.pathindexes.insert(id, reader);
@@ -500,7 +501,7 @@ impl Recorder {
         }
         if config.record.is_empty() {
             for (id, name) in &shards.by_id {
-                let path = config.archive_directory.join(name).join("current");
+                let path = config.archive_directory.join(&**name).join("current");
                 let reader = ArchiveReader::open(path)?;
                 let _ = bcast_tx.send(BCastMsg::NewCurrent(*id, reader));
             }

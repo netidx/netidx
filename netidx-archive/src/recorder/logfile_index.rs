@@ -28,10 +28,11 @@ impl Ord for File {
 }
 
 impl File {
-    async fn read(config: &Config) -> Result<Vec<File>> {
+    async fn read(config: &Config, shard: &str) -> Result<Vec<File>> {
         let mut files = vec![];
         {
-            let mut reader = tokio::fs::read_dir(&config.archive_directory).await?;
+            let path = config.archive_directory.join(shard);
+            let mut reader = tokio::fs::read_dir(&path).await?;
             while let Some(dir) = reader.next_entry().await? {
                 let typ = dir.file_type().await?;
                 if typ.is_file() {
@@ -49,7 +50,14 @@ impl File {
         if let Some(cmds) = &config.archive_cmds {
             use tokio::process::Command;
             info!("running list command");
-            match Command::new(&cmds.list.0).args(cmds.list.1.iter()).output().await {
+            let args = cmds.list.1.iter().cloned().map(|s| {
+                if &s == "$shard" {
+                    shard.into()
+                } else {
+                    s
+                }
+            });
+            match Command::new(&cmds.list.0).args(args).output().await {
                 Err(e) => warn!("failed to run list command {}", e),
                 Ok(o) if !o.status.success() => warn!("list command failed {:?}", o),
                 Ok(output) => {
@@ -73,10 +81,10 @@ impl File {
         Ok(files)
     }
 
-    pub(super) fn path(&self, base: &PathBuf) -> PathBuf {
+    pub(super) fn path(&self, base: &PathBuf, shard: &str) -> PathBuf {
         match self {
-            File::Head => base.join("current"),
-            File::Historical(h) => base.join(h.to_rfc3339()),
+            File::Head => base.join(shard).join("current"),
+            File::Historical(h) => base.join(shard).join(h.to_rfc3339()),
         }
     }
 }
@@ -85,8 +93,8 @@ impl File {
 pub(super) struct LogfileIndex(Vec<File>);
 
 impl LogfileIndex {
-    pub(super) async fn new(config: &Config) -> Result<Self> {
-        Ok(Self(File::read(&config).await?))
+    pub(super) async fn new(config: &Config, shard: &str) -> Result<Self> {
+        Ok(Self(File::read(&config, shard).await?))
     }
 
     pub(super) fn first(&self) -> File {

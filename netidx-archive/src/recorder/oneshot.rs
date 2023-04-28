@@ -85,6 +85,7 @@ impl OneshotConfig {
 }
 
 async fn do_oneshot(
+    shard: ArcStr,
     head: Option<ArchiveReader>,
     pathindex: ArchiveReader,
     config: Arc<Config>,
@@ -108,7 +109,8 @@ async fn do_oneshot(
         });
     }
     debug!("opening logfile collection");
-    let mut log = LogfileCollection::new(config, head, args.start, args.end).await?;
+    let mut log =
+        LogfileCollection::new(config, shard, head, args.start, args.end).await?;
     debug!("seeking to the beginning");
     log.seek(Seek::Beginning)?;
     debug!("reimaging");
@@ -205,9 +207,17 @@ async fn start_oneshot(
 ) -> Result<OneshotReply> {
     let mut set = JoinSet::new();
     for (id, pathindex) in shards.pathindexes.iter() {
+        let shard = shards.by_id[id].clone();
         let head = heads.lock().get(id).cloned();
         let pathindex = pathindex.clone();
-        set.spawn(do_oneshot(head, pathindex, config.clone(), limit, args.clone()));
+        set.spawn(do_oneshot(
+            shard,
+            head,
+            pathindex,
+            config.clone(),
+            limit,
+            args.clone(),
+        ));
     }
     let mut res = OneshotReply {
         deltas: CURSOR_BATCH_POOL.take(),

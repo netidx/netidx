@@ -144,15 +144,15 @@ async fn wait_list(pending: &mut Option<Fuse<oneshot::Receiver<Lst>>>) -> Lst {
 fn rotate_log_file(
     archive: ArchiveWriter,
     path: &PathBuf,
-    shard_name: &String,
+    shard_name: &ArcStr,
     cmds: &Option<ArchiveCmds>,
     now: DateTime<Utc>,
 ) -> Result<ArchiveWriter> {
     use std::{fs, iter};
     info!("rotating log file {}", now);
     drop(archive); // ensure the current file is closed
-    let current_name = path.join(shard_name).join("current");
-    let new_name = path.join(shard_name).join(now.to_rfc3339());
+    let current_name = path.join(&**shard_name).join("current");
+    let new_name = path.join(&**shard_name).join(now.to_rfc3339());
     fs::rename(&current_name, &new_name)?;
     debug!("would run put, cmd config {:?}", cmds);
     if let Some(cmds) = cmds {
@@ -161,7 +161,7 @@ fn rotate_log_file(
         info!("running put {:?}", &cmds.put);
         let args = cmds.put.1.iter().cloned().map(|arg| {
             if &arg == "$shard" {
-                shard_name.clone()
+                String::from(&**shard_name)
             } else {
                 arg
             }
@@ -230,7 +230,7 @@ pub(super) async fn run(
     config: Arc<Config>,
     record_config: Arc<RecordConfig>,
     shard_id: ShardId,
-    shard_name: String,
+    shard_name: ArcStr,
 ) -> Result<()> {
     let (tx_batch, rx_batch) = mpsc::channel(10000);
     let mut rx_batch = Batched::new(rx_batch, 10000);
@@ -239,7 +239,7 @@ pub(super) async fn run(
     let mut image: FxHashMap<SubId, Event> = HashMap::default();
     let mut subscribed: HashMap<Path, Dval> = HashMap::new();
     let mut archive = task::block_in_place(|| {
-        ArchiveWriter::open(config.archive_directory.join(&shard_name).join("current"))
+        ArchiveWriter::open(config.archive_directory.join(&*shard_name).join("current"))
     })?;
     let _ = bcast.send(BCastMsg::NewCurrent(shard_id, archive.reader()?));
     let flush_frequency = record_config.flush_frequency.map(|f| archive.block_size() * f);

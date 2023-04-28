@@ -282,6 +282,7 @@ impl SessionShard {
     async fn new(
         session_bcast: broadcast::Sender<SessionBCastMsg>,
         shard_id: ShardId,
+        shard: ArcStr,
         config: Arc<Config>,
         publisher: Publisher,
         head: Option<ArchiveReader>,
@@ -296,9 +297,14 @@ impl SessionShard {
         })?;
         let used =
             pathindex.index().iter_pathmap().any(|(_, path)| filter.is_match(path));
-        let log =
-            LogfileCollection::new(config, head, Bound::Unbounded, Bound::Unbounded)
-                .await?;
+        let log = LogfileCollection::new(
+            config,
+            shard,
+            head,
+            Bound::Unbounded,
+            Bound::Unbounded,
+        )
+        .await?;
         Ok(Self {
             session_bcast,
             shard_id,
@@ -939,6 +945,7 @@ async fn session(
     for (id, pathindex) in shards.pathindexes.iter() {
         let pathindex = pathindex.clone();
         let publisher = publisher.clone();
+        let shard = shards.by_id[id].clone();
         let config = config.clone();
         let session_bcast = session_bcast.clone();
         let session_bcast_rx = session_bcast.subscribe();
@@ -952,6 +959,7 @@ async fn session(
             let t = SessionShard::new(
                 session_bcast.clone(),
                 id,
+                shard,
                 config,
                 publisher,
                 head,
