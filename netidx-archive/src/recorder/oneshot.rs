@@ -9,7 +9,7 @@ use crate::{
         publish::{END_DOC, FILTER_DOC, START_DOC},
         Config, PublishConfig,
     },
-    recorder_client::{OneshotReply, PATHMAPS},
+    recorder_client::{OneshotReply, OneshotReplyShard, PATHMAPS, SHARDS},
 };
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -107,7 +107,7 @@ async fn do_oneshot(
     config: Arc<Config>,
     limit: usize,
     args: OneshotConfig,
-) -> Result<OneshotReply> {
+) -> Result<OneshotReplyShard> {
     pathindex.check_remap_rescan()?;
     let mut filterset = FILTER.take();
     let mut pathmap = PATHMAPS.take();
@@ -120,7 +120,7 @@ async fn do_oneshot(
         }
     }));
     if pathmap.is_empty() {
-        return Ok(OneshotReply {
+        return Ok(OneshotReplyShard {
             deltas: CURSOR_BATCH_POOL.take(),
             image: IMG_POOL.take(),
             pathmap,
@@ -134,7 +134,8 @@ async fn do_oneshot(
     debug!("reimaging");
     let mut idx = log.reimage()?;
     idx.retain(|id, _| pathmap.contains_key(id));
-    let mut data = OneshotReply { pathmap, image: idx, deltas: CURSOR_BATCH_POOL.take() };
+    let mut data =
+        OneshotReplyShard { pathmap, image: idx, deltas: CURSOR_BATCH_POOL.take() };
     let mut total = 0;
     loop {
         debug!("reading archive batch");
@@ -188,12 +189,8 @@ impl PendingOneshot {
                 Ok(mut replies) => {
                     let mut reply = replies.pop().unwrap();
                     for mut r in replies.drain(..) {
-                        let OneshotReply { pathmap, image, deltas } = &mut reply;
-                        pathmap.extend(r.pathmap.drain());
-                        image.extend(r.image.drain());
-                        deltas.extend(r.deltas.drain(..));
+                        reply.0.extend(r.0.drain(..));
                     }
-                    reply.deltas.make_contiguous().sort_by_key(|(ts, _)| *ts);
                     self.reply.send(Value::Bytes(pack(&reply)?.freeze()));
                 }
             }
@@ -228,7 +225,7 @@ async fn start_oneshot(
     for (id, pathindex) in shards.pathindexes.iter() {
         if let Some(spec) = shards.spec.get(id) {
             if args.filter.disjoint(spec) {
-                continue
+                continue;
             }
         }
         let shard = shards.by_id[id].clone();
@@ -243,32 +240,11 @@ async fn start_oneshot(
             args.clone(),
         ));
     }
-    let mut res = OneshotReply {
-        deltas: CURSOR_BATCH_POOL.take(),
-        image: IMG_POOL.take(),
-        pathmap: PATHMAPS.take(),
-    };
+    let mut res = OneshotReply(SHARDS.take());
     loop {
         match set.join_next().await {
             None => return Ok(res),
-            Some(r) => {
-                let OneshotReply { mut pathmap, mut image, mut deltas } = r??;
-                if res.deltas.is_empty() {
-                    res.deltas = deltas;
-                } else {
-                    res.deltas.extend(deltas.drain(..));
-                }
-                if res.image.is_empty() {
-                    res.image = image;
-                } else {
-                    res.image.extend(image.drain());
-                }
-                if res.pathmap.is_empty() {
-                    res.pathmap = pathmap;
-                } else {
-                    res.pathmap.extend(pathmap.drain());
-                }
-            }
+            Some(r) => res.0.push(r??),
         }
     }
 }

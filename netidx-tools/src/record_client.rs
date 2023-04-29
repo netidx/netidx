@@ -128,6 +128,7 @@ async fn oneshot(subscriber: Subscriber, params: OneshotParams) -> Result<()> {
         }
         stdout.write_all_buf(&mut buf).await?;
     }
+    stdout.flush().await?;
     Ok(())
 }
 

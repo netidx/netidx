@@ -58,20 +58,33 @@ pub struct Glob {
 }
 
 impl Glob {
+    /// return the longest plain string before the first glob char
+    pub fn plain(&self) -> &str {
+        match Self::first_glob_char(&*self.raw) {
+            None => &*self.raw,
+            Some(i) => &self.raw[0..i],
+        }
+    }
+
     /// returns true if the specified string contains any non escaped
     /// glob meta chars.
-    pub fn is_glob(mut s: &str) -> bool {
+    pub fn is_glob(s: &str) -> bool {
+        Self::first_glob_char(s).is_some()
+    }
+    
+    /// returns the index of the first glob special char or None if raw is a plain string
+    pub fn first_glob_char(mut s: &str) -> Option<usize> {
         loop {
             if s.is_empty() {
-                break false;
+                break None;
             } else {
                 match s.find(&['?', '*', '{', '['][..]) {
-                    None => break false,
+                    None => break None,
                     Some(i) => {
                         if utils::is_escaped(s, '\\', i) {
                             s = &s[i + 1..];
                         } else {
-                            break true;
+                            break Some(i);
                         }
                     }
                 }
@@ -201,12 +214,12 @@ impl GlobSet {
     /// disjoint globsets will never both match a given path
     pub fn disjoint(&self, other: &Self) -> bool {
         for g0 in self.0.raw.iter() {
-            if other.0.glob.is_match(g0.base()) {
+            if dbg!(other.0.glob.is_match(dbg!(g0.plain()))) {
                 return false;
             }
         }
         for g1 in other.0.raw.iter() {
-            if self.0.glob.is_match(g1.base()) {
+            if dbg!(self.0.glob.is_match(dbg!(g1.plain()))) {
                 return false;
             }
         }

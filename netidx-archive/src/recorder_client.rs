@@ -16,14 +16,18 @@ use std::{collections::VecDeque, sync::Arc};
 
 lazy_static! {
     pub(crate) static ref PATHMAPS: Pool<FxHashMap<Id, Path>> = Pool::new(100, 100_000);
+    pub(crate) static ref SHARDS: Pool<Vec<OneshotReplyShard>> = Pool::new(100, 128);
 }
 
 #[derive(Debug, Clone, Pack)]
-pub struct OneshotReply {
+pub struct OneshotReplyShard {
     pub pathmap: Pooled<FxHashMap<Id, Path>>,
     pub image: Pooled<FxHashMap<Id, Event>>,
     pub deltas: Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
 }
+
+#[derive(Debug, Clone, Pack)]
+pub struct OneshotReply(pub Pooled<Vec<OneshotReplyShard>>);
 
 fn encode_bound(bound: &Option<DateTime<Utc>>) -> Value {
     match bound {
