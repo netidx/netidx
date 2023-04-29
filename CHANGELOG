@@ -1,3 +1,8 @@
+* 0.18.9 archive
+
+  - don't compress the index for an additional 2x and a reduction in
+    complexity.
+
 * 0.18.8 archive
 
   - introduce index headers to batches. the index header contains a
