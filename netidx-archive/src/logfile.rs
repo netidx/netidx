@@ -1018,8 +1018,10 @@ impl ArchiveWriter {
         if batch.len() > 0 {
             let timestamp = self.time.timestamp(timestamp);
             let index = if self.indexed {
-                for BatchItem(id, _) in batch.iter() {
-                    self.index.insert(*id);
+                if !image {
+                    for BatchItem(id, _) in batch.iter() {
+                        self.index.insert(*id);
+                    }
                 }
                 let mut index = RECORD_INDEX_POOL.take();
                 index.extend(self.index.drain());
