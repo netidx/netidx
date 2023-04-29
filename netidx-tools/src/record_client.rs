@@ -135,7 +135,7 @@ fn verify(file: impl AsRef<std::path::Path>) -> Result<()> {
     let reader = ArchiveReader::open(file)?;
     let mut cursor = Cursor::new();
     loop {
-        let batches = reader.read_deltas(None, &mut cursor, 100)?;
+        let (_, batches) = reader.read_deltas(None, &mut cursor, 100)?;
         if batches.is_empty() {
             break;
         }
@@ -199,7 +199,7 @@ fn dump(file: PathBuf, metadata: bool) -> Result<()> {
     if !metadata {
         let mut cursor = Cursor::new();
         loop {
-            let batches = reader.read_deltas(None, &mut cursor, 100)?;
+            let (_, batches) = reader.read_deltas(None, &mut cursor, 100)?;
             if batches.is_empty() {
                 return Ok(());
             }

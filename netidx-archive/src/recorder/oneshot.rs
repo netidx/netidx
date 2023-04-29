@@ -19,7 +19,6 @@ use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, error};
 use netidx::{
     chars::Chars,
-    pack::Pack,
     path::Path,
     pool::Pool,
     publisher::{Publisher, Value},
@@ -136,9 +135,10 @@ async fn do_oneshot(
     let mut idx = log.reimage()?;
     idx.retain(|id, _| pathmap.contains_key(id));
     let mut data = OneshotReply { pathmap, image: idx, deltas: CURSOR_BATCH_POOL.take() };
+    let mut total = 0;
     loop {
         debug!("reading archive batch");
-        let mut batches = log.read_deltas(Some(&*filterset), 100)?;
+        let (len, mut batches) = log.read_deltas(Some(&*filterset), 100)?;
         if batches.is_empty() {
             break Ok(data);
         } else {
@@ -147,9 +147,10 @@ async fn do_oneshot(
                 !batch.is_empty()
             });
             data.deltas.extend(batches.drain(..));
-            if data.encoded_len() > limit {
-                bail!("data is too large");
-            }
+        }
+        total += len;
+        if total > limit {
+            bail!("too large")
         }
     }
 }

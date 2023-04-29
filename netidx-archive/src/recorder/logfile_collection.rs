@@ -219,11 +219,11 @@ impl LogfileCollection {
         &mut self,
         filter: Option<&FxHashSet<Id>>,
         read_count: usize,
-    ) -> Result<Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
+    ) -> Result<(usize, Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>)> {
         self.apply_read(
             |archive, cursor| archive.read_deltas(filter, cursor, read_count),
-            |batch| !batch.is_empty(),
-            Pooled::orphan(VecDeque::new()),
+            |(_, batch)| !batch.is_empty(),
+            (0, Pooled::orphan(VecDeque::new())),
         )
     }
 

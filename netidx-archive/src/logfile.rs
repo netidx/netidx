@@ -1419,7 +1419,7 @@ impl ArchiveReader {
         mmap: &Mmap,
         pos: usize,
         end: usize,
-    ) -> Result<Pooled<Vec<BatchItem>>> {
+    ) -> Result<(usize, Pooled<Vec<BatchItem>>)> {
         thread_local! {
             static BUF: RefCell<Vec<u8>> = RefCell::new(vec![]);
         }
@@ -1438,8 +1438,9 @@ impl ArchiveReader {
                 let index_len =
                     if indexed { decode_varint(&mut &mmap[pos..])? as usize } else { 0 };
                 let pos = pos + index_len;
-                Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut &mmap[pos..])
-                    .context("decoding batch")?)
+                let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(&mut &mmap[pos..])
+                    .context("decoding batch")?;
+                Ok((rh.record_length as usize, batch))
             }
             Some(dcm) => {
                 let mut dcm = dcm.lock();
@@ -1463,9 +1464,10 @@ impl ArchiveReader {
                             &mut *compression_buf,
                         )
                         .context("decompressing to buffer")?;
-                    Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(
+                    let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(
                         &mut &compression_buf[..len],
-                    )?)
+                    )?;
+                    Ok((rh.record_length as usize, batch))
                 })
             }
         }
@@ -1505,7 +1507,7 @@ impl ArchiveReader {
                 let mut image = IMG_POOL.take();
                 let mmap = self.mmap.read();
                 for pos in to_read.drain(..) {
-                    let mut batch = ArchiveReader::get_batch_at(
+                    let (_, mut batch) = ArchiveReader::get_batch_at(
                         self.indexed,
                         &self.compressed,
                         &*mmap,
@@ -1567,7 +1569,7 @@ impl ArchiveReader {
         filter: Option<&FxHashSet<Id>>,
         cursor: &mut Cursor,
         n: usize,
-    ) -> Result<Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
+    ) -> Result<(usize, Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>)> {
         self.check_remap_rescan()?;
         let mut res = CURSOR_BATCH_POOL.take();
         let start = match cursor.current {
@@ -1590,8 +1592,9 @@ impl ArchiveReader {
             (idxs, index.end)
         };
         let mut current = cursor.current;
+        let mut total = 0;
         for (ts, pos) in idxs.drain(..) {
-            let batch = ArchiveReader::get_batch_at(
+            let (len, batch) = ArchiveReader::get_batch_at(
                 self.indexed,
                 &self.compressed,
                 &*mmap,
@@ -1599,10 +1602,11 @@ impl ArchiveReader {
                 end,
             )?;
             current = Some(ts);
+            total += len;
             res.push_back((ts, batch));
         }
         cursor.current = current;
-        Ok(res)
+        Ok((total, res))
     }
 
     /// Read the next matching batch after the cursor position without
@@ -1634,7 +1638,7 @@ impl ArchiveReader {
         };
         match pos {
             Some((ts, pos, end)) => {
-                let batch = ArchiveReader::get_batch_at(
+                let (_, batch) = ArchiveReader::get_batch_at(
                     self.indexed,
                     &self.compressed,
                     &*mmap,
@@ -1694,7 +1698,7 @@ impl ArchiveReader {
         output.add_raw_pathmappings(pms)?;
         let mmap = self.mmap.read();
         for (ts, (image, pos)) in unified_index.iter() {
-            let batch =
+            let (_, batch) =
                 Self::get_batch_at(false, &self.compressed, &*mmap, *pos, index.end)?;
             output.add_batch(*image, *ts, &batch)?;
         }
@@ -1837,7 +1841,7 @@ mod test {
         t.check_remap_rescan().unwrap();
         assert_eq!(t.delta_batches(), batches);
         let mut cursor = Cursor::new();
-        let mut batch = t.read_deltas(None, &mut cursor, batches).unwrap();
+        let (_, mut batch) = t.read_deltas(None, &mut cursor, batches).unwrap();
         let now = Utc::now();
         for (ts, b) in batch.drain(..) {
             let elapsed = (now - ts).num_seconds();
