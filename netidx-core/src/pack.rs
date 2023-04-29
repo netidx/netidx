@@ -277,7 +277,7 @@ pub fn varint_len(value: u64) -> usize {
 }
 
 pub fn encode_varint(mut value: u64, buf: &mut impl BufMut) {
-    loop {
+    for _ in 0..10 {
         if value < 0x80 {
             buf.put_u8(value as u8);
             break;
@@ -306,14 +306,12 @@ pub fn i64_uzz(n: u64) -> i64 {
 
 pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
     let mut value = 0;
-    let mut i = 0;
-    while i < 10 {
+    for i in 0..10 {
         let byte = <u8 as Pack>::decode(buf)?;
         value |= u64::from(byte & 0x7F) << (i * 7);
         if byte <= 0x7F {
             return Ok(value);
         }
-        i += 1;
     }
     Err(PackError::InvalidFormat)
 }
