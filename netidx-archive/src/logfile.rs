@@ -4,7 +4,7 @@ use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use memmap2::{Mmap, MmapMut};
 use netidx::{
     chars::Chars,
@@ -1463,7 +1463,6 @@ impl ArchiveReader {
                             &mut *compression_buf,
                         )
                         .context("decompressing to buffer")?;
-                    debug!("decompressed {} bytes", len);
                     Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(
                         &mut &compression_buf[..len],
                     )?)
@@ -1521,6 +1520,7 @@ impl ArchiveReader {
     }
 
     fn matching_idxs(
+        indexed: bool,
         compressed: bool,
         index: &ArchiveIndex,
         mmap: &Mmap,
@@ -1535,8 +1535,7 @@ impl ArchiveReader {
                 .deltamap
                 .range((start, end))
                 .filter_map(|(ts, pos)| match filter {
-                    None => Some((*ts, *pos)),
-                    Some(set) => {
+                    Some(set) if indexed => {
                         let ids = Self::get_index_at(compressed, &*mmap, *pos, index.end);
                         match ids {
                             Ok(ids) => {
@@ -1552,6 +1551,7 @@ impl ArchiveReader {
                             }
                         }
                     }
+                    None | Some(_) => Some((*ts, *pos)),
                 })
                 .take(n),
         );
@@ -1578,6 +1578,7 @@ impl ArchiveReader {
         let (mut idxs, end) = {
             let index = self.index.read();
             let idxs = Self::matching_idxs(
+                self.indexed,
                 self.compressed.is_some(),
                 &*index,
                 &*mmap,
@@ -1620,6 +1621,7 @@ impl ArchiveReader {
         let pos = {
             let index = self.index.read();
             let mut idxs = Self::matching_idxs(
+                self.indexed,
                 self.compressed.is_some(),
                 &*index,
                 &*mmap,
@@ -1692,7 +1694,8 @@ impl ArchiveReader {
         output.add_raw_pathmappings(pms)?;
         let mmap = self.mmap.read();
         for (ts, (image, pos)) in unified_index.iter() {
-            let batch = Self::get_batch_at(false, &self.compressed, &*mmap, *pos, index.end)?;
+            let batch =
+                Self::get_batch_at(false, &self.compressed, &*mmap, *pos, index.end)?;
             output.add_batch(*image, *ts, &batch)?;
         }
         Ok(())
@@ -1732,7 +1735,8 @@ impl ArchiveReader {
                 (&mut job.cbuf[0..4]).put_u32(rh.record_length);
                 let index_len = if indexed {
                     let index_len = decode_varint(&mut &mmap[pos..])? as usize;
-                    (&mut job.cbuf[4..index_len]).put_slice(&mmap[pos..pos + index_len]);
+                    (&mut job.cbuf[4..4 + index_len])
+                        .put_slice(&mmap[pos..pos + index_len]);
                     index_len
                 } else {
                     0
