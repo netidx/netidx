@@ -39,10 +39,6 @@ use std::{
 use tokio::task::{self, JoinSet};
 use zstd::bulk::{Compressor, Decompressor};
 
-thread_local! {
-    static CBUF: RefCell<Vec<u8>> = RefCell::new(vec![]);
-}
-
 #[derive(Debug, Clone)]
 pub struct FileHeader {
     pub compressed: bool,
@@ -1399,14 +1395,11 @@ impl ArchiveReader {
     }
 
     fn get_index_at(
-        compressed: &Option<Arc<Mutex<Decompressor>>>,
+        compressed: bool,
         mmap: &Mmap,
         pos: usize,
         end: usize,
     ) -> Result<RecordIndex> {
-        thread_local! {
-            static BUF: RefCell<Vec<u8>> = RefCell::new(vec![]);
-        }
         if pos >= end {
             bail!("record out of bounds")
         }
@@ -1416,26 +1409,10 @@ impl ArchiveReader {
         if pos + rh.record_length as usize > end {
             bail!("get_batch: error truncated record at {}", pos);
         }
-        let pos = pos + <RecordHeader as Pack>::const_encoded_len().unwrap();
-        match compressed {
-            None => Ok(<RecordIndex as Pack>::decode(&mut buf)?),
-            Some(dcm) => {
-                buf.advance(4);
-                let clen = buf.get_u32() as usize;
-                let pos = pos + 8;
-                CBUF.with(|cbuf| {
-                    let mut cbuf = cbuf.borrow_mut();
-                    if cbuf.len() < clen << 3 {
-                        cbuf.resize(clen << 3, 0u8);
-                    }
-                    let len = dcm
-                        .lock()
-                        .decompress_to_buffer(&mmap[pos..pos + clen], &mut *cbuf)
-                        .context("decompress header")?;
-                    Ok(<RecordIndex as Pack>::decode(&mut &cbuf[..len])?)
-                })
-            }
+        if compressed {
+            buf.advance(4);
         }
+        Ok(<RecordIndex as Pack>::decode(&mut buf)?)
     }
 
     fn get_batch_at(
@@ -1445,6 +1422,9 @@ impl ArchiveReader {
         pos: usize,
         end: usize,
     ) -> Result<(usize, Pooled<Vec<BatchItem>>)> {
+        thread_local! {
+            static BUF: RefCell<Vec<u8>> = RefCell::new(vec![]);
+        }
         if pos >= end {
             bail!("record out of bounds")
         }
@@ -1464,32 +1444,34 @@ impl ArchiveReader {
                     .context("decoding batch")?;
                 Ok((rh.record_length as usize, batch))
             }
-            Some(dcm) => CBUF.with(|compression_buf| {
-                let mut compression_buf = compression_buf.borrow_mut();
-                let uncomp_len = Buf::get_u32(&mut &mmap[pos..]) as usize;
-                let pos = pos + 4;
-                let index_len = if indexed {
-                    4 + Buf::get_u32(&mut &mmap[pos..]) as usize
-                } else {
-                    0
-                };
-                let pos = pos + index_len;
-                if compression_buf.len() < uncomp_len {
-                    compression_buf.resize(uncomp_len, 0u8);
-                }
-                let comp_len = rh.record_length as usize - 4 - index_len;
-                let len = dcm
-                    .lock()
-                    .decompress_to_buffer(
-                        &mmap[pos..pos + comp_len],
-                        &mut *compression_buf,
-                    )
-                    .context("decompressing to buffer")?;
-                let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(
-                    &mut &compression_buf[..len],
-                )?;
-                Ok((rh.record_length as usize, batch))
-            }),
+            Some(dcm) => {
+                let mut dcm = dcm.lock();
+                BUF.with(|compression_buf| {
+                    let mut compression_buf = compression_buf.borrow_mut();
+                    let uncomp_len = Buf::get_u32(&mut &mmap[pos..]) as usize;
+                    let pos = pos + 4;
+                    let index_len = if indexed {
+                        decode_varint(&mut &mmap[pos..])? as usize
+                    } else {
+                        0
+                    };
+                    let pos = pos + index_len;
+                    if compression_buf.len() < uncomp_len {
+                        compression_buf.resize(uncomp_len, 0u8);
+                    }
+                    let comp_len = rh.record_length as usize - 4 - index_len;
+                    let len = dcm
+                        .decompress_to_buffer(
+                            &mmap[pos..pos + comp_len],
+                            &mut *compression_buf,
+                        )
+                        .context("decompressing to buffer")?;
+                    let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(
+                        &mut &compression_buf[..len],
+                    )?;
+                    Ok((rh.record_length as usize, batch))
+                })
+            }
         }
     }
 
@@ -1543,7 +1525,7 @@ impl ArchiveReader {
 
     fn matching_idxs(
         indexed: bool,
-        compressed: &Option<Arc<Mutex<Decompressor>>>,
+        compressed: bool,
         index: &ArchiveIndex,
         mmap: &Mmap,
         filter: Option<&FxHashSet<Id>>,
@@ -1601,7 +1583,7 @@ impl ArchiveReader {
             let index = self.index.read();
             let idxs = Self::matching_idxs(
                 self.indexed,
-                &self.compressed,
+                self.compressed.is_some(),
                 &*index,
                 &*mmap,
                 filter,
@@ -1646,7 +1628,7 @@ impl ArchiveReader {
             let index = self.index.read();
             let mut idxs = Self::matching_idxs(
                 self.indexed,
-                &self.compressed,
+                self.compressed.is_some(),
                 &*index,
                 &*mmap,
                 filter,
@@ -1757,27 +1739,20 @@ impl ArchiveReader {
                 let pos = pos + RecordHeader::const_encoded_len().unwrap();
                 let end = pos + rh.record_length as usize;
                 (&mut job.cbuf[0..4]).put_u32(rh.record_length);
-                let (index_len, index_clen) = if indexed {
+                let index_len = if indexed {
                     let index_len = decode_varint(&mut &mmap[pos..])? as usize;
-                    let len = job
-                        .comp
-                        .compress_to_buffer(
-                            &mmap[pos..pos + index_len],
-                            &mut job.cbuf[8..],
-                        )
-                        .context("compress index")?;
-                    (&mut job.cbuf[4..8]).put_u32(len as u32);
-                    (index_len, len)
+                    (&mut job.cbuf[4..4 + index_len])
+                        .put_slice(&mmap[pos..pos + index_len]);
+                    index_len
                 } else {
-                    (&mut job.cbuf[4..8]).put_u32(0 as u32);
-                    (0, 0)
+                    0
                 };
                 let pos = pos + index_len;
                 let len = job
                     .comp
-                    .compress_to_buffer(&mmap[pos..end], &mut job.cbuf[8 + index_clen..])
+                    .compress_to_buffer(&mmap[pos..end], &mut job.cbuf[4 + index_len..])
                     .context("compress to buffer")?;
-                job.pos = len + index_clen + 8;
+                job.pos = len + index_len + 4;
                 Ok(job)
             })
         }
