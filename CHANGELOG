@@ -6,12 +6,12 @@
   - implement disjointness checking for globset. Use it to not start
     oneshot or publisher tasks that can never match the user's filter
 
-* 0.18.9 archive
+* 0.19.9 archive
 
   - don't compress the index for an additional 2x and a reduction in
     complexity.
 
-* 0.18.8 archive
+* 0.19.8 archive
 
   - introduce index headers to batches. the index header contains a
     list of all the ids in the batch. now you can read_deltas with a
