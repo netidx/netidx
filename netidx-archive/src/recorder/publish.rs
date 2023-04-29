@@ -923,11 +923,12 @@ async fn session(
     let (mut session_bcast, mut session_bcast_rx) = broadcast::channel(1000);
     let session_base = session_base(&publish_config.base, session_id);
     debug!("new session base {}", session_base);
+    let cluster_shards = publish_config.cluster_shards.unwrap_or(0);
     let mut cluster = Cluster::new(
         &publisher,
         subscriber,
         session_base.append("cluster"),
-        publish_config.cluster_shards.unwrap_or(0),
+        cluster_shards,
     )
     .await?;
     debug!("cluster established");
@@ -980,7 +981,9 @@ async fn session(
                 loop {
                     match m {
                         Ok(m) => match m {
-                            SessionBCastMsg::Command(c) => cluster.send_cmd(&c),
+                            SessionBCastMsg::Command(c) => if cluster_shards > 0 {
+                                cluster.send_cmd(&c)
+                            },
                             SessionBCastMsg::Update(u) => controls.process_update(&mut batch, u),
                         }
                         Err(e) => error!("session bcast for session {} error {}", session_id, e),
@@ -1206,7 +1209,9 @@ pub(super) async fn run(
                                 filter,
                                 Some(cfg)
                             );
-                            cluster.send_cmd(&(client, session_id, filter_txt));
+                            if cluster_shards > 0 {
+                                cluster.send_cmd(&(client, session_id, filter_txt));
+                            }
                             reply.send(Value::from(uuid_string(session_id)));
                         }
                     }

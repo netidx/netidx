@@ -303,10 +303,12 @@ pub(super) async fn run(
                     Err(e) => error!("could not join pending oneshot {}", e),
                     Ok((oid, path, res)) => match we_initiated.entry(oid) {
                         Entry::Occupied(e) => handle_reply_for_us(e, res),
-                        Entry::Vacant(_) => cluster.send_cmd_to_one(
-                            &path,
-                            &ClusterCmd::Reply(oid, res)
-                        ),
+                        Entry::Vacant(_) => if cluster_shards > 0 {
+                            cluster.send_cmd_to_one(
+                                &path,
+                                &ClusterCmd::Reply(oid, res)
+                            )
+                        },
                     }
                 }
             },
@@ -345,7 +347,9 @@ pub(super) async fn run(
                     let id = Oid::new();
                     let path = our_path.clone();
                     we_initiated.insert(id, PendingOneshot::new(reply, cluster_shards + 1));
-                    cluster.send_cmd(&ClusterCmd::NewOneshot(id, path.clone(), args.clone()));
+                    if cluster_shards > 0 {
+                        cluster.send_cmd(&ClusterCmd::NewOneshot(id, path.clone(), args.clone()));
+                    }
                     let shards = shards.clone();
                     let config = config.clone();
                     let limit = publish_config.oneshot_data_limit;
