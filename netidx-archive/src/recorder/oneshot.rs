@@ -4,7 +4,7 @@ use super::{
     Shards,
 };
 use crate::{
-    logfile::{ArchiveReader, BatchItem, Seek, CURSOR_BATCH_POOL, IMG_POOL},
+    logfile::{ArchiveReader, BatchItem, Id, Seek, CURSOR_BATCH_POOL, IMG_POOL},
     recorder::{
         publish::{END_DOC, FILTER_DOC, START_DOC},
         Config, PublishConfig,
@@ -15,12 +15,13 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, error};
 use netidx::{
     chars::Chars,
     pack::Pack,
     path::Path,
+    pool::Pool,
     publisher::{Publisher, Value},
     resolver_client::GlobSet,
     subscriber::Subscriber,
@@ -53,6 +54,10 @@ pub(crate) struct OneshotConfig {
 }
 
 atomic_id!(Oid);
+
+lazy_static! {
+    pub(crate) static ref FILTER: Pool<FxHashSet<Id>> = Pool::new(1000, 10000);
+}
 
 #[derive(Debug, Pack)]
 enum ClusterCmd {
@@ -105,9 +110,11 @@ async fn do_oneshot(
     args: OneshotConfig,
 ) -> Result<OneshotReply> {
     pathindex.check_remap_rescan()?;
+    let mut filterset = FILTER.take();
     let mut pathmap = PATHMAPS.take();
     pathmap.extend(pathindex.index().iter_pathmap().filter_map(|(id, path)| {
         if args.filter.is_match(path) {
+            filterset.insert(*id);
             Some((*id, path.clone()))
         } else {
             None
@@ -131,7 +138,7 @@ async fn do_oneshot(
     let mut data = OneshotReply { pathmap, image: idx, deltas: CURSOR_BATCH_POOL.take() };
     loop {
         debug!("reading archive batch");
-        let mut batches = log.read_deltas(100)?;
+        let mut batches = log.read_deltas(Some(&*filterset), 100)?;
         if batches.is_empty() {
             break Ok(data);
         } else {

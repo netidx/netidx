@@ -52,6 +52,12 @@ pub(crate) enum Cmd {
         window: usize,
         file: PathBuf,
     },
+    #[structopt(name = "index", about = "index the archive file")]
+    Index {
+        #[structopt(long = "keep", help = "don't delete the input file")]
+        keep: bool,
+        file: PathBuf,
+    },
     #[structopt(name = "dump", about = "print the contents of an archive")]
     Dump {
         file: PathBuf,
@@ -129,7 +135,7 @@ fn verify(file: impl AsRef<std::path::Path>) -> Result<()> {
     let reader = ArchiveReader::open(file)?;
     let mut cursor = Cursor::new();
     loop {
-        let batches = reader.read_deltas(&mut cursor, 100)?;
+        let batches = reader.read_deltas(None, &mut cursor, 100)?;
         if batches.is_empty() {
             break;
         }
@@ -143,6 +149,10 @@ fn verify(file: impl AsRef<std::path::Path>) -> Result<()> {
 }
 
 async fn compress(file: PathBuf, keep: bool, window: usize) -> Result<()> {
+    let hdr = logfile::read_file_header(&file)?;
+    if !hdr.indexed {
+        index(file.clone(), false).await?
+    }
     let reader = ArchiveReader::open(file.clone())?;
     let mut compressed = file.to_string_lossy().into_owned();
     compressed.push_str(".rz");
@@ -153,6 +163,21 @@ async fn compress(file: PathBuf, keep: bool, window: usize) -> Result<()> {
     }
     if !keep {
         std::fs::rename(compressed, file)?
+    }
+    Ok(())
+}
+
+async fn index(file: PathBuf, keep: bool) -> Result<()> {
+    let reader = ArchiveReader::open(file.clone())?;
+    let mut indexed = file.to_string_lossy().into_owned();
+    indexed.push_str(".ix");
+    reader.build_index(&indexed).await?;
+    if let Err(e) = verify(indexed.clone()) {
+        std::fs::remove_file(&indexed)?;
+        return Err(e).context("verifying contents");
+    }
+    if !keep {
+        std::fs::rename(indexed, file)?
     }
     Ok(())
 }
@@ -170,10 +195,11 @@ fn dump(file: PathBuf, metadata: bool) -> Result<()> {
     println!("image batches: {}", reader.image_batches());
     println!("delta batches: {}", reader.delta_batches());
     println!("compressed: {}", reader.is_compressed());
+    println!("indexed: {}", reader.is_indexed());
     if !metadata {
         let mut cursor = Cursor::new();
         loop {
-            let batches = reader.read_deltas(&mut cursor, 100)?;
+            let batches = reader.read_deltas(None, &mut cursor, 100)?;
             if batches.is_empty() {
                 return Ok(());
             }
@@ -207,5 +233,6 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
         Cmd::Dump { file, metadata } => dump(file, metadata),
         Cmd::Verify { file } => verify(file),
         Cmd::Compressed { file } => compressed(file),
+        Cmd::Index { file, keep } => index(file, keep).await,
     }
 }

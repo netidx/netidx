@@ -1274,6 +1274,10 @@ impl ArchiveReader {
         self.compressed.is_some()
     }
 
+    pub fn is_indexed(&self) -> bool {
+        self.indexed
+    }
+
     pub(crate) fn strong_count(&self) -> usize {
         Arc::strong_count(&self.index)
     }
@@ -1572,7 +1576,7 @@ impl ArchiveReader {
             Some(dt) => Bound::Excluded(dt),
         };
         let mmap = self.mmap.read();
-        let (idxs, end) = {
+        let (mut idxs, end) = {
             let index = self.index.read();
             let idxs = Self::matching_idxs(
                 self.compressed.is_some(),

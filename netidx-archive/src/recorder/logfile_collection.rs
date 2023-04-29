@@ -8,7 +8,7 @@ use crate::{
 use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, info, warn};
 use netidx::{pool::Pooled, subscriber::Event};
 use parking_lot::Mutex;
@@ -208,18 +208,20 @@ impl LogfileCollection {
         }
     }
 
-    /// read a batch of deltas from the current data source, if it exists. If no data source can be opened
-    /// then the outer result will be error. If reading the current data source fails then the inner result
-    /// will be error.
+    /// read a batch of deltas from the current data source, if it
+    /// exists. If no data source can be opened then the outer result
+    /// will be error. If reading the current data source fails then
+    /// the inner result will be error.
     ///
-    /// This function will automatically move to the next file in the collection as long as it's timestamp is
-    /// within the bounds.
+    /// This function will automatically move to the next file in the
+    /// collection as long as it's timestamp is within the bounds.
     pub fn read_deltas(
         &mut self,
+        filter: Option<&FxHashSet<Id>>,
         read_count: usize,
     ) -> Result<Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
         self.apply_read(
-            |archive, cursor| archive.read_deltas(cursor, read_count),
+            |archive, cursor| archive.read_deltas(filter, cursor, read_count),
             |batch| !batch.is_empty(),
             Pooled::orphan(VecDeque::new()),
         )
@@ -229,9 +231,10 @@ impl LogfileCollection {
     /// to the next file if necessary.
     pub fn read_next(
         &mut self,
+        filter: Option<&FxHashSet<Id>>,
     ) -> Result<Option<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
         self.apply_read(
-            |archive, cursor| archive.read_next(cursor),
+            |archive, cursor| archive.read_next(filter, cursor),
             |batch| batch.is_some(),
             None,
         )

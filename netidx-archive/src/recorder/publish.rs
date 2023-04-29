@@ -1,4 +1,4 @@
-use super::{logfile_collection::LogfileCollection, Shards};
+use super::{logfile_collection::LogfileCollection, oneshot::FILTER, Shards};
 use crate::{
     logfile::{ArchiveReader, BatchItem, Id, Seek},
     recorder::{BCastMsg, Config, PublishConfig},
@@ -269,6 +269,7 @@ struct SessionShard {
     published_ids: FxHashSet<publisher::Id>,
     session_bcast: broadcast::Sender<SessionBCastMsg>,
     filter: GlobSet,
+    filterset: Pooled<FxHashSet<Id>>,
     speed: Speed,
     state: Arc<AtomicState>,
     data_base: Path,
@@ -293,6 +294,14 @@ impl SessionShard {
             head.as_ref().map(|a| a.check_remap_rescan()).transpose()?;
             Ok::<_, anyhow::Error>(())
         })?;
+        let mut filterset = FILTER.take();
+        filterset.extend(pathindex.index().iter_pathmap().filter_map(|(id, path)| {
+            if filter.is_match(path) {
+                Some(*id)
+            } else {
+                None
+            }
+        }));
         let used =
             pathindex.index().iter_pathmap().any(|(_, path)| filter.is_match(path));
         let log = LogfileCollection::new(
@@ -314,6 +323,7 @@ impl SessionShard {
                 last_batch_ts: None,
             },
             filter,
+            filterset,
             state: Arc::new(AtomicState::new(State::Pause)),
             data_base: session_base.append("data"),
             log,
@@ -340,17 +350,19 @@ impl SessionShard {
                 break future::pending().await;
             } else {
                 match &mut self.speed {
-                    Speed::Unlimited => match self.log.read_next()? {
-                        None => {
-                            set_tail!();
+                    Speed::Unlimited => {
+                        match self.log.read_next(Some(&self.filterset))? {
+                            None => {
+                                set_tail!();
+                            }
+                            Some((ts, batch)) => {
+                                self.log.seek(Seek::Absolute(ts))?;
+                                break Ok((ts, batch));
+                            }
                         }
-                        Some((ts, batch)) => {
-                            self.log.seek_n(1)?;
-                            break Ok((ts, batch));
-                        }
-                    },
+                    }
                     Speed::Limited { rate, last_emitted, last_batch_ts } => {
-                        match self.log.read_next()? {
+                        match self.log.read_next(Some(&self.filterset))? {
                             None => {
                                 set_tail!();
                             }
@@ -358,7 +370,7 @@ impl SessionShard {
                                 None => {
                                     *last_batch_ts = Some(ts);
                                     *last_emitted = Utc::now();
-                                    self.log.seek_n(1)?;
+                                    self.log.seek(Seek::Absolute(ts))?;
                                     break Ok((ts, batch));
                                 }
                                 Some(last_ts) => {
@@ -376,7 +388,7 @@ impl SessionShard {
                                     }
                                     *last_batch_ts = Some(ts);
                                     *last_emitted = Utc::now();
-                                    self.log.seek_n(1)?;
+                                    self.log.seek(Seek::Absolute(ts))?;
                                     break Ok((ts, batch));
                                 }
                             },
@@ -451,7 +463,8 @@ impl SessionShard {
                 State::Tail => {
                     // safe because it's impossible to get into state
                     // Tail without an archive.
-                    let mut batches = self.log.read_deltas(missed as usize)?;
+                    let mut batches =
+                        self.log.read_deltas(Some(&self.filterset), missed as usize)?;
                     for (ts, mut batch) in batches.drain(..) {
                         self.process_batch((ts, &mut *batch)).await?;
                     }
