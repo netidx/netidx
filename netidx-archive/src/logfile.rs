@@ -1432,24 +1432,23 @@ impl ArchiveReader {
         if pos + rh.record_length as usize > end {
             bail!("get_batch: error truncated record at {}", pos);
         }
+        let pos = pos + <RecordHeader as Pack>::const_encoded_len().unwrap();
         match compressed {
             None => {
                 let index_len =
-                    if indexed { decode_varint(&mut buf)? as usize } else { 0 };
-                buf.advance(index_len);
-                Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)
+                    if indexed { decode_varint(&mut &mmap[pos..])? as usize } else { 0 };
+                let pos = pos + index_len;
+                Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut &mmap[pos..])
                     .context("decoding batch")?)
             }
             Some(dcm) => {
                 let mut dcm = dcm.lock();
                 BUF.with(|compression_buf| {
                     let mut compression_buf = compression_buf.borrow_mut();
-                    let pos = pos + <RecordHeader as Pack>::const_encoded_len().unwrap();
                     let uncomp_len = Buf::get_u32(&mut &mmap[pos..]) as usize;
                     let pos = pos + 4;
                     let index_len = if indexed {
-                        let l = decode_varint(&mut &mmap[pos..])?;
-                        l as usize + varint_len(l)
+                        decode_varint(&mut &mmap[pos..])? as usize
                     } else {
                         0
                     };
@@ -1732,9 +1731,8 @@ impl ArchiveReader {
                 let end = pos + rh.record_length as usize;
                 (&mut job.cbuf[0..4]).put_u32(rh.record_length);
                 let index_len = if indexed {
-                    let l = decode_varint(&mut &mmap[pos..])?;
-                    let index_len = l as usize + varint_len(l);
-                    (&mut job.cbuf[4..index_len]).put_slice(&mmap[pos..index_len]);
+                    let index_len = decode_varint(&mut &mmap[pos..])? as usize;
+                    (&mut job.cbuf[4..index_len]).put_slice(&mmap[pos..pos + index_len]);
                     index_len
                 } else {
                     0
