@@ -75,6 +75,19 @@ impl OneshotConfig {
             Ok(s) => s,
             Err(e) => rpc_err!(req.reply, format!("invalid end {}", e)),
         };
+        match (start, end) {
+            (
+                Bound::Excluded(st) | Bound::Included(st),
+                Bound::Excluded(en) | Bound::Included(en),
+            ) if en <= st => rpc_err!(
+                req.reply,
+                format!("start time {} is after the end time {}", st, en)
+            ),
+            (
+                Bound::Excluded(_) | Bound::Included(_) | Bound::Unbounded,
+                Bound::Excluded(_) | Bound::Included(_) | Bound::Unbounded,
+            ) => (),
+        }
         let filter = match parse_filter(filter) {
             Ok(s) => s,
             Err(e) => rpc_err!(req.reply, format!("could not parse filter {}", e)),
@@ -282,8 +295,11 @@ pub(super) async fn run(
                 match r {
                     Err(e) => error!("could not join pending oneshot {}", e),
                     Ok((oid, path, res)) => match we_initiated.entry(oid) {
-                        Entry::Vacant(_) => cluster.send_cmd_to_one(&path, &ClusterCmd::Reply(oid, res)),
                         Entry::Occupied(e) => handle_reply_for_us(e, res),
+                        Entry::Vacant(_) => cluster.send_cmd_to_one(
+                            &path,
+                            &ClusterCmd::Reply(oid, res)
+                        ),
                     }
                 }
             },
