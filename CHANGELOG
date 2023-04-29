@@ -1,3 +1,11 @@
+* 0.19.10 archive
+
+  - fix a bug in the oneshot rpc. It now returns results by shard with
+    a pathmap to interpret the results by shard.
+
+  - implement disjointness checking for globset. Use it to not start
+    oneshot or publisher tasks that can never match the user's filter
+
 * 0.18.9 archive
 
   - don't compress the index for an additional 2x and a reduction in
