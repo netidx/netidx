@@ -84,11 +84,10 @@ async fn list_task(
     interval: Duration,
     mut rx: mpsc::UnboundedReceiver<oneshot::Sender<Lst>>,
     resolver: ResolverRead,
-    spec: Vec<Glob>,
+    spec: GlobSet,
 ) -> Result<()> {
     use rand::{thread_rng, Rng};
     let mut cts = CTS::new(&spec);
-    let spec = GlobSet::new(true, spec)?;
     let max_jitter = interval.as_secs_f64() * 0.1;
     while let Some(reply) = rx.next().await {
         let wait = thread_rng().gen_range(0. ..max_jitter);
@@ -119,7 +118,7 @@ fn start_list_task(
     poll_interval: Duration,
     rx: mpsc::UnboundedReceiver<oneshot::Sender<Lst>>,
     resolver: ResolverRead,
-    spec: Vec<Glob>,
+    spec: GlobSet,
 ) {
     task::spawn(async move {
         let r = list_task(poll_interval, rx, resolver, spec).await;

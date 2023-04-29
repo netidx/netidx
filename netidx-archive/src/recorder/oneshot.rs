@@ -226,6 +226,11 @@ async fn start_oneshot(
 ) -> Result<OneshotReply> {
     let mut set = JoinSet::new();
     for (id, pathindex) in shards.pathindexes.iter() {
+        if let Some(spec) = shards.spec.get(id) {
+            if args.filter.disjoint(spec) {
+                continue
+            }
+        }
         let shard = shards.by_id[id].clone();
         let head = shards.heads.read().get(id).cloned();
         let pathindex = pathindex.clone();

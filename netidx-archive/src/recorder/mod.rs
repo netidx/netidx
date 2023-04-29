@@ -11,7 +11,7 @@ use netidx::{
     pool::Pooled,
     protocol::glob::Glob,
     publisher::{BindCfg, PublisherBuilder},
-    resolver_client::DesiredAuth,
+    resolver_client::{DesiredAuth, GlobSet},
     subscriber::Subscriber,
 };
 use netidx_core::atomic_id;
@@ -267,7 +267,7 @@ impl PublishConfig {
 #[derive(Debug, Clone)]
 pub struct RecordConfig {
     /// the path spec globs to record
-    pub spec: Vec<Glob>,
+    pub spec: GlobSet,
     /// how often to poll the resolver for structure changes. None
     /// means only once at startup.
     pub poll_interval: Option<Duration>,
@@ -288,7 +288,7 @@ pub struct RecordConfig {
 impl RecordConfig {
     /// Create a new RecordConfig logging the specified globs with all
     /// other parameters set to the default.
-    pub fn new(spec: Vec<Glob>) -> Self {
+    pub fn new(spec: GlobSet) -> Self {
         Self {
             spec,
             poll_interval: file::default_poll_interval(),
@@ -311,7 +311,10 @@ impl RecordConfig {
                 rotate_interval,
             } = c;
             let res = RecordConfig {
-                spec: spec.into_iter().map(Glob::new).collect::<Result<Vec<_>>>()?,
+                spec: GlobSet::new(
+                    true,
+                    spec.into_iter().map(Glob::new).collect::<Result<Vec<_>>>()?,
+                )?,
                 poll_interval: poll_interval.or(f.poll_interval),
                 image_frequency: image_frequency.or(f.image_frequency),
                 flush_frequency: flush_frequency.or(f.flush_frequency),
@@ -405,6 +408,7 @@ enum BCastMsg {
 }
 
 pub(crate) struct Shards {
+    spec: FxHashMap<ShardId, GlobSet>,
     by_id: FxHashMap<ShardId, ArcStr>,
     by_name: FxHashMap<ArcStr, ShardId>,
     pathindexes: FxHashMap<ShardId, ArchiveReader>,
@@ -418,6 +422,7 @@ impl Shards {
     ) -> Result<(FxHashMap<ShardId, ArchiveWriter>, Arc<Self>)> {
         use std::fs;
         let mut t = Self {
+            spec: HashMap::default(),
             by_id: HashMap::default(),
             by_name: HashMap::default(),
             pathindexes: HashMap::default(),
@@ -449,6 +454,7 @@ impl Shards {
     ) -> Result<(FxHashMap<ShardId, ArchiveWriter>, Arc<Self>)> {
         use std::fs;
         let mut t = Self {
+            spec: HashMap::default(),
             by_id: HashMap::default(),
             by_name: HashMap::default(),
             pathindexes: HashMap::default(),
@@ -456,10 +462,11 @@ impl Shards {
             bcast: HashMap::default(),
         };
         let mut writers = HashMap::default();
-        for name in cfg.keys() {
+        for (name, rcfg) in cfg.iter() {
             let id = ShardId::new();
             t.by_id.insert(id, name.clone());
             t.by_name.insert(name.clone(), id);
+            t.spec.insert(id, rcfg.spec.clone());
             let dir = archive_directory.join(&**name);
             fs::create_dir_all(&dir)?;
             let writer = ArchiveWriter::open(dir.join("pathindex"))?;
@@ -554,7 +561,7 @@ impl Recorder {
                     id,
                     name,
                 )
-                    .await;
+                .await;
                 if let Err(e) = r {
                     error!("recorder stopped on error {}", e);
                 }

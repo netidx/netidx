@@ -197,6 +197,21 @@ impl GlobSet {
     pub fn published_only(&self) -> bool {
         self.0.published_only
     }
+
+    /// disjoint globsets will never both match a given path
+    pub fn disjoint(&self, other: &Self) -> bool {
+        for g0 in self.0.raw.iter() {
+            if other.0.glob.is_match(g0.base()) {
+                return false;
+            }
+        }
+        for g1 in other.0.raw.iter() {
+            if self.0.glob.is_match(g1.base()) {
+                return false;
+            }
+        }
+        return true
+    }
 }
 
 impl Deref for GlobSet {

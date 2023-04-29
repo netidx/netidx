@@ -934,6 +934,11 @@ async fn session(
     let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
     let mut joinset: JoinSet<Result<()>> = JoinSet::new();
     for (id, pathindex) in shards.pathindexes.iter() {
+        if let Some(spec) = shards.spec.get(id) {
+            if filter.disjoint(spec) {
+                continue
+            }
+        }
         let pathindex = pathindex.clone();
         let publisher = publisher.clone();
         let shard = shards.by_id[id].clone();
