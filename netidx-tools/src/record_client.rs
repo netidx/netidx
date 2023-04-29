@@ -11,7 +11,7 @@ use netidx::{
 };
 use netidx_archive::{
     logfile::{self, ArchiveReader, BatchItem, Cursor, Seek},
-    recorder_client::Client,
+    recorder_client::{Client, OneshotReplyShard},
 };
 use netidx_tools_core::ClientParams;
 use structopt::StructOpt;
@@ -116,17 +116,44 @@ async fn oneshot(subscriber: Subscriber, params: OneshotParams) -> Result<()> {
     )?;
     let client = Client::new(&subscriber, &params.base).await?;
     let mut res = client.oneshot(&start, &end, &filter).await?;
-    for (id, value) in res.image.drain() {
-        Out { raw: false, path: &res.pathmap[&id], value }.write(&mut buf)?;
+    for OneshotReplyShard { pathmap, image, .. } in res.0.iter_mut() {
+        for (id, value) in image.drain() {
+            Out { raw: false, path: &pathmap[&id], value }.write(&mut buf)?;
+        }
     }
     stdout.write_all_buf(&mut buf).await?;
-    for (ts, mut batch) in res.deltas.drain(..) {
-        Out { raw: false, path: "timestamp", value: Event::Update(Value::DateTime(ts)) }
-            .write(&mut buf)?;
-        for BatchItem(id, value) in batch.drain(..) {
-            Out { raw: false, path: &res.pathmap[&id], value }.write(&mut buf)?;
+    loop {
+        let min_ts = res.0.iter().fold(None, |mts, r| match r.deltas.front() {
+            None => mts,
+            Some((ts, _)) => match mts {
+                None => Some(*ts),
+                Some(mts) if *ts < mts => Some(*ts),
+                Some(mts) => Some(mts),
+            },
+        });
+        match min_ts {
+            None => break,
+            Some(min_ts) => {
+                for OneshotReplyShard { pathmap, deltas, .. } in res.0.iter_mut() {
+                    if let Some((ts, _)) = deltas.front() {
+                        if min_ts == *ts {
+                            let (ts, mut batch) = deltas.pop_front().unwrap();
+                            Out {
+                                raw: false,
+                                path: "timestamp",
+                                value: Event::Update(Value::DateTime(ts)),
+                            }
+                            .write(&mut buf)?;
+                            for BatchItem(id, value) in batch.drain(..) {
+                                Out { raw: false, path: &pathmap[&id], value }
+                                    .write(&mut buf)?;
+                            }
+                            stdout.write_all_buf(&mut buf).await?;
+                        }
+                    }
+                }
+            }
         }
-        stdout.write_all_buf(&mut buf).await?;
     }
     stdout.flush().await?;
     Ok(())

@@ -71,7 +71,7 @@ impl Glob {
     pub fn is_glob(s: &str) -> bool {
         Self::first_glob_char(s).is_some()
     }
-    
+
     /// returns the index of the first glob special char or None if raw is a plain string
     pub fn first_glob_char(mut s: &str) -> Option<usize> {
         loop {
@@ -211,19 +211,26 @@ impl GlobSet {
         self.0.published_only
     }
 
-    /// disjoint globsets will never both match a given path
+    /// disjoint globsets will never both match a given path. However
+    /// non disjoint globsets might not match the same paths. So in
+    /// other words this will only return turn if the two globsets
+    /// definitely will not match any of the same paths. It is
+    /// possible that this returns true and the globsets are in fact
+    /// disjoint.
     pub fn disjoint(&self, other: &Self) -> bool {
         for g0 in self.0.raw.iter() {
-            if dbg!(other.0.glob.is_match(dbg!(g0.plain()))) {
-                return false;
+            let plain0 = g0.plain();
+            for g1 in other.0.raw.iter() {
+                let plain1 = g1.plain();
+                if plain0.starts_with(plain1)
+                    || plain1.starts_with(plain0)
+                    || plain0 == plain1
+                {
+                    return false;
+                }
             }
         }
-        for g1 in other.0.raw.iter() {
-            if dbg!(self.0.glob.is_match(dbg!(g1.plain()))) {
-                return false;
-            }
-        }
-        return true
+        return true;
     }
 }
 
