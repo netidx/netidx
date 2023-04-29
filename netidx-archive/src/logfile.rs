@@ -783,7 +783,11 @@ impl Drop for ArchiveWriter {
 }
 
 impl ArchiveWriter {
-    fn open_full(path: impl AsRef<FilePath>, compress: Option<Vec<u8>>) -> Result<Self> {
+    fn open_full(
+        path: impl AsRef<FilePath>,
+        indexed: bool,
+        compress: Option<Vec<u8>>,
+    ) -> Result<Self> {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
             warn!("archive file size is limited to 4 GiB on this platform")
         }
@@ -847,7 +851,7 @@ impl ArchiveWriter {
             let committed = (fh_len + ch_len) as u64;
             let fh = FileHeader {
                 compressed: comp_hdr.is_some(),
-                indexed: true,
+                indexed,
                 version: FILE_VERSION,
                 committed,
             };
@@ -875,7 +879,7 @@ impl ArchiveWriter {
     /// Open the specified archive for read/write access, if the file
     /// does not exist then a new archive will be created.
     pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
-        Self::open_full(path, None)
+        Self::open_full(path, true, None)
     }
 
     // remap the file reserving space for at least additional_capacity bytes
@@ -1661,6 +1665,36 @@ impl ArchiveReader {
         Ok((max_rec_len, dict))
     }
 
+    /// Write an indexed copy to the specified file. The copy will not
+    /// be compressed, so if you wanted it compressed you will have to
+    /// recompress it after writing the index.
+    pub async fn build_index(&self, dest: impl AsRef<FilePath>) -> Result<()> {
+        if self.indexed {
+            bail!("file is already indexed")
+        }
+        self.check_remap_rescan()?;
+        let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> = BTreeMap::new();
+        let index = self.index.read();
+        for (ts, pos) in index.deltamap.iter() {
+            unified_index.insert(*ts, (false, *pos));
+        }
+        for (ts, pos) in index.imagemap.iter() {
+            unified_index.insert(*ts, (true, *pos));
+        }
+        let mut output = ArchiveWriter::open_full(dest, true, None)?;
+        let mut pms = PM_POOL.take();
+        for (id, path) in index.path_by_id.iter() {
+            pms.push(PathMapping(path.clone(), *id));
+        }
+        output.add_raw_pathmappings(pms)?;
+        let mmap = self.mmap.read();
+        for (ts, (image, pos)) in unified_index.iter() {
+            let batch = Self::get_batch_at(false, &self.compressed, &*mmap, *pos, index.end)?;
+            output.add_batch(*image, *ts, &batch)?;
+        }
+        Ok(())
+    }
+
     /// This function will create an archive with compressed batches
     /// and images. Compressed archives can be read as normal, but can
     /// no longer be written.
@@ -1724,7 +1758,7 @@ impl ArchiveReader {
         for (ts, pos) in index.imagemap.iter() {
             unified_index.insert(*ts, (true, *pos));
         }
-        let mut output = ArchiveWriter::open_full(dest, Some(dict))?;
+        let mut output = ArchiveWriter::open_full(dest, self.indexed, Some(dict))?;
         let mut pms = PM_POOL.take();
         for (id, path) in index.path_by_id.iter() {
             pms.push(PathMapping(path.clone(), *id));
@@ -1736,7 +1770,7 @@ impl ArchiveReader {
             .map(|_| {
                 Ok(CompJob {
                     ts: DateTime::<Utc>::MIN_UTC,
-                    cbuf: vec![0u8; max_len],
+                    cbuf: vec![0u8; max_len * 2],
                     comp: Compressor::with_prepared_dictionary(pdict)?,
                     image: false,
                     pos: 0,
