@@ -2,9 +2,9 @@ use anyhow::{Context, Error, Result};
 use bytes::{Buf, BufMut};
 use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
-use fxhash::{FxBuildHasher, FxHashMap};
+use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use memmap2::{Mmap, MmapMut};
 use netidx::{
     chars::Chars,
@@ -23,7 +23,7 @@ use std::{
     self,
     cell::RefCell,
     cmp::max,
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     error, fmt,
     fs::{File, OpenOptions},
     iter::IntoIterator,
@@ -42,6 +42,7 @@ use zstd::bulk::{Compressor, Decompressor};
 #[derive(Debug, Clone)]
 pub struct FileHeader {
     pub compressed: bool,
+    pub indexed: bool,
     pub version: u32,
     pub committed: u64,
 }
@@ -61,7 +62,11 @@ impl Pack for FileHeader {
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
         buf.put_slice(FILE_MAGIC);
-        buf.put_u32(((self.compressed as u32) << 31) | FILE_VERSION);
+        buf.put_u32(
+            ((self.compressed as u32) << 31)
+                | ((self.indexed as u32) << 30)
+                | FILE_VERSION,
+        );
         buf.put_u64(self.committed);
         Ok(())
     }
@@ -73,10 +78,11 @@ impl Pack for FileHeader {
             }
         }
         let v = buf.get_u32();
-        let version = v & 0x7FFF_FFFF;
+        let version = v & 0x3FFF_FFFF;
         let compressed = (v & 0x8000_0000) > 0;
+        let indexed = (v & 0x4000_0000) > 0;
         let committed = buf.get_u64();
-        Ok(FileHeader { compressed, version, committed })
+        Ok(FileHeader { compressed, indexed, version, committed })
     }
 }
 
@@ -137,20 +143,25 @@ impl Pack for RecordHeader {
     }
 }
 
+#[derive(Debug, Clone, Pack)]
+pub struct RecordIndex {
+    pub index: Pooled<Vec<Id>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Hash, Eq, PartialOrd, Ord)]
-pub struct Id(u64);
+pub struct Id(u32);
 
 impl Pack for Id {
     fn encoded_len(&self) -> usize {
-        varint_len(self.0)
+        varint_len(self.0 as u64)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        Ok(encode_varint(self.0, buf))
+        Ok(encode_varint(self.0 as u64, buf))
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        Ok(Id(decode_varint(buf)?))
+        Ok(Id(decode_varint(buf)? as u32))
     }
 }
 
@@ -292,6 +303,7 @@ impl FromValue for Seek {
 }
 
 lazy_static! {
+    static ref RECORD_INDEX_POOL: Pool<Vec<Id>> = Pool::new(100, 10000);
     static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(10, 100000);
     pub static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(100, 1000000);
     pub(crate) static ref CURSOR_BATCH_POOL: Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
@@ -561,7 +573,7 @@ fn scan_records(
     mut imagemap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
     mut deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
     time_basis: &mut DateTime<Utc>,
-    max_id: &mut u64,
+    max_id: &mut u32,
     end: usize,
     start_pos: usize,
     buf: &mut impl Buf,
@@ -648,13 +660,14 @@ pub fn read_file_header(path: impl AsRef<FilePath>) -> Result<FileHeader> {
 }
 
 fn scan_file(
+    indexed: &mut bool,
     compressed: &mut Option<CompressionHeader>,
     path_by_id: &mut IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: &mut HashMap<Path, Id>,
     imagemap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
     deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
     time_basis: &mut DateTime<Utc>,
-    max_id: &mut u64,
+    max_id: &mut u32,
     buf: &mut impl Buf,
 ) -> Result<usize> {
     let total_bytes = buf.remaining();
@@ -663,6 +676,7 @@ fn scan_file(
         *compressed =
             Some(CompressionHeader::decode(buf).context("read compression header")?);
     }
+    *indexed = header.indexed;
     scan_records(
         path_by_id,
         id_by_path,
@@ -754,9 +768,11 @@ pub struct ArchiveWriter {
     file: Arc<File>,
     end: Arc<AtomicUsize>,
     committed: usize,
-    next_id: u64,
+    next_id: u32,
     block_size: usize,
     mmap: MmapMut,
+    indexed: bool,
+    index: FxHashSet<Id>,
 }
 
 impl Drop for ArchiveWriter {
@@ -791,9 +807,12 @@ impl ArchiveWriter {
                 next_id: 0,
                 block_size,
                 mmap,
+                indexed: false,
+                index: HashSet::default(),
             };
             let mut compress = None;
             let end = scan_file(
+                &mut t.indexed,
                 &mut compress,
                 &mut t.path_by_id,
                 &mut t.id_by_path,
@@ -828,6 +847,7 @@ impl ArchiveWriter {
             let committed = (fh_len + ch_len) as u64;
             let fh = FileHeader {
                 compressed: comp_hdr.is_some(),
+                indexed: true,
                 version: FILE_VERSION,
                 committed,
             };
@@ -846,6 +866,8 @@ impl ArchiveWriter {
                 next_id: 0,
                 block_size,
                 mmap,
+                indexed: true,
+                index: HashSet::default(),
             })
         }
     }
@@ -991,8 +1013,26 @@ impl ArchiveWriter {
     ) -> Result<()> {
         if batch.len() > 0 {
             let timestamp = self.time.timestamp(timestamp);
-            let record_length = <Pooled<Vec<BatchItem>> as Pack>::encoded_len(&batch);
+            let index = if self.indexed {
+                for BatchItem(id, _) in batch.iter() {
+                    self.index.insert(*id);
+                }
+                let mut index = RECORD_INDEX_POOL.take();
+                index.extend(self.index.drain());
+                Some(RecordIndex { index })
+            } else {
+                None
+            };
+            let index_length = index
+                .as_ref()
+                .map(|i| <RecordIndex as Pack>::encoded_len(i))
+                .unwrap_or(0);
+            let record_length =
+                index_length + <Pooled<Vec<BatchItem>> as Pack>::encoded_len(&batch);
             self.add_batch_f(image, timestamp, record_length, |buf| {
+                if let Some(index) = index {
+                    <RecordIndex as Pack>::encode(&index, buf)?
+                }
                 Ok(<Pooled<Vec<BatchItem>> as Pack>::encode(&batch, buf)?)
             })?
         }
@@ -1046,6 +1086,7 @@ impl ArchiveWriter {
         Ok(ArchiveReader {
             index: Arc::new(RwLock::new(ArchiveIndex::new())),
             compressed: None,
+            indexed: self.indexed,
             file: self.file.clone(),
             end: self.end.clone(),
             mmap: Arc::new(RwLock::new(unsafe { Mmap::map(&self.file)? })),
@@ -1170,6 +1211,7 @@ pub struct ArchiveReader {
     compressed: Option<Arc<Mutex<Decompressor<'static>>>>,
     file: Arc<File>,
     end: Arc<AtomicUsize>,
+    indexed: bool,
     mmap: Arc<RwLock<Mmap>>,
 }
 
@@ -1193,7 +1235,9 @@ impl ArchiveReader {
         let mut index = ArchiveIndex::new();
         let mut max_id = 0;
         let mut compressed = None;
+        let mut indexed = false;
         let end = scan_file(
+            &mut indexed,
             &mut compressed,
             &mut index.path_by_id,
             &mut index.id_by_path,
@@ -1214,6 +1258,7 @@ impl ArchiveReader {
             .transpose()?;
         Ok(ArchiveReader {
             index: Arc::new(RwLock::new(index)),
+            indexed,
             compressed,
             file: Arc::new(file),
             end: Arc::new(AtomicUsize::new(end)),
@@ -1339,7 +1384,29 @@ impl ArchiveReader {
         }
     }
 
+    fn get_index_at(
+        compressed: bool,
+        mmap: &Mmap,
+        pos: usize,
+        end: usize,
+    ) -> Result<RecordIndex> {
+        if pos >= end {
+            bail!("record out of bounds")
+        }
+        let mut buf = &mmap[pos..];
+        let rh =
+            <RecordHeader as Pack>::decode(&mut buf).context("reading record header")?;
+        if pos + rh.record_length as usize > end {
+            bail!("get_batch: error truncated record at {}", pos);
+        }
+        if compressed {
+            buf.advance(4);
+        }
+        Ok(<RecordIndex as Pack>::decode(&mut buf)?)
+    }
+
     fn get_batch_at(
+        indexed: bool,
         compressed: &Option<Arc<Mutex<Decompressor>>>,
         mmap: &Mmap,
         pos: usize,
@@ -1350,40 +1417,50 @@ impl ArchiveReader {
         }
         if pos >= end {
             bail!("record out of bounds")
-        } else {
-            let mut buf = &mmap[pos..];
-            let rh = <RecordHeader as Pack>::decode(&mut buf)
-                .context("reading record header")?;
-            if pos + rh.record_length as usize > end {
-                bail!("get_batch: error truncated record at {}", pos);
+        }
+        let mut buf = &mmap[pos..];
+        let rh =
+            <RecordHeader as Pack>::decode(&mut buf).context("reading record header")?;
+        if pos + rh.record_length as usize > end {
+            bail!("get_batch: error truncated record at {}", pos);
+        }
+        match compressed {
+            None => {
+                let index_len =
+                    if indexed { decode_varint(&mut buf)? as usize } else { 0 };
+                buf.advance(index_len);
+                Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)
+                    .context("decoding batch")?)
             }
-            match compressed {
-                None => Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(&mut buf)
-                    .context("decoding batch")?),
-                Some(dcm) => {
-                    let mut dcm = dcm.lock();
-                    BUF.with(|compression_buf| {
-                        let mut compression_buf = compression_buf.borrow_mut();
-                        let pos =
-                            pos + <RecordHeader as Pack>::const_encoded_len().unwrap();
-                        let uncomp_len = Buf::get_u32(&mut &mmap[pos..]) as usize;
-                        let pos = pos + 4;
-                        if compression_buf.len() < uncomp_len {
-                            compression_buf.resize(uncomp_len, 0u8);
-                        }
-                        let comp_len = rh.record_length as usize - 4;
-                        let len = dcm
-                            .decompress_to_buffer(
-                                &mmap[pos..pos + comp_len],
-                                &mut *compression_buf,
-                            )
-                            .context("decompressing to buffer")?;
-                        debug!("decompressed {} bytes", len);
-                        Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(
-                            &mut &compression_buf[..len],
-                        )?)
-                    })
-                }
+            Some(dcm) => {
+                let mut dcm = dcm.lock();
+                BUF.with(|compression_buf| {
+                    let mut compression_buf = compression_buf.borrow_mut();
+                    let pos = pos + <RecordHeader as Pack>::const_encoded_len().unwrap();
+                    let uncomp_len = Buf::get_u32(&mut &mmap[pos..]) as usize;
+                    let pos = pos + 4;
+                    let index_len = if indexed {
+                        let l = decode_varint(&mut &mmap[pos..])?;
+                        l as usize + varint_len(l)
+                    } else {
+                        0
+                    };
+                    let pos = pos + index_len;
+                    if compression_buf.len() < uncomp_len {
+                        compression_buf.resize(uncomp_len, 0u8);
+                    }
+                    let comp_len = rh.record_length as usize - 4 - index_len;
+                    let len = dcm
+                        .decompress_to_buffer(
+                            &mmap[pos..pos + comp_len],
+                            &mut *compression_buf,
+                        )
+                        .context("decompressing to buffer")?;
+                    debug!("decompressed {} bytes", len);
+                    Ok(<Pooled<Vec<BatchItem>> as Pack>::decode(
+                        &mut &compression_buf[..len],
+                    )?)
+                })
             }
         }
     }
@@ -1423,6 +1500,7 @@ impl ArchiveReader {
                 let mmap = self.mmap.read();
                 for pos in to_read.drain(..) {
                     let mut batch = ArchiveReader::get_batch_at(
+                        self.indexed,
                         &self.compressed,
                         &*mmap,
                         pos as usize,
@@ -1435,38 +1513,83 @@ impl ArchiveReader {
         }
     }
 
+    fn matching_idxs(
+        compressed: bool,
+        index: &ArchiveIndex,
+        mmap: &Mmap,
+        filter: Option<&FxHashSet<Id>>,
+        start: Bound<DateTime<Utc>>,
+        end: Bound<DateTime<Utc>>,
+        n: usize,
+    ) -> Pooled<Vec<(DateTime<Utc>, usize)>> {
+        let mut idxs = POS_POOL.take();
+        idxs.extend(
+            index
+                .deltamap
+                .range((start, end))
+                .filter_map(|(ts, pos)| match filter {
+                    None => Some((*ts, *pos)),
+                    Some(set) => {
+                        let ids = Self::get_index_at(compressed, &*mmap, *pos, index.end);
+                        match ids {
+                            Ok(ids) => {
+                                if ids.index.iter().any(|id| set.contains(id)) {
+                                    Some((*ts, *pos))
+                                } else {
+                                    None
+                                }
+                            }
+                            Err(e) => {
+                                error!("failed to read index entry for {}, {}", ts, e);
+                                None
+                            }
+                        }
+                    }
+                })
+                .take(n),
+        );
+        idxs
+    }
+
     /// read at most `n` delta items from the specified cursor, and
     /// advance it by the number of items read. The cursor will not be
     /// invalidated even if no items can be read, however depending on
     /// it's bounds it may never read any more items.
     pub fn read_deltas(
         &self,
+        filter: Option<&FxHashSet<Id>>,
         cursor: &mut Cursor,
         n: usize,
     ) -> Result<Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>> {
         self.check_remap_rescan()?;
-        let mut idxs = POS_POOL.take();
         let mut res = CURSOR_BATCH_POOL.take();
         let start = match cursor.current {
             None => cursor.start,
             Some(dt) => Bound::Excluded(dt),
         };
-        let end = {
+        let mmap = self.mmap.read();
+        let (idxs, end) = {
             let index = self.index.read();
-            idxs.extend(
-                index
-                    .deltamap
-                    .range((start, cursor.end))
-                    .map(|(ts, pos)| (*ts, *pos))
-                    .take(n),
+            let idxs = Self::matching_idxs(
+                self.compressed.is_some(),
+                &*index,
+                &*mmap,
+                filter,
+                start,
+                cursor.end,
+                n,
             );
-            index.end
+            (idxs, index.end)
         };
         let mut current = cursor.current;
-        let mmap = self.mmap.read();
         for (ts, pos) in idxs.drain(..) {
-            let batch =
-                ArchiveReader::get_batch_at(&self.compressed, &*mmap, pos as usize, end)?;
+            let batch = ArchiveReader::get_batch_at(
+                self.indexed,
+                &self.compressed,
+                &*mmap,
+                pos as usize,
+                end,
+            )?;
             current = Some(ts);
             res.push_back((ts, batch));
         }
@@ -1474,10 +1597,11 @@ impl ArchiveReader {
         Ok(res)
     }
 
-    /// Read the batch after the cursor position without changing the
-    /// cursor position.
+    /// Read the next matching batch after the cursor position without
+    /// changing the cursor position.
     pub fn read_next(
         &self,
+        filter: Option<&FxHashSet<Id>>,
         cursor: &Cursor,
     ) -> Result<Option<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
         self.check_remap_rescan()?;
@@ -1485,19 +1609,26 @@ impl ArchiveReader {
             None => cursor.start,
             Some(dt) => Bound::Excluded(dt),
         };
+        let mmap = self.mmap.read();
         let pos = {
             let index = self.index.read();
-            index
-                .deltamap
-                .range((start, cursor.end))
-                .next()
-                .map(|(ts, pos)| (*ts, *pos, index.end))
+            let mut idxs = Self::matching_idxs(
+                self.compressed.is_some(),
+                &*index,
+                &*mmap,
+                filter,
+                start,
+                cursor.end,
+                1,
+            );
+            idxs.pop().map(|(ts, pos)| (ts, pos, index.end))
         };
         match pos {
             Some((ts, pos, end)) => {
                 let batch = ArchiveReader::get_batch_at(
+                    self.indexed,
                     &self.compressed,
-                    &*self.mmap.read(),
+                    &*mmap,
                     pos as usize,
                     end,
                 )?;
@@ -1551,6 +1682,7 @@ impl ArchiveReader {
             pos: usize,
         }
         async fn compress_task(
+            indexed: bool,
             mmap: Arc<RwLock<Mmap>>,
             mut job: CompJob,
         ) -> Result<CompJob> {
@@ -1561,11 +1693,20 @@ impl ArchiveReader {
                 let pos = pos + RecordHeader::const_encoded_len().unwrap();
                 let end = pos + rh.record_length as usize;
                 (&mut job.cbuf[0..4]).put_u32(rh.record_length);
+                let index_len = if indexed {
+                    let l = decode_varint(&mut &mmap[pos..])?;
+                    let index_len = l as usize + varint_len(l);
+                    (&mut job.cbuf[4..index_len]).put_slice(&mmap[pos..index_len]);
+                    index_len
+                } else {
+                    0
+                };
+                let pos = pos + index_len;
                 let len = job
                     .comp
-                    .compress_to_buffer(&mmap[pos..end], &mut job.cbuf[4..])
+                    .compress_to_buffer(&mmap[pos..end], &mut job.cbuf[4 + index_len..])
                     .context("compress to buffer")?;
-                job.pos = len;
+                job.pos = len + index_len + 4;
                 Ok(job)
             })
         }
@@ -1618,11 +1759,7 @@ impl ArchiveReader {
                         Some(job) => {
                             ent.remove();
                             output
-                                .add_batch_raw(
-                                    job.image,
-                                    job.ts,
-                                    &job.cbuf[0..job.pos + 4],
-                                )
+                                .add_batch_raw(job.image, job.ts, &job.cbuf[0..job.pos])
                                 .context("add raw batch")?;
                             compjobs.push(job);
                         }
@@ -1637,7 +1774,11 @@ impl ArchiveReader {
                     job.image = *image;
                     job.pos = *pos;
                     commitq.insert(*ts, None);
-                    running_jobs.spawn(compress_task(Arc::clone(&self.mmap), job));
+                    running_jobs.spawn(compress_task(
+                        self.indexed,
+                        Arc::clone(&self.mmap),
+                        job,
+                    ));
                 }
             }
         }
@@ -1656,7 +1797,7 @@ mod test {
         t.check_remap_rescan().unwrap();
         assert_eq!(t.delta_batches(), batches);
         let mut cursor = Cursor::new();
-        let mut batch = t.read_deltas(&mut cursor, batches).unwrap();
+        let mut batch = t.read_deltas(None, &mut cursor, batches).unwrap();
         let now = Utc::now();
         for (ts, b) in batch.drain(..) {
             let elapsed = (now - ts).num_seconds();
