@@ -42,6 +42,7 @@ fn encode_filter(filter: &GlobSet) -> Value {
     Value::Array(Arc::from(v))
 }
 
+#[derive(Debug, Clone)]
 pub struct Client {
     oneshot: Proc,
 }

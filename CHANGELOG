@@ -1,3 +1,7 @@
+* 0.19.11 archive
+
+  - derive debug and clone on the recorder_client::Client struct.
+
 * 0.19.10 archive
 
   - fix a bug in the oneshot rpc. It now returns results by shard with
