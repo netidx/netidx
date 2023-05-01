@@ -13,7 +13,7 @@ use log::{debug, info, warn};
 use netidx::{pool::Pooled, subscriber::Event};
 use parking_lot::Mutex;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     ops::Bound,
     path::PathBuf,
     sync::Arc,
@@ -48,39 +48,41 @@ impl DataSource {
             },
             File::Historical(ts) => {
                 debug!("would run get, cmd config {:?}", &config.archive_cmds);
-                if let Some(cmds) = &config.archive_cmds {
-                    use std::{iter, process::Command};
-                    info!("running get {:?}", &cmds.get);
-                    let out = task::block_in_place(|| {
-                        let now = ts.to_rfc3339();
-                        let args = cmds
-                            .get
-                            .1
-                            .iter()
-                            .cloned()
-                            .map(|a| if &a == "{shard}" { shard.into() } else { a })
-                            .chain(iter::once(now));
-                        Command::new(&cmds.get.0).args(args).output()
-                    });
-                    match out {
-                        Err(e) => warn!("failed to execute get command {}", e),
-                        Ok(o) if !o.status.success() => {
-                            warn!("get command failed {:?}", o)
-                        }
-                        Ok(out) => {
-                            if out.stdout.len() > 0 {
-                                let out = String::from_utf8_lossy(&out.stdout);
-                                warn!("get command stdout {}", out)
+                let path = file.path(&config.archive_directory, shard);
+                if !std::path::Path::exists(&path) {
+                    if let Some(cmds) = &config.archive_cmds {
+                        use std::{iter, process::Command};
+                        info!("running get {:?}", &cmds.get);
+                        let out = task::block_in_place(|| {
+                            let now = ts.to_rfc3339();
+                            let args = cmds
+                                .get
+                                .1
+                                .iter()
+                                .cloned()
+                                .map(|a| if &a == "{shard}" { shard.into() } else { a })
+                                .chain(iter::once(now));
+                            Command::new(&cmds.get.0).args(args).output()
+                        });
+                        match out {
+                            Err(e) => warn!("failed to execute get command {}", e),
+                            Ok(o) if !o.status.success() => {
+                                warn!("get command failed {:?}", o)
                             }
-                            if out.stderr.len() > 0 {
-                                let out = String::from_utf8_lossy(&out.stderr);
-                                warn!("get command stderr {}", out);
+                            Ok(out) => {
+                                if out.stdout.len() > 0 {
+                                    let out = String::from_utf8_lossy(&out.stdout);
+                                    warn!("get command stdout {}", out)
+                                }
+                                if out.stderr.len() > 0 {
+                                    let out = String::from_utf8_lossy(&out.stderr);
+                                    warn!("get command stderr {}", out);
+                                }
+                                info!("get command succeeded");
                             }
-                            info!("get command succeeded");
                         }
                     }
                 }
-                let path = file.path(&config.archive_directory, shard);
                 debug!("opening log file {:?}", &path);
                 let archive = {
                     let mut readers = ARCHIVE_READERS.lock();
@@ -96,10 +98,18 @@ impl DataSource {
                             readers.retain(|_, (last, r)| {
                                 r.strong_count() > 1 && now - *last > *CACHE_FOR
                             });
+                            drop(readers); // release the lock
                             let rd = task::block_in_place(|| ArchiveReader::open(&path))?;
-                            readers.insert(path, (now, rd.clone()));
-                            debug!("log file opened successfully");
-                            rd
+                            match ARCHIVE_READERS.lock().entry(path) {
+                                Entry::Vacant(e) => {
+                                    e.insert((ts, rd)).1.clone()
+                                }
+                                Entry::Occupied(mut e) => {
+                                    let (ts, rd) = e.get_mut();
+                                    *ts = now;
+                                    rd.clone()
+                                }
+                            }
                         }
                     }
                 };
