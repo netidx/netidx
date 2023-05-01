@@ -1,3 +1,11 @@
+* 0.19.12 archive
+
+  - cache open archive files for some time
+
+  - only reindex a shard's directory when it is necessary
+
+  - faster index reading and writing
+
 * 0.19.11 archive
 
   - derive debug and clone on the recorder_client::Client struct.
