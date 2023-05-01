@@ -96,7 +96,7 @@ impl DataSource {
                             debug!("log file was not cached, opening");
                             let now = Utc::now();
                             readers.retain(|_, (last, r)| {
-                                r.strong_count() > 1 && now - *last > *CACHE_FOR
+                                r.strong_count() > 1 || now - *last < *CACHE_FOR
                             });
                             drop(readers); // release the lock
                             let rd = task::block_in_place(|| ArchiveReader::open(&path))?;
@@ -135,7 +135,7 @@ impl Drop for LogfileCollection {
         let now = Utc::now();
         ARCHIVE_READERS
             .lock()
-            .retain(|_, (last, r)| r.strong_count() > 1 && now - *last > *CACHE_FOR);
+            .retain(|_, (last, r)| r.strong_count() > 1 || now - *last < *CACHE_FOR);
     }
 }
 
