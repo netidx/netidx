@@ -8,10 +8,7 @@ use log::{error, info, warn};
 use memmap2::{Mmap, MmapMut};
 use netidx::{
     chars::Chars,
-    pack::{
-        decode_varint, encode_varint, len_wrapped_decode, len_wrapped_encode,
-        len_wrapped_len, varint_len, Pack, PackError,
-    },
+    pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
     subscriber::{Event, FromValue, Value},
@@ -146,27 +143,9 @@ impl Pack for RecordHeader {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Pack)]
 pub struct RecordIndex {
     pub index: Vec<Id>,
-}
-
-impl Pack for RecordIndex {
-    fn encoded_len(&self) -> usize {
-        len_wrapped_len(Pack::encoded_len(&self.index))
-    }
-
-    fn encode(&self, buf: &mut impl BufMut) -> std::result::Result<(), PackError> {
-        len_wrapped_encode(buf, self, |buf| Pack::encode(&self.index, buf))
-    }
-
-    fn decode(buf: &mut impl Buf) -> std::result::Result<Self, PackError> {
-        len_wrapped_decode(buf, |buf| Ok(Self { index: Pack::decode(buf)? }))
-    }
-
-    fn decode_into(&mut self, buf: &mut impl Buf) -> std::result::Result<(), PackError> {
-        len_wrapped_decode(buf, |buf| Pack::decode_into(&mut self.index, buf))
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Hash, Eq, PartialOrd, Ord)]
