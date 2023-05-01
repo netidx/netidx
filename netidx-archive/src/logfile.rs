@@ -1508,9 +1508,9 @@ impl ArchiveReader {
         match pos {
             Bound::Unbounded => Ok(Pooled::orphan(HashMap::default())),
             _ => {
+                let mut image = IMG_POOL.take();
                 let index = self.index.read();
                 let mmap = self.mmap.read();
-                let mut image = IMG_POOL.take();
                 let start =
                     match index.imagemap.range((Bound::Unbounded, pos)).next_back() {
                         None => Bound::Unbounded,
