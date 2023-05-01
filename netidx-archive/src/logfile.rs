@@ -8,7 +8,10 @@ use log::{error, info, warn};
 use memmap2::{Mmap, MmapMut};
 use netidx::{
     chars::Chars,
-    pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
+    pack::{
+        decode_varint, encode_varint, len_wrapped_decode, len_wrapped_encode,
+        len_wrapped_len, varint_len, Pack, PackError,
+    },
     path::Path,
     pool::{Pool, Pooled},
     subscriber::{Event, FromValue, Value},
@@ -143,9 +146,27 @@ impl Pack for RecordHeader {
     }
 }
 
-#[derive(Debug, Clone, Pack)]
+#[derive(Debug, Clone)]
 pub struct RecordIndex {
-    pub index: Pooled<Vec<Id>>,
+    pub index: Vec<Id>,
+}
+
+impl Pack for RecordIndex {
+    fn encoded_len(&self) -> usize {
+        len_wrapped_len(Pack::encoded_len(&self.index))
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> std::result::Result<(), PackError> {
+        len_wrapped_encode(buf, self, |buf| Pack::encode(&self.index, buf))
+    }
+
+    fn decode(buf: &mut impl Buf) -> std::result::Result<Self, PackError> {
+        len_wrapped_decode(buf, |buf| Ok(Self { index: Pack::decode(buf)? }))
+    }
+
+    fn decode_into(&mut self, buf: &mut impl Buf) -> std::result::Result<(), PackError> {
+        len_wrapped_decode(buf, |buf| Pack::decode_into(&mut self.index, buf))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Hash, Eq, PartialOrd, Ord)]
@@ -303,7 +324,6 @@ impl FromValue for Seek {
 }
 
 lazy_static! {
-    static ref RECORD_INDEX_POOL: Pool<Vec<Id>> = Pool::new(100, 10000);
     static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(10, 100000);
     pub static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(100, 1000000);
     pub(crate) static ref CURSOR_BATCH_POOL: Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
@@ -773,6 +793,7 @@ pub struct ArchiveWriter {
     mmap: MmapMut,
     indexed: bool,
     index: FxHashSet<Id>,
+    index_vec: Vec<Id>,
 }
 
 impl Drop for ArchiveWriter {
@@ -813,6 +834,7 @@ impl ArchiveWriter {
                 mmap,
                 indexed: false,
                 index: HashSet::default(),
+                index_vec: Vec::new(),
             };
             let mut compress = None;
             let end = scan_file(
@@ -872,6 +894,7 @@ impl ArchiveWriter {
                 mmap,
                 indexed: true,
                 index: HashSet::default(),
+                index_vec: Vec::new(),
             })
         }
     }
@@ -1023,9 +1046,8 @@ impl ArchiveWriter {
                         self.index.insert(*id);
                     }
                 }
-                let mut index = RECORD_INDEX_POOL.take();
-                index.extend(self.index.drain());
-                Some(RecordIndex { index })
+                self.index_vec.extend(self.index.drain());
+                Some(RecordIndex { index: mem::replace(&mut self.index_vec, vec![]) })
             } else {
                 None
             };
@@ -1036,11 +1058,15 @@ impl ArchiveWriter {
             let record_length =
                 index_length + <Pooled<Vec<BatchItem>> as Pack>::encoded_len(&batch);
             self.add_batch_f(image, timestamp, record_length, |buf| {
-                if let Some(index) = index {
-                    <RecordIndex as Pack>::encode(&index, buf)?
+                if let Some(index) = &index {
+                    <RecordIndex as Pack>::encode(index, buf)?
                 }
                 Ok(<Pooled<Vec<BatchItem>> as Pack>::encode(&batch, buf)?)
-            })?
+            })?;
+            if let Some(index) = index {
+                self.index_vec = index.index;
+                self.index_vec.clear()
+            }
         }
         Ok(())
     }
@@ -1395,11 +1421,12 @@ impl ArchiveReader {
     }
 
     fn get_index_at(
+        index: &mut RecordIndex,
         compressed: bool,
         mmap: &Mmap,
         pos: usize,
         end: usize,
-    ) -> Result<RecordIndex> {
+    ) -> Result<()> {
         if pos >= end {
             bail!("record out of bounds")
         }
@@ -1412,7 +1439,7 @@ impl ArchiveReader {
         if compressed {
             buf.advance(4);
         }
-        Ok(<RecordIndex as Pack>::decode(&mut buf)?)
+        Ok(<RecordIndex as Pack>::decode_into(index, &mut buf)?)
     }
 
     fn get_batch_at(
@@ -1533,33 +1560,45 @@ impl ArchiveReader {
         end: Bound<DateTime<Utc>>,
         n: usize,
     ) -> Pooled<Vec<(DateTime<Utc>, usize)>> {
-        let mut idxs = POS_POOL.take();
-        idxs.extend(
-            index
-                .deltamap
-                .range((start, end))
-                .filter_map(|(ts, pos)| match filter {
-                    Some(set) if indexed => {
-                        let ids = Self::get_index_at(compressed, &*mmap, *pos, index.end);
-                        match ids {
-                            Ok(ids) => {
-                                if ids.index.iter().any(|id| set.contains(id)) {
-                                    Some((*ts, *pos))
-                                } else {
+        thread_local! {
+            static IDS: RefCell<RecordIndex> = RefCell::new(RecordIndex {index: Vec::new()});
+        }
+        IDS.with(|ids| {
+            let mut ids = ids.borrow_mut();
+            let mut idxs = POS_POOL.take();
+            idxs.extend(
+                index
+                    .deltamap
+                    .range((start, end))
+                    .filter_map(|(ts, pos)| match filter {
+                        Some(set) if indexed => {
+                            ids.index.clear();
+                            let r = Self::get_index_at(
+                                &mut *ids, compressed, &*mmap, *pos, index.end,
+                            );
+                            match r {
+                                Ok(()) => {
+                                    if ids.index.iter().any(|id| set.contains(id)) {
+                                        Some((*ts, *pos))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "failed to read index entry for {}, {}",
+                                        ts, e
+                                    );
                                     None
                                 }
                             }
-                            Err(e) => {
-                                error!("failed to read index entry for {}, {}", ts, e);
-                                None
-                            }
                         }
-                    }
-                    None | Some(_) => Some((*ts, *pos)),
-                })
-                .take(n),
-        );
-        idxs
+                        None | Some(_) => Some((*ts, *pos)),
+                    })
+                    .take(n),
+            );
+            idxs
+        })
     }
 
     /// read at most `n` delta items from the specified cursor, and
