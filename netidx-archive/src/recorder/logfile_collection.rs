@@ -21,8 +21,9 @@ use std::{
 use tokio::task;
 
 lazy_static! {
-    static ref ARCHIVE_READERS: Mutex<FxHashMap<PathBuf, ArchiveReader>> =
+    static ref ARCHIVE_READERS: Mutex<FxHashMap<PathBuf, (DateTime<Utc>, ArchiveReader)>> =
         Mutex::new(HashMap::default());
+    static ref CACHE_FOR: chrono::Duration = chrono::Duration::minutes(10);
 }
 
 struct DataSource {
@@ -84,15 +85,19 @@ impl DataSource {
                 let archive = {
                     let mut readers = ARCHIVE_READERS.lock();
                     match readers.get_mut(&path) {
-                        Some(reader) => {
+                        Some((last_used, reader)) => {
                             debug!("log file was cached");
+                            *last_used = Utc::now();
                             reader.clone()
                         }
                         None => {
                             debug!("log file was not cached, opening");
-                            readers.retain(|_, r| r.strong_count() > 1);
+                            let now = Utc::now();
+                            readers.retain(|_, (last, r)| {
+                                r.strong_count() > 1 && now - *last > *CACHE_FOR
+                            });
                             let rd = task::block_in_place(|| ArchiveReader::open(&path))?;
-                            readers.insert(path, rd.clone());
+                            readers.insert(path, (now, rd.clone()));
                             debug!("log file opened successfully");
                             rd
                         }
@@ -117,21 +122,24 @@ impl Drop for LogfileCollection {
     fn drop(&mut self) {
         self.source = None;
         self.head = None;
-        ARCHIVE_READERS.lock().retain(|_, r| r.strong_count() > 1);
+        let now = Utc::now();
+        ARCHIVE_READERS
+            .lock()
+            .retain(|_, (last, r)| r.strong_count() > 1 && now - *last > *CACHE_FOR);
     }
 }
 
 impl LogfileCollection {
-    pub async fn new(
+    pub fn new(
+        index: LogfileIndex,
         config: Arc<Config>,
         shard: ArcStr,
         head: Option<ArchiveReader>,
         start: Bound<DateTime<Utc>>,
         end: Bound<DateTime<Utc>>,
-    ) -> Result<Self> {
-        let index = LogfileIndex::new(&config, &shard).await?;
+    ) -> Self {
         let pos = Cursor::create_from(start, end, None);
-        Ok(Self { index, source: None, head, pos, config, shard })
+        Self { index, source: None, head, pos, config, shard }
     }
 
     /// Attempt to open a source if we don't already have one, return true
@@ -285,14 +293,13 @@ impl LogfileCollection {
     }
 
     /// tell the collection that the log file has been rotated
-    pub async fn log_rotated(&mut self, ts: DateTime<Utc>) -> Result<()> {
-        let files = LogfileIndex::new(&self.config, &self.shard).await?;
+    pub async fn log_rotated(&mut self, ts: DateTime<Utc>, index: LogfileIndex) -> Result<()> {
         if let Some(d) = self.source.as_mut() {
             if d.file == File::Head {
                 d.file = File::Historical(ts);
             }
         }
-        self.index = files;
+        self.index = index;
         Ok(())
     }
 

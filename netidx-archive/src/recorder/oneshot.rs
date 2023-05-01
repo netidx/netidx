@@ -1,5 +1,6 @@
 use super::{
     logfile_collection::LogfileCollection,
+    logfile_index::LogfileIndex,
     publish::{parse_bound, parse_filter},
     Shards,
 };
@@ -103,6 +104,7 @@ impl OneshotConfig {
 async fn do_oneshot(
     shard: ArcStr,
     head: Option<ArchiveReader>,
+    index: LogfileIndex,
     pathindex: ArchiveReader,
     config: Arc<Config>,
     limit: usize,
@@ -128,7 +130,7 @@ async fn do_oneshot(
     }
     debug!("opening logfile collection");
     let mut log =
-        LogfileCollection::new(config, shard, head, args.start, args.end).await?;
+        LogfileCollection::new(index, config, shard, head, args.start, args.end);
     debug!("seeking to the beginning");
     log.seek(Seek::Beginning)?;
     debug!("reimaging");
@@ -230,10 +232,12 @@ async fn start_oneshot(
         }
         let shard = shards.by_id[id].clone();
         let head = shards.heads.read().get(id).cloned();
+        let index = shards.indexes.read()[id].clone();
         let pathindex = pathindex.clone();
         set.spawn(do_oneshot(
             shard,
             head,
+            index,
             pathindex,
             config.clone(),
             limit,

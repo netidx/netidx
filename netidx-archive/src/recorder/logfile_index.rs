@@ -2,7 +2,7 @@ use super::Config;
 use anyhow::Result;
 use chrono::prelude::*;
 use log::{debug, info, warn};
-use std::{cmp::Ordering, path::PathBuf};
+use std::{cmp::Ordering, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum File {
@@ -28,13 +28,13 @@ impl Ord for File {
 }
 
 impl File {
-    async fn read(config: &Config, shard: &str) -> Result<Vec<File>> {
+    fn read(config: &Config, shard: &str) -> Result<Vec<File>> {
         let mut files = vec![];
         {
             let path = config.archive_directory.join(shard);
-            let mut reader = tokio::fs::read_dir(&path).await?;
-            while let Some(dir) = reader.next_entry().await? {
-                let typ = dir.file_type().await?;
+            for dir in std::fs::read_dir(&path)? {
+                let dir = dir?;
+                let typ = dir.file_type()?;
                 if typ.is_file() {
                     let name = dir.file_name();
                     let name = name.to_string_lossy();
@@ -48,7 +48,7 @@ impl File {
         }
         debug!("would run list, cmd config {:?}", &config.archive_cmds);
         if let Some(cmds) = &config.archive_cmds {
-            use tokio::process::Command;
+            use std::process::Command;
             info!("running list command");
             let args = cmds.list.1.iter().cloned().map(|s| {
                 if &s == "{shard}" {
@@ -57,7 +57,7 @@ impl File {
                     s
                 }
             });
-            match Command::new(&cmds.list.0).args(args).output().await {
+            match Command::new(&cmds.list.0).args(args).output() {
                 Err(e) => warn!("failed to run list command {}", e),
                 Ok(o) if !o.status.success() => warn!("list command failed {:?}", o),
                 Ok(output) => {
@@ -89,12 +89,12 @@ impl File {
     }
 }
 
-#[derive(Debug)]
-pub(super) struct LogfileIndex(Vec<File>);
+#[derive(Debug, Clone)]
+pub(super) struct LogfileIndex(Arc<Vec<File>>);
 
 impl LogfileIndex {
-    pub(super) async fn new(config: &Config, shard: &str) -> Result<Self> {
-        Ok(Self(File::read(&config, shard).await?))
+    pub(super) fn new(config: &Config, shard: &str) -> Result<Self> {
+        Ok(Self(Arc::new(File::read(&config, shard)?)))
     }
 
     pub(super) fn first(&self) -> File {

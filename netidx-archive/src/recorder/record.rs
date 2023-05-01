@@ -1,4 +1,7 @@
-use super::{ArchiveCmds, BCastMsg, Config, RecordConfig, RotateDirective, ShardId, Shards};
+use super::{
+    ArchiveCmds, BCastMsg, Config, LogfileIndex, RecordConfig, RotateDirective, ShardId,
+    Shards,
+};
 use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL};
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -315,9 +318,11 @@ pub(super) async fn run(
                     last_image = 0;
                     last_flush = 0;
                     task::block_in_place(|| write_image(&mut archive, &by_subid, &image, now))?;
-                    let _ = bcast.send(BCastMsg::LogRotated(now));
                     let reader = archive.reader()?;
                     shards.heads.write().insert(shard_id, reader.clone());
+                    let index = task::block_in_place(|| LogfileIndex::new(&config, &shard_name))?;
+                    shards.indexes.write().insert(shard_id, index);
+                    let _ = bcast.send(BCastMsg::LogRotated(now));
                     let _ = bcast.send(BCastMsg::NewCurrent(reader));
                 }
             },

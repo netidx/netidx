@@ -1,4 +1,7 @@
-use super::{logfile_collection::LogfileCollection, oneshot::FILTER, Shards};
+use super::{
+    logfile_collection::LogfileCollection, logfile_index::LogfileIndex, oneshot::FILTER,
+    ShardId, Shards,
+};
 use crate::{
     logfile::{ArchiveReader, BatchItem, Id, Seek},
     recorder::{BCastMsg, Config, PublishConfig},
@@ -264,6 +267,8 @@ impl NewSessionConfig {
 }
 
 struct SessionShard {
+    shards: Arc<Shards>,
+    id: ShardId,
     publisher: Publisher,
     published: FxHashMap<Id, Val>,
     published_ids: FxHashSet<publisher::Id>,
@@ -280,11 +285,14 @@ struct SessionShard {
 
 impl SessionShard {
     async fn new(
+        shards: Arc<Shards>,
         session_bcast: broadcast::Sender<SessionBCastMsg>,
+        shard_id: ShardId,
         shard: ArcStr,
         config: Arc<Config>,
         publisher: Publisher,
         head: Option<ArchiveReader>,
+        index: LogfileIndex,
         pathindex: ArchiveReader,
         session_base: Path,
         filter: GlobSet,
@@ -305,14 +313,16 @@ impl SessionShard {
         let used =
             pathindex.index().iter_pathmap().any(|(_, path)| filter.is_match(path));
         let log = LogfileCollection::new(
+            index,
             config,
             shard,
             head,
             Bound::Unbounded,
             Bound::Unbounded,
-        )
-        .await?;
+        );
         Ok(Self {
+            shards,
+            id: shard_id,
             session_bcast,
             publisher,
             published: HashMap::default(),
@@ -485,7 +495,8 @@ impl SessionShard {
                 }
             },
             Ok(BCastMsg::LogRotated(ts)) => {
-                self.log.log_rotated(ts).await?;
+                let index = self.shards.indexes.read()[&self.id].clone();
+                self.log.log_rotated(ts, index).await?;
                 Ok(())
             }
             Ok(BCastMsg::NewCurrent(head)) => {
@@ -936,27 +947,33 @@ async fn session(
     for (id, pathindex) in shards.pathindexes.iter() {
         if let Some(spec) = shards.spec.get(id) {
             if filter.disjoint(spec) {
-                continue
+                continue;
             }
         }
+        let shards = shards.clone();
+        let id = *id;
         let pathindex = pathindex.clone();
         let publisher = publisher.clone();
-        let shard = shards.by_id[id].clone();
+        let shard = shards.by_id[&id].clone();
         let config = config.clone();
         let session_bcast = session_bcast.clone();
         let session_bcast_rx = session_bcast.subscribe();
-        let bcast = shards.bcast[id].subscribe();
-        let head = shards.heads.read().get(id).cloned();
+        let bcast = shards.bcast[&id].subscribe();
+        let head = shards.heads.read().get(&id).cloned();
+        let index = shards.indexes.read()[&id].clone();
         let session_base = session_base.clone();
         let filter = filter.clone();
         let cfg = cfg.clone();
         joinset.spawn(async move {
             let t = SessionShard::new(
+                shards,
                 session_bcast.clone(),
+                id,
                 shard,
                 config,
                 publisher,
                 head,
+                index,
                 pathindex,
                 session_base,
                 filter,

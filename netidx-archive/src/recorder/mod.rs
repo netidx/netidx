@@ -25,7 +25,7 @@ use std::{
 };
 use tokio::{sync::broadcast, task::JoinSet};
 
-use self::file::RecordShardConfig;
+use self::{file::RecordShardConfig, logfile_index::LogfileIndex};
 
 pub mod logfile_collection;
 mod logfile_index;
@@ -411,6 +411,7 @@ pub(crate) struct Shards {
     spec: FxHashMap<ShardId, GlobSet>,
     by_id: FxHashMap<ShardId, ArcStr>,
     by_name: FxHashMap<ArcStr, ShardId>,
+    indexes: RwLock<FxHashMap<ShardId, LogfileIndex>>,
     pathindexes: FxHashMap<ShardId, ArchiveReader>,
     heads: RwLock<FxHashMap<ShardId, ArchiveReader>>,
     bcast: FxHashMap<ShardId, broadcast::Sender<BCastMsg>>,
@@ -418,22 +419,24 @@ pub(crate) struct Shards {
 
 impl Shards {
     fn read(
-        path: impl AsRef<FilePath>,
+        config: &Arc<Config>,
     ) -> Result<(FxHashMap<ShardId, ArchiveWriter>, Arc<Self>)> {
         use std::fs;
         let mut t = Self {
             spec: HashMap::default(),
             by_id: HashMap::default(),
             by_name: HashMap::default(),
+            indexes: RwLock::new(HashMap::default()),
             pathindexes: HashMap::default(),
             heads: RwLock::new(HashMap::default()),
             bcast: HashMap::default(),
         };
-        for ent in fs::read_dir(path.as_ref())? {
+        for ent in fs::read_dir(&config.archive_directory)? {
             let ent = ent?;
             let name = ArcStr::from(ent.file_name().to_string_lossy());
             if ent.file_type()?.is_dir() && &name != ".." {
                 let id = ShardId::new();
+                t.indexes.write().insert(id, LogfileIndex::new(&config, &name)?);
                 t.by_id.insert(id, name.clone());
                 t.by_name.insert(name, id);
                 let indexpath = ent.path().join("pathindex");
@@ -449,25 +452,26 @@ impl Shards {
     }
 
     fn from_cfg(
-        archive_directory: &PathBuf,
-        cfg: &HashMap<ArcStr, RecordConfig>,
+        config: &Arc<Config>,
     ) -> Result<(FxHashMap<ShardId, ArchiveWriter>, Arc<Self>)> {
         use std::fs;
         let mut t = Self {
             spec: HashMap::default(),
             by_id: HashMap::default(),
             by_name: HashMap::default(),
+            indexes: RwLock::new(HashMap::default()),
             pathindexes: HashMap::default(),
             heads: RwLock::new(HashMap::default()),
             bcast: HashMap::default(),
         };
         let mut writers = HashMap::default();
-        for (name, rcfg) in cfg.iter() {
+        for (name, rcfg) in config.record.iter() {
             let id = ShardId::new();
+            t.indexes.write().insert(id, LogfileIndex::new(&config, &name)?);
             t.by_id.insert(id, name.clone());
             t.by_name.insert(name.clone(), id);
             t.spec.insert(id, rcfg.spec.clone());
-            let dir = archive_directory.join(&**name);
+            let dir = config.archive_directory.join(&**name);
             fs::create_dir_all(&dir)?;
             let writer = ArchiveWriter::open(dir.join("pathindex"))?;
             let reader = writer.reader()?;
@@ -491,9 +495,9 @@ impl Recorder {
         let subscriber =
             Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
         let (mut writers, shards) = if config.record.is_empty() {
-            Shards::read(&config.archive_directory)?
+            Shards::read(&config)?
         } else {
-            Shards::from_cfg(&config.archive_directory, &config.record)?
+            Shards::from_cfg(&config)?
         };
         if let Some(publish_config) = config.publish.as_ref() {
             let publish_config = Arc::new(publish_config.clone());
