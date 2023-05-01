@@ -49,7 +49,7 @@ impl DataSource {
             File::Historical(ts) => {
                 debug!("would run get, cmd config {:?}", &config.archive_cmds);
                 let path = file.path(&config.archive_directory, shard);
-                if !std::path::Path::exists(&path) {
+                if !path.exists() {
                     if let Some(cmds) = &config.archive_cmds {
                         use std::{iter, process::Command};
                         info!("running get {:?}", &cmds.get);
