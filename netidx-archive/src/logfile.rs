@@ -1420,13 +1420,13 @@ impl ArchiveReader {
         }
     }
 
-    fn get_index_at(
-        index: &mut RecordIndex,
+    fn scan_index_at(
+        index: &FxHashSet<Id>,
         compressed: bool,
         mmap: &Mmap,
         pos: usize,
         end: usize,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if pos >= end {
             bail!("record out of bounds")
         }
@@ -1439,7 +1439,14 @@ impl ArchiveReader {
         if compressed {
             buf.advance(4);
         }
-        Ok(<RecordIndex as Pack>::decode_into(index, &mut buf)?)
+        let elts = decode_varint(&mut buf)?;
+        for _ in 0..elts {
+            let id = decode_varint(&mut buf)?;
+            if index.contains(&Id(id as u32)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn get_batch_at(
@@ -1550,55 +1557,33 @@ impl ArchiveReader {
         }
     }
 
-    fn matching_idxs(
+    fn matching_idxs<'a, 'b: 'a>(
         indexed: bool,
         compressed: bool,
-        index: &ArchiveIndex,
-        mmap: &Mmap,
-        filter: Option<&FxHashSet<Id>>,
+        index: &'a ArchiveIndex,
+        mmap: &'a Mmap,
+        filter: Option<&'a FxHashSet<Id>>,
         start: Bound<DateTime<Utc>>,
         end: Bound<DateTime<Utc>>,
         n: usize,
-    ) -> Pooled<Vec<(DateTime<Utc>, usize)>> {
-        thread_local! {
-            static IDS: RefCell<RecordIndex> = RefCell::new(RecordIndex {index: Vec::new()});
-        }
-        IDS.with(|ids| {
-            let mut ids = ids.borrow_mut();
-            let mut idxs = POS_POOL.take();
-            idxs.extend(
-                index
-                    .deltamap
-                    .range((start, end))
-                    .filter_map(|(ts, pos)| match filter {
-                        Some(set) if indexed => {
-                            ids.index.clear();
-                            let r = Self::get_index_at(
-                                &mut *ids, compressed, &*mmap, *pos, index.end,
-                            );
-                            match r {
-                                Ok(()) => {
-                                    if ids.index.iter().any(|id| set.contains(id)) {
-                                        Some((*ts, *pos))
-                                    } else {
-                                        None
-                                    }
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "failed to read index entry for {}, {}",
-                                        ts, e
-                                    );
-                                    None
-                                }
-                            }
+    ) -> impl Iterator<Item = (DateTime<Utc>, usize)> + 'a {
+        index
+            .deltamap
+            .range((start, end))
+            .filter_map(move |(ts, pos)| match filter {
+                Some(set) if indexed => {
+                    match Self::scan_index_at(set, compressed, &*mmap, *pos, index.end) {
+                        Ok(true) => Some((*ts, *pos)),
+                        Ok(false) => None,
+                        Err(e) => {
+                            error!("failed to read index entry for {}, {}", ts, e);
+                            None
                         }
-                        None | Some(_) => Some((*ts, *pos)),
-                    })
-                    .take(n),
-            );
-            idxs
-        })
+                    }
+                }
+                None | Some(_) => Some((*ts, *pos)),
+            })
+            .take(n)
     }
 
     /// read at most `n` delta items from the specified cursor, and
@@ -1618,29 +1603,26 @@ impl ArchiveReader {
             Some(dt) => Bound::Excluded(dt),
         };
         let mmap = self.mmap.read();
-        let (mut idxs, end) = {
-            let index = self.index.read();
-            let idxs = Self::matching_idxs(
-                self.indexed,
-                self.compressed.is_some(),
-                &*index,
-                &*mmap,
-                filter,
-                start,
-                cursor.end,
-                n,
-            );
-            (idxs, index.end)
-        };
+        let index = self.index.read();
         let mut current = cursor.current;
         let mut total = 0;
-        for (ts, pos) in idxs.drain(..) {
+        let matched = Self::matching_idxs(
+            self.indexed,
+            self.compressed.is_some(),
+            &*index,
+            &*mmap,
+            filter,
+            start,
+            cursor.end,
+            n,
+        );
+        for (ts, pos) in matched {
             let (len, batch) = ArchiveReader::get_batch_at(
                 self.indexed,
                 &self.compressed,
                 &*mmap,
                 pos as usize,
-                end,
+                index.end,
             )?;
             current = Some(ts);
             total += len;
@@ -1663,28 +1645,25 @@ impl ArchiveReader {
             Some(dt) => Bound::Excluded(dt),
         };
         let mmap = self.mmap.read();
-        let pos = {
-            let index = self.index.read();
-            let mut idxs = Self::matching_idxs(
-                self.indexed,
-                self.compressed.is_some(),
-                &*index,
-                &*mmap,
-                filter,
-                start,
-                cursor.end,
-                1,
-            );
-            idxs.pop().map(|(ts, pos)| (ts, pos, index.end))
-        };
-        match pos {
-            Some((ts, pos, end)) => {
+        let index = self.index.read();
+        let mut matched = Self::matching_idxs(
+            self.indexed,
+            self.compressed.is_some(),
+            &*index,
+            &*mmap,
+            filter,
+            start,
+            cursor.end,
+            1,
+        );
+        match matched.next() {
+            Some((ts, pos)) => {
                 let (_, batch) = ArchiveReader::get_batch_at(
                     self.indexed,
                     &self.compressed,
                     &*mmap,
                     pos as usize,
-                    end,
+                    index.end,
                 )?;
                 Ok(Some((ts, batch)))
             }
