@@ -1,3 +1,9 @@
+* 0.19.13 archive
+
+  - further minor optimizations
+
+  - reimage should also take a filter
+
 * 0.19.12 archive
 
   - cache open archive files for some time
