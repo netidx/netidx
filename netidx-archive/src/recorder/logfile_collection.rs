@@ -9,14 +9,15 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use fxhash::{FxHashMap, FxHashSet};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use netidx::{pool::Pooled, subscriber::Event};
 use parking_lot::Mutex;
 use std::{
-    collections::{HashMap, VecDeque, hash_map::Entry},
+    collections::{hash_map::Entry, HashMap, VecDeque},
     ops::Bound,
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 use tokio::task;
 
@@ -32,6 +33,49 @@ struct DataSource {
 }
 
 impl DataSource {
+    fn get_file_from_external(
+        path: &PathBuf,
+        config: &Config,
+        ts: DateTime<Utc>,
+        shard: &str,
+    ) {
+        if !path.exists() {
+            debug!("would run get, cmd config {:?}", &config.archive_cmds);
+            if let Some(cmds) = &config.archive_cmds {
+                use std::{iter, process::Command};
+                info!("running get {:?}", &cmds.get);
+                let out = task::block_in_place(|| {
+                    let now = ts.to_rfc3339();
+                    let args = cmds
+                        .get
+                        .1
+                        .iter()
+                        .cloned()
+                        .map(|a| if &a == "{shard}" { shard.into() } else { a })
+                        .chain(iter::once(now));
+                    Command::new(&cmds.get.0).args(args).output()
+                });
+                match out {
+                    Err(e) => warn!("failed to execute get command {}", e),
+                    Ok(o) if !o.status.success() => {
+                        warn!("get command failed {:?}", o)
+                    }
+                    Ok(out) => {
+                        if out.stdout.len() > 0 {
+                            let out = String::from_utf8_lossy(&out.stdout);
+                            warn!("get command stdout {}", out)
+                        }
+                        if out.stderr.len() > 0 {
+                            let out = String::from_utf8_lossy(&out.stderr);
+                            warn!("get command stderr {}", out);
+                        }
+                        info!("get command succeeded");
+                    }
+                }
+            }
+        }
+    }
+
     fn new(
         config: &Config,
         shard: &str,
@@ -47,73 +91,46 @@ impl DataSource {
                 }
             },
             File::Historical(ts) => {
-                debug!("would run get, cmd config {:?}", &config.archive_cmds);
                 let path = file.path(&config.archive_directory, shard);
-                if !path.exists() {
-                    if let Some(cmds) = &config.archive_cmds {
-                        use std::{iter, process::Command};
-                        info!("running get {:?}", &cmds.get);
-                        let out = task::block_in_place(|| {
-                            let now = ts.to_rfc3339();
-                            let args = cmds
-                                .get
-                                .1
-                                .iter()
-                                .cloned()
-                                .map(|a| if &a == "{shard}" { shard.into() } else { a })
-                                .chain(iter::once(now));
-                            Command::new(&cmds.get.0).args(args).output()
+                let now = Utc::now();
+                debug!("opening log file {:?}", &path);
+                let mut readers = ARCHIVE_READERS.lock();
+                match readers.get_mut(&path) {
+                    Some((last_used, reader)) => {
+                        debug!("log file was cached");
+                        *last_used = now;
+                        Ok(Some(Self { file, archive: reader.clone() }))
+                    }
+                    None => {
+                        debug!("log file was not cached, opening");
+                        readers.retain(|_, (last, r)| {
+                            r.strong_count() > 1 || now - *last < *CACHE_FOR
                         });
-                        match out {
-                            Err(e) => warn!("failed to execute get command {}", e),
-                            Ok(o) if !o.status.success() => {
-                                warn!("get command failed {:?}", o)
-                            }
-                            Ok(out) => {
-                                if out.stdout.len() > 0 {
-                                    let out = String::from_utf8_lossy(&out.stdout);
-                                    warn!("get command stdout {}", out)
+                        drop(readers); // release the lock
+                        let rd = task::block_in_place(|| {
+                            for _ in 0..3 {
+                                Self::get_file_from_external(&path, config, ts, shard);
+                                match ArchiveReader::open(&path) {
+                                    Ok(rd) => return Ok::<_, anyhow::Error>(rd),
+                                    Err(e) => {
+                                        error!("could not open archive file {}", e);
+                                        std::thread::sleep(Duration::from_secs(1));
+                                    }
                                 }
-                                if out.stderr.len() > 0 {
-                                    let out = String::from_utf8_lossy(&out.stderr);
-                                    warn!("get command stderr {}", out);
-                                }
-                                info!("get command succeeded");
                             }
-                        }
+                            bail!("could not open log file")
+                        })?;
+                        let archive = match ARCHIVE_READERS.lock().entry(path) {
+                            Entry::Vacant(e) => e.insert((now, rd)).1.clone(),
+                            Entry::Occupied(mut e) => {
+                                let (last, rd) = e.get_mut();
+                                *last = now;
+                                rd.clone()
+                            }
+                        };
+                        Ok(Some(Self { file, archive }))
                     }
                 }
-                debug!("opening log file {:?}", &path);
-                let archive = {
-                    let mut readers = ARCHIVE_READERS.lock();
-                    match readers.get_mut(&path) {
-                        Some((last_used, reader)) => {
-                            debug!("log file was cached");
-                            *last_used = Utc::now();
-                            reader.clone()
-                        }
-                        None => {
-                            debug!("log file was not cached, opening");
-                            let now = Utc::now();
-                            readers.retain(|_, (last, r)| {
-                                r.strong_count() > 1 || now - *last < *CACHE_FOR
-                            });
-                            drop(readers); // release the lock
-                            let rd = task::block_in_place(|| ArchiveReader::open(&path))?;
-                            match ARCHIVE_READERS.lock().entry(path) {
-                                Entry::Vacant(e) => {
-                                    e.insert((ts, rd)).1.clone()
-                                }
-                                Entry::Occupied(mut e) => {
-                                    let (ts, rd) = e.get_mut();
-                                    *ts = now;
-                                    rd.clone()
-                                }
-                            }
-                        }
-                    }
-                };
-                Ok(Some(Self { file, archive }))
             }
         }
     }
@@ -291,7 +308,10 @@ impl LogfileCollection {
     }
 
     /// reimage the file at the current cursor position, returning the path map and the image
-    pub fn reimage(&mut self, filter: Option<&FxHashSet<Id>>) -> Result<Pooled<FxHashMap<Id, Event>>> {
+    pub fn reimage(
+        &mut self,
+        filter: Option<&FxHashSet<Id>>,
+    ) -> Result<Pooled<FxHashMap<Id, Event>>> {
         if self.source()? {
             task::block_in_place(|| {
                 let ds = self.source.as_mut().unwrap();
