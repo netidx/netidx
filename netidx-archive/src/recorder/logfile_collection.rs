@@ -293,14 +293,13 @@ impl LogfileCollection {
     }
 
     /// tell the collection that the log file has been rotated
-    pub async fn log_rotated(&mut self, ts: DateTime<Utc>, index: LogfileIndex) -> Result<()> {
+    pub fn log_rotated(&mut self, ts: DateTime<Utc>, index: LogfileIndex) {
         if let Some(d) = self.source.as_mut() {
             if d.file == File::Head {
                 d.file = File::Historical(ts);
             }
         }
         self.index = index;
-        Ok(())
     }
 
     /// seek n batches forward if n is positive or backward if n is negative

@@ -5,7 +5,7 @@ use log::{debug, info, warn};
 use std::{cmp::Ordering, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum File {
+pub enum File {
     Head,
     Historical(DateTime<Utc>),
 }
@@ -90,14 +90,14 @@ impl File {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct LogfileIndex(Arc<Vec<File>>);
+pub struct LogfileIndex(Arc<Vec<File>>);
 
 impl LogfileIndex {
-    pub(super) fn new(config: &Config, shard: &str) -> Result<Self> {
+    pub fn new(config: &Config, shard: &str) -> Result<Self> {
         Ok(Self(Arc::new(File::read(&config, shard)?)))
     }
 
-    pub(super) fn first(&self) -> File {
+    pub fn first(&self) -> File {
         if self.0.len() == 0 {
             File::Head
         } else {
@@ -105,7 +105,7 @@ impl LogfileIndex {
         }
     }
 
-    pub(super) fn last(&self) -> File {
+    pub fn last(&self) -> File {
         if self.0.len() == 0 {
             File::Head
         } else {
@@ -113,7 +113,7 @@ impl LogfileIndex {
         }
     }
 
-    pub(super) fn find(&self, ts: DateTime<Utc>) -> File {
+    pub fn find(&self, ts: DateTime<Utc>) -> File {
         if self.0.len() == 0 {
             File::Head
         } else {
@@ -130,7 +130,7 @@ impl LogfileIndex {
         }
     }
 
-    pub(super) fn next(&self, cur: File) -> File {
+    pub fn next(&self, cur: File) -> File {
         if self.0.len() == 0 {
             File::Head
         } else {
@@ -146,7 +146,7 @@ impl LogfileIndex {
         }
     }
 
-    pub(super) fn prev(&self, cur: File) -> File {
+    pub fn prev(&self, cur: File) -> File {
         if self.0.len() == 0 {
             File::Head
         } else {

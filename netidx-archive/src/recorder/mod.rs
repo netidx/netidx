@@ -17,18 +17,13 @@ use netidx::{
 use netidx_core::atomic_id;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    path::{Path as FilePath, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::broadcast, task::JoinSet};
 
 use self::{file::RecordShardConfig, logfile_index::LogfileIndex};
 
 pub mod logfile_collection;
-mod logfile_index;
+pub mod logfile_index;
 mod oneshot;
 mod publish;
 mod record;

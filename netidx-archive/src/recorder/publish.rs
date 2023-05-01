@@ -496,7 +496,7 @@ impl SessionShard {
             },
             Ok(BCastMsg::LogRotated(ts)) => {
                 let index = self.shards.indexes.read()[&self.id].clone();
-                self.log.log_rotated(ts, index).await?;
+                self.log.log_rotated(ts, index);
                 Ok(())
             }
             Ok(BCastMsg::NewCurrent(head)) => {
