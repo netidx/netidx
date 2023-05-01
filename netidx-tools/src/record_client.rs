@@ -170,9 +170,9 @@ fn verify(file: impl AsRef<std::path::Path>) -> Result<()> {
     }
     let mut cursor = Cursor::new();
     reader.seek(&mut cursor, Seek::Beginning);
-    reader.build_image(&cursor)?;
+    reader.build_image(None, &cursor)?;
     reader.seek(&mut cursor, Seek::End);
-    reader.build_image(&cursor)?;
+    reader.build_image(None, &cursor)?;
     Ok(())
 }
 

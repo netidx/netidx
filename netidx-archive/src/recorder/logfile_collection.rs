@@ -281,11 +281,11 @@ impl LogfileCollection {
     }
 
     /// reimage the file at the current cursor position, returning the path map and the image
-    pub fn reimage(&mut self) -> Result<Pooled<FxHashMap<Id, Event>>> {
+    pub fn reimage(&mut self, filter: Option<&FxHashSet<Id>>) -> Result<Pooled<FxHashMap<Id, Event>>> {
         if self.source()? {
             task::block_in_place(|| {
                 let ds = self.source.as_mut().unwrap();
-                ds.archive.build_image(&self.pos)
+                ds.archive.build_image(filter, &self.pos)
             })
         } else {
             Ok(IMG_POOL.take())

@@ -581,7 +581,7 @@ impl SessionShard {
 
     fn reimage(&mut self, pbatch: &mut UpdateBatch) -> Result<()> {
         if self.used {
-            let mut idx = self.log.reimage()?;
+            let mut idx = self.log.reimage(Some(&self.filterset))?;
             let cursor = self.log.position();
             let _ = self.session_bcast.send(SessionBCastMsg::Update(SessionUpdate::Pos(
                 match cursor.current() {

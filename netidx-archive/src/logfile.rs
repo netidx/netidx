@@ -1495,7 +1495,11 @@ impl ArchiveReader {
     /// beginning and the cursor position will be read, otherwise only
     /// the deltas between the closest image that is older, and the
     /// cursor start need to be read.
-    pub fn build_image(&self, cursor: &Cursor) -> Result<Pooled<FxHashMap<Id, Event>>> {
+    pub fn build_image(
+        &self,
+        filter: Option<&FxHashSet<Id>>,
+        cursor: &Cursor,
+    ) -> Result<Pooled<FxHashMap<Id, Event>>> {
         self.check_remap_rescan()?;
         let pos = match cursor.current {
             None => cursor.start,
@@ -1504,31 +1508,54 @@ impl ArchiveReader {
         match pos {
             Bound::Unbounded => Ok(Pooled::orphan(HashMap::default())),
             _ => {
-                let (mut to_read, end) = {
-                    let index = self.index.read();
-                    let mut to_read = TO_READ_POOL.take();
-                    let mut iter = index.imagemap.range((Bound::Unbounded, pos));
-                    let s = match iter.next_back() {
+                let index = self.index.read();
+                let mmap = self.mmap.read();
+                let mut image = IMG_POOL.take();
+                let start =
+                    match index.imagemap.range((Bound::Unbounded, pos)).next_back() {
                         None => Bound::Unbounded,
                         Some((ts, pos)) => {
-                            to_read.push(*pos);
+                            let (_, mut batch) = ArchiveReader::get_batch_at(
+                                self.indexed,
+                                &self.compressed,
+                                &*mmap,
+                                *pos,
+                                index.end,
+                            )?;
+                            image.extend(batch.drain(..).filter_map(
+                                |BatchItem(id, up)| match filter {
+                                    Some(set) if set.contains(&id) => Some((id, up)),
+                                    Some(_) => None,
+                                    None => Some((id, up)),
+                                },
+                            ));
                             Bound::Included(*ts)
                         }
                     };
-                    to_read.extend(index.deltamap.range((s, pos)).map(|v| v.1));
-                    (to_read, index.end)
-                };
-                let mut image = IMG_POOL.take();
-                let mmap = self.mmap.read();
-                for pos in to_read.drain(..) {
+                let matched = Self::matching_idxs(
+                    self.indexed,
+                    self.compressed.is_some(),
+                    &index,
+                    &mmap,
+                    filter,
+                    start,
+                    pos,
+                );
+                for (_, pos) in matched {
                     let (_, mut batch) = ArchiveReader::get_batch_at(
                         self.indexed,
                         &self.compressed,
                         &*mmap,
                         pos as usize,
-                        end,
+                        index.end,
                     )?;
-                    image.extend(batch.drain(..).map(|b| (b.0, b.1)));
+                    image.extend(batch.drain(..).filter_map(|BatchItem(id, up)| {
+                        match filter {
+                            Some(set) if set.contains(&id) => Some((id, up)),
+                            Some(_) => None,
+                            None => Some((id, up)),
+                        }
+                    }));
                 }
                 Ok(image)
             }
@@ -1543,25 +1570,20 @@ impl ArchiveReader {
         filter: Option<&'a FxHashSet<Id>>,
         start: Bound<DateTime<Utc>>,
         end: Bound<DateTime<Utc>>,
-        n: usize,
     ) -> impl Iterator<Item = (DateTime<Utc>, usize)> + 'a {
-        index
-            .deltamap
-            .range((start, end))
-            .filter_map(move |(ts, pos)| match filter {
-                Some(set) if indexed => {
-                    match Self::scan_index_at(set, compressed, &*mmap, *pos, index.end) {
-                        Ok(true) => Some((*ts, *pos)),
-                        Ok(false) => None,
-                        Err(e) => {
-                            error!("failed to read index entry for {}, {}", ts, e);
-                            None
-                        }
+        index.deltamap.range((start, end)).filter_map(move |(ts, pos)| match filter {
+            Some(set) if indexed => {
+                match Self::scan_index_at(set, compressed, &*mmap, *pos, index.end) {
+                    Ok(true) => Some((*ts, *pos)),
+                    Ok(false) => None,
+                    Err(e) => {
+                        error!("failed to read index entry for {}, {}", ts, e);
+                        None
                     }
                 }
-                None | Some(_) => Some((*ts, *pos)),
-            })
-            .take(n)
+            }
+            None | Some(_) => Some((*ts, *pos)),
+        })
     }
 
     /// read at most `n` delta items from the specified cursor, and
@@ -1592,8 +1614,8 @@ impl ArchiveReader {
             filter,
             start,
             cursor.end,
-            n,
-        );
+        )
+        .take(n);
         for (ts, pos) in matched {
             let (len, batch) = ArchiveReader::get_batch_at(
                 self.indexed,
@@ -1632,8 +1654,8 @@ impl ArchiveReader {
             filter,
             start,
             cursor.end,
-            1,
-        );
+        )
+        .take(1);
         match matched.next() {
             Some((ts, pos)) => {
                 let (_, batch) = ArchiveReader::get_batch_at(

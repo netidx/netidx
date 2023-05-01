@@ -134,7 +134,7 @@ async fn do_oneshot(
     debug!("seeking to the beginning");
     log.seek(Seek::Beginning)?;
     debug!("reimaging");
-    let mut idx = log.reimage()?;
+    let mut idx = log.reimage(Some(&*filterset))?;
     idx.retain(|id, _| pathmap.contains_key(id));
     let mut data =
         OneshotReplyShard { pathmap, image: idx, deltas: CURSOR_BATCH_POOL.take() };
