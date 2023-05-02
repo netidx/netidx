@@ -1,3 +1,9 @@
+* 0.19.14 archive
+
+  - don't call get if the file exists
+
+  - don't hold the lock while opening the archive file in LogfileCollection
+
 * 0.19.13 archive
 
   - further minor optimizations
