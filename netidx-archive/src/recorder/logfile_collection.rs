@@ -122,11 +122,7 @@ impl DataSource {
                         })?;
                         let archive = match ARCHIVE_READERS.lock().entry(path) {
                             Entry::Vacant(e) => e.insert((now, rd)).1.clone(),
-                            Entry::Occupied(mut e) => {
-                                let (last, rd) = e.get_mut();
-                                *last = now;
-                                rd.clone()
-                            }
+                            Entry::Occupied(e) => e.get().1.clone(),
                         };
                         Ok(Some(Self { file, archive }))
                     }
