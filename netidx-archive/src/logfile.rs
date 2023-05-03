@@ -644,7 +644,7 @@ fn scan_header(buf: &mut impl Buf) -> Result<FileHeader> {
         .context("read file header")?;
     // this is the first version, so no upgrading can be done yet
     if header.version != FILE_VERSION {
-        bail!("file version mismatch, can't read it")
+        bail!("file version mismatch, expected {} got {}", header.version, FILE_VERSION)
     }
     Ok(header)
 }
