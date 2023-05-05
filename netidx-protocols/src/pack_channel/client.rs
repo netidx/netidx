@@ -77,7 +77,7 @@ impl Connection {
         if !queue.has_remaining() {
             match self.inner.try_recv_one().await? {
                 Some(Value::Bytes(buf)) => *queue = buf,
-                Some(_) => bail!("unexpected response"),
+                Some(v) => bail!("unexpected response {}", v),
                 None => (),
             }
         }
@@ -88,7 +88,7 @@ impl Connection {
         if !queue.has_remaining() {
             match self.inner.recv_one().await? {
                 Value::Bytes(buf) => *queue = buf,
-                _ => bail!("unexpected response"),
+                v => bail!("unexpected response {}", v),
             }
         }
         Ok(())

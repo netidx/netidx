@@ -1,3 +1,7 @@
+* 0.19.7 protocols
+
+  - add more context to channel errors
+
 * 0.19.14 archive
 
   - don't call get if the file exists
