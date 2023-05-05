@@ -880,16 +880,20 @@ impl PublisherInner {
             .any(|(b, set)| Path::is_parent(&**b, &**path) && set.contains(path))
     }
 
-    pub fn publish(&mut self, id: Id, flags: PublishFlags, path: Path) -> Result<()> {
+    pub fn check_publish(&self, path: &Path) -> Result<()> {
         if !Path::is_absolute(&path) {
             bail!("can't publish a relative path")
         }
         if self.stop.is_none() {
             bail!("publisher is dead")
         }
-        if self.by_path.contains_key(&path) {
+        if self.by_path.contains_key(path) {
             bail!("already published")
         }
+        Ok(())
+    }
+
+    pub fn publish(&mut self, id: Id, flags: PublishFlags, path: Path) {
         self.by_path.insert(path.clone(), id);
         self.to_unpublish.remove(&path);
         self.to_publish.insert(
@@ -897,7 +901,6 @@ impl PublisherInner {
             if flags.is_empty() { None } else { Some(flags.bits()) },
         );
         self.trigger_publish();
-        Ok(())
     }
 
     fn unpublish(&mut self, path: &Path) {
@@ -945,6 +948,31 @@ impl PublisherInner {
         if !self.publish_triggered {
             self.publish_triggered = true;
             let _: Result<_, _> = self.trigger_publish.unbounded_send(None);
+        }
+    }
+
+    fn writes(&mut self, id: Id, tx: Sender<Pooled<Vec<WriteRequest>>>) {
+        if self.by_id.contains_key(&id) {
+            let e = self
+                .on_write_chans
+                .entry(ChanWrap(tx.clone()))
+                .or_insert_with(|| (ChanId::new(), HashSet::new()));
+            e.1.insert(id);
+            let cid = e.0;
+            let mut gc = Vec::new();
+            let ow = self.on_write.entry(id).or_insert_with(Vec::new);
+            ow.retain(|(_, c)| {
+                if c.is_closed() {
+                    gc.push(ChanWrap(c.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            ow.push((cid, tx));
+            for c in gc {
+                self.on_write_chans.remove(&c);
+            }
         }
     }
 }
@@ -1177,11 +1205,16 @@ impl Publisher {
     /// as many times as they like. Subscribers will then pick
     /// randomly among the advertised publishers when subscribing. See
     /// `subscriber`
-    pub fn publish_with_flags<T>(
+    ///
+    /// If specified the write channel will be registered before the
+    /// value is published, so there can be no race (however small)
+    /// that might cause you to miss a write.
+    pub fn publish_with_flags_and_writes<T>(
         &self,
         mut flags: PublishFlags,
         path: Path,
         init: T,
+        tx: Option<Sender<Pooled<Vec<WriteRequest>>>>,
     ) -> Result<Val>
     where
         T: TryInto<Value>,
@@ -1192,7 +1225,7 @@ impl Publisher {
         let destroy_on_idle = flags.contains(PublishFlags::DESTROY_ON_IDLE);
         flags.remove(PublishFlags::DESTROY_ON_IDLE);
         let mut pb = self.0.lock();
-        pb.publish(id, flags, path.clone())?;
+        pb.check_publish(&path)?;
         let subscribed = pb
             .hc_subscribed
             .entry(BTreeSet::new())
@@ -1205,7 +1238,30 @@ impl Publisher {
         if destroy_on_idle {
             pb.destroy_on_idle.insert(id);
         }
+        if let Some(tx) = tx {
+            pb.writes(id, tx);
+        }
+        pb.publish(id, flags, path.clone());
         Ok(Val(id))
+    }
+
+    /// Publish `Path` with initial value `init` and flags `flags`. It
+    /// is an error for the same publisher to publish the same path
+    /// twice, however different publishers may publish a given path
+    /// as many times as they like. Subscribers will then pick
+    /// randomly among the advertised publishers when subscribing. See
+    /// `subscriber`
+    pub fn publish_with_flags<T>(
+        &self,
+        flags: PublishFlags,
+        path: Path,
+        init: T,
+    ) -> Result<Val>
+    where
+        T: TryInto<Value>,
+        <T as TryInto<Value>>::Error: std::error::Error + Send + Sync + 'static,
+    {
+        self.publish_with_flags_and_writes(flags, path, init, None)
     }
 
     /// Create an alias to an already published value at `path`. This
@@ -1228,7 +1284,8 @@ impl Publisher {
         if !pb.by_id.contains_key(&id) {
             bail!("no such value published by this publisher")
         }
-        pb.publish(id, flags, path.clone())?;
+        pb.check_publish(&path)?;
+        pb.publish(id, flags, path.clone());
         let v = pb.by_id.get_mut(&id).unwrap();
         match &mut v.aliases {
             Some(a) => {
@@ -1321,6 +1378,9 @@ impl Publisher {
         }
         let (tx, rx) = unbounded();
         let mut pb = self.0.lock();
+        if pb.default.contains_key(&base) {
+            bail!("default is already published")
+        }
         if pb.stop.is_none() {
             bail!("publisher is dead")
         }
@@ -1519,29 +1579,7 @@ impl Publisher {
     /// If you no longer wish to accept writes for an id you can drop
     /// all registered channels, or call `stop_writes`.
     pub fn writes(&self, id: Id, tx: Sender<Pooled<Vec<WriteRequest>>>) {
-        let mut pb = self.0.lock();
-        if pb.by_id.contains_key(&id) {
-            let e = pb
-                .on_write_chans
-                .entry(ChanWrap(tx.clone()))
-                .or_insert_with(|| (ChanId::new(), HashSet::new()));
-            e.1.insert(id);
-            let cid = e.0;
-            let mut gc = Vec::new();
-            let ow = pb.on_write.entry(id).or_insert_with(Vec::new);
-            ow.retain(|(_, c)| {
-                if c.is_closed() {
-                    gc.push(ChanWrap(c.clone()));
-                    false
-                } else {
-                    true
-                }
-            });
-            ow.push((cid, tx));
-            for c in gc {
-                pb.on_write_chans.remove(&c);
-            }
-        }
+        self.0.lock().writes(id, tx)
     }
 
     /// Stop accepting writes to the specified id

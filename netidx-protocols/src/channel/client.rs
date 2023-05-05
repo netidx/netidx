@@ -86,11 +86,11 @@ pub struct Connection {
 
 impl Connection {
     async fn connect_singleton(subscriber: &Subscriber, path: Path) -> Result<Self> {
-        let to = Duration::from_secs(3);
+        let to = Duration::from_secs(15);
         let (tx, rx) = mpsc::channel(5);
         let mut n = 0;
         let con = loop {
-            if n > 7 {
+            if n > 3 {
                 break subscriber
                     .subscribe_nondurable_one(path.clone(), Some(to))
                     .await?;
@@ -113,18 +113,15 @@ impl Connection {
             dirty: AtomicBool::new(false),
             receiver: Mutex::new(Receiver { updates: rx, queued: VecDeque::new() }),
         };
-        let to = Duration::from_millis(100);
-        loop {
-            con.send(Value::from("ready"))?;
-            match time::timeout(to, con.recv_one()).await {
-                Err(_) => (),
-                Ok(Err(e)) => return Err(e),
-                Ok(Ok(Value::String(s))) if &*s == "ready" => {
-                    con.send(Value::from("go"))?;
-                    break;
-                }
-                _ => (),
-            }
+        con.send(Value::from("ready"))?;
+        match time::timeout(Duration::from_secs(15), con.recv_one()).await {
+            Err(_) => bail!("timeout waiting for channel handshake"),
+            Ok(Err(e)) => return Err(e),
+            Ok(Ok(Value::String(s))) if &*s == "ready" => con.send(Value::from("go"))?,
+            Ok(Ok(v)) => bail!(
+                "unexpected channel handshake, expected Value::String(\"ready\") got {}",
+                v
+            ),
         }
         Ok(con)
     }
@@ -132,7 +129,7 @@ impl Connection {
     /// Connect to the endpoint at the specified path. The endpoint
     /// may be either a listener or a singleton.
     pub async fn connect(subscriber: &Subscriber, path: Path) -> Result<Self> {
-        let to = Duration::from_secs(3);
+        let to = Duration::from_secs(15);
         let acceptor = subscriber.subscribe(path.clone());
         time::timeout(to, acceptor.wait_subscribed()).await??;
         match acceptor.last() {

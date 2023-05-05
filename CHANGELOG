@@ -1,6 +1,11 @@
-* 0.19.7 protocols
+* 0.19.5 protocols 0.19.8 netidx
 
   - add more context to channel errors
+
+  - fix a race in connect_singleton
+
+  - add publish_with_flags_and_writes to eliminate a race between
+    publishing and registering a write channel.
 
 * 0.19.14 archive
 

@@ -112,13 +112,13 @@ pub async fn singleton_with_flags(
     timeout: Option<Duration>,
     path: Path,
 ) -> Result<Singleton> {
-    let val = publisher.publish_with_flags(
+    let (tx, rx) = mpsc::channel(5);
+    let val = publisher.publish_with_flags_and_writes(
         flags | PublishFlags::ISOLATED,
         path.clone(),
         Value::from("connection"),
+        Some(tx),
     )?;
-    let (tx, rx) = mpsc::channel(5);
-    publisher.writes(val.id(), tx);
     publisher.flushed().await;
     Ok(Singleton {
         publisher: publisher.clone(),
@@ -158,17 +158,17 @@ impl Singleton {
                 queued: VecDeque::new(),
             }),
         };
-        for _ in 1..3 {
-            let to = Duration::from_secs(3);
-            match time::timeout(to, con.recv_one()).await?? {
-                Value::String(s) if &*s == "ready" => {
-                    con.send_one(Value::from("ready")).await?
-                }
-                Value::String(s) if &*s == "go" => return Ok(con),
-                _ => (),
+        let to = Duration::from_secs(15);
+        match time::timeout(to, con.recv_one()).await?? {
+            Value::String(s) if &*s == "ready" => {
+                con.send_one(Value::from("ready")).await?
             }
+            v => bail!("unexpected handshake, expected String(\"ready\") got {}", v),
         }
-        bail!("protocol negotiation failed")
+        match time::timeout(to, con.recv_one()).await?? {
+            Value::String(s) if &*s == "go" => return Ok(con),
+            v => bail!("unexpected handshake, expected String(\"go\") got {}", v),
+        }
     }
 }
 
@@ -312,10 +312,13 @@ impl Listener {
         path: Path,
     ) -> Result<Listener> {
         let publisher = publisher.clone();
-        let listener =
-            publisher.publish_with_flags(flags, path.clone(), Value::from("channel"))?;
         let (tx_waiting, rx_waiting) = mpsc::channel(50);
-        publisher.writes(listener.id(), tx_waiting);
+        let listener = publisher.publish_with_flags_and_writes(
+            flags,
+            path.clone(),
+            Value::from("channel"),
+            Some(tx_waiting),
+        )?;
         publisher.flushed().await;
         Ok(Self {
             publisher,
