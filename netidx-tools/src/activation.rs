@@ -482,11 +482,7 @@ async fn run_server(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()
 }
 
 #[tokio::main]
-pub(super) async fn tokio_run(
-    cfg: Config,
-    auth: DesiredAuth,
-    params: Params,
-) -> Result<()> {
+async fn tokio_run(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
     run_server(cfg, auth, params).await.context("activation")
 }
 

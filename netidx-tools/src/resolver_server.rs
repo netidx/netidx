@@ -24,7 +24,7 @@ pub(crate) struct Params {
 }
 
 #[tokio::main]
-pub(crate) async fn tokio_run(config: Config, params: Params) -> Result<()> {
+async fn tokio_run(config: Config, params: Params) -> Result<()> {
     let _server = Server::new(config, params.delay_reads, params.id)
         .await
         .context("starting server")?;
