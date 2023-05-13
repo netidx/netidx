@@ -136,11 +136,16 @@ enum Opt {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    env_logger::init();
+async fn tokio_main() -> Result<()> {
     match Opt::from_args() {
         #[cfg(unix)]
-        Opt::ResolverServer(p) => resolver_server::run(p).await,
+        Opt::Activation { .. } => {
+            panic!("activation server cannot be initialized from async");
+        }
+        #[cfg(unix)]
+        Opt::ResolverServer(_) => {
+            panic!("resolver server cannot be initialized from async")
+        }
         Opt::Resolver { common, cmd } => {
             let (cfg, auth) = common.load();
             resolver::run(cfg, auth, cmd).await
@@ -158,16 +163,9 @@ async fn main() -> Result<()> {
             let (cfg, auth) = common.load();
             container::run(cfg, auth, params).await
         }
-        Opt::RecordClient { cmd } => {
-            record_client::run(cmd).await
-        },
+        Opt::RecordClient { cmd } => record_client::run(cmd).await,
         #[cfg(unix)]
         Opt::Record { config, example } => recorder::run(config, example).await,
-        #[cfg(unix)]
-        Opt::Activation { common, params } => {
-            let (cfg, auth) = common.load();
-            activation::run(cfg, auth, params).await
-        }
         Opt::Stress { cmd } => match cmd {
             Stress::Subscriber { common, params } => {
                 let (cfg, auth) = common.load();
@@ -190,5 +188,22 @@ async fn main() -> Result<()> {
             let (cfg, auth) = common.load();
             wsproxy::run(cfg, auth, publisher, proxy).await
         }
+    }
+}
+
+// Daemonization and tokio don't play well together. The best practice is to daemonize
+// as early as possible, before the async runtime is initialized. This means we can't
+// use the tokio_main macro on main, so we short-circuit ResolverServer handling here.
+fn main() -> Result<()> {
+    env_logger::init();
+    let opt = Opt::from_args();
+    match opt {
+        #[cfg(unix)]
+        Opt::ResolverServer(p) => resolver_server::run(p),
+        Opt::Activation { common, params } => {
+            let (cfg, auth) = common.load();
+            activation::run(cfg, auth, params)
+        }
+        _ => tokio_main(),
     }
 }

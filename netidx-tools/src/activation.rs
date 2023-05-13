@@ -1,4 +1,4 @@
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use daemonize::Daemonize;
 use futures::{future::join_all, prelude::*, select_biased, stream::SelectAll};
 use log::{error, info, warn};
@@ -481,7 +481,12 @@ async fn run_server(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()
     Ok(())
 }
 
-pub(super) async fn run(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
+#[tokio::main]
+async fn tokio_run(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
+    run_server(cfg, auth, params).await.context("activation")
+}
+
+pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
     if !params.foreground {
         let mut d = Daemonize::new();
         if let Some(pid_file) = params.pid_file.as_ref() {
@@ -489,5 +494,5 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, params: Params) -> Resul
         }
         d.start().context("failed to daemonize")?
     }
-    run_server(cfg, auth, params).await.context("activation")
+    tokio_run(cfg, auth, params)
 }
