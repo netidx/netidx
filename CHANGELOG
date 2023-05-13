@@ -1,3 +1,8 @@
+* 0.19.19 tools
+
+  - fix bug that caused daemonized resolver server and activation
+    server to fail.
+
 * 0.19.5 protocols 0.19.8 netidx
 
   - add more context to channel errors
