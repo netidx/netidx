@@ -42,7 +42,7 @@ num_cpus = "1"
 triomphe = "0.1"
 arcstr = { version = "1", features = ["serde"] }
 rustls-pemfile = "1"
-rustls = "0.21"
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
 tokio-rustls = "0.24"
 webpki = "0.22"
 x509-parser = "0.15"

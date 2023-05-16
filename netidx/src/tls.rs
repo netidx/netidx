@@ -16,6 +16,19 @@ pub(crate) fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
         .collect())
 }
 
+// TODO: second pass feature: verify that the crls file is signed by our CA
+pub(crate) fn load_crls(crls_path: &str) -> Result<Vec<Vec<u8>>> {
+    let crl_bytes = std::fs::read(crls_path)?;
+    let (_, crl) = x509_parser::parse_x509_crl(&crl_bytes)?;
+    let revoked = crl
+        .tbs_cert_list
+        .revoked_certificates
+        .iter()
+        .map(|r| r.raw_serial().to_vec())
+        .collect::<Vec<_>>();
+    Ok(revoked)
+}
+
 pub(crate) fn get_common_name(cert: &[u8]) -> Result<Option<String>> {
     let (_, cert) = x509_parser::parse_x509_certificate(&cert)?;
     let name = cert
@@ -82,6 +95,78 @@ pub(crate) fn load_private_key(
         bail!("expected a key in pem format")
     }
 }
+struct CustomVerifier {
+    webpki_verifier: rustls::client::WebPkiVerifier,
+    revoked_certificate_serials: Vec<Vec<u8>>,
+}
+
+impl rustls::client::ServerCertVerifier for CustomVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::Certificate,
+        intermediates: &[rustls::Certificate],
+        server_name: &rustls::ServerName,
+        scts: &mut dyn Iterator<Item = &[u8]>,
+        ocsp_response: &[u8],
+        now: std::time::SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        // first, do normal verification
+        rustls::client::WebPkiVerifier::verify_server_cert(
+            &self.webpki_verifier,
+            end_entity,
+            intermediates,
+            server_name,
+            scts,
+            ocsp_response,
+            now,
+        )?;
+        // then see if any certificate appears on the revocation list
+        let () = match x509_parser::parse_x509_certificate(&end_entity.0) {
+            Err(e) => {
+                return Err(rustls::Error::General(format!(
+                    "failed to parse end entity certificate {:?}: {}",
+                    end_entity.0, e
+                )));
+            }
+            Ok((_, cert)) => {
+                if self
+                    .revoked_certificate_serials
+                    .iter()
+                    .any(|r| r == cert.tbs_certificate.raw_serial())
+                {
+                    return Err(rustls::Error::General("revoked certificate".into()));
+                }
+            }
+        };
+        for certificate in intermediates {
+            match x509_parser::parse_x509_certificate(&certificate.0) {
+                Err(e) => {
+                    return Err(rustls::Error::General(format!(
+                        "failed to parse intermediate certificate {:?}: {}",
+                        &certificate.0, e
+                    )));
+                }
+                Ok((_, cert)) => {
+                    let cert_raw_serial = cert.tbs_certificate.raw_serial();
+                    if self
+                        .revoked_certificate_serials
+                        .iter()
+                        .any(|r| r == cert_raw_serial)
+                    {
+                        return Err(rustls::Error::General(
+                            format!(
+                                "revoked certificate, serial number: {:?}",
+                                cert_raw_serial
+                            )
+                            .into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(rustls::client::ServerCertVerified::assertion())
+    }
+}
 
 pub(crate) fn create_tls_connector(
     askpass: Option<&str>,
@@ -95,10 +180,16 @@ pub(crate) fn create_tls_connector(
     }
     let certs = load_certs(certificate)?;
     let private_key = load_private_key(askpass, private_key)?;
+    let revoked_certificate_serials = load_crls("crls.txt")?;
     let mut config = rustls::ClientConfig::builder()
         .with_safe_defaults()
-        .with_root_certificates(root_store)
+        .with_root_certificates(root_store.clone())
         .with_single_cert(certs, private_key)?;
+
+    config.dangerous().set_certificate_verifier(Arc::new(CustomVerifier {
+        revoked_certificate_serials,
+        webpki_verifier: rustls::client::WebPkiVerifier::new(root_store, None),
+    }));
     config.resumption = rustls::client::Resumption::in_memory_sessions(256);
     Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
 }
