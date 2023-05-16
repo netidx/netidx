@@ -121,47 +121,54 @@ impl rustls::client::ServerCertVerifier for CustomVerifier {
             now,
         )?;
         // then see if any certificate appears on the revocation list
-        let () = match x509_parser::parse_x509_certificate(&end_entity.0) {
-            Err(e) => {
-                return Err(rustls::Error::General(format!(
+        x509_parser::parse_x509_certificate(&end_entity.0)
+            .map_err(|e| {
+                rustls::Error::General(format!(
                     "failed to parse end entity certificate {:?}: {}",
                     end_entity.0, e
-                )));
-            }
-            Ok((_, cert)) => {
+                ))
+            })
+            .and_then(|(_, cert)| {
+                let cert_raw_serial_lowercase =
+                    cert.tbs_certificate.raw_serial().to_ascii_lowercase();
                 if self
                     .revoked_certificate_serials
                     .iter()
-                    .any(|r| r == cert.tbs_certificate.raw_serial())
+                    .any(|r| r.to_ascii_lowercase() == cert_raw_serial_lowercase)
                 {
-                    return Err(rustls::Error::General("revoked certificate".into()));
+                    Err(rustls::Error::General(format!(
+                        "revoked certificate, serial number: {:?}",
+                        cert_raw_serial_lowercase
+                    ))
+                    .into())
+                } else {
+                    Ok(())
                 }
-            }
-        };
+            })?;
+
+        // check if any intermediates are revoked
         for certificate in intermediates {
-            match x509_parser::parse_x509_certificate(&certificate.0) {
-                Err(e) => {
-                    return Err(rustls::Error::General(format!(
+            let (_, cert) =
+                x509_parser::parse_x509_certificate(&certificate.0).map_err(|e| {
+                    rustls::Error::General(format!(
                         "failed to parse intermediate certificate {:?}: {}",
                         &certificate.0, e
-                    )));
-                }
-                Ok((_, cert)) => {
-                    let cert_raw_serial = cert.tbs_certificate.raw_serial();
-                    if self
-                        .revoked_certificate_serials
-                        .iter()
-                        .any(|r| r == cert_raw_serial)
-                    {
-                        return Err(rustls::Error::General(
-                            format!(
-                                "revoked certificate, serial number: {:?}",
-                                cert_raw_serial
-                            )
-                            .into(),
-                        ));
-                    }
-                }
+                    ))
+                })?;
+            let cert_raw_serial_lowercase =
+                cert.tbs_certificate.raw_serial().to_ascii_lowercase();
+            if self
+                .revoked_certificate_serials
+                .iter()
+                .any(|r| r.to_ascii_lowercase() == cert_raw_serial_lowercase)
+            {
+                return Err(rustls::Error::General(
+                    format!(
+                        "revoked certificate, serial number: {:?}",
+                        cert_raw_serial_lowercase
+                    )
+                    .into(),
+                ));
             }
         }
         Ok(rustls::client::ServerCertVerified::assertion())
