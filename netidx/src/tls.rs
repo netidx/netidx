@@ -187,6 +187,8 @@ pub(crate) fn create_tls_connector(
     }
     let certs = load_certs(certificate)?;
     let private_key = load_private_key(askpass, private_key)?;
+    // FIXME: add a parameter that checks to see if path to crls.txt is provided
+    // FIXME: add a global command-line option/config option for crls.txt
     let revoked_certificate_serials = load_crls("crls.txt")?;
     let mut config = rustls::ClientConfig::builder()
         .with_safe_defaults()
