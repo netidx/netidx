@@ -107,7 +107,7 @@ pub mod file {
             if dir.is_file() {
                 return Ok(dir);
             }
-            bail!("no default config file was found")
+            bail!("no netidx default client config file was found")
         }
 
         pub fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
