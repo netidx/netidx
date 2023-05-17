@@ -22,13 +22,13 @@ use std::{
 };
 
 /// The on disk format, encoded as JSON
-mod file {
+pub mod file {
     use crate::chars::Chars;
     use std::{collections::BTreeMap, net::SocketAddr};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) enum Auth {
+    pub enum Auth {
         Anonymous,
         Krb5(String),
         Local(String),
@@ -49,7 +49,7 @@ mod file {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct TlsIdentity {
+    pub struct TlsIdentity {
         pub trusted: String,
         pub certificate: String,
         pub private_key: String,
@@ -57,7 +57,7 @@ mod file {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct Tls {
+    pub struct Tls {
         #[serde(default)]
         pub default_identity: Option<String>,
         pub identities: BTreeMap<String, TlsIdentity>,
@@ -67,15 +67,15 @@ mod file {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct Config {
-        pub(super) base: String,
-        pub(super) addrs: Vec<(SocketAddr, Auth)>,
+    pub struct Config {
+        pub base: String,
+        pub addrs: Vec<(SocketAddr, Auth)>,
         #[serde(default)]
-        pub(super) tls: Option<Tls>,
+        pub tls: Option<Tls>,
         #[serde(default)]
-        pub(super) default_auth: super::DefaultAuthMech,
+        pub default_auth: super::DefaultAuthMech,
         #[serde(default)]
-        pub(super) default_bind_config: Option<String>,
+        pub default_bind_config: Option<String>,
     }
 }
 
