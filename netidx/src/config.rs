@@ -7,24 +7,22 @@ use crate::{
     tls, utils,
 };
 use anyhow::Result;
-use log::debug;
 use serde_json::from_str;
 use std::{
-    cmp::min,
-    collections::BTreeMap,
-    convert::AsRef,
-    convert::Into,
-    env,
-    fs::read_to_string,
-    net::SocketAddr,
-    path::{Path as FsPath, PathBuf},
-    str,
+    cmp::min, collections::BTreeMap, convert::AsRef, convert::Into, fs::read_to_string,
+    net::SocketAddr, path::Path as FsPath, str,
 };
 
 /// The on disk format, encoded as JSON
 pub mod file {
     use crate::chars::Chars;
-    use std::{collections::BTreeMap, net::SocketAddr};
+    use anyhow::Result;
+    use std::{
+        collections::BTreeMap,
+        env,
+        net::SocketAddr,
+        path::{Path, PathBuf},
+    };
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -76,6 +74,49 @@ pub mod file {
         pub default_auth: super::DefaultAuthMech,
         #[serde(default)]
         pub default_bind_config: Option<String>,
+    }
+
+    impl Config {
+        pub fn default_path() -> Result<PathBuf> {
+            if let Some(cfg) = env::var_os("NETIDX_CFG") {
+                let cfg = PathBuf::from(cfg);
+                if cfg.is_file() {
+                    return Ok(cfg);
+                }
+            }
+            if let Some(mut cfg) = dirs::config_dir() {
+                cfg.push("netidx");
+                cfg.push("client.json");
+                if cfg.is_file() {
+                    return Ok(cfg);
+                }
+            }
+            if let Some(mut home) = dirs::home_dir() {
+                home.push(".config");
+                home.push("netidx");
+                home.push("client.json");
+                if home.is_file() {
+                    return Ok(home);
+                }
+            }
+            let dir = if cfg!(windows) {
+                PathBuf::from("C:\\netidx\\client.json")
+            } else {
+                PathBuf::from("/etc/netidx/client.json")
+            };
+            if dir.is_file() {
+                return Ok(dir);
+            }
+            bail!("no default config file was found")
+        }
+
+        pub fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
+            Ok(serde_json::from_reader(std::fs::File::open(file)?)?)
+        }
+
+        pub fn load_default() -> Result<Config> {
+            Self::load(Self::default_path()?)
+        }
     }
 }
 
@@ -268,7 +309,7 @@ impl Config {
         }
     }
 
-    /// Load the cluster config from the specified file.
+    /// Load the config from the specified file.
     pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
         Config::parse(&read_to_string(file)?)
     }
@@ -288,39 +329,6 @@ impl Config {
     /// It will load the first file that exists, if that file fails to
     /// load then Err will be returned.
     pub fn load_default() -> Result<Config> {
-        if let Some(cfg) = env::var_os("NETIDX_CFG") {
-            let cfg = PathBuf::from(cfg);
-            if cfg.is_file() {
-                debug!("loading {}", cfg.to_string_lossy());
-                return Config::load(cfg);
-            }
-        }
-        if let Some(mut cfg) = dirs::config_dir() {
-            cfg.push("netidx");
-            cfg.push("client.json");
-            if cfg.is_file() {
-                debug!("loading {}", cfg.to_string_lossy());
-                return Config::load(cfg);
-            }
-        }
-        if let Some(mut home) = dirs::home_dir() {
-            home.push(".config");
-            home.push("netidx");
-            home.push("client.json");
-            if home.is_file() {
-                debug!("loading {}", home.to_string_lossy());
-                return Config::load(home);
-            }
-        }
-        let dir = if cfg!(windows) {
-            PathBuf::from("C:\\netidx\\client.json")
-        } else {
-            PathBuf::from("/etc/netidx/client.json")
-        };
-        if dir.is_file() {
-            debug!("loading {}", dir.to_string_lossy());
-            return Config::load(dir);
-        }
-        bail!("no default config file was found")
+        Self::load(file::Config::default_path()?)
     }
 }
