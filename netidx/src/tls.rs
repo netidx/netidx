@@ -26,26 +26,29 @@ pub(crate) fn get_common_name(cert: &[u8]) -> Result<Option<String>> {
     Ok(name)
 }
 
-fn load_key_password(askpass: &str, path: &str) -> Result<String> {
+fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
     use keyring::Entry;
     use std::process::Command;
     let entry = Entry::new("netidx", path)?;
     info!("loading password for {} from the system keyring", path);
     match entry.get_password() {
         Ok(password) => Ok(password),
-        Err(e) => {
-            info!("failed to find password entry for netidx {}, error {}", path, e);
-            let res = Command::new(askpass).arg(path).output()?;
-            let password = String::from_utf8_lossy(&res.stdout);
-            if let Err(e) = entry.set_password(&password) {
-                warn!("failed to set password entry for netidx {}, error {}", path, e);
-            }
-            Ok(password.into_owned())
+        Err(e) => match askpass {
+	    None => bail!("password isn't in the keychain and no askpass specified"),
+	    Some(askpass) => {
+		info!("failed to find password entry for netidx {}, error {}", path, e);
+		let res = Command::new(askpass).arg(path).output()?;
+		let password = String::from_utf8_lossy(&res.stdout);
+		if let Err(e) = entry.set_password(&password) {
+                    warn!("failed to set password entry for netidx {}, error {}", path, e);
+		}
+		Ok(password.into_owned())
+	    }
         }
     }
 }
 
-pub(crate) fn load_private_key(
+pub fn load_private_key(
     askpass: Option<&str>,
     path: &str,
 ) -> Result<rustls::PrivateKey> {
@@ -66,10 +69,7 @@ pub(crate) fn load_private_key(
             Err(e) => bail!("failed to parse encrypted key {}", e),
         };
         debug!("decrypting key");
-        let mut password = match askpass {
-            Some(askpass) => load_key_password(askpass, path)?,
-            None => bail!("loading encrypted private keys not supported"),
-        };
+        let mut password = load_key_password(askpass, path)?;
         let key = match key.decrypt(&password) {
             Ok(key) => key,
             Err(e) => bail!("failed to decrypt key {}", e),
