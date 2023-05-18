@@ -137,7 +137,7 @@ pub struct Tls {
 
 impl Tls {
     // e.g. marketdata.architect.com => com.architect.marketdata.
-    pub(crate) fn reverse_domain_name(name: &mut String) {
+    pub fn reverse_domain_name(name: &mut String) {
         const MAX: usize = 1024;
         let mut tmp = [0u8; MAX + 1];
         let mut i = 0;
@@ -150,7 +150,7 @@ impl Tls {
         name.push_str(str::from_utf8(&mut tmp[0..i]).unwrap());
     }
 
-    pub(crate) fn default_identity(&self) -> &TlsIdentity {
+    pub fn default_identity(&self) -> &TlsIdentity {
         &self.identities[&self.default_identity]
     }
 

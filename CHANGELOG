@@ -1,3 +1,7 @@
+* 0.19.12 netidx
+
+  - make some more functions public
+
 * 0.19.11 netidx
 
   - make the tls module public

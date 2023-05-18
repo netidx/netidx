@@ -26,7 +26,7 @@ pub(crate) fn get_common_name(cert: &[u8]) -> Result<Option<String>> {
     Ok(name)
 }
 
-fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
+pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
     use keyring::Entry;
     use std::process::Command;
     let entry = Entry::new("netidx", path)?;
