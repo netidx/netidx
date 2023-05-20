@@ -1,3 +1,9 @@
+* 0.19.14 netidx
+
+  - public tls function to precache key passwords in the keychain
+
+  - trim cr and lf from passwords read from askpass
+
 * 0.19.13 netidx
 
   - more config file path exposure
