@@ -77,6 +77,21 @@ pub mod file {
     }
 
     impl Config {
+	/// This will return the platform default user config file. It
+	/// will not verify that the file exists, and it will not
+	/// check the system default.
+	pub fn user_platform_default_path() -> Result<PathBuf> {
+            if let Some(mut cfg) = dirs::config_dir() {
+                cfg.push("netidx");
+                cfg.push("client.json");
+                return Ok(cfg);
+            }
+	    bail!("default netidx config path could not be determined")
+	}
+
+	/// This will search the user default, and system default
+	/// paths for a netidx config file and return the first one it
+	/// finds. User default paths take priority over system defaults.
         pub fn default_path() -> Result<PathBuf> {
             if let Some(cfg) = env::var_os("NETIDX_CFG") {
                 let cfg = PathBuf::from(cfg);

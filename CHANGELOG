@@ -1,3 +1,7 @@
+* 0.19.13 netidx
+
+  - more config file path exposure
+
 * 0.19.12 netidx
 
   - make some more functions public
