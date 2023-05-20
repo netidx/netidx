@@ -26,6 +26,8 @@ pub(crate) fn get_common_name(cert: &[u8]) -> Result<Option<String>> {
     Ok(name)
 }
 
+/// load the password for the key at the specified path, or else call
+/// askpass to ask the user, or else fail.
 pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
     use keyring::Entry;
     use std::process::Command;
@@ -39,13 +41,21 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
 		info!("failed to find password entry for netidx {}, error {}", path, e);
 		let res = Command::new(askpass).arg(path).output()?;
 		let password = String::from_utf8_lossy(&res.stdout);
-		if let Err(e) = entry.set_password(&password) {
+		let password = password.trim_matches(|c| c == '\r' || c == '\n');
+		if let Err(e) = entry.set_password(password) {
                     warn!("failed to set password entry for netidx {}, error {}", path, e);
 		}
-		Ok(password.into_owned())
+		Ok(String::from(password))
 	    }
         }
     }
+}
+
+/// Save the password for the specified key in the user's keychain.
+pub fn save_password_for_key(path: &str, password: &str) -> Result<()> {
+    use keyring::Entry;
+    let entry = Entry::new("netidx", path)?;
+    Ok(entry.set_password(password)?)
 }
 
 pub fn load_private_key(
