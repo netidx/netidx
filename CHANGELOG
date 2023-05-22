@@ -1,3 +1,35 @@
+* 0.19.15 netidx
+
+  - change the way we use certificates in tls mode
+
+     - the cn is still the string passed to id map for permissions
+
+     - subjectAltName is expected to be a dns name with exactly 1
+       entry, this is used as the server name
+
+     - this should be backwards compatible with what we were doing
+       before, because rustls always required subjectAltName to be
+       specified. So the main change is the CommonName can be anything
+       now.
+
+  - implement additional id mappers, specify id_map_type in the config
+
+     - DoNotMap: don't map ids at all, just use the raw string. In the
+       case of kerberos this will be the user principal name of the
+       user. In the case of tls this will be the common name on the
+       certificate. In the case of local this will be the uidnumber of
+       the user.
+
+     - Command: The previous behavior, id_map_command will be called
+       to translate the raw user into a set of users/groups. This is
+       the default
+
+     - Socket: The id_map_command string must be specified and should
+       be the path to a listening unix domain socket. The resolver
+       will connect to the socket and write the user name followed by
+       a newline. It will expect the server to write the response in
+       the same format as /usr/bin/id and then close the socket.
+
 * 0.19.14 netidx
 
   - public tls function to precache key passwords in the keychain

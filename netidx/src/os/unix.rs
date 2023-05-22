@@ -75,7 +75,7 @@ impl Mapper {
             }
         };
         match &self {
-            Mapper::DoNotMap => bail!("can't use raw user names with local auth"),
+            Mapper::DoNotMap => Ok(ArcStr::from(format!("{}", user))),
             Mapper::Command(cmd) => task::block_in_place(|| {
                 let out = Command::new(&**cmd).arg(user.to_string()).output()?;
                 parse(String::from_utf8_lossy(&out.stdout).as_ref())
