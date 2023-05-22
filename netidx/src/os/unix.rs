@@ -80,13 +80,13 @@ impl Mapper {
                 let out = Command::new(&**cmd).arg(user.to_string()).output()?;
                 parse(String::from_utf8_lossy(&out.stdout).as_ref())
             }),
-	    Mapper::Socket(path) => task::block_in_place(|| {
-		let mut sock = UnixStream::connect(&**path)?;
-		sock.write_all(format!("{}\n", user).as_bytes())?;
-		let mut reply = vec![];
-		sock.read_to_end(&mut reply)?;
-		parse(String::from_utf8_lossy(&reply).as_ref())
-	    })
+            Mapper::Socket(path) => task::block_in_place(|| {
+                let mut sock = UnixStream::connect(&**path)?;
+                sock.write_all(format!("{}\n", user).as_bytes())?;
+                let mut reply = vec![];
+                sock.read_to_end(&mut reply)?;
+                parse(String::from_utf8_lossy(&reply).as_ref())
+            }),
         }
     }
 
