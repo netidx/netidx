@@ -2,6 +2,7 @@ use crate::config::{Tls, TlsIdentity};
 use anyhow::Result;
 use log::{debug, info, warn};
 use parking_lot::Mutex;
+use pkcs8::{der::pem::PemLabel, EncryptedPrivateKeyInfo, PrivateKeyInfo};
 use std::{
     collections::{BTreeMap, Bound},
     fmt, mem,
@@ -36,18 +37,21 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
     match entry.get_password() {
         Ok(password) => Ok(password),
         Err(e) => match askpass {
-	    None => bail!("password isn't in the keychain and no askpass specified"),
-	    Some(askpass) => {
-		info!("failed to find password entry for netidx {}, error {}", path, e);
-		let res = Command::new(askpass).arg(path).output()?;
-		let password = String::from_utf8_lossy(&res.stdout);
-		let password = password.trim_matches(|c| c == '\r' || c == '\n');
-		if let Err(e) = entry.set_password(password) {
-                    warn!("failed to set password entry for netidx {}, error {}", path, e);
-		}
-		Ok(String::from(password))
-	    }
-        }
+            None => bail!("password isn't in the keychain and no askpass specified"),
+            Some(askpass) => {
+                info!("failed to find password entry for netidx {}, error {}", path, e);
+                let res = Command::new(askpass).arg(path).output()?;
+                let password = String::from_utf8_lossy(&res.stdout);
+                let password = password.trim_matches(|c| c == '\r' || c == '\n');
+                if let Err(e) = entry.set_password(password) {
+                    warn!(
+                        "failed to set password entry for netidx {}, error {}",
+                        path, e
+                    );
+                }
+                Ok(String::from(password))
+            }
+        },
     }
 }
 
@@ -58,38 +62,49 @@ pub fn save_password_for_key(path: &str, password: &str) -> Result<()> {
     Ok(entry.set_password(password)?)
 }
 
-pub fn load_private_key(
-    askpass: Option<&str>,
-    path: &str,
-) -> Result<rustls::PrivateKey> {
-    use pkcs8::{
-        der::{pem::PemLabel, zeroize::Zeroize},
-        EncryptedPrivateKeyInfo, PrivateKeyInfo, SecretDocument,
-    };
-    debug!("reading key from {}", path);
-    let key = std::fs::read_to_string(path)?;
-    let (label, doc) = match SecretDocument::from_pem(&key) {
-        Ok((label, doc)) => (label, doc),
-        Err(e) => bail!("failed to load pem {}, error: {}", path, e),
-    };
-    debug!("key label is {}", label);
-    if label == EncryptedPrivateKeyInfo::PEM_LABEL {
-        let key = match EncryptedPrivateKeyInfo::try_from(doc.as_bytes()) {
-            Ok(key) => key,
-            Err(e) => bail!("failed to parse encrypted key {}", e),
-        };
-        debug!("decrypting key");
-        let mut password = load_key_password(askpass, path)?;
-        let key = match key.decrypt(&password) {
-            Ok(key) => key,
-            Err(e) => bail!("failed to decrypt key {}", e),
-        };
-        password.zeroize();
-        Ok(rustls::PrivateKey(Vec::from(key.as_bytes())))
-    } else if label == PrivateKeyInfo::PEM_LABEL {
-        Ok(rustls::PrivateKey(Vec::from(doc.as_bytes())))
+pub enum Key {
+    Encrypted(Vec<u8>),
+    Clear(Vec<u8>),
+}
+
+pub fn load_raw_key_from_pem(path: &str) -> Result<Key> {
+    use pem::parse;
+    let key = parse(std::fs::read(path)?)?;
+    if key.tag() == EncryptedPrivateKeyInfo::PEM_LABEL {
+        Ok(Key::Encrypted(key.into_contents()))
+    } else if key.tag() == PrivateKeyInfo::PEM_LABEL {
+        Ok(Key::Clear(key.into_contents()))
+    } else if key.tag() == "RSA PRIVATE KEY" {
+        // openssl does this, check the headers
+        if dbg!(key.headers()).get("Proc-Type") == Some("4,ENCRYPTED") {
+            Ok(Key::Encrypted(key.into_contents()))
+        } else {
+            Ok(Key::Clear(key.into_contents()))
+        }
     } else {
-        bail!("expected a key in pem format")
+        bail!("unknown pem label \"{}\"", key.tag())
+    }
+}
+
+pub fn load_private_key(askpass: Option<&str>, path: &str) -> Result<rustls::PrivateKey> {
+    use pkcs8::der::zeroize::Zeroize;
+    debug!("reading key from {}", path);
+    match load_raw_key_from_pem(path)? {
+        Key::Clear(raw) => Ok(rustls::PrivateKey(raw)),
+        Key::Encrypted(raw) => {
+            let key = match EncryptedPrivateKeyInfo::try_from(&raw[..]) {
+                Ok(key) => key,
+                Err(e) => bail!("failed to parse encrypted key {}", e),
+            };
+            debug!("decrypting key");
+            let mut password = load_key_password(askpass, path)?;
+            let key = match key.decrypt(&password) {
+                Ok(key) => key,
+                Err(e) => bail!("failed to decrypt key {}", e),
+            };
+            password.zeroize();
+            Ok(rustls::PrivateKey(Vec::from(key.as_bytes())))
+        }
     }
 }
 
