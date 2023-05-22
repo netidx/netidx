@@ -1,5 +1,5 @@
 use crate::config::{Tls, TlsIdentity};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, info, warn};
 use parking_lot::Mutex;
 use std::{
@@ -10,7 +10,8 @@ use std::{
 
 pub(crate) fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
     use std::{fs, io::BufReader};
-    Ok(rustls_pemfile::certs(&mut BufReader::new(fs::File::open(path)?))?
+    Ok(rustls_pemfile::certs(&mut BufReader::new(fs::File::open(path)?))
+        .context("parsing cert pem")?
         .into_iter()
         .map(|v| rustls::Certificate(v))
         .collect())
@@ -36,18 +37,21 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
     match entry.get_password() {
         Ok(password) => Ok(password),
         Err(e) => match askpass {
-	    None => bail!("password isn't in the keychain and no askpass specified"),
-	    Some(askpass) => {
-		info!("failed to find password entry for netidx {}, error {}", path, e);
-		let res = Command::new(askpass).arg(path).output()?;
-		let password = String::from_utf8_lossy(&res.stdout);
-		let password = password.trim_matches(|c| c == '\r' || c == '\n');
-		if let Err(e) = entry.set_password(password) {
-                    warn!("failed to set password entry for netidx {}, error {}", path, e);
-		}
-		Ok(String::from(password))
-	    }
-        }
+            None => bail!("password isn't in the keychain and no askpass specified"),
+            Some(askpass) => {
+                info!("failed to find password entry for netidx {}, error {}", path, e);
+                let res = Command::new(askpass).arg(path).output()?;
+                let password = String::from_utf8_lossy(&res.stdout);
+                let password = password.trim_matches(|c| c == '\r' || c == '\n');
+                if let Err(e) = entry.set_password(password) {
+                    warn!(
+                        "failed to set password entry for netidx {}, error {}",
+                        path, e
+                    );
+                }
+                Ok(String::from(password))
+            }
+        },
     }
 }
 
@@ -58,10 +62,7 @@ pub fn save_password_for_key(path: &str, password: &str) -> Result<()> {
     Ok(entry.set_password(password)?)
 }
 
-pub fn load_private_key(
-    askpass: Option<&str>,
-    path: &str,
-) -> Result<rustls::PrivateKey> {
+pub fn load_private_key(askpass: Option<&str>, path: &str) -> Result<rustls::PrivateKey> {
     use pkcs8::{
         der::{pem::PemLabel, zeroize::Zeroize},
         EncryptedPrivateKeyInfo, PrivateKeyInfo, SecretDocument,
@@ -100,15 +101,17 @@ pub(crate) fn create_tls_connector(
     private_key: &str,
 ) -> Result<tokio_rustls::TlsConnector> {
     let mut root_store = rustls::RootCertStore::empty();
-    for cert in load_certs(root_certificates)? {
-        root_store.add(&cert)?;
+    for cert in load_certs(root_certificates).context("loading root certs")? {
+        root_store.add(&cert).context("adding root cert")?;
     }
-    let certs = load_certs(certificate)?;
-    let private_key = load_private_key(askpass, private_key)?;
+    let certs = load_certs(certificate).context("loading user cert")?;
+    let private_key =
+        load_private_key(askpass, private_key).context("loading user private key")?;
     let mut config = rustls::ClientConfig::builder()
         .with_safe_defaults()
         .with_root_certificates(root_store)
-        .with_single_cert(certs, private_key)?;
+        .with_single_cert(certs, private_key)
+        .context("building rustls client config")?;
     config.resumption = rustls::client::Resumption::in_memory_sessions(256);
     Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
 }

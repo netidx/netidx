@@ -12,7 +12,7 @@ use crate::{
     tls,
     utils::Either,
 };
-use anyhow::{Error, Result};
+use anyhow::{Context, Error, Result};
 use cross_krb5::ClientCtx;
 use futures::{
     channel::{mpsc, oneshot},
@@ -142,10 +142,12 @@ async fn connect(
             }
             (DesiredAuth::Tls { .. }, Auth::Tls { name }) => {
                 let tls = tls.as_ref().ok_or_else(|| anyhow!("no tls cache"))?;
-                let ctx = task::block_in_place(|| tls.load(name))?;
+                let ctx = task::block_in_place(|| tls.load(name))
+                    .context("loading tls connector")?;
                 let hello = ClientHello::ReadOnly(AuthRead::Tls);
                 cwt!("hello", channel::write_raw(&mut con, &hello));
-                let name = rustls::ServerName::try_from(&**name)?;
+                let name = rustls::ServerName::try_from(&**name)
+                    .context("creating rustls servername")?;
                 let tls = ctx.connect(name, con).await?;
                 let mut con = Channel::new::<
                     ClientCtx,
@@ -213,7 +215,11 @@ async fn connection(
                                 }
                                 Err(e) => {
                                     con = None;
-                                    warn!("connect_read failed: {}", e);
+                                    warn!(
+                                        "connect_read failed: {}, {}",
+                                        e,
+                                        e.root_cause()
+                                    );
                                     continue;
                                 }
                             }
