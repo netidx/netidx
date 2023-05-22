@@ -321,11 +321,11 @@ impl Config {
                                 if cert.len() == 0 || cert.len() > 1 {
                                     bail!("certificate should contain exactly 1 cert")
                                 }
-                                match tls::get_common_name(&cert[0].0)? {
+                                match tls::get_names(&cert[0].0)? {
                                     None => {
                                         bail!("server certificate has no common name")
                                     }
-                                    Some(cn) if &cn != name => {
+                                    Some(names) if &names.cn != name => {
                                         bail!("name must match the common name")
                                     }
                                     Some(_) => (),

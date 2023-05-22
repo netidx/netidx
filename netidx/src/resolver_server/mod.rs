@@ -386,7 +386,8 @@ async fn ownership_check(
     }
     use publisher::Hello as PHello;
     let n = thread_rng().gen::<u128>();
-    let answer = utils::make_sha3_token([&n.to_be_bytes()[..], &secret.to_be_bytes()[..]]);
+    let answer =
+        utils::make_sha3_token([&n.to_be_bytes()[..], &secret.to_be_bytes()[..]]);
     time::timeout(timeout, con.send_one(&PHello::ResolverAuthenticate(ctx.id))).await??;
     let m = AuthChallenge { hash_method: HashMethod::Sha3_512, challenge: n };
     time::timeout(timeout, con.send_one(&m)).await??;
@@ -564,8 +565,20 @@ fn get_tls_uifo(
     let (_, server_con) = tls.get_ref();
     match server_con.peer_certificates() {
         Some([cert, ..]) => {
-            let user = tls::get_common_name(&cert.0)?;
-            Ok(a.1.write().users.ifo(id, user.as_ref().map(|s| s.as_str()))?)
+	    // CR estokes: document this.
+	    // if a subjectAltName exists then we use that as the user name
+	    // otherwise we use the common name on the certificate.
+            let names = tls::get_names(&cert.0)?;
+            Ok(a.1.write().users.ifo(
+                id,
+                names.as_ref().map(|names| {
+                    if names.alt_names.len() > 0 {
+                        names.alt_names[0].as_str()
+                    } else {
+                        names.cn.as_str()
+                    }
+                }),
+            )?)
         }
         Some(_) | None => bail!("tls handshake should be complete by now"),
     }

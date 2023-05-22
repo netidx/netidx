@@ -7,6 +7,7 @@ use std::{
     fmt, mem,
     sync::Arc,
 };
+use x509_parser::prelude::GeneralName;
 
 pub(crate) fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
     use std::{fs, io::BufReader};
@@ -17,14 +18,37 @@ pub(crate) fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
         .collect())
 }
 
-pub(crate) fn get_common_name(cert: &[u8]) -> Result<Option<String>> {
+#[derive(Debug)]
+pub struct Names {
+    pub cn: String,
+    pub alt_names: Vec<String>,
+}
+
+pub(crate) fn get_names(cert: &[u8]) -> Result<Option<Names>> {
     let (_, cert) = x509_parser::parse_x509_certificate(&cert)?;
-    let name = cert
+    let cn = cert
         .subject()
         .iter_common_name()
         .next()
         .and_then(|cn| cn.as_str().ok().map(String::from));
-    Ok(name)
+    let alt_names = cert
+        .subject_alternative_name()?
+        .map(|alt_name| &alt_name.value.general_names)
+        .unwrap_or(&vec![])
+        .into_iter()
+        .filter_map(|gn| match gn {
+            GeneralName::DNSName(d) => Some(String::from(*d)),
+            GeneralName::DirectoryName(d) => Some(d.to_string()),
+            GeneralName::EDIPartyName(d) => d.as_string().ok(),
+            GeneralName::IPAddress(_) => None,
+            GeneralName::OtherName(_, _) => None,
+            GeneralName::RFC822Name(d) => Some(String::from(*d)),
+            GeneralName::RegisteredID(_) => None,
+            GeneralName::URI(d) => Some(String::from(*d)),
+            GeneralName::X400Address(d) => d.as_string().ok(),
+        })
+        .collect();
+    Ok(cn.map(|cn| Names { cn, alt_names }))
 }
 
 /// load the password for the key at the specified path, or else call
