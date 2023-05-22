@@ -1,7 +1,11 @@
-use crate::resolver_server::config::{IdMap, Config, MemberServer};
+use crate::resolver_server::config::{Config, IdMap, MemberServer};
 use anyhow::{anyhow, Result};
 use arcstr::ArcStr;
-use std::process::Command;
+use std::{
+    io::{Read, Write},
+    os::unix::net::UnixStream,
+    process::Command,
+};
 use tokio::task;
 
 // Unix group membership is a little complex, it can come from a
@@ -10,13 +14,18 @@ use tokio::task;
 // but unfortunatly Apple doesn't implement it. Luckily the 'id'
 // command is specified in POSIX.
 #[derive(Clone)]
-pub(crate) struct Mapper(Option<ArcStr>);
+pub(crate) enum Mapper {
+    DoNotMap,
+    Socket(ArcStr),
+    Command(ArcStr),
+}
 
 impl Mapper {
     pub(crate) fn new(_cfg: &Config, member: &MemberServer) -> Result<Mapper> {
         match &member.id_map {
-            IdMap::DoNotMap => Ok(Mapper(None)),
-            IdMap::Command(cmd) => Ok(Mapper(Some(ArcStr::from(cmd)))),
+            IdMap::DoNotMap => Ok(Mapper::DoNotMap),
+            IdMap::Command(cmd) => Ok(Mapper::Command(ArcStr::from(cmd))),
+            IdMap::Socket(path) => Ok(Mapper::Socket(ArcStr::from(path))),
             IdMap::PlatformDefault => task::block_in_place(|| {
                 let out = Command::new("sh").arg("-c").arg("which id").output()?;
                 let buf = String::from_utf8_lossy(&out.stdout);
@@ -24,42 +33,60 @@ impl Mapper {
                     .lines()
                     .next()
                     .ok_or_else(|| anyhow!("can't find the id command"))?;
-                Ok(Mapper(Some(ArcStr::from(path))))
+                Ok(Mapper::Command(ArcStr::from(path)))
             }),
         }
     }
 
     pub(crate) fn groups(&self, user: &str) -> Result<(ArcStr, Vec<ArcStr>)> {
-        match &self.0 {
-            None => Ok((user.into(), vec![])),
-            Some(cmd) => task::block_in_place(|| {
+        let parse = |s: &str| {
+            let mut primary = Mapper::parse_output(&s, "gid=")?;
+            let groups = Mapper::parse_output(&s, "groups=")?;
+            let primary = if primary.is_empty() {
+                bail!("missing primary group")
+            } else {
+                primary.swap_remove(0)
+            };
+            Ok((primary, groups))
+        };
+        match &self {
+            Mapper::DoNotMap => Ok((user.into(), vec![])),
+            Mapper::Command(cmd) => task::block_in_place(|| {
                 let out = Command::new(&**cmd).arg(user).output()?;
-                let s = String::from_utf8_lossy(&out.stdout);
-                let mut primary = Mapper::parse_output(&s, "gid=")?;
-                let groups = Mapper::parse_output(&s, "groups=")?;
-                let primary = if primary.is_empty() {
-                    bail!("missing primary group")
-                } else {
-                    primary.swap_remove(0)
-                };
-                Ok((primary, groups))
+                parse(String::from_utf8_lossy(&out.stdout).as_ref())
+            }),
+            Mapper::Socket(path) => task::block_in_place(|| {
+                let mut sock = UnixStream::connect(&**path)?;
+                sock.write_all(format!("{}\n", user).as_bytes())?;
+                let mut reply = vec![];
+                sock.read_to_end(&mut reply)?;
+                parse(String::from_utf8_lossy(&reply).as_ref())
             }),
         }
     }
 
     pub(crate) fn user(&self, user: u32) -> Result<ArcStr> {
-        match &self.0 {
-            None => bail!("can't use raw user names with local auth"),
-            Some(cmd) => task::block_in_place(|| {
+        let parse = |s: &str| {
+            let mut user = Mapper::parse_output(s, "uid=")?;
+            if user.is_empty() {
+                bail!("user not found")
+            } else {
+                Ok(user.swap_remove(0))
+            }
+        };
+        match &self {
+            Mapper::DoNotMap => bail!("can't use raw user names with local auth"),
+            Mapper::Command(cmd) => task::block_in_place(|| {
                 let out = Command::new(&**cmd).arg(user.to_string()).output()?;
-                let mut user =
-                    Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "uid=")?;
-                if user.is_empty() {
-                    bail!("user not found")
-                } else {
-                    Ok(user.swap_remove(0))
-                }
+                parse(String::from_utf8_lossy(&out.stdout).as_ref())
             }),
+	    Mapper::Socket(path) => task::block_in_place(|| {
+		let mut sock = UnixStream::connect(&**path)?;
+		sock.write_all(format!("{}\n", user).as_bytes())?;
+		let mut reply = vec![];
+		sock.read_to_end(&mut reply)?;
+		parse(String::from_utf8_lossy(&reply).as_ref())
+	    })
         }
     }
 

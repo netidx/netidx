@@ -198,6 +198,7 @@ pub mod file {
     pub(super) enum IdMapType {
         DoNotMap,
         Command,
+	Socket,
     }
 
     fn default_id_map_type() -> IdMapType {
@@ -237,6 +238,7 @@ pub enum IdMap {
     DoNotMap,
     PlatformDefault,
     Command(String),
+    Socket(String),
 }
 
 #[derive(Debug, Clone)]
@@ -309,6 +311,10 @@ impl Config {
             .map(|m| {
 		let id_map = match &m.id_map_type {
 		    IdMapType::DoNotMap => IdMap::DoNotMap,
+		    IdMapType::Socket => match m.id_map_command {
+			None => bail!("you must specify the socket path as id_map_command"),
+			Some(path) => IdMap::Socket(path),
+		    }
 		    IdMapType::Command => match m.id_map_command {
 			None => IdMap::PlatformDefault,
 			Some(cmd) => {
