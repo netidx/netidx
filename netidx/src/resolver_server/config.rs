@@ -323,10 +323,10 @@ impl Config {
                                 }
                                 match tls::get_names(&cert[0].0)? {
                                     None => {
-                                        bail!("server certificate has no common name")
+                                        bail!("server certificate has no subjectAltName name")
                                     }
-                                    Some(names) if &names.cn != name => {
-                                        bail!("name must match the common name")
+                                    Some(names) if &names.alt_name != name => {
+                                        bail!("name must match the subjectAltName name")
                                     }
                                     Some(_) => (),
                                 }

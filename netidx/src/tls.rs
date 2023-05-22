@@ -2,6 +2,7 @@ use crate::config::{Tls, TlsIdentity};
 use anyhow::{Context, Result};
 use log::{debug, info, warn};
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 use std::{
     collections::{BTreeMap, Bound},
     fmt, mem,
@@ -20,8 +21,11 @@ pub(crate) fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
 
 #[derive(Debug)]
 pub struct Names {
+    /// this can be anything and will be used to identify the user via map-ids
     pub cn: String,
-    pub alt_names: Vec<String>,
+    /// This must be a hostname. There must be exactly 1
+    /// subjectAltName on the certificate.
+    pub alt_name: String,
 }
 
 pub(crate) fn get_names(cert: &[u8]) -> Result<Option<Names>> {
@@ -31,24 +35,31 @@ pub(crate) fn get_names(cert: &[u8]) -> Result<Option<Names>> {
         .iter_common_name()
         .next()
         .and_then(|cn| cn.as_str().ok().map(String::from));
-    let alt_names = cert
+    let mut alt_names: SmallVec<[String; 4]> = cert
         .subject_alternative_name()?
         .map(|alt_name| &alt_name.value.general_names)
         .unwrap_or(&vec![])
         .into_iter()
         .filter_map(|gn| match gn {
             GeneralName::DNSName(d) => Some(String::from(*d)),
-            GeneralName::DirectoryName(d) => Some(d.to_string()),
-            GeneralName::EDIPartyName(d) => d.as_string().ok(),
-            GeneralName::IPAddress(_) => None,
-            GeneralName::OtherName(_, _) => None,
-            GeneralName::RFC822Name(d) => Some(String::from(*d)),
-            GeneralName::RegisteredID(_) => None,
-            GeneralName::URI(d) => Some(String::from(*d)),
-            GeneralName::X400Address(d) => d.as_string().ok(),
+            GeneralName::DirectoryName(_)
+            | GeneralName::EDIPartyName(_)
+            | GeneralName::IPAddress(_)
+            | GeneralName::OtherName(_, _)
+            | GeneralName::RFC822Name(_)
+            | GeneralName::RegisteredID(_)
+            | GeneralName::URI(_)
+            | GeneralName::X400Address(_) => None,
         })
         .collect();
-    Ok(cn.map(|cn| Names { cn, alt_names }))
+    let alt_name = if alt_names.len() == 0 {
+	bail!("certificate is missing subjectAltName")
+    } else if alt_names.len() > 1 {
+	bail!("certificate must have exactly 1 subjectAltName for use with netidx")
+    } else {
+	alt_names.pop().unwrap()
+    };
+    Ok(cn.map(|cn| Names { cn, alt_name }))
 }
 
 /// load the password for the key at the specified path, or else call

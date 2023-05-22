@@ -565,20 +565,11 @@ fn get_tls_uifo(
     let (_, server_con) = tls.get_ref();
     match server_con.peer_certificates() {
         Some([cert, ..]) => {
-	    // CR estokes: document this.
-	    // if a subjectAltName exists then we use that as the user name
-	    // otherwise we use the common name on the certificate.
             let names = tls::get_names(&cert.0)?;
-            Ok(a.1.write().users.ifo(
-                id,
-                names.as_ref().map(|names| {
-                    if names.alt_names.len() > 0 {
-                        names.alt_names[0].as_str()
-                    } else {
-                        names.cn.as_str()
-                    }
-                }),
-            )?)
+            Ok(a.1
+                .write()
+                .users
+                .ifo(id, names.as_ref().map(|names| names.cn.as_str()))?)
         }
         Some(_) | None => bail!("tls handshake should be complete by now"),
     }

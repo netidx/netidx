@@ -200,14 +200,14 @@ impl Tls {
             if let Err(e) = tls::load_certs(&id.trusted) {
                 bail!("trusted certs {} cannot be read {}", id.trusted, e)
             }
-            let cn = match tls::load_certs(&id.certificate) {
+            let dns = match tls::load_certs(&id.certificate) {
                 Err(e) => bail!("certificate can't be read {}", e),
                 Ok(certs) => {
                     if certs.len() == 0 || certs.len() > 1 {
                         bail!("certificate file should contain 1 cert")
                     }
                     match tls::get_names(&certs[0].0)? {
-                        Some(name) => name.cn,
+                        Some(name) => name.alt_name,
                         None => bail!("certificate has no common name"),
                     }
                 }
@@ -220,7 +220,7 @@ impl Tls {
                 name,
                 TlsIdentity {
                     trusted: id.trusted,
-                    name: cn,
+                    name: dns,
                     certificate: id.certificate,
                     private_key: id.private_key,
                 },
