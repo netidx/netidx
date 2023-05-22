@@ -197,7 +197,7 @@ pub mod file {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub enum IdMap {
-        DoNotMapUseRaw,
+        DoNotMap,
 	PlatformDefault,
         Command(String),
     }
@@ -301,7 +301,7 @@ impl Config {
             .into_iter()
             .map(|m| {
 		match &m.id_map_command {
-		    IdMap::DoNotMapUseRaw | IdMap::PlatformDefault => (),
+		    IdMap::DoNotMap | IdMap::PlatformDefault => (),
 		    IdMap::Command(cmd) => {
 			if let Err(e) = std::fs::File::open(cmd) {
                             bail!("id_map_command error: {}", e)

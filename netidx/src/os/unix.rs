@@ -15,7 +15,7 @@ pub(crate) struct Mapper(Option<ArcStr>);
 impl Mapper {
     pub(crate) fn new(_cfg: &Config, member: &MemberServer) -> Result<Mapper> {
         match &member.id_map_command {
-            IdMap::DoNotMapUseRaw => Ok(Mapper(None)),
+            IdMap::DoNotMap => Ok(Mapper(None)),
             IdMap::Command(cmd) => Ok(Mapper(Some(ArcStr::from(cmd)))),
             IdMap::PlatformDefault => task::block_in_place(|| {
                 let out = Command::new("sh").arg("-c").arg("which id").output()?;
