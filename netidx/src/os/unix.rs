@@ -1,4 +1,4 @@
-use crate::resolver_server::config::{file::IdMap, Config, MemberServer};
+use crate::resolver_server::config::{IdMap, Config, MemberServer};
 use anyhow::{anyhow, Result};
 use arcstr::ArcStr;
 use std::process::Command;
@@ -14,7 +14,7 @@ pub(crate) struct Mapper(Option<ArcStr>);
 
 impl Mapper {
     pub(crate) fn new(_cfg: &Config, member: &MemberServer) -> Result<Mapper> {
-        match &member.id_map_command {
+        match &member.id_map {
             IdMap::DoNotMap => Ok(Mapper(None)),
             IdMap::Command(cmd) => Ok(Mapper(Some(ArcStr::from(cmd)))),
             IdMap::PlatformDefault => task::block_in_place(|| {
