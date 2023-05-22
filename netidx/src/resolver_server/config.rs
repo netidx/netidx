@@ -16,10 +16,12 @@ use std::{
     convert::Into,
     default::Default,
     fs::read_to_string,
-    net::{SocketAddr, IpAddr},
+    net::{IpAddr, SocketAddr},
     path::Path as FsPath,
     time::Duration,
 };
+
+use self::file::IdMap;
 
 type Permissions = String;
 type Entity = String;
@@ -101,11 +103,11 @@ impl Default for PMap {
 }
 
 /// The on disk format, encoded as JSON
-pub(crate) mod file {
+pub mod file {
     use super::{super::config::check_addrs, resolver, Chars, PMap};
     use crate::{path::Path, pool::Pooled};
     use anyhow::Result;
-    use std::net::{SocketAddr, IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -194,6 +196,18 @@ pub(crate) mod file {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
+    pub enum IdMap {
+        DoNotMapUseRaw,
+	PlatformDefault,
+        Command(String),
+    }
+
+    fn default_id_map_command() -> IdMap {
+        IdMap::PlatformDefault
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub(super) struct MemberServer {
         pub(super) addr: SocketAddr,
         #[serde(default = "default_bind_addr")]
@@ -204,7 +218,8 @@ pub(crate) mod file {
         pub(super) pid_file: String,
         pub(super) reader_ttl: u64,
         pub(super) writer_ttl: u64,
-        pub(super) id_map_command: Option<String>,
+        #[serde(default = "default_id_map_command")]
+        pub(super) id_map_command: IdMap,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,7 +243,7 @@ pub struct MemberServer {
     pub(super) reader_ttl: Duration,
     pub(super) writer_ttl: Duration,
     #[allow(dead_code)]
-    pub(crate) id_map_command: Option<String>, // default /usr/bin/id
+    pub(crate) id_map_command: file::IdMap,
 }
 
 #[derive(Debug, Clone)]
@@ -285,25 +300,28 @@ impl Config {
             .member_servers
             .into_iter()
             .map(|m| {
-                if let Some(cmd) = &m.id_map_command {
-                    if let Err(e) = std::fs::File::open(cmd) {
-                        bail!("id_map_command error: {}", e)
-                    }
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        if std::fs::metadata(cmd)?.mode() & 0o001 == 0 {
-                            bail!("id_map_command must be executable")
-                        }
-                    }
-                    // lets pretend the resolver server will someday run on windows
-                    #[cfg(windows)]
-                    {
-                        if !cmd.ends_with(".exe") {
-                            bail!("id_map_command must be executable")
-                        }
-                    }
-                }
+		match &m.id_map_command {
+		    IdMap::DoNotMapUseRaw | IdMap::PlatformDefault => (),
+		    IdMap::Command(cmd) => {
+			if let Err(e) = std::fs::File::open(cmd) {
+                            bail!("id_map_command error: {}", e)
+			}
+			#[cfg(unix)]
+			{
+                            use std::os::unix::fs::MetadataExt;
+                            if std::fs::metadata(cmd)?.mode() & 0o001 == 0 {
+				bail!("id_map_command must be executable")
+                            }
+			}
+			// lets pretend the resolver server will someday run on windows
+			#[cfg(windows)]
+			{
+                            if !cmd.ends_with(".exe") {
+				bail!("id_map_command must be executable")
+                            }
+			}
+		    }
+		}
                 match &m.auth {
                     file::Auth::Anonymous
                     | file::Auth::Krb5 { .. }

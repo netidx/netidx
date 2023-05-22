@@ -1,4 +1,4 @@
-use crate::resolver_server::config::{Config, MemberServer};
+use crate::resolver_server::config::{file::IdMap, Config, MemberServer};
 use anyhow::{anyhow, Result};
 use arcstr::ArcStr;
 use std::process::Command;
@@ -10,50 +10,57 @@ use tokio::task;
 // but unfortunatly Apple doesn't implement it. Luckily the 'id'
 // command is specified in POSIX.
 #[derive(Clone)]
-pub(crate) struct Mapper(ArcStr);
+pub(crate) struct Mapper(Option<ArcStr>);
 
 impl Mapper {
     pub(crate) fn new(_cfg: &Config, member: &MemberServer) -> Result<Mapper> {
         match &member.id_map_command {
-            Some(cmd) => Ok(Mapper(ArcStr::from(cmd))),
-            None => task::block_in_place(|| {
+            IdMap::DoNotMapUseRaw => Ok(Mapper(None)),
+            IdMap::Command(cmd) => Ok(Mapper(Some(ArcStr::from(cmd)))),
+            IdMap::PlatformDefault => task::block_in_place(|| {
                 let out = Command::new("sh").arg("-c").arg("which id").output()?;
                 let buf = String::from_utf8_lossy(&out.stdout);
                 let path = buf
                     .lines()
                     .next()
                     .ok_or_else(|| anyhow!("can't find the id command"))?;
-                Ok(Mapper(ArcStr::from(path)))
+                Ok(Mapper(Some(ArcStr::from(path))))
             }),
         }
     }
 
     pub(crate) fn groups(&self, user: &str) -> Result<(ArcStr, Vec<ArcStr>)> {
-        task::block_in_place(|| {
-            let out = Command::new(&*self.0).arg(user).output()?;
-            let s = String::from_utf8_lossy(&out.stdout);
-            let mut primary = Mapper::parse_output(&s, "gid=")?;
-            let groups = Mapper::parse_output(&s, "groups=")?;
-            let primary = if primary.is_empty() {
-                bail!("missing primary group")
-            } else {
-                primary.swap_remove(0)
-            };
-            Ok((primary, groups))
-        })
+        match &self.0 {
+            None => Ok((user.into(), vec![])),
+            Some(cmd) => task::block_in_place(|| {
+                let out = Command::new(&**cmd).arg(user).output()?;
+                let s = String::from_utf8_lossy(&out.stdout);
+                let mut primary = Mapper::parse_output(&s, "gid=")?;
+                let groups = Mapper::parse_output(&s, "groups=")?;
+                let primary = if primary.is_empty() {
+                    bail!("missing primary group")
+                } else {
+                    primary.swap_remove(0)
+                };
+                Ok((primary, groups))
+            }),
+        }
     }
 
     pub(crate) fn user(&self, user: u32) -> Result<ArcStr> {
-        task::block_in_place(|| {
-            let out = Command::new(&*self.0).arg(user.to_string()).output()?;
-            let mut user =
-                Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "uid=")?;
-            if user.is_empty() {
-                bail!("user not found")
-            } else {
-                Ok(user.swap_remove(0))
-            }
-        })
+        match &self.0 {
+            None => bail!("can't use raw user names with local auth"),
+            Some(cmd) => task::block_in_place(|| {
+                let out = Command::new(&**cmd).arg(user.to_string()).output()?;
+                let mut user =
+                    Mapper::parse_output(&String::from_utf8_lossy(&out.stdout), "uid=")?;
+                if user.is_empty() {
+                    bail!("user not found")
+                } else {
+                    Ok(user.swap_remove(0))
+                }
+            }),
+        }
     }
 
     fn parse_output(out: &str, key: &str) -> Result<Vec<ArcStr>> {
