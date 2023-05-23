@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
 use daemonize::Daemonize;
 use futures::future;
-use netidx::resolver_server::{config::Config, Server};
+use netidx::resolver_server::{
+    config::{file, Config},
+    Server,
+};
+use std::fs::File;
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug)]
@@ -32,13 +36,21 @@ async fn tokio_run(config: Config, params: Params) -> Result<()> {
 }
 
 pub(crate) fn run(params: Params) -> Result<()> {
-    let config = Config::load(params.config.clone())
-        .context("failed to load resolver server config")?;
-    let member = &config.member_servers[params.id];
-    if !params.foreground {
-        let mut file = member.pid_file.clone();
-        file.push_str(&format!("{}.pid", params.id));
-        Daemonize::new().pid_file(file).start().context("failed to daemonize")?;
+    if params.foreground {
+        let config = Config::load(params.config.clone())
+            .context("failed to load resolver server config")?;
+        tokio_run(config, params)
+    } else {
+        let config: file::Config = serde_json::from_reader(File::open(&params.config)?)?;
+        let member = config.member_servers[params.id];
+        Daemonize::new()
+            .stdout(stdout)
+            .stderr(stderr)
+            .pid_file(member.pid_file.join(format!("{}.pid", params.id)))
+            .start()
+            .context("failed to daemonize")?;
+        let config = Config::load(params.config.clone())
+            .context("failed to load resolver server config")?;
+        tokio_run(config, params)
     }
-    tokio_run(config, params)
 }

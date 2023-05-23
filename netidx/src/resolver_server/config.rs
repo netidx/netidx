@@ -93,7 +93,7 @@ pub(crate) fn check_addrs<T: Clone + Into<resolver::Auth>>(
 
 /// The permissions format
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct PMap(pub HashMap<String, HashMap<Entity, Permissions>>);
+pub struct PMap(pub HashMap<String, HashMap<Entity, Permissions>>);
 
 impl Default for PMap {
     fn default() -> Self {
@@ -106,11 +106,11 @@ pub mod file {
     use super::{super::config::check_addrs, resolver, Chars, PMap};
     use crate::{path::Path, pool::Pooled};
     use anyhow::Result;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, path::PathBuf};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(crate) enum Auth {
+    pub enum Auth {
         Anonymous,
         Krb5(String),
         Local(String),
@@ -130,7 +130,7 @@ pub mod file {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) enum RefAuth {
+    pub enum RefAuth {
         Anonymous,
         Krb5(String),
         Local(String),
@@ -150,11 +150,11 @@ pub mod file {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct Referral {
-        path: String,
+    pub struct Referral {
+        pub path: String,
         #[serde(default)]
-        ttl: Option<u16>,
-        addrs: Vec<(SocketAddr, RefAuth)>,
+        pub ttl: Option<u16>,
+        pub addrs: Vec<(SocketAddr, RefAuth)>,
     }
 
     impl Referral {
@@ -195,7 +195,7 @@ pub mod file {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) enum IdMapType {
+    pub enum IdMapType {
         DoNotMap,
         Command,
 	Socket,
@@ -211,31 +211,31 @@ pub mod file {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct MemberServer {
-        pub(super) addr: SocketAddr,
+    pub struct MemberServer {
+        pub addr: SocketAddr,
         #[serde(default = "default_bind_addr")]
-        pub(super) bind_addr: IpAddr,
-        pub(super) auth: Auth,
-        pub(super) hello_timeout: u64,
-        pub(super) max_connections: usize,
-        pub(super) pid_file: String,
-        pub(super) reader_ttl: u64,
-        pub(super) writer_ttl: u64,
+        pub bind_addr: IpAddr,
+        pub auth: Auth,
+        pub hello_timeout: u64,
+        pub max_connections: usize,
+        pub pid_file: PathBuf,
+        pub reader_ttl: u64,
+        pub writer_ttl: u64,
         #[serde(default)]
-        pub(super) id_map_command: Option<String>,
+        pub id_map_command: Option<String>,
         #[serde(default = "default_id_map_type")]
-        pub(super) id_map_type: IdMapType,
+        pub id_map_type: IdMapType,
 	#[serde(default = "default_id_map_timeout")]
-	pub(super) id_map_timeout: u64,
+	pub id_map_timeout: u64,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    pub(super) struct Config {
-        pub(super) children: Vec<Referral>,
-        pub(super) parent: Option<Referral>,
-        pub(super) member_servers: Vec<MemberServer>,
-        pub(super) perms: PMap,
+    pub struct Config {
+        pub children: Vec<Referral>,
+        pub parent: Option<Referral>,
+        pub member_servers: Vec<MemberServer>,
+        pub perms: PMap,
     }
 }
 
