@@ -57,7 +57,7 @@ pub(super) struct SecCtxData<S: 'static> {
 
 impl<S: 'static + SecDataCommon> SecCtxData<S> {
     pub(super) fn new(cfg: &Config, member: &MemberServer) -> Result<Self> {
-        let mut users = UserDb::new(Mapper::new(cfg, member)?);
+        let mut users = UserDb::new(member.id_map_timeout, Mapper::new(cfg, member)?);
         let pmap = PMap::from_file(&cfg.perms, &mut users, cfg.root(), &cfg.children)?;
         Ok(Self { users, pmap, data: HashMap::default() })
     }

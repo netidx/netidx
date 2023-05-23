@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::{anyhow, Error, Result};
 use arcstr::ArcStr;
+use chrono::prelude::*;
 use fxhash::FxHashMap;
 use netidx_core::pool::Pool;
 use netidx_netproto::resolver;
@@ -76,6 +77,7 @@ pub struct Entity(u32);
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct UserInfo {
+    pub(crate) timestamp: DateTime<Utc>,
     pub(crate) id: Entity,
     pub(crate) primary_group: Entity,
     pub(crate) groups: Vec<Entity>,
@@ -92,6 +94,7 @@ impl UserInfo {
 
 lazy_static! {
     pub(crate) static ref ANONYMOUS: Arc<UserInfo> = Arc::new(UserInfo {
+	timestamp: Utc::now(),
         id: Entity(0),
         primary_group: Entity(0),
         groups: vec![Entity(0)],
@@ -102,6 +105,7 @@ lazy_static! {
 
 pub(crate) struct UserDb {
     next: u32,
+    timeout: chrono::Duration,
     mapper: Mapper,
     names: FxHashMap<Entity, ArcStr>,
     entities: FxHashMap<ArcStr, Entity>,
@@ -109,9 +113,10 @@ pub(crate) struct UserDb {
 }
 
 impl UserDb {
-    pub(crate) fn new(mapper: Mapper) -> UserDb {
+    pub(crate) fn new(timeout: chrono::Duration, mapper: Mapper) -> UserDb {
         UserDb {
             next: 1,
+            timeout,
             mapper,
             names: HashMap::default(),
             entities: HashMap::default(),
@@ -138,17 +143,19 @@ impl UserDb {
         resolver: SocketAddr,
         user: Option<&str>,
     ) -> Result<Arc<UserInfo>> {
+        let now = Utc::now();
         match user {
             None => Ok(ANONYMOUS.clone()),
             Some(user) => match self.users.get(user) {
-                Some(user) => Ok(user.clone()),
-                None => {
+                Some(user) if now - user.timestamp < self.timeout => Ok(user.clone()),
+                Some(_) | None => {
                     let (primary_group_s, groups_s) = self.mapper.groups(user)?;
                     let primary_group = self.entity(&primary_group_s);
                     let groups =
                         groups_s.iter().map(|b| self.entity(b)).collect::<Vec<_>>();
                     let id = self.entity(user);
                     let ifo = Arc::new(UserInfo {
+                        timestamp: Utc::now(),
                         id,
                         primary_group,
                         groups,
@@ -333,7 +340,12 @@ impl PMap {
                                 BUF.with(|buf| {
                                     let mut buf = buf.borrow_mut();
                                     subst(&expr, &mut *buf, sub);
-                                    if uifo.groups.iter().find(|g| &**buf == &**g).is_some() {
+                                    if uifo
+                                        .groups
+                                        .iter()
+                                        .find(|g| &**buf == &**g)
+                                        .is_some()
+                                    {
                                         if gd.contains(Permissions::DENY) {
                                             p & !*gd
                                         } else {

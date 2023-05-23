@@ -205,6 +205,10 @@ pub mod file {
         IdMapType::Command
     }
 
+    fn default_id_map_timeout() -> u64 {
+	3600
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(super) struct MemberServer {
@@ -221,6 +225,8 @@ pub mod file {
         pub(super) id_map_command: Option<String>,
         #[serde(default = "default_id_map_type")]
         pub(super) id_map_type: IdMapType,
+	#[serde(default = "default_id_map_timeout")]
+	pub(super) id_map_timeout: u64,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,6 +259,7 @@ pub struct MemberServer {
     pub(super) writer_ttl: Duration,
     #[allow(dead_code)]
     pub(crate) id_map: IdMap,
+    pub(crate) id_map_timeout: chrono::Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -391,6 +398,7 @@ impl Config {
                     reader_ttl: Duration::from_secs(m.reader_ttl),
                     writer_ttl: Duration::from_secs(m.writer_ttl),
                     id_map,
+		    id_map_timeout: chrono::Duration::seconds(m.id_map_timeout as i64),
                 })
             })
             .collect::<Result<Vec<_>>>()?;

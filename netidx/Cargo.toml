@@ -49,6 +49,7 @@ x509-parser = "0.15"
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
 keyring = "2"
 smallvec = { version = "1", features = ["const_generics", "union"] }
+chrono = "0.4.24"
 
 [dev-dependencies]
 env_logger = "0.10"

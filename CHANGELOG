@@ -30,6 +30,10 @@
        a newline. It will expect the server to write the response in
        the same format as /usr/bin/id and then close the socket.
 
+  - implement id_map_timeout in the config which is the number of
+    seconds to cache id map entries before they must be done
+    again. The default is 1 hour.
+
 * 0.19.14 netidx
 
   - public tls function to precache key passwords in the keychain
