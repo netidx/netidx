@@ -253,7 +253,7 @@ impl<T: Clone + 'static> Cached<T> {
         match get_match(&self.0.tls.identities, &rev_identity) {
             None => {
                 self.0.t.lock().tmp = rev_identity;
-                bail!("no plausable identity matches {}", identity)
+                bail!("no plausible identity matches {}", identity)
             }
             Some(TlsIdentity { name: _, trusted, certificate, private_key }) => {
                 let askpass = self.0.tls.askpass.as_ref().map(|s| s.as_str());

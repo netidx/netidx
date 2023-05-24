@@ -41,10 +41,12 @@ pub(crate) fn run(params: Params) -> Result<()> {
             .context("failed to load resolver server config")?;
         tokio_run(config, params)
     } else {
-        let config: file::Config = serde_json::from_reader(File::open(&params.config)?)?;
-        let member = &config.member_servers[params.id];
+        let mut config: file::Config =
+            serde_json::from_reader(File::open(&params.config)?)?;
+        let member = &mut config.member_servers[params.id];
+        member.pid_file.set_extension(params.id.to_string());
         Daemonize::new()
-            .pid_file(member.pid_file.join(format!("{}.pid", params.id)))
+            .pid_file(&member.pid_file)
             .start()
             .context("failed to daemonize")?;
         let config = Config::load(params.config.clone())
