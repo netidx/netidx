@@ -1,3 +1,4 @@
+use self::file::IdMapType;
 use crate::{
     chars::Chars,
     path::Path,
@@ -17,10 +18,9 @@ use std::{
     default::Default,
     fs::read_to_string,
     net::{IpAddr, SocketAddr},
-    path::{Path as FsPath, PathBuf},
+    path::Path as FsPath,
     time::Duration,
 };
-use self::file::IdMapType;
 
 type Permissions = String;
 type Entity = String;
@@ -106,7 +106,10 @@ pub mod file {
     use super::{super::config::check_addrs, resolver, Chars, PMap};
     use crate::{path::Path, pool::Pooled};
     use anyhow::Result;
-    use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, path::PathBuf};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        path::PathBuf,
+    };
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -198,7 +201,7 @@ pub mod file {
     pub enum IdMapType {
         DoNotMap,
         Command,
-	Socket,
+        Socket,
     }
 
     fn default_id_map_type() -> IdMapType {
@@ -206,7 +209,7 @@ pub mod file {
     }
 
     fn default_id_map_timeout() -> u64 {
-	3600
+        3600
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,8 +228,8 @@ pub mod file {
         pub id_map_command: Option<String>,
         #[serde(default = "default_id_map_type")]
         pub id_map_type: IdMapType,
-	#[serde(default = "default_id_map_timeout")]
-	pub id_map_timeout: u64,
+        #[serde(default = "default_id_map_timeout")]
+        pub id_map_timeout: u64,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,7 +257,6 @@ pub struct MemberServer {
     pub(super) auth: Auth,
     pub(super) hello_timeout: Duration,
     pub(super) max_connections: usize,
-    pub(super) pid_file: PathBuf,
     pub(super) reader_ttl: Duration,
     pub(super) writer_ttl: Duration,
     #[allow(dead_code)]
@@ -389,7 +391,6 @@ impl Config {
                     bail!("hello_timeout must be positive")
                 }
                 Ok(MemberServer {
-                    pid_file: m.pid_file,
                     addr: m.addr,
                     bind_addr: m.bind_addr,
                     auth: m.auth.into(),
