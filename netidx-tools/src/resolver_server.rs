@@ -42,10 +42,8 @@ pub(crate) fn run(params: Params) -> Result<()> {
         tokio_run(config, params)
     } else {
         let config: file::Config = serde_json::from_reader(File::open(&params.config)?)?;
-        let member = config.member_servers[params.id];
+        let member = &config.member_servers[params.id];
         Daemonize::new()
-            .stdout(stdout)
-            .stderr(stderr)
             .pid_file(member.pid_file.join(format!("{}.pid", params.id)))
             .start()
             .context("failed to daemonize")?;

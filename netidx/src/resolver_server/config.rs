@@ -17,7 +17,7 @@ use std::{
     default::Default,
     fs::read_to_string,
     net::{IpAddr, SocketAddr},
-    path::Path as FsPath,
+    path::{Path as FsPath, PathBuf},
     time::Duration,
 };
 use self::file::IdMapType;
@@ -254,7 +254,7 @@ pub struct MemberServer {
     pub(super) auth: Auth,
     pub(super) hello_timeout: Duration,
     pub(super) max_connections: usize,
-    pub pid_file: String,
+    pub(super) pid_file: PathBuf,
     pub(super) reader_ttl: Duration,
     pub(super) writer_ttl: Duration,
     #[allow(dead_code)]
