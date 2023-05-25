@@ -232,7 +232,7 @@ pub(super) async fn run(
     shard_id: ShardId,
     shard_name: ArcStr,
 ) -> Result<()> {
-    let (tx_batch, rx_batch) = mpsc::channel(1000);
+    let (tx_batch, rx_batch) = mpsc::channel(record_config.slack);
     let mut rx_batch = Batched::new(rx_batch, 10000);
     let (tx_list, rx_list) = mpsc::unbounded();
     let mut by_subid: FxHashMap<SubId, Id> = HashMap::default();

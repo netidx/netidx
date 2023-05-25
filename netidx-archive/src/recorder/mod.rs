@@ -102,6 +102,10 @@ pub mod file {
         RotateDirective::Interval(Duration::from_secs(86400))
     }
 
+    pub fn default_slack() -> usize {
+        100
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub struct RecordShardConfig {
@@ -111,6 +115,8 @@ pub mod file {
         pub flush_frequency: Option<usize>,
         pub flush_interval: Option<Duration>,
         pub rotate_interval: Option<RotateDirective>,
+        #[serde(default = "default_slack")]
+        pub slack: usize,
     }
 
     impl RecordShardConfig {
@@ -122,6 +128,7 @@ pub mod file {
                 flush_frequency: None,
                 flush_interval: None,
                 rotate_interval: None,
+                slack: default_slack(),
             }
         }
     }
@@ -278,6 +285,8 @@ pub struct RecordConfig {
     /// rotate the log file at the specified interval or file size or
     /// never.
     pub rotate_interval: RotateDirective,
+    /// how much channel slack to allocate
+    pub slack: usize,
 }
 
 impl RecordConfig {
@@ -291,6 +300,7 @@ impl RecordConfig {
             flush_frequency: file::default_flush_frequency(),
             flush_interval: file::default_flush_interval(),
             rotate_interval: file::default_rotate_interval(),
+            slack: file::default_slack(),
         }
     }
 
@@ -304,6 +314,7 @@ impl RecordConfig {
                 flush_frequency,
                 flush_interval,
                 rotate_interval,
+                slack,
             } = c;
             let res = RecordConfig {
                 spec: GlobSet::new(
@@ -315,6 +326,7 @@ impl RecordConfig {
                 flush_frequency: flush_frequency.or(f.flush_frequency),
                 flush_interval: flush_interval.or(f.flush_interval),
                 rotate_interval: rotate_interval.unwrap_or(f.rotate_interval),
+                slack,
             };
             shards.insert(name, res);
         }
