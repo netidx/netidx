@@ -1,3 +1,11 @@
+* 0.19.21 tools
+
+  - pull in new archive
+
+* 0.19.15 archive
+
+  - make channel slack configurable
+
 * 0.19.20 tools
 
   - fix daemonizeing the resolver server (again)
