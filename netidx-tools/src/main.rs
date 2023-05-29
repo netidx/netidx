@@ -15,7 +15,6 @@ mod activation;
 mod container;
 #[cfg(unix)]
 mod recorder;
-#[cfg(unix)]
 mod resolver_server;
 
 #[macro_use]
@@ -62,7 +61,6 @@ enum Stress {
 #[derive(StructOpt, Debug)]
 #[structopt(name = "netidx")]
 enum Opt {
-    #[cfg(unix)]
     #[structopt(name = "resolver-server", about = "run a resolver")]
     ResolverServer(resolver_server::Params),
     #[structopt(name = "resolver", about = "query the resolver")]
@@ -142,7 +140,6 @@ async fn tokio_main() -> Result<()> {
         Opt::Activation { .. } => {
             panic!("activation server cannot be initialized from async");
         }
-        #[cfg(unix)]
         Opt::ResolverServer(_) => {
             panic!("resolver server cannot be initialized from async")
         }
@@ -198,7 +195,6 @@ fn main() -> Result<()> {
     env_logger::init();
     let opt = Opt::from_args();
     match opt {
-        #[cfg(unix)]
         Opt::ResolverServer(p) => resolver_server::run(p),
         #[cfg(unix)]
         Opt::Activation { common, params } => {

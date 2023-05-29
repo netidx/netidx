@@ -1,21 +1,73 @@
-use crate::resolver_server::config::{Config, MemberServer};
-use anyhow::{bail, Result};
+use crate::resolver_server::config::{Config, IdMap, MemberServer};
+use anyhow::bail;
+use anyhow::{anyhow, Result};
 use arcstr::ArcStr;
+use std::process::Command;
+use tokio::task;
 
-pub(crate) struct Mapper;
+// Unix group membership is a little complex, it can come from a
+// lot of places, and it's not entirely standardized at the api
+// level, it seems libc provides getgrouplist on most platforms,
+// but unfortunatly Apple doesn't implement it. Luckily the 'id'
+// command is specified in POSIX.
+#[derive(Clone)]
+pub(crate) enum Mapper {
+    DoNotMap,
+    Command(ArcStr),
+}
 
 impl Mapper {
-    pub(crate) fn new(_cfg: &Config, _member: &MemberServer) -> Result<Mapper> {
-        Ok(Mapper)
+    pub(crate) fn new(_cfg: &Config, member: &MemberServer) -> Result<Mapper> {
+        match &member.id_map {
+            IdMap::DoNotMap => Ok(Mapper::DoNotMap),
+            IdMap::Command(cmd) => Ok(Mapper::Command(ArcStr::from(cmd))),
+            IdMap::Socket(_) => bail!("id-map sockets are not supported on windows"),
+            IdMap::PlatformDefault => Ok(Mapper::DoNotMap),
+        }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn user(&self, _user: u32) -> Result<ArcStr> {
-        bail!("user listing is not implemented on windows")
+    pub(crate) fn groups(&self, user: &str) -> Result<(ArcStr, Vec<ArcStr>)> {
+        let parse = |s: &str| {
+            let mut primary = Mapper::parse_output(&s, "gid=")?;
+            let groups = Mapper::parse_output(&s, "groups=")?;
+            let primary = if primary.is_empty() {
+                bail!("missing primary group")
+            } else {
+                primary.swap_remove(0)
+            };
+            Ok((primary, groups))
+        };
+        match &self {
+            Mapper::DoNotMap => Ok((user.into(), vec![])),
+            Mapper::Command(cmd) => task::block_in_place(|| {
+                let out = Command::new(&**cmd).arg(user).output()?;
+                parse(String::from_utf8_lossy(&out.stdout).as_ref())
+            }),
+        }
     }
 
-    pub(crate) fn groups(&mut self, _user: &str) -> Result<(ArcStr, Vec<ArcStr>)> {
-        bail!("group listing is not implemented on windows")
+    fn parse_output(out: &str, key: &str) -> Result<Vec<ArcStr>> {
+        let mut groups = Vec::new();
+        match out.find(key) {
+            None => Ok(Vec::new()),
+            Some(i) => {
+                let mut s = &out[i..];
+                while let Some(i_op) = s.find('(') {
+                    match s.find(')') {
+                        None => {
+                            return Err(anyhow!(
+                                "invalid id command output, expected ')'"
+                            ))
+                        }
+                        Some(i_cp) => {
+                            groups.push(ArcStr::from(&s[i_op + 1..i_cp]));
+                            s = &s[i_cp + 1..];
+                        }
+                    }
+                }
+                Ok(groups)
+            }
+        }
     }
 }
 
