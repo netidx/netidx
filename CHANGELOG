@@ -1,3 +1,10 @@
+* 0.19.22 tools archive
+
+  - the resolver server now runs on windows in a limited capacity, basically
+  tls or kerberos mod only
+
+  - fix building netidx-archive on windows
+
 * 0.19.21 tools
 
   - pull in new archive
