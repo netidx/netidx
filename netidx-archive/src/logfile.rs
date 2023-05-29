@@ -890,7 +890,7 @@ impl ArchiveWriter {
         let new_blocks = (new_len / self.block_size as usize) + 1;
         let new_size = new_blocks * self.block_size as usize;
         self.file.set_len(new_size as u64)?;
-        Ok(drop(mem::replace(&mut self.mmap, unsafe { MmapMut::map_mut(&self.file)? })))
+        Ok(drop(mem::replace(&mut self.mmap, unsafe { MmapMut::map_mut(&*self.file)? })))
     }
 
     fn check_reserve(&mut self, record_length: usize) -> Result<usize> {
@@ -1099,7 +1099,7 @@ impl ArchiveWriter {
             indexed: self.indexed,
             file: self.file.clone(),
             end: self.end.clone(),
-            mmap: Arc::new(RwLock::new(unsafe { Mmap::map(&self.file)? })),
+            mmap: Arc::new(RwLock::new(unsafe { Mmap::map(&*self.file)? })),
         })
     }
 }
