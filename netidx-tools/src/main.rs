@@ -200,6 +200,7 @@ fn main() -> Result<()> {
     match opt {
         #[cfg(unix)]
         Opt::ResolverServer(p) => resolver_server::run(p),
+        #[cfg(unix)]
         Opt::Activation { common, params } => {
             let (cfg, auth) = common.load();
             activation::run(cfg, auth, params)
