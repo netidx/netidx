@@ -6,13 +6,12 @@ use futures::{
     prelude::*,
     select_biased, stream,
 };
-use fxhash::{FxBuildHasher, FxHashMap};
+use fxhash::{FxHashMap, FxHashSet};
 use log::{error, info};
 use netidx::{
     chars::Chars,
     path::Path,
     pool::{Pool, Pooled},
-    protocol::glob::{Glob, GlobSet},
     publisher::{
         ClId, Id, PublishFlags, Publisher, SendResult, Val, Value, WriteRequest,
     },
@@ -22,7 +21,6 @@ use parking_lot::Mutex;
 use std::{
     borrow::Borrow,
     collections::HashMap,
-    iter,
     ops::Drop,
     sync::{Arc, Weak},
     time::{Duration, Instant},
@@ -31,7 +29,10 @@ use tokio::{sync::Mutex as AsyncMutex, task};
 
 #[macro_use]
 pub mod server {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::{
+        collections::HashSet,
+        panic::{catch_unwind, AssertUnwindSafe},
+    };
 
     use super::*;
 
@@ -58,16 +59,16 @@ pub mod server {
             $map:expr,
             $tx:expr,
             $($arg:ident: $typ:ty = $default:expr; $doc:expr),*
-        ) => { 
+        ) => {
             define_rpc!(
-                $publisher, 
-                netidx::publisher::PublishFlags::empty(), 
-                $path, 
-                $topdoc, 
-                $map, 
-                $tx, 
+                $publisher,
+                netidx::publisher::PublishFlags::empty(),
+                $path,
+                $topdoc,
+                $map,
+                $tx,
                 $($arg: $typ = $default; $doc),*
-            ) 
+            )
         };
         (
             $publisher:expr,
@@ -149,8 +150,9 @@ pub mod server {
         id: ProcId,
         call: Arc<Val>,
         _doc: Val,
-        args: HashMap<Id, Arg, FxBuildHasher>,
-        pending: HashMap<ClId, PendingCall, FxBuildHasher>,
+        args: FxHashMap<Id, Arg>,
+        arg_names: FxHashSet<ArcStr>,
+        pending: FxHashMap<ClId, PendingCall>,
         handler: Option<mpsc::Sender<T>>,
         map: M,
         events: stream::Fuse<mpsc::Receiver<Pooled<Vec<WriteRequest>>>>,
@@ -166,10 +168,7 @@ pub mod server {
         async fn run(mut self) {
             static GC_FREQ: Duration = Duration::from_secs(1);
             static GC_THRESHOLD: usize = 128;
-            fn gc_pending(
-                pending: &mut HashMap<ClId, PendingCall, FxBuildHasher>,
-                now: Instant,
-            ) {
+            fn gc_pending(pending: &mut FxHashMap<ClId, PendingCall>, now: Instant) {
                 static STALE: Duration = Duration::from_secs(60);
                 pending.retain(|_, pc| now - pc.initiated < STALE);
                 pending.shrink_to_fit();
@@ -180,8 +179,22 @@ pub mod server {
                     _ = stop => break,
                     mut batch = self.events.select_next_some() => for req in batch.drain(..) {
                         if req.id == self.call.id() {
-                            let args = self.pending.remove(&req.client).map(|pc| pc.args)
+                            let mut args = self.pending.remove(&req.client).map(|pc| pc.args)
                                 .unwrap_or_else(|| ARGS.take());
+                match req.value {
+                Value::Null => (),
+                Value::Array(a) => for v in &*a {
+                    match v.clone().cast_to::<(Chars, Value)>() {
+                    Ok((name, val)) => {
+                        if let Some(name) = self.arg_names.get(&*name) {
+                        args.insert(name.clone(), val);
+                        }
+                    }
+                    Err(_) => ()
+                    }
+                }
+                _ => ()
+                };
                             let call = RpcCall {
                                 client: req.client,
                                 id: self.id,
@@ -328,20 +341,16 @@ pub mod server {
             let id = ProcId::new();
             let (tx_ev, rx_ev) = mpsc::channel(3);
             let (tx_stop, rx_stop) = oneshot::channel();
-            let call = Arc::new(publisher.publish_with_flags(
-                flags | PublishFlags::USE_EXISTING,
-                name.clone(),
-                Value::Null,
-            )?);
             let _doc = publisher.publish_with_flags(
                 flags | PublishFlags::USE_EXISTING,
                 name.append("doc"),
                 doc,
             )?;
-            publisher.writes(call.id(), tx_ev.clone());
+            let mut arg_names = HashSet::default();
             let args = args
                 .into_iter()
                 .map(|ArgSpec { name: arg, doc, default_value }| {
+                    arg_names.insert(arg.clone());
                     let base = name.append(&*arg);
                     let _value = publisher
                         .publish_with_flags(
@@ -360,13 +369,20 @@ pub mod server {
                     )?;
                     Ok((_value.id(), Arg { name: arg, _value, _doc }))
                 })
-                .collect::<Result<HashMap<Id, Arg, FxBuildHasher>>>()?;
+                .collect::<Result<FxHashMap<Id, Arg>>>()?;
+            let call = Arc::new(publisher.publish_with_flags(
+                flags | PublishFlags::USE_EXISTING,
+                name.clone(),
+                arg_names.clone(),
+            )?);
+            publisher.writes(call.id(), tx_ev.clone());
             let inner = ProcInner {
                 id,
                 call,
                 _doc,
                 args,
-                pending: HashMap::with_hasher(FxBuildHasher::default()),
+                arg_names,
+                pending: HashMap::default(),
                 map,
                 handler,
                 events: rx_ev.fuse(),
@@ -389,6 +405,12 @@ pub mod server {
 
 #[macro_use]
 pub mod client {
+    use std::collections::HashSet;
+
+    use fxhash::FxHashSet;
+    use netidx::subscriber::Event;
+    use once_cell::sync::OnceCell;
+
     use super::*;
 
     lazy_static! {
@@ -397,7 +419,7 @@ pub mod client {
         // could be permuted. This structure ensures that this does
         // not happen.
         static ref PROCS: Mutex<FxHashMap<SubscriberId, FxHashMap<Path, Weak<AsyncMutex<()>>>>> =
-            Mutex::new(HashMap::with_hasher(FxBuildHasher::default()));
+            Mutex::new(HashMap::default());
     }
 
     /// Convenience macro for calling rpcs.
@@ -419,7 +441,7 @@ pub mod client {
         sid: SubscriberId,
         lock: Option<Arc<AsyncMutex<()>>>,
         call: Dval,
-        args: HashMap<String, Dval>,
+        args: OnceCell<FxHashSet<Chars>>,
     }
 
     impl Drop for ProcInner {
@@ -454,7 +476,7 @@ pub mod client {
                 let mut locks = PROCS.lock();
                 let lock = locks
                     .entry(sid)
-                    .or_insert_with(|| HashMap::with_hasher(FxBuildHasher::default()))
+                    .or_insert_with(|| HashMap::default())
                     .entry(name.clone())
                     .or_insert_with(Weak::new);
                 match Weak::upgrade(lock) {
@@ -467,20 +489,7 @@ pub mod client {
                 }
             };
             let call = subscriber.subscribe(name.clone());
-            let pat = GlobSet::new(
-                true,
-                iter::once(Glob::new(Chars::from(format!("{}/*/val", name.clone())))?),
-            )?;
-            let mut args = HashMap::new();
-            let mut batches = subscriber.resolver().list_matching(&pat).await?;
-            for mut batch in batches.drain(..) {
-                for arg_path in batch.drain(..) {
-                    let arg_name =
-                        Path::basename(Path::dirname(&*arg_path).unwrap()).unwrap();
-                    args.insert(String::from(arg_name), subscriber.subscribe(arg_path));
-                }
-            }
-            Ok(Proc(Arc::new(ProcInner { name, sid, lock, call, args })))
+            Ok(Proc(Arc::new(ProcInner { name, sid, lock, call, args: OnceCell::new() })))
         }
 
         /**
@@ -514,25 +523,47 @@ pub mod client {
         {
             let result = {
                 let _guard = self.0.lock.as_ref().unwrap().lock().await;
-                for (name, val) in args {
-                    match self.0.args.get(name.borrow()) {
-                        None => bail!("no such argument {}", name.borrow()),
-                        Some(dv) => {
-                            dv.wait_subscribed().await?;
-                            dv.write(val);
+                if self.0.args.get().is_none() {
+                    loop {
+                        self.0.call.wait_subscribed().await?;
+                        match self.0.call.last() {
+                            Event::Unsubscribed => (),
+                            Event::Update(v) => {
+                                let args = v
+                                    .clone()
+                                    .cast_to::<FxHashSet<Chars>>()
+                                    .ok()
+                                    .unwrap_or(HashSet::default());
+                                self.0
+                                    .args
+                                    .set(args)
+                                    .map_err(|_| anyhow!("once cell set twice"))?;
+                                break;
+                            }
                         }
                     }
                 }
-                self.0.call.write_with_recipt(Value::Null)
+                let args = {
+                    let mut set: FxHashMap<Chars, Value> = HashMap::default();
+                    let names = match self.0.args.get() {
+                        Some(names) => names,
+                        None => bail!("no args set"),
+                    };
+                    for (name, val) in args {
+                        match names.get(name.borrow()) {
+                            None => bail!("no such argument {}", name.borrow()),
+                            Some(name) => {
+                                set.insert(name.clone(), val);
+                            }
+                        }
+                    }
+                    set
+                };
+                self.0.call.write_with_recipt(args.into())
             };
             Ok(result
                 .await
                 .map_err(|_| anyhow!("call cancelled before a reply was received"))?)
-        }
-
-        /// List the procedures' arguments
-        pub fn args(&self) -> impl Iterator<Item = &str> {
-            self.0.args.keys().map(|s| s.as_str())
         }
     }
 }

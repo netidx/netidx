@@ -1,4 +1,5 @@
 use anyhow::{bail, Result as Res};
+use arcstr::ArcStr;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::{Buf, BufMut, Bytes};
 use chrono::{naive::NaiveDateTime, prelude::*};
@@ -1916,6 +1917,25 @@ impl convert::From<String> for Value {
 
 impl convert::From<&'static str> for Value {
     fn from(v: &'static str) -> Value {
+        Value::String(Chars::from(v))
+    }
+}
+
+impl FromValue for ArcStr {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast_to::<Chars>().map(|c| ArcStr::from(&*c))
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::String(c) => Some(ArcStr::from(&*c)),
+            _ => None,
+        }
+    }
+}
+
+impl convert::From<ArcStr> for Value {
+    fn from(v: ArcStr) -> Value {
         Value::String(Chars::from(v))
     }
 }

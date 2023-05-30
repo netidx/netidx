@@ -30,6 +30,7 @@ futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"
 arcstr = { version = "1", features = ["serde"] }
+once_cell = "1.17.2"
 
 [dev-dependencies]
 proptest = "1"

@@ -1,4 +1,5 @@
 use crate::pack::{Pack, PackError};
+use arcstr::ArcStr;
 use bytes::{Buf, BufMut, Bytes};
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
@@ -146,6 +147,12 @@ impl From<String> for Chars {
     }
 }
 
+impl From<ArcStr> for Chars {
+    fn from(src: ArcStr) -> Chars {
+	Chars(Bytes::copy_from_slice(src.as_bytes()))
+    }
+}
+
 impl Into<String> for &Chars {
     fn into(self) -> String {
         self.as_ref().into()
@@ -155,6 +162,12 @@ impl Into<String> for &Chars {
 impl Into<String> for Chars {
     fn into(self) -> String {
         self.as_ref().into()
+    }
+}
+
+impl Into<ArcStr> for Chars {
+    fn into(self) -> ArcStr {
+	self.as_ref().into()
     }
 }
 
