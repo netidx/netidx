@@ -1,3 +1,15 @@
+* 0.20.0 protocols and deps
+
+  - change the rpc calling convention to fix a race condition where
+    the publisher is still publishing arguments when the subscriber is
+    created. Now only one published value is required to call an
+    rpc. The arguments are sent as a list of pairs to procedure
+    instead of as individual argument sets. The rpc server still
+    supports the old calling convention.
+
+  - RPC CLIENTS >0.20 CAN'T CALL RPC SERVERS <0.20. Older clients can
+    still call newer servers.
+
 * 0.19.22 tools archive
 
   - the resolver server now runs on windows in a limited capacity, basically
