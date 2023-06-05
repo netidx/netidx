@@ -1,3 +1,9 @@
+* 0.19.17 netidx
+
+  - fix a bug where a dead resolver server could cause publishing to
+    take a long time (even if at least 1 resolver in the cluster is
+    still alive)
+
 * 0.20.1 protocols and deps
 
   - remove the lock around rpc procedure calls, it is no longer
