@@ -69,7 +69,7 @@ struct Connection {
     resolver_addr: SocketAddr,
     resolver_auth: Auth,
     write_addr: SocketAddr,
-    published: Arc<RwLock<HashMap<Path, ToWrite>>>,
+    published: Arc<RwLock<FxHashMap<Path, ToWrite>>>,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     security_context: Option<K5CtxWrap<ClientCtx>>,
     tls: Option<tls::CachedConnector>,
@@ -383,78 +383,63 @@ impl Connection {
 
     async fn process_batch(&mut self, (tx_batch, reply): ArcBatch) -> Result<()> {
         self.active = true;
-        let mut tries: usize = 0;
-        'batch: loop {
-            if tries > 3 {
-                self.degraded = true;
-                bail!("abandoning batch");
-            }
-            if tries > 0 {
-                let wait = thread_rng().gen_range(1..12);
-                time::sleep(Duration::from_secs(wait)).await;
-            }
-            tries += 1;
-            let c = match self.con {
-                Some(ref mut c) => c,
-                None => match self.connect().await {
-                    Ok(()) => self.con.as_mut().unwrap(),
-                    Err(e) => {
-                        self.handle_failed_connect(e);
-                        continue 'batch;
-                    }
-                },
-            };
-            let timeout =
-                max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 100));
-            for (_, m) in &**tx_batch {
-                c.queue_send(m)?;
-            }
-            match c.flush_timeout(timeout).await {
+        let c = match self.con {
+            Some(ref mut c) => c,
+            None => match self.connect().await {
+                Ok(()) => self.con.as_mut().unwrap(),
                 Err(e) => {
-                    info!("write_con connection send error {}", e);
-                    self.con = None;
+                    let err = format!("connection failed {}", e);
+                    self.handle_failed_connect(e);
+                    bail!(err)
                 }
-                Ok(()) => {
-                    let mut rx_batch = RAWFROMWRITEPOOL.take();
-                    while rx_batch.len() < tx_batch.len() {
-                        let f = c.receive_batch(&mut *rx_batch);
-                        match time::timeout(timeout, f).await {
-                            Ok(Ok(())) => (),
-                            Ok(Err(e)) => {
-                                warn!("write_con connection recv error {}", e);
-                                self.con = None;
-                                continue 'batch;
-                            }
-                            Err(e) => {
-                                warn!("write_con timeout, waited: {}", e);
-                                self.con = None;
-                                continue 'batch;
-                            }
+            },
+        };
+        let timeout = max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 100));
+        for (_, m) in &**tx_batch {
+            c.queue_send(m)?;
+        }
+        match c.flush_timeout(timeout).await {
+            Err(e) => {
+                self.con = None;
+                bail!("write_con connection send error {}", e);
+            }
+            Ok(()) => {
+                let mut rx_batch = RAWFROMWRITEPOOL.take();
+                while rx_batch.len() < tx_batch.len() {
+                    let f = c.receive_batch(&mut *rx_batch);
+                    match time::timeout(timeout, f).await {
+                        Ok(Ok(())) => (),
+                        Ok(Err(e)) => {
+                            self.con = None;
+                            bail!("write_con connection recv error {}", e);
+                        }
+                        Err(e) => {
+                            self.con = None;
+                            bail!("write_con timeout, waited: {}", e);
                         }
                     }
-                    for ((_, tx), rx) in tx_batch.iter().zip(rx_batch.iter()) {
-                        match tx {
-                            ToWrite::Publish(_) => match rx {
-                                FromWrite::Published => (),
-                                _ => {
-                                    self.degraded = true;
-                                }
-                            },
-                            _ => (),
-                        }
-                    }
-                    let mut result = FROMWRITEPOOL.take();
-                    // not relevant for writes
-                    let publishers = PUBLISHERPOOL.take();
-                    for (i, m) in rx_batch.drain(..).enumerate() {
-                        result.push((tx_batch[i].0, m))
-                    }
-                    let _ = reply.send((publishers, result));
-                    break 'batch;
                 }
+                for ((_, tx), rx) in tx_batch.iter().zip(rx_batch.iter()) {
+                    match tx {
+                        ToWrite::Publish(_) => match rx {
+                            FromWrite::Published => (),
+                            _ => {
+                                self.degraded = true;
+                            }
+                        },
+                        _ => (),
+                    }
+                }
+                let mut result = FROMWRITEPOOL.take();
+                // not relevant for writes
+                let publishers = PUBLISHERPOOL.take();
+                for (i, m) in rx_batch.drain(..).enumerate() {
+                    result.push((tx_batch[i].0, m))
+                }
+                let _ = reply.send((publishers, result));
+                Ok(())
             }
         }
-        Ok(())
     }
 
     async fn start(
@@ -462,7 +447,7 @@ impl Connection {
         resolver_addr: SocketAddr,
         resolver_auth: Auth,
         write_addr: SocketAddr,
-        published: Arc<RwLock<HashMap<Path, ToWrite>>>,
+        published: Arc<RwLock<FxHashMap<Path, ToWrite>>>,
         desired_auth: DesiredAuth,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
@@ -485,6 +470,7 @@ impl Connection {
         };
         let mut receiver = receiver.fuse();
         loop {
+            #[rustfmt::skip]
             select_biased! {
                 _ = t.disconnect.tick().fuse() => {
                     if t.active {
@@ -504,8 +490,11 @@ impl Connection {
                 batch = receiver.next() => match batch {
                     None => break,
                     Some(batch) => match t.process_batch(batch).await {
-                        Err(e) => warn!("write batch failed {}", e),
-                        Ok(()) => ()
+                        Ok(()) => (),
+                        Err(e) => {
+			    t.degraded = true;
+			    warn!("write batch failed {}", e)
+			},
                     }
                 }
             }
@@ -521,8 +510,8 @@ async fn write_mgr(
     write_addr: SocketAddr,
     tls: Option<tls::CachedConnector>,
 ) -> Result<()> {
-    let published: Arc<RwLock<HashMap<Path, ToWrite>>> =
-        Arc::new(RwLock::new(HashMap::new()));
+    let published: Arc<RwLock<FxHashMap<Path, ToWrite>>> =
+        Arc::new(RwLock::new(HashMap::default()));
     let mut senders = {
         let mut senders = Vec::new();
         for (addr, auth) in resolver.addrs.iter() {
@@ -573,13 +562,17 @@ async fn write_mgr(
         }
         for s in senders.iter_mut() {
             let (tx, rx) = oneshot::channel();
-            let _ = s.send((Arc::clone(&tx_batch), tx)).await;
+            let _ = s.try_send((Arc::clone(&tx_batch), tx));
             waiters.push(rx);
         }
-        match select_ok(waiters).await {
-            Err(e) => warn!("write_mgr: write failed on all writers {}", e),
-            Ok((rx_batch, _)) => {
-                let _ = reply.send(rx_batch);
+        if waiters.is_empty() {
+            warn!("write_mgr: all writers are backed up")
+        } else {
+            match select_ok(waiters).await {
+                Err(e) => warn!("write_mgr: write failed on all writers {}", e),
+                Ok((rx_batch, _)) => {
+                    let _ = reply.send(rx_batch);
+                }
             }
         }
     }
