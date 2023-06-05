@@ -1,3 +1,8 @@
+* 0.20.1 protocols and deps
+
+  - remove the lock around rpc procedure calls, it is no longer
+    necessary with the new calling convention
+
 * 0.20.0 protocols and deps
 
   - change the rpc calling convention to fix a race condition where

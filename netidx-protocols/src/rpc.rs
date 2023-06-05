@@ -15,17 +15,16 @@ use netidx::{
     publisher::{
         ClId, Id, PublishFlags, Publisher, SendResult, Val, Value, WriteRequest,
     },
-    subscriber::{Dval, Subscriber, SubscriberId},
+    subscriber::{Dval, Subscriber},
 };
-use parking_lot::Mutex;
 use std::{
     borrow::Borrow,
     collections::HashMap,
     ops::Drop,
-    sync::{Arc, Weak},
+    sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{sync::Mutex as AsyncMutex, task};
+use tokio::task;
 
 #[macro_use]
 pub mod server {
@@ -408,19 +407,11 @@ pub mod client {
     use std::collections::HashSet;
 
     use fxhash::FxHashSet;
+    use log::debug;
     use netidx::subscriber::Event;
     use once_cell::sync::OnceCell;
 
     use super::*;
-
-    lazy_static! {
-        // The same procedure can't be called concurrently from the
-        // same subscriber. If it is, the arguments of the two calls
-        // could be permuted. This structure ensures that this does
-        // not happen.
-        static ref PROCS: Mutex<FxHashMap<SubscriberId, FxHashMap<Path, Weak<AsyncMutex<()>>>>> =
-            Mutex::new(HashMap::default());
-    }
 
     /// Convenience macro for calling rpcs.
     /// `call_rpc!(proc, arg0: 3, arg1: "foo", arg2: vec!["foo", "bar", "baz"])`
@@ -437,28 +428,8 @@ pub mod client {
 
     #[derive(Debug)]
     struct ProcInner {
-        name: Path,
-        sid: SubscriberId,
-        lock: Option<Arc<AsyncMutex<()>>>,
         call: Dval,
         args: OnceCell<FxHashSet<Chars>>,
-    }
-
-    impl Drop for ProcInner {
-        fn drop(&mut self) {
-            let mut procs = PROCS.lock();
-            drop(self.lock.take());
-            if let Some(procs_by_sub) = procs.get_mut(&self.sid) {
-                if let Some(weak_lock) = procs_by_sub.get(&self.name) {
-                    if weak_lock.strong_count() == 0 {
-                        procs_by_sub.remove(&self.name);
-                        if procs_by_sub.is_empty() {
-                            procs.remove(&self.sid);
-                        }
-                    }
-                }
-            }
-        }
     }
 
     #[derive(Debug, Clone)]
@@ -471,25 +442,8 @@ pub mod client {
         /// unsubscribe from the procedure and free all associated
         /// resources.
         pub async fn new(subscriber: &Subscriber, name: Path) -> Result<Proc> {
-            let sid = subscriber.id();
-            let lock = {
-                let mut locks = PROCS.lock();
-                let lock = locks
-                    .entry(sid)
-                    .or_insert_with(|| HashMap::default())
-                    .entry(name.clone())
-                    .or_insert_with(Weak::new);
-                match Weak::upgrade(lock) {
-                    Some(lock) => Some(lock),
-                    None => {
-                        let m = Arc::new(AsyncMutex::new(()));
-                        *lock = Arc::downgrade(&m);
-                        Some(m)
-                    }
-                }
-            };
             let call = subscriber.subscribe(name.clone());
-            Ok(Proc(Arc::new(ProcInner { name, sid, lock, call, args: OnceCell::new() })))
+            Ok(Proc(Arc::new(ProcInner { call, args: OnceCell::new() })))
         }
 
         /**
@@ -514,56 +468,60 @@ pub mod client {
 
         `call` may safely be called concurrently on multiple
         instances of `Proc` that call the same procedure
-        (there is internal syncronization).
         **/
         pub async fn call<I, K>(&self, args: I) -> Result<Value>
         where
             I: IntoIterator<Item = (K, Value)>,
             K: Borrow<str>,
         {
-            let result = {
-                let _guard = self.0.lock.as_ref().unwrap().lock().await;
-                if self.0.args.get().is_none() {
-                    loop {
-                        self.0.call.wait_subscribed().await?;
-                        match self.0.call.last() {
-                            Event::Unsubscribed => (),
-                            Event::Update(v) => {
-                                let args = v
-                                    .clone()
-                                    .cast_to::<FxHashSet<Chars>>()
-                                    .ok()
-                                    .unwrap_or(HashSet::default());
-                                self.0
-                                    .args
-                                    .set(args)
-                                    .map_err(|_| anyhow!("once cell set twice"))?;
-                                break;
-                            }
+            if self.0.args.get().is_none() {
+                loop {
+		    debug!("waiting for subscription to procedure");
+                    self.0.call.wait_subscribed().await?;
+		    debug!("fetching args");
+                    match self.0.call.last() {
+                        Event::Unsubscribed => (),
+                        Event::Update(v) => {
+			    debug!("args are {:?}", v);
+                            let args = v
+                                .clone()
+                                .cast_to::<FxHashSet<Chars>>()
+                                .ok()
+                                .unwrap_or(HashSet::default());
+                            self.0
+                                .args
+                                .set(args)
+                                .map_err(|_| anyhow!("once cell set twice"))?;
+                            break;
                         }
                     }
                 }
-                let args = {
-                    let mut set: FxHashMap<Chars, Value> = HashMap::default();
-                    let names = match self.0.args.get() {
-                        Some(names) => names,
-                        None => bail!("no args set"),
-                    };
-                    for (name, val) in args {
-                        match names.get(name.borrow()) {
-                            None => bail!("no such argument {}", name.borrow()),
-                            Some(name) => {
-                                set.insert(name.clone(), val);
-                            }
+            }
+            let args = {
+                let mut set: FxHashMap<Chars, Value> = HashMap::default();
+                let names = match self.0.args.get() {
+                    Some(names) => names,
+                    None => bail!("no args set"),
+                };
+                for (name, val) in args {
+                    match names.get(name.borrow()) {
+                        None => bail!("no such argument {}", name.borrow()),
+                        Some(name) => {
+                            set.insert(name.clone(), val);
                         }
                     }
-                    set
-                };
-                self.0.call.write_with_recipt(args.into())
+                }
+                set
             };
-            Ok(result
+	    debug!("calling procedure");
+            let res = self
+                .0
+                .call
+                .write_with_recipt(args.into())
                 .await
-                .map_err(|_| anyhow!("call cancelled before a reply was received"))?)
+                .map_err(|_| anyhow!("call cancelled before a reply was received"))?;
+	    debug!("procedure called");
+	    Ok(res)
         }
     }
 }
