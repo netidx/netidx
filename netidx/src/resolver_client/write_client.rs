@@ -26,7 +26,7 @@ use futures::{
 use fxhash::FxHashMap;
 use log::{debug, info, warn};
 use netidx_core::pool::Pool;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rand::{thread_rng, Rng};
 use std::{
     cmp::max, collections::HashMap, fmt::Debug, net::SocketAddr, sync::Arc,
@@ -34,6 +34,7 @@ use std::{
 };
 use tokio::{
     net::TcpStream,
+    sync::broadcast::{self, error::RecvError},
     task,
     time::{self, Instant, Interval},
 };
@@ -45,8 +46,11 @@ lazy_static! {
 }
 
 type Batch = (Pooled<Vec<(usize, ToWrite)>>, oneshot::Sender<Response<FromWrite>>);
-type ArcBatch =
-    (Arc<Pooled<Vec<(usize, ToWrite)>>>, oneshot::Sender<Response<FromWrite>>);
+
+struct ToCon {
+    batch: Pooled<Vec<(usize, ToWrite)>>,
+    replies: Mutex<Vec<oneshot::Sender<Response<FromWrite>>>>,
+}
 
 macro_rules! wt {
     ($loc:expr, $e:expr) => {{
@@ -381,7 +385,7 @@ impl Connection {
         }
     }
 
-    async fn process_batch(&mut self, (tx_batch, reply): ArcBatch) -> Result<()> {
+    async fn process_batch(&mut self, tx: Arc<ToCon>) -> Result<()> {
         self.active = true;
         let c = match self.con {
             Some(ref mut c) => c,
@@ -394,56 +398,40 @@ impl Connection {
                 }
             },
         };
-        let timeout = max(HELLO_TO, Duration::from_micros(tx_batch.len() as u64 * 100));
-        for (_, m) in &**tx_batch {
+        let timeout = max(HELLO_TO, Duration::from_micros(tx.batch.len() as u64 * 100));
+        for (_, m) in &*tx.batch {
             c.queue_send(m)?;
         }
-        match c.flush_timeout(timeout).await {
-            Err(e) => {
-                self.con = None;
-                bail!("write_con connection send error {}", e);
-            }
-            Ok(()) => {
-                let mut rx_batch = RAWFROMWRITEPOOL.take();
-                while rx_batch.len() < tx_batch.len() {
-                    let f = c.receive_batch(&mut *rx_batch);
-                    match time::timeout(timeout, f).await {
-                        Ok(Ok(())) => (),
-                        Ok(Err(e)) => {
-                            self.con = None;
-                            bail!("write_con connection recv error {}", e);
-                        }
-                        Err(e) => {
-                            self.con = None;
-                            bail!("write_con timeout, waited: {}", e);
-                        }
+        c.flush_timeout(timeout).await?;
+        let mut rx_batch = RAWFROMWRITEPOOL.take();
+        while rx_batch.len() < tx.batch.len() {
+            time::timeout(timeout, c.receive_batch(&mut *rx_batch)).await??
+        }
+        for ((_, tx), rx) in tx.batch.iter().zip(rx_batch.iter()) {
+            match tx {
+                ToWrite::Publish(_) => match rx {
+                    FromWrite::Published => (),
+                    _ => {
+                        self.degraded = true;
                     }
-                }
-                for ((_, tx), rx) in tx_batch.iter().zip(rx_batch.iter()) {
-                    match tx {
-                        ToWrite::Publish(_) => match rx {
-                            FromWrite::Published => (),
-                            _ => {
-                                self.degraded = true;
-                            }
-                        },
-                        _ => (),
-                    }
-                }
-                let mut result = FROMWRITEPOOL.take();
-                // not relevant for writes
-                let publishers = PUBLISHERPOOL.take();
-                for (i, m) in rx_batch.drain(..).enumerate() {
-                    result.push((tx_batch[i].0, m))
-                }
-                let _ = reply.send((publishers, result));
-                Ok(())
+                },
+                _ => (),
             }
         }
+        let mut result = FROMWRITEPOOL.take();
+        // not relevant for writes
+        let publishers = PUBLISHERPOOL.take();
+        for (i, m) in rx_batch.drain(..).enumerate() {
+            result.push((tx.batch[i].0, m))
+        }
+        if let Some(reply) = tx.replies.lock().pop() {
+            let _ = reply.send((publishers, result));
+        }
+        Ok(())
     }
 
     async fn start(
-        receiver: mpsc::Receiver<ArcBatch>,
+        mut receiver: broadcast::Receiver<Arc<ToCon>>,
         resolver_addr: SocketAddr,
         resolver_auth: Auth,
         write_addr: SocketAddr,
@@ -468,7 +456,6 @@ impl Connection {
             heartbeat: time::interval_at(now + HB, HB),
             disconnect: time::interval_at(now + LINGER, LINGER),
         };
-        let mut receiver = receiver.fuse();
         loop {
             #[rustfmt::skip]
             select_biased! {
@@ -481,17 +468,22 @@ impl Connection {
                     }
                 },
                 _ = t.heartbeat.tick().fuse() => {
-                    if t.active {
+                    if t.active && !t.degraded {
                         t.active = false;
                     } else {
                         t.send_heartbeat().await;
                     }
                 },
-                batch = receiver.next() => match batch {
-                    None => break,
-                    Some(batch) => match t.process_batch(batch).await {
+                batch = receiver.recv().fuse() => match batch {
+		    Err(RecvError::Closed) => break,
+		    Err(RecvError::Lagged(_)) => {
+			t.con = None;
+			t.degraded = true;
+		    }
+		    Ok(batch) => match t.process_batch(batch).await {
                         Ok(()) => (),
                         Err(e) => {
+			    t.con = None;
 			    t.degraded = true;
 			    warn!("write batch failed {}", e)
 			},
@@ -512,40 +504,42 @@ async fn write_mgr(
 ) -> Result<()> {
     let published: Arc<RwLock<FxHashMap<Path, ToWrite>>> =
         Arc::new(RwLock::new(HashMap::default()));
-    let mut senders = {
-        let mut senders = Vec::new();
-        for (addr, auth) in resolver.addrs.iter() {
-            let (sender, receiver) = mpsc::channel(100);
-            let addr = *addr;
-            let auth = auth.clone();
-            let published = published.clone();
-            let desired_auth = desired_auth.clone();
-            let secrets = secrets.clone();
-            let tls = tls.clone();
-            senders.push(sender);
-            task::spawn(async move {
-                Connection::start(
-                    receiver,
-                    addr,
-                    auth,
-                    write_addr,
-                    published,
-                    desired_auth,
-                    secrets,
-                    tls,
-                )
-                .await;
-                info!("write task for {:?} exited", addr);
-            });
-        }
-        senders
-    };
+    let (sender, _) = broadcast::channel(100);
+    for (addr, auth) in resolver.addrs.iter() {
+        let addr = *addr;
+        let auth = auth.clone();
+        let published = published.clone();
+        let desired_auth = desired_auth.clone();
+        let secrets = secrets.clone();
+        let tls = tls.clone();
+        let receiver = sender.subscribe();
+        task::spawn(async move {
+            Connection::start(
+                receiver,
+                addr,
+                auth,
+                write_addr,
+                published,
+                desired_auth,
+                secrets,
+                tls,
+            )
+            .await;
+            info!("write task for {:?} exited", addr);
+        });
+    }
     while let Some((batch, reply)) = receiver.next().await {
-        let tx_batch = Arc::new(batch);
-        let mut waiters = Vec::new();
+        let mut replies = vec![];
+        let mut waiters = vec![];
+        for _ in resolver.addrs.iter() {
+            let (tx, rx) = oneshot::channel();
+            replies.push(tx);
+            waiters.push(rx);
+        }
+        let tx_batch = Arc::new(ToCon { batch, replies: Mutex::new(replies) });
         {
             let mut published = published.write();
-            for (_, tx) in tx_batch.iter() {
+            for (_, tx) in tx_batch.batch.iter() {
                 match tx {
                     ToWrite::Publish(p)
                     | ToWrite::PublishDefault(p)
@@ -560,19 +554,11 @@ async fn write_mgr(
                 }
             }
         }
-        for s in senders.iter_mut() {
-            let (tx, rx) = oneshot::channel();
-            let _ = s.try_send((Arc::clone(&tx_batch), tx));
-            waiters.push(rx);
-        }
-        if waiters.is_empty() {
-            warn!("write_mgr: all writers are backed up")
-        } else {
-            match select_ok(waiters).await {
-                Err(e) => warn!("write_mgr: write failed on all writers {}", e),
-                Ok((rx_batch, _)) => {
-                    let _ = reply.send(rx_batch);
-                }
+        let _ = sender.send(tx_batch);
+        match select_ok(waiters).await {
+            Err(e) => warn!("write_mgr: write failed on all writers {}", e),
+            Ok((rx_batch, _)) => {
+                let _ = reply.send(rx_batch);
             }
         }
     }
