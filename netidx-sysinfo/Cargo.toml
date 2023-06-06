@@ -1,0 +1,17 @@
+[package]
+name = "netidx-sysinfo"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4"
+env_logger = "0.9"
+anyhow = "1.0"
+netidx = { path = "../netidx", version = "^0.19.7", default_features = false }
+netidx-core = { path = "../netidx-core", version = "^0.18.5" }
+netidx-tools-core = { path = "../netidx-tools-core", version = "^0.19" }
+structopt = "*"
+sysinfo = "0.29.0"
+tokio = { version = "1", features = ["full"] }

@@ -23,5 +23,6 @@ members = [
     "netidx-browser",
     "netidx-container",
     "netidx-derive",
-    "netidx-wsproxy"
+    "netidx-wsproxy",
+    "netidx-sysinfo"
 ]
