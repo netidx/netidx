@@ -177,11 +177,11 @@ fn update_procs_stats(
         match procs_map.get_mut(&pid) {
             Some(proc_stat) => {
                 // TODO: is there a way to just see the previous published value so we don't clone needlessly to update it?
-                proc_stat.name.update(batch, new_name.to_string().clone());
-                proc_stat.cmdline.update(batch, new_cmdline.clone());
-                proc_stat.exe.update(batch, new_exe.clone());
-                proc_stat.uid.update(batch, new_uid);
-                proc_stat.gid.update(batch, new_gid);
+                proc_stat.name.update_changed(batch, new_name.to_string().clone());
+                proc_stat.cmdline.update_changed(batch, new_cmdline.clone());
+                proc_stat.exe.update_changed(batch, new_exe.clone());
+                proc_stat.uid.update_changed(batch, new_uid);
+                proc_stat.gid.update_changed(batch, new_gid);
                 proc_stat.cpu.update(batch, new_cpu);
                 proc_stat.vsize.update(batch, new_vsize);
                 proc_stat.rss.update(batch, new_rss);
@@ -297,9 +297,9 @@ async fn run(opt: SysinfoOpt, cfg: Config, auth: DesiredAuth) -> Result<()> {
             });
 
             let mut batch = publisher.start_batch();
-            total_memory.update(&mut batch, sys.total_memory());
+            total_memory.update_changed(&mut batch, sys.total_memory());
             used_memory.update(&mut batch, sys.used_memory());
-            total_swap.update(&mut batch, sys.total_swap());
+            total_swap.update_changed(&mut batch, sys.total_swap());
             used_swap.update(&mut batch, sys.used_swap());
 
             let loadavg = sys.load_average();
