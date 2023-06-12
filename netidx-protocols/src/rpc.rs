@@ -174,7 +174,7 @@ pub mod server {
             }
             let mut stop = self.stop;
             loop {
-		#[rustfmt::skip]
+                #[rustfmt::skip]
                 select_biased! {
                     _ = stop => break,
                     mut batch = self.events.select_next_some() => for req in batch.drain(..) {
@@ -408,7 +408,7 @@ pub mod client {
     use std::collections::HashSet;
 
     use fxhash::FxHashSet;
-    use log::debug;
+    use log::{debug, trace};
     use netidx::subscriber::Event;
     use once_cell::sync::OnceCell;
 
@@ -477,13 +477,13 @@ pub mod client {
         {
             if self.0.args.get().is_none() {
                 loop {
-		    debug!("waiting for subscription to procedure");
+                    debug!("waiting for subscription to procedure");
                     self.0.call.wait_subscribed().await?;
-		    debug!("fetching args");
+                    debug!("fetching args");
                     match self.0.call.last() {
                         Event::Unsubscribed => (),
                         Event::Update(v) => {
-			    debug!("args are {:?}", v);
+                            debug!("args are {:?}", v);
                             let args = v
                                 .clone()
                                 .cast_to::<FxHashSet<Chars>>()
@@ -514,15 +514,15 @@ pub mod client {
                 }
                 set
             };
-	    debug!("calling procedure");
+            trace!("calling procedure");
             let res = self
                 .0
                 .call
                 .write_with_recipt(args.into())
                 .await
                 .map_err(|_| anyhow!("call cancelled before a reply was received"))?;
-	    debug!("procedure called");
-	    Ok(res)
+            trace!("procedure called");
+            Ok(res)
         }
     }
 }
