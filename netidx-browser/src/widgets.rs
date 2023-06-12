@@ -852,20 +852,18 @@ impl Entry {
         selected_path: gtk::Label,
     ) -> Self {
         let we_changed = Rc::new(Cell::new(false));
-        let mut ctx_r = ctx.borrow_mut();
-        let ctx_r = &mut ctx_r;
         let text = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.text.clone(),
         )));
         let on_change = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
+            &mut ctx.borrow_mut(),
             scope.clone(),
             spec.on_change.clone(),
         )));
         let on_activate = Rc::new(RefCell::new(BSNode::compile(
-            ctx_r,
+            &mut ctx.borrow_mut(),
             scope,
             spec.on_activate.clone(),
         )));
