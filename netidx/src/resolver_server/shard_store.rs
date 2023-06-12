@@ -728,7 +728,7 @@ impl Store {
         uifo: Arc<UserInfo>,
         publisher: Arc<Publisher>,
     ) -> Result<()> {
-        use rand::{prelude::*, thread_rng};
+        use rand::prelude::*;
         let mut published_paths = join_all(self.shards.iter().map(|shard| {
             let (tx, rx) = oneshot::channel();
             let _ = shard.internal.unbounded_send((publisher.id, tx));

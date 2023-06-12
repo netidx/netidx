@@ -192,7 +192,7 @@ impl LinePlot {
     ) -> Result<()> {
         use super::cairo_backend::CairoBackend;
         use chrono::Duration;
-        use plotters::{coord::ranged1d::ValueFormatter, prelude::*, style::RGBColor};
+        use plotters::{coord::ranged1d::ValueFormatter, prelude::*};
         use std::cmp::max;
         fn get_min_max(specified: Option<Value>, computed: Value) -> Value {
             match specified {

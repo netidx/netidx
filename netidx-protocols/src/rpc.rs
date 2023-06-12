@@ -174,26 +174,27 @@ pub mod server {
             }
             let mut stop = self.stop;
             loop {
+		#[rustfmt::skip]
                 select_biased! {
                     _ = stop => break,
                     mut batch = self.events.select_next_some() => for req in batch.drain(..) {
                         if req.id == self.call.id() {
                             let mut args = self.pending.remove(&req.client).map(|pc| pc.args)
                                 .unwrap_or_else(|| ARGS.take());
-                match req.value {
-                Value::Null => (),
-                Value::Array(a) => for v in &*a {
-                    match v.clone().cast_to::<(Chars, Value)>() {
-                    Ok((name, val)) => {
-                        if let Some(name) = self.arg_names.get(&*name) {
-                        args.insert(name.clone(), val);
-                        }
-                    }
-                    Err(_) => ()
-                    }
-                }
-                _ => ()
-                };
+			    match req.value {
+				Value::Null => (),
+				Value::Array(a) => for v in &*a {
+				    match v.clone().cast_to::<(Chars, Value)>() {
+					Ok((name, val)) => {
+					    if let Some(name) = self.arg_names.get(&*name) {
+						args.insert(name.clone(), val);
+					    }
+					}
+					Err(_) => ()
+				    }
+				}
+				_ => ()
+			    };
                             let call = RpcCall {
                                 client: req.client,
                                 id: self.id,
