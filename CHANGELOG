@@ -1,3 +1,9 @@
+* 0.20.1 browser, protocols
+  
+  - fix borrow error in the browser
+
+  - reduce log verbosity in rpc
+
 * 0.19.17 netidx
 
   - fix a bug where a dead resolver server could cause publishing to
