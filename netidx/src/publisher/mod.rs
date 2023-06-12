@@ -436,6 +436,7 @@ pub enum Event {
     Unsubscribe(Id, ClId),
 }
 
+#[derive(Debug)]
 struct Update {
     updates: Pooled<Vec<publisher::From>>,
     unsubscribes: Option<Pooled<Vec<Id>>>,
