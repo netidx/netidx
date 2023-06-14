@@ -997,9 +997,9 @@ impl Subscriber {
                                 DvState::Subscribed(_) => unreachable!(),
                                 DvState::Dead(d) => {
                                     d.tries += 1;
-                                    let wait = Duration::from_secs(pick(d.tries) as u64);
+                                    let wait = Duration::from_millis(pick(d.tries) as u64 * 50);
                                     d.next_try = now + wait;
-                                    let s = wait.as_secs();
+                                    let s = wait.as_secs_f32();
                                     warn!(
                                         "resubscription error {}: {}, next try: {}s",
                                         p, e, s
