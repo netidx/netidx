@@ -1,3 +1,7 @@
+* 0.19.18 netidx
+
+  - reduce the wait time between resubscription attempts
+
 * 0.20.1 browser, protocols
   
   - fix borrow error in the browser
