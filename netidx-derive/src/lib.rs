@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use proc_macro2::{token_stream, Delimiter, TokenStream, TokenTree};
 use quote::{format_ident, quote, ToTokens};
 use syn::{
@@ -45,7 +47,7 @@ fn is_attr(att: &Attribute, allowed: &[&str], s: &str) -> bool {
 fn get_tag(
     att: &Attribute,
     n: usize,
-    tagged: &mut bool,
+    tagged: &mut HashSet<String>,
     allowed: &[&str],
 ) -> Option<TokenStream> {
     parse_attr(att, |i, mut ts| {
@@ -55,10 +57,9 @@ fn get_tag(
         } else if i != "tag" {
             return None;
         }
-        if !*tagged && n > 0 {
-            panic!("all cases must be tagged")
+        if tagged.is_empty() && n > 0 {
+            panic!("all cases must be tagged or none must be")
         }
-        *tagged = true;
         match ts.next() {
             None => panic!("tag expected an integer argument"),
             Some(TokenTree::Group(g)) => {
@@ -68,7 +69,11 @@ fn get_tag(
                 match g.stream().into_iter().next() {
                     None => panic!("tag expected an int literal argument"),
                     Some(TokenTree::Literal(l)) => {
-                        Some(TokenStream::from(TokenTree::Literal(l)))
+                        if !tagged.insert(l.to_string()) {
+                            panic!("tags must be unique {} reused", l)
+                        }
+                        let res = TokenStream::from(TokenTree::Literal(l));
+                        Some(res)
                     }
                     Some(_) => panic!("tag expected an int literal argument"),
                 }
@@ -269,17 +274,17 @@ fn encode(no_wrap: bool, input: &Data) -> TokenStream {
             Fields::Unit => panic!("unit structs are not supported by Pack"),
         },
         Data::Enum(en) => {
-            let mut tagged = false;
+            let mut tagged = HashSet::default();
             let cases = en.variants.iter().enumerate().map(|(i, v)| {
 		let tag = &v.ident;
                 let i = v
                     .attrs
                     .iter()
                     .find_map(|a| get_tag(a, i, &mut tagged, &ENUM_ATTRS))
-                    .unwrap_or_else(|| if tagged {
-			panic!("all cases must be tagged or none must be")
-		    } else {
+                    .unwrap_or_else(|| if tagged.is_empty() {
 			Index::from(i).to_token_stream()
+		    } else {
+			panic!("all cases must be tagged or none must be")
 		    });
 		match &v.fields {
                     Fields::Named(f) => {
@@ -464,7 +469,7 @@ fn decode(no_wrap: bool, input: &Data) -> TokenStream {
         },
         Data::Enum(en) => {
             let mut other: Option<TokenStream> = None;
-            let mut tagged = false;
+            let mut tagged = HashSet::default();
             let cases = en
                 .variants
                 .iter()
@@ -476,10 +481,10 @@ fn decode(no_wrap: bool, input: &Data) -> TokenStream {
                         .iter()
                         .find_map(|a| get_tag(a, i, &mut tagged, &ENUM_ATTRS))
                         .unwrap_or_else(|| {
-                            if tagged {
-                                panic!("all cases must be tagged or none must be")
-                            } else {
+                            if tagged.is_empty() {
                                 Index::from(i).to_token_stream()
+                            } else {
+                                panic!("all cases must be tagged or none must be")
                             }
                         });
                     match &v.fields {
