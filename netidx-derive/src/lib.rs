@@ -42,14 +42,23 @@ fn is_attr(att: &Attribute, allowed: &[&str], s: &str) -> bool {
     .unwrap_or(false)
 }
 
-fn get_tag(att: &Attribute, tagged: &mut bool, allowed: &[&str]) -> Option<TokenStream> {
-    let res = parse_attr(att, |i, mut ts| {
+fn get_tag(
+    att: &Attribute,
+    n: usize,
+    tagged: &mut bool,
+    allowed: &[&str],
+) -> Option<TokenStream> {
+    parse_attr(att, |i, mut ts| {
         let i = i.to_string();
         if !allowed.contains(&i.as_str()) {
             panic!("invalid attribute '{}'", i)
         } else if i != "tag" {
             return None;
         }
+        if !*tagged && n > 0 {
+            panic!("all cases must be tagged")
+        }
+        *tagged = true;
         match ts.next() {
             None => panic!("tag expected an integer argument"),
             Some(TokenTree::Group(g)) => {
@@ -67,13 +76,7 @@ fn get_tag(att: &Attribute, tagged: &mut bool, allowed: &[&str]) -> Option<Token
             Some(_) => panic!("tag expected an integer argument"),
         }
     })
-    .flatten();
-    if res.is_none() && *tagged {
-        panic!("all cases must be explicitly tagged or none must be")
-    } else {
-        *tagged |= res.is_some()
-    }
-    res
+    .flatten()
 }
 
 static ENUM_ATTRS: [&'static str; 2] = ["tag", "other"];
@@ -272,8 +275,12 @@ fn encode(no_wrap: bool, input: &Data) -> TokenStream {
                 let i = v
                     .attrs
                     .iter()
-                    .find_map(|a| get_tag(a, &mut tagged, &ENUM_ATTRS))
-                    .unwrap_or_else(|| Index::from(i).to_token_stream());
+                    .find_map(|a| get_tag(a, i, &mut tagged, &ENUM_ATTRS))
+                    .unwrap_or_else(|| if tagged {
+			panic!("all cases must be tagged or none must be")
+		    } else {
+			Index::from(i).to_token_stream()
+		    });
 		match &v.fields {
                     Fields::Named(f) => {
 			let match_fields = f
@@ -457,64 +464,78 @@ fn decode(no_wrap: bool, input: &Data) -> TokenStream {
         },
         Data::Enum(en) => {
             let mut other: Option<TokenStream> = None;
+            let mut tagged = false;
             let cases = en
                 .variants
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
-		    let mut tagged = false;
                     let tag = &v.ident;
                     let i = v
-			.attrs
-			.iter()
-			.find_map(|a| get_tag(a, &mut tagged, &ENUM_ATTRS))
-			.unwrap_or_else(|| Index::from(i).to_token_stream());
-		    match &v.fields {
-			Fields::Named(f) => {
+                        .attrs
+                        .iter()
+                        .find_map(|a| get_tag(a, i, &mut tagged, &ENUM_ATTRS))
+                        .unwrap_or_else(|| {
+                            if tagged {
+                                panic!("all cases must be tagged or none must be")
+                            } else {
+                                Index::from(i).to_token_stream()
+                            }
+                        });
+                    match &v.fields {
+                        Fields::Named(f) => {
                             if v.attrs.iter().any(|a| is_attr(a, &ENUM_ATTRS, "other")) {
-				panic!("other attribute must be applied to a unit variant")
+                                panic!(
+                                    "other attribute must be applied to a unit variant"
+                                )
                             }
                             let name_fields = f.named.iter().map(|f| &f.ident);
                             let decode_fields = f.named.iter().map(decode_named_field);
+                            #[rustfmt::skip]
                             quote! {
 				#i => {
                                     #(#decode_fields);*;
                                     Ok(Self::#tag { #(#name_fields),* })
 				}
                             }
-			}
-			Fields::Unnamed(f) => {
+                        }
+                        Fields::Unnamed(f) => {
                             if v.attrs.iter().any(|a| is_attr(a, &ENUM_ATTRS, "other")) {
-				panic!("other attribute must be applied to a unit variant")
+                                panic!(
+                                    "other attribute must be applied to a unit variant"
+                                )
                             }
                             let name_fields = f
-				.unnamed
-				.iter()
-				.enumerate()
-				.map(|(i, _)| format_ident!("field{}", i));
+                                .unnamed
+                                .iter()
+                                .enumerate()
+                                .map(|(i, _)| format_ident!("field{}", i));
                             let decode_fields = f
-				.unnamed
-				.iter()
-				.enumerate()
-				.map(|(i, f)| decode_unnamed_field(f, i));
+                                .unnamed
+                                .iter()
+                                .enumerate()
+                                .map(|(i, f)| decode_unnamed_field(f, i));
+                            #[rustfmt::skip]
                             quote! {
 				#i => {
                                     #(#decode_fields);*;
                                     Ok(Self::#tag(#(#name_fields),*))
 				}
                             }
-			}
-			Fields::Unit => {
+                        }
+                        Fields::Unit => {
                             if v.attrs.iter().any(|a| is_attr(a, &ENUM_ATTRS, "other")) {
-				if other.is_some() {
-                                    panic!("other attribute may be specified at most once")
-				}
-				other = Some(quote! { _ => Ok(Self::#tag) })
+                                if other.is_some() {
+                                    panic!(
+                                        "other attribute may be specified at most once"
+                                    )
+                                }
+                                other = Some(quote! { _ => Ok(Self::#tag) })
                             }
                             quote! { #i => Ok(Self::#tag), }
-			}
+                        }
                     }
-		})
+                })
                 .collect::<Vec<_>>();
             if no_wrap {
                 match other {
