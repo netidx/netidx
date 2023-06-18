@@ -1,9 +1,15 @@
+* 0.18.1 netidx-derive
+
+  - add an attribute #[pack(tag(n))] that allows explicitly specifying
+    the on the wire tag of an enum variant. If tag is specified on one
+    variant case then it must be specified on all of them.
+
 * 0.19.18 netidx
 
   - reduce the wait time between resubscription attempts
 
 * 0.20.1 browser, protocols
-  
+
   - fix borrow error in the browser
 
   - reduce log verbosity in rpc
