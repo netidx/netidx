@@ -1204,9 +1204,12 @@ impl ArchiveIndex {
     ) -> (bool, DateTime<Utc>) {
         let ts = match cursor.current() {
             Some(ts) => ts,
-            None => {
-                self.deltamap.keys().next().copied().unwrap_or(DateTime::<Utc>::MIN_UTC)
-            }
+            None => self.deltamap.keys().next().copied().unwrap_or(
+                Utc.from_utc_datetime(&NaiveDateTime::new(
+                    NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+                    NaiveTime::from_hms_opt(0, 0, 1).unwrap(),
+                )),
+            ),
         };
         let new_ts = ts + offset;
         cursor.set_current(new_ts);
