@@ -1,3 +1,7 @@
+* 0.18.1 netidx-archive
+
+  - fix a date overflow when seeking backwards with an empty current file
+
 * 0.18.2 netidx-derive
 
   - Check in the proc macro that no tag is used more than once
