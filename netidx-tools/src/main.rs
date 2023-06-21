@@ -11,7 +11,6 @@ mod wsproxy;
 
 #[cfg(unix)]
 mod activation;
-#[cfg(unix)]
 mod container;
 #[cfg(unix)]
 mod recorder;
@@ -84,7 +83,6 @@ enum Opt {
         #[structopt(flatten)]
         params: subscriber::Params,
     },
-    #[cfg(unix)]
     #[structopt(name = "container", about = "a hierarchical database in netidx")]
     Container {
         #[structopt(flatten)]
@@ -155,7 +153,6 @@ async fn tokio_main() -> Result<()> {
             let (cfg, auth) = common.load();
             subscriber::run(cfg, auth, params).await
         }
-        #[cfg(unix)]
         Opt::Container { common, params } => {
             let (cfg, auth) = common.load();
             container::run(cfg, auth, params).await
