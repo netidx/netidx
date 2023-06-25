@@ -305,15 +305,11 @@ pub fn i64_uzz(n: u64) -> i64 {
 }
 
 pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
-    let mut bytes = buf.chunk();
+    let bytes = buf.chunk();
     let mut value = 0;
     for i in 0..10 {
-	if i > bytes.len() {
-	    buf.advance(i);
-	    bytes = buf.chunk();
-	    if bytes.len() == 0 {
-		return Err(PackError::BufferShort);
-	    }
+	if i >= bytes.len() {
+	    return Err(PackError::BufferShort);
 	}
         let byte = bytes[i];
         value |= u64::from(byte & 0x7F) << (i * 7);

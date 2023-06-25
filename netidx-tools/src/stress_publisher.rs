@@ -47,7 +47,7 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
             for col in 0..p.cols {
                 let path = Path::from(format!("{}/{}/{}", p.base, row, col));
                 published
-                    .push(publisher.publish(path, Value::V64(v)).context("encode value")?)
+                    .push(publisher.publish(path, Value::U64(v)).context("encode value")?)
             }
         }
         published
@@ -58,7 +58,7 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
         let mut updates = publisher.start_batch();
         v += 1;
         for p in published.iter() {
-            p.update(&mut updates, Value::V64(v as u64));
+            p.update(&mut updates, Value::U64(v as u64));
             sent += 1;
         }
         updates.commit(None).await;
