@@ -23,15 +23,12 @@ use futures::{
     prelude::*,
     select_biased,
 };
-use fxhash::FxHashMap;
+use fxhash::{FxBuildHasher, FxHashMap};
+use indexmap::IndexMap;
 use log::{debug, info, warn};
-use netidx_core::pool::Pool;
 use parking_lot::{Mutex, RwLock};
 use rand::{thread_rng, Rng};
-use std::{
-    cmp::max, collections::HashMap, fmt::Debug, net::SocketAddr, sync::Arc,
-    time::Duration,
-};
+use std::{cmp::max, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     net::TcpStream,
     sync::broadcast::{self, error::RecvError},
@@ -40,10 +37,6 @@ use tokio::{
 };
 
 const TTL: u64 = 120;
-
-lazy_static! {
-    static ref REPUB: Pool<Vec<ToWrite>> = Pool::new(100, 10_000_000);
-}
 
 type Batch = (Pooled<Vec<(usize, ToWrite)>>, oneshot::Sender<Response<FromWrite>>);
 
@@ -73,7 +66,7 @@ struct Connection {
     resolver_addr: SocketAddr,
     resolver_auth: Auth,
     write_addr: SocketAddr,
-    published: FxHashMap<Path, ToWrite>,
+    published: IndexMap<Path, ToWrite, FxBuildHasher>,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     security_context: Option<K5CtxWrap<ClientCtx>>,
     tls: Option<tls::CachedConnector>,
@@ -116,13 +109,57 @@ impl Connection {
             }
             con.flush().await?;
             let mut success = 0;
+            let mut has_clear = false;
+            let mut to_remove: Vec<Option<Path>> = vec![];
             for msg in self.published.values() {
-                match con.receive().await? {
-                    FromWrite::Published => {
-                        success += 1;
+                let reply = con.receive().await?;
+                match msg {
+                    ToWrite::Publish(_)
+                    | ToWrite::PublishDefault(_)
+                    | ToWrite::PublishWithFlags(_, _)
+                    | ToWrite::PublishDefaultWithFlags(_, _) => match reply {
+                        FromWrite::Published => success += 1,
+                        r => {
+                            warn!("republish unexpected response to {:?} from resolver {:?}", msg, r)
+                        }
+                    },
+                    ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => match reply {
+                        FromWrite::Unpublished => {
+                            success += 1;
+                            to_remove.push(Some(p.clone()));
+                        }
+                        r => {
+                            warn!("republish unexpected response to {:?} from resolver {:?}", msg, r)
+                        }
+                    },
+                    ToWrite::Clear => match reply {
+                        FromWrite::Unpublished => {
+                            has_clear = true;
+                            success += 1;
+                            to_remove.push(None);
+                        }
+                        r => {
+                            warn!("republish unexpected response to {:?} from resolver {:?}", msg, r)
+                        }
+                    },
+                    ToWrite::Heartbeat => (),
+                }
+            }
+            for p in to_remove {
+                match p {
+                    Some(p) => {
+                        if has_clear {
+                            self.published.shift_remove(&p);
+                        } else {
+                            self.published.remove(&p);
+                        }
                     }
-                    r => {
-                        warn!("unexpected republish reply for {:?} {:?}", msg, r)
+                    None => {
+                        if let Some((pos, _, _)) =
+                            self.published.get_full(&Path::from(""))
+                        {
+                            self.published = self.published.split_off(pos);
+                        }
                     }
                 }
             }
@@ -406,7 +443,10 @@ impl Connection {
                 ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => {
                     self.published.remove(p);
                 }
-                ToWrite::Clear | ToWrite::Heartbeat => (),
+                ToWrite::Clear => {
+                    self.published.clear();
+                }
+                ToWrite::Heartbeat => (),
             }
         }
         let timeout = max(HELLO_TO, Duration::from_micros(tx.batch.len() as u64 * 100));
@@ -455,7 +495,7 @@ impl Connection {
             resolver_addr,
             resolver_auth,
             write_addr,
-            published: HashMap::default(),
+            published: IndexMap::default(),
             secrets,
             desired_auth,
             security_context: None,
@@ -490,11 +530,26 @@ impl Connection {
 			t.con = None;
 			t.degraded = true;
 		    }
-		    Ok(batch) => match t.process_batch(batch).await {
+		    Ok(batch) => match t.process_batch(batch.clone()).await {
                         Ok(()) => (),
                         Err(e) => {
 			    t.con = None;
 			    t.degraded = true;
+			    for (_, tx) in batch.batch.iter() {
+				match tx {
+				    ToWrite::Publish(_)
+					| ToWrite::PublishDefault(_)
+					| ToWrite::PublishWithFlags(_, _)
+					| ToWrite::PublishDefaultWithFlags(_, _) => (),
+				    ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => {
+					t.published.insert(p.clone(), tx.clone());
+				    }
+				    ToWrite::Clear => {
+					t.published.insert(Path::from(""), ToWrite::Clear);
+				    },
+				    ToWrite::Heartbeat => (),
+				}
+			    }
 			    warn!("write batch failed {}", e)
 			},
                     }
