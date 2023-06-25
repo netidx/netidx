@@ -27,7 +27,7 @@ use futures::{
     select,
 };
 use fxhash::FxHashMap;
-use log::info;
+use log::{info, trace};
 use std::{
     collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},
@@ -613,6 +613,7 @@ impl Store {
         publisher: Arc<Publisher>,
         mut msgs: impl Iterator<Item = ToWrite>,
     ) -> Result<()> {
+	trace!("handling write from {:?}", &publisher);
         let mut finished = false;
         loop {
             let mut n = 0;
@@ -662,6 +663,7 @@ impl Store {
                 }
                 n += 1;
             }
+	    trace!("handle_write_batch dispatching {} messages to shards", n);
             if by_shard.iter().all(|v| v.is_empty()) {
                 assert!(finished);
                 break Ok(());
@@ -677,6 +679,7 @@ impl Store {
                 .await
                 .into_iter()
                 .collect::<result::Result<Vec<Pooled<WriteR>>, Canceled>>()?;
+	    trace!("handle_write_batch {} shards replied", replies.len());
             if let Some(ref mut c) = con {
                 for i in 0..n {
                     if replies.len() == 1
@@ -717,7 +720,9 @@ impl Store {
                 }
                 c.flush().await?;
             }
+	    trace!("handle_write_batch processed replies");
             if finished {
+		trace!("handle_write_batch finished");
                 break Ok(());
             }
         }
@@ -729,6 +734,7 @@ impl Store {
         publisher: Arc<Publisher>,
     ) -> Result<()> {
         use rand::prelude::*;
+	trace!("clearing publisher {:?}", &publisher);
         let mut published_paths = join_all(self.shards.iter().map(|shard| {
             let (tx, rx) = oneshot::channel();
             let _ = shard.internal.unbounded_send((publisher.id, tx));

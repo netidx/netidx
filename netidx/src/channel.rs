@@ -12,7 +12,7 @@ use futures::{
     prelude::*,
     select_biased, stream,
 };
-use log::info;
+use log::{info, trace};
 use parking_lot::Mutex;
 use std::{clone::Clone, fmt::Debug, mem, ops::Deref, sync::Arc, time::Duration};
 use tokio::{
@@ -20,7 +20,7 @@ use tokio::{
     task, time,
 };
 
-const BUF: usize = 4096;
+const BUF: usize = 8388608;
 const LEN_MASK: u32 = 0x7FFFFFFF;
 const MAX_BATCH: usize = 0x3FFFFFFF;
 const ENC_MASK: u32 = 0x80000000;
@@ -107,7 +107,9 @@ async fn flush_buf<B: Buf, S: AsyncWrite + Send + 'static>(
     let lenb = len.to_be_bytes();
     let mut buf = Buf::chain(&lenb[..], buf);
     while buf.has_remaining() {
+        let i = buf.remaining();
         soc.write_buf(&mut buf).await?;
+        trace!("flush_buf wrote {}", i - buf.remaining());
     }
     soc.flush().await?;
     Ok(())
@@ -255,10 +257,12 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
     mut soc: ReadHalf<S>,
     ctx: Option<K5CtxWrap<C>>,
 ) -> Receiver<BytesMut> {
+    trace!("starting read task");
     let (mut tx, rx) = mpsc::channel(3);
     task::spawn(async move {
         let mut stop = stop.fuse();
         let mut buf = BytesMut::with_capacity(BUF);
+        let mut tmp = vec![0; BUF];
         let res: Result<()> = 'main: loop {
             while buf.remaining() >= mem::size_of::<u32>() {
                 let (encrypted, len) = {
@@ -270,7 +274,12 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
                     }
                 };
                 if buf.remaining() - mem::size_of::<u32>() < len {
-                    break; // read more
+                    trace!(
+                        "read_task: {} is less than batch len {}, reading more",
+                        buf.remaining(),
+                        len
+                    );
+                    break;
                 } else if !encrypted {
                     if ctx.is_some() {
                         break 'main Err(anyhow!("encryption is required"));
@@ -292,12 +301,16 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
             if buf.remaining_mut() < mem::size_of::<u32>() {
                 buf.reserve(buf.capacity());
             }
+            trace!("reading more from socket");
+	    #[rustfmt::skip]
             select_biased! {
                 _ = stop => break Ok(()),
-                i = soc.read_buf(&mut buf).fuse() => {
+                i = soc.read(&mut tmp).fuse() => {
+		    trace!("read {:?} from the socket", i);
                     if try_cf!(i) == 0 {
                         break Err(anyhow!("EOF"));
                     }
+		    buf.extend_from_slice(&tmp[0..i.unwrap()]);
                 }
             }
         };
@@ -349,11 +362,26 @@ impl ReadChannel {
         &mut self,
         batch: &mut Vec<T>,
     ) -> Result<()> {
-        batch.push(self.receive().await?);
-        while self.buf.has_remaining() {
-            batch.push(T::decode(&mut self.buf)?);
+        macro_rules! process {
+            () => {{
+                while self.buf.has_remaining() {
+                    let t = T::decode(&mut self.buf);
+                    trace!(
+                        "receive_batch remains {} decoded {:?}",
+                        self.buf.remaining(),
+                        t
+                    );
+                    batch.push(t?);
+                }
+                Ok::<_, anyhow::Error>(())
+            }};
         }
-        Ok(())
+        batch.push(self.receive().await?);
+        if self.buf.remaining() > 8 * 1024 * 1024 {
+            process!()
+        } else {
+            task::block_in_place(|| process!())
+        }
     }
 
     pub(crate) async fn receive_batch_fn<T, F>(&mut self, mut f: F) -> Result<()>
@@ -361,11 +389,26 @@ impl ReadChannel {
         T: Pack + Debug,
         F: FnMut(T),
     {
-        f(self.receive().await?);
-        while self.buf.has_remaining() {
-            f(T::decode(&mut self.buf)?);
+        macro_rules! process {
+            () => {{
+                while self.buf.has_remaining() {
+                    let t = T::decode(&mut self.buf);
+                    trace!(
+                        "receive_batch_fn remains {} decoded {:?}",
+                        self.buf.remaining(),
+                        t
+                    );
+                    f(t?);
+                }
+                Ok::<_, anyhow::Error>(())
+            }};
         }
-        Ok(())
+        f(self.receive().await?);
+        if self.buf.remaining() < 8 * 1024 * 1024 {
+            process!()
+        } else {
+            task::block_in_place(|| process!())
+        }
     }
 }
 

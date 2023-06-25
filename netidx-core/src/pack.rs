@@ -304,6 +304,26 @@ pub fn i64_uzz(n: u64) -> i64 {
     ((n >> 1) as i64) ^ (((n as i64) << 63) >> 63)
 }
 
+/*
+pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
+    let bytes = buf.chunk();
+    if bytes.len() == 0 {
+	Err(PackError::BufferShort)
+    } else {
+	let mut value = 0;
+	for i in 0..10 {
+            let byte = bytes[i];
+            value |= u64::from(byte & 0x7F) << (i * 7);
+            if byte <= 0x7F {
+		buf.advance(i + 1);
+		return Ok(value);
+            }
+	}
+	Err(PackError::InvalidFormat)
+    }
+}
+*/
+
 pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
     let mut value = 0;
     for i in 0..10 {

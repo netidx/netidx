@@ -27,7 +27,7 @@ use config::{Config, MemberServer};
 use cross_krb5::{AcceptFlags, K5ServerCtx, ServerCtx, Step};
 use futures::{channel::oneshot, prelude::*, select_biased};
 use fxhash::FxHashMap;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use parking_lot::{Mutex, RwLock};
 use rand::{thread_rng, Rng};
@@ -226,6 +226,7 @@ async fn client_loop_write(
     uifo: Arc<UserInfo>,
     publisher: Arc<Publisher>,
 ) -> Result<()> {
+    debug!("starting write loop for {:?}", connection_id);
     let mut con = Some(con);
     let mut server_stop = server_stop.fuse();
     let mut rx_stop = rx_stop.fuse();
@@ -238,18 +239,27 @@ async fn client_loop_write(
         batch: &mut Vec<ToWrite>,
     ) -> Result<()> {
         match con {
-            Some(ref mut con) => con.receive_batch(batch).await,
-            None => future::pending().await,
+            Some(ref mut con) => {
+                trace!("receiving batch");
+                con.receive_batch(batch).await
+            }
+            None => {
+                trace!("isn't connected, not receiving");
+                future::pending().await
+            }
         }
     }
     'main: loop {
+        #[rustfmt::skip]
         select_biased! {
             _ = server_stop => break Ok(()),
             _ = rx_stop => break Ok(()),
             _ = timeout.tick().fuse() => {
                 if act {
+		    trace!("checking timeout, {:?} was active", connection_id);
                     act = false;
                 } else {
+		    trace!("dropping inactive connection {:?} ", connection_id);
                     drop(con);
                     ctx.ctracker.close(connection_id);
                     ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
@@ -264,11 +274,17 @@ async fn client_loop_write(
                     info!("write client loop error reading message: {}", e)
                 },
                 Ok(()) => {
+		    trace!("{:?} received a batch", connection_id);
                     act = true;
                     if batch.len() == 1 && batch[0] == ToWrite::Heartbeat {
+			trace!("{:?} batch is just a heartbeat", connection_id);
                         continue 'main
                     }
-                    let c = con.as_mut().unwrap();
+                    let c = match con.as_mut() {
+			Some(c) => c,
+			None => unreachable!("bug, con is none and we received a batch"),
+		    };
+		    trace!("{:?} checking batch of len {} for clear", connection_id, batch.len());
                     while let Some((i, _)) =
                         batch.iter().enumerate().find(|(_, m)| *m == &ToWrite::Clear)
                     {
@@ -287,6 +303,7 @@ async fn client_loop_write(
                                 ToWrite::UnpublishDefault(_) =>
                                     c.queue_send(&FromWrite::Unpublished)?,
                                 ToWrite::Clear => {
+				    trace!("{:?} handling clear", connection_id);
                                     ctx.store.handle_clear(
                                         uifo.clone(),
                                         publisher.clone()
@@ -298,6 +315,7 @@ async fn client_loop_write(
                         c.flush().await?;
                         batch = Pooled::orphan(rest);
                     }
+		    trace!("{:?} handling write batch of size {}", connection_id, batch.len());
                     if let Err(e) = ctx.store.handle_batch_write(
                         Some(c),
                         uifo.clone(),
