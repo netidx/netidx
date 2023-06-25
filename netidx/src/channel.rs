@@ -1,7 +1,7 @@
 use crate::{pack::Pack, utils};
 use anyhow::{anyhow, Error, Result};
 use byteorder::{BigEndian, ByteOrder};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{buf::UninitSlice, Buf, BufMut, BytesMut};
 use cross_krb5::K5Ctx;
 use futures::{
     channel::{
@@ -13,8 +13,16 @@ use futures::{
     select_biased, stream,
 };
 use log::{info, trace};
+use netidx_core::pool::{Pool, Pooled};
 use parking_lot::Mutex;
-use std::{clone::Clone, fmt::Debug, mem, ops::Deref, sync::Arc, time::Duration};
+use std::{
+    clone::Clone,
+    fmt::Debug,
+    mem::{self, MaybeUninit},
+    ops::{Deref, DerefMut},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
     task, time,
@@ -252,17 +260,127 @@ impl WriteChannel {
     }
 }
 
+struct PBuf {
+    data: Pooled<Vec<u8>>,
+    pos: usize,
+}
+
+impl PBuf {
+    fn reserve(&mut self, n: usize) {
+        self.data.reserve(n)
+    }
+
+    fn extend_from_slice(&mut self, d: &[u8]) {
+        if self.remaining_mut() < d.len() {
+            self.reserve(d.len() - self.remaining_mut());
+        }
+        self.chunk_mut()[..d.len()].copy_from_slice(d);
+        unsafe { self.advance_mut(d.len()) }
+    }
+
+    fn capacity(&self) -> usize {
+        self.data.capacity()
+    }
+
+    fn resize(&mut self, n: usize, t: u8) {
+        self.data.resize(self.pos + n, t)
+    }
+
+    // return 0..len self becomes len..remaining
+    fn split_to(&mut self, len: usize) -> Self {
+        if self.remaining() < len {
+            panic!("not enough data in the buffer to split to {}", len)
+        }
+        if self.remaining() == len {
+            mem::take(self)
+        } else if self.remaining() - len > len {
+            let mut new = Self::default();
+            new.extend_from_slice(&self[..len]);
+            self.advance(len);
+            let pos = self.pos;
+            let rem = self.remaining();
+            if pos > rem << 1 {
+                self.data.copy_within(pos..pos + rem, 0);
+                self.pos = 0;
+                self.resize(rem, 0);
+            }
+            new
+        } else {
+            let mut new = Self::default();
+            new.extend_from_slice(&self[len..]);
+            self.resize(len, 0);
+            mem::replace(self, new)
+        }
+    }
+}
+
+impl Default for PBuf {
+    fn default() -> Self {
+        lazy_static! {
+            static ref POOL: Pool<Vec<u8>> = Pool::new(10, BUF << 2);
+        }
+        Self { data: POOL.take(), pos: 0 }
+    }
+}
+
+impl Buf for PBuf {
+    fn advance(&mut self, cnt: usize) {
+        self.pos += cnt
+    }
+
+    fn chunk(&self) -> &[u8] {
+        &self.data[self.pos..]
+    }
+
+    fn remaining(&self) -> usize {
+        self.data.len() - self.pos
+    }
+}
+
+unsafe impl BufMut for PBuf {
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        let new = self.data.len() + cnt;
+        assert!(new <= self.data.capacity());
+        self.data.set_len(new)
+    }
+
+    fn chunk_mut(&mut self) -> &mut UninitSlice {
+        let cap = self.data.spare_capacity_mut();
+        let len = cap.len();
+        let ptr = cap.as_mut_ptr() as *mut u8;
+        unsafe { UninitSlice::from_raw_parts_mut(ptr, len) }
+    }
+
+    fn remaining_mut(&self) -> usize {
+        self.data.capacity() - self.data.len()
+    }
+}
+
+impl Deref for PBuf {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.data[self.pos..]
+    }
+}
+
+impl DerefMut for PBuf {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let pos = self.pos;
+        &mut self.data[pos..]
+    }
+}
+
 fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'static>(
     stop: oneshot::Receiver<()>,
     mut soc: ReadHalf<S>,
     ctx: Option<K5CtxWrap<C>>,
-) -> Receiver<BytesMut> {
+) -> Receiver<PBuf> {
     trace!("starting read task");
     let (mut tx, rx) = mpsc::channel(3);
     task::spawn(async move {
         let mut stop = stop.fuse();
-        let mut buf = BytesMut::with_capacity(BUF);
-        let mut tmp = vec![0; BUF];
+        let mut buf = PBuf::default();
         let res: Result<()> = 'main: loop {
             while buf.remaining() >= mem::size_of::<u32>() {
                 let (encrypted, len) = {
@@ -276,7 +394,7 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
                 if buf.remaining() - mem::size_of::<u32>() < len {
                     trace!(
                         "read_task: {} is less than batch len {}, reading more",
-                        buf.remaining(),
+                        buf.remaining() - mem::size_of::<u32>(),
                         len
                     );
                     break;
@@ -293,24 +411,31 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
                     };
                     buf.advance(mem::size_of::<u32>());
                     let decrypted = try_cf!(break, 'main, task::block_in_place(|| {
-                        ctx.lock().unwrap_iov(len, &mut buf)
+                        ctx.lock().unwrap(&buf[..len])
                     }));
-                    try_cf!(break, 'main, tx.send(decrypted).await);
+                    buf.advance(len);
+                    buf.extend_from_slice(&*decrypted);
+                    try_cf!(break, 'main, tx.send(mem::take(&mut buf)).await);
                 }
             }
-            if buf.remaining_mut() < mem::size_of::<u32>() {
-                buf.reserve(buf.capacity());
+            if buf.remaining_mut() < BUF {
+                buf.reserve(std::cmp::max(buf.capacity(), BUF));
             }
+            let cap = unsafe {
+                mem::transmute::<&mut [MaybeUninit<u8>], &mut [u8]>(
+                    buf.chunk_mut().as_uninit_slice_mut(),
+                )
+            };
             trace!("reading more from socket");
-	    #[rustfmt::skip]
+            #[rustfmt::skip]
             select_biased! {
                 _ = stop => break Ok(()),
-                i = soc.read(&mut tmp).fuse() => {
+                i = soc.read(cap).fuse() => {
 		    trace!("read {:?} from the socket", i);
                     if try_cf!(i) == 0 {
                         break Err(anyhow!("EOF"));
                     }
-		    buf.extend_from_slice(&tmp[0..i.unwrap()]);
+		    unsafe { buf.advance_mut(i.unwrap()); }
                 }
             }
         };
@@ -320,9 +445,9 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
 }
 
 pub(crate) struct ReadChannel {
-    buf: BytesMut,
+    buf: PBuf,
     _stop: oneshot::Sender<()>,
-    incoming: stream::Fuse<Receiver<BytesMut>>,
+    incoming: stream::Fuse<Receiver<PBuf>>,
 }
 
 impl ReadChannel {
@@ -335,7 +460,7 @@ impl ReadChannel {
     ) -> ReadChannel {
         let (stop_tx, stop_rx) = oneshot::channel();
         ReadChannel {
-            buf: BytesMut::new(),
+            buf: PBuf::default(),
             _stop: stop_tx,
             incoming: read_task(stop_rx, socket, k5ctx).fuse(),
         }
@@ -355,7 +480,9 @@ impl ReadChannel {
         if !self.buf.has_remaining() {
             self.fill_buffer().await?;
         }
-        Ok(T::decode(&mut self.buf)?)
+        let res = T::decode(&mut self.buf);
+        trace!("receive decoded {:?}", res);
+        Ok(res?)
     }
 
     pub(crate) async fn receive_batch<T: Pack + Debug>(

@@ -73,7 +73,7 @@ struct Connection {
     resolver_addr: SocketAddr,
     resolver_auth: Auth,
     write_addr: SocketAddr,
-    published: Arc<RwLock<FxHashMap<Path, ToWrite>>>,
+    published: FxHashMap<Path, ToWrite>,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     security_context: Option<K5CtxWrap<ClientCtx>>,
     tls: Option<tls::CachedConnector>,
@@ -94,9 +94,7 @@ impl Connection {
     }
 
     async fn republish(&mut self, con: &mut Channel, ttl_expired: bool) -> Result<()> {
-        let mut names = REPUB.take();
-        names.extend(self.published.read().values().cloned());
-        let len = names.len();
+        let len = self.published.len();
         if len == 0 {
             info!("connected to resolver {:?} for write", self.resolver_addr);
             if self.degraded {
@@ -113,12 +111,12 @@ impl Connection {
                 "write_con ttl: {} degraded: {}, republishing: {}",
                 len, ttl_expired, self.degraded
             );
-            for msg in &*names {
+            for msg in self.published.values() {
                 con.queue_send(msg)?
             }
             con.flush().await?;
             let mut success = 0;
-            for msg in &*names {
+            for msg in self.published.values() {
                 match con.receive().await? {
                     FromWrite::Published => {
                         success += 1;
@@ -130,9 +128,8 @@ impl Connection {
             }
             self.degraded = success != len;
             info!(
-                "connected to resolver {:?} for write (republished {})",
-                self.resolver_addr,
-                names.len()
+                "connected to resolver {:?} for write (republished {}) degraded: {}",
+                self.resolver_addr, success, self.degraded
             );
         }
         Ok(())
@@ -398,6 +395,20 @@ impl Connection {
                 }
             },
         };
+        for (_, tx) in tx.batch.iter() {
+            match tx {
+                ToWrite::Publish(p)
+                | ToWrite::PublishDefault(p)
+                | ToWrite::PublishWithFlags(p, _)
+                | ToWrite::PublishDefaultWithFlags(p, _) => {
+                    self.published.insert(p.clone(), tx.clone());
+                }
+                ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => {
+                    self.published.remove(p);
+                }
+                ToWrite::Clear | ToWrite::Heartbeat => (),
+            }
+        }
         let timeout = max(HELLO_TO, Duration::from_micros(tx.batch.len() as u64 * 100));
         for (_, m) in &*tx.batch {
             c.queue_send(m)?;
@@ -435,7 +446,6 @@ impl Connection {
         resolver_addr: SocketAddr,
         resolver_auth: Auth,
         write_addr: SocketAddr,
-        published: Arc<RwLock<FxHashMap<Path, ToWrite>>>,
         desired_auth: DesiredAuth,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
@@ -445,7 +455,7 @@ impl Connection {
             resolver_addr,
             resolver_auth,
             write_addr,
-            published,
+            published: HashMap::default(),
             secrets,
             desired_auth,
             security_context: None,
@@ -502,13 +512,10 @@ async fn write_mgr(
     write_addr: SocketAddr,
     tls: Option<tls::CachedConnector>,
 ) -> Result<()> {
-    let published: Arc<RwLock<FxHashMap<Path, ToWrite>>> =
-        Arc::new(RwLock::new(HashMap::default()));
     let (sender, _) = broadcast::channel(100);
     for (addr, auth) in resolver.addrs.iter() {
         let addr = *addr;
         let auth = auth.clone();
-        let published = published.clone();
         let desired_auth = desired_auth.clone();
         let secrets = secrets.clone();
         let tls = tls.clone();
@@ -519,7 +526,6 @@ async fn write_mgr(
                 addr,
                 auth,
                 write_addr,
-                published,
                 desired_auth,
                 secrets,
                 tls,
@@ -537,23 +543,6 @@ async fn write_mgr(
             waiters.push(rx);
         }
         let tx_batch = Arc::new(ToCon { batch, replies: Mutex::new(replies) });
-        {
-            let mut published = published.write();
-            for (_, tx) in tx_batch.batch.iter() {
-                match tx {
-                    ToWrite::Publish(p)
-                    | ToWrite::PublishDefault(p)
-                    | ToWrite::PublishWithFlags(p, _)
-                    | ToWrite::PublishDefaultWithFlags(p, _) => {
-                        published.insert(p.clone(), tx.clone());
-                    }
-                    ToWrite::Unpublish(_)
-                    | ToWrite::UnpublishDefault(_)
-                    | ToWrite::Clear
-                    | ToWrite::Heartbeat => (),
-                }
-            }
-        }
         let _ = sender.send(tx_batch);
         match select_ok(waiters).await {
             Err(e) => warn!("write_mgr: write failed on all writers {}", e),

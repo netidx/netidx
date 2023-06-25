@@ -515,7 +515,7 @@ mod publisher {
                                 c += 1;
                                 vs.write(Value::U64(c));
                             }
-                            _ => panic!("unexpected value from publisher"),
+                            v => panic!("unexpected value from publisher {:?}", v),
                         }
                     }
                 }
@@ -555,7 +555,7 @@ mod publisher {
     }
 
     #[test]
-    fn publish_subscribe_tls() {
+    fn tls_publish_subscribe() {
         let _ = env_logger::try_init();
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
