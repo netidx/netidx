@@ -1,3 +1,23 @@
+* 0.19.19 netidx
+
+  - fix a performance regression in tls due to a broken read_buf
+    operation in tokio. This was slowing reads down 50x over the
+    baseline.
+
+  - optimize packed buffer decoding with a custom buffer
+    implementation vs BytesMut
+
+  - optimize varint decoding
+
+  - aside from the regression, which was crushing performance,
+    throughput is now 20% better
+
+  - fix a bug in resolver_client::write_client that caused it to
+    always write the first publish operation twice.
+
+  - handle additional rare republish cases in
+    resolver_client::write_client
+
 * 0.20.3 netidx-tools
 
   - port the container server to windows

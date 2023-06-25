@@ -1,6 +1,6 @@
 [package]
 name = "netidx-archive"
-version = "0.19.18"
+version = "0.19.19"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 homepage = "https://netidx.github.io/netidx-book/"
@@ -16,7 +16,7 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 anyhow = "1"
-netidx = { path = "../netidx", version = "^0.19.7", default_features = false }
+netidx = { path = "../netidx", version = "^0.19.19", default_features = false }
 netidx-netproto = { version = "^0.18.2", path = "../netidx-netproto" }
 netidx-protocols = { path = "../netidx-protocols", version = "^0.20.0", default_features = false }
 netidx-derive = { path = "../netidx-derive", version = "^0.18" }

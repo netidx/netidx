@@ -1,6 +1,6 @@
 [package]
 name = "netidx-wsproxy"
-version = "0.20.0"
+version = "0.20.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -24,7 +24,7 @@ env_logger = "0.10"
 futures = "0.3"
 fxhash = "0.2"
 log = "0.4"
-netidx = { path = "../netidx", version = "^0.19.7", default_features = false }
+netidx = { path = "../netidx", version = "^0.19.19", default_features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "^0.20", default_features = false }
 netidx-core = { path = "../netidx-core", version = "^0.18", default_features = false }
 parking_lot = "0.12"
