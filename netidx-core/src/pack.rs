@@ -304,27 +304,34 @@ pub fn i64_uzz(n: u64) -> i64 {
     ((n >> 1) as i64) ^ (((n as i64) << 63) >> 63)
 }
 
-/*
+// this abuses the buffer api a bit, and as a result it could fail in
+// the case where it's asked to decode a varint that straddles a
+// chunk. However we don't use buffers in netidx in a way that does
+// that. It's also pretty strange to imagine that would ever happen
+// IRL.
+//
+// It is multiple x faster than the alternative.
 pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
     let bytes = buf.chunk();
-    if bytes.len() == 0 {
-	Err(PackError::BufferShort)
-    } else {
-	let mut value = 0;
-	for i in 0..10 {
-            let byte = bytes[i];
-            value |= u64::from(byte & 0x7F) << (i * 7);
-            if byte <= 0x7F {
-		buf.advance(i + 1);
-		return Ok(value);
-            }
+    let mut value = 0;
+    for i in 0..10 {
+	if i > bytes.len() {
+	    buf.advance(i + 1);
+	    return Err(PackError::BufferShort);
 	}
-	Err(PackError::InvalidFormat)
+        let byte = bytes[i];
+        value |= u64::from(byte & 0x7F) << (i * 7);
+        if byte <= 0x7F {
+	    buf.advance(i + 1);
+            return Ok(value);
+        }
     }
+    buf.advance(10);
+    Err(PackError::InvalidFormat)
 }
-*/
 
-pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
+/*
+pub fn decode_varint_safe(buf: &mut impl Buf) -> Result<u64, PackError> {
     let mut value = 0;
     for i in 0..10 {
         let byte = <u8 as Pack>::decode(buf)?;
@@ -335,6 +342,7 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
     }
     Err(PackError::InvalidFormat)
 }
+*/
 
 pub fn len_wrapped_len(len: usize) -> usize {
     let vlen = varint_len((len + varint_len(len as u64)) as u64);
