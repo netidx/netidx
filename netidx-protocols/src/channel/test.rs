@@ -94,57 +94,56 @@ fn singleton() {
     })
 }
 
-#[test]
-fn hang() {
-    Runtime::new().unwrap().block_on(async move {
-        let ctx = Arc::new(Ctx::new().await);
-        let mut listener =
-            server::Listener::new(&ctx.publisher, None, ctx.base.clone()).await.unwrap();
-        let ctx_ = ctx.clone();
-        task::spawn(async move {
-            let con = client::Connection::connect(&ctx_.subscriber, ctx_.base.clone())
-                .await
-                .unwrap();
-            for i in 0..100 {
-                con.send(Value::U64(i as u64)).unwrap();
+#[tokio::test(flavor = "multi_thread")]
+async fn hang() {
+    const SZ: usize = 10000;
+    let ctx = Arc::new(Ctx::new().await);
+    let mut listener =
+        server::Listener::new(&ctx.publisher, None, ctx.base.clone()).await.unwrap();
+    let ctx_ = ctx.clone();
+    task::spawn(async move {
+        let con = client::Connection::connect(&ctx_.subscriber, ctx_.base.clone())
+            .await
+            .unwrap();
+        for i in 0..SZ {
+            con.send(Value::U64(i as u64)).unwrap();
+        }
+        con.flush().await.unwrap();
+        for i in 0..SZ {
+            match con.recv_one().await.unwrap() {
+                Value::U64(j) => assert_eq!(j as usize, i),
+                _ => panic!("expected u64"),
             }
-            con.flush().await.unwrap();
-            for i in 0..100 {
-                match con.recv_one().await.unwrap() {
-                    Value::U64(j) => assert_eq!(j, i),
-                    _ => panic!("expected u64"),
-                }
+        }
+    });
+    let ctx_ = ctx.clone();
+    task::spawn(async move {
+        let con = client::Connection::connect(&ctx_.subscriber, ctx_.base.clone())
+            .await
+            .unwrap();
+        for i in 0..SZ {
+            con.send(Value::U64(i as u64)).unwrap();
+        }
+        con.flush().await.unwrap();
+        for i in 0..SZ {
+            match con.recv_one().await.unwrap() {
+                Value::U64(j) => assert_eq!(j as usize, i),
+                _ => panic!("expected u64"),
             }
-        });
-        let ctx_ = ctx.clone();
-        task::spawn(async move {
-            let con = client::Connection::connect(&ctx_.subscriber, ctx_.base.clone())
-                .await
-                .unwrap();
-            for i in 0..100 {
-                con.send(Value::U64(i as u64)).unwrap();
+        }
+    });
+    let con = listener.accept().await.unwrap().wait_connected().await.unwrap();
+    let (tx, rx) = oneshot::channel();
+    task::spawn(async move {
+        for _ in 0..SZ {
+            match con.recv_one().await.unwrap() {
+                Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
+                _ => panic!("expected u64"),
             }
-            con.flush().await.unwrap();
-            for i in 0..100 {
-                match con.recv_one().await.unwrap() {
-                    Value::U64(j) => assert_eq!(j, i),
-                    _ => panic!("expected u64"),
-                }
-            }
-        });
-        let con = listener.accept().await.unwrap().wait_connected().await.unwrap();
-        let (tx, rx) = oneshot::channel();
-        task::spawn(async move {
-            for _ in 0..100 {
-                match con.recv_one().await.unwrap() {
-                    Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
-                    _ => panic!("expected u64"),
-                }
-            }
-            let _ = tx.send(());
-        });
-        // hang the second connection
-        let _con = listener.accept().await.unwrap().wait_connected().await.unwrap();
-        time::timeout(Duration::from_secs(10), rx).await.unwrap().unwrap()
-    })
+        }
+        let _ = tx.send(());
+    });
+    // hang the second connection
+    let _con = listener.accept().await.unwrap().wait_connected().await.unwrap();
+    time::timeout(Duration::from_secs(10), rx).await.unwrap().unwrap()
 }

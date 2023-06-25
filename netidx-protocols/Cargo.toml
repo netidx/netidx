@@ -20,7 +20,7 @@ netidx = { path = "../netidx", version = "^0.19.8", default_features = false }
 netidx-core = {path = "../netidx-core", version = "^0.18.5", default_features = false }
 netidx-netproto = {path = "../netidx-netproto", version = "^0.18.3", default_features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "^0.19", default_features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros"] }
 serde = "1"
 serde_derive = "1"
 bytes = "1"

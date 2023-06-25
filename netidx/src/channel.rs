@@ -266,13 +266,15 @@ struct PBuf {
 }
 
 impl PBuf {
-    fn reserve(&mut self, n: usize) {
-        self.data.reserve(n)
+    // reserve additional mutable capacity
+    fn reserve_mut(&mut self, n: usize) {
+	let rem = self.remaining_mut();
+        self.data.reserve(rem + n)
     }
 
     fn extend_from_slice(&mut self, d: &[u8]) {
         if self.remaining_mut() < d.len() {
-            self.reserve(d.len() - self.remaining_mut());
+            self.reserve_mut(d.len());
         }
         self.chunk_mut()[..d.len()].copy_from_slice(d);
         unsafe { self.advance_mut(d.len()) }
@@ -419,7 +421,7 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
                 }
             }
             if buf.remaining_mut() < BUF {
-                buf.reserve(std::cmp::max(buf.capacity(), BUF));
+                buf.reserve_mut(std::cmp::max(buf.capacity(), BUF));
             }
             let cap = unsafe {
                 mem::transmute::<&mut [MaybeUninit<u8>], &mut [u8]>(
