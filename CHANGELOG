@@ -1,7 +1,7 @@
 * 0.22.0 netidx
 
   - start using cargo workspaces to manage versions hence the big bump
-    to harmoize everything
+    to harmonize everything
 
   - fix a performance regression in tls due to a broken read_buf
     operation in tokio. This was slowing reads down 50x over the
