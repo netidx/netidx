@@ -1,3 +1,8 @@
+* 0.22.1
+
+  - fix a memory leak in subscriber that was triggered by lots of
+    resubscriptions.
+
 * 0.22.0 netidx
 
   - start using cargo workspaces to manage versions hence the big bump
