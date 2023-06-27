@@ -1,5 +1,5 @@
 use super::{
-    ConId, DvDead, DvState, Event, NoSuchValue, PermissionDenied, Streams, SubId,
+    ConId, DvDead, DvState, Event, NoSuchValue, PermissionDenied, SubId,
     SubStatus, SubscribeValRequest, Subscriber, SubscriberInner, SubscriberWeak, ToCon,
     UpdatesFlags, Val, ValInner, ValWeak, BATCHES, DECODE_BATCHES,
 };
@@ -34,6 +34,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use log::info;
 use parking_lot::Mutex;
 use protocol::resolver::UserInfo;
+use smallvec::SmallVec;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     mem,
@@ -52,7 +53,7 @@ use triomphe::Arc as TArc;
 struct Sub {
     path: Path,
     sub_id: SubId,
-    streams: Streams,
+    streams: SmallVec<[(ChanId, ChanWrap<Pooled<Vec<(SubId, Event)>>>); 1]>,
     last: Option<TArc<Mutex<Event>>>,
     val: ValWeak,
 }
@@ -69,7 +70,7 @@ fn unsubscribe(
     id: Id,
     conid: ConId,
 ) {
-    for (chan_id, c) in sub.streams.0.iter() {
+    for (chan_id, c) in sub.streams.iter() {
         by_chan
             .entry(*chan_id)
             .or_insert_with(|| (c.clone(), BATCHES.take()))
@@ -316,7 +317,7 @@ impl ConnectionCtx {
     ) -> Result<()> {
         if let Some(sub) = self.subscriptions.get_mut(&id) {
             let mut already_have = false;
-            for (id, c) in sub.streams.0.iter() {
+            for (id, c) in sub.streams.iter() {
                 if tx.same_receiver(&c.0) {
                     already_have = true;
                 }
@@ -351,7 +352,7 @@ impl ConnectionCtx {
             if !already_have {
                 let tx = ChanWrap(tx);
                 let id = self.by_receiver.entry(tx.clone()).or_insert_with(ChanId::new);
-                sub.streams = sub.streams.add(*id, tx);
+                sub.streams.push((*id, tx));
             }
         }
         Ok(())
@@ -411,7 +412,7 @@ impl ConnectionCtx {
             match m {
                 From::Update(i, m) => match self.subscriptions.get(&i) {
                     Some(sub) => {
-                        for (chan_id, c) in sub.streams.0.iter() {
+                        for (chan_id, c) in sub.streams.iter() {
                             self.by_chan
                                 .entry(*chan_id)
                                 .or_insert_with(|| (c.clone(), BATCHES.take()))
@@ -483,7 +484,7 @@ impl ConnectionCtx {
                                             path: req.path,
                                             sub_id: req.sub_id,
                                             last: Some(last),
-                                            streams: Streams::new(),
+                                            streams: SmallVec::new(),
                                             val: s.downgrade(),
                                         },
                                     );
@@ -505,7 +506,7 @@ impl ConnectionCtx {
         for m in batch.drain(..) {
             if let From::Update(i, m) = m {
                 if let Some(sub) = self.subscriptions.get(&i) {
-                    for (chan_id, c) in sub.streams.0.iter() {
+                    for (chan_id, c) in sub.streams.iter() {
                         self.by_chan
                             .entry(*chan_id)
                             .or_insert_with(|| (c.clone(), BATCHES.take()))

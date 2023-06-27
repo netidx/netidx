@@ -14,7 +14,7 @@ use crate::{
     publisher::PublishFlags,
     resolver_client::ResolverRead,
     tls,
-    utils::{BatchItem, Batched, ChanId, ChanWrap},
+    utils::{BatchItem, Batched, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
 use bytes::{Buf, BufMut, Bytes};
@@ -33,10 +33,11 @@ use log::{info, warn};
 use netidx_netproto::resolver::{PublisherRef, UserInfo};
 use parking_lot::Mutex;
 use rand::Rng;
+use smallvec::SmallVec;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::{
     cmp::{max, Eq, PartialEq},
-    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
+    collections::{hash_map::Entry, HashMap, VecDeque},
     error, fmt,
     hash::Hash,
     iter, mem,
@@ -51,71 +52,10 @@ use tokio::{
 };
 use triomphe::Arc as TArc;
 
-type StreamsInner<T> = Arc<Vec<(T, ChanWrap<Pooled<Vec<(SubId, Event)>>>)>>;
-
 lazy_static! {
-    static ref HCSTREAMS: Mutex<HashSet<StreamsInner<ChanId>>> =
-        Mutex::new(HashSet::new());
-    static ref HCDVSTREAMS: Mutex<HashSet<StreamsInner<UpdatesFlags>>> =
-        Mutex::new(HashSet::new());
     static ref BATCHES: Pool<Vec<(SubId, Event)>> = Pool::new(64, 16384);
     static ref DECODE_BATCHES: Pool<Vec<From>> = Pool::new(64, 16384);
 }
-
-macro_rules! hcstreams {
-    ($name:ident, $static:ident, $typ:ty) => {
-        #[derive(Debug)]
-        struct $name(StreamsInner<$typ>);
-
-        impl $name {
-            fn new() -> $name {
-                let mut inner = $static.lock();
-                match inner.get(&vec![]) {
-                    Some(empty) => $name(empty.clone()),
-                    None => {
-                        let r = Arc::new(vec![]);
-                        inner.insert(r.clone());
-                        $name(r)
-                    }
-                }
-            }
-
-            fn add(
-                &self,
-                chanid: $typ,
-                chan: ChanWrap<Pooled<Vec<(SubId, Event)>>>,
-            ) -> $name {
-                let mut dead = false;
-                let mut vec = Vec::clone(&self.0);
-                vec.retain(|(_, c)| {
-                    if c.0.is_closed() {
-                        dead = true;
-                        false
-                    } else {
-                        true
-                    }
-                });
-                vec.push((chanid, chan));
-                vec.sort_by_key(|(id, _)| *id);
-                let mut inner = $static.lock();
-                if dead {
-                    inner.remove(&self.0);
-                }
-                match inner.get(&vec) {
-                    Some(cur) => $name(Arc::clone(cur)),
-                    None => {
-                        let t = Arc::new(vec);
-                        inner.insert(t.clone());
-                        $name(t)
-                    }
-                }
-            }
-        }
-    };
-}
-
-hcstreams!(Streams, HCSTREAMS, ChanId);
-hcstreams!(DvStreams, HCDVSTREAMS, UpdatesFlags);
 
 #[derive(Debug)]
 pub struct PermissionDenied;
@@ -340,7 +280,7 @@ enum DvState {
 struct DvalInner {
     sub_id: SubId,
     sub: DvState,
-    streams: DvStreams,
+    streams: SmallVec<[(UpdatesFlags, ChanWrap<Pooled<Vec<(SubId, Event)>>>); 1]>,
 }
 
 #[derive(Debug, Clone)]
@@ -419,8 +359,8 @@ impl Dval {
     ) {
         let mut t = self.0.lock();
         let c = ChanWrap(tx.clone());
-        if !t.streams.0.iter().any(|(_, s)| &c == s) {
-            t.streams = t.streams.add(flags, c);
+        if !t.streams.iter().any(|(_, s)| &c == s) {
+            t.streams.push((flags, c));
         }
         if let DvState::Subscribed(ref sub) = t.sub {
             let m = ToCon::Stream { tx, sub_id: t.sub_id, id: sub.0.id, flags };
@@ -683,7 +623,6 @@ impl SubscriberInner {
         resolved: &Resolved,
         flags: PublishFlags,
     ) -> Option<Chosen> {
-        use smallvec::SmallVec;
         use std::{cmp::min, net::IpAddr};
         fn mv4(ip: Ipv4Addr, mask: Ipv4Addr) -> Ipv4Addr {
             let mut masked = [0u8; 4];
@@ -997,7 +936,8 @@ impl Subscriber {
                                 DvState::Subscribed(_) => unreachable!(),
                                 DvState::Dead(d) => {
                                     d.tries += 1;
-                                    let wait = Duration::from_millis(pick(d.tries) as u64 * 50);
+                                    let wait =
+                                        Duration::from_millis(pick(d.tries) as u64 * 50);
                                     d.next_try = now + wait;
                                     let s = wait.as_secs_f32();
                                     warn!(
@@ -1009,7 +949,7 @@ impl Subscriber {
                             },
                             Ok(sub) => {
                                 info!("resubscription success {}", p);
-                                for (flags, tx) in dv.streams.0.iter().cloned() {
+                                for (flags, tx) in dv.streams.iter().cloned() {
                                     sub.0.connection.send(ToCon::Stream {
                                         tx: tx.0,
                                         sub_id: dv.sub_id,
@@ -1429,7 +1369,7 @@ impl Subscriber {
                 tries: 0,
                 next_try: Instant::now(),
             })),
-            streams: DvStreams::new(),
+            streams: SmallVec::new(),
         })));
         t.durable_dead.insert(path, s.downgrade());
         let _ = t.trigger_resub.unbounded_send(());

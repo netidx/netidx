@@ -157,12 +157,6 @@ struct PoolInner<T: Poolable + Send + Sync + 'static> {
     id: Pid,
 }
 
-impl<T: Poolable + Send + Sync + 'static> Drop for PoolInner<T> {
-    fn drop(&mut self) {
-        POOLS.lock().pools.remove(&self.id);
-    }
-}
-
 fn pool_shark() {
     use std::{
         thread::{sleep, spawn},
@@ -189,6 +183,16 @@ fn pool_shark() {
 /// that object.
 #[derive(Clone, Debug)]
 pub struct Pool<T: Poolable + Send + Sync + 'static>(Arc<PoolInner<T>>);
+
+impl<T: Poolable + Send + Sync + 'static> Drop for Pool<T> {
+    fn drop(&mut self) {
+        // one held by us, and one held by the pool shark
+        if Arc::strong_count(&self.0) <= 2 {
+            let res = POOLS.lock().pools.remove(&self.0.id);
+            drop(res)
+        }
+    }
+}
 
 impl<T: Poolable + Send + Sync + 'static> Prune for Pool<T> {
     fn prune(&self) {
