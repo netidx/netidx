@@ -5,6 +5,7 @@ use crate::{
 use arcstr::ArcStr;
 use bytes::{buf, Buf, BufMut, Bytes, BytesMut};
 use chrono::{naive::NaiveDateTime, prelude::*};
+use indexmap::{IndexMap, IndexSet};
 use rust_decimal::Decimal;
 use std::{
     any::Any,
@@ -780,123 +781,137 @@ impl<T: Pack> Pack for VecDeque<T> {
     }
 }
 
-impl<K, V, R> Pack for HashMap<K, V, R>
-where
-    K: Pack + Hash + Eq,
-    V: Pack,
-    R: Default + BuildHasher,
-{
-    fn encoded_len(&self) -> usize {
-        self.iter().fold(varint_len(self.len() as u64), |len, (k, v)| {
-            len + <K as Pack>::encoded_len(k) + <V as Pack>::encoded_len(v)
-        })
-    }
+macro_rules! impl_hashmap {
+    ($ty:ident) => {
+	impl<K, V, R> Pack for $ty<K, V, R>
+	where
+	    K: Pack + Hash + Eq,
+	    V: Pack,
+	    R: Default + BuildHasher,
+	{
+	    fn encoded_len(&self) -> usize {
+		self.iter().fold(varint_len(self.len() as u64), |len, (k, v)| {
+		    len + <K as Pack>::encoded_len(k) + <V as Pack>::encoded_len(v)
+		})
+	    }
 
-    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        encode_varint(self.len() as u64, buf);
-        for (k, v) in self {
-            <K as Pack>::encode(k, buf)?;
-            <V as Pack>::encode(v, buf)?;
-        }
-        Ok(())
-    }
+	    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+		encode_varint(self.len() as u64, buf);
+		for (k, v) in self {
+		    <K as Pack>::encode(k, buf)?;
+		    <V as Pack>::encode(v, buf)?;
+		}
+		Ok(())
+	    }
 
-    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        let elts = decode_varint(buf)? as usize;
-        if elts > MAX_VEC {
-            return Err(PackError::TooBig);
-        }
-        let pre = if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC {
-            MAX_VEC / (mem::size_of::<K>() + mem::size_of::<V>())
-        } else {
-            elts
-        };
-        let mut data = HashMap::with_capacity_and_hasher(pre, R::default());
-        for _ in 0..elts {
-            let k = <K as Pack>::decode(buf)?;
-            let v = <V as Pack>::decode(buf)?;
-            data.insert(k, v);
-        }
-        Ok(data)
-    }
+	    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+		let elts = decode_varint(buf)? as usize;
+		if elts > MAX_VEC {
+		    return Err(PackError::TooBig);
+		}
+		let pre = if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC {
+		    MAX_VEC / (mem::size_of::<K>() + mem::size_of::<V>())
+		} else {
+		    elts
+		};
+		let mut data = $ty::with_capacity_and_hasher(pre, R::default());
+		for _ in 0..elts {
+		    let k = <K as Pack>::decode(buf)?;
+		    let v = <V as Pack>::decode(buf)?;
+		    data.insert(k, v);
+		}
+		Ok(data)
+	    }
 
-    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
-        let elts = decode_varint(buf)? as usize;
-        if elts > MAX_VEC {
-            return Err(PackError::TooBig);
-        }
-        let pre = if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC {
-            MAX_VEC / (mem::size_of::<K>() + mem::size_of::<V>())
-        } else {
-            elts
-        };
-        if pre > self.capacity() {
-            self.reserve(pre - self.capacity());
-        }
-        for _ in 0..elts {
-            let k = <K as Pack>::decode(buf)?;
-            let v = <V as Pack>::decode(buf)?;
-            self.insert(k, v);
-        }
-        Ok(())
+	    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
+		let elts = decode_varint(buf)? as usize;
+		if elts > MAX_VEC {
+		    return Err(PackError::TooBig);
+		}
+		let pre = if elts * (mem::size_of::<K>() + mem::size_of::<V>()) > MAX_VEC {
+		    MAX_VEC / (mem::size_of::<K>() + mem::size_of::<V>())
+		} else {
+		    elts
+		};
+		if pre > self.capacity() {
+		    self.reserve(pre - self.capacity());
+		}
+		for _ in 0..elts {
+		    let k = <K as Pack>::decode(buf)?;
+		    let v = <V as Pack>::decode(buf)?;
+		    self.insert(k, v);
+		}
+		Ok(())
+	    }
+	}
     }
 }
 
-impl<K, R> Pack for HashSet<K, R>
-where
-    K: Pack + Hash + Eq,
-    R: Default + BuildHasher,
-{
-    fn encoded_len(&self) -> usize {
-        self.iter().fold(varint_len(self.len() as u64), |len, k| {
-            len + <K as Pack>::encoded_len(k)
-        })
-    }
+impl_hashmap!(HashMap);
+impl_hashmap!(IndexMap);
 
-    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        encode_varint(self.len() as u64, buf);
-        for k in self {
-            <K as Pack>::encode(k, buf)?;
-        }
-        Ok(())
-    }
+macro_rules! impl_hashset {
+    ($ty:ident) => {
+	impl<K, R> Pack for $ty<K, R>
+	where
+	    K: Pack + Hash + Eq,
+	    R: Default + BuildHasher,
+	{
+	    fn encoded_len(&self) -> usize {
+		self.iter().fold(varint_len(self.len() as u64), |len, k| {
+		    len + <K as Pack>::encoded_len(k)
+		})
+	    }
 
-    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        let elts = decode_varint(buf)? as usize;
-        if elts > MAX_VEC {
-            return Err(PackError::TooBig);
-        }
-        let pre = if elts * mem::size_of::<K>() > MAX_VEC {
-            MAX_VEC / mem::size_of::<K>()
-        } else {
-            elts
-        };
-        let mut data = HashSet::with_capacity_and_hasher(pre, R::default());
-        for _ in 0..elts {
-            data.insert(<K as Pack>::decode(buf)?);
-        }
-        Ok(data)
-    }
+	    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+		encode_varint(self.len() as u64, buf);
+		for k in self {
+		    <K as Pack>::encode(k, buf)?;
+		}
+		Ok(())
+	    }
 
-    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
-        let elts = decode_varint(buf)? as usize;
-        if elts > MAX_VEC {
-            return Err(PackError::TooBig);
-        }
-        let pre = if elts * mem::size_of::<K>() > MAX_VEC {
-            MAX_VEC / mem::size_of::<K>()
-        } else {
-            elts
-        };
-        if pre > self.capacity() {
-            self.reserve(pre - self.capacity());
-        }
-        for _ in 0..elts {
-            self.insert(<K as Pack>::decode(buf)?);
-        }
-        Ok(())
+	    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+		let elts = decode_varint(buf)? as usize;
+		if elts > MAX_VEC {
+		    return Err(PackError::TooBig);
+		}
+		let pre = if elts * mem::size_of::<K>() > MAX_VEC {
+		    MAX_VEC / mem::size_of::<K>()
+		} else {
+		    elts
+		};
+		let mut data = $ty::with_capacity_and_hasher(pre, R::default());
+		for _ in 0..elts {
+		    data.insert(<K as Pack>::decode(buf)?);
+		}
+		Ok(data)
+	    }
+
+	    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
+		let elts = decode_varint(buf)? as usize;
+		if elts > MAX_VEC {
+		    return Err(PackError::TooBig);
+		}
+		let pre = if elts * mem::size_of::<K>() > MAX_VEC {
+		    MAX_VEC / mem::size_of::<K>()
+		} else {
+		    elts
+		};
+		if pre > self.capacity() {
+		    self.reserve(pre - self.capacity());
+		}
+		for _ in 0..elts {
+		    self.insert(<K as Pack>::decode(buf)?);
+		}
+		Ok(())
+	    }
+	}
     }
 }
+
+impl_hashset!(HashSet);
+impl_hashset!(IndexSet);
 
 impl<T: Pack> Pack for Option<T> {
     fn encoded_len(&self) -> usize {

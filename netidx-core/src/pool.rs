@@ -6,6 +6,7 @@ use fxhash::FxHashMap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use indexmap::{IndexMap, IndexSet};
 use std::{
     borrow::Borrow,
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
@@ -28,41 +29,55 @@ pub trait Poolable {
     }
 }
 
-impl<K, V, R> Poolable for HashMap<K, V, R>
-where
-    K: Hash + Eq,
-    R: Default + BuildHasher,
-{
-    fn empty() -> Self {
-        HashMap::default()
-    }
+macro_rules! impl_hashmap {
+    ($ty:ident) => {
+	impl<K, V, R> Poolable for $ty<K, V, R>
+	where
+	    K: Hash + Eq,
+	    R: Default + BuildHasher,
+	{
+	    fn empty() -> Self {
+		$ty::default()
+	    }
 
-    fn reset(&mut self) {
-        self.clear()
-    }
+	    fn reset(&mut self) {
+		self.clear()
+	    }
 
-    fn capacity(&self) -> usize {
-        HashMap::capacity(self)
+	    fn capacity(&self) -> usize {
+		$ty::capacity(self)
+	    }
+	}
     }
 }
 
-impl<K, R> Poolable for HashSet<K, R>
-where
-    K: Hash + Eq,
-    R: Default + BuildHasher,
-{
-    fn empty() -> Self {
-        HashSet::default()
-    }
+impl_hashmap!(HashMap);
+impl_hashmap!(IndexMap);
 
-    fn reset(&mut self) {
-        self.clear()
-    }
+macro_rules! impl_hashset {
+    ($ty:ident) => {
+	impl<K, R> Poolable for $ty<K, R>
+	where
+	    K: Hash + Eq,
+	    R: Default + BuildHasher,
+	{
+	    fn empty() -> Self {
+		$ty::default()
+	    }
 
-    fn capacity(&self) -> usize {
-        HashSet::capacity(self)
+	    fn reset(&mut self) {
+		self.clear()
+	    }
+
+	    fn capacity(&self) -> usize {
+		$ty::capacity(self)
+	    }
+	}
     }
 }
+
+impl_hashset!(HashSet);
+impl_hashset!(IndexSet);
 
 impl<T> Poolable for Vec<T> {
     fn empty() -> Self {
