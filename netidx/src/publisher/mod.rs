@@ -847,6 +847,7 @@ struct PublisherInner {
     destroy_on_idle: FxHashSet<Id>,
     on_write_chans: FxHashMap<ChanWrap<Pooled<Vec<WriteRequest>>>, (ChanId, HashSet<Id>)>,
     on_event_chans: Vec<UnboundedSender<Event>>,
+    on_event_by_id_chans: FxHashMap<Id, Vec<UnboundedSender<Event>>>,
     on_write: FxHashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>>,
     resolver: ResolverWrite,
     advertised: HashMap<Path, HashSet<Path>>,
@@ -943,6 +944,17 @@ impl PublisherInner {
 
     fn send_event(&mut self, event: Event) {
         self.on_event_chans.retain(|chan| chan.unbounded_send(event).is_ok());
+        let id = match &event {
+            Event::Destroyed(id) => id,
+            Event::Subscribe(id, _) => id,
+            Event::Unsubscribe(id, _) => id,
+        };
+        if let Some(chans) = self.on_event_by_id_chans.get_mut(id) {
+            chans.retain(|chan| chan.unbounded_send(event).is_ok());
+            if chans.is_empty() {
+                self.on_event_by_id_chans.remove(id);
+            }
+        }
     }
 
     fn trigger_publish(&mut self) {
@@ -1132,6 +1144,7 @@ impl Publisher {
             destroy_on_idle: HashSet::default(),
             on_write_chans: HashMap::default(),
             on_event_chans: Vec::new(),
+            on_event_by_id_chans: HashMap::default(),
             on_write: HashMap::default(),
             resolver,
             advertised: HashMap::new(),
@@ -1595,6 +1608,16 @@ impl Publisher {
     /// you can just drop it.
     pub fn events(&self, tx: UnboundedSender<Event>) {
         self.0.lock().on_event_chans.push(tx)
+    }
+
+    /// Register `tx` to receive a message about publisher events
+    ///
+    /// This does exactly the same thing as events, however only
+    /// events for the specifed id will be delivered to the
+    /// channel. As with events, if you don't want to receive events
+    /// anymore for the channel you can just drop it.
+    pub fn events_for_id(&self, id: Id, tx: UnboundedSender<Event>) {
+        self.0.lock().on_event_by_id_chans.entry(id).or_insert(vec![]).push(tx);
     }
 }
 

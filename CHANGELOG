@@ -1,3 +1,8 @@
+* 0.22.2
+
+  - add Publisher::events_for_id, that does the same thing as events,
+    but only for a specific id.
+
 * 0.22.1
 
   - fix a memory leak in subscriber that was triggered by lots of
