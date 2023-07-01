@@ -1,6 +1,9 @@
 * 0.22.4
 
-  - add Subscriber::subscribe_with_updates
+  - add Subscriber::subscribe_updates, subscribe_nondurable_updates,
+    subscribe_nondurable_one_updates. These methods allow registering
+    for updates as part of the subscription process to avoid any race
+    in receiving values. 
 
 * 0.22.3
 
