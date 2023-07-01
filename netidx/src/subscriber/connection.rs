@@ -1,7 +1,7 @@
 use super::{
-    ConId, DvDead, DvState, Event, NoSuchValue, PermissionDenied, SubId,
-    SubStatus, SubscribeValRequest, Subscriber, SubscriberInner, SubscriberWeak, ToCon,
-    UpdatesFlags, Val, ValInner, ValWeak, BATCHES, DECODE_BATCHES,
+    ConId, DvDead, DvState, Event, NoSuchValue, PermissionDenied, SubId, SubStatus,
+    SubscribeValRequest, Subscriber, SubscriberInner, SubscriberWeak, ToCon,
+    UpdatesFlags, Val, ValInner, ValWeak, WUpdateChan, BATCHES, DECODE_BATCHES,
 };
 pub use crate::protocol::value::{FromValue, Typ, Value};
 pub use crate::resolver_client::DesiredAuth;
@@ -23,7 +23,7 @@ use anyhow::{anyhow, Error, Result};
 use cross_krb5::ClientCtx;
 use futures::{
     channel::{
-        mpsc::{self, Receiver, Sender},
+        mpsc::{self, Receiver},
         oneshot,
     },
     prelude::*,
@@ -312,13 +312,13 @@ impl ConnectionCtx {
         &mut self,
         id: Id,
         sub_id: SubId,
-        mut tx: Sender<Pooled<Vec<(SubId, Event)>>>,
+        mut tx: WUpdateChan,
         flags: UpdatesFlags,
     ) -> Result<()> {
         if let Some(sub) = self.subscriptions.get_mut(&id) {
             let mut already_have = false;
             for (id, c) in sub.streams.iter() {
-                if tx.same_receiver(&c.0) {
+                if &tx == c {
                     already_have = true;
                 }
                 if c.0.is_closed() {
@@ -333,14 +333,14 @@ impl ConnectionCtx {
                     let m = last.lock().clone();
                     let mut b = BATCHES.take();
                     b.push((sub_id, m));
-                    if let Err(e) = tx.try_send(b) {
+                    if let Err(e) = tx.0.try_send(b) {
                         if e.is_disconnected() {
                             return Ok(());
                         } else if e.is_full() {
                             let b = e.into_inner();
                             let mut tx = tx.clone();
                             self.blocked_channels.push(Box::pin(async move {
-                                let _ = tx.send(b).await;
+                                let _ = tx.0.send(b).await;
                             }))
                         }
                     }
@@ -350,7 +350,6 @@ impl ConnectionCtx {
                 sub.last = None;
             }
             if !already_have {
-                let tx = ChanWrap(tx);
                 let id = self.by_receiver.entry(tx.clone()).or_insert_with(ChanId::new);
                 sub.streams.push((*id, tx));
             }
@@ -458,6 +457,14 @@ impl ConnectionCtx {
                     Some(req) => match self.subscriptions.get_mut(&id) {
                         Some(sub) => match sub.val.upgrade() {
                             Some(val) => {
+                                for (f, c) in req.streams {
+                                    self.handle_connect_stream(
+                                        id,
+                                        req.sub_id,
+                                        c,
+                                        f | UpdatesFlags::BEGIN_WITH_LAST,
+                                    )?
+                                }
                                 let _ = req.finished.send(Ok(val));
                             }
                             None => {
@@ -489,6 +496,14 @@ impl ConnectionCtx {
                                         },
                                     );
                                 }
+                            }
+                            for (f, c) in req.streams {
+                                self.handle_connect_stream(
+                                    id,
+                                    req.sub_id,
+                                    c,
+                                    f | UpdatesFlags::BEGIN_WITH_LAST,
+                                )?
                             }
                         }
                     },

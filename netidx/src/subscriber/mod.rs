@@ -1135,7 +1135,7 @@ impl Subscriber {
     /// beginning of the subscription. This ensures that every update
     /// from the beginning of the subscription will appear in the
     /// specified update channels.
-    async fn subscribe_nondurable_updates<I, CI>(
+    pub async fn subscribe_nondurable_updates<I, CI>(
         &self,
         batch: I,
         timeout: Option<Duration>,
@@ -1466,7 +1466,11 @@ impl Subscriber {
     /// The semantics of `durable_subscribe` are the same as
     /// subscribe_nondurable, except that certain errors are caught,
     /// and resubscriptions are attempted. see `Dval`.
-    pub fn subscribe_with_updates<I>(&self, path: Path, updates: I) -> Dval
+    ///
+    /// If the specified path is already subscribed then the specified
+    /// updates channels will be registered with the dval as if
+    /// dval.updates has been called.
+    pub fn subscribe_updates<I>(&self, path: Path, updates: I) -> Dval
     where
         I: IntoIterator<Item = (UpdatesFlags, Sender<Pooled<Vec<(SubId, Event)>>>)>,
     {
