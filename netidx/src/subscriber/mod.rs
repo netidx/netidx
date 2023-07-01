@@ -272,6 +272,7 @@ impl Val {
 #[derive(Debug)]
 struct DvDead {
     queued_writes: Vec<(Value, Option<oneshot::Sender<Value>>)>,
+    waiting: Vec<oneshot::Sender<()>>,
     tries: usize,
     next_try: Instant,
 }
@@ -381,33 +382,13 @@ impl Dval {
     /// this method is called, it will return immediatly without
     /// allocating any resources.
     pub async fn wait_subscribed(&self) -> Result<()> {
-        match &self.0.lock().sub {
+	let (tx, rx) = oneshot::channel();
+        match &mut self.0.lock().sub {
             DvState::Subscribed(_) => return Ok(()),
-            DvState::Dead(_) => (),
+            DvState::Dead(d) => d.waiting.push(tx),
         }
-        let (tx, mut rx) = mpsc::channel(2);
-        self.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
-        loop {
-            match rx.next().await {
-                None => bail!("unexpected resub error"),
-                Some(mut batch) => {
-                    let mut subed = false;
-                    for (_, ev) in batch.drain(..) {
-                        match ev {
-                            Event::Unsubscribed => {
-                                subed = false;
-                            }
-                            Event::Update(_) => {
-                                subed = true;
-                            }
-                        }
-                    }
-                    if subed {
-                        break Ok(());
-                    }
-                }
-            }
-        }
+	let _ = rx.await;
+	Ok(())
     }
 
     /// Write a value back to the publisher, see `Val::write`. If we
@@ -887,16 +868,18 @@ impl Subscriber {
                             dead.push(p.clone());
                         }
                         Some(s) => {
-                            let (next_try, tries, streams) = {
-                                let mut dv = s.0.lock();
+                            let mut dv = s.0.lock();
+                            let (next_try, tries) = {
                                 match &mut dv.sub {
                                     DvState::Dead(d) => {
-                                        (d.next_try, d.tries, dv.streams.clone())
+                                        (d.next_try, d.tries)
                                     }
                                     DvState::Subscribed(_) => unreachable!(),
                                 }
                             };
                             if next_try <= now {
+				let streams = dv.streams.clone();
+				drop(dv);
                                 batch.push((p.clone(), streams));
                                 durable_pending.insert(p.clone(), w.clone());
                                 max_tries = max(max_tries, tries);
@@ -909,7 +892,7 @@ impl Subscriber {
                     }
                 }
                 for p in dead.iter().chain(batch.iter().map(|(p, _)| p)) {
-                    durable_dead.remove(p);
+		    durable_dead.remove(p);
                 }
                 let timeout = 30 + max(10, batch.len() / 10000) * max_tries;
                 (batch, Duration::from_secs(timeout as u64))
@@ -1438,6 +1421,9 @@ impl Subscriber {
             .or_else(|| t.durable_alive.get(&path))
         {
             if let Some(s) = s.upgrade() {
+		for (f, c) in updates {
+		    s.updates(f, c)
+		}
                 return s;
             }
         }
@@ -1445,6 +1431,7 @@ impl Subscriber {
             sub_id: SubId::new(),
             sub: DvState::Dead(Box::new(DvDead {
                 queued_writes: Vec::new(),
+		waiting: Vec::new(),
                 tries: 0,
                 next_try: Instant::now(),
             })),

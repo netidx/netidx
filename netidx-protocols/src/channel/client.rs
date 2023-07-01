@@ -132,15 +132,15 @@ impl Connection {
         let to = Duration::from_secs(15);
         let acceptor = subscriber.subscribe(path.clone());
         time::timeout(to, acceptor.wait_subscribed()).await??;
-        match acceptor.last() {
-            Event::Unsubscribed => bail!("connect failed"),
+        match dbg!(acceptor.last()) {
+            Event::Unsubscribed => bail!("connect failed, unsubscribed after connect"),
             Event::Update(Value::String(s)) if &*s == "connection" => {
                 Self::connect_singleton(subscriber, path).await
             }
             Event::Update(Value::String(s)) if &*s == "channel" => {
                 let f = acceptor.write_with_recipt(Value::from("connect"));
                 match time::timeout(to, f).await? {
-                    Err(_) => bail!("connect failed"),
+                    Err(_) => bail!("connect failed, timed out"),
                     Ok(v @ Value::String(_)) => {
                         let path = v.cast_to::<Path>()?;
                         Self::connect_singleton(subscriber, path).await

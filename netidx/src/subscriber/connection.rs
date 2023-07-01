@@ -31,7 +31,7 @@ use futures::{
     stream::FuturesUnordered,
 };
 use fxhash::{FxHashMap, FxHashSet};
-use log::info;
+use log::{info, trace};
 use parking_lot::Mutex;
 use protocol::resolver::UserInfo;
 use smallvec::SmallVec;
@@ -89,6 +89,7 @@ fn unsubscribe(
             let mut inner = ds.0.lock();
             inner.sub = DvState::Dead(Box::new(DvDead {
                 queued_writes: Vec::new(),
+		waiting: Vec::new(),
                 tries: 0,
                 next_try: Instant::now(),
             }));
@@ -453,10 +454,15 @@ impl ConnectionCtx {
                     }
                 }
                 From::Subscribed(p, id, m) => match self.pending.remove(&p) {
-                    None => con.queue_send(&To::Unsubscribe(id))?,
+                    None => {
+			trace!("subscribed for id with no subscription");
+			con.queue_send(&To::Unsubscribe(id))?
+		    },
                     Some(req) => match self.subscriptions.get_mut(&id) {
-                        Some(sub) => match sub.val.upgrade() {
+                        Some(sub) => match sub.val.upgrade() { // we're subscribed to an alias
                             Some(val) => {
+				trace!("subscribe to alias success");
+				// we ignore last in this case because we already have it
                                 for (f, c) in req.streams {
                                     self.handle_connect_stream(
                                         id,
@@ -468,12 +474,14 @@ impl ConnectionCtx {
                                 let _ = req.finished.send(Ok(val));
                             }
                             None => {
+				trace!("alias pair dropped while subscribing");
                                 let _ = req.finished.send(Err(anyhow!(
                                     "subscribe alias while unsubscribing"
                                 )));
                             }
                         },
                         None => {
+			    trace!("subscribe success");
                             let last = TArc::new(Mutex::new(Event::Update(m)));
                             let s = Val(Arc::new(ValInner {
                                 sub_id: req.sub_id,
@@ -483,8 +491,12 @@ impl ConnectionCtx {
                                 last: last.clone(),
                             }));
                             match req.finished.send(Ok(s.clone())) {
-                                Err(_) => con.queue_send(&To::Unsubscribe(id))?,
+                                Err(e) => {
+				    trace!("could not deliver finished subscription {:?}", e);
+				    con.queue_send(&To::Unsubscribe(id))?
+				},
                                 Ok(()) => {
+				    trace!("storing finished subscripiton");
                                     self.subscriptions.insert(
                                         id,
                                         Sub {
@@ -497,6 +509,7 @@ impl ConnectionCtx {
                                     );
                                 }
                             }
+			    trace!("connecting streams");
                             for (f, c) in req.streams {
                                 self.handle_connect_stream(
                                     id,

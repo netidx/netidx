@@ -19,6 +19,7 @@ pub(crate) struct Ctx {
 
 impl Ctx {
     pub(crate) async fn new() -> Self {
+	env_logger::init();
         let cfg = ServerConfig::load("../cfg/simple-server.json")
             .expect("load simple server config");
         let _server =
