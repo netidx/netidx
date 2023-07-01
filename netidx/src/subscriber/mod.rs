@@ -109,6 +109,11 @@ bitflags! {
     }
 }
 
+type Updates = Pooled<Vec<(SubId, Event)>>;
+pub type UpdateChan = Sender<Updates>;
+type WUpdateChan = ChanWrap<Updates>;
+type Streams = SmallVec<[(UpdatesFlags, WUpdateChan); 1]>;
+
 #[derive(Debug)]
 struct SubscribeValRequest {
     path: Path,
@@ -120,18 +125,14 @@ struct SubscribeValRequest {
     finished: oneshot::Sender<Result<Val>>,
     con: BatchSender<ToCon>,
     deadline: Option<Instant>,
+    streams: Streams,
 }
 
 #[derive(Debug)]
 enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
-    Stream {
-        id: Id,
-        sub_id: SubId,
-        tx: Sender<Pooled<Vec<(SubId, Event)>>>,
-        flags: UpdatesFlags,
-    },
+    Stream { id: Id, sub_id: SubId, tx: WUpdateChan, flags: UpdatesFlags },
     Write(Id, Value, Option<oneshot::Sender<Value>>),
     Flush(oneshot::Sender<()>),
 }
@@ -218,8 +219,13 @@ impl Val {
     /// register a duplicate channel and begin_with_last is true you
     /// will get an update with the current state, even though the
     /// channel registration will be ignored.
-    pub fn updates(&self, flags: UpdatesFlags, tx: Sender<Pooled<Vec<(SubId, Event)>>>) {
-        let m = ToCon::Stream { tx, sub_id: self.0.sub_id, id: self.0.id, flags };
+    pub fn updates(&self, flags: UpdatesFlags, tx: UpdateChan) {
+        let m = ToCon::Stream {
+            tx: ChanWrap(tx),
+            sub_id: self.0.sub_id,
+            id: self.0.id,
+            flags,
+        };
         self.0.connection.send(m);
     }
 
@@ -280,7 +286,7 @@ enum DvState {
 struct DvalInner {
     sub_id: SubId,
     sub: DvState,
-    streams: SmallVec<[(UpdatesFlags, ChanWrap<Pooled<Vec<(SubId, Event)>>>); 1]>,
+    streams: Streams,
 }
 
 #[derive(Debug, Clone)]
@@ -358,9 +364,9 @@ impl Dval {
         tx: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
     ) {
         let mut t = self.0.lock();
-        let c = ChanWrap(tx.clone());
-        if !t.streams.iter().any(|(_, s)| &c == s) {
-            t.streams.push((flags, c));
+        let tx = ChanWrap(tx);
+        if !t.streams.iter().any(|(_, s)| &tx == s) {
+            t.streams.push((flags, tx.clone()));
         }
         if let DvState::Subscribed(ref sub) = t.sub {
             let m = ToCon::Stream { tx, sub_id: t.sub_id, id: sub.0.id, flags };
@@ -475,7 +481,7 @@ impl Dval {
 #[derive(Debug)]
 enum SubStatus {
     Subscribed(ValWeak),
-    Pending(Box<Vec<oneshot::Sender<Result<Val>>>>), // the box ensures SubStatus is tag + 1 word
+    Pending(Box<SmallVec<[oneshot::Sender<Result<Val>>; 1]>>), // the box ensures SubStatus is tag + 1 word
 }
 
 const REMEBER_FAILED: Duration = Duration::from_secs(60);
@@ -868,43 +874,43 @@ impl Subscriber {
             let now = Instant::now();
             let (batch, timeout) = {
                 let mut dead = Vec::new();
-                let mut batch = Vec::new();
+                let mut batch: Vec<(Path, Streams)> = Vec::new();
                 let mut subscriber = subscriber.0.lock();
                 let subscriber = &mut *subscriber;
                 let durable_dead = &mut subscriber.durable_dead;
                 let durable_pending = &mut subscriber.durable_pending;
                 let mut max_tries = 1;
                 let mut total_retries = 0;
-                task::block_in_place(|| {
-                    for (p, w) in durable_dead.iter() {
-                        match w.upgrade() {
-                            None => {
-                                dead.push(p.clone());
-                            }
-                            Some(s) => {
-                                let (next_try, tries) = {
-                                    let mut dv = s.0.lock();
-                                    match &mut dv.sub {
-                                        DvState::Dead(d) => (d.next_try, d.tries),
-                                        DvState::Subscribed(_) => unreachable!(),
+                for (p, w) in durable_dead.iter() {
+                    match w.upgrade() {
+                        None => {
+                            dead.push(p.clone());
+                        }
+                        Some(s) => {
+                            let (next_try, tries, streams) = {
+                                let mut dv = s.0.lock();
+                                match &mut dv.sub {
+                                    DvState::Dead(d) => {
+                                        (d.next_try, d.tries, dv.streams.clone())
                                     }
-                                };
-                                if next_try <= now {
-                                    batch.push(p.clone());
-                                    durable_pending.insert(p.clone(), w.clone());
-                                    max_tries = max(max_tries, tries);
-                                    total_retries += 1;
-                                    if total_retries >= 100_000 {
-                                        break;
-                                    }
+                                    DvState::Subscribed(_) => unreachable!(),
+                                }
+                            };
+                            if next_try <= now {
+                                batch.push((p.clone(), streams));
+                                durable_pending.insert(p.clone(), w.clone());
+                                max_tries = max(max_tries, tries);
+                                total_retries += 1;
+                                if total_retries >= 100_000 {
+                                    break;
                                 }
                             }
                         }
                     }
-                    for p in dead.iter().chain(batch.iter()) {
-                        durable_dead.remove(p);
-                    }
-                });
+                }
+                for p in dead.iter().chain(batch.iter().map(|(p, _)| p)) {
+                    durable_dead.remove(p);
+                }
                 let timeout = 30 + max(10, batch.len() / 10000) * max_tries;
                 (batch, Duration::from_secs(timeout as u64))
             };
@@ -914,7 +920,7 @@ impl Subscriber {
                 None
             } else {
                 update_retry(&mut *subscriber.0.lock(), retry);
-                Some(subscriber.subscribe_nondurable(batch, Some(timeout)).await)
+                Some(subscriber.subscribe_nondurable_internal(batch, Some(timeout)).await)
             }
         }
         fn finish_resubscription_batch(
@@ -949,14 +955,6 @@ impl Subscriber {
                             },
                             Ok(sub) => {
                                 info!("resubscription success {}", p);
-                                for (flags, tx) in dv.streams.iter().cloned() {
-                                    sub.0.connection.send(ToCon::Stream {
-                                        tx: tx.0,
-                                        sub_id: dv.sub_id,
-                                        id: sub.0.id,
-                                        flags: flags | UpdatesFlags::BEGIN_WITH_LAST,
-                                    });
-                                }
                                 if let DvState::Dead(d) = &mut dv.sub {
                                     for (v, resp) in d.queued_writes.drain(..) {
                                         sub.0
@@ -1123,43 +1121,78 @@ impl Subscriber {
     /// `subscribe` future in a `tokio::time::timeout`.
     pub async fn subscribe_nondurable(
         &self,
-        batch: impl IntoIterator<Item = Path>,
+        batch: impl Iterator<Item = Path>,
         timeout: Option<Duration>,
     ) -> FuturesUnordered<impl Future<Output = (Path, Result<Val>)>> {
+        self.subscribe_nondurable_internal(batch.map(|p| (p, [])), timeout).await
+    }
+
+    /// Subscribe to values with updates channel registered from the
+    /// beginning.
+    ///
+    /// This is the same as subscribe_nondurable except that updates
+    /// channels may be registered for each path from the very
+    /// beginning of the subscription. This ensures that every update
+    /// from the beginning of the subscription will appear in the
+    /// specified update channels.
+    async fn subscribe_nondurable_updates<I, CI>(
+        &self,
+        batch: I,
+        timeout: Option<Duration>,
+    ) -> FuturesUnordered<impl Future<Output = (Path, Result<Val>)>>
+    where
+        I: IntoIterator<Item = (Path, CI)>,
+        CI: IntoIterator<Item = (UpdatesFlags, UpdateChan)>,
+    {
+        let batch = batch
+            .into_iter()
+            .map(|(p, i)| (p, i.into_iter().map(|(f, c)| (f, ChanWrap(c)))));
+        self.subscribe_nondurable_internal(batch, timeout).await
+    }
+
+    async fn subscribe_nondurable_internal<I, CI>(
+        &self,
+        batch: I,
+        timeout: Option<Duration>,
+    ) -> FuturesUnordered<impl Future<Output = (Path, Result<Val>)>>
+    where
+        I: IntoIterator<Item = (Path, CI)>,
+        CI: IntoIterator<Item = (UpdatesFlags, WUpdateChan)>,
+    {
         #[derive(Debug)]
         enum St {
-            Resolve,
+            Resolve(Streams),
             Subscribing(oneshot::Receiver<Result<Val>>),
-            WaitingOther(oneshot::Receiver<Result<Val>>),
-            Subscribed(Val),
+            WaitingOther(oneshot::Receiver<Result<Val>>, Streams),
+            Subscribed(Val, Streams),
             Error(Error),
         }
         let now = Instant::now();
-        let paths = batch.into_iter().collect::<Vec<_>>();
         let mut pending: HashMap<Path, St> = HashMap::new();
         // Init
         let r = {
             let mut t = self.0.lock();
             t.gc_recently_failed();
-            for p in paths.clone() {
+            for (p, chans) in batch {
+                let streams: Streams = chans.into_iter().collect();
                 match t.subscribed.entry(p.clone()) {
                     Entry::Vacant(e) => {
-                        e.insert(SubStatus::Pending(Box::new(vec![])));
-                        pending.insert(p, St::Resolve);
+                        e.insert(SubStatus::Pending(Box::new(SmallVec::new())));
+                        pending.insert(p, St::Resolve(streams));
                     }
                     Entry::Occupied(mut e) => match e.get_mut() {
-                        SubStatus::Pending(ref mut v) => {
+                        SubStatus::Pending(v) => {
                             let (tx, rx) = oneshot::channel();
                             v.push(tx);
-                            pending.insert(p, St::WaitingOther(rx));
+                            pending.insert(p, St::WaitingOther(rx, streams));
                         }
                         SubStatus::Subscribed(r) => match r.upgrade() {
                             Some(r) => {
-                                pending.insert(p, St::Subscribed(r));
+                                pending.insert(p, St::Subscribed(r, streams));
                             }
                             None => {
-                                e.insert(SubStatus::Pending(Box::new(vec![])));
-                                pending.insert(p, St::Resolve);
+                                e.insert(SubStatus::Pending(Box::new(SmallVec::new())));
+                                pending.insert(p, St::Resolve(streams));
                             }
                         },
                     },
@@ -1172,11 +1205,11 @@ impl Subscriber {
             let to_resolve = pending
                 .iter()
                 .filter(|(_, s)| match s {
-                    St::Resolve => true,
+                    St::Resolve(_) => true,
                     _ => false,
                 })
                 .map(|(p, _)| p.clone())
-                .collect::<Vec<_>>();
+                .collect::<SmallVec<[_; 100]>>();
             let r = match timeout {
                 None => Ok(r.resolve(to_resolve.iter().cloned()).await),
                 Some(d) => time::timeout(d, r.resolve(to_resolve.iter().cloned())).await,
@@ -1235,6 +1268,10 @@ impl Subscriber {
                             };
                             let (tx, rx) = oneshot::channel();
                             let con_ = con.clone();
+                            let streams = match pending.remove(&p) {
+                                Some(St::Resolve(streams)) => streams,
+                                _ => unreachable!(),
+                            };
                             let r = con.send(ToCon::Subscribe(SubscribeValRequest {
                                 path: p.clone(),
                                 sub_id,
@@ -1245,6 +1282,7 @@ impl Subscriber {
                                 finished: tx,
                                 con: con_,
                                 deadline,
+                                streams,
                             }));
                             if r {
                                 pending.insert(p, St::Subscribing(rx));
@@ -1265,8 +1303,19 @@ impl Subscriber {
         // Wait
         async fn wait_result(sub: Subscriber, path: Path, st: St) -> (Path, Result<Val>) {
             match st {
-                St::Resolve => unreachable!(),
-                St::Subscribed(raw) => (path, Ok(raw)),
+                St::Resolve(_) => unreachable!(),
+                St::Subscribed(raw, streams) => {
+                    for (f, tx) in streams {
+                        let m = ToCon::Stream {
+                            tx,
+                            flags: f,
+                            sub_id: raw.0.sub_id,
+                            id: raw.0.id,
+                        };
+                        raw.0.connection.send(m);
+                    }
+                    (path, Ok(raw))
+                }
                 St::Error(e) => {
                     let mut t = sub.0.lock();
                     if let Some(sub) = t.subscribed.remove(path.as_ref()) {
@@ -1282,10 +1331,21 @@ impl Subscriber {
                     }
                     (path, Err(e))
                 }
-                St::WaitingOther(w) => match w.await {
+                St::WaitingOther(w, streams) => match w.await {
                     Err(e) => (path, Err(anyhow!("other side died {}", e))),
                     Ok(Err(e)) => (path, Err(e)),
-                    Ok(Ok(raw)) => (path, Ok(raw)),
+                    Ok(Ok(raw)) => {
+                        for (f, tx) in streams {
+                            let m = ToCon::Stream {
+                                tx,
+                                flags: f,
+                                sub_id: raw.0.sub_id,
+                                id: raw.0.id,
+                            };
+                            raw.0.connection.send(m);
+                        }
+                        (path, Ok(raw))
+                    }
                 },
                 St::Subscribing(w) => {
                     let res = match w.await {
@@ -1330,10 +1390,12 @@ impl Subscriber {
         pending.drain().map(|(path, st)| wait_result(self.clone(), path, st)).collect()
     }
 
-    /// Subscribe to just one value. This is sufficient for a small
-    /// number of paths, but if you need to subscribe to a lot of
-    /// values it is more efficent to use `subscribe`. The semantics
-    /// of this method are the same as `subscribe` called with 1 path.
+    /// Subscribe to just one value.
+    ///
+    /// This is sufficient for a small number of paths, but if you
+    /// need to subscribe to a lot of values it is more efficent to
+    /// use `subscribe`. The semantics of this method are the same as
+    /// `subscribe` called with 1 path.
     pub async fn subscribe_nondurable_one(
         &self,
         path: Path,
@@ -1342,15 +1404,32 @@ impl Subscriber {
         self.subscribe_nondurable(iter::once(path), timeout).await.next().await.unwrap().1
     }
 
-    /// Create a durable value subscription to `path`.
+    /// Subscribe to just one value with updates channels registered
+    /// from the start.
     ///
-    /// Batching of durable subscriptions is automatic, if you create
-    /// a lot of durable subscriptions all at once they will batch.
-    ///
-    /// The semantics of `durable_subscribe` are the same as
-    /// subscribe_nondurable, except that certain errors are caught,
-    /// and resubscriptions are attempted. see `Dval`.
-    pub fn subscribe(&self, path: Path) -> Dval {
+    /// This is sufficient for a small number of paths, but if you
+    /// need to subscribe to a lot of values it is more efficent to
+    /// use `subscribe`. The semantics of this method are the same as
+    /// `subscribe` called with 1 path.
+    pub async fn subscribe_nondurable_one_updates(
+        &self,
+        path: Path,
+        updates: impl IntoIterator<Item = (UpdatesFlags, UpdateChan)>,
+        timeout: Option<Duration>,
+    ) -> Result<Val> {
+        let updates = updates.into_iter().map(|(f, c)| (f, ChanWrap(c)));
+        self.subscribe_nondurable_internal(iter::once((path, updates)), timeout)
+            .await
+            .next()
+            .await
+            .unwrap()
+            .1
+    }
+
+    pub fn subscribe_internal<I>(&self, path: Path, updates: I) -> Dval
+    where
+        I: IntoIterator<Item = (UpdatesFlags, Sender<Pooled<Vec<(SubId, Event)>>>)>,
+    {
         let mut t = self.0.lock();
         if let Some(s) = t
             .durable_dead
@@ -1369,11 +1448,41 @@ impl Subscriber {
                 tries: 0,
                 next_try: Instant::now(),
             })),
-            streams: SmallVec::new(),
+            streams: SmallVec::from_iter(
+                updates.into_iter().map(|(f, c)| (f, ChanWrap(c))),
+            ),
         })));
         t.durable_dead.insert(path, s.downgrade());
         let _ = t.trigger_resub.unbounded_send(());
         s
+    }
+
+    /// Create a durable value subscription to `path` with updates
+    /// already attached.
+    ///
+    /// Batching of durable subscriptions is automatic, if you create
+    /// a lot of durable subscriptions all at once they will batch.
+    ///
+    /// The semantics of `durable_subscribe` are the same as
+    /// subscribe_nondurable, except that certain errors are caught,
+    /// and resubscriptions are attempted. see `Dval`.
+    pub fn subscribe_with_updates<I>(&self, path: Path, updates: I) -> Dval
+    where
+        I: IntoIterator<Item = (UpdatesFlags, Sender<Pooled<Vec<(SubId, Event)>>>)>,
+    {
+        self.subscribe_internal(path, updates)
+    }
+
+    /// Create a durable value subscription to `path`.
+    ///
+    /// Batching of durable subscriptions is automatic, if you create
+    /// a lot of durable subscriptions all at once they will batch.
+    ///
+    /// The semantics of `durable_subscribe` are the same as
+    /// subscribe_nondurable, except that certain errors are caught,
+    /// and resubscriptions are attempted. see `Dval`.
+    pub fn subscribe(&self, path: Path) -> Dval {
+        self.subscribe_internal(path, [])
     }
 
     /// This will return when all pending operations are flushed out
