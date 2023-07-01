@@ -89,13 +89,18 @@ impl Connection {
         let to = Duration::from_secs(15);
         let (tx, rx) = mpsc::channel(5);
         let mut n = 0;
+        let f = UpdatesFlags::empty();
         let con = loop {
+            let tx = tx.clone();
             if n > 3 {
                 break subscriber
-                    .subscribe_nondurable_one(path.clone(), Some(to))
+                    .subscribe_nondurable_one_updates(path.clone(), [(f, tx)], Some(to))
                     .await?;
             } else {
-                match subscriber.subscribe_nondurable_one(path.clone(), Some(to)).await {
+                match subscriber
+                    .subscribe_nondurable_one_updates(path.clone(), [(f, tx)], Some(to))
+                    .await
+                {
                     Ok(con) => break con,
                     Err(_) => {
                         n += 1;
@@ -105,7 +110,6 @@ impl Connection {
                 }
             }
         };
-        con.updates(UpdatesFlags::empty(), tx);
         let con = Connection {
             _subscriber: subscriber.clone(),
             con,
@@ -117,11 +121,18 @@ impl Connection {
         match time::timeout(Duration::from_secs(15), con.recv_one()).await {
             Err(_) => bail!("timeout waiting for channel handshake"),
             Ok(Err(e)) => return Err(e),
+            Ok(Ok(Value::String(s))) if &*s == "connection" => (),
+            Ok(Ok(Value::String(s))) if &*s == "ready" => {
+                con.send(Value::from("go"))?;
+                return Ok(con);
+            }
+            Ok(Ok(v)) => bail!("channel handshake, expected \"connection\" got {}", v),
+        }
+        match time::timeout(Duration::from_secs(15), con.recv_one()).await {
+            Err(_) => bail!("timeout waiting for channel handshake"),
+            Ok(Err(e)) => return Err(e),
             Ok(Ok(Value::String(s))) if &*s == "ready" => con.send(Value::from("go"))?,
-            Ok(Ok(v)) => bail!(
-                "unexpected channel handshake, expected Value::String(\"ready\") got {}",
-                v
-            ),
+            Ok(Ok(v)) => bail!("channel handshake, expected \"ready\" got {}", v),
         }
         Ok(con)
     }
@@ -132,7 +143,7 @@ impl Connection {
         let to = Duration::from_secs(15);
         let acceptor = subscriber.subscribe(path.clone());
         time::timeout(to, acceptor.wait_subscribed()).await??;
-        match dbg!(acceptor.last()) {
+        match acceptor.last() {
             Event::Unsubscribed => bail!("connect failed, unsubscribed after connect"),
             Event::Update(Value::String(s)) if &*s == "connection" => {
                 Self::connect_singleton(subscriber, path).await

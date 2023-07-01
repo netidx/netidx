@@ -17,9 +17,10 @@ pub(crate) struct Ctx {
     pub(crate) base: Path,
 }
 
+
 impl Ctx {
     pub(crate) async fn new() -> Self {
-	env_logger::init();
+	let _ = env_logger::try_init();
         let cfg = ServerConfig::load("../cfg/simple-server.json")
             .expect("load simple server config");
         let _server =
@@ -32,7 +33,7 @@ impl Ctx {
             DesiredAuth::Anonymous,
             "127.0.0.1/32".parse().unwrap(),
             768,
-            3
+            3,
         )
         .await
         .unwrap();

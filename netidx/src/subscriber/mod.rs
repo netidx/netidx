@@ -29,7 +29,7 @@ use futures::{
 };
 use fxhash::FxHashMap;
 use if_addrs::{get_if_addrs, IfAddr, Interface as NetworkInterface};
-use log::{info, warn};
+use log::{info, warn, trace};
 use netidx_netproto::resolver::{PublisherRef, UserInfo};
 use parking_lot::Mutex;
 use rand::Rng;
@@ -1158,6 +1158,7 @@ impl Subscriber {
             t.gc_recently_failed();
             for (p, chans) in batch {
                 let streams: Streams = chans.into_iter().collect();
+		trace!("subscribing to {} streams {}", p, streams.len());
                 match t.subscribed.entry(p.clone()) {
                     Entry::Vacant(e) => {
                         e.insert(SubStatus::Pending(Box::new(SmallVec::new())));
@@ -1171,6 +1172,7 @@ impl Subscriber {
                         }
                         SubStatus::Subscribed(r) => match r.upgrade() {
                             Some(r) => {
+				trace!("already subscribed to {}", p);
                                 pending.insert(p, St::Subscribed(r, streams));
                             }
                             None => {
@@ -1291,7 +1293,7 @@ impl Subscriber {
                     for (f, tx) in streams {
                         let m = ToCon::Stream {
                             tx,
-                            flags: f,
+                            flags: f | UpdatesFlags::BEGIN_WITH_LAST,
                             sub_id: raw.0.sub_id,
                             id: raw.0.id,
                         };

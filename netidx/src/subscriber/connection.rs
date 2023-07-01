@@ -320,9 +320,11 @@ impl ConnectionCtx {
             let mut already_have = false;
             for (id, c) in sub.streams.iter() {
                 if &tx == c {
+		    trace!("ignore already registered stream");
                     already_have = true;
                 }
                 if c.0.is_closed() {
+		    trace!("scheduling closed stream for gc");
                     self.by_receiver.remove(&c);
                     self.gc_chan.insert(*id);
                 }
@@ -333,11 +335,14 @@ impl ConnectionCtx {
                 if let Some(last) = &sub.last {
                     let m = last.lock().clone();
                     let mut b = BATCHES.take();
+		    trace!("pushing {:?} to new stream", m);
                     b.push((sub_id, m));
                     if let Err(e) = tx.0.try_send(b) {
                         if e.is_disconnected() {
+			    trace!("channel closed while sending last");
                             return Ok(());
                         } else if e.is_full() {
+			    trace!("no slack in channel for last adding to blocked");
                             let b = e.into_inner();
                             let mut tx = tx.clone();
                             self.blocked_channels.push(Box::pin(async move {
@@ -348,9 +353,11 @@ impl ConnectionCtx {
                 }
             }
             if flags.contains(UpdatesFlags::STOP_COLLECTING_LAST) {
+		trace!("no longer collecting last");
                 sub.last = None;
             }
             if !already_have {
+		trace!("adding new channel to streams");
                 let id = self.by_receiver.entry(tx.clone()).or_insert_with(ChanId::new);
                 sub.streams.push((*id, tx));
             }
@@ -509,7 +516,7 @@ impl ConnectionCtx {
                                     );
                                 }
                             }
-			    trace!("connecting streams");
+			    trace!("connecting {} streams", req.streams.len());
                             for (f, c) in req.streams {
                                 self.handle_connect_stream(
                                     id,
