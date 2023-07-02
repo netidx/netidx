@@ -12,6 +12,12 @@ documentation = "https://docs.rs/netidx"
 keywords = ["networking", "distributed", "kerberos", "tool"]
 categories = ["gui"]
 
+[profile.release]
+codegen-units = 1
+opt-level = 3
+lto = true
+debug = false
+
 [[bin]]
 name = "netidx-browser"
 path = "src/main.rs"
