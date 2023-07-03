@@ -1,3 +1,7 @@
+* 0.22.7
+
+  - subscribe_interal shouldn't have been public. Sorry!
+
 * 0.22.6
 
   - fix a race condition in channel registration in subscriber

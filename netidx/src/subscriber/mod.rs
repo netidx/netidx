@@ -1419,7 +1419,7 @@ impl Subscriber {
             .1
     }
 
-    pub fn subscribe_internal<I>(&self, path: Path, updates: I) -> Dval
+    fn subscribe_internal<I>(&self, path: Path, updates: I) -> Dval
     where
         I: IntoIterator<Item = (UpdatesFlags, Sender<Pooled<Vec<(SubId, Event)>>>)>,
     {
