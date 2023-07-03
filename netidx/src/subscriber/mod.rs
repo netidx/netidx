@@ -804,6 +804,14 @@ impl Subscriber {
         }
     }
 
+    pub fn is_subscribed_or_pending(&self, path: &Path) -> bool {
+        let t = self.0.lock();
+        t.subscribed.contains_key(path)
+            || t.durable_dead.contains_key(path)
+            || t.durable_pending.contains_key(path)
+            || t.durable_alive.contains_key(path)
+    }
+
     pub fn resolver(&self) -> ResolverRead {
         self.0.lock().resolver.clone()
     }
