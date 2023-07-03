@@ -160,13 +160,8 @@ fn rotate_log_file(
         use std::process::Command;
         let now = now.to_rfc3339();
         info!("running put {:?}", &cmds.put);
-        let args = cmds.put.1.iter().cloned().map(|arg| {
-            if &arg == "{shard}" {
-                String::from(&**shard_name)
-            } else {
-                arg
-            }
-        });
+        let args =
+            cmds.put.1.iter().cloned().map(|arg| arg.replace("{shard}", &**shard_name));
         let out =
             Command::new(&cmds.put.0).args(args.chain(iter::once(now.clone()))).output();
         match out {

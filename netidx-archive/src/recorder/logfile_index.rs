@@ -50,13 +50,7 @@ impl File {
         if let Some(cmds) = &config.archive_cmds {
             use std::process::Command;
             info!("running list command");
-            let args = cmds.list.1.iter().cloned().map(|s| {
-                if &s == "{shard}" {
-                    shard.into()
-                } else {
-                    s
-                }
-            });
+            let args = cmds.list.1.iter().cloned().map(|s| s.replace("{shard}", shard));
             match Command::new(&cmds.list.0).args(args).output() {
                 Err(e) => warn!("failed to run list command {}", e),
                 Ok(o) if !o.status.success() => warn!("list command failed {:?}", o),
