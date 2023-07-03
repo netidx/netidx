@@ -506,7 +506,7 @@ impl ReadChannel {
             }};
         }
         batch.push(self.receive().await?);
-        if self.buf.remaining() > 8 * 1024 * 1024 {
+        if self.buf.remaining() < 8 * 1024 * 1024 {
             process!()
         } else {
             task::block_in_place(|| process!())

@@ -29,7 +29,7 @@ use futures::{
 };
 use fxhash::FxHashMap;
 use if_addrs::{get_if_addrs, IfAddr, Interface as NetworkInterface};
-use log::{info, warn, trace};
+use log::{info, trace, warn};
 use netidx_netproto::resolver::{PublisherRef, UserInfo};
 use parking_lot::Mutex;
 use rand::Rng;
@@ -382,13 +382,13 @@ impl Dval {
     /// this method is called, it will return immediatly without
     /// allocating any resources.
     pub async fn wait_subscribed(&self) -> Result<()> {
-	let (tx, rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         match &mut self.0.lock().sub {
             DvState::Subscribed(_) => return Ok(()),
             DvState::Dead(d) => d.waiting.push(tx),
         }
-	let _ = rx.await;
-	Ok(())
+        let _ = rx.await;
+        Ok(())
     }
 
     /// Write a value back to the publisher, see `Val::write`. If we
@@ -871,15 +871,13 @@ impl Subscriber {
                             let mut dv = s.0.lock();
                             let (next_try, tries) = {
                                 match &mut dv.sub {
-                                    DvState::Dead(d) => {
-                                        (d.next_try, d.tries)
-                                    }
+                                    DvState::Dead(d) => (d.next_try, d.tries),
                                     DvState::Subscribed(_) => unreachable!(),
                                 }
                             };
                             if next_try <= now {
-				let streams = dv.streams.clone();
-				drop(dv);
+                                let streams = dv.streams.clone();
+                                drop(dv);
                                 batch.push((p.clone(), streams));
                                 durable_pending.insert(p.clone(), w.clone());
                                 max_tries = max(max_tries, tries);
@@ -892,7 +890,7 @@ impl Subscriber {
                     }
                 }
                 for p in dead.iter().chain(batch.iter().map(|(p, _)| p)) {
-		    durable_dead.remove(p);
+                    durable_dead.remove(p);
                 }
                 let timeout = 30 + max(10, batch.len() / 10000) * max_tries;
                 (batch, Duration::from_secs(timeout as u64))
@@ -938,6 +936,16 @@ impl Subscriber {
                             },
                             Ok(sub) => {
                                 info!("resubscription success {}", p);
+                                for (f, tx) in &dv.streams {
+                                    sub.0.connection.send(ToCon::Stream {
+                                        tx: tx.clone(),
+                                        sub_id: dv.sub_id,
+                                        id: sub.0.id,
+                                        flags: *f
+                                            | UpdatesFlags::BEGIN_WITH_LAST
+                                            | UpdatesFlags::NO_SPURIOUS,
+                                    });
+                                }
                                 if let DvState::Dead(d) = &mut dv.sub {
                                     for (v, resp) in d.queued_writes.drain(..) {
                                         sub.0
@@ -1158,7 +1166,7 @@ impl Subscriber {
             t.gc_recently_failed();
             for (p, chans) in batch {
                 let streams: Streams = chans.into_iter().collect();
-		trace!("subscribing to {} streams {}", p, streams.len());
+                trace!("subscribing to {} streams {}", p, streams.len());
                 match t.subscribed.entry(p.clone()) {
                     Entry::Vacant(e) => {
                         e.insert(SubStatus::Pending(Box::new(SmallVec::new())));
@@ -1172,7 +1180,7 @@ impl Subscriber {
                         }
                         SubStatus::Subscribed(r) => match r.upgrade() {
                             Some(r) => {
-				trace!("already subscribed to {}", p);
+                                trace!("already subscribed to {}", p);
                                 pending.insert(p, St::Subscribed(r, streams));
                             }
                             None => {
@@ -1423,9 +1431,9 @@ impl Subscriber {
             .or_else(|| t.durable_alive.get(&path))
         {
             if let Some(s) = s.upgrade() {
-		for (f, c) in updates {
-		    s.updates(f, c)
-		}
+                for (f, c) in updates {
+                    s.updates(f, c)
+                }
                 return s;
             }
         }
@@ -1433,7 +1441,7 @@ impl Subscriber {
             sub_id: SubId::new(),
             sub: DvState::Dead(Box::new(DvDead {
                 queued_writes: Vec::new(),
-		waiting: Vec::new(),
+                waiting: Vec::new(),
                 tries: 0,
                 next_try: Instant::now(),
             })),

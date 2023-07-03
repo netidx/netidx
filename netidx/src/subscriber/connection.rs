@@ -658,16 +658,17 @@ impl ConnectionCtx {
         let mut periodic = time::interval_at(Instant::now() + PERIOD, PERIOD);
         loop {
             select_biased! {
+                // this has to come first because batch_channel isn't cancel safe
+                batch = self.from_sub.recv().fuse() => match batch {
+                    Some(batch) => self.handle_from_sub(write_con, batch)?,
+                    None => break Ok(()),
+                },
                 r = flush(write_con, &mut self.pending_flushes).fuse() => r?,
                 now = periodic.tick().fuse() => {
                     self.handle_heartbeat(now)?;
                     if !self.maybe_disconnect_idle() {
                         break Ok(())
                     }
-                },
-                batch = self.from_sub.recv().fuse() => match batch {
-                    Some(batch) => self.handle_from_sub(write_con, batch)?,
-                    None => break Ok(()),
                 },
                 r = read_batch(
                     &mut batches,

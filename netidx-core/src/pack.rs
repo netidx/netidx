@@ -312,8 +312,8 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
 	if i >= bytes.len() {
 	    return Err(PackError::BufferShort);
 	}
-        let byte = bytes[i];
-        value |= u64::from(byte & 0x7F) << (i * 7);
+        let byte = unsafe { *bytes.get_unchecked(i) };
+        value |= ((byte & 0x7F) as u64) << (i * 7);
         if byte <= 0x7F {
 	    buf.advance(i + 1);
             return Ok(value);
