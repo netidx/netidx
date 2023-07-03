@@ -1,3 +1,7 @@
+* 0.22.8
+
+  - more flexible substitution in recorder script args
+
 * 0.22.7
 
   - subscribe_interal shouldn't have been public. Sorry!
