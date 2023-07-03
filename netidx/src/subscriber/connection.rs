@@ -209,19 +209,22 @@ fn decode_task(
     task::spawn(async move {
         let mut buf = DECODE_BATCHES.take();
         let r: Result<(), anyhow::Error> = loop {
+            let mut only_updates = true;
             select_biased! {
                 _ = stop => { break Ok(()); },
-                r = con.receive_batch(&mut buf).fuse() => match r {
+                r = con.receive_batch_fn(|up| {
+                    match up {
+                        From::Update(_, _) => (),
+                        _ => { only_updates = false }
+                    }
+                    buf.push(up);
+                }).fuse() => match r {
                     Err(e) => {
                         buf.clear();
                         try_cf!(send.send(Err(e)).await)
                     }
                     Ok(()) => {
                         let batch = mem::replace(&mut buf, DECODE_BATCHES.take());
-                        let only_updates = batch.iter().all(|v| match v {
-                            From::Update(_, _) => true,
-                            _ => false
-                        });
                         try_cf!(send.send(Ok((batch, only_updates))).await)
                     }
                 }

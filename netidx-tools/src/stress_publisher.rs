@@ -7,7 +7,7 @@ use netidx::{
 };
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
-use tokio::{signal, time};
+use tokio::{signal, time, task};
 
 #[derive(StructOpt, Debug)]
 pub(super) struct Params {
@@ -57,10 +57,12 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
     loop {
         let mut updates = publisher.start_batch();
         v += 1;
-        for p in published.iter() {
-            p.update(&mut updates, Value::V64(v as u64));
-            sent += 1;
-        }
+        task::block_in_place(|| {
+            for p in published.iter() {
+                p.update(&mut updates, Value::V64(v as u64));
+                sent += 1;
+            }
+        });
         updates.commit(None).await;
         if let Some(delay) = delay {
             time::sleep(delay).await;
