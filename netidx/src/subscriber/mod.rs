@@ -345,6 +345,11 @@ impl Dval {
         DvalWeak(Arc::downgrade(&self.0))
     }
 
+    /// Return the number of strong references to this dval
+    pub fn strong_count(&self) -> usize {
+	Arc::strong_count(&self.0)
+    }
+    
     /// Get the last value published by the publisher, or Unsubscribed
     /// if the subscription is currently dead.
     pub fn last(&self) -> Event {
