@@ -63,7 +63,7 @@ impl File {
                     info!("list succeeded with {}", &stdout);
                     for name in stdout.split("\n") {
                         match name.parse::<DateTime<Utc>>() {
-                            Err(e) => warn!("failed to parse list ts {}", e),
+                            Err(e) => warn!("failed to parse list ts \'{}\', {}", name, e),
                             Ok(ts) => files.push(File::Historical(ts)),
                         }
                     }
