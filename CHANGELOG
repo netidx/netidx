@@ -1,3 +1,7 @@
+* 0.22.12
+
+ - improve error message when a recorder timestamp fails to parse (include the failing timestamp)
+
 * 0.22.11
 
  - reduce lock contention on large recorders
