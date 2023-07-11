@@ -1,3 +1,7 @@
+* 0.22.11
+
+ - reduce lock contention on large recorders
+
 * 0.22.10
 
   - add Dval::strong_count
