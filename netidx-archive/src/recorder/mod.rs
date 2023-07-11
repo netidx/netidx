@@ -559,7 +559,8 @@ impl Recorder {
             let id = shards.by_name[&name];
             let pathindex_writer = writers.remove(&id).unwrap();
             let record_config = Arc::new(cfg.clone());
-            let subscriber = subscriber.clone();
+            let subscriber =
+		Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
             let config = config.clone();
             let shards = shards.clone();
             self.wait.spawn(async move {
