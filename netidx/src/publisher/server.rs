@@ -93,6 +93,16 @@ fn subscribe(
         Some(id) => {
             let id = *id;
             if let Some(ut) = t.by_id.get_mut(&id) {
+		if let Some(eauth) = &t.extended_auth {
+		    let mut res = false;
+		    if let Some(cl) = t.clients.get(&client) {
+			res = eauth.0(client, id, cl.user.as_ref());
+		    }
+		    if !res {
+			con.queue_send(&publisher::From::Denied(path))?;
+			return Ok(())
+		    }
+		}
                 if let Some(cl) = t.clients.get_mut(&client) {
                     cl.subscribed.insert(id, permissions);
                 }

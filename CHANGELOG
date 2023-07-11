@@ -1,3 +1,10 @@
+* 0.22.13
+
+ - add extended auth hook to publisher, allowing the registration of a
+   function that can make a final decision on authorization after the
+   traditional netidx authentication and authorization steps have been
+   completed
+
 * 0.22.12
 
  - improve error message when a recorder timestamp fails to parse (include the failing timestamp)

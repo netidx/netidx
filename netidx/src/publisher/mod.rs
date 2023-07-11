@@ -39,7 +39,7 @@ use std::{
     result,
     str::FromStr,
     sync::{Arc, Weak},
-    time::Duration,
+    time::Duration, fmt,
 };
 use tokio::{net::TcpListener, task};
 
@@ -459,6 +459,18 @@ type MsgQ = Sender<(Option<Duration>, Update)>;
 // keys/values, replaced by 1 word.
 type Subscribed = Arc<FxHashSet<ClId>>;
 
+/// Extended authorization hook
+pub type ExtendedAuth = Box<dyn Fn(ClId, Id, Option<&UserInfo>) -> bool + Send + Sync + 'static>;
+
+#[repr(transparent)]
+struct ExtendedAuthWrap(ExtendedAuth);
+
+impl fmt::Debug for ExtendedAuthWrap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+	write!(f, "<Fn>")
+    }
+}
+
 /// This represents a published value. When it is dropped the value
 /// will be unpublished.
 pub struct Val(Id);
@@ -848,6 +860,7 @@ struct PublisherInner {
     on_write_chans: FxHashMap<ChanWrap<Pooled<Vec<WriteRequest>>>, (ChanId, HashSet<Id>)>,
     on_event_chans: Vec<UnboundedSender<Event>>,
     on_event_by_id_chans: FxHashMap<Id, Vec<UnboundedSender<Event>>>,
+    extended_auth: Option<ExtendedAuthWrap>,
     on_write: FxHashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>>,
     resolver: ResolverWrite,
     advertised: HashMap<Path, HashSet<Path>>,
@@ -936,6 +949,7 @@ impl PublisherInner {
                 }
             }
             self.send_event(Event::Destroyed(id));
+            self.on_event_by_id_chans.remove(&id);
             if pbl.subscribed.len() > 0 {
                 self.to_unsubscribe.insert(id, pbl.subscribed);
             }
@@ -1145,6 +1159,7 @@ impl Publisher {
             on_write_chans: HashMap::default(),
             on_event_chans: Vec::new(),
             on_event_by_id_chans: HashMap::default(),
+            extended_auth: None,
             on_write: HashMap::default(),
             resolver,
             advertised: HashMap::new(),
@@ -1184,6 +1199,26 @@ impl Publisher {
         });
         PUBLISHERS.lock().push(pb.downgrade());
         Ok(pb)
+    }
+
+    /// Set an extended authorization function for the publisher. `f`
+    /// will be called on every subscription with the client, id, and
+    /// user info. If it returns false then the subscription will be
+    /// denied, otherwise it will be allowed.
+    ///
+    /// The extended authorization function is called after all other
+    /// authorization steps have been completed.
+    ///
+    /// Only one extended authorization function may be set for a
+    /// given publisher. If a new one is set the old one will be
+    /// overwritten.
+    pub fn set_extended_authorization(&self, f: ExtendedAuth) {
+        self.0.lock().extended_auth = Some(ExtendedAuthWrap(f));
+    }
+
+    /// Remove the extended authorization function
+    pub fn clear_extended_authorization(&self) {
+        self.0.lock().extended_auth = None;
     }
 
     /// Perform a clean shutdown of the publisher, remove all
