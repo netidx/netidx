@@ -12,7 +12,7 @@ use std::{
     boxed::Box,
     cell::RefCell,
     cmp::Eq,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque, BTreeMap, BTreeSet},
     default::Default,
     error, fmt,
     hash::{BuildHasher, Hash},
@@ -850,6 +850,50 @@ macro_rules! impl_hashmap {
 impl_hashmap!(HashMap);
 impl_hashmap!(IndexMap);
 
+impl<K: Ord + Pack, V: Pack> Pack for BTreeMap<K, V> {
+    fn encoded_len(&self) -> usize {
+	self.iter().fold(varint_len(self.len() as u64), |len, (k, v)| {
+	    len + <K as Pack>::encoded_len(k) + <V as Pack>::encoded_len(v)
+	})
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+	encode_varint(self.len() as u64, buf);
+	for (k, v) in self {
+	    <K as Pack>::encode(k, buf)?;
+	    <V as Pack>::encode(v, buf)?;
+	}
+	Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+	let elts = decode_varint(buf)? as usize;
+	if elts > MAX_VEC {
+	    return Err(PackError::TooBig);
+	}
+	let mut data = BTreeMap::default();
+	for _ in 0..elts {
+	    let k = <K as Pack>::decode(buf)?;
+	    let v = <V as Pack>::decode(buf)?;
+	    data.insert(k, v);
+	}
+	Ok(data)
+    }
+
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
+	let elts = decode_varint(buf)? as usize;
+	if elts > MAX_VEC {
+	    return Err(PackError::TooBig);
+	}
+	for _ in 0..elts {
+	    let k = <K as Pack>::decode(buf)?;
+	    let v = <V as Pack>::decode(buf)?;
+	    self.insert(k, v);
+	}
+	Ok(())
+    }
+}
+
 macro_rules! impl_hashset {
     ($ty:ident) => {
 	impl<K, R> Pack for $ty<K, R>
@@ -912,6 +956,45 @@ macro_rules! impl_hashset {
 
 impl_hashset!(HashSet);
 impl_hashset!(IndexSet);
+
+impl<K: Ord + Pack> Pack for BTreeSet<K> {
+    fn encoded_len(&self) -> usize {
+	self.iter().fold(varint_len(self.len() as u64), |len, k| {
+	    len + <K as Pack>::encoded_len(k)
+	})
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+	encode_varint(self.len() as u64, buf);
+	for k in self {
+	    <K as Pack>::encode(k, buf)?;
+	}
+	Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+	let elts = decode_varint(buf)? as usize;
+	if elts > MAX_VEC {
+	    return Err(PackError::TooBig);
+	}
+	let mut data = BTreeSet::default();
+	for _ in 0..elts {
+	    data.insert(<K as Pack>::decode(buf)?);
+	}
+	Ok(data)
+    }
+
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
+	let elts = decode_varint(buf)? as usize;
+	if elts > MAX_VEC {
+	    return Err(PackError::TooBig);
+	}
+	for _ in 0..elts {
+	    self.insert(<K as Pack>::decode(buf)?);
+	}
+	Ok(())
+    }
+}
 
 impl<T: Pack> Pack for Option<T> {
     fn encoded_len(&self) -> usize {
