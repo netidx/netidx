@@ -1,3 +1,7 @@
+* 0.22.14
+
+ - implement pack for btreemap and btreeset
+
 * 0.22.13
 
  - add extended auth hook to publisher, allowing the registration of a
