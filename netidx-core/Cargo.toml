@@ -1,6 +1,6 @@
 [package]
 name = "netidx-core"
-version = "0.22.13"
+version = "0.22.14"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
