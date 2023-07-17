@@ -7,6 +7,7 @@ use bytes::{buf, Buf, BufMut, Bytes, BytesMut};
 use chrono::{naive::NaiveDateTime, prelude::*};
 use indexmap::{IndexMap, IndexSet};
 use rust_decimal::Decimal;
+use compact_str::CompactString;
 use std::{
     any::Any,
     boxed::Box,
@@ -212,6 +213,31 @@ impl Pack for String {
         let mut v = vec![0; len];
         buf.copy_to_slice(&mut v);
         match String::from_utf8(v) {
+            Ok(s) => Ok(s),
+            Err(_) => Err(PackError::InvalidFormat),
+        }
+    }
+}
+
+impl Pack for CompactString {
+    fn encoded_len(&self) -> usize {
+        let len = CompactString::len(self);
+        varint_len(len as u64) + len
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(CompactString::len(self) as u64, buf);
+        Ok(buf.put_slice(self.as_bytes()))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let len = decode_varint(buf)? as usize;
+        if len > buf.remaining() {
+            return Err(PackError::TooBig);
+        }
+        let mut v = vec![0; len];
+        buf.copy_to_slice(&mut v);
+        match CompactString::from_utf8(v) {
             Ok(s) => Ok(s),
             Err(_) => Err(PackError::InvalidFormat),
         }
