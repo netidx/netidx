@@ -335,7 +335,7 @@ thread_local! {
 /// Note it is much more efficient to construct your own pools.
 /// size and max are the pool parameters used if the pool doesn't
 /// already exist.
-pub fn take_t<T: Any + Poolable + Send + Sync + 'static>(
+pub fn take_t<T: Any + Poolable + Send + 'static>(
     size: usize,
     max: usize,
 ) -> Pooled<T> {

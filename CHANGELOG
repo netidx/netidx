@@ -1,3 +1,7 @@
+* 0.22.16
+
+ - remove unecessary Sync requirement from pool
+
 * 0.22.15
 
  - implement pack for CompactString
