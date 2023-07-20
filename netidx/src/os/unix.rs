@@ -5,7 +5,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     process::Command,
-    task,
 };
 
 // Unix group membership is a little complex, it can come from a

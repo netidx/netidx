@@ -2,8 +2,7 @@ use crate::resolver_server::config::{Config, IdMap, MemberServer};
 use anyhow::bail;
 use anyhow::{anyhow, Result};
 use arcstr::ArcStr;
-use std::process::Command;
-use tokio::task;
+use tokio::process::Command;
 
 // Unix group membership is a little complex, it can come from a
 // lot of places, and it's not entirely standardized at the api
@@ -17,7 +16,7 @@ pub(crate) enum Mapper {
 }
 
 impl Mapper {
-    pub(crate) fn new(_cfg: &Config, member: &MemberServer) -> Result<Mapper> {
+    pub(crate) async fn new(_cfg: &Config, member: &MemberServer) -> Result<Mapper> {
         match &member.id_map {
             IdMap::DoNotMap => Ok(Mapper::DoNotMap),
             IdMap::Command(cmd) => Ok(Mapper::Command(ArcStr::from(cmd))),
@@ -26,7 +25,7 @@ impl Mapper {
         }
     }
 
-    pub(crate) fn groups(&self, user: &str) -> Result<(ArcStr, Vec<ArcStr>)> {
+    pub(crate) async fn groups(&self, user: &str) -> Result<(ArcStr, Vec<ArcStr>)> {
         let parse = |s: &str| {
             let mut primary = Mapper::parse_output(&s, "gid=")?;
             let groups = Mapper::parse_output(&s, "groups=")?;
@@ -39,10 +38,10 @@ impl Mapper {
         };
         match &self {
             Mapper::DoNotMap => Ok((user.into(), vec![])),
-            Mapper::Command(cmd) => task::block_in_place(|| {
-                let out = Command::new(&**cmd).arg(user).output()?;
+            Mapper::Command(cmd) => {
+                let out = Command::new(&**cmd).arg(user).output().await?;
                 parse(String::from_utf8_lossy(&out.stdout).as_ref())
-            }),
+            },
         }
     }
 

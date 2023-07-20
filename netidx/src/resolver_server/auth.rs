@@ -138,7 +138,7 @@ impl UserDb {
         }
     }
 
-    pub(crate) fn ifo(
+    pub(crate) async fn ifo(
         &mut self,
         resolver: SocketAddr,
         user: Option<&str>,
@@ -149,7 +149,7 @@ impl UserDb {
             Some(user) => match self.users.get(user) {
                 Some(user) if now - user.timestamp < self.timeout => Ok(user.clone()),
                 Some(_) | None => {
-                    let (primary_group_s, groups_s) = self.mapper.groups(user)?;
+                    let (primary_group_s, groups_s) = self.mapper.groups(user).await?;
                     let primary_group = self.entity(&primary_group_s);
                     let groups =
                         groups_s.iter().map(|b| self.entity(b)).collect::<Vec<_>>();

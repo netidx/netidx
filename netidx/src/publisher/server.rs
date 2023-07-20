@@ -93,16 +93,16 @@ fn subscribe(
         Some(id) => {
             let id = *id;
             if let Some(ut) = t.by_id.get_mut(&id) {
-		if let Some(eauth) = &t.extended_auth {
-		    let mut res = false;
-		    if let Some(cl) = t.clients.get(&client) {
-			res = eauth.0(client, id, cl.user.as_ref());
-		    }
-		    if !res {
-			con.queue_send(&publisher::From::Denied(path))?;
-			return Ok(())
-		    }
-		}
+                if let Some(eauth) = &t.extended_auth {
+                    let mut res = false;
+                    if let Some(cl) = t.clients.get(&client) {
+                        res = eauth.0(client, id, cl.user.as_ref());
+                    }
+                    if !res {
+                        con.queue_send(&publisher::From::Denied(path))?;
+                        return Ok(());
+                    }
+                }
                 if let Some(cl) = t.clients.get_mut(&client) {
                     cl.subscribed.insert(id, permissions);
                 }
@@ -404,9 +404,12 @@ impl ClientCtx {
                 DesiredAuth::Tls { identity } => {
                     let tls =
                         self.tls_ctx.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
-                    let ctx = task::block_in_place(|| {
-                        tls.load(identity.as_ref().map(|s| s.as_str()))
-                    })?;
+                    let ctx = task::spawn_blocking({
+                        let identity = identity.clone();
+                        let tls = tls.clone();
+                        move || tls.load(identity.as_ref().map(|s| s.as_str()))
+                    })
+                    .await??;
                     let tls = time::timeout(HELLO_TIMEOUT, ctx.accept(con)).await??;
                     self.set_user(uifo);
                     let mut con = Channel::new::<

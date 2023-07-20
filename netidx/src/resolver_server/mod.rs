@@ -29,12 +29,13 @@ use futures::{channel::oneshot, prelude::*, select_biased};
 use fxhash::FxHashMap;
 use log::{debug, error, info, trace, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex as SyncMutex;
 use rand::{thread_rng, Rng};
 use secctx::{K5SecData, LocalSecData, SecCtx, TlsSecData};
 use shard_store::Store;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
+    ops::Deref,
     fmt::Debug,
     mem,
     net::SocketAddr,
@@ -43,6 +44,7 @@ use std::{
 };
 use tokio::{
     net::{TcpListener, TcpStream},
+    sync::{Mutex, RwLock},
     task,
     time::{self, Instant},
 };
@@ -54,11 +56,11 @@ lazy_static! {
 
 atomic_id!(CId);
 
-struct CTracker(Mutex<HashSet<CId>>);
+struct CTracker(SyncMutex<HashSet<CId>>);
 
 impl CTracker {
     fn new() -> Self {
-        CTracker(Mutex::new(HashSet::new()))
+        CTracker(SyncMutex::new(HashSet::new()))
     }
 
     fn open(&self) -> CId {
@@ -81,24 +83,25 @@ enum ClientInfo {
     Running { publisher: Arc<Publisher>, stop: oneshot::Sender<()> },
 }
 
-struct Clinfos(Mutex<FxHashMap<SocketAddr, ClientInfo>>);
+struct ClinfosInner(FxHashMap<SocketAddr, ClientInfo>);
 
-impl Clinfos {
-    fn new() -> Self {
-        Clinfos(Mutex::new(HashMap::default()))
-    }
-
-    async fn wait_running<F, R>(&self, addr: &SocketAddr, f: F) -> R
+impl ClinfosInner {
+    async fn wait_running<'b, 'a, F, A, R>(&'b mut self, addr: &SocketAddr, f: F) -> R
     where
+	'b: 'a,
         R: 'static,
-        F: FnOnce(Entry<SocketAddr, ClientInfo>) -> R,
+        A: Future<Output = R> + 'a,
+        F: FnOnce(Entry<'a, SocketAddr, ClientInfo>) -> A,
     {
         loop {
             let rx = {
-                let mut inner = self.0.lock();
-                match inner.get_mut(&addr) {
-                    None => break f(inner.entry(*addr)),
-                    Some(ClientInfo::Running { .. }) => break f(inner.entry(*addr)),
+                match self.0.get_mut(&addr) {
+                    None => break f(self.0.entry(*addr)).await,
+                    Some(ClientInfo::Running { .. }) => {
+			let entry = self.0.entry(*addr);
+                        let r = f(entry).await;
+			break r;
+                    }
                     Some(ClientInfo::CleaningUp(w)) => {
                         let (tx, rx) = oneshot::channel();
                         w.push(tx);
@@ -111,30 +114,32 @@ impl Clinfos {
     }
 
     async fn remove(
-        &self,
+        &mut self,
         ctx: &Ctx,
         publisher: &Arc<Publisher>,
         uifo: &Arc<UserInfo>,
     ) -> Result<()> {
         let cleanup = self
-            .wait_running(&publisher.addr, |e| match e {
-                Entry::Vacant(_) => false,
-                Entry::Occupied(mut e) => {
-                    *e.get_mut() = ClientInfo::CleaningUp(Vec::new());
-                    ctx.secctx.remove(&publisher.id);
-                    true
+            .wait_running(&publisher.addr, |e| async {
+                match e {
+                    Entry::Vacant(_) => false,
+                    Entry::Occupied(mut e) => {
+                        *e.get_mut() = ClientInfo::CleaningUp(Vec::new());
+                        ctx.secctx.remove(&publisher.id).await;
+                        true
+                    }
                 }
             })
             .await;
         if cleanup {
             ctx.store.handle_clear(uifo.clone(), publisher.clone()).await?;
-            self.0.lock().remove(&publisher.addr);
+            self.0.remove(&publisher.addr);
         }
         Ok(())
     }
 
     async fn insert(
-        &self,
+        &mut self,
         ctx: &Ctx,
         uifo: &Arc<UserInfo>,
         hello: &ClientHelloWrite,
@@ -145,46 +150,48 @@ impl Clinfos {
         }
         loop {
             let r = self
-                .wait_running(&hello.write_addr, |e| match e {
-                    Entry::Vacant(e) => {
-                        let publisher = Arc::new(Publisher {
-                            addr: hello.write_addr,
-                            resolver: ctx.id,
-                            id: PublisherId::new(),
-                            hash_method: HashMethod::Sha3_512,
-                            target_auth: hello.auth.clone().try_into()?,
-                            user_info: None,
-                        });
-                        let (tx, rx) = oneshot::channel();
-                        e.insert(ClientInfo::Running {
-                            publisher: publisher.clone(),
-                            stop: tx,
-                        });
-                        Ok(R::Finished(publisher, true, rx))
-                    }
-                    Entry::Occupied(mut e) => {
-                        let ifo = e.get_mut();
-                        match ifo {
-                            ClientInfo::Running { publisher, stop } => {
-                                let anon = publisher.target_auth.is_anonymous();
-                                match &hello.auth {
-                                    AuthWrite::Anonymous if anon => (),
-                                    AuthWrite::Anonymous => bail!("not permitted"),
-                                    AuthWrite::Reuse => (),
-                                    AuthWrite::Krb5 { .. }
-                                    | AuthWrite::Local
-                                    | AuthWrite::Tls { .. } => {
-                                        let publisher = publisher.clone();
-                                        *ifo = ClientInfo::CleaningUp(Vec::new());
-                                        ctx.secctx.remove(&publisher.id);
-                                        return Ok(R::ClearClient(publisher));
+                .wait_running(&hello.write_addr, |e| async {
+                    match e {
+                        Entry::Vacant(e) => {
+                            let publisher = Arc::new(Publisher {
+                                addr: hello.write_addr,
+                                resolver: ctx.id,
+                                id: PublisherId::new(),
+                                hash_method: HashMethod::Sha3_512,
+                                target_auth: hello.auth.clone().try_into()?,
+                                user_info: None,
+                            });
+                            let (tx, rx) = oneshot::channel();
+                            e.insert(ClientInfo::Running {
+                                publisher: publisher.clone(),
+                                stop: tx,
+                            });
+                            Ok(R::Finished(publisher, true, rx))
+                        }
+                        Entry::Occupied(mut e) => {
+                            let ifo = e.get_mut();
+                            match ifo {
+                                ClientInfo::Running { publisher, stop } => {
+                                    let anon = publisher.target_auth.is_anonymous();
+                                    match &hello.auth {
+                                        AuthWrite::Anonymous if anon => (),
+                                        AuthWrite::Anonymous => bail!("not permitted"),
+                                        AuthWrite::Reuse => (),
+                                        AuthWrite::Krb5 { .. }
+                                        | AuthWrite::Local
+                                        | AuthWrite::Tls { .. } => {
+                                            let publisher = publisher.clone();
+                                            *ifo = ClientInfo::CleaningUp(Vec::new());
+                                            ctx.secctx.remove(&publisher.id).await;
+                                            return Ok(R::ClearClient(publisher));
+                                        }
                                     }
+                                    let (tx, rx) = oneshot::channel();
+                                    *stop = tx;
+                                    Ok(R::Finished(publisher.clone(), false, rx))
                                 }
-                                let (tx, rx) = oneshot::channel();
-                                *stop = tx;
-                                Ok(R::Finished(publisher.clone(), false, rx))
+                                _ => unreachable!(),
                             }
-                            _ => unreachable!(),
                         }
                     }
                 })
@@ -193,17 +200,33 @@ impl Clinfos {
                 R::Finished(publisher, t, rx) => break Ok((publisher, t, rx)),
                 R::ClearClient(publisher) => {
                     ctx.store.handle_clear(uifo.clone(), publisher).await?;
-                    self.0.lock().remove(&hello.write_addr);
+                    self.0.remove(&hello.write_addr);
                 }
             }
         }
     }
 
     fn id(&self, addr: &SocketAddr) -> Option<PublisherId> {
-        self.0.lock().get(addr).and_then(|ifo| match ifo {
+        self.0.get(addr).and_then(|ifo| match ifo {
             ClientInfo::CleaningUp(_) => None,
             ClientInfo::Running { publisher, .. } => Some(publisher.id),
         })
+    }
+}
+
+struct Clinfos(Mutex<ClinfosInner>);
+
+impl Deref for Clinfos {
+    type Target = Mutex<ClinfosInner>;
+
+    fn deref(&self) -> &Self::Target {
+	&self.0
+    }
+}
+
+impl Clinfos {
+    fn new() -> Self {
+        Clinfos(Mutex::new(ClinfosInner(HashMap::default())))
     }
 }
 
@@ -262,7 +285,7 @@ async fn client_loop_write(
 		    trace!("dropping inactive connection {:?} ", connection_id);
                     drop(con);
                     ctx.ctracker.close(connection_id);
-                    ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
+                    ctx.clinfos.lock().await.remove(&ctx, &publisher, &uifo).await?;
                     bail!("write client timed out");
                 }
             },
@@ -425,7 +448,7 @@ async fn write_client_anonymous_auth(
 ) -> AuthResult {
     let uifo = &*ANONYMOUS;
     let (publisher, ttl_expired, rx_stop) =
-        ctx.clinfos.insert(&ctx, uifo, &hello).await?;
+        ctx.clinfos.lock().await.insert(&ctx, uifo, &hello).await?;
     let h = ServerHelloWrite {
         ttl: ctx.cfg.writer_ttl.as_secs(),
         ttl_expired,
@@ -435,7 +458,7 @@ async fn write_client_anonymous_auth(
     info!("hello_write accepting Anonymous authentication");
     debug!("hello_write sending hello {:?}", h);
     if let Err(e) = send(ctx.cfg.hello_timeout, &mut con, &h).await {
-        ctx.clinfos.remove(&ctx, &publisher, uifo).await?;
+        ctx.clinfos.lock().await.remove(&ctx, &publisher, uifo).await?;
         Err(e)?;
     }
     Ok((
@@ -454,7 +477,7 @@ async fn write_client_local_auth(
 ) -> AuthResult {
     let tok: BoundedBytes<TOKEN_MAX> = recv(ctx.cfg.hello_timeout, &mut con).await?;
     let cred = a.0.authenticate(&*tok)?;
-    let uifo = a.1.write().users.ifo(ctx.id, Some(&cred.user))?;
+    let uifo = a.1.write().await.users.ifo(ctx.id, Some(&cred.user)).await?;
     info!("hello_write local auth succeeded");
     let h = ServerHelloWrite {
         ttl: ctx.cfg.writer_ttl.as_secs(),
@@ -466,9 +489,9 @@ async fn write_client_local_auth(
     send(ctx.cfg.hello_timeout, &mut con, &h).await?;
     let mut con = Channel::new::<ServerCtx, TcpStream>(None, con);
     let secret = ownership_check(&ctx, &mut con, hello.write_addr).await?;
-    let (publisher, _, rx_stop) = ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
+    let (publisher, _, rx_stop) = ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
     let d = LocalSecData { user: cred.user, secret };
-    a.1.write().insert(publisher.id, d);
+    a.1.write().await.insert(publisher.id, d);
     Ok((con, uifo, publisher, rx_stop))
 }
 
@@ -479,13 +502,13 @@ async fn write_client_reuse_local(
     hello: &ClientHelloWrite,
 ) -> AuthResult {
     let wa = &hello.write_addr;
-    let id = ctx.clinfos.id(wa).ok_or_else(|| anyhow!("missing"))?;
-    let d = a.1.read().get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
-    let uifo = a.1.write().users.ifo(ctx.id, Some(&*d.user))?;
+    let id = ctx.clinfos.lock().await.id(wa).ok_or_else(|| anyhow!("missing"))?;
+    let d = a.1.read().await.get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
+    let uifo = a.1.write().await.users.ifo(ctx.id, Some(&*d.user)).await?;
     let mut con = Channel::new::<ServerCtx, TcpStream>(None, con);
     challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
     let (publisher, ttl_expired, rx_stop) =
-        ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
+        ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
     let h = ServerHelloWrite {
         ttl: ctx.cfg.writer_ttl.as_secs(),
         ttl_expired,
@@ -495,11 +518,11 @@ async fn write_client_reuse_local(
     match time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await {
         Ok(Ok(())) => (),
         Err(e) => {
-            ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
+            ctx.clinfos.lock().await.remove(&ctx, &publisher, &uifo).await?;
             Err(e)?
         }
         Ok(Err(e)) => {
-            ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
+            ctx.clinfos.lock().await.remove(&ctx, &publisher, &uifo).await?;
             Err(e)?
         }
     }
@@ -526,12 +549,12 @@ async fn write_client_krb5_auth(
     debug!("hello_write sending {:?}", h);
     time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await??;
     let secret = ownership_check(&ctx, &mut con, hello.write_addr).await?;
-    let client = task::block_in_place(|| k5ctx.lock().client())?;
-    let uifo = a.1.write().users.ifo(ctx.id, Some(&client))?;
+    let client = k5ctx.lock().client()?;
+    let uifo = a.1.write().await.users.ifo(ctx.id, Some(&client)).await?;
     info!("hello_write listener ownership check succeeded");
-    let (publisher, _, rx_stop) = ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
+    let (publisher, _, rx_stop) = ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
     let d = K5SecData { ctx: k5ctx, secret };
-    a.1.write().insert(publisher.id, d);
+    a.1.write().await.insert(publisher.id, d);
     Ok((con, uifo, publisher, rx_stop))
 }
 
@@ -542,17 +565,19 @@ async fn write_client_reuse_krb5(
     hello: &ClientHelloWrite,
 ) -> AuthResult {
     let wa = &hello.write_addr;
-    let id = ctx.clinfos.id(wa).ok_or_else(|| anyhow!("missing"))?;
-    let d = a.1.read().get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
+    let id = ctx.clinfos.lock().await.id(wa).ok_or_else(|| anyhow!("missing"))?;
+    let d = a.1.read().await.get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
     let uifo =
         a.1.write()
+            .await
             .users
-            .ifo(ctx.id, Some(&task::block_in_place(|| d.ctx.lock().client())?))?;
+            .ifo(ctx.id, Some(&task::block_in_place(|| d.ctx.lock().client())?))
+            .await?;
     let mut con = Channel::new(Some(d.ctx), con);
     info!("hello_write all traffic now encrypted");
     challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
     let (publisher, ttl_expired, rx_stop) =
-        ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
+        ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
     let h = ServerHelloWrite {
         ttl: ctx.cfg.writer_ttl.as_secs(),
         ttl_expired,
@@ -564,21 +589,24 @@ async fn write_client_reuse_krb5(
     match time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await {
         Ok(Ok(())) => (),
         Err(e) => {
-            ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
+            ctx.clinfos.lock().await.remove(&ctx, &publisher, &uifo).await?;
             Err(e)?
         }
         Ok(Err(e)) => {
-            ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
+            ctx.clinfos.lock().await.remove(&ctx, &publisher, &uifo).await?;
             Err(e)?
         }
     }
     Ok((con, uifo, publisher, rx_stop))
 }
 
-fn get_tls_uifo(
+async fn get_tls_uifo(
     id: SocketAddr,
     tls: &tokio_rustls::server::TlsStream<TcpStream>,
-    a: &Arc<(tokio_rustls::TlsAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
+    a: &Arc<(
+        tokio_rustls::TlsAcceptor,
+        RwLock<secctx::SecCtxData<secctx::TlsSecData>>,
+    )>,
 ) -> Result<Arc<UserInfo>> {
     let (_, server_con) = tls.get_ref();
     match server_con.peer_certificates() {
@@ -586,8 +614,10 @@ fn get_tls_uifo(
             let names = tls::get_names(&cert.0)?;
             Ok(a.1
                 .write()
+                .await
                 .users
-                .ifo(id, names.as_ref().map(|names| names.cn.as_str()))?)
+                .ifo(id, names.as_ref().map(|names| names.cn.as_str()))
+                .await?)
         }
         Some(_) | None => bail!("tls handshake should be complete by now"),
     }
@@ -596,11 +626,14 @@ fn get_tls_uifo(
 async fn write_client_tls_auth(
     ctx: &Arc<Ctx>,
     con: TcpStream,
-    a: &Arc<(tokio_rustls::TlsAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
+    a: &Arc<(
+        tokio_rustls::TlsAcceptor,
+        RwLock<secctx::SecCtxData<secctx::TlsSecData>>,
+    )>,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
     let tls = a.0.accept(con).await?;
-    let uifo = get_tls_uifo(ctx.id, &tls, a)?;
+    let uifo = get_tls_uifo(ctx.id, &tls, a).await?;
     let mut con =
         Channel::new::<ServerCtx, tokio_rustls::server::TlsStream<TcpStream>>(None, tls);
     info!("hello_write all traffic now encrypted");
@@ -614,29 +647,32 @@ async fn write_client_tls_auth(
     time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await??;
     let secret = ownership_check(&ctx, &mut con, hello.write_addr).await?;
     info!("hello_write listener ownership check succeeded");
-    let (publisher, _, rx_stop) = ctx.clinfos.insert(&ctx, &uifo, hello).await?;
+    let (publisher, _, rx_stop) = ctx.clinfos.lock().await.insert(&ctx, &uifo, hello).await?;
     let d = TlsSecData(secret);
-    a.1.write().insert(publisher.id, d);
+    a.1.write().await.insert(publisher.id, d);
     Ok((con, uifo, publisher, rx_stop))
 }
 
 async fn write_client_reuse_tls(
     ctx: &Arc<Ctx>,
     con: TcpStream,
-    a: &Arc<(tokio_rustls::TlsAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
+    a: &Arc<(
+        tokio_rustls::TlsAcceptor,
+        RwLock<secctx::SecCtxData<secctx::TlsSecData>>,
+    )>,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
     let tls = a.0.accept(con).await?;
     let wa = &hello.write_addr;
-    let id = ctx.clinfos.id(wa).ok_or_else(|| anyhow!("missing"))?;
-    let d = a.1.read().get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
-    let uifo = get_tls_uifo(ctx.id, &tls, a)?;
+    let id = ctx.clinfos.lock().await.id(wa).ok_or_else(|| anyhow!("missing"))?;
+    let d = a.1.read().await.get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
+    let uifo = get_tls_uifo(ctx.id, &tls, a).await?;
     let mut con =
         Channel::new::<ServerCtx, tokio_rustls::server::TlsStream<TcpStream>>(None, tls);
     info!("hello_write all traffic now encrypted");
     challenge_auth(&ctx.cfg, &mut con, d.0).await?;
     let (publisher, ttl_expired, rx_stop) =
-        ctx.clinfos.insert(&ctx, &uifo, &hello).await?;
+        ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
     let h = ServerHelloWrite {
         ttl: ctx.cfg.writer_ttl.as_secs(),
         ttl_expired,
@@ -648,11 +684,11 @@ async fn write_client_reuse_tls(
     match time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await {
         Ok(Ok(())) => (),
         Err(e) => {
-            ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
+            ctx.clinfos.lock().await.remove(&ctx, &publisher, &uifo).await?;
             Err(e)?
         }
         Ok(Err(e)) => {
-            ctx.clinfos.remove(&ctx, &publisher, &uifo).await?;
+            ctx.clinfos.lock().await.remove(&ctx, &publisher, &uifo).await?;
             Err(e)?
         }
     }
@@ -746,7 +782,7 @@ async fn hello_client_read(
                 let tok: BoundedBytes<TOKEN_MAX> =
                     recv(ctx.cfg.hello_timeout, &mut con).await?;
                 let cred = a.0.authenticate(&*tok)?;
-                let uifo = a.1.write().users.ifo(ctx.id, Some(&cred.user))?;
+                let uifo = a.1.write().await.users.ifo(ctx.id, Some(&cred.user)).await?;
                 send(ctx.cfg.hello_timeout, &mut con, &AuthRead::Local).await?;
                 (Channel::new::<ServerCtx, TcpStream>(None, con), uifo)
             }
@@ -760,10 +796,8 @@ async fn hello_client_read(
                 send(ctx.cfg.hello_timeout, &mut con, &AuthRead::Krb5).await?;
                 let k5ctx = K5CtxWrap::new(k5ctx);
                 let con = Channel::new::<ServerCtx, TcpStream>(Some(k5ctx.clone()), con);
-                let uifo = a.1.write().users.ifo(
-                    ctx.id,
-                    Some(&task::block_in_place(|| k5ctx.lock().client())?),
-                )?;
+                let client = k5ctx.lock().client()?;
+                let uifo = a.1.write().await.users.ifo(ctx.id, Some(&client)).await?;
                 (con, uifo)
             }
             SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Tls(_) => bail!(NO),
@@ -771,7 +805,7 @@ async fn hello_client_read(
         AuthRead::Tls => match &ctx.secctx {
             SecCtx::Tls(a) => {
                 let tls = a.0.accept(con).await?;
-                let uifo = get_tls_uifo(ctx.id, &tls, a)?;
+                let uifo = get_tls_uifo(ctx.id, &tls, a).await?;
                 let mut con = Channel::new::<
                     ServerCtx,
                     tokio_rustls::server::TlsStream<TcpStream>,
@@ -885,7 +919,7 @@ async fn server_loop(
                     while ctx.ctracker.num_open() > max_connections {
                         time::sleep(Duration::from_millis(10u64)).await;
                     }
-                    debug!("I have {} writers", ctx.clinfos.0.lock().len())
+                    debug!("I have {} writers", ctx.clinfos.lock().await.0.len())
                 }
             },
         }

@@ -1,6 +1,6 @@
 use super::{
     auth::{Permissions, UserInfo},
-    secctx::SecCtx,
+    secctx::{SecCtx, SecCtxDataReadGuard},
     store::{self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL},
 };
 use crate::{
@@ -103,6 +103,7 @@ impl Shard {
                     batch = read_rx.next() => match batch {
                         None => break,
                         Some((req, reply)) => {
+			    let secctx = secctx.read().await;
                             let r = Shard::process_read_batch(
                                 shard,
                                 &mut store,
@@ -116,6 +117,7 @@ impl Shard {
                     batch = write_rx.next() => match batch {
                         None => break,
                         Some((req, reply)) => {
+			    let secctx = secctx.read().await;
                             let r = Shard::process_write_batch(
                                 &mut store,
                                 &secctx,
@@ -140,7 +142,7 @@ impl Shard {
     fn process_read_batch(
         shard: usize,
         store: &mut store::Store,
-        secctx: &SecCtx,
+        secctx: &SecCtxDataReadGuard,
         resolver: SocketAddr,
         mut req: ReadRequest,
     ) -> ReadResponse {
@@ -152,7 +154,6 @@ impl Shard {
             batch: FROM_READ_POOL.take(),
         };
         let uifo = req.uifo;
-        let secctx = secctx.read();
         let pmap = secctx.pmap();
         resp.batch.extend(req.batch.drain(..).map(|(id, m)| match m {
             ToRead::Resolve(path) => {
@@ -285,12 +286,11 @@ impl Shard {
 
     fn process_write_batch(
         store: &mut store::Store,
-        secctx: &SecCtx,
+        secctx: &SecCtxDataReadGuard,
         mut req: WriteRequest,
     ) -> Pooled<WriteR> {
         let uifo = &*req.uifo;
         let publisher = req.publisher;
-        let secctx = secctx.read();
         let pmap = secctx.pmap();
         let publish = |s: &mut store::Store,
                        path: Path,

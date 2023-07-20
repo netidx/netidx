@@ -18,9 +18,11 @@ use cross_krb5::{K5Ctx, ServerCtx};
 use fxhash::FxHashMap;
 use log::debug;
 use netidx_core::pack::Pack;
-use parking_lot::{RwLock, RwLockReadGuard};
 use std::{collections::HashMap, sync::Arc};
-use tokio::task;
+use tokio::{
+    sync::{RwLock, RwLockReadGuard},
+    task,
+};
 
 pub(super) struct LocalAuth(AuthServer);
 
@@ -56,8 +58,9 @@ pub(super) struct SecCtxData<S: 'static> {
 }
 
 impl<S: 'static + SecDataCommon> SecCtxData<S> {
-    pub(super) fn new(cfg: &Config, member: &MemberServer) -> Result<Self> {
-        let mut users = UserDb::new(member.id_map_timeout, Mapper::new(cfg, member)?);
+    pub(super) async fn new(cfg: &Config, member: &MemberServer) -> Result<Self> {
+        let mut users =
+            UserDb::new(member.id_map_timeout, Mapper::new(cfg, member).await?);
         let pmap = PMap::from_file(&cfg.perms, &mut users, cfg.root(), &cfg.children)?;
         Ok(Self { users, pmap, data: HashMap::default() })
     }
@@ -165,39 +168,39 @@ impl SecCtx {
             Auth::Local { path } => {
                 debug!("starting local authenticator process");
                 let auth = LocalAuth::new(&path, cfg, member).await?;
-                let store = RwLock::new(SecCtxData::new(cfg, member)?);
+                let store = RwLock::new(SecCtxData::new(cfg, member).await?);
                 SecCtx::Local(Arc::new((auth, store)))
             }
             Auth::Krb5 { spn } => {
                 debug!("creating kerberos context with spn {}", spn);
-                let store = RwLock::new(SecCtxData::new(cfg, member)?);
+                let store = RwLock::new(SecCtxData::new(cfg, member).await?);
                 SecCtx::Krb5(Arc::new((spn.clone(), store)))
             }
             Auth::Tls { name: _, trusted, certificate, private_key } => {
                 debug!("creating tls acceptor");
                 let auth =
                     tls::create_tls_acceptor(None, trusted, certificate, private_key)?;
-                let store = RwLock::new(SecCtxData::new(cfg, member)?);
+                let store = RwLock::new(SecCtxData::new(cfg, member).await?);
                 SecCtx::Tls(Arc::new((auth, store)))
             }
         };
         Ok(t)
     }
 
-    pub(super) fn read(&self) -> SecCtxDataReadGuard {
+    pub(super) async fn read(&self) -> SecCtxDataReadGuard {
         match self {
             SecCtx::Anonymous => SecCtxDataReadGuard::Anonymous,
-            SecCtx::Krb5(a) => SecCtxDataReadGuard::Krb5(a.1.read()),
-            SecCtx::Local(a) => SecCtxDataReadGuard::Local(a.1.read()),
-            SecCtx::Tls(a) => SecCtxDataReadGuard::Tls(a.1.read()),
+            SecCtx::Krb5(a) => SecCtxDataReadGuard::Krb5(a.1.read().await),
+            SecCtx::Local(a) => SecCtxDataReadGuard::Local(a.1.read().await),
+            SecCtx::Tls(a) => SecCtxDataReadGuard::Tls(a.1.read().await),
         }
     }
 
-    pub(super) fn remove(&self, id: &PublisherId) {
+    pub(super) async fn remove(&self, id: &PublisherId) {
         match self {
-            SecCtx::Krb5(a) => a.1.write().remove(id),
-            SecCtx::Local(a) => a.1.write().remove(id),
-            SecCtx::Tls(a) => a.1.write().remove(id),
+            SecCtx::Krb5(a) => a.1.write().await.remove(id),
+            SecCtx::Local(a) => a.1.write().await.remove(id),
+            SecCtx::Tls(a) => a.1.write().await.remove(id),
             SecCtx::Anonymous => (),
         }
     }
