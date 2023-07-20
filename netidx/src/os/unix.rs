@@ -1,12 +1,12 @@
 use crate::resolver_server::config::{Config, IdMap, MemberServer};
 use anyhow::{anyhow, Result};
 use arcstr::ArcStr;
-use std::{
-    io::{Read, Write},
-    os::unix::net::UnixStream,
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UnixStream,
     process::Command,
+    task,
 };
-use tokio::task;
 
 // Unix group membership is a little complex, it can come from a
 // lot of places, and it's not entirely standardized at the api
@@ -21,24 +21,24 @@ pub(crate) enum Mapper {
 }
 
 impl Mapper {
-    pub(crate) fn new(_cfg: &Config, member: &MemberServer) -> Result<Mapper> {
+    pub(crate) async fn new(_cfg: &Config, member: &MemberServer) -> Result<Mapper> {
         match &member.id_map {
             IdMap::DoNotMap => Ok(Mapper::DoNotMap),
             IdMap::Command(cmd) => Ok(Mapper::Command(ArcStr::from(cmd))),
             IdMap::Socket(path) => Ok(Mapper::Socket(ArcStr::from(path))),
-            IdMap::PlatformDefault => task::block_in_place(|| {
-                let out = Command::new("sh").arg("-c").arg("which id").output()?;
+            IdMap::PlatformDefault => {
+                let out = Command::new("sh").arg("-c").arg("which id").output().await?;
                 let buf = String::from_utf8_lossy(&out.stdout);
                 let path = buf
                     .lines()
                     .next()
                     .ok_or_else(|| anyhow!("can't find the id command"))?;
                 Ok(Mapper::Command(ArcStr::from(path)))
-            }),
+            }
         }
     }
 
-    pub(crate) fn groups(&self, user: &str) -> Result<(ArcStr, Vec<ArcStr>)> {
+    pub(crate) async fn groups(&self, user: &str) -> Result<(ArcStr, Vec<ArcStr>)> {
         let parse = |s: &str| {
             let mut primary = Mapper::parse_output(&s, "gid=")?;
             let groups = Mapper::parse_output(&s, "groups=")?;
@@ -51,21 +51,21 @@ impl Mapper {
         };
         match &self {
             Mapper::DoNotMap => Ok((user.into(), vec![])),
-            Mapper::Command(cmd) => task::block_in_place(|| {
-                let out = Command::new(&**cmd).arg(user).output()?;
+            Mapper::Command(cmd) => {
+                let out = Command::new(&**cmd).arg(user).output().await?;
                 parse(String::from_utf8_lossy(&out.stdout).as_ref())
-            }),
-            Mapper::Socket(path) => task::block_in_place(|| {
-                let mut sock = UnixStream::connect(&**path)?;
-                sock.write_all(format!("{}\n", user).as_bytes())?;
+            }
+            Mapper::Socket(path) => {
+                let mut sock = UnixStream::connect(&**path).await?;
+                sock.write_all(format!("{}\n", user).as_bytes()).await?;
                 let mut reply = vec![];
-                sock.read_to_end(&mut reply)?;
+                sock.read_to_end(&mut reply).await?;
                 parse(String::from_utf8_lossy(&reply).as_ref())
-            }),
+            }
         }
     }
 
-    pub(crate) fn user(&self, user: u32) -> Result<ArcStr> {
+    pub(crate) async fn user(&self, user: u32) -> Result<ArcStr> {
         let parse = |s: &str| {
             let mut user = Mapper::parse_output(s, "uid=")?;
             if user.is_empty() {
@@ -76,17 +76,17 @@ impl Mapper {
         };
         match &self {
             Mapper::DoNotMap => Ok(ArcStr::from(format!("{}", user))),
-            Mapper::Command(cmd) => task::block_in_place(|| {
-                let out = Command::new(&**cmd).arg(user.to_string()).output()?;
+            Mapper::Command(cmd) => {
+                let out = Command::new(&**cmd).arg(user.to_string()).output().await?;
                 parse(String::from_utf8_lossy(&out.stdout).as_ref())
-            }),
-            Mapper::Socket(path) => task::block_in_place(|| {
-                let mut sock = UnixStream::connect(&**path)?;
-                sock.write_all(format!("{}\n", user).as_bytes())?;
+            }
+            Mapper::Socket(path) => {
+                let mut sock = UnixStream::connect(&**path).await?;
+                sock.write_all(format!("{}\n", user).as_bytes()).await?;
                 let mut reply = vec![];
-                sock.read_to_end(&mut reply)?;
+                sock.read_to_end(&mut reply).await?;
                 parse(String::from_utf8_lossy(&reply).as_ref())
-            }),
+            }
         }
     }
 
@@ -163,7 +163,7 @@ pub(crate) mod local_auth {
         ) -> Result<()> {
             let cred = client.peer_cred()?;
             debug!("got peer credentials {:?}", cred);
-            let user = mapper.user(cred.uid())?;
+            let user = mapper.user(cred.uid()).await?;
             debug!("got user {}", user);
             let salt = loop {
                 let ts = Instant::now();
@@ -243,7 +243,7 @@ pub(crate) mod local_auth {
             let _ = fs::remove_file(socket_path).await;
             let listener = UnixListener::bind(socket_path)?;
             fs::set_permissions(socket_path, Permissions::from_mode(0o777)).await?;
-            let mapper = Mapper::new(cfg, member)?;
+            let mapper = Mapper::new(cfg, member).await?;
             let issued =
                 Arc::new(Mutex::new(HashMap::with_hasher(FxBuildHasher::default())));
             let secret = thread_rng().gen::<u128>();

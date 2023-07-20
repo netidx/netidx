@@ -89,7 +89,7 @@ fn unsubscribe(
             let mut inner = ds.0.lock();
             inner.sub = DvState::Dead(Box::new(DvDead {
                 queued_writes: Vec::new(),
-		waiting: Vec::new(),
+                waiting: Vec::new(),
                 tries: 0,
                 next_try: Instant::now(),
             }));
@@ -177,8 +177,12 @@ async fn hello_publisher(
             bail!("desired authentication mechanism not supported")
         }
         (DesiredAuth::Tls { .. }, TargetAuth::Tls { name }) => {
-            let tls = tls_ctx.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
-            let ctx = task::block_in_place(|| tls.load(name))?;
+            let tls = tls_ctx.clone().ok_or_else(|| anyhow!("no tls ctx"))?;
+            let ctx = task::spawn_blocking({
+                let name = name.clone();
+                move || tls.load(&name)
+            })
+            .await??;
             let name = rustls::ServerName::try_from(&**name)?;
             channel::write_raw(&mut con, &Hello::Tls(uifo)).await?;
             let tls = ctx.connect(name, con).await?;
@@ -323,11 +327,11 @@ impl ConnectionCtx {
             let mut already_have = false;
             for (id, c) in sub.streams.iter() {
                 if &tx == c {
-		    trace!("ignore already registered stream");
+                    trace!("ignore already registered stream");
                     already_have = true;
                 }
                 if c.0.is_closed() {
-		    trace!("scheduling closed stream for gc");
+                    trace!("scheduling closed stream for gc");
                     self.by_receiver.remove(&c);
                     self.gc_chan.insert(*id);
                 }
@@ -338,14 +342,14 @@ impl ConnectionCtx {
                 if let Some(last) = &sub.last {
                     let m = last.lock().clone();
                     let mut b = BATCHES.take();
-		    trace!("pushing {:?} to new stream", m);
+                    trace!("pushing {:?} to new stream", m);
                     b.push((sub_id, m));
                     if let Err(e) = tx.0.try_send(b) {
                         if e.is_disconnected() {
-			    trace!("channel closed while sending last");
+                            trace!("channel closed while sending last");
                             return Ok(());
                         } else if e.is_full() {
-			    trace!("no slack in channel for last adding to blocked");
+                            trace!("no slack in channel for last adding to blocked");
                             let b = e.into_inner();
                             let mut tx = tx.clone();
                             self.blocked_channels.push(Box::pin(async move {
@@ -356,11 +360,11 @@ impl ConnectionCtx {
                 }
             }
             if flags.contains(UpdatesFlags::STOP_COLLECTING_LAST) {
-		trace!("no longer collecting last");
+                trace!("no longer collecting last");
                 sub.last = None;
             }
             if !already_have {
-		trace!("adding new channel to streams");
+                trace!("adding new channel to streams");
                 let id = self.by_receiver.entry(tx.clone()).or_insert_with(ChanId::new);
                 sub.streams.push((*id, tx));
             }
@@ -463,16 +467,65 @@ impl ConnectionCtx {
                         unsubscribe(&mut *t, &mut self.by_chan, s, id, self.conid);
                     }
                 }
-                From::Subscribed(p, id, m) => match self.pending.remove(&p) {
-                    None => {
-			trace!("subscribed for id with no subscription");
-			con.queue_send(&To::Unsubscribe(id))?
-		    },
-                    Some(req) => match self.subscriptions.get_mut(&id) {
-                        Some(sub) => match sub.val.upgrade() { // we're subscribed to an alias
-                            Some(val) => {
-				trace!("subscribe to alias success");
-				// we ignore last in this case because we already have it
+                From::Subscribed(p, id, m) => {
+                    match self.pending.remove(&p) {
+                        None => {
+                            trace!("subscribed for id with no subscription");
+                            con.queue_send(&To::Unsubscribe(id))?
+                        }
+                        Some(req) => match self.subscriptions.get_mut(&id) {
+                            Some(sub) => match sub.val.upgrade() {
+                                // we're subscribed to an alias
+                                Some(val) => {
+                                    trace!("subscribe to alias success");
+                                    // we ignore last in this case because we already have it
+                                    for (f, c) in req.streams {
+                                        self.handle_connect_stream(
+                                            id,
+                                            req.sub_id,
+                                            c,
+                                            f | UpdatesFlags::BEGIN_WITH_LAST,
+                                        )?
+                                    }
+                                    let _ = req.finished.send(Ok(val));
+                                }
+                                None => {
+                                    trace!("alias pair dropped while subscribing");
+                                    let _ = req.finished.send(Err(anyhow!(
+                                        "subscribe alias while unsubscribing"
+                                    )));
+                                }
+                            },
+                            None => {
+                                trace!("subscribe success");
+                                let last = TArc::new(Mutex::new(Event::Update(m)));
+                                let s = Val(Arc::new(ValInner {
+                                    sub_id: req.sub_id,
+                                    id,
+                                    conid: self.conid,
+                                    connection: req.con,
+                                    last: last.clone(),
+                                }));
+                                match req.finished.send(Ok(s.clone())) {
+                                    Err(e) => {
+                                        trace!("could not deliver finished subscription {:?}", e);
+                                        con.queue_send(&To::Unsubscribe(id))?
+                                    }
+                                    Ok(()) => {
+                                        trace!("storing finished subscripiton");
+                                        self.subscriptions.insert(
+                                            id,
+                                            Sub {
+                                                path: req.path,
+                                                sub_id: req.sub_id,
+                                                last: Some(last),
+                                                streams: SmallVec::new(),
+                                                val: s.downgrade(),
+                                            },
+                                        );
+                                    }
+                                }
+                                trace!("connecting {} streams", req.streams.len());
                                 for (f, c) in req.streams {
                                     self.handle_connect_stream(
                                         id,
@@ -481,56 +534,10 @@ impl ConnectionCtx {
                                         f | UpdatesFlags::BEGIN_WITH_LAST,
                                     )?
                                 }
-                                let _ = req.finished.send(Ok(val));
-                            }
-                            None => {
-				trace!("alias pair dropped while subscribing");
-                                let _ = req.finished.send(Err(anyhow!(
-                                    "subscribe alias while unsubscribing"
-                                )));
                             }
                         },
-                        None => {
-			    trace!("subscribe success");
-                            let last = TArc::new(Mutex::new(Event::Update(m)));
-                            let s = Val(Arc::new(ValInner {
-                                sub_id: req.sub_id,
-                                id,
-                                conid: self.conid,
-                                connection: req.con,
-                                last: last.clone(),
-                            }));
-                            match req.finished.send(Ok(s.clone())) {
-                                Err(e) => {
-				    trace!("could not deliver finished subscription {:?}", e);
-				    con.queue_send(&To::Unsubscribe(id))?
-				},
-                                Ok(()) => {
-				    trace!("storing finished subscripiton");
-                                    self.subscriptions.insert(
-                                        id,
-                                        Sub {
-                                            path: req.path,
-                                            sub_id: req.sub_id,
-                                            last: Some(last),
-                                            streams: SmallVec::new(),
-                                            val: s.downgrade(),
-                                        },
-                                    );
-                                }
-                            }
-			    trace!("connecting {} streams", req.streams.len());
-                            for (f, c) in req.streams {
-                                self.handle_connect_stream(
-                                    id,
-                                    req.sub_id,
-                                    c,
-                                    f | UpdatesFlags::BEGIN_WITH_LAST,
-                                )?
-                            }
-                        }
-                    },
-                },
+                    }
+                }
             }
         }
         self.send_updates();
