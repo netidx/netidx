@@ -35,10 +35,10 @@ use secctx::{K5SecData, LocalSecData, SecCtx, TlsSecData};
 use shard_store::Store;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
-    ops::Deref,
     fmt::Debug,
     mem,
     net::SocketAddr,
+    ops::Deref,
     sync::Arc,
     time::Duration,
 };
@@ -88,7 +88,7 @@ struct ClinfosInner(FxHashMap<SocketAddr, ClientInfo>);
 impl ClinfosInner {
     async fn wait_running<'b, 'a, F, A, R>(&'b mut self, addr: &SocketAddr, f: F) -> R
     where
-	'b: 'a,
+        'b: 'a,
         R: 'static,
         A: Future<Output = R> + 'a,
         F: FnOnce(Entry<'a, SocketAddr, ClientInfo>) -> A,
@@ -98,9 +98,9 @@ impl ClinfosInner {
                 match self.0.get_mut(&addr) {
                     None => break f(self.0.entry(*addr)).await,
                     Some(ClientInfo::Running { .. }) => {
-			let entry = self.0.entry(*addr);
+                        let entry = self.0.entry(*addr);
                         let r = f(entry).await;
-			break r;
+                        break r;
                     }
                     Some(ClientInfo::CleaningUp(w)) => {
                         let (tx, rx) = oneshot::channel();
@@ -220,7 +220,7 @@ impl Deref for Clinfos {
     type Target = Mutex<ClinfosInner>;
 
     fn deref(&self) -> &Self::Target {
-	&self.0
+        &self.0
     }
 }
 
@@ -372,10 +372,14 @@ pub(crate) async fn krb5_authentication(
 ) -> Result<ServerCtx> {
     // the GSS token shouldn't ever be bigger than 1 MB
     const L: usize = 1 * 1024 * 1024;
-    let mut ctx = task::block_in_place(|| ServerCtx::new(AcceptFlags::empty(), spn))?;
+    let spn = spn.map(String::from);
+    let mut ctx = task::spawn_blocking(move || {
+        ServerCtx::new(AcceptFlags::empty(), spn.as_ref().map(|s| s.as_str()))
+    })
+    .await??;
     loop {
         let token: BoundedBytes<L> = recv(timeout, con).await?;
-        match task::block_in_place(|| ctx.step(&*token))? {
+        match task::spawn_blocking(move || ctx.step(&*token)).await?? {
             Step::Continue((nctx, token)) => {
                 ctx = nctx;
                 let token = BoundedBytes::<L>(utils::bytes(&*token));
@@ -489,7 +493,8 @@ async fn write_client_local_auth(
     send(ctx.cfg.hello_timeout, &mut con, &h).await?;
     let mut con = Channel::new::<ServerCtx, TcpStream>(None, con);
     let secret = ownership_check(&ctx, &mut con, hello.write_addr).await?;
-    let (publisher, _, rx_stop) = ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
+    let (publisher, _, rx_stop) =
+        ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
     let d = LocalSecData { user: cred.user, secret };
     a.1.write().await.insert(publisher.id, d);
     Ok((con, uifo, publisher, rx_stop))
@@ -552,7 +557,8 @@ async fn write_client_krb5_auth(
     let client = k5ctx.lock().client()?;
     let uifo = a.1.write().await.users.ifo(ctx.id, Some(&client)).await?;
     info!("hello_write listener ownership check succeeded");
-    let (publisher, _, rx_stop) = ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
+    let (publisher, _, rx_stop) =
+        ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
     let d = K5SecData { ctx: k5ctx, secret };
     a.1.write().await.insert(publisher.id, d);
     Ok((con, uifo, publisher, rx_stop))
@@ -567,12 +573,8 @@ async fn write_client_reuse_krb5(
     let wa = &hello.write_addr;
     let id = ctx.clinfos.lock().await.id(wa).ok_or_else(|| anyhow!("missing"))?;
     let d = a.1.read().await.get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
-    let uifo =
-        a.1.write()
-            .await
-            .users
-            .ifo(ctx.id, Some(&task::block_in_place(|| d.ctx.lock().client())?))
-            .await?;
+    let client = d.ctx.lock().client()?;
+    let uifo = a.1.write().await.users.ifo(ctx.id, Some(&client)).await?;
     let mut con = Channel::new(Some(d.ctx), con);
     info!("hello_write all traffic now encrypted");
     challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
@@ -603,10 +605,7 @@ async fn write_client_reuse_krb5(
 async fn get_tls_uifo(
     id: SocketAddr,
     tls: &tokio_rustls::server::TlsStream<TcpStream>,
-    a: &Arc<(
-        tokio_rustls::TlsAcceptor,
-        RwLock<secctx::SecCtxData<secctx::TlsSecData>>,
-    )>,
+    a: &Arc<(tokio_rustls::TlsAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
 ) -> Result<Arc<UserInfo>> {
     let (_, server_con) = tls.get_ref();
     match server_con.peer_certificates() {
@@ -626,10 +625,7 @@ async fn get_tls_uifo(
 async fn write_client_tls_auth(
     ctx: &Arc<Ctx>,
     con: TcpStream,
-    a: &Arc<(
-        tokio_rustls::TlsAcceptor,
-        RwLock<secctx::SecCtxData<secctx::TlsSecData>>,
-    )>,
+    a: &Arc<(tokio_rustls::TlsAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
     let tls = a.0.accept(con).await?;
@@ -647,7 +643,8 @@ async fn write_client_tls_auth(
     time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await??;
     let secret = ownership_check(&ctx, &mut con, hello.write_addr).await?;
     info!("hello_write listener ownership check succeeded");
-    let (publisher, _, rx_stop) = ctx.clinfos.lock().await.insert(&ctx, &uifo, hello).await?;
+    let (publisher, _, rx_stop) =
+        ctx.clinfos.lock().await.insert(&ctx, &uifo, hello).await?;
     let d = TlsSecData(secret);
     a.1.write().await.insert(publisher.id, d);
     Ok((con, uifo, publisher, rx_stop))
@@ -656,10 +653,7 @@ async fn write_client_tls_auth(
 async fn write_client_reuse_tls(
     ctx: &Arc<Ctx>,
     con: TcpStream,
-    a: &Arc<(
-        tokio_rustls::TlsAcceptor,
-        RwLock<secctx::SecCtxData<secctx::TlsSecData>>,
-    )>,
+    a: &Arc<(tokio_rustls::TlsAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
     let tls = a.0.accept(con).await?;
