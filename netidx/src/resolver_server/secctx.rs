@@ -19,10 +19,7 @@ use fxhash::FxHashMap;
 use log::debug;
 use netidx_core::pack::Pack;
 use std::{collections::HashMap, sync::Arc};
-use tokio::{
-    sync::{RwLock, RwLockReadGuard},
-    task,
-};
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 pub(super) struct LocalAuth(AuthServer);
 
@@ -93,11 +90,9 @@ impl SecDataCommon for K5SecData {
 
 impl SecCtxData<K5SecData> {
     pub(super) fn get(&self, id: &PublisherId) -> Option<&K5SecData> {
-        self.data.get(id).and_then(|r| {
-            match task::block_in_place(|| r.ctx.lock().ttl()) {
-                Ok(ttl) if ttl.as_secs() > 0 => Some(r),
-                _ => None,
-            }
+        self.data.get(id).and_then(|r| match r.ctx.lock().ttl() {
+            Ok(ttl) if ttl.as_secs() > 0 => Some(r),
+            _ => None,
         })
     }
 }

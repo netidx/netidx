@@ -93,14 +93,24 @@ pub(crate) async fn krb5_authentication(
         Ok(time::timeout(HELLO_TO, channel::write_raw(con, &token)).await??)
     }
     const L: usize = 1 * 1024 * 1024;
-    let (mut ctx, token) = task::block_in_place(|| {
-        ClientCtx::new(InitiateFlags::empty(), principal, target_principal, None)
-    })?;
+    let (mut ctx, token) = task::spawn_blocking({
+        let principal = principal.map(String::from);
+        let target_principal = String::from(target_principal);
+        move || {
+            ClientCtx::new(
+                InitiateFlags::empty(),
+                principal.as_ref().map(|s| s.as_str()),
+                &target_principal,
+                None,
+            )
+        }
+    })
+    .await??;
     send(con, &*token).await?;
     loop {
         let token: BoundedBytes<L> =
             time::timeout(HELLO_TO, channel::read_raw(con)).await??;
-        match task::block_in_place(|| ctx.step(&*token))? {
+        match task::spawn_blocking(move || ctx.step(&*token)).await?? {
             Step::Continue((nctx, token)) => {
                 ctx = nctx;
                 send(con, &*token).await?

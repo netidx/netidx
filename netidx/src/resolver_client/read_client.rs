@@ -142,8 +142,13 @@ async fn connect(
             }
             (DesiredAuth::Tls { .. }, Auth::Tls { name }) => {
                 let tls = tls.as_ref().ok_or_else(|| anyhow!("no tls cache"))?;
-                let ctx = task::block_in_place(|| tls.load(name))
-                    .context("loading tls connector")?;
+                let ctx = task::spawn_blocking({
+                    let tls = tls.clone();
+                    let name = name.clone();
+                    move || tls.load(&name)
+                })
+                .await
+                .context("loading tls connector")??;
                 let hello = ClientHello::ReadOnly(AuthRead::Tls);
                 cwt!("hello", channel::write_raw(&mut con, &hello));
                 let name = rustls::ServerName::try_from(&**name)

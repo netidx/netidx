@@ -275,9 +275,7 @@ impl Connection {
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
                     match (&self.security_context, secret) {
                         (Some(ctx), Some(secret))
-                            if task::block_in_place(|| ctx.lock().ttl())
-                                .unwrap_or(sec)
-                                > sec =>
+                            if ctx.lock().ttl().unwrap_or(sec) > sec =>
                         {
                             debug!("reusing existing session");
                             wt!(
@@ -324,7 +322,11 @@ impl Connection {
                 (DesiredAuth::Tls { identity }, Auth::Tls { name }) => {
                     debug!("tls auth selected");
                     let tls = self.tls.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
-                    let ctx = task::block_in_place(|| tls.load(name))?;
+                    let ctx = task::spawn_blocking({
+			let tls = tls.clone();
+			let name = name.clone();
+			move || tls.load(&name)
+		    }).await??;
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
                     let name = rustls::ServerName::try_from(&**name)?;
                     match secret {
