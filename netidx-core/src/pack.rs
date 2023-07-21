@@ -4,7 +4,7 @@ use crate::{
 };
 use arcstr::ArcStr;
 use bytes::{buf, Buf, BufMut, Bytes, BytesMut};
-use chrono::{naive::NaiveDateTime, prelude::*};
+use chrono::{naive::{NaiveDateTime, NaiveDate}, prelude::*};
 use indexmap::{IndexMap, IndexSet};
 use rust_decimal::Decimal;
 use compact_str::CompactString;
@@ -1130,6 +1130,61 @@ impl Pack for bool {
             1 => Ok(true),
             _ => Err(PackError::UnknownTag),
         }
+    }
+}
+
+const YEAR_MASK: u32 =  0xFFFF_FE00;
+const MONTH_MASK: u32 = 0x0000_01E0;
+const DAY_MASK: u32 =   0x0000_001F;
+
+impl Pack for NaiveDate {
+    fn const_encoded_len() -> Option<usize> {
+	Some(mem::size_of::<u32>())
+    }
+
+    fn encoded_len(&self) -> usize {
+	<Self as Pack>::const_encoded_len().unwrap()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+	let i = (self.year() as u32) << 9;
+	let i = i | self.month() << 5;
+	let i = i | self.day();
+	Ok(buf.put_u32(i))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+	let i: u32 = Pack::decode(buf)?;
+	let year = (i & YEAR_MASK) as i32 >> 9;
+	let month = (i & MONTH_MASK) >> 5;
+	let day = i & DAY_MASK;
+	match Self::from_ymd_opt(year, month, day) {
+	    Some(d) => Ok(d),
+	    None => Err(PackError::InvalidFormat)
+	}
+    }
+}
+
+impl Pack for NaiveDateTime {
+    fn const_encoded_len() -> Option<usize> {
+        Some(mem::size_of::<i64>() + mem::size_of::<u32>())
+    }
+
+    fn encoded_len(&self) -> usize {
+        <DateTime<Utc> as Pack>::const_encoded_len().unwrap()
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        buf.put_i64(self.timestamp());
+        Ok(buf.put_u32(self.timestamp_subsec_nanos()))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let ts = Pack::decode(buf)?;
+        let ns = Pack::decode(buf)?;
+        let ndt = NaiveDateTime::from_timestamp_opt(ts, ns)
+            .ok_or_else(|| PackError::InvalidFormat)?;
+        Ok(ndt)
     }
 }
 
