@@ -1,3 +1,7 @@
+* 0.22.17
+
+ - implement pack for NaiveDateTime and NaiveDate
+
 * 0.22.16
 
  - remove unecessary Sync requirement from pool

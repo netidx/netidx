@@ -1133,9 +1133,9 @@ impl Pack for bool {
     }
 }
 
-const YEAR_MASK: u32 = 0xFFFF_E000;
-const MONTH_MASK: u32 = 0x0000_1E00;
-const DAY_MASK: u32 = 0x0000_01FF;
+const YEAR_MASK: u32 =  0xFFFF_FE00;
+const MONTH_MASK: u32 = 0x0000_01E0;
+const DAY_MASK: u32 =   0x0000_001F;
 
 impl Pack for NaiveDate {
     fn const_encoded_len() -> Option<usize> {
