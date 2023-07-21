@@ -7,3 +7,6 @@ pub mod pack;
 pub mod pool;
 pub mod utils;
 pub mod path;
+
+#[cfg(test)]
+mod test;
