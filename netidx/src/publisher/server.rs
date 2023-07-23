@@ -136,9 +136,10 @@ fn subscribe(
 
 fn unsubscribe(t: &mut PublisherInner, client: ClId, id: Id) {
     if let Some(ut) = t.by_id.get_mut(&id) {
-        let subs =
+	let current_subs = BTreeSet::from_iter(ut.subscribed.iter().copied());
+        let new_subs =
             BTreeSet::from_iter(ut.subscribed.iter().filter(|a| *a != &client).copied());
-        match t.hc_subscribed.entry(subs) {
+        match t.hc_subscribed.entry(new_subs) {
             Entry::Occupied(e) => {
                 ut.subscribed = e.get().clone();
             }
@@ -149,6 +150,11 @@ fn unsubscribe(t: &mut PublisherInner, client: ClId, id: Id) {
                 e.insert(Arc::clone(&ut.subscribed));
             }
         }
+	if let Entry::Occupied(e) = t.hc_subscribed.entry(current_subs) {
+	    if Arc::strong_count(e.get()) == 1 {
+		e.remove();
+	    }
+	}
         let nsubs = ut.subscribed.len();
         if let Some(cl) = t.clients.get_mut(&client) {
             cl.subscribed.remove(&id);

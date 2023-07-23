@@ -1,3 +1,9 @@
+* 0.22.18
+
+ - eliminate block_in_place from the netidx crate so that netidx can
+   be used on the current_thread tokio runtime. This also applies to
+   netidx-protocols, but not netidx-archive or netidx-container.
+
 * 0.22.17
 
  - implement pack for NaiveDateTime and NaiveDate
