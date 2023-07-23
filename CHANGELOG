@@ -2,7 +2,11 @@
 
  - eliminate block_in_place from the netidx crate so that netidx can
    be used on the current_thread tokio runtime. This also applies to
-   netidx-protocols, but not netidx-archive or netidx-container.
+   netidx-protocols, but not netidx-archive or netidx-container
+
+ - fix a memory leak that effects long running publishers that serve a
+   lot of different clients. The hashconsing of connected clients was
+   not removing unused sets
 
 * 0.22.17
 
