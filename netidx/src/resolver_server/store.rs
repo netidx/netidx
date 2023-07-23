@@ -168,6 +168,27 @@ impl Store {
         t
     }
 
+    pub(crate) fn shrink_to_fit(&mut self) {
+	self.publishers_by_id.shrink_to_fit();
+	self.publishers_by_addr.shrink_to_fit();
+	self.published_by_path.shrink_to_fit();
+	self.flags_by_path.shrink_to_fit();
+	self.published_by_id.shrink_to_fit();
+	for v in self.published_by_id.values_mut() {
+	    v.shrink_to_fit()
+	}
+	self.published_by_level.shrink_to_fit();
+	self.columns.shrink_to_fit();
+	for v in self.columns.values_mut() {
+	    v.shrink_to_fit()
+	}
+	self.defaults_by_id.shrink_to_fit();
+	for v in self.defaults_by_id.values_mut() {
+	    v.shrink_to_fit();
+	}
+	self.sets.gc()
+    }
+
     fn remove_parents(&mut self, mut p: &str) {
         let mut save = false;
         loop {

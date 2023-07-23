@@ -3,6 +3,7 @@ use super::{
     secctx::{SecCtx, SecCtxDataReadGuard},
     store::{self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL},
 };
+use chrono::prelude::*;
 use crate::{
     channel::Channel,
     pack::Z64,
@@ -97,6 +98,7 @@ impl Shard {
         let mut write_rx = write_rx.fuse();
         let t = Shard { read, write, internal };
         task::spawn(async move {
+	    let mut last_shrink = Utc::now();
             let mut store = store::Store::new(parent, children);
             loop {
                 select! {
@@ -133,6 +135,11 @@ impl Shard {
                         }
                     }
                 }
+		let now = Utc::now();
+		if now - last_shrink > chrono::Duration::hours(1) {
+		    last_shrink = now;
+		    store.shrink_to_fit()
+		}
             }
             info!("shard loop finished")
         });
