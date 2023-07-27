@@ -1,3 +1,7 @@
+* 0.22.19
+
+ - implement pack for ArrayString and ArrayVec
+
 * 0.22.18
 
  - eliminate block_in_place from the netidx crate so that netidx can

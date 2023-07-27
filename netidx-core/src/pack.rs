@@ -11,11 +11,12 @@ use chrono::{
 use compact_str::CompactString;
 use indexmap::{IndexMap, IndexSet};
 use rust_decimal::Decimal;
+use arrayvec::{ArrayString, ArrayVec};
 use std::{
     any::Any,
     boxed::Box,
     cell::RefCell,
-    cmp::Eq,
+    cmp::{self, Eq},
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     default::Default,
     error, fmt,
@@ -234,13 +235,47 @@ impl Pack for CompactString {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+	thread_local! {
+	    static TMP: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+	}
         let len = decode_varint(buf)? as usize;
         if len > buf.remaining() {
             return Err(PackError::TooBig);
         }
-        let mut v = vec![0; len];
+	TMP.with(|tmp| {
+	    let mut tmp = tmp.borrow_mut();
+	    tmp.resize(len, 0);
+	    buf.copy_to_slice(&mut tmp);
+	    if tmp.capacity() > cmp::max(1024, tmp.len() << 2) {
+		tmp.shrink_to(1024)
+	    }
+            match CompactString::from_utf8(&tmp[..]) {
+		Ok(s) => Ok(s),
+		Err(_) => Err(PackError::InvalidFormat),
+            }
+	})
+    }
+}
+
+impl<const C: usize> Pack for ArrayString<C> {
+    fn encoded_len(&self) -> usize {
+        let len = ArrayString::len(self);
+        varint_len(len as u64) + len
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(ArrayString::len(self) as u64, buf);
+        Ok(buf.put_slice(self.as_bytes()))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let len = decode_varint(buf)? as usize;
+        if len > buf.remaining() || len > C {
+            return Err(PackError::TooBig);
+        }
+        let mut v = [0u8; C];
         buf.copy_to_slice(&mut v);
-        match CompactString::from_utf8(v) {
+        match ArrayString::from_byte_string(&v) {
             Ok(s) => Ok(s),
             Err(_) => Err(PackError::InvalidFormat),
         }
@@ -750,6 +785,45 @@ impl<T: Pack> Pack for Vec<T> {
         };
         if pre > self.capacity() {
             self.reserve(pre - self.capacity());
+        }
+        for _ in 0..elts {
+            self.push(<T as Pack>::decode(buf)?);
+        }
+        Ok(())
+    }
+}
+
+impl<T: Pack, const C: usize> Pack for ArrayVec<T, C> {
+    fn encoded_len(&self) -> usize {
+        self.iter().fold(varint_len(ArrayVec::len(self) as u64), |len, t| {
+            len + <T as Pack>::encoded_len(t)
+        })
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(ArrayVec::len(self) as u64, buf);
+        for t in self {
+            <T as Pack>::encode(t, buf)?
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let elts = decode_varint(buf)? as usize;
+        if elts > C {
+            return Err(PackError::TooBig);
+        }
+        let mut data = ArrayVec::new();
+        for _ in 0..elts {
+            data.push(<T as Pack>::decode(buf)?);
+        }
+        Ok(data)
+    }
+
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
+        let elts = decode_varint(buf)? as usize;
+        if elts > C - self.len() {
+            return Err(PackError::TooBig);
         }
         for _ in 0..elts {
             self.push(<T as Pack>::decode(buf)?);
