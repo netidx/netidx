@@ -1,6 +1,7 @@
 use crate::pack::{Pack, PackError};
 use arcstr::ArcStr;
 use bytes::{Buf, BufMut, Bytes};
+use compact_str::CompactString;
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     borrow::Borrow,
@@ -144,6 +145,12 @@ impl From<&'static str> for Chars {
 impl From<String> for Chars {
     fn from(src: String) -> Chars {
         Chars(Bytes::from(src))
+    }
+}
+
+impl From<CompactString> for Chars {
+    fn from(src: CompactString) -> Self {
+	Chars(Bytes::copy_from_slice(src.as_bytes()))
     }
 }
 

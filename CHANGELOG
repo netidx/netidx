@@ -1,3 +1,7 @@
+* 0.22.20
+
+ - implement convert Chars from CompactString
+
 * 0.22.19
 
  - implement pack for ArrayString and ArrayVec
