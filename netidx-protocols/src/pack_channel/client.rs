@@ -15,8 +15,14 @@ pub struct Batch {
 }
 
 impl Batch {
+    /// Queue a packable thing in the batch.
     pub fn queue<S: Pack>(&mut self, t: &S) -> Result<()> {
         Ok(Pack::encode(t, &mut self.data)?)
+    }
+
+    /// returns the number of bytes queued in this batch
+    pub fn len(&self) -> usize {
+	self.data.len()
     }
 }
 

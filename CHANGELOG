@@ -1,3 +1,7 @@
+* 0.23.2
+
+- add *channel::*::Batch::len method
+
 * 0.23.1
 
 - simplify the accept api. Sorry semantic versioning.

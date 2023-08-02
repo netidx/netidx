@@ -39,6 +39,11 @@ impl Batch {
     pub fn queue(&mut self, v: Value) {
         self.anchor.update_subscriber(&mut self.queued, self.client, v);
     }
+
+    /// returns the number of values queued in this batch
+    pub fn len(&self) -> usize {
+	self.queued.len()
+    }
 }
 
 struct Receiver {

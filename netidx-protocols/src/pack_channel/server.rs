@@ -20,6 +20,11 @@ impl Batch {
     pub fn queue<S: Pack>(&mut self, t: &S) -> Result<()> {
         Ok(Pack::encode(t, &mut self.data)?)
     }
+
+    /// Returns the number of bytes queued in this batch
+    pub fn len(&self) -> usize {
+	self.data.len()
+    }
 }
 
 /// A bidirectional channel between two end points.
