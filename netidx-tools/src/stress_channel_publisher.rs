@@ -1,4 +1,4 @@
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use bytes::{Buf, BufMut};
 use chrono::prelude::*;
 use netidx::{
@@ -87,14 +87,11 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
         .context("create publisher")?;
     let mut listener = Listener::new(&publisher, None, p.base.clone()).await?;
     loop {
-        let mut acceptor = listener.accept().await?;
+        let client = listener.accept().await?;
         task::spawn(async move {
-            match acceptor.wait_connected().await {
-                Err(e) => println!("client accept failed {}", e),
-                Ok(client) => match handle_client(client).await {
-                    Ok(()) => println!("client disconnected"),
-                    Err(e) => println!("client disconnected {}", e),
-                },
+            match handle_client(client).await {
+                Ok(()) => println!("client disconnected"),
+                Err(e) => println!("client disconnected {}", e),
             }
         });
     }
