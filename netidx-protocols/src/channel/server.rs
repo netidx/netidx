@@ -12,9 +12,13 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::Duration, result,
 };
-use tokio::{sync::Mutex, time};
+use tokio::{
+    sync::{oneshot, Mutex},
+    task::{self, JoinHandle},
+    time,
+};
 
 /// Generate a random session name ${base}/uuid
 pub fn session(base: &Path) -> Path {
@@ -95,50 +99,14 @@ impl Receiver {
 
 /// This is a single pending connection. You must call wait_connected
 /// to finish the handshake.
-pub struct Singleton {
+struct SingletonInner {
     publisher: Publisher,
     anchor: Arc<Val>,
     timeout: Option<Duration>,
     writes: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
 }
 
-/// Create a new single connection at path. One client can connect to
-/// this connection, further connection attempts will be ignored. This
-/// is useful for example for returning a channel from an rpc call, in
-/// that case there is no need for a listener.
-pub async fn singleton_with_flags(
-    publisher: &Publisher,
-    flags: PublishFlags,
-    timeout: Option<Duration>,
-    path: Path,
-) -> Result<Singleton> {
-    let (tx, rx) = mpsc::channel(5);
-    let val = publisher.publish_with_flags_and_writes(
-        flags | PublishFlags::ISOLATED,
-        path.clone(),
-        Value::from("connection"),
-        Some(tx),
-    )?;
-    publisher.flushed().await;
-    Ok(Singleton {
-        publisher: publisher.clone(),
-        timeout,
-        anchor: Arc::new(val),
-        writes: rx,
-    })
-}
-
-pub async fn singleton(
-    publisher: &Publisher,
-    timeout: Option<Duration>,
-    path: Path,
-) -> Result<Singleton> {
-    singleton_with_flags(publisher, PublishFlags::empty(), timeout, path).await
-}
-
-impl Singleton {
-    /// Wait for the client to connect and return the connection when
-    /// then have done so.
+impl SingletonInner {
     pub async fn wait_connected(self) -> Result<Connection> {
         let mut subscribed = loop {
             self.publisher.wait_client(self.anchor.id()).await;
@@ -170,6 +138,73 @@ impl Singleton {
             v => bail!("unexpected handshake, expected String(\"go\") got {}", v),
         }
     }
+}
+
+pub struct Singleton(task::JoinHandle<Result<Connection>>);
+
+impl Drop for Singleton {
+    fn drop(&mut self) {
+        self.0.abort()
+    }
+}
+
+impl Singleton {
+    /// Wait for the client to connect. This method is cancel safe, it
+    /// is safe to use in select.
+    pub async fn wait_connected(&mut self) -> Result<Connection> {
+        (&mut self.0).await?
+    }
+}
+
+/// Create a new single connection at path. One client can connect to
+/// this connection, further connection attempts will be ignored. This
+/// is useful for example for returning a channel from an rpc call, in
+/// that case there is no need for a listener.
+pub async fn singleton_with_flags(
+    publisher: &Publisher,
+    flags: PublishFlags,
+    timeout: Option<Duration>,
+    path: Path,
+) -> Result<Singleton> {
+    let publisher = publisher.clone();
+    let (tx_res, rx_res) = oneshot::channel();
+    let jh = task::spawn(async move {
+        let (tx, rx) = mpsc::channel(5);
+        let res = publisher.publish_with_flags_and_writes(
+            flags | PublishFlags::ISOLATED,
+            path.clone(),
+            Value::from("connection"),
+            Some(tx),
+        );
+        publisher.flushed().await;
+        let val = match res {
+            Ok(val) => {
+                let _ = tx_res.send(Ok(()));
+                val
+            }
+            Err(e) => {
+                let _ = tx_res.send(Err(e));
+                bail!("failed to publish")
+            }
+        };
+        let inner = SingletonInner {
+            publisher: publisher.clone(),
+            timeout,
+            anchor: Arc::new(val),
+            writes: rx,
+        };
+        Ok(inner.wait_connected().await?)
+    });
+    rx_res.await??;
+    Ok(Singleton(jh))
+}
+
+pub async fn singleton(
+    publisher: &Publisher,
+    timeout: Option<Duration>,
+    path: Path,
+) -> Result<Singleton> {
+    singleton_with_flags(publisher, PublishFlags::empty(), timeout, path).await
 }
 
 /// A bidirectional channel between two endpoints.
@@ -293,7 +328,7 @@ impl Connection {
 
 /// A listener can accept connections from muliple clients and produce
 /// a channel to talk to each one.
-pub struct Listener {
+pub struct ListenerInner {
     publisher: Publisher,
     _listener: Val,
     waiting: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
@@ -303,15 +338,14 @@ pub struct Listener {
     flags: PublishFlags,
 }
 
-impl Listener {
+impl ListenerInner {
     /// just like new, but with publish flags
-    pub async fn new_with_flags(
-        publisher: &Publisher,
+    async fn new_with_flags(
+        publisher: Publisher,
         flags: PublishFlags,
         timeout: Option<Duration>,
         path: Path,
-    ) -> Result<Listener> {
-        let publisher = publisher.clone();
+    ) -> Result<Self> {
         let (tx_waiting, rx_waiting) = mpsc::channel(50);
         let listener = publisher.publish_with_flags_and_writes(
             flags,
@@ -331,20 +365,9 @@ impl Listener {
         })
     }
 
-    /// Create a new listener at the specified path. The actual
-    /// connections will be randomly generated uuids under the
-    /// specified path.
-    pub async fn new(
-        publisher: &Publisher,
-        timeout: Option<Duration>,
-        path: Path,
-    ) -> Result<Listener> {
-        Self::new_with_flags(publisher, PublishFlags::empty(), timeout, path).await
-    }
-
     /// Wait for a client to connect, and return a singleton
     /// connection to the new client.
-    pub async fn accept(&mut self) -> Result<Singleton> {
+    async fn accept(&mut self) -> Result<Singleton> {
         let send_result = loop {
             if let Some(req) = self.queued.pop() {
                 match &req.value {
@@ -367,5 +390,69 @@ impl Listener {
         send_result.send(Value::from(session.clone()));
         Ok(singleton_with_flags(&self.publisher, self.flags, self.timeout, session)
             .await?)
+    }
+}
+
+pub struct Listener {
+    rx: mpsc::Receiver<Result<Singleton>>,
+    jh: JoinHandle<result::Result<(), mpsc::SendError>>,
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        self.jh.abort()
+    }
+}
+
+impl Listener {
+    /// just like new, but with publish flags
+    pub async fn new_with_flags(
+        publisher: &Publisher,
+        flags: PublishFlags,
+        timeout: Option<Duration>,
+        path: Path,
+    ) -> Result<Listener> {
+        let publisher = publisher.clone();
+        let (mut tx, rx) = mpsc::channel(3);
+	let (tx_res, rx_res) = oneshot::channel();
+        let jh = task::spawn(async move {
+            match ListenerInner::new_with_flags(publisher, flags, timeout, path).await {
+                Err(e) => { let _ = tx_res.send(Err(e)); },
+                Ok(mut inner) => {
+		    let _ = tx_res.send(Ok(()));
+                    loop {
+                        match inner.accept().await {
+                            Ok(s) => tx.send(Ok(s)).await?,
+                            Err(e) => tx.send(Err(e)).await?,
+                        }
+                    }
+                }
+            }
+	    Ok::<_, mpsc::SendError>(())
+        });
+	rx_res.await??;
+	Ok(Self { rx, jh })
+    }
+
+    /// Create a new listener at the specified path. The actual
+    /// connections will be randomly generated uuids under the
+    /// specified path.
+    pub async fn new(
+        publisher: &Publisher,
+        timeout: Option<Duration>,
+        path: Path,
+    ) -> Result<Listener> {
+        Self::new_with_flags(publisher, PublishFlags::empty(), timeout, path).await
+    }
+
+    /// Wait for a client to connect, and return a singleton
+    /// connection to the new client. This method is cancel safe, it
+    /// can be safely used in a select! without risk of losing an
+    /// incoming connection.
+    pub async fn accept(&mut self) -> Result<Singleton> {
+	match self.rx.next().await {
+	    Some(r) => r,
+	    None => bail!("accept task died")
+	}
     }
 }

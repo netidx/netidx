@@ -161,7 +161,7 @@ pub struct Singleton(server::Singleton);
 
 impl Singleton {
     /// Wait for the client to connect and complete the handshake
-    pub async fn wait_connected(self) -> Result<Connection> {
+    pub async fn wait_connected(&mut self) -> Result<Connection> {
         let inner = self.0.wait_connected().await?;
         Ok(Connection {
             inner,

@@ -1,4 +1,6 @@
 use super::*;
+use anyhow::Result;
+use futures::future;
 use netidx::{
     config::Config as ClientConfig,
     path::Path,
@@ -8,7 +10,7 @@ use netidx::{
     subscriber::{Subscriber, Value},
 };
 use std::{sync::Arc, time::Duration};
-use tokio::{runtime::Runtime, sync::oneshot, task, time};
+use tokio::{select, sync::oneshot, task, time};
 
 pub(crate) struct Ctx {
     pub(crate) _server: Server,
@@ -17,10 +19,9 @@ pub(crate) struct Ctx {
     pub(crate) base: Path,
 }
 
-
 impl Ctx {
     pub(crate) async fn new() -> Self {
-	let _ = env_logger::try_init();
+        let _ = env_logger::try_init();
         let cfg = ServerConfig::load("../cfg/simple-server.json")
             .expect("load simple server config");
         let _server =
@@ -43,57 +44,108 @@ impl Ctx {
     }
 }
 
-#[test]
-fn ping_pong() {
-    Runtime::new().unwrap().block_on(async move {
-        let ctx = Ctx::new().await;
-        let mut listener =
-            server::Listener::new(&ctx.publisher, None, ctx.base.clone()).await.unwrap();
-        task::spawn(async move {
-            let con =
-                client::Connection::connect(&ctx.subscriber, ctx.base).await.unwrap();
-            for i in 0..100 {
-                con.send(Value::U64(i as u64)).unwrap();
-                match con.recv_one().await.unwrap() {
-                    Value::U64(j) => assert_eq!(j, i),
-                    _ => panic!("expected u64"),
-                }
-            }
-        });
-        let con = listener.accept().await.unwrap().wait_connected().await.unwrap();
-        for _ in 0..100 {
+#[tokio::test(flavor = "multi_thread")]
+async fn ping_pong() {
+    let ctx = Ctx::new().await;
+    let mut listener =
+        server::Listener::new(&ctx.publisher, None, ctx.base.clone()).await.unwrap();
+    task::spawn(async move {
+        let con = client::Connection::connect(&ctx.subscriber, ctx.base).await.unwrap();
+        for i in 0..100 {
+            con.send(Value::U64(i as u64)).unwrap();
             match con.recv_one().await.unwrap() {
-                Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
+                Value::U64(j) => assert_eq!(j, i),
                 _ => panic!("expected u64"),
             }
         }
-    })
+    });
+    let con = listener.accept().await.unwrap().wait_connected().await.unwrap();
+    for _ in 0..100 {
+        match con.recv_one().await.unwrap() {
+            Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
+            _ => panic!("expected u64"),
+        }
+    }
 }
 
-#[test]
-fn singleton() {
-    Runtime::new().unwrap().block_on(async move {
-        let ctx = Ctx::new().await;
-        let path = ctx.base.clone();
-        let acceptor = server::singleton(&ctx.publisher, None, ctx.base).await.unwrap();
-        task::spawn(async move {
-            let con = client::Connection::connect(&ctx.subscriber, path).await.unwrap();
-            for i in 0..100 {
-                con.send(Value::U64(i as u64)).unwrap();
-                match con.recv_one().await.unwrap() {
-                    Value::U64(j) => assert_eq!(j, i),
-                    _ => panic!("expected u64"),
-                }
-            }
-        });
-        let con = acceptor.wait_connected().await.unwrap();
-        for _ in 0..100 {
+#[tokio::test(flavor = "multi_thread")]
+async fn singleton() {
+    let ctx = Ctx::new().await;
+    let path = ctx.base.clone();
+    let mut acceptor = server::singleton(&ctx.publisher, None, ctx.base).await.unwrap();
+    task::spawn(async move {
+        let con = client::Connection::connect(&ctx.subscriber, path).await.unwrap();
+        for i in 0..100 {
+            con.send(Value::U64(i as u64)).unwrap();
             match con.recv_one().await.unwrap() {
-                Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
+                Value::U64(j) => assert_eq!(j, i),
                 _ => panic!("expected u64"),
             }
         }
-    })
+    });
+    let con = acceptor.wait_connected().await.unwrap();
+    for _ in 0..100 {
+        match con.recv_one().await.unwrap() {
+            Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
+            _ => panic!("expected u64"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_cancel_safe() {
+    let ctx = Ctx::new().await;
+    let mut listener =
+        server::Listener::new(&ctx.publisher, None, ctx.base.clone()).await.unwrap();
+    task::spawn(async move {
+        for i in 0..100 {
+            let con = client::Connection::connect(&ctx.subscriber, ctx.base.clone())
+                .await
+                .unwrap();
+            con.send(Value::U64(i as u64)).unwrap();
+            match con.recv_one().await.unwrap() {
+                Value::U64(j) => assert_eq!(j, i),
+                _ => panic!("expected u64"),
+            }
+        }
+    });
+    let mut pending: Option<server::Singleton> = None;
+    async fn wait_pending(
+        pending: &mut Option<server::Singleton>,
+    ) -> Result<server::Connection> {
+        match pending {
+            Some(pending) => pending.wait_connected().await,
+            None => future::pending().await,
+        }
+    }
+    async fn wait_accept(
+        pending: bool,
+        listener: &mut server::Listener,
+    ) -> Result<server::Singleton> {
+        if pending {
+            future::pending().await
+        } else {
+            listener.accept().await
+        }
+    }
+    for _ in 0..100 {
+        let is_pending = pending.is_some();
+	#[rustfmt::skip]
+        select! {
+            () = futures::future::ready(()) => println!("cancel!"), // ensure a lot of cancels happen
+            r = wait_accept(is_pending, &mut listener) => {
+		pending = Some(r.unwrap());
+            },
+            r = wait_pending(&mut pending) => {
+		pending = None;
+		let con = r.unwrap();
+		match con.recv_one().await.unwrap() {
+                    Value::U64(i) => con.send_one(Value::U64(i)).await.unwrap(),
+                    _ => panic!("expected u64"),
+		}
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

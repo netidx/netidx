@@ -87,7 +87,7 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
         .context("create publisher")?;
     let mut listener = Listener::new(&publisher, None, p.base.clone()).await?;
     loop {
-        let acceptor = listener.accept().await?;
+        let mut acceptor = listener.accept().await?;
         task::spawn(async move {
             match acceptor.wait_connected().await {
                 Err(e) => println!("client accept failed {}", e),

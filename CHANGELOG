@@ -1,3 +1,9 @@
+* 0.23.0
+
+- channel::Listener::accept and channel::Singleton::wait_connected
+  were not cancel safe. This is now fixed but it required a small api
+  change, hence 0.23.
+
 * 0.22.20
 
  - implement convert Chars from CompactString
