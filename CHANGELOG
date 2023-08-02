@@ -1,3 +1,7 @@
+* 0.23.1
+
+- simplify the accept api. Sorry semantic versioning.
+
 * 0.23.0
 
 - channel::Listener::accept and channel::Singleton::wait_connected

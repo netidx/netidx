@@ -1,7 +1,5 @@
 use super::*;
 use crate::channel::test::Ctx;
-use anyhow::Result;
-use futures::future;
 use netidx::subscriber::Value;
 use tokio::{task, select};
 
@@ -18,7 +16,7 @@ async fn pack_ping_pong() {
             assert_eq!(j, i)
         }
     });
-    let con = listener.accept().await.unwrap().wait_connected().await.unwrap();
+    let con = listener.accept().await.unwrap();
     for _ in 0..100 {
         let i: u64 = con.recv_one().await.unwrap();
         con.send_one(&i).await.unwrap();
@@ -42,35 +40,11 @@ async fn accept_cancel_safe() {
             }
         }
     });
-    let mut pending: Option<server::Singleton> = None;
-    async fn wait_pending(
-        pending: &mut Option<server::Singleton>,
-    ) -> Result<server::Connection> {
-        match pending {
-            Some(pending) => pending.wait_connected().await,
-            None => future::pending().await,
-        }
-    }
-    async fn wait_accept(
-        pending: bool,
-        listener: &mut server::Listener,
-    ) -> Result<server::Singleton> {
-        if pending {
-            future::pending().await
-        } else {
-            listener.accept().await
-        }
-    }
     for _ in 0..100 {
-        let is_pending = pending.is_some();
         #[rustfmt::skip]
         select! {
             () = futures::future::ready(()) => println!("cancel!"), // ensure a lot of cancels happen
-            r = wait_accept(is_pending, &mut listener) => {
-		pending = Some(r.unwrap());
-            },
-            r = wait_pending(&mut pending) => {
-		pending = None;
+            r = listener.accept() => {
 		let con = r.unwrap();
 		let i: u64 = con.recv_one().await.unwrap();
                 con.send_one(&i).await.unwrap();
@@ -107,7 +81,7 @@ async fn pack_batch_ping_pong() {
             assert_eq!(i, 100)
         }
     });
-    let con = listener.accept().await.unwrap().wait_connected().await.unwrap();
+    let con = listener.accept().await.unwrap();
     for _ in 0..100 {
         let mut v: Vec<u64> = Vec::new();
         con.recv(|i| {

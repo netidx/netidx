@@ -394,7 +394,7 @@ impl ListenerInner {
 }
 
 pub struct Listener {
-    rx: mpsc::Receiver<Result<Singleton>>,
+    rx: mpsc::Receiver<Result<Connection>>,
     jh: JoinHandle<result::Result<(), mpsc::SendError>>,
 }
 
@@ -422,7 +422,10 @@ impl Listener {
 		    let _ = tx_res.send(Ok(()));
                     loop {
                         match inner.accept().await {
-                            Ok(s) => tx.send(Ok(s)).await?,
+                            Ok(mut s) => match s.wait_connected().await {
+				Err(e) => tx.send(Err(e)).await?,
+				Ok(con) => tx.send(Ok(con)).await?,
+			    }
                             Err(e) => tx.send(Err(e)).await?,
                         }
                     }
@@ -449,7 +452,7 @@ impl Listener {
     /// connection to the new client. This method is cancel safe, it
     /// can be safely used in a select! without risk of losing an
     /// incoming connection.
-    pub async fn accept(&mut self) -> Result<Singleton> {
+    pub async fn accept(&mut self) -> Result<Connection> {
 	match self.rx.next().await {
 	    Some(r) => r,
 	    None => bail!("accept task died")

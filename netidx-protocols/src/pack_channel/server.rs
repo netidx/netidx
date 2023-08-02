@@ -217,7 +217,12 @@ impl Listener {
 
     /// Wait for a client to connect, and return a singleton
     /// connection to the new client.
-    pub async fn accept(&mut self) -> Result<Singleton> {
-        Ok(Singleton(self.0.accept().await?))
+    pub async fn accept(&mut self) -> Result<Connection> {
+        let inner = self.0.accept().await?;
+        Ok(Connection {
+            inner,
+            buf: Mutex::new(BytesMut::new()),
+            queue: AsyncMutex::new(Bytes::new()),
+        })
     }
 }
