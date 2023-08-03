@@ -1,3 +1,7 @@
+* 0.23.3
+
+- fix multiple bugs unpacking ArrayString
+
 * 0.23.2
 
 - add *channel::*::Batch::len method

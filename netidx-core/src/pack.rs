@@ -3,6 +3,7 @@ use crate::{
     utils::take_t,
 };
 use arcstr::ArcStr;
+use arrayvec::{ArrayString, ArrayVec};
 use bytes::{buf, Buf, BufMut, Bytes, BytesMut};
 use chrono::{
     naive::{NaiveDate, NaiveDateTime},
@@ -11,7 +12,6 @@ use chrono::{
 use compact_str::CompactString;
 use indexmap::{IndexMap, IndexSet};
 use rust_decimal::Decimal;
-use arrayvec::{ArrayString, ArrayVec};
 use std::{
     any::Any,
     boxed::Box,
@@ -235,25 +235,25 @@ impl Pack for CompactString {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-	thread_local! {
-	    static TMP: RefCell<Vec<u8>> = RefCell::new(Vec::new());
-	}
+        thread_local! {
+            static TMP: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+        }
         let len = decode_varint(buf)? as usize;
         if len > buf.remaining() {
             return Err(PackError::TooBig);
         }
-	TMP.with(|tmp| {
-	    let mut tmp = tmp.borrow_mut();
-	    tmp.resize(len, 0);
-	    buf.copy_to_slice(&mut tmp);
-	    if tmp.capacity() > cmp::max(1024, tmp.len() << 2) {
-		tmp.shrink_to(1024)
-	    }
-            match CompactString::from_utf8(&tmp[..]) {
-		Ok(s) => Ok(s),
-		Err(_) => Err(PackError::InvalidFormat),
+        TMP.with(|tmp| {
+            let mut tmp = tmp.borrow_mut();
+            tmp.resize(len, 0);
+            buf.copy_to_slice(&mut tmp);
+            if tmp.capacity() > cmp::max(1024, tmp.len() << 2) {
+                tmp.shrink_to(1024)
             }
-	})
+            match CompactString::from_utf8(&tmp[..]) {
+                Ok(s) => Ok(s),
+                Err(_) => Err(PackError::InvalidFormat),
+            }
+        })
     }
 }
 
@@ -274,9 +274,13 @@ impl<const C: usize> Pack for ArrayString<C> {
             return Err(PackError::TooBig);
         }
         let mut v = [0u8; C];
-        buf.copy_to_slice(&mut v);
-        match ArrayString::from_byte_string(&v) {
-            Ok(s) => Ok(s),
+        buf.copy_to_slice(&mut v[..len]);
+        let mut res: ArrayString<C> = ArrayString::new();
+        match str::from_utf8(&v[..len]) {
+            Ok(s) => {
+                res.push_str(s);
+                Ok(res)
+            }
             Err(_) => Err(PackError::InvalidFormat),
         }
     }
