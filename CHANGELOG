@@ -1,4 +1,8 @@
-* 0.23.3
+* 0.22.22
+
+- fix a bug in pack that would cause decoding an empty length wrapped struct to fail
+
+* 0.22.21
 
 - fix multiple bugs unpacking ArrayString
 

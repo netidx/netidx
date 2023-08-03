@@ -413,6 +413,8 @@ where
     F: FnOnce(&mut buf::Take<&mut B>) -> Result<T, PackError>,
 {
     let len = decode_varint(buf)?;
+    // this has to be 1 not 2 because empty structs will be encoded as
+    // length 1
     if len < 1 {
         return Err(PackError::BufferShort);
     }
