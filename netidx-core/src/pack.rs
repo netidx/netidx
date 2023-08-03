@@ -413,7 +413,7 @@ where
     F: FnOnce(&mut buf::Take<&mut B>) -> Result<T, PackError>,
 {
     let len = decode_varint(buf)?;
-    if len < 2 {
+    if len < 1 {
         return Err(PackError::BufferShort);
     }
     let mut limited = buf.take((len - varint_len(len) as u64) as usize);
