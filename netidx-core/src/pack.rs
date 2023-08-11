@@ -745,6 +745,45 @@ impl Pack for i8 {
     }
 }
 
+impl<T: Pack, const S: usize> Pack for [T; S] {
+    fn encoded_len(&self) -> usize {
+        self.iter().fold(varint_len(S as u64), |len, t| {
+            len + <T as Pack>::encoded_len(t)
+        })
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(S as u64, buf);
+        for t in self {
+            <T as Pack>::encode(t, buf)?
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+	use std::{panic::{self, AssertUnwindSafe}, array};
+        let elts = decode_varint(buf)? as usize;
+        if elts != S {
+            return Err(PackError::InvalidFormat);
+        }
+	// CR estokes: once try_from_fn is stable replace this
+	panic::catch_unwind(AssertUnwindSafe(|| {
+	    array::from_fn(|_| <T as Pack>::decode(buf).unwrap())
+	})).map_err(|_| PackError::InvalidFormat)
+    }
+
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
+        let elts = decode_varint(buf)? as usize;
+	if elts != S {
+	    return Err(PackError::InvalidFormat)
+	}
+        for i in 0..S {
+            self[i] = <T as Pack>::decode(buf)?;
+        }
+        Ok(())
+    }
+}
+
 const MAX_VEC: usize = 2 * 1024 * 1024 * 1024;
 
 impl<T: Pack> Pack for Vec<T> {

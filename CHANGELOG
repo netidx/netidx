@@ -1,3 +1,7 @@
+* 0.22.23
+
+- implement pack for arbitrary sized arrays
+
 * 0.22.22
 
 - fix a bug in pack that would cause decoding an empty length wrapped struct to fail

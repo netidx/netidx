@@ -30,3 +30,11 @@ fn test_varint_pack() {
         check_encode_decode(&mut buf, d)
     }
 }
+
+#[test]
+fn test_array_pack() {
+    let mut buf = [0u8; 65];
+    let a = [42u8; 64];
+    Pack::encode(&a, &mut &mut buf[..]).unwrap();
+    assert_eq!(<[u8; 64] as Pack>::decode(&mut &buf[..]).unwrap(), a)
+}
