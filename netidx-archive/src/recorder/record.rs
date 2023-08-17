@@ -3,7 +3,7 @@ use super::{
     Shards,
 };
 use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use futures::{
@@ -64,7 +64,7 @@ impl CTS {
         let res =
             future::join_all(self.0.iter_mut().map(|(_, ct)| r.check_changed(ct))).await;
         for r in res {
-            if r? {
+            if r.context("checking for resolver changes")? {
                 return Ok(true);
             }
         }
@@ -154,7 +154,7 @@ fn rotate_log_file(
     drop(archive); // ensure the current file is closed
     let current_name = path.join(&**shard_name).join("current");
     let new_name = path.join(&**shard_name).join(now.to_rfc3339());
-    fs::rename(&current_name, &new_name)?;
+    fs::rename(&current_name, &new_name).context("renaming current")?;
     debug!("would run put, cmd config {:?}", cmds);
     if let Some(cmds) = cmds {
         use std::process::Command;
@@ -191,14 +191,15 @@ fn write_pathmap(
     task::block_in_place(|| {
         let i = to_add.iter().map(|(ref p, _)| p);
         pathindex.add_paths(i)
-    })?;
+    })
+    .context("adding paths to pathindex")?;
     for (path, subid) in to_add.drain(..) {
         if !by_subid.contains_key(&subid) {
             let id = pathindex.id_for_path(&path).unwrap();
             by_subid.insert(subid, id);
         }
     }
-    pathindex.flush()?;
+    pathindex.flush().context("flushing pathindex")?;
     Ok(())
 }
 
@@ -214,7 +215,7 @@ fn write_image(
             b.push(BatchItem(*id, ev.clone()));
         }
     }
-    archive.add_batch(true, ts, &b)?;
+    archive.add_batch(true, ts, &b).context("adding image batch")?;
     Ok(())
 }
 
@@ -236,9 +237,10 @@ pub(super) async fn run(
     let bcast = shards.bcast[&shard_id].clone();
     let mut archive = task::block_in_place(|| {
         ArchiveWriter::open(config.archive_directory.join(&*shard_name).join("current"))
-    })?;
+    })
+    .context("opening current archive for write")?;
     {
-        let reader = archive.reader()?;
+        let reader = archive.reader().context("getting current reader")?;
         shards.heads.write().insert(shard_id, reader.clone());
         let _ = bcast.send(BCastMsg::NewCurrent(reader));
     }
@@ -283,7 +285,7 @@ pub(super) async fn run(
             _ = maybe_interval(&mut flush).fuse() => {
                 if archive.len() > last_flush {
                     task::block_in_place(|| -> Result<()> {
-                        archive.flush()?;
+                        archive.flush().context("flushing archive")?;
                         Ok(last_flush = archive.len())
                     })?;
                 }
@@ -309,13 +311,15 @@ pub(super) async fn run(
                             &config.archive_cmds,
                             now
                         )
-                    })?;
+                    }).context("rotating log file")?;
                     last_image = 0;
                     last_flush = 0;
-                    task::block_in_place(|| write_image(&mut archive, &by_subid, &image, now))?;
-                    let reader = archive.reader()?;
+                    task::block_in_place(|| write_image(&mut archive, &by_subid, &image, now))
+			.context("writing image")?;
+                    let reader = archive.reader().context("getting reader")?;
                     shards.heads.write().insert(shard_id, reader.clone());
-                    let index = task::block_in_place(|| LogfileIndex::new(&config, &shard_name))?;
+                    let index = task::block_in_place(|| LogfileIndex::new(&config, &shard_name))
+			.context("opening logfile index")?;
                     shards.indexes.write().insert(shard_id, index);
                     let _ = bcast.send(BCastMsg::LogRotated(now));
                     let _ = bcast.send(BCastMsg::NewCurrent(reader));
@@ -352,7 +356,8 @@ pub(super) async fn run(
                             by_subid.remove(&dv.id());
                         }
                     }
-                    write_pathmap(&mut pathindex, &mut to_add, &mut by_subid)?
+                    write_pathmap(&mut pathindex, &mut to_add, &mut by_subid)
+            .context("writing pathmap")?
                 }
             },
             batch = rx_batch.next() => match batch {
@@ -373,13 +378,15 @@ pub(super) async fn run(
                                 }
                             }
                         }
-                        archive.add_batch(false, now, &tbatch)?;
+                        archive.add_batch(false, now, &tbatch)
+                .context("adding archive batch")?;
                         let _ = bcast.send(BCastMsg::Batch(now, Arc::new(tbatch)));
                         match record_config.image_frequency {
                             None => (),
                             Some(freq) if archive.len() - last_image < freq => (),
                             Some(_) => {
-                                write_image(&mut archive, &by_subid, &image, Utc::now())?;
+                                write_image(&mut archive, &by_subid, &image, Utc::now())
+                    .context("writing image")?;
                                 last_image = archive.len();
                             }
                         }
@@ -387,7 +394,7 @@ pub(super) async fn run(
                             None => (),
                             Some(freq) if archive.len() - last_flush < freq => (),
                             Some(_) => {
-                                archive.flush()?;
+                                archive.flush().context("flushing archive")?;
                                 last_flush = archive.len();
                             }
                         }

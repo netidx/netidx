@@ -575,7 +575,7 @@ impl Recorder {
                 )
                 .await;
                 if let Err(e) = r {
-                    error!("recorder stopped on error {}", e);
+                    error!("recorder stopped on error {:?}", e);
                 }
             });
         }
