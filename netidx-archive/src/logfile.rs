@@ -108,7 +108,7 @@ const MAX_RECORD_LEN: u32 = u32::MAX;
 const MAX_TIMESTAMP: u32 = 0x03FFFFFF;
 
 // Every record in the archive starts with this header
-#[derive(PackedStruct, Debug, Clone)]
+#[derive(PackedStruct, Debug, Clone, Copy)]
 #[packed_struct(bit_numbering = "msb0", size_bytes = "8")]
 pub struct RecordHeader {
     // the record type
@@ -1420,9 +1420,10 @@ impl ArchiveReader {
         if compressed {
             buf.advance(4);
         }
-        let elts = decode_varint(&mut buf)?;
-        for _ in 0..elts {
-            let id = decode_varint(&mut buf)?;
+        let index_len = decode_varint(&mut buf).context("decoding index length")?;
+        let mut buf = buf.take(index_len as usize - varint_len(index_len));
+        while buf.has_remaining() {
+            let id = decode_varint(&mut buf).context("decoding index element")?;
             if index.contains(&Id(id as u32)) {
                 return Ok(true);
             }
@@ -1580,7 +1581,7 @@ impl ArchiveReader {
                     Ok(true) => Some((*ts, *pos)),
                     Ok(false) => None,
                     Err(e) => {
-                        error!("failed to read index entry for {}, {}", ts, e);
+                        error!("failed to read index entry for {}, {:?}", ts, e);
                         None
                     }
                 }

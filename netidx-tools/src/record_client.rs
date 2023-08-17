@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, collections::HashSet};
 
 use anyhow::{Context, Result};
 use bytes::BytesMut;
@@ -63,6 +63,8 @@ pub(crate) enum Cmd {
         file: PathBuf,
         #[structopt(long = "metadata-only", about = "don't print the data")]
         metadata: bool,
+	#[structopt(long = "check-index", about = "don't dump data but check all the indexes")]
+	check_index: bool
     },
     #[structopt(name = "verify", about = "verify that an archive can be read")]
     Verify { file: PathBuf },
@@ -210,7 +212,7 @@ async fn index(file: PathBuf, keep: bool) -> Result<()> {
     Ok(())
 }
 
-fn dump(file: PathBuf, metadata: bool) -> Result<()> {
+fn dump(file: PathBuf, metadata: bool, check_index: bool) -> Result<()> {
     let reader = ArchiveReader::open(file)?;
     reader.check_remap_rescan()?;
     if !metadata {
@@ -224,10 +226,15 @@ fn dump(file: PathBuf, metadata: bool) -> Result<()> {
     println!("delta batches: {}", reader.delta_batches());
     println!("compressed: {}", reader.is_compressed());
     println!("indexed: {}", reader.is_indexed());
+    let filter = if check_index {
+	Some(HashSet::default())
+    } else {
+	None
+    };
     if !metadata {
         let mut cursor = Cursor::new();
         loop {
-            let (_, batches) = reader.read_deltas(None, &mut cursor, 100)?;
+            let (_, batches) = reader.read_deltas(filter.as_ref(), &mut cursor, 100)?;
             if batches.is_empty() {
                 return Ok(());
             }
@@ -258,7 +265,7 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
             oneshot(subscriber, params).await
         }
         Cmd::Compress { file, window, keep } => compress(file, keep, window).await,
-        Cmd::Dump { file, metadata } => dump(file, metadata),
+        Cmd::Dump { file, metadata, check_index } => dump(file, metadata, check_index),
         Cmd::Verify { file } => verify(file),
         Cmd::Compressed { file } => compressed(file),
         Cmd::Index { file, keep } => index(file, keep).await,
