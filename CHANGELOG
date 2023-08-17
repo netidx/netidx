@@ -1,5 +1,9 @@
 * 0.22.24
 
+- add extensive anyhow context information to the recorder
+
+* 0.22.23
+
 - fix a bug in the way netidx-archive was interpreting index
   lengths. It could cause suprious log errors, as well as false
   positive index hits that would later need to be filtered at
