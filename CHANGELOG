@@ -1,3 +1,10 @@
+* 0.22.24
+
+- fix a bug in the way netidx-archive was interpreting index
+  lengths. It could cause suprious log errors, as well as false
+  positive index hits that would later need to be filtered at
+  additional expense.
+
 * 0.22.23
 
 - implement pack for arbitrary sized arrays
