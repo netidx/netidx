@@ -1,23 +1,31 @@
-* 0.22.24
+* 0.22.20
+
+- don't spam the keychain with requests for cert passwords we've
+  already asked for
+
+- add a mechanism to populate passwords for certs without consulting
+  the keychain or calling askpass
+
+* 0.23.7
 
 - add extensive anyhow context information to the recorder
 
-* 0.22.23
+* 0.23.6
 
 - fix a bug in the way netidx-archive was interpreting index
   lengths. It could cause suprious log errors, as well as false
   positive index hits that would later need to be filtered at
   additional expense.
 
-* 0.22.23
+* 0.23.5
 
 - implement pack for arbitrary sized arrays
 
-* 0.22.22
+* 0.23.4
 
 - fix a bug in pack that would cause decoding an empty length wrapped struct to fail
 
-* 0.22.21
+* 0.23.3
 
 - fix multiple bugs unpacking ArrayString
 

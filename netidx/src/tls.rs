@@ -1,10 +1,11 @@
 use crate::config::{Tls, TlsIdentity};
 use anyhow::{Context, Result};
+use fxhash::FxHashMap;
 use log::{debug, info, warn};
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::{
-    collections::{BTreeMap, Bound},
+    collections::{BTreeMap, Bound, HashMap},
     fmt, mem,
     sync::Arc,
 };
@@ -53,13 +54,34 @@ pub(crate) fn get_names(cert: &[u8]) -> Result<Option<Names>> {
         })
         .collect();
     let alt_name = if alt_names.len() == 0 {
-	bail!("certificate is missing subjectAltName")
+        bail!("certificate is missing subjectAltName")
     } else if alt_names.len() > 1 {
-	bail!("certificate must have exactly 1 subjectAltName for use with netidx")
+        bail!("certificate must have exactly 1 subjectAltName for use with netidx")
     } else {
-	alt_names.pop().unwrap()
+        alt_names.pop().unwrap()
     };
     Ok(cn.map(|cn| Names { cn, alt_name }))
+}
+
+lazy_static! {
+    static ref CACHED: Mutex<FxHashMap<String, String>> = Mutex::new(HashMap::default());
+}
+
+/// If you obtained a certificate private key password via another
+/// method as part of startup, you can provide it here and the system
+/// keychain won't be consulted.
+pub fn pre_cache_password(path: &str, password: &str) {
+    CACHED.lock().insert(path.into(), password.into());
+}
+
+/// clear all cached passwords
+pub fn clear_cached_passwords() {
+    for (_, p) in CACHED.lock().drain() {
+        let mut v = p.into_bytes();
+        for i in 0..v.len() {
+            v[i] = 0;
+        }
+    }
 }
 
 /// load the password for the key at the specified path, or else call
@@ -67,26 +89,42 @@ pub(crate) fn get_names(cert: &[u8]) -> Result<Option<Names>> {
 pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
     use keyring::Entry;
     use std::process::Command;
-    let entry = Entry::new("netidx", path)?;
     info!("loading password for {} from the system keyring", path);
-    match entry.get_password() {
-        Ok(password) => Ok(password),
-        Err(e) => match askpass {
-            None => bail!("password isn't in the keychain and no askpass specified"),
-            Some(askpass) => {
-                info!("failed to find password entry for netidx {}, error {}", path, e);
-                let res = Command::new(askpass).arg(path).output()?;
-                let password = String::from_utf8_lossy(&res.stdout);
-                let password = password.trim_matches(|c| c == '\r' || c == '\n');
-                if let Err(e) = entry.set_password(password) {
-                    warn!(
-                        "failed to set password entry for netidx {}, error {}",
-                        path, e
-                    );
+    let mut cache = CACHED.lock();
+    match cache.get(path) {
+        Some(pass) => Ok(pass.into()),
+        None => {
+            let entry = Entry::new("netidx", path)?;
+            match entry.get_password() {
+                Ok(password) => {
+                    cache.insert(path.into(), password.clone());
+                    Ok(password)
                 }
-                Ok(String::from(password))
+                Err(e) => match askpass {
+                    None => {
+                        bail!("password isn't in the keychain and no askpass specified")
+                    }
+                    Some(askpass) => {
+                        info!(
+                            "failed to find password entry for netidx {}, error {}",
+                            path, e
+                        );
+                        let res = Command::new(askpass).arg(path).output()?;
+                        let password = String::from_utf8_lossy(&res.stdout);
+                        let password = password.trim_matches(|c| c == '\r' || c == '\n');
+                        if let Err(e) = entry.set_password(password) {
+                            warn!(
+                                "failed to set password entry for netidx {}, error {}",
+                                path, e
+                            );
+                        }
+                        let password = String::from(password);
+                        cache.insert(path.into(), password.clone());
+                        Ok(password)
+                    }
+                },
             }
-        },
+        }
     }
 }
 

@@ -886,6 +886,7 @@ async fn server_loop(
     loop {
         select_biased! {
             _ = stop => {
+		dbg!("stop");
                 for cl in client_stops.drain(..) {
                     let _ = cl.send(());
                 }
@@ -938,7 +939,7 @@ impl Server {
     pub async fn new(cfg: Config, delay_reads: bool, id: usize) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
-        let jh = task::spawn(async move {
+        task::spawn(async move {
             let res = server_loop(cfg, delay_reads, recv_stop, send_ready, id).await;
             match &res {
                 Ok(_) => info!("resolver server shutdown"),
@@ -946,10 +947,10 @@ impl Server {
             }
             res
         });
-        let local_addr = select_biased! {
-            _ = jh.fuse() => bail!("resolver server shutdown"),
-            a = recv_ready.fuse() => a?,
-        };
+	let local_addr = match recv_ready.await {
+	    Err(_) => bail!("resolver server shutdown"),
+	    Ok(addr) => addr,
+	};
         Ok(Server { stop: Some(send_stop), local_addr })
     }
 
