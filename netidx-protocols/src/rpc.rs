@@ -405,14 +405,13 @@ pub mod server {
 
 #[macro_use]
 pub mod client {
-    use std::collections::HashSet;
-
+    use super::*;
     use fxhash::FxHashSet;
     use log::{debug, trace};
     use netidx::subscriber::Event;
     use once_cell::sync::OnceCell;
-
-    use super::*;
+    use std::collections::HashSet;
+    use tokio::time;
 
     /// Convenience macro for calling rpcs.
     /// `call_rpc!(proc, arg0: 3, arg1: "foo", arg2: vec!["foo", "bar", "baz"])`
@@ -431,6 +430,7 @@ pub mod client {
     struct ProcInner {
         call: Dval,
         args: OnceCell<FxHashSet<Chars>>,
+        subscribe_timeout: Duration,
     }
 
     #[derive(Debug, Clone)]
@@ -442,9 +442,28 @@ pub mod client {
         /// call the procedure. Dropping the `Proc` structure will
         /// unsubscribe from the procedure and free all associated
         /// resources.
-        pub async fn new(subscriber: &Subscriber, name: Path) -> Result<Proc> {
+        pub fn new(subscriber: &Subscriber, name: Path) -> Result<Proc> {
             let call = subscriber.subscribe(name.clone());
-            Ok(Proc(Arc::new(ProcInner { call, args: OnceCell::new() })))
+            Ok(Proc(Arc::new(ProcInner {
+                call,
+                args: OnceCell::new(),
+                subscribe_timeout: Duration::from_secs(10),
+            })))
+        }
+
+        /// Exactly the same as subscribe, except allows setting the
+        /// subscribe timeout, which is 10 seconds by default.
+        pub fn new_with_timeout(
+            subscriber: &Subscriber,
+            name: Path,
+            subscribe_timeout: Duration,
+        ) -> Result<Proc> {
+            let call = subscriber.subscribe(name.clone());
+            Ok(Proc(Arc::new(ProcInner {
+                call,
+                args: OnceCell::new(),
+                subscribe_timeout,
+            })))
         }
 
         /**
@@ -478,7 +497,12 @@ pub mod client {
             if self.0.args.get().is_none() {
                 loop {
                     debug!("waiting for subscription to procedure");
-                    self.0.call.wait_subscribed().await?;
+                    time::timeout(
+                        self.0.subscribe_timeout,
+                        self.0.call.wait_subscribed(),
+                    )
+                    .await
+                    .map_err(|_| anyhow!("timeout subscribing to procedure"))??;
                     debug!("fetching args");
                     match self.0.call.last() {
                         Event::Unsubscribed => (),
@@ -561,7 +585,7 @@ mod test {
                 });
                 time::sleep(Duration::from_millis(100)).await;
                 let proc: client::Proc =
-                    client::Proc::new(&ctx.subscriber, proc_name.clone()).await.unwrap();
+                    client::Proc::new(&ctx.subscriber, proc_name.clone()).unwrap();
                 let res = call_rpc!(proc, arg1: "hello rpc").await.unwrap();
                 assert_eq!(res, Value::U32(42));
                 let args: Vec<(Arc<str>, Value)> = vec![];
