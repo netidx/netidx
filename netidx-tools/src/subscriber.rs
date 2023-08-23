@@ -314,8 +314,7 @@ impl Ctx {
                             let proc = match self.rpcs.get(&p) {
                                 Some(proc) => proc,
                                 None => {
-                                    let proc =
-                                        Proc::new(&self.subscriber, p.clone()).await;
+                                    let proc = Proc::new(&self.subscriber, p.clone());
                                     let proc = match proc {
                                         Ok(proc) => proc,
                                         Err(e) => {

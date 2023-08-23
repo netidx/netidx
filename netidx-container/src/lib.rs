@@ -1318,7 +1318,7 @@ impl ContainerInner {
             name: Path,
             mut rx: mpsc::UnboundedReceiver<(Vec<(Chars, Value)>, RpcCallId)>,
         ) -> Result<()> {
-            let proc = rpc::client::Proc::new(&subscriber, name.clone()).await?;
+            let proc = rpc::client::Proc::new(&subscriber, name.clone())?;
             while let Some((args, id)) = rx.next().await {
                 let name = name.clone();
                 let result = proc.call(args).await?;

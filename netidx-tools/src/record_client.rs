@@ -116,7 +116,7 @@ async fn oneshot(subscriber: Subscriber, params: OneshotParams) -> Result<()> {
             .map(|g| Glob::new(Chars::from(g)))
             .collect::<Result<Vec<Glob>>>()?,
     )?;
-    let client = Client::new(&subscriber, &params.base).await?;
+    let client = Client::new(&subscriber, &params.base)?;
     let mut res = client.oneshot(&start, &end, &filter).await?;
     for OneshotReplyShard { pathmap, image, .. } in res.0.iter_mut() {
         for (id, value) in image.drain() {

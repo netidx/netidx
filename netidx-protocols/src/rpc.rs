@@ -477,7 +477,7 @@ pub mod client {
         # use anyhow::Result;
         # async fn z() -> Result<()> {
         #   let subscriber = unimplemented!();
-            let echo = Proc::new(subscriber, Path::from("/examples/api/echo")).await?;
+            let echo = Proc::new(subscriber, Path::from("/examples/api/echo"))?;
             let v = call_rpc!(echo, arg1: "hello echo").await?;
         #   drop(echo);
         #   Ok(())

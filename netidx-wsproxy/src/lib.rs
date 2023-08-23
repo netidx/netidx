@@ -170,7 +170,7 @@ impl ClientCtx {
         Ok(())
     }
 
-    async fn call(
+    fn call(
         &mut self,
         id: u64,
         path: Path,
@@ -179,7 +179,7 @@ impl ClientCtx {
         let proc = match self.rpcs.entry(path) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
-                let proc = Proc::new(&self.subscriber, e.key().clone()).await?;
+                let proc = Proc::new(&self.subscriber, e.key().clone())?;
                 e.insert(proc)
             }
         }
@@ -232,7 +232,7 @@ impl ClientCtx {
                             }
                         }
                         Request::Call { id, path, args } => {
-                            match self.call(id, path, args).await {
+                            match self.call(id, path, args) {
                                 Ok(pending) => calls_pending.push(pending),
                                 Err(e) => {
                                     let error = format!("rpc call failed {}", e);

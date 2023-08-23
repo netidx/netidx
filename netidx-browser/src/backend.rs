@@ -337,7 +337,7 @@ impl CtxInner {
             name: Path,
             mut rx: mpsc::UnboundedReceiver<(Vec<(Chars, Value)>, RpcCallId)>,
         ) -> Result<()> {
-            let proc = rpc::Proc::new(&subscriber, name.clone()).await?;
+            let proc = rpc::Proc::new(&subscriber, name.clone())?;
             while let Some((args, id)) = rx.next().await {
                 let res = match proc.call(args).await {
                     Ok(v) => v,

@@ -48,8 +48,8 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn new(subscriber: &Subscriber, base: &Path) -> Result<Client> {
-        let oneshot = Proc::new(subscriber, base.append("oneshot")).await?;
+    pub fn new(subscriber: &Subscriber, base: &Path) -> Result<Client> {
+        let oneshot = Proc::new(subscriber, base.append("oneshot"))?;
         Ok(Self { oneshot })
     }
 
