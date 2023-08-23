@@ -886,7 +886,7 @@ async fn server_loop(
     loop {
         select_biased! {
             _ = stop => {
-		dbg!("stop");
+		debug!("server loop stop requested");
                 for cl in client_stops.drain(..) {
                     let _ = cl.send(());
                 }
