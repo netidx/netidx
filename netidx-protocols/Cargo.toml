@@ -15,23 +15,23 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-anyhow = "1"
 netidx = { path = "../netidx", version = "0.24.0", default_features = false }
 netidx-core = {path = "../netidx-core", version = "0.24.1", default_features = false }
 netidx-netproto = {path = "../netidx-netproto", version = "0.24.1", default_features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "0.24.0", default_features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros"] }
-serde = "1"
-serde_derive = "1"
-bytes = "1"
-fxhash = "0.2"
-lazy_static = "1"
-log = "0.4"
-futures = "0.3"
-uuid = { version = "1", features = ["v4"] }
-parking_lot = "0.12"
-arcstr = { version = "1", features = ["serde"] }
-once_cell = "1.17.2"
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_derive = { workspace = true }
+bytes = { workspace = true }
+fxhash = { workspace = true }
+lazy_static = { workspace = true }
+log = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+arcstr = { workspace = true }
+once_cell = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

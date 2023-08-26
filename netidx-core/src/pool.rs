@@ -212,8 +212,8 @@ impl<T: Poolable + Send + 'static> Drop for Pool<T> {
 impl<T: Poolable + Send + 'static> Prune for Pool<T> {
     fn prune(&self) {
         let len = self.0.pool.len();
-        let ten_percent = self.0.pool.capacity() / 10;
-        let one_percent = ten_percent / 10;
+        let ten_percent = std::cmp::max(1, self.0.pool.capacity() / 10);
+        let one_percent = std::cmp::max(1, ten_percent / 10);
         if len > ten_percent {
             for _ in 0..ten_percent {
                 self.0.pool.pop();

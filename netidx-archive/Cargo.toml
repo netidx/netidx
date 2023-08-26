@@ -15,32 +15,32 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-anyhow = "1"
 netidx = { path = "../netidx", version = "0.24.0", default_features = false }
 netidx-netproto = { version = "0.24.1", path = "../netidx-netproto" }
 netidx-protocols = { path = "../netidx-protocols", version = "0.24.0", default_features = false }
 netidx-derive = { path = "../netidx-derive", version = "0.22.0" }
 netidx-core = { path = "../netidx-core", version = "0.24.1" }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "process"] }
-bytes = "1"
-fs3 = "0.5"
-memmap2 = "0.5"
-fxhash = "0.2"
-futures = "0.3"
-arcstr = { version = "1", features = ["serde"] }
-lazy_static = "1"
-packed_struct = "0.10"
-packed_struct_codegen = "0.10"
-chrono = { version = "^0.4.23", features = ["serde"] }
-log = "0.4"
-parking_lot = "0.12"
-indexmap = "1"
-diligent-date-parser = "0.1"
-serde = "1"
-serde_derive = "1"
-serde_json = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
-num_cpus = "1.15.0"
-zstd = { version = "0.12.3", features = ["zstdmt"] }
-smallvec = { version = "1.10.0", features = ["const_generics", "union"] }
-rand = "0.8.5"
+tokio = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+fs3 = { workspace = true }
+memmap2 = { workspace = true }
+fxhash = { workspace = true }
+futures = { workspace = true }
+arcstr = { workspace = true }
+lazy_static = { workspace = true }
+packed_struct = { workspace = true }
+packed_struct_codegen = { workspace = true }
+chrono = { workspace = true }
+log = { workspace = true }
+parking_lot = { workspace = true }
+indexmap = { workspace = true }
+diligent-date-parser = { workspace = true }
+serde = { workspace = true }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+num_cpus = { workspace = true }
+zstd = { workspace = true }
+smallvec = { workspace = true }
+rand = { workspace = true }

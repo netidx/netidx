@@ -18,4 +18,4 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 netidx = { path = "../netidx", version = "0.24.0", default_features = false }
-structopt = "0.3"
+structopt = { workspace = true }

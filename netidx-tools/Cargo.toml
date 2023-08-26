@@ -31,14 +31,6 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-anyhow = "1"
-async-stream = "0.3"
-bytes = "1"
-chrono = {version = "^0.4.23", features = ["serde"]}
-env_logger = "0.10"
-futures = "0.3"
-fxhash = "0.2"
-log = "0.4"
 netidx-tools-core = { path = "../netidx-tools-core", version = "0.24.0", default_features = false }
 netidx-archive = { path = "../netidx-archive", version = "0.24.0", default_features = false }
 netidx = { path = "../netidx", version = "0.24.0", default_features = false }
@@ -46,14 +38,22 @@ netidx-protocols = { path = "../netidx-protocols", version = "0.24.0", default_f
 netidx-bscript = { path = "../netidx-bscript", version = "0.24.0", default_features = false }
 netidx-container = { path = "../netidx-container", version = "0.24.0", default_features = false }
 netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.24.0", default_features = false }
-parking_lot = "0.12"
-serde = "1"
-serde_derive = "1"
-serde_json = "1"
-structopt = "0.3"
-tokio = { version = "1", features = ["full"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-arcstr = { version = "1", features = ["serde"] }
-combine = "4"
-dirs = "5"
-hdrhistogram = "7"
+tokio = { workspace = true }
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+env_logger = { workspace = true }
+futures = { workspace = true }
+fxhash = { workspace = true }
+log = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
+structopt = { workspace = true }
+uuid = { workspace = true }
+arcstr = { workspace = true }
+combine = { workspace = true }
+dirs = { workspace = true }
+hdrhistogram = { workspace = true }
