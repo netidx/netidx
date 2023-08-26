@@ -1,6 +1,6 @@
 [package]
 name = "netidx-bscript"
-version = "0.24.0"
+version = "0.24.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 homepage = "https://netidx.github.io/netidx-book/"
@@ -22,8 +22,8 @@ chrono = { version = "^0.4.23", features = ["serde"] }
 combine = "4"
 fxhash = "0.2"
 lazy_static = "1"
-netidx-netproto = { path = "../netidx-netproto", version = "0.22.0" }
-netidx-core = { path = "../netidx-core", version = "0.22.0" }
+netidx-netproto = { path = "../netidx-netproto", version = "0.24.1" }
+netidx-core = { path = "../netidx-core", version = "0.24.1" }
 netidx = { path = "../netidx", version = "0.24.0", default_features = false }
 regex = "1"
 serde = "1"
