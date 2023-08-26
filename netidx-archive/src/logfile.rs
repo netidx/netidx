@@ -306,10 +306,10 @@ lazy_static! {
     static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(10, 100_000);
     pub static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(10, 100_000);
     pub(crate) static ref CURSOR_BATCH_POOL: Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
-        Pool::new(100, 100_000);
+        Pool::new(100, 10_000);
     static ref IDX_POOL: Pool<Vec<(Id, Path)>> = Pool::new(10, 100_000);
     pub(crate) static ref IMG_POOL: Pool<FxHashMap<Id, Event>> =
-        Pool::new(100, 100_000);
+        Pool::new(100, 10_000);
     static ref EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
     static ref TO_READ_POOL: Pool<Vec<usize>> = Pool::new(10, 100_000);
 }

@@ -357,7 +357,7 @@ pub(super) async fn run(
                         }
                     }
                     write_pathmap(&mut pathindex, &mut to_add, &mut by_subid)
-            .context("writing pathmap")?
+			.context("writing pathmap")?
                 }
             },
             batch = rx_batch.next() => match batch {
@@ -379,14 +379,14 @@ pub(super) async fn run(
                             }
                         }
                         archive.add_batch(false, now, &tbatch)
-                .context("adding archive batch")?;
+			    .context("adding archive batch")?;
                         let _ = bcast.send(BCastMsg::Batch(now, Arc::new(tbatch)));
                         match record_config.image_frequency {
                             None => (),
                             Some(freq) if archive.len() - last_image < freq => (),
                             Some(_) => {
                                 write_image(&mut archive, &by_subid, &image, Utc::now())
-                    .context("writing image")?;
+				    .context("writing image")?;
                                 last_image = archive.len();
                             }
                         }
