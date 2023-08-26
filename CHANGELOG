@@ -1,3 +1,7 @@
+* 0.24.2
+
+- switch to workspace dependencies and update dependencies
+
 * 0.24.1 
 
 - prune over large recorder pools after experiance in production

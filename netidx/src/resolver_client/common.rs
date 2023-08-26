@@ -19,20 +19,20 @@ pub(super) const HELLO_TO: Duration = Duration::from_secs(15);
 
 lazy_static! {
     pub(super) static ref PUBLISHERPOOL: Pool<FxHashMap<PublisherId, Publisher>> =
-        Pool::new(1000, 1000);
-    pub(super) static ref RAWTOREADPOOL: Pool<Vec<ToRead>> = Pool::new(1000, 10000);
-    pub(super) static ref RAWFROMREADPOOL: Pool<Vec<FromRead>> = Pool::new(1000, 10000);
-    pub(super) static ref TOREADPOOL: Pool<Vec<(usize, ToRead)>> = Pool::new(1000, 10000);
+        Pool::new(1000, 100);
+    pub(super) static ref RAWTOREADPOOL: Pool<Vec<ToRead>> = Pool::new(100, 10_000);
+    pub(super) static ref RAWFROMREADPOOL: Pool<Vec<FromRead>> = Pool::new(100, 10_000);
+    pub(super) static ref TOREADPOOL: Pool<Vec<(usize, ToRead)>> = Pool::new(100, 10_000);
     pub(super) static ref FROMREADPOOL: Pool<Vec<(usize, FromRead)>> =
-        Pool::new(1000, 10000);
-    pub(super) static ref RAWTOWRITEPOOL: Pool<Vec<ToWrite>> = Pool::new(1000, 10000);
-    pub(super) static ref RAWFROMWRITEPOOL: Pool<Vec<FromWrite>> = Pool::new(1000, 10000);
+        Pool::new(100, 10_000);
+    pub(super) static ref RAWTOWRITEPOOL: Pool<Vec<ToWrite>> = Pool::new(100, 10_000);
+    pub(super) static ref RAWFROMWRITEPOOL: Pool<Vec<FromWrite>> = Pool::new(100, 10_000);
     pub(super) static ref TOWRITEPOOL: Pool<Vec<(usize, ToWrite)>> =
-        Pool::new(1000, 10000);
+        Pool::new(100, 10_000);
     pub(super) static ref FROMWRITEPOOL: Pool<Vec<(usize, FromWrite)>> =
-        Pool::new(1000, 10000);
-    pub(super) static ref RESOLVEDPOOL: Pool<Vec<Resolved>> = Pool::new(1000, 10000);
-    pub(super) static ref LISTPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(1000, 10000);
+        Pool::new(100, 10_000);
+    pub(super) static ref RESOLVEDPOOL: Pool<Vec<Resolved>> = Pool::new(100, 10_000);
+    pub(super) static ref LISTPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(100, 10_000);
     pub(super) static ref PATHPOOL: Pool<Vec<Path>> = Pool::new(100, 100);
 }
 

@@ -47,17 +47,17 @@ type WriteR = VecDeque<(u64, FromWrite)>;
 
 lazy_static! {
     static ref PUBLISHERS_POOL: Pool<FxHashMap<PublisherId, Publisher>> =
-        Pool::new(1024, 1000);
-    static ref TO_READ_POOL: Pool<ReadB> = Pool::new(640, 150000);
-    static ref FROM_READ_POOL: Pool<ReadR> = Pool::new(640, 150000);
-    static ref TO_WRITE_POOL: Pool<WriteB> = Pool::new(640, 15000);
+        Pool::new(100, 1000);
+    static ref TO_READ_POOL: Pool<ReadB> = Pool::new(100, 10_000);
+    static ref FROM_READ_POOL: Pool<ReadR> = Pool::new(100, 10_000);
+    static ref TO_WRITE_POOL: Pool<WriteB> = Pool::new(100, 10_000);
     static ref REPLIES: Pool<Vec<Pooled<ReadR>>> = Pool::new(10, 1024);
-    static ref FROM_WRITE_POOL: Pool<WriteR> = Pool::new(640, 15000);
-    static ref COLS_HPOOL: Pool<HashMap<Path, Z64>> = Pool::new(32, 10000);
-    static ref PATH_HPOOL: Pool<HashSet<Path>> = Pool::new(32, 10000);
+    static ref FROM_WRITE_POOL: Pool<WriteR> = Pool::new(100, 10_000);
+    static ref COLS_HPOOL: Pool<HashMap<Path, Z64>> = Pool::new(32, 10_000);
+    static ref PATH_HPOOL: Pool<HashSet<Path>> = Pool::new(32, 10_000);
     static ref PATH_BPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(32, 1024);
-    static ref READ_SHARD_BATCH: Pool<Vec<Pooled<ReadB>>> = Pool::new(1000, 1024);
-    static ref WRITE_SHARD_BATCH: Pool<Vec<Pooled<WriteB>>> = Pool::new(1000, 1024);
+    static ref READ_SHARD_BATCH: Pool<Vec<Pooled<ReadB>>> = Pool::new(100, 1024);
+    static ref WRITE_SHARD_BATCH: Pool<Vec<Pooled<WriteB>>> = Pool::new(100, 1024);
 }
 
 struct ReadRequest {
