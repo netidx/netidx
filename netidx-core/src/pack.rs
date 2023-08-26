@@ -73,7 +73,7 @@ impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        let mut t = take_t::<T>(10000, 10000);
+        let mut t = take_t::<T>(1000, 1000);
         <T as Pack>::decode_into(&mut *t, buf)?;
         Ok(t)
     }

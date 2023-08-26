@@ -1,3 +1,13 @@
+* 0.24.1 
+
+- prune over large recorder pools after experiance in production
+
+* 0.24.0
+
+- rpc client constructor is no longer async
+
+- implement a configurable subscription timeout in the rpc client
+
 * 0.22.24
 
 - don't spam the keychain with requests for cert passwords we've
