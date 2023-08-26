@@ -81,6 +81,7 @@ x509-parser = "0.15"
 zstd = { version = "0.12.3", features = ["zstdmt"] }
 
 [workspace]
+resolver = "2"
 members = [
     "netidx-core",
     "netidx-netproto",
