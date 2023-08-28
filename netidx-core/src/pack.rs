@@ -373,7 +373,7 @@ pub fn i64_uzz(n: u64) -> i64 {
     ((n >> 1) as i64) ^ (((n as i64) << 63) >> 63)
 }
 
-pub fn decode_varint_(buf: &mut impl Buf) -> Result<u64, PackError> {
+pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
     let bytes = buf.chunk();
     let mut value = 0;
     for i in 0..10 {
@@ -390,6 +390,8 @@ pub fn decode_varint_(buf: &mut impl Buf) -> Result<u64, PackError> {
     buf.advance(10);
     Err(PackError::InvalidFormat)
 }
+
+/* simd experiment
 
 fn first_byte_lte_7f(x: u64) -> Option<usize> {
     const MSB_MASK: u64 = 0x8080808080808080;
@@ -490,6 +492,7 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
 	decode_varint_(buf)
     }
 }
+*/
 
 pub fn len_wrapped_len(len: usize) -> usize {
     let vlen = varint_len((len + varint_len(len as u64)) as u64);
