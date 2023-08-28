@@ -15,7 +15,7 @@ use netidx_protocols::{call_rpc, rpc::client::Proc};
 use std::{collections::VecDeque, sync::Arc};
 
 lazy_static! {
-    pub(crate) static ref PATHMAPS: Pool<FxHashMap<Id, Path>> = Pool::new(100, 100_000);
+    pub(crate) static ref PATHMAPS: Pool<FxHashMap<Id, Path>> = Pool::new(100, 10_000);
     pub(crate) static ref SHARDS: Pool<Vec<OneshotReplyShard>> = Pool::new(100, 128);
 }
 

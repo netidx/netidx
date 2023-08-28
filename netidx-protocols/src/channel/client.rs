@@ -13,7 +13,7 @@ use std::{
 use tokio::{sync::Mutex, time};
 
 lazy_static! {
-    static ref BATCHES: Pool<Vec<Value>> = Pool::new(1000, 100_000);
+    static ref BATCHES: Pool<Vec<Value>> = Pool::new(100, 10_000);
 }
 
 struct Receiver {

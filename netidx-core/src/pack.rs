@@ -73,7 +73,7 @@ impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        let mut t = take_t::<T>(10000, 10000);
+        let mut t = take_t::<T>(1000, 1000);
         <T as Pack>::decode_into(&mut *t, buf)?;
         Ok(t)
     }
@@ -390,6 +390,109 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
     buf.advance(10);
     Err(PackError::InvalidFormat)
 }
+
+/* simd experiment
+
+fn first_byte_lte_7f(x: u64) -> Option<usize> {
+    const MSB_MASK: u64 = 0x8080808080808080;
+    let r = (x & MSB_MASK) ^ MSB_MASK;
+    if r != 0 {
+        Some((r.leading_zeros() >> 3) as usize)
+    } else {
+        None
+    }
+}
+
+unsafe fn decode_varint2(bytes: &[u8]) -> u64 {
+    ((bytes.get_unchecked(0) & 0x7F) as u64)
+        | ((bytes.get_unchecked(1) & 0x7F) as u64) << 7
+}
+
+unsafe fn decode_varint3(bytes: &[u8]) -> u64 {
+    decode_varint2(bytes) | ((bytes.get_unchecked(2) & 0x7F) as u64) << 14
+}
+
+unsafe fn decode_varint4(bytes: &[u8]) -> u64 {
+    decode_varint3(bytes) | ((bytes.get_unchecked(3) & 0x7F) as u64) << 21
+}
+
+unsafe fn decode_varint5(bytes: &[u8]) -> u64 {
+    decode_varint4(bytes) | ((bytes.get_unchecked(4) & 0x7F) as u64) << 28
+}
+
+unsafe fn decode_varint6(bytes: &[u8]) -> u64 {
+    decode_varint5(bytes) | ((bytes.get_unchecked(5) & 0x7F) as u64) << 35
+}
+
+unsafe fn decode_varint7(bytes: &[u8]) -> u64 {
+    decode_varint6(bytes) | ((bytes.get_unchecked(6) & 0x7F) as u64) << 42
+}
+
+unsafe fn decode_varint8(bytes: &[u8]) -> u64 {
+    decode_varint7(bytes) | ((bytes.get_unchecked(7) & 0x7F) as u64) << 49
+}
+
+unsafe fn decode_varint9(bytes: &[u8]) -> u64 {
+    decode_varint8(bytes) | ((bytes.get_unchecked(8) & 0x7F) as u64) << 56
+}
+
+unsafe fn decode_varint10(bytes: &[u8]) -> u64 {
+    decode_varint9(bytes) | ((bytes.get_unchecked(9) & 0x7F) as u64) << 63
+}
+
+unsafe fn decode_varint_word(buf: &mut impl Buf) -> Result<u64, PackError> {
+    use std::hint::unreachable_unchecked;
+    let bytes = buf.chunk();
+    let word = {
+	let mut buf = bytes;
+	buf.get_u64()
+    };
+    match first_byte_lte_7f(word) {
+        Some(i) => {
+            let res = match i {
+                0 => *bytes.get_unchecked(0) as u64,
+                1 => decode_varint2(bytes),
+                2 => decode_varint3(bytes),
+                3 => decode_varint4(bytes),
+                4 => decode_varint5(bytes),
+                5 => decode_varint6(bytes),
+                6 => decode_varint7(bytes),
+                7 => decode_varint8(bytes),
+                _ => unreachable_unchecked(),
+            };
+	    buf.advance(i + 1);
+            return Ok(res);
+        }
+        None => {
+            for i in 8..10 {
+                if i >= bytes.len() {
+                    return Err(PackError::BufferShort);
+                }
+                if *bytes.get_unchecked(i) <= 0x7F {
+                    let res = match i {
+                        8 => decode_varint9(bytes),
+                        9 => decode_varint10(bytes),
+                        _ => unreachable_unchecked(),
+                    };
+		    buf.advance(i + 1);
+                    return Ok(res);
+                }
+            }
+        }
+    }
+    buf.advance(10);
+    Err(PackError::InvalidFormat)
+}
+
+pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, PackError> {
+    if buf.chunk().len() >= 8 {
+        let res = unsafe { decode_varint_word(buf) };
+        res
+    } else {
+	decode_varint_(buf)
+    }
+}
+*/
 
 pub fn len_wrapped_len(len: usize) -> usize {
     let vlen = varint_len((len + varint_len(len as u64)) as u64);
@@ -747,9 +850,7 @@ impl Pack for i8 {
 
 impl<T: Pack, const S: usize> Pack for [T; S] {
     fn encoded_len(&self) -> usize {
-        self.iter().fold(varint_len(S as u64), |len, t| {
-            len + <T as Pack>::encoded_len(t)
-        })
+        self.iter().fold(varint_len(S as u64), |len, t| len + <T as Pack>::encoded_len(t))
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
@@ -761,22 +862,26 @@ impl<T: Pack, const S: usize> Pack for [T; S] {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-	use std::{panic::{self, AssertUnwindSafe}, array};
+        use std::{
+            array,
+            panic::{self, AssertUnwindSafe},
+        };
         let elts = decode_varint(buf)? as usize;
         if elts != S {
             return Err(PackError::InvalidFormat);
         }
-	// CR estokes: once try_from_fn is stable replace this
-	panic::catch_unwind(AssertUnwindSafe(|| {
-	    array::from_fn(|_| <T as Pack>::decode(buf).unwrap())
-	})).map_err(|_| PackError::InvalidFormat)
+        // CR estokes: once try_from_fn is stable replace this
+        panic::catch_unwind(AssertUnwindSafe(|| {
+            array::from_fn(|_| <T as Pack>::decode(buf).unwrap())
+        }))
+        .map_err(|_| PackError::InvalidFormat)
     }
 
     fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
         let elts = decode_varint(buf)? as usize;
-	if elts != S {
-	    return Err(PackError::InvalidFormat)
-	}
+        if elts != S {
+            return Err(PackError::InvalidFormat);
+        }
         for i in 0..S {
             self[i] = <T as Pack>::decode(buf)?;
         }

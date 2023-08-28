@@ -16,7 +16,7 @@ use netidx::{
 };
 use netidx_core::atomic_id;
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::broadcast, task::JoinSet};
 
@@ -612,8 +612,10 @@ impl Recorder {
             let id = shards.by_name[&name];
             let pathindex_writer = writers.remove(&id).unwrap();
             let record_config = Arc::new(cfg.clone());
-            let subscriber =
-		Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
+            let subscriber = Subscriber::new(
+                config.netidx_config.clone(),
+                config.desired_auth.clone(),
+            )?;
             let config = config.clone();
             let shards = shards.clone();
             self.wait.spawn(async move {

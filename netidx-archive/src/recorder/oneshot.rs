@@ -56,7 +56,7 @@ pub(crate) struct OneshotConfig {
 atomic_id!(Oid);
 
 lazy_static! {
-    pub(crate) static ref FILTER: Pool<FxHashSet<Id>> = Pool::new(1000, 10000);
+    pub(crate) static ref FILTER: Pool<FxHashSet<Id>> = Pool::new(100, 10000);
 }
 
 #[derive(Debug, Pack)]

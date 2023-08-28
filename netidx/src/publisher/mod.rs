@@ -297,10 +297,10 @@ lazy_static! {
     static ref TOPUB: Pool<HashMap<Path, Option<u32>>> = Pool::new(10, 10_000);
     static ref TOUPUB: Pool<HashSet<Path>> = Pool::new(5, 10_000);
     static ref TOUSUB: Pool<HashMap<Id, Subscribed>> = Pool::new(5, 10_000);
-    static ref RAWBATCH: Pool<Vec<BatchMsg>> = Pool::new(100, 100_000);
-    static ref UPDATES: Pool<Vec<publisher::From>> = Pool::new(100, 100_000);
-    static ref RAWUNSUBS: Pool<Vec<(ClId, Id)>> = Pool::new(100, 100_000);
-    static ref UNSUBS: Pool<Vec<Id>> = Pool::new(100, 100_000);
+    static ref RAWBATCH: Pool<Vec<BatchMsg>> = Pool::new(100, 10_000);
+    static ref UPDATES: Pool<Vec<publisher::From>> = Pool::new(100, 10_000);
+    static ref RAWUNSUBS: Pool<Vec<(ClId, Id)>> = Pool::new(100, 10_000);
+    static ref UNSUBS: Pool<Vec<Id>> = Pool::new(100, 10_000);
     static ref BATCH: Pool<FxHashMap<ClId, Update>> = Pool::new(100, 1000);
 
     // estokes 2021: This is reasonable because there will never be

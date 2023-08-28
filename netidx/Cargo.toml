@@ -1,6 +1,6 @@
 [package]
 name = "netidx"
-version = "0.24.0"
+version = "0.24.2"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -17,40 +17,40 @@ default = []
 krb5_iov = ["cross-krb5/iov"]
 
 [dependencies]
-netidx-core = { version = "0.22.0", path = "../netidx-core" }
-netidx-netproto = { version = "0.22.0", path = "../netidx-netproto" }
-cross-krb5 = { version = "0.3", default_features = false }
-indexmap = "2"
-log = "0.4"
-anyhow = "1"
-fxhash = "0.2"
-futures = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "fs", "sync", "process"] }
-immutable-chunkmap = "1"
-serde = { version = "1", features = ["rc"] }
-serde_derive = "1"
-serde_json = "1"
-rand = "0.8"
-lazy_static = "1"
-bytes = { version = "1", features = ["serde"] }
-byteorder = "1"
-crossbeam = "0.8"
-parking_lot = "0.12"
-bitflags = "2"
-if-addrs = "0.10"
-dirs = "5"
-num_cpus = "1"
-triomphe = "0.1"
-arcstr = { version = "1", features = ["serde"] }
-rustls-pemfile = "1"
-rustls = "0.21"
-tokio-rustls = "0.24"
-webpki = "0.22"
-x509-parser = "0.15"
-pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
-keyring = "2"
-smallvec = { version = "1", features = ["const_generics", "union"] }
-chrono = "0.4.24"
+netidx-core = { version = "0.24.1", path = "../netidx-core" }
+netidx-netproto = { version = "0.24.1", path = "../netidx-netproto" }
+tokio = { workspace = true }
+cross-krb5 = { workspace = true }
+indexmap = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }
+fxhash = { workspace = true }
+futures = { workspace = true }
+immutable-chunkmap = { workspace = true }
+serde = { workspace = true }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+lazy_static = { workspace = true }
+bytes = { workspace = true }
+byteorder = { workspace = true }
+crossbeam = { workspace = true }
+parking_lot = { workspace = true }
+bitflags = { workspace = true }
+if-addrs = { workspace = true }
+dirs = { workspace = true }
+num_cpus = { workspace = true }
+triomphe = { workspace = true }
+arcstr = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+webpki = { workspace = true }
+x509-parser = { workspace = true }
+pkcs8 = { workspace = true }
+keyring = { workspace = true }
+smallvec = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 env_logger = "0.10"

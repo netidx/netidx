@@ -32,12 +32,12 @@ use std::{
 };
 
 lazy_static! {
-    static ref SIGNED_PUBS_POOL: Pool<Vec<PublisherRef>> = Pool::new(256, 100);
+    static ref SIGNED_PUBS_POOL: Pool<Vec<PublisherRef>> = Pool::new(100, 100);
     static ref BY_ID_POOL: Pool<FxHashMap<PublisherId, PublisherRef>> =
-        Pool::new(256, 100);
-    pub(super) static ref PATH_POOL: Pool<Vec<Path>> = Pool::new(256, 10000);
-    pub(super) static ref COLS_POOL: Pool<Vec<(Path, Z64)>> = Pool::new(256, 10000);
-    pub(super) static ref REF_POOL: Pool<Vec<Referral>> = Pool::new(256, 100);
+        Pool::new(100, 100);
+    pub(super) static ref PATH_POOL: Pool<Vec<Path>> = Pool::new(100, 10_000);
+    pub(super) static ref COLS_POOL: Pool<Vec<(Path, Z64)>> = Pool::new(100, 10_000);
+    pub(super) static ref REF_POOL: Pool<Vec<Referral>> = Pool::new(100, 100);
 }
 
 type Set<T> = ISet<T, 8>;

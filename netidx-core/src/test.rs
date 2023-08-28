@@ -1,4 +1,5 @@
 use crate::pack::{self, Pack};
+use bytes::Buf;
 use chrono::prelude::*;
 use rand::{thread_rng, Rng};
 
@@ -12,10 +13,40 @@ fn test_naive_date_pack() {
     }
 }
 
+fn check_encode_decode_short(buf: &mut [u8; 7], d: u64) {
+    let mut b = &mut buf[..];
+    pack::encode_varint(d, &mut b);
+    let mut b = &buf[..];
+    let u = pack::decode_varint(&mut b).unwrap();
+    assert_eq!(7 - pack::varint_len(d), b.remaining());
+    if d != u {
+        panic!("{:?} {:x} != {:x}", buf, d, u)
+    }
+}
+
 fn check_encode_decode(buf: &mut [u8; 16], d: u64) {
-    pack::encode_varint(d, &mut &mut buf[..]);
-    let u = pack::decode_varint(&mut &buf[..]).unwrap();
-    assert_eq!(d, u)
+    let mut b = &mut buf[..];
+    pack::encode_varint(d, &mut b);
+    let mut b = &buf[..];
+    let u = pack::decode_varint(&mut b).unwrap();
+    assert_eq!(16 - pack::varint_len(d), b.remaining());
+    if d != u {
+        panic!("{:?} {:x} != {:x}", buf, d, u)
+    }
+}
+
+#[test]
+fn test_varint_pack_sp() {
+    let mut buf = [0u8; 16];
+    check_encode_decode(&mut buf, 256)
+}
+
+#[test]
+fn test_varint_pack_short() {
+    let mut buf = [0u8; 7];
+    for d in 0..u32::MAX as u64 {
+        check_encode_decode_short(&mut buf, d)
+    }
 }
 
 #[test]

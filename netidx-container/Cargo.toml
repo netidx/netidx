@@ -1,6 +1,6 @@
 [package]
 name = "netidx-container"
-version = "0.24.0"
+version = "0.24.2"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -17,26 +17,26 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-anyhow = "1"
-base64 = "0.21"
-bytes = "1"
-chrono = { version = "^0.4.23" }
-futures = "0.3"
-fxhash = "0.2"
-log = "0.4"
-netidx-core = { path = "../netidx-core", version = "0.22.0" }
+netidx-core = { path = "../netidx-core", version = "0.24.1" }
 netidx = { path = "../netidx", version = "0.24.0", default_features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.24.0", default_features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "0.24.0", default_features = false }
-parking_lot = "0.12"
-serde = "1"
-serde_derive = "1"
-serde_json = "1"
-sled = { version = "0.34" }
-structopt = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "fs"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-lazy_static = "1"
-arcstr = { version = "1", features = ["serde"] }
-rayon = "1"
-dirs = "5"
+tokio = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+fxhash = { workspace = true }
+log = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
+sled = { workspace = true }
+structopt = { workspace = true }
+uuid = { workspace = true }
+lazy_static = { workspace = true }
+arcstr = { workspace = true }
+rayon = { workspace = true }
+dirs = { workspace = true }

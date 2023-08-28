@@ -190,7 +190,7 @@ fn pool_shark() {
 /// a lock-free, thread-safe, dynamically-sized object pool.
 ///
 /// this pool begins with an initial capacity and will continue
-/// creating new objects on request when none are available.  pooled
+/// creating new objects on request when none are available. Pooled
 /// objects are returned to the pool on destruction.
 ///
 /// if, during an attempted return, a pool already has
@@ -212,8 +212,8 @@ impl<T: Poolable + Send + 'static> Drop for Pool<T> {
 impl<T: Poolable + Send + 'static> Prune for Pool<T> {
     fn prune(&self) {
         let len = self.0.pool.len();
-        let ten_percent = self.0.pool.capacity() / 10;
-        let one_percent = ten_percent / 10;
+        let ten_percent = std::cmp::max(1, self.0.pool.capacity() / 10);
+        let one_percent = std::cmp::max(1, ten_percent / 10);
         if len > ten_percent {
             for _ in 0..ten_percent {
                 self.0.pool.pop();
@@ -387,7 +387,7 @@ impl<'de, T: Poolable + Send + 'static + DeserializeOwned> Deserialize<'de>
     where
         D: serde::Deserializer<'de>,
     {
-        let mut t = take_t::<T>(10000, 10000);
+        let mut t = take_t::<T>(1000, 1000);
         Self::deserialize_in_place(deserializer, &mut t)?;
         Ok(t)
     }

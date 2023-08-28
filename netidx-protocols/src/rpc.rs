@@ -99,7 +99,7 @@ pub mod server {
     }
 
     lazy_static! {
-        static ref ARGS: Pool<HashMap<ArcStr, Value>> = Pool::new(10000, 50);
+        static ref ARGS: Pool<HashMap<ArcStr, Value>> = Pool::new(1000, 50);
     }
 
     pub struct RpcReply(Option<SendResult>);

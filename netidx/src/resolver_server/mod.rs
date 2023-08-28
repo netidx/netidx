@@ -50,8 +50,8 @@ use tokio::{
 };
 
 lazy_static! {
-    static ref WRITE_BATCHES: Pool<Vec<ToWrite>> = Pool::new(5000, 100000);
-    static ref READ_BATCHES: Pool<Vec<ToRead>> = Pool::new(5000, 100000);
+    static ref WRITE_BATCHES: Pool<Vec<ToWrite>> = Pool::new(100, 10_000);
+    static ref READ_BATCHES: Pool<Vec<ToRead>> = Pool::new(100, 10_000);
 }
 
 atomic_id!(CId);
