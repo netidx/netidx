@@ -35,27 +35,21 @@ lazy_static! {
 
 pub fn reopen(timestamp: DateTime<Utc>) -> Result<()> {
     let mut readers = ARCHIVE_READERS.lock();
-    error!("reopen request {}", timestamp);
     for (_, cached) in readers.iter_mut() {
         if cached.timestamp == timestamp {
-            error!("reopening {}", timestamp);
             cached.reader.reopen()?;
         }
     }
-    error!("---");
     Ok(())
 }
 
 pub fn remap_rescan(timestamp: DateTime<Utc>) -> Result<()> {
     let mut readers = ARCHIVE_READERS.lock();
-    error!("remap request {}", timestamp);
     for (_, cached) in readers.iter_mut() {
         if cached.timestamp == timestamp {
-            error!("remapping {}", timestamp);
             cached.reader.check_remap_rescan(true)?;
         }
     }
-    error!("---");
     Ok(())
 }
 
@@ -63,9 +57,6 @@ struct DataSource {
     file: File,
     archive: ArchiveReader,
 }
-
-// CR alee: TODO close readers which are not in use, which automatically
-// maybe CACHE_FOR already does this well enough
 
 impl DataSource {
     fn get_file_from_external(

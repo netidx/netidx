@@ -570,8 +570,6 @@ impl Recorder {
                 let subscriber = subscriber.clone();
                 let config = config.clone();
                 let publisher = publisher.clone();
-                // CR alee: TODO need an additional broadcaster to send
-                // messages as a result of remap(None)
                 async move {
                     let r = publish::run(
                         shards,
