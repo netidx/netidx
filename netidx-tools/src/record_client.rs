@@ -214,7 +214,7 @@ async fn index(file: PathBuf, keep: bool) -> Result<()> {
 
 fn dump(file: PathBuf, metadata: bool, check_index: bool) -> Result<()> {
     let reader = ArchiveReader::open(file)?;
-    reader.check_remap_rescan()?;
+    reader.check_remap_rescan(false)?;
     if !metadata {
         println!("---------------- pathmap --------------------");
         for (id, path) in reader.index().iter_pathmap() {

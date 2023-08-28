@@ -797,7 +797,7 @@ impl ArchiveWriter {
             }
             let mut time_basis = DateTime::<Utc>::MIN_UTC;
             let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
-            file.try_lock_exclusive()?;
+            // file.try_lock_exclusive()?;
             let block_size = allocation_granularity(path)? as usize;
             let mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut t = ArchiveWriter {
@@ -839,7 +839,7 @@ impl ArchiveWriter {
                 .write(true)
                 .create(true)
                 .open(path.as_ref())?;
-            file.try_lock_exclusive()?;
+            // file.try_lock_exclusive()?;
             let block_size = allocation_granularity(path.as_ref())? as usize;
             let fh_len = <FileHeader as Pack>::const_encoded_len().unwrap();
             let rh_len = <RecordHeader as Pack>::const_encoded_len().unwrap();
@@ -909,9 +909,11 @@ impl ArchiveWriter {
     /// if everything is already committed.
     pub fn flush(&mut self) -> Result<()> {
         let end = self.end.load(Ordering::Relaxed);
+        error!("committed={} end={}", self.committed, end);
         if self.committed < end {
             self.mmap.flush()?;
             let mut buf = &mut self.mmap[COMMITTED_OFFSET..];
+            error!("putting");
             buf.put_u64(end as u64);
             self.committed = end;
         }
@@ -1244,6 +1246,10 @@ impl ArchiveReader {
         let file =
             OpenOptions::new().read(true).open(path.as_ref()).context("open file")?;
         file.try_lock_shared()?;
+        Self::open_with(Arc::new(file))
+    }
+
+    fn open_with(file: Arc<File>) -> Result<Self> {
         let mmap = unsafe { Mmap::map(&file).context("mmap file")? };
         let mut index = ArchiveIndex::new();
         let mut max_id = 0;
@@ -1260,7 +1266,7 @@ impl ArchiveReader {
             &mut max_id,
             &mut &*mmap,
         )
-        .context("scan file")?;
+            .context("scan file")?;
         index.end = end;
         let compressed = compressed
             .map(|dict| {
@@ -1273,7 +1279,7 @@ impl ArchiveReader {
             index: Arc::new(RwLock::new(index)),
             indexed,
             compressed,
-            file: Arc::new(file),
+            file,
             end: Arc::new(AtomicUsize::new(end)),
             mmap: Arc::new(RwLock::new(mmap)),
         })
@@ -1307,21 +1313,34 @@ impl ArchiveReader {
         self.index.read().imagemap.len()
     }
 
+    /// Only use this if `ArchiveReader` was opened alone and not from
+    /// an `ArchiveWriter`.
+    pub fn reopen(&mut self) -> Result<()> {
+        let t = Self::open_with(self.file.clone())?;
+        *self = t;
+        Ok(())
+    }
+
     /// Check if the memory map needs to be remapped due to growth,
     /// and check if additional records exist that need to be
     /// indexed. This method is only relevant if this `ArchiveReader`
     /// was created from an `ArchiveWriter`, this method is called
     /// automatically by `read_deltas` and `build_image`.
-    pub fn check_remap_rescan(&self) -> Result<()> {
+    pub fn check_remap_rescan(&self, force: bool) -> Result<()> {
         let end = self.end.load(Ordering::Relaxed);
         let mmap = self.mmap.upgradable_read();
-        let mmap = if end > mmap.len() {
+        let mmap = if end > mmap.len() || force {
             let mut mmap = RwLockUpgradableReadGuard::upgrade(mmap);
             drop(mem::replace(&mut *mmap, unsafe { Mmap::map(&*self.file)? }));
             RwLockWriteGuard::downgrade_to_upgradable(mmap)
         } else {
             mmap
         };
+        if force {
+            // rescan header to find end
+            let header = scan_header(&mut &mmap[..])?;
+            self.end.store(header.committed as usize, Ordering::Relaxed);
+        }
         let index = self.index.upgradable_read();
         if index.end < end {
             let mut index = RwLockUpgradableReadGuard::upgrade(index);
@@ -1504,7 +1523,7 @@ impl ArchiveReader {
         filter: Option<&FxHashSet<Id>>,
         cursor: &Cursor,
     ) -> Result<Pooled<FxHashMap<Id, Event>>> {
-        self.check_remap_rescan()?;
+        self.check_remap_rescan(false)?;
         let pos = match cursor.current {
             None => cursor.start,
             Some(pos) => Bound::Included(pos),
@@ -1600,7 +1619,7 @@ impl ArchiveReader {
         cursor: &mut Cursor,
         n: usize,
     ) -> Result<(usize, Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>)> {
-        self.check_remap_rescan()?;
+        self.check_remap_rescan(false)?;
         let mut res = CURSOR_BATCH_POOL.take();
         let start = match cursor.current {
             None => cursor.start,
@@ -1643,7 +1662,7 @@ impl ArchiveReader {
         filter: Option<&FxHashSet<Id>>,
         cursor: &Cursor,
     ) -> Result<Option<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
-        self.check_remap_rescan()?;
+        self.check_remap_rescan(false)?;
         let start = match cursor.current {
             None => cursor.start,
             Some(dt) => Bound::Excluded(dt),
@@ -1705,7 +1724,7 @@ impl ArchiveReader {
         if self.indexed {
             bail!("file is already indexed")
         }
-        self.check_remap_rescan()?;
+        self.check_remap_rescan(false)?;
         let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> = BTreeMap::new();
         let index = self.index.read();
         for (ts, pos) in index.deltamap.iter() {
@@ -1781,7 +1800,7 @@ impl ArchiveReader {
         if self.compressed.is_some() {
             bail!("archive is already compressed")
         }
-        self.check_remap_rescan()?;
+        self.check_remap_rescan(false)?;
         let (max_len, dict) = self.train()?;
         let pdict = Box::leak(Box::new(zstd::dict::EncoderDictionary::copy(&dict, 19)));
         let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> = BTreeMap::new();

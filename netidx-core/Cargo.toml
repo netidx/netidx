@@ -30,6 +30,7 @@ parking_lot = "0.12.1"
 pin-utils = "0.1"
 rand = "0.8.5"
 rust_decimal = { version = "1",  features = ["serde-with-float", "serde-with-str", "serde-with-arbitrary-precision"] }
+schemars = { version = "1.0.0", package = "architect-schemars", features = ["chrono", "bytes", "smallvec", "uuid1", "enumflags2", "rust_decimal"] }
 serde_derive = "1"
 serde = { version = "1.0", features = ["rc"] }
 sha3 = "0.10"

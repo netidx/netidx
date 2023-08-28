@@ -704,7 +704,7 @@ impl Drop for DefaultHandle {
 }
 
 #[derive(Debug, Clone)]
-enum BatchMsg {
+pub enum BatchMsg {
     UpdateChanged(Id, Value),
     Update(Option<ClId>, Id, Value),
 }
@@ -721,6 +721,10 @@ impl UpdateBatch {
     /// return the number of queued updates in the batch
     pub fn len(&self) -> usize {
         self.updates.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &BatchMsg> {
+        self.updates.iter()
     }
 
     /// merge all the updates from `other` into `self` assuming they

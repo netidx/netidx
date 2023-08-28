@@ -266,6 +266,35 @@ impl NewSessionConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+enum ExternalControl {
+    Reindex,
+    RemapRescan(Option<DateTime<Utc>>),
+    Reopen(Option<DateTime<Utc>>)
+}
+
+impl ExternalControl {
+    fn reindex(req: RpcCall) -> Option<(ExternalControl, RpcReply)> {
+        Some((ExternalControl::Reindex, req.reply))
+    }
+
+    fn remap_rescan(mut req: RpcCall, ts: Value) -> Option<(ExternalControl, RpcReply)> {
+        match ts {
+            Value::DateTime(ts) => Some((ExternalControl::RemapRescan(Some(ts)), req.reply)),
+            Value::Null => Some((ExternalControl::RemapRescan(None), req.reply)),
+            _ => rpc_err!(req.reply, "invalid timestamp"),
+        }
+    }
+
+    fn reopen(mut req: RpcCall, ts: Value) -> Option<(ExternalControl, RpcReply)> {
+        match ts {
+            Value::DateTime(ts) => Some((ExternalControl::Reopen(Some(ts)), req.reply)),
+            Value::Null => Some((ExternalControl::Reopen(None), req.reply)),
+            _ => rpc_err!(req.reply, "invalid timestamp"),
+        }
+    }
+}
+
 struct SessionShard {
     shards: Arc<Shards>,
     id: ShardId,
@@ -298,8 +327,8 @@ impl SessionShard {
         filter: GlobSet,
     ) -> Result<Self> {
         task::block_in_place(|| {
-            pathindex.check_remap_rescan()?;
-            head.as_ref().map(|a| a.check_remap_rescan()).transpose()?;
+            pathindex.check_remap_rescan(false)?;
+            head.as_ref().map(|a| a.check_remap_rescan(false)).transpose()?;
             Ok::<_, anyhow::Error>(())
         })?;
         let mut filterset = FILTER.take();
@@ -427,7 +456,7 @@ impl SessionShard {
         } else {
             let mut pbatch = self.publisher.start_batch();
             task::block_in_place(|| {
-                self.pathindex.check_remap_rescan()?;
+                self.pathindex.check_remap_rescan(false)?;
                 let index = self.pathindex.index();
                 for BatchItem(id, ev) in batch.1.drain(..) {
                     let v = match ev {
@@ -486,6 +515,18 @@ impl SessionShard {
                 State::Tail => {
                     let cursor = self.log.position();
                     if cursor.contains(&ts) {
+                        let mut batch = (*batch).clone();
+                        self.process_batch((ts, &mut batch)).await?;
+                        let cursor = self.log.position_mut();
+                        cursor.set_current(ts);
+                    }
+                    Ok(())
+                }
+            },
+            Ok(BCastMsg::TailInvalidated) => match self.state.load() {
+                State::Play | State::Pause => Ok(()),
+                State::Tail => {
+                    while let Some((ts, batch)) = self.log.read_next(Some(&self.filterset))? {
                         let mut batch = (*batch).clone();
                         self.process_batch((ts, &mut batch)).await?;
                         let cursor = self.log.position_mut();
@@ -592,7 +633,7 @@ impl SessionShard {
                     },
                 },
             )));
-            self.pathindex.check_remap_rescan()?;
+            self.pathindex.check_remap_rescan(false)?;
             let index = self.pathindex.index();
             for (id, path) in index.iter_pathmap() {
                 let v = match idx.remove(id) {
@@ -673,7 +714,8 @@ impl SessionShard {
                 match m {
                     Err(e) => break Err(e),
                     Ok(m) => match m {
-                        BCastMsg::Batch(_, _) => match state.load() {
+                        BCastMsg::Batch(_, _)
+                        | BCastMsg::TailInvalidated => match state.load() {
                             State::Pause | State::Play => (),
                             State::Tail => break Ok(m),
                         },
@@ -684,7 +726,7 @@ impl SessionShard {
         }
         let (events_tx, mut events_rx) = mpsc::unbounded();
         self.publisher.events(events_tx);
-        task::block_in_place(|| self.pathindex.check_remap_rescan())?;
+        task::block_in_place(|| self.pathindex.check_remap_rescan(false))?;
         let mut batch = self.publisher.start_batch();
         debug!("seeking to the end");
         self.seek(&mut batch, Seek::End)?;
@@ -1157,6 +1199,38 @@ pub(super) async fn run(
     )
     .await?;
     let mut control_rx = control_rx.fuse();
+    let (ecm_tx, ecm_rx) = mpsc::channel(10);
+    let _reindex = Proc::new(
+        &publisher,
+        publish_config.base.append("reindex"),
+        "external control, reindex archive file".into(),
+        [] as [ArgSpec; 0],
+        ExternalControl::reindex,
+        Some(ecm_tx.clone()),
+    )?;
+    let _remap_rescan: Proc = define_rpc!(
+        &publisher,
+        publish_config.base.append("remap-rescan"),
+        "external control, remap/rescan archive file",
+        ExternalControl::remap_rescan,
+        Some(ecm_tx.clone()),
+        ts: Value = Value::Null; "timestamp of historical file to remap/rescan, null for head"
+    )?;
+    let _reopen: Proc = define_rpc!(
+        &publisher,
+        publish_config.base.append("reopen"),
+        "external control, reopen archive file",
+        ExternalControl::reopen,
+        Some(ecm_tx.clone()),
+        ts: Value = Value::Null; "timestamp of historical file to reopen, null for head"
+    )?;
+    let mut ecm_rx = ecm_rx.fuse();
+    let ecm_reply = |res: Result<()>, mut reply: RpcReply| {
+        match res {
+            Ok(()) => reply.send(Value::Ok),
+            Err(e) => reply.send(Value::Error(e.to_string().into())),
+        }
+    };
     let mut poll_members = time::interval(std::time::Duration::from_secs(30));
     loop {
         select_biased! {
@@ -1164,6 +1238,15 @@ pub(super) async fn run(
                 if let Err(e) = cluster.poll_members().await {
                     warn!("failed to poll cluster members, will retry {}", e)
                 }
+            },
+            m = ecm_rx.next() => match m {
+                None => break Ok(()),
+                Some((ExternalControl::Reindex, reply)) =>
+                    ecm_reply(shards.reindex(&config), reply),
+                Some((ExternalControl::RemapRescan(ts), reply)) =>
+                    ecm_reply(shards.remap_rescan(ts), reply),
+                Some((ExternalControl::Reopen(ts), reply)) =>
+                    ecm_reply(shards.reopen(ts), reply)
             },
             cmds = cluster.wait_cmds().fuse() => match cmds {
                 Err(e) => {

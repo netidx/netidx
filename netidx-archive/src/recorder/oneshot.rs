@@ -110,7 +110,7 @@ async fn do_oneshot(
     limit: usize,
     args: OneshotConfig,
 ) -> Result<OneshotReplyShard> {
-    pathindex.check_remap_rescan()?;
+    pathindex.check_remap_rescan(false)?;
     let mut filterset = FILTER.take();
     let mut pathmap = PATHMAPS.take();
     pathmap.extend(pathindex.index().iter_pathmap().filter_map(|(id, path)| {

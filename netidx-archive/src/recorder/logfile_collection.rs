@@ -21,16 +21,51 @@ use std::{
 };
 use tokio::task;
 
+struct Cached {
+    timestamp: DateTime<Utc>,
+    last_used: DateTime<Utc>,
+    reader: ArchiveReader
+}
+
 lazy_static! {
-    static ref ARCHIVE_READERS: Mutex<FxHashMap<PathBuf, (DateTime<Utc>, ArchiveReader)>> =
+    static ref ARCHIVE_READERS: Mutex<FxHashMap<PathBuf, Cached>> =
         Mutex::new(HashMap::default());
     static ref CACHE_FOR: chrono::Duration = chrono::Duration::minutes(10);
+}
+
+pub fn reopen(timestamp: DateTime<Utc>) -> Result<()> {
+    let mut readers = ARCHIVE_READERS.lock();
+    error!("reopen request {}", timestamp);
+    for (_, cached) in readers.iter_mut() {
+        if cached.timestamp == timestamp {
+            error!("reopening {}", timestamp);
+            cached.reader.reopen()?;
+        }
+    }
+    error!("---");
+    Ok(())
+}
+
+pub fn remap_rescan(timestamp: DateTime<Utc>) -> Result<()> {
+    let mut readers = ARCHIVE_READERS.lock();
+    error!("remap request {}", timestamp);
+    for (_, cached) in readers.iter_mut() {
+        if cached.timestamp == timestamp {
+            error!("remapping {}", timestamp);
+            cached.reader.check_remap_rescan(true)?;
+        }
+    }
+    error!("---");
+    Ok(())
 }
 
 struct DataSource {
     file: File,
     archive: ArchiveReader,
 }
+
+// CR alee: TODO close readers which are not in use, which automatically
+// maybe CACHE_FOR already does this well enough
 
 impl DataSource {
     fn get_file_from_external(
@@ -96,15 +131,16 @@ impl DataSource {
                 debug!("opening log file {:?}", &path);
                 let mut readers = ARCHIVE_READERS.lock();
                 match readers.get_mut(&path) {
-                    Some((last_used, reader)) => {
+                    Some(cached) => {
                         debug!("log file was cached");
-                        *last_used = now;
-                        Ok(Some(Self { file, archive: reader.clone() }))
+                        cached.last_used = now;
+                        Ok(Some(Self { file, archive: cached.reader.clone() }))
                     }
                     None => {
                         debug!("log file was not cached, opening");
-                        readers.retain(|_, (last, r)| {
-                            r.strong_count() > 1 || now - *last < *CACHE_FOR
+                        readers.retain(|_, cached| {
+                            cached.reader.strong_count() > 1 ||
+                                now - cached.last_used < *CACHE_FOR
                         });
                         drop(readers); // release the lock
                         let rd = task::block_in_place(|| {
@@ -121,8 +157,15 @@ impl DataSource {
                             bail!("could not open log file")
                         })?;
                         let archive = match ARCHIVE_READERS.lock().entry(path) {
-                            Entry::Vacant(e) => e.insert((now, rd)).1.clone(),
-                            Entry::Occupied(e) => e.get().1.clone(),
+                            Entry::Vacant(e) => {
+                                e.insert(Cached {
+                                    timestamp: ts,
+                                    last_used: now,
+                                    reader: rd.clone()
+                                });
+                                rd
+                            },
+                            Entry::Occupied(e) => e.get().reader.clone(),
                         };
                         Ok(Some(Self { file, archive }))
                     }
@@ -148,7 +191,8 @@ impl Drop for LogfileCollection {
         let now = Utc::now();
         ARCHIVE_READERS
             .lock()
-            .retain(|_, (last, r)| r.strong_count() > 1 || now - *last < *CACHE_FOR);
+            .retain(|_, cached| cached.reader.strong_count() > 1
+                || now - cached.last_used < *CACHE_FOR);
     }
 }
 
