@@ -267,9 +267,12 @@ impl LogfileCollection {
                     let result = f(archive, &mut self.pos)?;
                     Ok::<_, anyhow::Error>((file, result))
                 })?;
+                error!("read file {:?} at pos {:?}", file, self.pos);
                 if s(&result) {
+                    error!("OK");
                     break Ok(result);
                 } else {
+                    error!("errrrr");
                     match file {
                         File::Head => break Ok(empty),
                         File::Historical(_) => {

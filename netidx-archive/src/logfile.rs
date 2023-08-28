@@ -909,12 +909,11 @@ impl ArchiveWriter {
     /// if everything is already committed.
     pub fn flush(&mut self) -> Result<()> {
         let end = self.end.load(Ordering::Relaxed);
-        error!("committed={} end={}", self.committed, end);
         if self.committed < end {
-            self.mmap.flush()?;
+            self.mmap.flush()?; // first stage commit
             let mut buf = &mut self.mmap[COMMITTED_OFFSET..];
-            error!("putting");
             buf.put_u64(end as u64);
+            self.mmap.flush()?; // second stage commit
             self.committed = end;
         }
         Ok(())
@@ -1628,6 +1627,7 @@ impl ArchiveReader {
         let mmap = self.mmap.read();
         let index = self.index.read();
         let mut current = cursor.current;
+        warn!("current is {:?}", current);
         let mut total = 0;
         let matched = Self::matching_idxs(
             self.indexed,
@@ -1647,6 +1647,7 @@ impl ArchiveReader {
                 pos as usize,
                 index.end,
             )?;
+            warn!("read {} items at {}", len, ts);
             current = Some(ts);
             total += len;
             res.push_back((ts, batch));
