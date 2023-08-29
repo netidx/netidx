@@ -523,18 +523,15 @@ impl SessionShard {
                     Ok(())
                 }
             },
-            Ok(BCastMsg::TailInvalidated) => match self.state.load() {
-                State::Play | State::Pause => Ok(()),
-                State::Tail => {
-                    while let Some((ts, batch)) = self.log.read_next(Some(&self.filterset))? {
-                        let mut batch = (*batch).clone();
-                        self.process_batch((ts, &mut batch)).await?;
-                        let cursor = self.log.position_mut();
-                        cursor.set_current(ts);
-                    }
-                    Ok(())
+            Ok(BCastMsg::TailInvalidated) => {
+                if self.state.load() == State::Tail {
+                    let _ = self.session_bcast.send(SessionBCastMsg::Update(
+                        SessionUpdate::State(State::Play),
+                    ));
+                    self.set_state(State::Play);
                 }
-            },
+                Ok(())
+            }
             Ok(BCastMsg::LogRotated(ts)) => {
                 let index = self.shards.indexes.read()[&self.id].clone();
                 self.log.log_rotated(ts, index);
