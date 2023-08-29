@@ -1662,7 +1662,6 @@ impl ArchiveReader {
         let mmap = self.mmap.read();
         let index = self.index.read();
         let mut current = cursor.current;
-        warn!("current is {:?}", current);
         let mut total = 0;
         let matched = Self::matching_idxs(
             self.indexed,
@@ -1682,7 +1681,6 @@ impl ArchiveReader {
                 pos as usize,
                 index.end,
             )?;
-            warn!("read {} items at {}", len, ts);
             current = Some(ts);
             total += len;
             res.push_back((ts, batch));
