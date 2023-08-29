@@ -1915,7 +1915,7 @@ mod test {
     use std::fs;
 
     fn check_contents(t: &ArchiveReader, paths: &[Path], batches: usize) {
-        t.check_remap_rescan().unwrap();
+        t.check_remap_rescan(false).unwrap();
         assert_eq!(t.delta_batches(), batches);
         let mut cursor = Cursor::new();
         let (_, mut batch) = t.read_deltas(None, &mut cursor, batches).unwrap();
