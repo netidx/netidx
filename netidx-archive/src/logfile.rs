@@ -764,6 +764,7 @@ pub struct ArchiveWriter {
     path_by_id: IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: HashMap<Path, Id>,
     file: Arc<File>,
+    _external_lock: Option<Arc<File>>,
     end: Arc<AtomicUsize>,
     committed: usize,
     next_id: u32,
@@ -786,18 +787,32 @@ impl ArchiveWriter {
         path: impl AsRef<FilePath>,
         indexed: bool,
         compress: Option<Vec<u8>>,
+        external_lock: Option<impl AsRef<FilePath>>
     ) -> Result<Self> {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
             warn!("archive file size is limited to 4 GiB on this platform")
         }
         let time = MonotonicTimestamper::new();
+        let external_lock = if let Some(path) = external_lock {
+            let lock = if FilePath::is_file(path.as_ref()) {
+                OpenOptions::new().read(true).write(true).open(path.as_ref())?
+            } else {
+                OpenOptions::new().read(true).write(true).create(true).open(path.as_ref())?
+            };
+            lock.try_lock_exclusive()?;
+            Some(Arc::new(lock))
+        } else {
+            None
+        };
         if FilePath::is_file(path.as_ref()) {
             if compress.is_some() {
                 bail!("can't write to an already compressed file")
             }
             let mut time_basis = DateTime::<Utc>::MIN_UTC;
             let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
-            // file.try_lock_exclusive()?;
+            if external_lock.is_none() {
+                file.try_lock_exclusive()?;
+            }
             let block_size = allocation_granularity(path)? as usize;
             let mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut t = ArchiveWriter {
@@ -805,6 +820,7 @@ impl ArchiveWriter {
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
                 file: Arc::new(file),
+                _external_lock: external_lock,
                 end: Arc::new(AtomicUsize::new(0)),
                 committed: 0,
                 next_id: 0,
@@ -839,7 +855,9 @@ impl ArchiveWriter {
                 .write(true)
                 .create(true)
                 .open(path.as_ref())?;
-            // file.try_lock_exclusive()?;
+            if external_lock.is_none() {
+                file.try_lock_exclusive()?;
+            }
             let block_size = allocation_granularity(path.as_ref())? as usize;
             let fh_len = <FileHeader as Pack>::const_encoded_len().unwrap();
             let rh_len = <RecordHeader as Pack>::const_encoded_len().unwrap();
@@ -865,6 +883,7 @@ impl ArchiveWriter {
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
                 file: Arc::new(file),
+                _external_lock: external_lock,
                 end: Arc::new(AtomicUsize::new(committed as usize)),
                 committed: committed as usize,
                 next_id: 0,
@@ -880,7 +899,23 @@ impl ArchiveWriter {
     /// Open the specified archive for read/write access, if the file
     /// does not exist then a new archive will be created.
     pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
-        Self::open_full(path, true, None)
+        Self::open_full(path, true, None, None::<&str>)
+    }
+
+    /// Open the specified archive with an external sentinel file
+    /// for excusive lock.  It is intended to be used so that an external
+    /// program can write to an archive while [netidx record] reads and
+    /// publishes them at the same time.
+    ///
+    /// THIS IS POTENTIALLY DANGEROUS!  The protection against more than
+    /// one writer, and therefore data corruption, is weaker than with
+    /// [open], since writers have to agree on the same external lock
+    /// filename.
+    pub fn open_external(
+        path: impl AsRef<FilePath>,
+        external_lock: impl AsRef<FilePath>
+    ) -> Result<Self> {
+        Self::open_full(path, true, None, Some(external_lock))
     }
 
     // remap the file reserving space for at least additional_capacity bytes
@@ -1734,7 +1769,7 @@ impl ArchiveReader {
         for (ts, pos) in index.imagemap.iter() {
             unified_index.insert(*ts, (true, *pos));
         }
-        let mut output = ArchiveWriter::open_full(dest, true, None)?;
+        let mut output = ArchiveWriter::open_full(dest, true, None, None::<&str>)?;
         let mut pms = PM_POOL.take();
         for (id, path) in index.path_by_id.iter() {
             pms.push(PathMapping(path.clone(), *id));
@@ -1812,7 +1847,7 @@ impl ArchiveReader {
         for (ts, pos) in index.imagemap.iter() {
             unified_index.insert(*ts, (true, *pos));
         }
-        let mut output = ArchiveWriter::open_full(dest, self.indexed, Some(dict))?;
+        let mut output = ArchiveWriter::open_full(dest, self.indexed, Some(dict), None::<&str>)?;
         let mut pms = PM_POOL.take();
         for (id, path) in index.path_by_id.iter() {
             pms.push(PathMapping(path.clone(), *id));
