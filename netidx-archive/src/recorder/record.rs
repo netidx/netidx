@@ -2,7 +2,7 @@ use super::{
     ArchiveCmds, BCastMsg, Config, LogfileIndex, RecordConfig, RotateDirective, ShardId,
     Shards,
 };
-use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL};
+use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL, put_file};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use chrono::prelude::*;
@@ -13,7 +13,7 @@ use futures::{
     select_biased,
 };
 use fxhash::{FxHashMap, FxHashSet};
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use netidx::{
     path::Path,
     pool::Pooled,
@@ -149,37 +149,12 @@ fn rotate_log_file(
     cmds: &Option<ArchiveCmds>,
     now: DateTime<Utc>,
 ) -> Result<ArchiveWriter> {
-    use std::{fs, iter};
     info!("rotating log file {}", now);
     drop(archive); // ensure the current file is closed
     let current_name = path.join(&**shard_name).join("current");
     let new_name = path.join(&**shard_name).join(now.to_rfc3339());
-    fs::rename(&current_name, &new_name).context("renaming current")?;
-    debug!("would run put, cmd config {:?}", cmds);
-    if let Some(cmds) = cmds {
-        use std::process::Command;
-        let now = now.to_rfc3339();
-        info!("running put {:?}", &cmds.put);
-        let args =
-            cmds.put.1.iter().cloned().map(|arg| arg.replace("{shard}", &**shard_name));
-        let out =
-            Command::new(&cmds.put.0).args(args.chain(iter::once(now.clone()))).output();
-        match out {
-            Err(e) => warn!("archive put failed for {}, {}", now, e),
-            Ok(o) if !o.status.success() => {
-                warn!("archive put failed for {}, {:?}", now, o)
-            }
-            Ok(out) => {
-                if out.stdout.len() > 0 {
-                    warn!("archive put stdout {}", String::from_utf8_lossy(&out.stdout));
-                }
-                if out.stderr.len() > 0 {
-                    warn!("archive put stderr {}", String::from_utf8_lossy(&out.stderr));
-                }
-                info!("put completed successfully");
-            }
-        }
-    }
+    std::fs::rename(&current_name, &new_name).context("renaming current")?;
+    put_file(cmds, shard_name, &now.to_rfc3339())?;
     ArchiveWriter::open(current_name)
 }
 

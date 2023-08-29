@@ -4,7 +4,7 @@ use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use memmap2::{Mmap, MmapMut};
 use netidx::{
     chars::Chars,
@@ -19,25 +19,13 @@ use parking_lot::{
     lock_api::{RwLockUpgradableReadGuard, RwLockWriteGuard},
     Mutex, RwLock, RwLockReadGuard,
 };
-use std::{
-    self,
-    cell::RefCell,
-    cmp::max,
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    error, fmt,
-    fs::{File, OpenOptions},
-    iter::IntoIterator,
-    mem,
-    ops::{Bound, Drop, RangeBounds},
-    path::Path as FilePath,
-    str::FromStr,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
+use std::{self, cell::RefCell, cmp::max, collections::{BTreeMap, HashMap, HashSet, VecDeque}, error, fmt, fs::{File, OpenOptions}, iter, iter::IntoIterator, mem, ops::{Bound, Drop, RangeBounds}, path::Path as FilePath, str::FromStr, sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+}};
 use tokio::task::{self, JoinSet};
 use zstd::bulk::{Compressor, Decompressor};
+use crate::recorder::ArchiveCmds;
 
 #[derive(Debug, Clone)]
 pub struct FileHeader {
@@ -686,6 +674,39 @@ fn scan_file(
         total_bytes - buf.remaining(),
         buf,
     )
+}
+
+/// Run archive PUT cmds on the given archive file
+pub fn put_file(
+    cmds: &Option<ArchiveCmds>,
+    shard_name: &str,
+    file_name: &str
+) -> Result<()> {
+    debug!("would run put, cmd config {:?}", cmds);
+    if let Some(cmds) = cmds {
+        use std::process::Command;
+        info!("running put {:?}", &cmds.put);
+        let args =
+            cmds.put.1.iter().cloned().map(|arg| arg.replace("{shard}", shard_name));
+        let out =
+            Command::new(&cmds.put.0).args(args.chain(iter::once(file_name.to_string()))).output();
+        match out {
+            Err(e) => warn!("archive put failed for {}, {}", file_name, e),
+            Ok(o) if !o.status.success() => {
+                warn!("archive put failed for {}, {:?}", file_name, o)
+            }
+            Ok(out) => {
+                if out.stdout.len() > 0 {
+                    warn!("archive put stdout {}", String::from_utf8_lossy(&out.stdout));
+                }
+                if out.stderr.len() > 0 {
+                    warn!("archive put stderr {}", String::from_utf8_lossy(&out.stderr));
+                }
+                info!("put completed successfully");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// This reads and writes the netidx archive format (as written by the
