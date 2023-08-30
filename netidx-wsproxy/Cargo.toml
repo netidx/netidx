@@ -1,6 +1,6 @@
 [package]
 name = "netidx-wsproxy"
-version = "0.24.2"
+version = "0.25.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -17,9 +17,9 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-netidx = { path = "../netidx", version = "0.24.0", default_features = false }
-netidx-protocols = { path = "../netidx-protocols", version = "0.24.0", default_features = false }
-netidx-core = { path = "../netidx-core", version = "0.24.1", default_features = false }
+netidx = { path = "../netidx", version = "0.25.0", default_features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.25.0", default_features = false }
+netidx-core = { path = "../netidx-core", version = "0.25.0", default_features = false }
 anyhow = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }

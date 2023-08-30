@@ -1,6 +1,6 @@
 [package]
 name = "netidx-bscript"
-version = "0.24.2"
+version = "0.25.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 homepage = "https://netidx.github.io/netidx-book/"
@@ -15,9 +15,9 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-netidx-netproto = { path = "../netidx-netproto", version = "0.24.1" }
-netidx-core = { path = "../netidx-core", version = "0.24.1" }
-netidx = { path = "../netidx", version = "0.24.0", default_features = false }
+netidx-netproto = { path = "../netidx-netproto", version = "0.25.0" }
+netidx-core = { path = "../netidx-core", version = "0.25.0" }
+netidx = { path = "../netidx", version = "0.25.0", default_features = false }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
