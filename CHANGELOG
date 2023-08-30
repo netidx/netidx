@@ -1,10 +1,17 @@
+* 0.25.0
+
+- add recorder rpcs to facilitate an external process writing logs
+  while the recorder is used to service readers concurrently
+
+- fix use of deprecated tls function
+
 * 0.24.2
 
 - switch to workspace dependencies and update dependencies
 
 - trim pools in the entire tree
 
-* 0.24.1 
+* 0.24.1
 
 - prune over large recorder pools after experiance in production
 
