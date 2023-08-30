@@ -183,7 +183,7 @@ pub(crate) fn create_tls_connector(
     let mut config = rustls::ClientConfig::builder()
         .with_safe_defaults()
         .with_root_certificates(root_store)
-        .with_single_cert(certs, private_key)
+        .with_client_auth_cert(certs, private_key)
         .context("building rustls client config")?;
     config.resumption = rustls::client::Resumption::in_memory_sessions(256);
     Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))

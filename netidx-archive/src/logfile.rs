@@ -4,7 +4,7 @@ use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use memmap2::{Mmap, MmapMut};
 use netidx::{
     chars::Chars,
@@ -19,13 +19,25 @@ use parking_lot::{
     lock_api::{RwLockUpgradableReadGuard, RwLockWriteGuard},
     Mutex, RwLock, RwLockReadGuard,
 };
-use std::{self, cell::RefCell, cmp::max, collections::{BTreeMap, HashMap, HashSet, VecDeque}, error, fmt, fs::{File, OpenOptions}, iter, iter::IntoIterator, mem, ops::{Bound, Drop, RangeBounds}, path::Path as FilePath, str::FromStr, sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-}};
+use std::{
+    self,
+    cell::RefCell,
+    cmp::max,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    error, fmt,
+    fs::{File, OpenOptions},
+    iter::IntoIterator,
+    mem,
+    ops::{Bound, Drop, RangeBounds},
+    path::Path as FilePath,
+    str::FromStr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use tokio::task::{self, JoinSet};
 use zstd::bulk::{Compressor, Decompressor};
-use crate::recorder::ArchiveCmds;
 
 #[derive(Debug, Clone)]
 pub struct FileHeader {
@@ -296,8 +308,7 @@ lazy_static! {
     pub(crate) static ref CURSOR_BATCH_POOL: Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
         Pool::new(100, 10_000);
     static ref IDX_POOL: Pool<Vec<(Id, Path)>> = Pool::new(10, 100_000);
-    pub(crate) static ref IMG_POOL: Pool<FxHashMap<Id, Event>> =
-        Pool::new(100, 10_000);
+    pub(crate) static ref IMG_POOL: Pool<FxHashMap<Id, Event>> = Pool::new(100, 10_000);
     static ref EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
     static ref TO_READ_POOL: Pool<Vec<usize>> = Pool::new(10, 100_000);
 }
@@ -676,39 +687,6 @@ fn scan_file(
     )
 }
 
-/// Run archive PUT cmds on the given archive file
-pub fn put_file(
-    cmds: &Option<ArchiveCmds>,
-    shard_name: &str,
-    file_name: &str
-) -> Result<()> {
-    debug!("would run put, cmd config {:?}", cmds);
-    if let Some(cmds) = cmds {
-        use std::process::Command;
-        info!("running put {:?}", &cmds.put);
-        let args =
-            cmds.put.1.iter().cloned().map(|arg| arg.replace("{shard}", shard_name));
-        let out =
-            Command::new(&cmds.put.0).args(args.chain(iter::once(file_name.to_string()))).output();
-        match out {
-            Err(e) => warn!("archive put failed for {}, {}", file_name, e),
-            Ok(o) if !o.status.success() => {
-                warn!("archive put failed for {}, {:?}", file_name, o)
-            }
-            Ok(out) => {
-                if out.stdout.len() > 0 {
-                    warn!("archive put stdout {}", String::from_utf8_lossy(&out.stdout));
-                }
-                if out.stderr.len() > 0 {
-                    warn!("archive put stderr {}", String::from_utf8_lossy(&out.stderr));
-                }
-                info!("put completed successfully");
-            }
-        }
-    }
-    Ok(())
-}
-
 /// This reads and writes the netidx archive format (as written by the
 /// "record" command in the tools). The archive format is intended to
 /// be a compact format for storing recordings of netidx data for long
@@ -808,7 +786,7 @@ impl ArchiveWriter {
         path: impl AsRef<FilePath>,
         indexed: bool,
         compress: Option<Vec<u8>>,
-        external_lock: Option<impl AsRef<FilePath>>
+        external_lock: Option<impl AsRef<FilePath>>,
     ) -> Result<Self> {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
             warn!("archive file size is limited to 4 GiB on this platform")
@@ -818,7 +796,11 @@ impl ArchiveWriter {
             let lock = if FilePath::is_file(path.as_ref()) {
                 OpenOptions::new().read(true).write(true).open(path.as_ref())?
             } else {
-                OpenOptions::new().read(true).write(true).create(true).open(path.as_ref())?
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(path.as_ref())?
             };
             lock.try_lock_exclusive()?;
             Some(Arc::new(lock))
@@ -934,7 +916,7 @@ impl ArchiveWriter {
     /// filename.
     pub fn open_external(
         path: impl AsRef<FilePath>,
-        external_lock: impl AsRef<FilePath>
+        external_lock: impl AsRef<FilePath>,
     ) -> Result<Self> {
         Self::open_full(path, true, None, Some(external_lock))
     }
@@ -1321,7 +1303,7 @@ impl ArchiveReader {
             &mut max_id,
             &mut &*mmap,
         )
-            .context("scan file")?;
+        .context("scan file")?;
         index.end = end;
         let compressed = compressed
             .map(|dict| {
@@ -1866,7 +1848,8 @@ impl ArchiveReader {
         for (ts, pos) in index.imagemap.iter() {
             unified_index.insert(*ts, (true, *pos));
         }
-        let mut output = ArchiveWriter::open_full(dest, self.indexed, Some(dict), None::<&str>)?;
+        let mut output =
+            ArchiveWriter::open_full(dest, self.indexed, Some(dict), None::<&str>)?;
         let mut pms = PM_POOL.take();
         for (id, path) in index.path_by_id.iter() {
             pms.push(PathMapping(path.clone(), *id));

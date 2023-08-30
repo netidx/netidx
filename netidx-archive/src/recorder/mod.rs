@@ -3,7 +3,7 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
-use log::error;
+use log::{debug, error, info, warn};
 use netidx::{
     chars::Chars,
     config::Config as NetIdxCfg,
@@ -17,7 +17,7 @@ use netidx::{
 use netidx_core::atomic_id;
 use parking_lot::RwLock;
 use serde_derive::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, iter, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::broadcast, task::JoinSet};
 
 use self::{file::RecordShardConfig, logfile_index::LogfileIndex};
@@ -642,4 +642,38 @@ impl Recorder {
         t.start_jobs().await?;
         Ok(t)
     }
+}
+
+/// Run archive PUT cmds on the given archive file
+pub fn put_file(
+    cmds: &Option<ArchiveCmds>,
+    shard_name: &str,
+    file_name: &str,
+) -> Result<()> {
+    debug!("would run put, cmd config {:?}", cmds);
+    if let Some(cmds) = cmds {
+        use std::process::Command;
+        info!("running put {:?}", &cmds.put);
+        let args =
+            cmds.put.1.iter().cloned().map(|arg| arg.replace("{shard}", shard_name));
+        let out = Command::new(&cmds.put.0)
+            .args(args.chain(iter::once(file_name.to_string())))
+            .output();
+        match out {
+            Err(e) => warn!("archive put failed for {}, {}", file_name, e),
+            Ok(o) if !o.status.success() => {
+                warn!("archive put failed for {}, {:?}", file_name, o)
+            }
+            Ok(out) => {
+                if out.stdout.len() > 0 {
+                    warn!("archive put stdout {}", String::from_utf8_lossy(&out.stdout));
+                }
+                if out.stderr.len() > 0 {
+                    warn!("archive put stderr {}", String::from_utf8_lossy(&out.stderr));
+                }
+                info!("put completed successfully");
+            }
+        }
+    }
+    Ok(())
 }
