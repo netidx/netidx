@@ -1,5 +1,4 @@
-use std::{path::PathBuf, collections::HashSet};
-
+use std::{path::PathBuf, collections::HashSet, future};
 use anyhow::{Context, Result};
 use bytes::BytesMut;
 use chrono::prelude::*;
@@ -32,6 +31,14 @@ pub(crate) struct OneshotParams {
 }
 
 #[derive(StructOpt, Debug)]
+pub(crate) struct SessionParams {
+    #[structopt(long = "base", help = "the base path of the recorder instance")]
+    base: Path,
+    #[structopt(long = "pos", help = "the position to start the replay at")]
+    pos: Option<String>,
+}
+
+#[derive(StructOpt, Debug)]
 pub(crate) enum Cmd {
     #[structopt(name = "oneshot", about = "get a oneshot recording")]
     Oneshot {
@@ -39,6 +46,13 @@ pub(crate) enum Cmd {
         common: ClientParams,
         #[structopt(flatten)]
         params: OneshotParams,
+    },
+    #[structopt(name = "session", about = "run a recorder session")]
+    Session {
+        #[structopt(flatten)]
+        common: ClientParams,
+        #[structopt(flatten)]
+        params: SessionParams,
     },
     #[structopt(name = "compress", about = "generate a compressed archive file")]
     Compress {
@@ -161,6 +175,34 @@ async fn oneshot(subscriber: Subscriber, params: OneshotParams) -> Result<()> {
     Ok(())
 }
 
+async fn session(subscriber: Subscriber, params: SessionParams) -> Result<()> {
+    let base = params.base;
+    let session = subscriber.subscribe(base.append("session"));
+    session.wait_subscribed().await?;
+    let session_id =
+        session.write_with_recipt(Value::Null).await?.cast_to::<String>()?;
+    let session_base = base.append(&session_id);
+    let with_session_base =
+        |path: &str| subscriber.subscribe(session_base.append(path));
+    let session_speed = with_session_base("control/speed/current");
+    let session_start = with_session_base("control/start/current");
+    let session_end = with_session_base("control/end/current");
+    let session_pos = with_session_base("control/pos/current");
+    let session_state = with_session_base("control/state/current");
+    session_speed.wait_subscribed().await?;
+    session_start.wait_subscribed().await?;
+    session_end.wait_subscribed().await?;
+    session_pos.wait_subscribed().await?;
+    session_state.wait_subscribed().await?;
+    session_start.write(Value::String(Chars::from("Unbounded")));
+    session_end.write(Value::String(Chars::from("Unbounded")));
+    session_speed.write(Value::String(Chars::from("Unlimited")));
+    session_pos.write(params.pos.unwrap_or("Beginning".into()).into());
+    session_state.write(Value::String(Chars::from("play")));
+    future::pending::<()>().await;
+    Ok(())
+}
+
 fn verify(file: impl AsRef<std::path::Path>) -> Result<()> {
     let reader = ArchiveReader::open(file)?;
     let mut cursor = Cursor::new();
@@ -214,7 +256,7 @@ async fn index(file: PathBuf, keep: bool) -> Result<()> {
 
 fn dump(file: PathBuf, metadata: bool, check_index: bool) -> Result<()> {
     let reader = ArchiveReader::open(file)?;
-    reader.check_remap_rescan()?;
+    reader.check_remap_rescan(false)?;
     if !metadata {
         println!("---------------- pathmap --------------------");
         for (id, path) in reader.index().iter_pathmap() {
@@ -263,6 +305,11 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
             let (cfg, auth) = common.load();
             let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
             oneshot(subscriber, params).await
+        }
+        Cmd::Session { common, params } => {
+            let (cfg, auth) = common.load();
+            let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
+            session(subscriber, params).await
         }
         Cmd::Compress { file, window, keep } => compress(file, keep, window).await,
         Cmd::Dump { file, metadata, check_index } => dump(file, metadata, check_index),

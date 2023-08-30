@@ -4,7 +4,7 @@ use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use memmap2::{Mmap, MmapMut};
 use netidx::{
     chars::Chars,
@@ -19,25 +19,13 @@ use parking_lot::{
     lock_api::{RwLockUpgradableReadGuard, RwLockWriteGuard},
     Mutex, RwLock, RwLockReadGuard,
 };
-use std::{
-    self,
-    cell::RefCell,
-    cmp::max,
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    error, fmt,
-    fs::{File, OpenOptions},
-    iter::IntoIterator,
-    mem,
-    ops::{Bound, Drop, RangeBounds},
-    path::Path as FilePath,
-    str::FromStr,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
+use std::{self, cell::RefCell, cmp::max, collections::{BTreeMap, HashMap, HashSet, VecDeque}, error, fmt, fs::{File, OpenOptions}, iter, iter::IntoIterator, mem, ops::{Bound, Drop, RangeBounds}, path::Path as FilePath, str::FromStr, sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+}};
 use tokio::task::{self, JoinSet};
 use zstd::bulk::{Compressor, Decompressor};
+use crate::recorder::ArchiveCmds;
 
 #[derive(Debug, Clone)]
 pub struct FileHeader {
@@ -688,6 +676,39 @@ fn scan_file(
     )
 }
 
+/// Run archive PUT cmds on the given archive file
+pub fn put_file(
+    cmds: &Option<ArchiveCmds>,
+    shard_name: &str,
+    file_name: &str
+) -> Result<()> {
+    debug!("would run put, cmd config {:?}", cmds);
+    if let Some(cmds) = cmds {
+        use std::process::Command;
+        info!("running put {:?}", &cmds.put);
+        let args =
+            cmds.put.1.iter().cloned().map(|arg| arg.replace("{shard}", shard_name));
+        let out =
+            Command::new(&cmds.put.0).args(args.chain(iter::once(file_name.to_string()))).output();
+        match out {
+            Err(e) => warn!("archive put failed for {}, {}", file_name, e),
+            Ok(o) if !o.status.success() => {
+                warn!("archive put failed for {}, {:?}", file_name, o)
+            }
+            Ok(out) => {
+                if out.stdout.len() > 0 {
+                    warn!("archive put stdout {}", String::from_utf8_lossy(&out.stdout));
+                }
+                if out.stderr.len() > 0 {
+                    warn!("archive put stderr {}", String::from_utf8_lossy(&out.stderr));
+                }
+                info!("put completed successfully");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// This reads and writes the netidx archive format (as written by the
 /// "record" command in the tools). The archive format is intended to
 /// be a compact format for storing recordings of netidx data for long
@@ -764,6 +785,7 @@ pub struct ArchiveWriter {
     path_by_id: IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: HashMap<Path, Id>,
     file: Arc<File>,
+    _external_lock: Option<Arc<File>>,
     end: Arc<AtomicUsize>,
     committed: usize,
     next_id: u32,
@@ -786,18 +808,32 @@ impl ArchiveWriter {
         path: impl AsRef<FilePath>,
         indexed: bool,
         compress: Option<Vec<u8>>,
+        external_lock: Option<impl AsRef<FilePath>>
     ) -> Result<Self> {
         if mem::size_of::<usize>() < mem::size_of::<u64>() {
             warn!("archive file size is limited to 4 GiB on this platform")
         }
         let time = MonotonicTimestamper::new();
+        let external_lock = if let Some(path) = external_lock {
+            let lock = if FilePath::is_file(path.as_ref()) {
+                OpenOptions::new().read(true).write(true).open(path.as_ref())?
+            } else {
+                OpenOptions::new().read(true).write(true).create(true).open(path.as_ref())?
+            };
+            lock.try_lock_exclusive()?;
+            Some(Arc::new(lock))
+        } else {
+            None
+        };
         if FilePath::is_file(path.as_ref()) {
             if compress.is_some() {
                 bail!("can't write to an already compressed file")
             }
             let mut time_basis = DateTime::<Utc>::MIN_UTC;
             let file = OpenOptions::new().read(true).write(true).open(path.as_ref())?;
-            file.try_lock_exclusive()?;
+            if external_lock.is_none() {
+                file.try_lock_exclusive()?;
+            }
             let block_size = allocation_granularity(path)? as usize;
             let mmap = unsafe { MmapMut::map_mut(&file)? };
             let mut t = ArchiveWriter {
@@ -805,6 +841,7 @@ impl ArchiveWriter {
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
                 file: Arc::new(file),
+                _external_lock: external_lock,
                 end: Arc::new(AtomicUsize::new(0)),
                 committed: 0,
                 next_id: 0,
@@ -839,7 +876,9 @@ impl ArchiveWriter {
                 .write(true)
                 .create(true)
                 .open(path.as_ref())?;
-            file.try_lock_exclusive()?;
+            if external_lock.is_none() {
+                file.try_lock_exclusive()?;
+            }
             let block_size = allocation_granularity(path.as_ref())? as usize;
             let fh_len = <FileHeader as Pack>::const_encoded_len().unwrap();
             let rh_len = <RecordHeader as Pack>::const_encoded_len().unwrap();
@@ -865,6 +904,7 @@ impl ArchiveWriter {
                 path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
                 id_by_path: HashMap::new(),
                 file: Arc::new(file),
+                _external_lock: external_lock,
                 end: Arc::new(AtomicUsize::new(committed as usize)),
                 committed: committed as usize,
                 next_id: 0,
@@ -880,7 +920,23 @@ impl ArchiveWriter {
     /// Open the specified archive for read/write access, if the file
     /// does not exist then a new archive will be created.
     pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
-        Self::open_full(path, true, None)
+        Self::open_full(path, true, None, None::<&str>)
+    }
+
+    /// Open the specified archive with an external sentinel file
+    /// for excusive lock.  It is intended to be used so that an external
+    /// program can write to an archive while [netidx record] reads and
+    /// publishes them at the same time.
+    ///
+    /// THIS IS POTENTIALLY DANGEROUS!  The protection against more than
+    /// one writer, and therefore data corruption, is weaker than with
+    /// [open], since writers have to agree on the same external lock
+    /// filename.
+    pub fn open_external(
+        path: impl AsRef<FilePath>,
+        external_lock: impl AsRef<FilePath>
+    ) -> Result<Self> {
+        Self::open_full(path, true, None, Some(external_lock))
     }
 
     // remap the file reserving space for at least additional_capacity bytes
@@ -910,9 +966,10 @@ impl ArchiveWriter {
     pub fn flush(&mut self) -> Result<()> {
         let end = self.end.load(Ordering::Relaxed);
         if self.committed < end {
-            self.mmap.flush()?;
+            self.mmap.flush()?; // first stage commit
             let mut buf = &mut self.mmap[COMMITTED_OFFSET..];
             buf.put_u64(end as u64);
+            self.mmap.flush()?; // second stage commit
             self.committed = end;
         }
         Ok(())
@@ -1244,6 +1301,10 @@ impl ArchiveReader {
         let file =
             OpenOptions::new().read(true).open(path.as_ref()).context("open file")?;
         file.try_lock_shared()?;
+        Self::open_with(Arc::new(file))
+    }
+
+    fn open_with(file: Arc<File>) -> Result<Self> {
         let mmap = unsafe { Mmap::map(&file).context("mmap file")? };
         let mut index = ArchiveIndex::new();
         let mut max_id = 0;
@@ -1260,7 +1321,7 @@ impl ArchiveReader {
             &mut max_id,
             &mut &*mmap,
         )
-        .context("scan file")?;
+            .context("scan file")?;
         index.end = end;
         let compressed = compressed
             .map(|dict| {
@@ -1273,7 +1334,7 @@ impl ArchiveReader {
             index: Arc::new(RwLock::new(index)),
             indexed,
             compressed,
-            file: Arc::new(file),
+            file,
             end: Arc::new(AtomicUsize::new(end)),
             mmap: Arc::new(RwLock::new(mmap)),
         })
@@ -1307,21 +1368,34 @@ impl ArchiveReader {
         self.index.read().imagemap.len()
     }
 
+    /// Only use this if `ArchiveReader` was opened alone and not from
+    /// an `ArchiveWriter`.
+    pub fn reopen(&mut self) -> Result<()> {
+        let t = Self::open_with(self.file.clone())?;
+        *self = t;
+        Ok(())
+    }
+
     /// Check if the memory map needs to be remapped due to growth,
     /// and check if additional records exist that need to be
     /// indexed. This method is only relevant if this `ArchiveReader`
     /// was created from an `ArchiveWriter`, this method is called
     /// automatically by `read_deltas` and `build_image`.
-    pub fn check_remap_rescan(&self) -> Result<()> {
+    pub fn check_remap_rescan(&self, force: bool) -> Result<()> {
         let end = self.end.load(Ordering::Relaxed);
         let mmap = self.mmap.upgradable_read();
-        let mmap = if end > mmap.len() {
+        let mmap = if end > mmap.len() || force {
             let mut mmap = RwLockUpgradableReadGuard::upgrade(mmap);
             drop(mem::replace(&mut *mmap, unsafe { Mmap::map(&*self.file)? }));
             RwLockWriteGuard::downgrade_to_upgradable(mmap)
         } else {
             mmap
         };
+        if force {
+            // rescan header to find end
+            let header = scan_header(&mut &mmap[..])?;
+            self.end.store(header.committed as usize, Ordering::Relaxed);
+        }
         let index = self.index.upgradable_read();
         if index.end < end {
             let mut index = RwLockUpgradableReadGuard::upgrade(index);
@@ -1504,7 +1578,7 @@ impl ArchiveReader {
         filter: Option<&FxHashSet<Id>>,
         cursor: &Cursor,
     ) -> Result<Pooled<FxHashMap<Id, Event>>> {
-        self.check_remap_rescan()?;
+        self.check_remap_rescan(false)?;
         let pos = match cursor.current {
             None => cursor.start,
             Some(pos) => Bound::Included(pos),
@@ -1600,7 +1674,7 @@ impl ArchiveReader {
         cursor: &mut Cursor,
         n: usize,
     ) -> Result<(usize, Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>)> {
-        self.check_remap_rescan()?;
+        self.check_remap_rescan(false)?;
         let mut res = CURSOR_BATCH_POOL.take();
         let start = match cursor.current {
             None => cursor.start,
@@ -1643,7 +1717,7 @@ impl ArchiveReader {
         filter: Option<&FxHashSet<Id>>,
         cursor: &Cursor,
     ) -> Result<Option<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
-        self.check_remap_rescan()?;
+        self.check_remap_rescan(false)?;
         let start = match cursor.current {
             None => cursor.start,
             Some(dt) => Bound::Excluded(dt),
@@ -1705,7 +1779,7 @@ impl ArchiveReader {
         if self.indexed {
             bail!("file is already indexed")
         }
-        self.check_remap_rescan()?;
+        self.check_remap_rescan(false)?;
         let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> = BTreeMap::new();
         let index = self.index.read();
         for (ts, pos) in index.deltamap.iter() {
@@ -1714,7 +1788,7 @@ impl ArchiveReader {
         for (ts, pos) in index.imagemap.iter() {
             unified_index.insert(*ts, (true, *pos));
         }
-        let mut output = ArchiveWriter::open_full(dest, true, None)?;
+        let mut output = ArchiveWriter::open_full(dest, true, None, None::<&str>)?;
         let mut pms = PM_POOL.take();
         for (id, path) in index.path_by_id.iter() {
             pms.push(PathMapping(path.clone(), *id));
@@ -1781,7 +1855,7 @@ impl ArchiveReader {
         if self.compressed.is_some() {
             bail!("archive is already compressed")
         }
-        self.check_remap_rescan()?;
+        self.check_remap_rescan(false)?;
         let (max_len, dict) = self.train()?;
         let pdict = Box::leak(Box::new(zstd::dict::EncoderDictionary::copy(&dict, 19)));
         let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> = BTreeMap::new();
@@ -1792,7 +1866,7 @@ impl ArchiveReader {
         for (ts, pos) in index.imagemap.iter() {
             unified_index.insert(*ts, (true, *pos));
         }
-        let mut output = ArchiveWriter::open_full(dest, self.indexed, Some(dict))?;
+        let mut output = ArchiveWriter::open_full(dest, self.indexed, Some(dict), None::<&str>)?;
         let mut pms = PM_POOL.take();
         for (id, path) in index.path_by_id.iter() {
             pms.push(PathMapping(path.clone(), *id));
@@ -1862,7 +1936,7 @@ mod test {
     use std::fs;
 
     fn check_contents(t: &ArchiveReader, paths: &[Path], batches: usize) {
-        t.check_remap_rescan().unwrap();
+        t.check_remap_rescan(false).unwrap();
         assert_eq!(t.delta_batches(), batches);
         let mut cursor = Cursor::new();
         let (_, mut batch) = t.read_deltas(None, &mut cursor, batches).unwrap();

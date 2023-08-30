@@ -412,6 +412,7 @@ enum BCastMsg {
     LogRotated(DateTime<Utc>),
     NewCurrent(ArchiveReader),
     Batch(DateTime<Utc>, Arc<Pooled<Vec<BatchItem>>>),
+    TailInvalidated,
 }
 
 pub(crate) struct Shards {
@@ -488,6 +489,56 @@ impl Shards {
             t.bcast.insert(id, tx);
         }
         Ok((writers, Arc::new(t)))
+    }
+
+    fn remap_rescan_pathindex(&self) -> Result<()> {
+        for (_, reader) in self.pathindexes.iter() {
+            reader.check_remap_rescan(true)?;
+        }
+        Ok(())
+    }
+
+    /// Reopen the specified archive file (None = current)
+    pub fn reopen(&self, ts: Option<DateTime<Utc>>) -> Result<()> {
+        self.remap_rescan_pathindex()?;
+        match ts {
+            Some(ts) => logfile_collection::reopen(ts)?,
+            None => {
+                let mut heads = self.heads.write();
+                for (_, reader) in heads.iter_mut() {
+                    reader.reopen()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Remap/rescan the specified archive file (None = current)
+    pub fn remap_rescan(&self, ts: Option<DateTime<Utc>>) -> Result<()> {
+        self.remap_rescan_pathindex()?;
+        match ts {
+            Some(ts) => logfile_collection::remap_rescan(ts)?,
+            None => {
+                let heads = self.heads.read();
+                for (_, reader) in heads.iter() {
+                    reader.check_remap_rescan(true)?;
+                }
+                for tx in self.bcast.values() {
+                    tx.send(BCastMsg::TailInvalidated)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn reindex(&self, config: &Arc<Config>) -> Result<()> {
+        self.remap_rescan_pathindex()?;
+        let mut indexes = self.indexes.write();
+        for (shard, logfile_index) in indexes.iter_mut() {
+            let name = self.by_id.get(shard).unwrap();
+            *logfile_index = LogfileIndex::new(config, name)?;
+        }
+        Ok(())
     }
 }
 
