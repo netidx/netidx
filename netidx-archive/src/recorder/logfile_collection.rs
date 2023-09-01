@@ -24,7 +24,7 @@ use tokio::task;
 struct Cached {
     timestamp: DateTime<Utc>,
     last_used: DateTime<Utc>,
-    reader: ArchiveReader
+    reader: ArchiveReader,
 }
 
 lazy_static! {
@@ -130,8 +130,8 @@ impl DataSource {
                     None => {
                         debug!("log file was not cached, opening");
                         readers.retain(|_, cached| {
-                            cached.reader.strong_count() > 1 ||
-                                now - cached.last_used < *CACHE_FOR
+                            cached.reader.strong_count() > 1
+                                || now - cached.last_used < *CACHE_FOR
                         });
                         drop(readers); // release the lock
                         let rd = task::block_in_place(|| {
@@ -152,10 +152,10 @@ impl DataSource {
                                 e.insert(Cached {
                                     timestamp: ts,
                                     last_used: now,
-                                    reader: rd.clone()
+                                    reader: rd.clone(),
                                 });
                                 rd
-                            },
+                            }
                             Entry::Occupied(e) => e.get().reader.clone(),
                         };
                         Ok(Some(Self { file, archive }))
@@ -180,10 +180,9 @@ impl Drop for LogfileCollection {
         self.source = None;
         self.head = None;
         let now = Utc::now();
-        ARCHIVE_READERS
-            .lock()
-            .retain(|_, cached| cached.reader.strong_count() > 1
-                || now - cached.last_used < *CACHE_FOR);
+        ARCHIVE_READERS.lock().retain(|_, cached| {
+            cached.reader.strong_count() > 1 || now - cached.last_used < *CACHE_FOR
+        });
     }
 }
 
@@ -237,16 +236,12 @@ impl LogfileCollection {
         }
     }
 
-    fn apply_read<
+    fn apply_read<R, F, S>(&mut self, mut f: F, s: S, empty: R) -> Result<R>
+    where
         R: 'static,
         F: FnMut(&ArchiveReader, &mut Cursor) -> Result<R>,
-        S: Fn(&R) -> bool,
-    >(
-        &mut self,
-        mut f: F,
-        s: S,
-        empty: R,
-    ) -> Result<R> {
+        S: Fn(&R, &Cursor) -> bool,
+    {
         if !self.source()? {
             bail!("no data source available")
         } else {
@@ -258,7 +253,7 @@ impl LogfileCollection {
                     let result = f(archive, &mut self.pos)?;
                     Ok::<_, anyhow::Error>((file, result))
                 })?;
-                if s(&result) {
+                if s(&result, &self.pos) {
                     break Ok(result);
                 } else {
                     match file {
@@ -288,7 +283,7 @@ impl LogfileCollection {
     ) -> Result<(usize, Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>)> {
         self.apply_read(
             |archive, cursor| archive.read_deltas(filter, cursor, read_count),
-            |(_, batch)| !batch.is_empty(),
+            |(_, batch), cursor| cursor.at_end() || !batch.is_empty(),
             (0, Pooled::orphan(VecDeque::new())),
         )
     }
@@ -301,7 +296,7 @@ impl LogfileCollection {
     ) -> Result<Option<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
         self.apply_read(
             |archive, cursor| archive.read_next(filter, cursor),
-            |batch| batch.is_some(),
+            |batch, cursor| cursor.at_end() || batch.is_some(),
             None,
         )
     }

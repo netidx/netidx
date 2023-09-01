@@ -1,3 +1,8 @@
+* 0.25.1
+
+- fix a recorder bug that would case read_deltas to read a lot more
+  data than is necessary to fill a request
+
 * 0.25.0
 
 - add recorder rpcs to facilitate an external process writing logs
