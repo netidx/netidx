@@ -240,27 +240,36 @@ impl LogfileCollection {
     where
         R: 'static,
         F: FnMut(&ArchiveReader, &mut Cursor) -> Result<R>,
-        S: Fn(&R, &Cursor) -> bool,
+        S: Fn(&R) -> bool,
     {
         if !self.source()? {
             bail!("no data source available")
         } else {
             loop {
-                let (file, result) = task::block_in_place(|| {
+                let r = task::block_in_place(|| {
                     let ds = self.source.as_mut().unwrap();
                     let archive = &ds.archive;
                     let file = ds.file;
-                    let result = f(archive, &mut self.pos)?;
-                    Ok::<_, anyhow::Error>((file, result))
+                    if archive.index().has_overlap(&self.pos) {
+                        let result = f(archive, &mut self.pos)?;
+                        Ok::<_, anyhow::Error>(Some((file, result)))
+                    } else {
+                        Ok(None)
+                    }
                 })?;
-                if s(&result, &self.pos) {
-                    break Ok(result);
-                } else {
-                    match file {
-                        File::Head => break Ok(empty),
-                        File::Historical(_) => {
-                            if !self.next_source()? {
-                                bail!("no data source available")
+                match r {
+                    None => break Ok(empty),
+                    Some((file, result)) => {
+                        if s(&result) {
+                            break Ok(result);
+                        } else {
+                            match file {
+                                File::Head => break Ok(empty),
+                                File::Historical(_) => {
+                                    if !self.next_source()? {
+                                        bail!("no data source available")
+                                    }
+                                }
                             }
                         }
                     }
@@ -283,7 +292,7 @@ impl LogfileCollection {
     ) -> Result<(usize, Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>)> {
         self.apply_read(
             |archive, cursor| archive.read_deltas(filter, cursor, read_count),
-            |(_, batch), cursor| cursor.at_end() || !batch.is_empty(),
+            |(_, batch)| !batch.is_empty(),
             (0, Pooled::orphan(VecDeque::new())),
         )
     }
@@ -296,7 +305,7 @@ impl LogfileCollection {
     ) -> Result<Option<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
         self.apply_read(
             |archive, cursor| archive.read_next(filter, cursor),
-            |batch, cursor| cursor.at_end() || batch.is_some(),
+            |batch| batch.is_some(),
             None,
         )
     }

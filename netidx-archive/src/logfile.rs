@@ -1197,6 +1197,27 @@ impl ArchiveIndex {
         }
     }
 
+    /// check if the speficied cursor has any overlap with the records
+    /// in the file.
+    pub fn has_overlap(&self, cursor: &Cursor) -> bool {
+	match (self.deltamap.first_key_value(), self.deltamap.last_key_value()) {
+	    (Some((fst, _)), Some((lst, _))) => {
+		let start = match cursor.start {
+		    Bound::Unbounded => true,
+		    Bound::Included(ts) => ts <= *lst,
+		    Bound::Excluded(ts) => ts < *lst,
+		};
+		let end = match cursor.end {
+		    Bound::Unbounded => true,
+		    Bound::Included(ts) => ts >= *fst,
+		    Bound::Excluded(ts) => ts > *fst
+		};
+		start && end
+	    }
+	    (_, _) => false,
+	}
+    }
+    
     /// seek the specified number of batches forward or back in the
     /// file. Return the number of batches moved.
     pub fn seek_steps(&self, cursor: &mut Cursor, steps: i8) -> i8 {
