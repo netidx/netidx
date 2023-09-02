@@ -1,3 +1,7 @@
+* 0.25.2
+
+- catch additional cases where the recorder reads more than it should
+
 * 0.25.1
 
 - fix a recorder bug that would case read_deltas to read a lot more
