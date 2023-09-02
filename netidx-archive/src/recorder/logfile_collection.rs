@@ -246,39 +246,30 @@ impl LogfileCollection {
             bail!("no data source available")
         } else {
             loop {
-                let r = task::block_in_place(|| {
+                let (file, result) = task::block_in_place(|| {
                     let ds = self.source.as_mut().unwrap();
                     let archive = &ds.archive;
                     let file = ds.file;
-                    if archive.index().has_overlap(&self.pos) {
-                        let result = f(archive, &mut self.pos)?;
-                        Ok::<_, anyhow::Error>(Some((file, result)))
-                    } else {
-                        Ok(None)
-                    }
+                    let result = f(archive, &mut self.pos)?;
+                    Ok::<_, anyhow::Error>((file, result))
                 })?;
-                match r {
-                    None => break Ok(empty),
-                    Some((file, result)) => {
-                        if s(&result) {
-                            break Ok(result);
-                        } else {
-                            match file {
-                                File::Head => break Ok(empty),
-                                File::Historical(end) => {
-                                    match self.pos.end() {
-                                        Bound::Unbounded => (),
-                                        Bound::Excluded(t) | Bound::Included(t)
-                                            if t < &end =>
-                                        {
-                                            break Ok(empty)
-                                        }
-                                        Bound::Excluded(_) | Bound::Included(_) => (),
-                                    }
-                                    if !self.next_source()? {
-                                        bail!("no data source available")
-                                    }
+                if s(&result) {
+                    break Ok(result);
+                } else {
+                    match file {
+                        File::Head => break Ok(empty),
+                        File::Historical(end) => {
+                            match self.pos.end() {
+                                Bound::Unbounded => (),
+                                Bound::Excluded(t) | Bound::Included(t)
+                                    if t < &end =>
+                                {
+                                    break Ok(empty)
                                 }
+                                Bound::Excluded(_) | Bound::Included(_) => (),
+                            }
+                            if !self.next_source()? {
+                                bail!("no data source available")
                             }
                         }
                     }
