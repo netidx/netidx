@@ -265,7 +265,16 @@ impl LogfileCollection {
                         } else {
                             match file {
                                 File::Head => break Ok(empty),
-                                File::Historical(_) => {
+                                File::Historical(end) => {
+                                    match self.pos.end() {
+                                        Bound::Unbounded => (),
+                                        Bound::Excluded(t) | Bound::Included(t)
+                                            if t < &end =>
+                                        {
+                                            break Ok(empty)
+                                        }
+                                        Bound::Excluded(_) | Bound::Included(_) => (),
+                                    }
                                     if !self.next_source()? {
                                         bail!("no data source available")
                                     }
