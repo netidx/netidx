@@ -262,7 +262,7 @@ impl LogfileCollection {
                             match self.pos.end() {
                                 Bound::Unbounded => (),
                                 Bound::Excluded(t) | Bound::Included(t)
-                                    if t < &end =>
+                                    if t <= &end =>
                                 {
                                     break Ok(empty)
                                 }
