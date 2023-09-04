@@ -1,9 +1,11 @@
+pub mod arraymap;
 mod reader;
+mod writer;
+
 #[cfg(test)]
 mod test;
-mod writer;
-mod index;
 
+use self::arraymap::ArrayMap;
 pub use self::{reader::ArchiveReader, writer::ArchiveWriter};
 use anyhow::{Context, Error, Result};
 use bytes::{Buf, BufMut};
@@ -24,7 +26,7 @@ use packed_struct::PackedStruct;
 use std::{
     self,
     cmp::max,
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     error, fmt,
     fs::OpenOptions,
     mem,
@@ -561,8 +563,8 @@ impl error::Error for RecordTooLarge {}
 fn scan_records(
     path_by_id: &mut IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: &mut FxHashMap<Path, Id>,
-    mut imagemap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
-    mut deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
+    mut imagemap: Option<&mut ArrayMap<DateTime<Utc>, usize>>,
+    mut deltamap: Option<&mut ArrayMap<DateTime<Utc>, usize>>,
     time_basis: &mut DateTime<Utc>,
     max_id: &mut u32,
     end: usize,
@@ -655,8 +657,8 @@ fn scan_file(
     compressed: &mut Option<CompressionHeader>,
     path_by_id: &mut IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: &mut FxHashMap<Path, Id>,
-    imagemap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
-    deltamap: Option<&mut BTreeMap<DateTime<Utc>, usize>>,
+    imagemap: Option<&mut ArrayMap<DateTime<Utc>, usize>>,
+    deltamap: Option<&mut ArrayMap<DateTime<Utc>, usize>>,
     time_basis: &mut DateTime<Utc>,
     max_id: &mut u32,
     buf: &mut impl Buf,

@@ -1,6 +1,6 @@
 use super::{
     scan_file, scan_header, scan_records, ArchiveWriter, BatchItem, Cursor, FileHeader,
-    Id, PathMapping, RecordHeader, Seek, CURSOR_BATCH_POOL, IMG_POOL, PM_POOL,
+    Id, PathMapping, RecordHeader, Seek, CURSOR_BATCH_POOL, IMG_POOL, PM_POOL, arraymap::ArrayMap,
 };
 use anyhow::{Context, Result};
 use bytes::{Buf, BufMut};
@@ -43,8 +43,8 @@ use zstd::bulk::{Compressor, Decompressor};
 pub struct ArchiveIndex {
     path_by_id: IndexMap<Id, Path, FxBuildHasher>,
     id_by_path: FxHashMap<Path, Id>,
-    imagemap: BTreeMap<DateTime<Utc>, usize>,
-    deltamap: BTreeMap<DateTime<Utc>, usize>,
+    imagemap: ArrayMap<DateTime<Utc>, usize>,
+    deltamap: ArrayMap<DateTime<Utc>, usize>,
     time_basis: DateTime<Utc>,
     end: usize,
 }
@@ -54,8 +54,8 @@ impl ArchiveIndex {
         ArchiveIndex {
             path_by_id: IndexMap::with_hasher(FxBuildHasher::default()),
             id_by_path: HashMap::default(),
-            imagemap: BTreeMap::new(),
-            deltamap: BTreeMap::new(),
+            imagemap: ArrayMap::new(),
+            deltamap: ArrayMap::new(),
             time_basis: DateTime::<Utc>::MIN_UTC,
             end: <FileHeader as Pack>::const_encoded_len().unwrap(),
         }
@@ -76,11 +76,11 @@ impl ArchiveIndex {
         self.id_by_path.get(path)
     }
 
-    pub fn deltamap(&self) -> &BTreeMap<DateTime<Utc>, usize> {
+    pub fn deltamap(&self) -> &ArrayMap<DateTime<Utc>, usize> {
         &self.deltamap
     }
 
-    pub fn imagemap(&self) -> &BTreeMap<DateTime<Utc>, usize> {
+    pub fn imagemap(&self) -> &ArrayMap<DateTime<Utc>, usize> {
         &self.imagemap
     }
 
