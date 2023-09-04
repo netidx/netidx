@@ -572,7 +572,7 @@ fn scan_records(
     buf: &mut impl Buf,
 ) -> Result<usize> {
     let total_size = buf.remaining();
-    loop {
+    let res = loop {
         let pos = start_pos + (total_size - buf.remaining());
         if pos >= end {
             break Ok(pos);
@@ -626,7 +626,14 @@ fn scan_records(
                 }
             }
         }
+    };
+    if let Some(deltamap) = deltamap {
+	deltamap.shrink_to_fit();
     }
+    if let Some(imagemap) = imagemap {
+	imagemap.shrink_to_fit();
+    }
+    res
 }
 
 fn scan_header(buf: &mut impl Buf) -> Result<FileHeader> {

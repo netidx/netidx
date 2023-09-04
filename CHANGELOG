@@ -1,3 +1,7 @@
+* 0.25.3
+
+- change logfile to use a sorted array instead of a BTreeMap as an index
+
 * 0.25.2
 
 - catch additional cases where the recorder reads more than it should
