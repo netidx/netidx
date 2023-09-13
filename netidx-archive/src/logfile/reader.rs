@@ -1,6 +1,7 @@
 use super::{
-    scan_file, scan_header, scan_records, ArchiveWriter, BatchItem, Cursor, FileHeader,
-    Id, PathMapping, RecordHeader, Seek, CURSOR_BATCH_POOL, IMG_POOL, PM_POOL, arraymap::ArrayMap,
+    arraymap::ArrayMap, scan_file, scan_header, scan_records, ArchiveWriter, BatchItem,
+    Cursor, FileHeader, Id, PathMapping, RecordHeader, Seek, CURSOR_BATCH_POOL, IMG_POOL,
+    PM_POOL,
 };
 use anyhow::{Context, Result};
 use bytes::{Buf, BufMut};
@@ -204,7 +205,7 @@ impl ArchiveReader {
     }
 
     fn open_with(file: Arc<File>) -> Result<Self> {
-        let mmap = unsafe { Mmap::map(&file).context("mmap file")? };
+        let mmap = unsafe { Mmap::map(&*file).context("mmap file")? };
         let mut index = ArchiveIndex::new();
         let mut max_id = 0;
         let mut compressed = None;
