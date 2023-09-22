@@ -32,6 +32,7 @@ impl File {
         let mut files = vec![];
         {
             let path = config.archive_directory.join(shard);
+            std::fs::create_dir_all(&path)?;
             for dir in std::fs::read_dir(&path)? {
                 let dir = dir?;
                 let typ = dir.file_type()?;
