@@ -513,10 +513,9 @@ pub mod client {
                                 .cast_to::<FxHashSet<Chars>>()
                                 .ok()
                                 .unwrap_or(HashSet::default());
-                            self.0
-                                .args
-                                .set(args)
-                                .map_err(|_| anyhow!("once cell set twice"))?;
+                            // Another thread may have set these args already,
+                            // so ignore if `set` returns Err.
+                            let _: Result<(), FxHashSet<Chars>> = self.0.args.set(args);
                             break;
                         }
                     }
