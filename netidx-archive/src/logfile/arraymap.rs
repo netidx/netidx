@@ -116,16 +116,16 @@ where
     {
         match bound {
             Bound::Unbounded => match dir {
-		Dir::Fwd => 0,
-		Dir::Bwd => self.keys.len() - 1,
-	    },
+                Dir::Fwd => 0,
+		        Dir::Bwd => self.keys.len().saturating_sub(1),
+	        },
             Bound::Excluded(k) => {
                 match self.keys.binary_search_by(|key| key.borrow().cmp(k)) {
                     Err(i) => i,
                     Ok(i) => match dir {
-			Dir::Fwd => i + 1,
-			Dir::Bwd => i - 1,
-		    },
+                        Dir::Fwd => i + 1,
+                        Dir::Bwd => i - 1,
+		            },
                 }
             }
             Bound::Included(k) => {

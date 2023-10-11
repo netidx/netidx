@@ -36,7 +36,7 @@ impl File {
             for dir in std::fs::read_dir(&path)? {
                 let dir = dir?;
                 let typ = dir.file_type()?;
-                if typ.is_file() {
+                if typ.is_file() || typ.is_symlink() {
                     let name = dir.file_name();
                     let name = name.to_string_lossy();
                     if name == "current" {
@@ -90,6 +90,10 @@ pub struct LogfileIndex(Arc<Vec<File>>);
 impl LogfileIndex {
     pub fn new(config: &Config, shard: &str) -> Result<Self> {
         Ok(Self(Arc::new(File::read(&config, shard)?)))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 
     pub fn first(&self) -> File {
