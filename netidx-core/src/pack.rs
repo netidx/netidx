@@ -1333,7 +1333,7 @@ impl Pack for DateTime<Utc> {
         let ns = Pack::decode(buf)?;
         let ndt = NaiveDateTime::from_timestamp_opt(ts, ns)
             .ok_or_else(|| PackError::InvalidFormat)?;
-        Ok(DateTime::from_utc(ndt, Utc))
+        Ok(Utc.from_utc_datetime(&ndt))
     }
 }
 

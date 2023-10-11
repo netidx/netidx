@@ -110,6 +110,7 @@ async fn do_oneshot(
     limit: usize,
     args: OneshotConfig,
 ) -> Result<OneshotReplyShard> {
+    debug!("logfile index has {} files", index.len());
     pathindex.check_remap_rescan(false)?;
     let mut filterset = FILTER.take();
     let mut pathmap = PATHMAPS.take();
@@ -131,7 +132,7 @@ async fn do_oneshot(
     debug!("opening logfile collection");
     let mut log =
         LogfileCollection::new(index, config, shard, head, args.start, args.end);
-    debug!("seeking to the beginning");
+    debug!("seeking to beginning");
     log.seek(Seek::Beginning)?;
     debug!("reimaging");
     let mut idx = log.reimage(Some(&*filterset))?;
@@ -142,6 +143,7 @@ async fn do_oneshot(
     loop {
         debug!("reading archive batch");
         let (len, mut batches) = log.read_deltas(Some(&*filterset), 1000)?;
+        debug!("read archive batch len={len}");
         if batches.is_empty() {
             break Ok(data);
         } else {
@@ -227,9 +229,11 @@ async fn start_oneshot(
     for (id, pathindex) in shards.pathindexes.iter() {
         if let Some(spec) = shards.spec.get(id) {
             if args.filter.disjoint(spec) {
+                debug!("skipping shard {:?} because filter is disjoint", id);
                 continue;
             }
         }
+        debug!("starting oneshot subtask for shard {:?}", id);
         let shard = shards.by_id[id].clone();
         let head = shards.heads.read().get(id).cloned();
         let index = shards.indexes.read()[id].clone();
