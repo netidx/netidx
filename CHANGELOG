@@ -1,3 +1,14 @@
+* 0.26.0
+
+- Fix a bug in write_with_recipt that could cause concurrent write
+  results to be delivered to the wrong request
+
+- This version changes the write protocol, however the change is
+  backwards compatible. In order for the bug to be fixed however both
+  sides must be running this version or above.
+
+- Merge #10, allow symlinks to archive files
+
 * 0.25.3
 
 - change logfile to use a sorted array instead of a BTreeMap as an index
