@@ -1,3 +1,4 @@
+use crate::resolver::UserInfo;
 use arcstr::ArcStr;
 use bytes::{Bytes, BytesMut};
 use netidx_core::{
@@ -7,10 +8,9 @@ use netidx_core::{
     pool::Pooled,
     utils::pack,
 };
-use crate::resolver::UserInfo;
-use proptest::{prelude::*, string::string_regex, collection};
+use proptest::{collection, prelude::*, string::string_regex};
 use rust_decimal::Decimal;
-use std::{fmt::Debug, sync::Arc, net::SocketAddr};
+use std::{fmt::Debug, net::SocketAddr, sync::Arc};
 
 fn check<T: Pack + Debug + PartialEq>(t: T) {
     let mut bytes = pack(&t).expect("encode failed");
@@ -47,15 +47,14 @@ fn path() -> impl Strategy<Value = Path> {
 }
 
 fn user_info() -> impl Strategy<Value = UserInfo> {
-    (arcstr(), arcstr(), collection::vec(arcstr(), (0, 20)), any::<SocketAddr>(), bytes()).prop_map(
-        |(name, primary_group, groups, resolver, token)| UserInfo {
+    (arcstr(), arcstr(), collection::vec(arcstr(), (0, 20)), any::<SocketAddr>(), bytes())
+        .prop_map(|(name, primary_group, groups, resolver, token)| UserInfo {
             name,
             primary_group,
             groups: groups.into(),
             resolver,
             token,
-        },
-    )
+        })
 }
 
 mod resolver {
@@ -387,7 +386,7 @@ mod resolver {
 mod publisher {
     use super::*;
     use crate::{
-        publisher::{From, Hello, Id, To},
+        publisher::{From, Hello, Id, To, WriteId},
         value::Value,
     };
     use chrono::prelude::*;
@@ -426,11 +425,8 @@ mod publisher {
                 }
             ),
             any::<u64>().prop_map(|i| To::Unsubscribe(Id::mk(i))),
-            (any::<u64>(), value(), any::<bool>()).prop_map(|(i, v, r)| To::Write(
-                Id::mk(i),
-                r,
-                v
-            ))
+            (any::<u64>(), value(), any::<bool>(), any::<u64>())
+                .prop_map(|(i, v, r, w)| To::Write(Id::mk(i), r, v, WriteId::mk(w)))
         ]
     }
 
@@ -487,7 +483,8 @@ mod publisher {
             )),
             (any::<u64>(), value()).prop_map(|(i, v)| From::Update(Id::mk(i), v)),
             Just(From::Heartbeat),
-            (any::<u64>(), value()).prop_map(|(i, v)| From::WriteResult(Id::mk(i), v))
+            (any::<u64>(), value(), any::<u64>())
+                .prop_map(|(i, v, w)| From::WriteResult(Id::mk(i), v, WriteId::mk(w)))
         ]
     }
 
