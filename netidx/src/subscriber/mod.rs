@@ -8,7 +8,7 @@ use crate::{
     path::Path,
     pool::{Pool, Pooled},
     protocol::{
-        publisher::{From, Id},
+        publisher::{From, Id, WriteId},
         resolver::{Publisher, PublisherId, Resolved, TargetAuth},
     },
     publisher::PublishFlags,
@@ -133,7 +133,7 @@ enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
     Stream { id: Id, sub_id: SubId, tx: WUpdateChan, flags: UpdatesFlags },
-    Write(Id, Value, Option<oneshot::Sender<Value>>),
+    Write(Id, Value, WriteId, Option<oneshot::Sender<Value>>),
     Flush(oneshot::Sender<()>),
 }
 
@@ -240,7 +240,7 @@ impl Val {
     /// update values you are subscribed to, or trigger some other
     /// observable action.
     pub fn write(&self, v: Value) {
-        self.0.connection.send(ToCon::Write(self.0.id, v, None));
+        self.0.connection.send(ToCon::Write(self.0.id, v, WriteId::new(), None));
     }
 
     /// This does the same thing as `write` except that it requires
@@ -253,7 +253,7 @@ impl Val {
     /// are required.
     pub fn write_with_recipt(&self, v: Value) -> oneshot::Receiver<Value> {
         let (tx, rx) = oneshot::channel();
-        self.0.connection.send(ToCon::Write(self.0.id, v, Some(tx)));
+        self.0.connection.send(ToCon::Write(self.0.id, v, WriteId::new(), Some(tx)));
         rx
     }
 
@@ -347,9 +347,9 @@ impl Dval {
 
     /// Return the number of strong references to this dval
     pub fn strong_count(&self) -> usize {
-	Arc::strong_count(&self.0)
+        Arc::strong_count(&self.0)
     }
-    
+
     /// Get the last value published by the publisher, or Unsubscribed
     /// if the subscription is currently dead.
     pub fn last(&self) -> Event {
@@ -433,7 +433,12 @@ impl Dval {
         let mut t = self.0.lock();
         match &mut t.sub {
             DvState::Subscribed(ref sub) => {
-                sub.0.connection.send(ToCon::Write(sub.0.id, v, Some(tx)));
+                sub.0.connection.send(ToCon::Write(
+                    sub.0.id,
+                    v,
+                    WriteId::new(),
+                    Some(tx),
+                ));
             }
             DvState::Dead(dead) => {
                 dead.queued_writes.push((v, Some(tx)));
@@ -961,7 +966,7 @@ impl Subscriber {
                                     for (v, resp) in d.queued_writes.drain(..) {
                                         sub.0
                                             .connection
-                                            .send(ToCon::Write(sub.0.id, v, resp));
+                                            .send(ToCon::Write(sub.0.id, v, WriteId::new(), resp));
                                     }
                                 }
                                 dv.sub = DvState::Subscribed(sub);

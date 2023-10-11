@@ -10,7 +10,7 @@ use crate::{
     pool::Pooled,
     protocol::{
         self,
-        publisher::{self, Id},
+        publisher::{self, Id, WriteId},
         value::Value,
     },
     resolver_client::DesiredAuth,
@@ -171,7 +171,7 @@ fn write(
     con: &mut WriteChannel,
     client: ClId,
     gc_on_write: &mut Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
-    wait_write_res: &mut Vec<(Id, oneshot::Receiver<Value>)>,
+    wait_write_res: &mut Vec<(Id, WriteId, oneshot::Receiver<Value>)>,
     write_batches: &mut FxHashMap<
         ChanId,
         (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
@@ -179,6 +179,7 @@ fn write(
     id: Id,
     v: Value,
     r: bool,
+    wid: WriteId,
 ) -> Result<()> {
     macro_rules! or_qwe {
         ($v:expr, $m:expr) => {
@@ -187,7 +188,7 @@ fn write(
                 None => {
                     if r {
                         let m = Value::Error(Chars::from($m));
-                        con.queue_send(&From::WriteResult(id, m))?
+                        con.queue_send(&From::WriteResult(id, m, wid))?
                     }
                     return Ok(());
                 }
@@ -216,7 +217,7 @@ fn write(
         None
     } else {
         let (send_result, wait) = SendResult::new();
-        wait_write_res.push((id, wait));
+        wait_write_res.push((id, wid, wait));
         Some(send_result)
     };
     for (cid, ch) in ow.iter() {
@@ -292,7 +293,7 @@ struct ClientCtx {
     flush_timeout: Option<Duration>,
     deferred_subs: DeferredSubs,
     deferred_subs_batch: Vec<(Path, Permissions)>,
-    wait_write_res: Vec<(Id, oneshot::Receiver<Value>)>,
+    wait_write_res: Vec<(Id, WriteId, oneshot::Receiver<Value>)>,
     gc_on_write: Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
     msg_sent: bool,
     tls_ctx: Option<tls::CachedAcceptor>,
@@ -542,7 +543,7 @@ impl ClientCtx {
                         },
                     }
                 }
-                Write(id, r, v) => write(
+                Write(id, r, v, wid) => write(
                     &mut *pb,
                     con,
                     self.client,
@@ -552,6 +553,7 @@ impl ClientCtx {
                     id,
                     v,
                     r,
+                    wid,
                 )?,
                 Unsubscribe(id) => {
                     gc = true;
@@ -581,11 +583,11 @@ impl ClientCtx {
                     }) as BlockedWriteFut
                 },
             ));
-            self.blocked_writes.extend(self.wait_write_res.drain(..).map(|(id, rx)| {
+            self.blocked_writes.extend(self.wait_write_res.drain(..).map(|(id, wid, rx)| {
                 Box::pin(async move {
                     BlockedWrite::Reply(match rx.await {
-                        Ok(v) => From::WriteResult(id, v),
-                        Err(_) => From::WriteResult(id, Value::Ok),
+                        Ok(v) => From::WriteResult(id, v, wid),
+                        Err(_) => From::WriteResult(id, Value::Ok, wid),
                     })
                 }) as BlockedWriteFut
             }));

@@ -6,6 +6,14 @@ use std::net::SocketAddr;
 
 atomic_id!(Id);
 
+atomic_id!(WriteId);
+
+impl Default for WriteId {
+    fn default() -> Self {
+        WriteId::new()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Pack)]
 pub enum Hello {
     /// No authentication will be provided. The publisher may drop
@@ -58,7 +66,7 @@ pub enum To {
     /// to the value, or it doesn't exist.
     Unsubscribe(Id),
     /// Send a write to the specified value.
-    Write(Id, bool, Value),
+    Write(Id, bool, Value, #[pack(default)] WriteId),
 }
 
 #[derive(Debug, Clone, PartialEq, Pack)]
@@ -84,5 +92,5 @@ pub enum From {
     /// functioning correctly.
     Heartbeat,
     /// Indicates the result of a write request
-    WriteResult(Id, Value),
+    WriteResult(Id, Value, #[pack(default)] WriteId),
 }

@@ -12,7 +12,7 @@ use crate::{
     pool::Pooled,
     protocol::{
         self,
-        publisher::{From, Id, To},
+        publisher::{From, Id, To, WriteId},
         resolver::TargetAuth,
     },
     resolver_client::common::krb5_authentication,
@@ -36,7 +36,7 @@ use parking_lot::Mutex;
 use protocol::resolver::UserInfo;
 use smallvec::SmallVec;
 use std::{
-    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
+    collections::{hash_map::Entry, HashMap, HashSet},
     mem,
     net::SocketAddr,
     pin::Pin,
@@ -254,7 +254,7 @@ pub(super) struct ConnectionCtx {
     subscriptions: FxHashMap<Id, Sub>,
     msg_recvd: bool,
     pending_flushes: Vec<oneshot::Sender<()>>,
-    pending_writes: FxHashMap<Id, VecDeque<oneshot::Sender<Value>>>,
+    pending_writes: FxHashMap<Id, FxHashMap<WriteId, oneshot::Sender<Value>>>,
     by_receiver: FxHashMap<ChanWrap<Pooled<Vec<(SubId, Event)>>>, ChanId>,
     by_chan: ByChan,
     gc_chan: FxHashSet<ChanId>,
@@ -401,13 +401,13 @@ impl ConnectionCtx {
                 ToCon::Stream { id, sub_id, tx, flags } => {
                     self.handle_connect_stream(id, sub_id, tx, flags)?
                 }
-                ToCon::Write(id, v, tx) => {
-                    write_con.queue_send(&To::Write(id, tx.is_some(), v))?;
+                ToCon::Write(id, v, wid, tx) => {
+                    write_con.queue_send(&To::Write(id, tx.is_some(), v, wid))?;
                     if let Some(tx) = tx {
                         self.pending_writes
                             .entry(id)
-                            .or_insert_with(VecDeque::new)
-                            .push_back(tx);
+                            .or_insert_with(HashMap::default)
+                            .insert(wid, tx);
                     }
                 }
                 ToCon::Flush(tx) => self.pending_flushes.push(tx),
@@ -440,13 +440,13 @@ impl ConnectionCtx {
                     None => con.queue_send(&To::Unsubscribe(i))?,
                 },
                 From::Heartbeat => (),
-                From::WriteResult(id, v) => {
+                From::WriteResult(id, v, wid) => {
                     if let Entry::Occupied(mut e) = self.pending_writes.entry(id) {
-                        let q = e.get_mut();
-                        if let Some(tx) = q.pop_front() {
+                        let tbl = e.get_mut();
+                        if let Some(tx) = tbl.remove(&wid) {
                             let _ = tx.send(v);
                         }
-                        if q.is_empty() {
+                        if tbl.is_empty() {
                             e.remove();
                         }
                     }
