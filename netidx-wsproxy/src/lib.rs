@@ -253,6 +253,7 @@ async fn handle_client(
     publisher: Publisher,
     subscriber: Subscriber,
     ws: WebSocket,
+    wstimeout: tokio::time::Duration
 ) -> Result<()> {
     static UPDATES: Lazy<Pool<Vec<Update>>> = Lazy::new(|| Pool::new(50, 10000));
     let (tx_up, mut rx_up) = mpsc::channel::<Pooled<Vec<(SubId, Event)>>>(3);
@@ -288,10 +289,16 @@ async fn handle_client(
                 for (id, event) in batch.drain(..) {
                     updates.push(Update {id, event});
                 }
-                reply(&mut tx_ws, &Response::Update { updates }).await?
+                if let Err(err) = tokio::time::timeout(wstimeout, async {
+                    reply(&mut tx_ws, &Response::Update { updates }).await
+                }).await{
+                    warn!("bad internet connection, err msg = {}", err);
+                    break;
+                }
             },
         }
     }
+    Ok(())
 }
 
 /// If you want to integrate the netidx api server into your own warp project
@@ -301,6 +308,7 @@ pub fn filter(
     publisher: Publisher,
     subscriber: Subscriber,
     path: &'static str,
+    wstimeout: tokio::time::Duration,
 ) -> BoxedFilter<(impl Reply,)> {
     warp::path(path)
         .and(warp::ws())
@@ -309,7 +317,7 @@ pub fn filter(
             ws.on_upgrade(move |ws| {
                 let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
                 async move {
-                    if let Err(e) = handle_client(publisher, subscriber, ws).await {
+                    if let Err(e) = handle_client(publisher, subscriber, ws, wstimeout).await {
                         warn!("client handler exited: {}", e)
                     }
                 }
@@ -327,7 +335,7 @@ pub async fn run(
     publisher: Publisher,
     subscriber: Subscriber,
 ) -> Result<()> {
-    let routes = filter(publisher, subscriber, "ws");
+    let routes = filter(publisher, subscriber, "ws", tokio::time::Duration::from_secs_f64(config.wstimeout.unwrap_or(3.0)));
     match (&config.cert, &config.key) {
         (_, None) | (None, _) => {
             warp::serve(routes).run(config.listen.parse::<SocketAddr>()?).await
