@@ -30,6 +30,7 @@ use warp::{
     ws::{Message, WebSocket, Ws},
     Filter, Reply,
 };
+use tokio::time::Duration;
 
 pub mod config;
 mod protocol;
@@ -48,15 +49,25 @@ struct PubEntry {
 type PendingCall =
     Pin<Box<dyn Future<Output = (u64, Result<Value>)> + Send + Sync + 'static>>;
 
-async fn reply<'a>(tx: &mut SplitSink<WebSocket, Message>, m: &Response) -> Result<()> {
+async fn reply<'a>(tx: &mut SplitSink<WebSocket, Message>, m: &Response, timeout: Option<Duration>) -> Result<()> {
     let s = serde_json::to_string(m)?;
-    Ok(tx.send(Message::text(s)).await?)
+    // CR base1172 for estokes: Here we're only enforcing that the SplitSink write completes within
+    // [timeout], with no guarantee on how long it takes to actually flush the message to the client.
+    // In a perfect world we'd probably want a proper flush timeout (similar to what [WriteChannel] does).
+    // For now, just requiring that [tx.send(..)] completes within [timeout] is probably good enough.
+    // DUR
+    let fut = tx.send(Message::text(s));
+    match timeout {
+        None => Ok(fut.await?),
+        Some(timeout) => Ok(tokio::time::timeout(timeout, fut).await??)
+    }
 }
 async fn err(
     tx: &mut SplitSink<WebSocket, Message>,
     message: impl Into<String>,
+    timeout: Option<Duration>,
 ) -> Result<()> {
-    reply(tx, &Response::Error { error: message.into() }).await
+    reply(tx, &Response::Error { error: message.into() }, timeout).await
 }
 
 struct ClientCtx {
@@ -192,6 +203,7 @@ impl ClientCtx {
         tx: &mut SplitSink<WebSocket, Message>,
         queued: &mut Vec<result::Result<Message, warp::Error>>,
         calls_pending: &mut FuturesUnordered<PendingCall>,
+        timeout: Option<Duration>
     ) -> Result<()> {
         let mut batch = self.publisher.start_batch();
         for r in queued.drain(..) {
@@ -200,35 +212,35 @@ impl ClientCtx {
                 continue;
             }
             match m.to_str() {
-                Err(_) => err(tx, "expected text").await?,
+                Err(_) => err(tx, "expected text", timeout).await?,
                 Ok(txt) => match serde_json::from_str::<Request>(txt) {
-                    Err(e) => err(tx, format!("could not parse message {}", e)).await?,
+                    Err(e) => err(tx, format!("could not parse message {}", e), timeout).await?,
                     Ok(req) => match req {
                         Request::Subscribe { path } => {
                             let id = self.subscribe(path);
-                            reply(tx, &Response::Subscribed { id }).await?
+                            reply(tx, &Response::Subscribed { id }, timeout).await?
                         }
                         Request::Unsubscribe { id } => match self.unsubscribe(id) {
-                            Err(e) => err(tx, e.to_string()).await?,
-                            Ok(()) => reply(tx, &Response::Unsubscribed).await?,
+                            Err(e) => err(tx, e.to_string(), timeout).await?,
+                            Ok(()) => reply(tx, &Response::Unsubscribed, timeout).await?,
                         },
                         Request::Write { id, val } => match self.write(id, val) {
-                            Err(e) => err(tx, e.to_string()).await?,
-                            Ok(()) => reply(tx, &Response::Wrote).await?,
+                            Err(e) => err(tx, e.to_string(), timeout).await?,
+                            Ok(()) => reply(tx, &Response::Wrote, timeout).await?,
                         },
                         Request::Publish { path, init } => match self.publish(path, init)
                         {
-                            Err(e) => err(tx, e.to_string()).await?,
-                            Ok(id) => reply(tx, &Response::Published { id }).await?,
+                            Err(e) => err(tx, e.to_string(), timeout).await?,
+                            Ok(id) => reply(tx, &Response::Published { id }, timeout).await?,
                         },
                         Request::Unpublish { id } => match self.unpublish(id) {
-                            Err(e) => err(tx, e.to_string()).await?,
-                            Ok(()) => reply(tx, &Response::Unpublished).await?,
+                            Err(e) => err(tx, e.to_string(), timeout).await?,
+                            Ok(()) => reply(tx, &Response::Unpublished, timeout).await?,
                         },
                         Request::Update { updates } => {
                             match self.update(&mut batch, updates) {
-                                Err(e) => err(tx, e.to_string()).await?,
-                                Ok(()) => reply(tx, &Response::Updated).await?,
+                                Err(e) => err(tx, e.to_string(), timeout).await?,
+                                Ok(()) => reply(tx, &Response::Updated, timeout).await?,
                             }
                         }
                         Request::Call { id, path, args } => {
@@ -236,11 +248,11 @@ impl ClientCtx {
                                 Ok(pending) => calls_pending.push(pending),
                                 Err(e) => {
                                     let error = format!("rpc call failed {}", e);
-                                    reply(tx, &Response::CallFailed { id, error }).await?
+                                    reply(tx, &Response::CallFailed { id, error }, timeout).await?
                                 }
                             }
                         }
-                        Request::Unknown => err(tx, "unknown request").await?,
+                        Request::Unknown => err(tx, "unknown request", timeout).await?,
                     },
                 },
             }
@@ -253,7 +265,7 @@ async fn handle_client(
     publisher: Publisher,
     subscriber: Subscriber,
     ws: WebSocket,
-    wstimeout: tokio::time::Duration
+    timeout: Option<Duration>
 ) -> Result<()> {
     static UPDATES: Lazy<Pool<Vec<Update>>> = Lazy::new(|| Pool::new(50, 10000));
     let (tx_up, mut rx_up) = mpsc::channel::<Pooled<Vec<(SubId, Event)>>>(3);
@@ -267,11 +279,11 @@ async fn handle_client(
         select_biased! {
             (id, res) = calls_pending.select_next_some() => match res {
                 Ok(result) => {
-                    reply(&mut tx_ws, &Response::CallSuccess { id, result }).await?
+                    reply(&mut tx_ws, &Response::CallSuccess { id, result }, timeout).await?
                 }
                 Err(e) => {
                     let error = format!("rpc call failed {}", e);
-                    reply(&mut tx_ws, &Response::CallFailed { id, error }).await?
+                    reply(&mut tx_ws, &Response::CallFailed { id, error }, timeout).await?
                 }
             },
             r = rx_ws.select_next_some() => match r {
@@ -280,7 +292,8 @@ async fn handle_client(
                     ctx.process_from_client(
                         &mut tx_ws,
                         &mut queued,
-                        &mut calls_pending
+                        &mut calls_pending,
+                        timeout
                     ).await?
                 }
             },
@@ -289,12 +302,7 @@ async fn handle_client(
                 for (id, event) in batch.drain(..) {
                     updates.push(Update {id, event});
                 }
-                if let Err(err) = tokio::time::timeout(wstimeout, async {
-                    reply(&mut tx_ws, &Response::Update { updates }).await
-                }).await{
-                    warn!("bad internet connection, err msg = {}", err);
-                    break;
-                }
+                reply(&mut tx_ws, &Response::Update { updates }, timeout).await?
             },
         }
     }
@@ -308,7 +316,7 @@ pub fn filter(
     publisher: Publisher,
     subscriber: Subscriber,
     path: &'static str,
-    wstimeout: tokio::time::Duration,
+    timeout: Option<Duration>,
 ) -> BoxedFilter<(impl Reply,)> {
     warp::path(path)
         .and(warp::ws())
@@ -317,7 +325,7 @@ pub fn filter(
             ws.on_upgrade(move |ws| {
                 let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
                 async move {
-                    if let Err(e) = handle_client(publisher, subscriber, ws, wstimeout).await {
+                    if let Err(e) = handle_client(publisher, subscriber, ws, timeout).await {
                         warn!("client handler exited: {}", e)
                     }
                 }
@@ -335,7 +343,7 @@ pub async fn run(
     publisher: Publisher,
     subscriber: Subscriber,
 ) -> Result<()> {
-    let routes = filter(publisher, subscriber, "ws", tokio::time::Duration::from_secs_f64(config.wstimeout.unwrap_or(3.0)));
+    let routes = filter(publisher, subscriber, "ws", config.timeout.map(Duration::from_secs));
     match (&config.cert, &config.key) {
         (_, None) | (None, _) => {
             warp::serve(routes).run(config.listen.parse::<SocketAddr>()?).await
