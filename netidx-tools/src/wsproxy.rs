@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use netidx::{
     publisher::PublisherBuilder, resolver_client::DesiredAuth, subscriber::Subscriber,
 };
+use std::time::Duration;
 
 use crate::publisher;
 
@@ -18,5 +19,6 @@ pub(super) async fn run(
         .await
         .context("creating publisher")?;
     let subscriber = Subscriber::new(cfg, auth).context("creating subscriber")?;
-    netidx_wsproxy::run(proxy, publisher, subscriber).await.context("ws proxy")
+    let timeout = pcfg.timeout.map(Duration::from_secs);
+    netidx_wsproxy::run(proxy, publisher, subscriber, timeout).await.context("ws proxy")
 }

@@ -30,7 +30,7 @@ use warp::{
     ws::{Message, WebSocket, Ws},
     Filter, Reply,
 };
-use tokio::time::Duration;
+use std::time::Duration;
 
 pub mod config;
 mod protocol;
@@ -257,7 +257,7 @@ impl ClientCtx {
                 },
             }
         }
-        Ok(batch.commit(None).await)
+        Ok(batch.commit(timeout).await)
     }
 }
 
@@ -342,8 +342,9 @@ pub async fn run(
     config: config::Config,
     publisher: Publisher,
     subscriber: Subscriber,
+    timeout: Option<Duration>
 ) -> Result<()> {
-    let routes = filter(publisher, subscriber, "ws", config.timeout.map(Duration::from_secs));
+    let routes = filter(publisher, subscriber, "ws", timeout);
     match (&config.cert, &config.key) {
         (_, None) | (None, _) => {
             warp::serve(routes).run(config.listen.parse::<SocketAddr>()?).await
