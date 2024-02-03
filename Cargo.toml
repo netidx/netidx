@@ -22,7 +22,7 @@ chrono = { version = "^0.4.24", features = ["serde"]}
 combine = "4"
 compact_str = { version = "0.7", features = ["serde"] }
 crossbeam = "0.8"
-cross-krb5 = { version = "0.3", default_features = false }
+cross-krb5 = { version = "0.4", default_features = false }
 digest = "0.10"
 dirs = "5"
 diligent-date-parser = "0.1.4"

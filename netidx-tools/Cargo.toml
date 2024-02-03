@@ -24,7 +24,7 @@ path = "src/main.rs"
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
-nix = "0.26"
+nix = "0.27"
 
 [features]
 default = []
