@@ -151,7 +151,7 @@ impl Connection {
                         if has_clear {
                             self.published.shift_remove(&p);
                         } else {
-                            self.published.remove(&p);
+                            self.published.swap_remove(&p);
                         }
                     }
                     None => {
@@ -443,7 +443,7 @@ impl Connection {
                     self.published.insert(p.clone(), tx.clone());
                 }
                 ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => {
-                    self.published.remove(p);
+                    self.published.swap_remove(p);
                 }
                 ToWrite::Clear => {
                     self.published.clear();

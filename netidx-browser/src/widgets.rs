@@ -675,7 +675,7 @@ impl RadioButton {
             if let Some(current) = self.current_group.take() {
                 self.button.join_group(gtk::RadioButton::NONE);
                 if let Some((_, group)) = ctx.user.radio_groups.get_mut(&current) {
-                    group.remove(&self.button);
+                    group.swap_remove(&self.button);
                     if group.is_empty() {
                         ctx.user.radio_groups.remove(&current);
                     }

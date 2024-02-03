@@ -579,7 +579,7 @@ impl IndexDescriptor {
                     break Path::from(name);
                 }
             };
-            if let Some(cnt) = t.cols.remove(NAME_COL) {
+            if let Some(cnt) = t.cols.swap_remove(NAME_COL) {
                 t.cols.insert(deconf, cnt);
             }
         }

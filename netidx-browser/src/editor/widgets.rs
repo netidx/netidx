@@ -1006,7 +1006,7 @@ impl LinePlot {
                                 seriesbox.remove(&c);
                             }
                         }
-                        series.borrow_mut().remove(&i);
+                        series.borrow_mut().swap_remove(&i);
                         on_change()
                     }));
         }));
