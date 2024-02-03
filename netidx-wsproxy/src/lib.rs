@@ -306,7 +306,6 @@ async fn handle_client(
             },
         }
     }
-    Ok(())
 }
 
 /// If you want to integrate the netidx api server into your own warp project

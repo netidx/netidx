@@ -3,7 +3,7 @@ use super::{
     SubscribeValRequest, Subscriber, SubscriberInner, SubscriberWeak, ToCon,
     UpdatesFlags, Val, ValInner, ValWeak, WUpdateChan, BATCHES, DECODE_BATCHES,
 };
-pub use crate::protocol::value::{FromValue, Typ, Value};
+pub use crate::protocol::value::{FromValue, Value};
 pub use crate::resolver_client::DesiredAuth;
 use crate::{
     batch_channel::BatchReceiver,
