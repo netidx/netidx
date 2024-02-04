@@ -21,7 +21,7 @@ use crate::{
     },
     tls, utils,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use auth::{UserInfo, ANONYMOUS};
 use config::{Config, MemberServer};
 use cross_krb5::{AcceptFlags, K5ServerCtx, ServerCtx, Step};
@@ -610,13 +610,13 @@ async fn get_tls_uifo(
     let (_, server_con) = tls.get_ref();
     match server_con.peer_certificates() {
         Some([cert, ..]) => {
-            let names = tls::get_names(&cert.0)?;
+            let names = tls::get_names(&cert.0).context("getting tls names")?;
             Ok(a.1
                 .write()
                 .await
                 .users
                 .ifo(id, names.as_ref().map(|names| names.cn.as_str()))
-                .await?)
+                .await.context("getting user info")?)
         }
         Some(_) | None => bail!("tls handshake should be complete by now"),
     }
@@ -798,14 +798,14 @@ async fn hello_client_read(
         },
         AuthRead::Tls => match &ctx.secctx {
             SecCtx::Tls(a) => {
-                let tls = a.0.accept(con).await?;
-                let uifo = get_tls_uifo(ctx.id, &tls, a).await?;
+                let tls = a.0.accept(con).await.context("accepting tls connection")?;
+                let uifo = get_tls_uifo(ctx.id, &tls, a).await.context("getting tls info")?;
                 let mut con = Channel::new::<
                     ServerCtx,
                     tokio_rustls::server::TlsStream<TcpStream>,
                 >(None, tls);
                 time::timeout(ctx.cfg.hello_timeout, con.send_one(&AuthRead::Tls))
-                    .await??;
+                    .await.context("saying hello")??;
                 (con, uifo)
             }
             SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Krb5(_) => bail!(NO),
