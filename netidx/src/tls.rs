@@ -5,7 +5,7 @@ use log::{debug, info, warn};
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::{
-    collections::{BTreeMap, Bound, HashMap},
+    collections::{BTreeMap, HashMap},
     fmt, mem,
     sync::Arc,
 };
@@ -221,13 +221,8 @@ pub(crate) fn get_match<'a: 'b, 'b, U>(
     m: &'a BTreeMap<String, U>,
     identity: &'b str,
 ) -> Option<&'a U> {
-    m.range::<str, (Bound<&str>, Bound<&str>)>((
-        Bound::Unbounded,
-        Bound::Included(identity),
-    ))
-    .next_back()
-    .and_then(|(k, v)| {
-        if k == identity || (identity.starts_with(k)) {
+    m.iter().find_map(|(k, v)| {
+        if k == identity || identity.starts_with(k) {
             Some(v)
         } else {
             None
@@ -340,3 +335,20 @@ impl CachedAcceptor {
         self.0.load(identity, create_tls_acceptor)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_get_match() {
+        let mut m = BTreeMap::new();
+        m.insert("com.mydomain.".to_string(), 1);
+        m.insert("com.mydomain.foo.".to_string(), 2);
+        let r = get_match(&m, "com.mydomain.bar.").copied();
+        assert_eq!(r, Some(1));
+        let r = get_match(&m, "com.mydomain.qux.").copied();
+        assert_eq!(r, Some(1));
+    }
+}
+
