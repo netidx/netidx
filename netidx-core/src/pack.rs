@@ -1301,16 +1301,16 @@ impl Pack for NaiveDateTime {
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        buf.put_i64(self.timestamp());
-        Ok(buf.put_u32(self.timestamp_subsec_nanos()))
+        buf.put_i64(self.and_utc().timestamp());
+        Ok(buf.put_u32(self.and_utc().timestamp_subsec_nanos()))
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let ts = Pack::decode(buf)?;
         let ns = Pack::decode(buf)?;
-        let ndt = NaiveDateTime::from_timestamp_opt(ts, ns)
-            .ok_or_else(|| PackError::InvalidFormat)?;
-        Ok(ndt)
+        let ndt =
+            DateTime::from_timestamp(ts, ns).ok_or_else(|| PackError::InvalidFormat)?;
+        Ok(ndt.naive_utc())
     }
 }
 
@@ -1331,9 +1331,9 @@ impl Pack for DateTime<Utc> {
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let ts = Pack::decode(buf)?;
         let ns = Pack::decode(buf)?;
-        let ndt = NaiveDateTime::from_timestamp_opt(ts, ns)
-            .ok_or_else(|| PackError::InvalidFormat)?;
-        Ok(Utc.from_utc_datetime(&ndt))
+        let dt =
+            DateTime::from_timestamp(ts, ns).ok_or_else(|| PackError::InvalidFormat)?;
+        Ok(dt)
     }
 }
 

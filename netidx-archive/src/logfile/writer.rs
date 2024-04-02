@@ -351,7 +351,7 @@ impl ArchiveWriter {
             bail!(RecordTooLarge)
         }
         match timestamp {
-            Timestamp::Offset(_, _) => (),
+            Timestamp::Offset(_) => (),
             Timestamp::NewBasis(basis) => {
                 let record_length = <DateTime<Utc> as Pack>::encoded_len(&basis);
                 let rh = RecordHeader {

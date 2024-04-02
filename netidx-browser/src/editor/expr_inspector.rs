@@ -19,7 +19,10 @@ use std::{
 
 #[derive(Clone, Boxed)]
 #[boxed_type(name = "NetidxExprInspectorWrap")]
-struct ExprWrap(Arc<dyn Fn(&DateTime<Local>, &Option<vm::Event<LocalEvent>>, &Value)>);
+struct ExprWrap(
+    #[allow(dead_code)] // we're just keeping it alive, C will call it
+    Arc<dyn Fn(&DateTime<Local>, &Option<vm::Event<LocalEvent>>, &Value)>,
+);
 
 fn log_expr_val(
     log: &gtk::ListStore,

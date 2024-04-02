@@ -312,14 +312,14 @@ lazy_static! {
 #[derive(Debug, Clone, Copy)]
 enum Timestamp {
     NewBasis(DateTime<Utc>),
-    Offset(DateTime<Utc>, u32),
+    Offset(u32),
 }
 
 impl Timestamp {
     pub fn offset(&self) -> u32 {
         match self {
             Timestamp::NewBasis(_) => 0,
-            Timestamp::Offset(_, off) => *off,
+            Timestamp::Offset(off) => *off,
         }
     }
 }
@@ -377,7 +377,7 @@ impl MonotonicTimestamper {
                 Some(off) if off <= 0 => {
                     if self.offset < MAX_TIMESTAMP {
                         self.offset += 1;
-                        Timestamp::Offset(basis, self.offset)
+                        Timestamp::Offset(self.offset)
                     } else {
                         let basis = self.update_basis(basis + Duration::microseconds(1));
                         Timestamp::NewBasis(basis)
@@ -385,7 +385,7 @@ impl MonotonicTimestamper {
                 }
                 Some(off) if (self.offset as i64 + off) <= MAX_TIMESTAMP as i64 => {
                     self.offset += off as u32;
-                    Timestamp::Offset(basis, self.offset)
+                    Timestamp::Offset(self.offset)
                 }
                 None | Some(_) => Timestamp::NewBasis(self.update_basis(now)),
             },
