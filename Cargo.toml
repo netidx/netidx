@@ -40,7 +40,7 @@ globset = "0.4"
 gtk = { version = "0.17", features = ["v3_24"] }
 hdrhistogram = "7"
 if-addrs = "0.10"
-immutable-chunkmap = "1"
+immutable-chunkmap = "2"
 indexmap = "2"
 keyring = "2"
 lazy_static = "1"
