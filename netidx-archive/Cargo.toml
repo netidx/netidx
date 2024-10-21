@@ -15,9 +15,9 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-netidx = { path = "../netidx", version = "0.26.0", default_features = false }
+netidx = { path = "../netidx", version = "0.26.0", default-features = false }
 netidx-netproto = { version = "0.26.0", path = "../netidx-netproto" }
-netidx-protocols = { path = "../netidx-protocols", version = "0.26.0", default_features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.26.0", default-features = false }
 netidx-derive = { path = "../netidx-derive", version = "0.22.0" }
 netidx-core = { path = "../netidx-core", version = "0.26.0" }
 tokio = { workspace = true }

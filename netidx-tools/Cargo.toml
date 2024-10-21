@@ -24,20 +24,20 @@ path = "src/main.rs"
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
-nix = { version = "0.28", features = ["process", "signal"] }
+nix = { version = "0.29", features = ["process", "signal"] }
 
 [features]
 default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-netidx-tools-core = { path = "../netidx-tools-core", version = "0.26.0", default_features = false }
-netidx-archive = { path = "../netidx-archive", version = "0.26.0", default_features = false }
-netidx = { path = "../netidx", version = "0.26.0", default_features = false }
-netidx-protocols = { path = "../netidx-protocols", version = "0.26.0", default_features = false }
-netidx-bscript = { path = "../netidx-bscript", version = "0.26.0", default_features = false }
-netidx-container = { path = "../netidx-container", version = "0.26.0", default_features = false }
-netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.26.0", default_features = false }
+netidx-tools-core = { path = "../netidx-tools-core", version = "0.26.0", default-features = false }
+netidx-archive = { path = "../netidx-archive", version = "0.26.0", default-features = false }
+netidx = { path = "../netidx", version = "0.26.0", default-features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.26.0", default-features = false }
+netidx-bscript = { path = "../netidx-bscript", version = "0.26.0", default-features = false }
+netidx-container = { path = "../netidx-container", version = "0.26.0", default-features = false }
+netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.26.0", default-features = false }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }

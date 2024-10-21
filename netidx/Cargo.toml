@@ -10,7 +10,7 @@ repository = "https://github.com/estokes/netidx"
 documentation = "https://docs.rs/netidx"
 readme = "../README.md"
 keywords = ["network", "networking", "distributed", "kerberos"]
-categories = ["network-programming"]
+categories = ["text-processing"]
 
 [features]
 default = []
