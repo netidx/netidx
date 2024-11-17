@@ -64,7 +64,7 @@ pub(crate) enum Cmd {
             default_value = "2"
         )]
         window: usize,
-        file: PathBuf,
+        file: Vec<PathBuf>,
     },
     #[structopt(name = "index", about = "index the archive file")]
     Index {
@@ -311,7 +311,12 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
             let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
             session(subscriber, params).await
         }
-        Cmd::Compress { file, window, keep } => compress(file, keep, window).await,
+        Cmd::Compress { file, window, keep } => {
+            for f in file {
+                compress(f, keep, window).await?
+            }
+            Ok(())
+        },
         Cmd::Dump { file, metadata, check_index } => dump(file, metadata, check_index),
         Cmd::Verify { file } => verify(file),
         Cmd::Compressed { file } => compressed(file),

@@ -628,10 +628,10 @@ fn scan_records(
         }
     };
     if let Some(deltamap) = deltamap {
-	deltamap.shrink_to_fit();
+        deltamap.shrink_to_fit();
     }
     if let Some(imagemap) = imagemap {
-	imagemap.shrink_to_fit();
+        imagemap.shrink_to_fit();
     }
     res
 }

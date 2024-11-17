@@ -1,7 +1,6 @@
 use super::{
-    arraymap::ArrayMap, scan_file, scan_header, scan_records, ArchiveWriter, BatchItem,
-    Cursor, FileHeader, Id, PathMapping, RecordHeader, Seek, CURSOR_BATCH_POOL, IMG_POOL,
-    PM_POOL,
+    arraymap::ArrayMap, scan_file, scan_header, scan_records, ArchiveWriter, BatchItem, Cursor,
+    FileHeader, Id, PathMapping, RecordHeader, Seek, CURSOR_BATCH_POOL, IMG_POOL, PM_POOL,
 };
 use anyhow::{Context, Result};
 use bytes::{Buf, BufMut};
@@ -88,7 +87,10 @@ impl ArchiveIndex {
     /// check if the specifed timestamp could be in the file, meaning
     /// it is equal or after the start and before or equal to the end
     pub fn check_in_file(&self, ts: DateTime<Utc>) -> bool {
-        match (self.deltamap.first_key_value(), self.deltamap.last_key_value()) {
+        match (
+            self.deltamap.first_key_value(),
+            self.deltamap.last_key_value(),
+        ) {
             (Some((fst, _)), Some((lst, _))) => *fst <= ts && ts <= *lst,
             (_, _) => false,
         }
@@ -97,7 +99,10 @@ impl ArchiveIndex {
     /// check if the speficied cursor has any overlap with the records
     /// in the file.
     pub fn has_overlap(&self, cursor: &Cursor) -> bool {
-        match (self.deltamap.first_key_value(), self.deltamap.last_key_value()) {
+        match (
+            self.deltamap.first_key_value(),
+            self.deltamap.last_key_value(),
+        ) {
             (Some((fst, _)), Some((lst, _))) => {
                 let start = match cursor.start {
                     Bound::Unbounded => true,
@@ -161,12 +166,15 @@ impl ArchiveIndex {
     ) -> (bool, DateTime<Utc>) {
         let ts = match cursor.current() {
             Some(ts) => ts,
-            None => self.deltamap.keys().next().copied().unwrap_or(
-                Utc.from_utc_datetime(&NaiveDateTime::new(
+            None => self
+                .deltamap
+                .keys()
+                .next()
+                .copied()
+                .unwrap_or(Utc.from_utc_datetime(&NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
                     NaiveTime::from_hms_opt(0, 0, 1).unwrap(),
-                )),
-            ),
+                ))),
         };
         let new_ts = ts + offset;
         cursor.set_current(new_ts);
@@ -198,8 +206,10 @@ impl ArchiveReader {
     /// the [ArchiveWriter::reader](ArchiveWriter::reader) method to
     /// get a reader.
     pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
-        let file =
-            OpenOptions::new().read(true).open(path.as_ref()).context("open file")?;
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path.as_ref())
+            .context("open file")?;
         file.try_lock_shared()?;
         Self::open_with(Arc::new(file))
     }
@@ -386,8 +396,7 @@ impl ArchiveReader {
             bail!("record out of bounds")
         }
         let mut buf = &mmap[pos..];
-        let rh =
-            <RecordHeader as Pack>::decode(&mut buf).context("reading record header")?;
+        let rh = <RecordHeader as Pack>::decode(&mut buf).context("reading record header")?;
         if pos + rh.record_length as usize > end {
             bail!("get_batch: error truncated record at {}", pos);
         }
@@ -419,16 +428,18 @@ impl ArchiveReader {
             bail!("record out of bounds")
         }
         let mut buf = &mmap[pos..];
-        let rh =
-            <RecordHeader as Pack>::decode(&mut buf).context("reading record header")?;
+        let rh = <RecordHeader as Pack>::decode(&mut buf).context("reading record header")?;
         if pos + rh.record_length as usize > end {
             bail!("get_batch: error truncated record at {}", pos);
         }
         let pos = pos + <RecordHeader as Pack>::const_encoded_len().unwrap();
         match compressed {
             None => {
-                let index_len =
-                    if indexed { decode_varint(&mut &mmap[pos..])? as usize } else { 0 };
+                let index_len = if indexed {
+                    decode_varint(&mut &mmap[pos..])? as usize
+                } else {
+                    0
+                };
                 let pos = pos + index_len;
                 let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(&mut &mmap[pos..])
                     .context("decoding batch")?;
@@ -451,14 +462,10 @@ impl ArchiveReader {
                     }
                     let comp_len = rh.record_length as usize - 4 - index_len;
                     let len = dcm
-                        .decompress_to_buffer(
-                            &mmap[pos..pos + comp_len],
-                            &mut *compression_buf,
-                        )
+                        .decompress_to_buffer(&mmap[pos..pos + comp_len], &mut *compression_buf)
                         .context("decompressing to buffer")?;
-                    let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(
-                        &mut &compression_buf[..len],
-                    )?;
+                    let batch =
+                        <Pooled<Vec<BatchItem>> as Pack>::decode(&mut &compression_buf[..len])?;
                     Ok((rh.record_length as usize, batch))
                 })
             }
@@ -489,27 +496,26 @@ impl ArchiveReader {
                 let mut image = IMG_POOL.take();
                 let index = self.index.read();
                 let mmap = self.mmap.read();
-                let start =
-                    match index.imagemap.range((Bound::Unbounded, pos)).next_back() {
-                        None => Bound::Unbounded,
-                        Some((ts, pos)) => {
-                            let (_, mut batch) = ArchiveReader::get_batch_at(
-                                self.indexed,
-                                &self.compressed,
-                                &*mmap,
-                                *pos,
-                                index.end,
-                            )?;
-                            image.extend(batch.drain(..).filter_map(
-                                |BatchItem(id, up)| match filter {
-                                    Some(set) if set.contains(&id) => Some((id, up)),
-                                    Some(_) => None,
-                                    None => Some((id, up)),
-                                },
-                            ));
-                            Bound::Included(*ts)
-                        }
-                    };
+                let start = match index.imagemap.range((Bound::Unbounded, pos)).next_back() {
+                    None => Bound::Unbounded,
+                    Some((ts, pos)) => {
+                        let (_, mut batch) = ArchiveReader::get_batch_at(
+                            self.indexed,
+                            &self.compressed,
+                            &*mmap,
+                            *pos,
+                            index.end,
+                        )?;
+                        image.extend(batch.drain(..).filter_map(
+                            |BatchItem(id, up)| match filter {
+                                Some(set) if set.contains(&id) => Some((id, up)),
+                                Some(_) => None,
+                                None => Some((id, up)),
+                            },
+                        ));
+                        Bound::Included(*ts)
+                    }
+                };
                 let matched = Self::matching_idxs(
                     self.indexed,
                     self.compressed.is_some(),
@@ -527,13 +533,15 @@ impl ArchiveReader {
                         pos as usize,
                         index.end,
                     )?;
-                    image.extend(batch.drain(..).filter_map(|BatchItem(id, up)| {
-                        match filter {
-                            Some(set) if set.contains(&id) => Some((id, up)),
-                            Some(_) => None,
-                            None => Some((id, up)),
-                        }
-                    }));
+                    image.extend(
+                        batch
+                            .drain(..)
+                            .filter_map(|BatchItem(id, up)| match filter {
+                                Some(set) if set.contains(&id) => Some((id, up)),
+                                Some(_) => None,
+                                None => Some((id, up)),
+                            }),
+                    );
                 }
                 Ok(image)
             }
@@ -549,19 +557,22 @@ impl ArchiveReader {
         start: Bound<DateTime<Utc>>,
         end: Bound<DateTime<Utc>>,
     ) -> impl Iterator<Item = (DateTime<Utc>, usize)> + 'a {
-        index.deltamap.range((start, end)).filter_map(move |(ts, pos)| match filter {
-            Some(set) if indexed => {
-                match Self::scan_index_at(set, compressed, &*mmap, *pos, index.end) {
-                    Ok(true) => Some((*ts, *pos)),
-                    Ok(false) => None,
-                    Err(e) => {
-                        error!("failed to read index entry for {}, {:?}", ts, e);
-                        None
+        index
+            .deltamap
+            .range((start, end))
+            .filter_map(move |(ts, pos)| match filter {
+                Some(set) if indexed => {
+                    match Self::scan_index_at(set, compressed, &*mmap, *pos, index.end) {
+                        Ok(true) => Some((*ts, *pos)),
+                        Ok(false) => None,
+                        Err(e) => {
+                            error!("failed to read index entry for {}, {:?}", ts, e);
+                            None
+                        }
                     }
                 }
-            }
-            None | Some(_) => Some((*ts, *pos)),
-        })
+                None | Some(_) => Some((*ts, *pos)),
+            })
     }
 
     /// read at most `n` delta items from the specified cursor, and
@@ -573,7 +584,10 @@ impl ArchiveReader {
         filter: Option<&FxHashSet<Id>>,
         cursor: &mut Cursor,
         n: usize,
-    ) -> Result<(usize, Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>)> {
+    ) -> Result<(
+        usize,
+        Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
+    )> {
         self.check_remap_rescan(false)?;
         let mut res = CURSOR_BATCH_POOL.take();
         let start = match cursor.current {
@@ -666,8 +680,7 @@ impl ArchiveReader {
         }
         let max_dict_len = end / 10;
         let max_dict_len = if max_dict_len == 0 { end } else { max_dict_len };
-        let dict =
-            zstd::dict::from_continuous(&mmap[fhl..end], &lengths[..], max_dict_len)?;
+        let dict = zstd::dict::from_continuous(&mmap[fhl..end], &lengths[..], max_dict_len)?;
         info!("dictionary of size {} was trained", dict.len());
         Ok((max_rec_len, dict))
     }
@@ -696,8 +709,7 @@ impl ArchiveReader {
         output.add_raw_pathmappings(pms)?;
         let mmap = self.mmap.read();
         for (ts, (image, pos)) in unified_index.iter() {
-            let (_, batch) =
-                Self::get_batch_at(false, &self.compressed, &*mmap, *pos, index.end)?;
+            let (_, batch) = Self::get_batch_at(false, &self.compressed, &*mmap, *pos, index.end)?;
             output.add_batch(*image, *ts, &batch)?;
         }
         Ok(())
@@ -706,16 +718,7 @@ impl ArchiveReader {
     /// This function will create an archive with compressed batches
     /// and images. Compressed archives can be read as normal, but can
     /// no longer be written.
-    ///
-    /// This function is only meant to be called by the command line
-    /// tool. It allocates static memory that will not be freed when
-    /// it returns. Do not call it directly unless you are ok with
-    /// this.
-    pub async fn compress(
-        &self,
-        window: usize,
-        dest: impl AsRef<FilePath>,
-    ) -> Result<()> {
+    pub async fn compress(&self, window: usize, dest: impl AsRef<FilePath>) -> Result<()> {
         struct CompJob {
             ts: DateTime<Utc>,
             image: bool,
@@ -737,8 +740,7 @@ impl ArchiveReader {
                 (&mut job.cbuf[0..4]).put_u32(rh.record_length);
                 let index_len = if indexed {
                     let index_len = decode_varint(&mut &mmap[pos..])? as usize;
-                    (&mut job.cbuf[4..4 + index_len])
-                        .put_slice(&mmap[pos..pos + index_len]);
+                    (&mut job.cbuf[4..4 + index_len]).put_slice(&mmap[pos..pos + index_len]);
                     index_len
                 } else {
                     0
@@ -757,75 +759,80 @@ impl ArchiveReader {
         }
         self.check_remap_rescan(false)?;
         let (max_len, dict) = self.train()?;
-        let pdict = Box::leak(Box::new(zstd::dict::EncoderDictionary::copy(&dict, 19)));
-        let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> = BTreeMap::new();
-        let index = self.index.read();
-        for (ts, pos) in index.deltamap.iter() {
-            unified_index.insert(*ts, (false, *pos));
-        }
-        for (ts, pos) in index.imagemap.iter() {
-            unified_index.insert(*ts, (true, *pos));
-        }
-        let mut output =
-            ArchiveWriter::open_full(dest, self.indexed, Some(dict), None::<&str>)?;
-        let mut pms = PM_POOL.take();
-        for (id, path) in index.path_by_id.iter() {
-            pms.push(PathMapping(path.clone(), *id));
-        }
-        output.add_raw_pathmappings(pms)?;
-        let ncpus = num_cpus::get();
-        let mut compjobs = (0..ncpus * window)
-            .into_iter()
-            .map(|_| {
-                Ok(CompJob {
-                    ts: DateTime::<Utc>::MIN_UTC,
-                    cbuf: vec![0u8; max_len * 2],
-                    comp: Compressor::with_prepared_dictionary(pdict)?,
-                    image: false,
-                    pos: 0,
+        let pdict = Box::leak(Box::new(zstd::dict::EncoderDictionary::copy(&dict, 19))) as *mut _;
+        let f = || async {
+            let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> = BTreeMap::new();
+            let index = self.index.read();
+            for (ts, pos) in index.deltamap.iter() {
+                unified_index.insert(*ts, (false, *pos));
+            }
+            for (ts, pos) in index.imagemap.iter() {
+                unified_index.insert(*ts, (true, *pos));
+            }
+            let mut output =
+                ArchiveWriter::open_full(dest, self.indexed, Some(dict), None::<&str>)?;
+            let mut pms = PM_POOL.take();
+            for (id, path) in index.path_by_id.iter() {
+                pms.push(PathMapping(path.clone(), *id));
+            }
+            output.add_raw_pathmappings(pms)?;
+            let ncpus = num_cpus::get();
+            let mut compjobs = (0..ncpus * window)
+                .into_iter()
+                .map(|_| {
+                    Ok(CompJob {
+                        ts: DateTime::<Utc>::MIN_UTC,
+                        cbuf: vec![0u8; max_len * 2],
+                        comp: Compressor::with_prepared_dictionary(unsafe { &*pdict })?,
+                        image: false,
+                        pos: 0,
+                    })
                 })
-            })
-            .collect::<Result<Vec<CompJob>>>()?;
-        let mut running_jobs: JoinSet<Result<CompJob>> = JoinSet::new();
-        let mut commitq: BTreeMap<DateTime<Utc>, Option<CompJob>> = BTreeMap::new();
-        let mut index_iter = unified_index.iter();
-        'main: loop {
-            while compjobs.is_empty() {
-                let job: CompJob = match running_jobs.join_next().await {
-                    None => break 'main,
-                    Some(res) => res??,
-                };
-                commitq.insert(job.ts, Some(job));
-                while let Some(mut ent) = commitq.first_entry() {
-                    match ent.get_mut().take() {
-                        None => break,
-                        Some(job) => {
-                            ent.remove();
-                            output
-                                .add_batch_raw(job.image, job.ts, &job.cbuf[0..job.pos])
-                                .context("add raw batch")?;
-                            compjobs.push(job);
+                .collect::<Result<Vec<CompJob>>>()?;
+            let mut running_jobs: JoinSet<Result<CompJob>> = JoinSet::new();
+            let mut commitq: BTreeMap<DateTime<Utc>, Option<CompJob>> = BTreeMap::new();
+            let mut index_iter = unified_index.iter();
+            'main: loop {
+                while compjobs.is_empty() {
+                    let job: CompJob = match running_jobs.join_next().await {
+                        None => break 'main,
+                        Some(res) => res??,
+                    };
+                    commitq.insert(job.ts, Some(job));
+                    while let Some(mut ent) = commitq.first_entry() {
+                        match ent.get_mut().take() {
+                            None => break,
+                            Some(job) => {
+                                ent.remove();
+                                output
+                                    .add_batch_raw(job.image, job.ts, &job.cbuf[0..job.pos])
+                                    .context("add raw batch")?;
+                                compjobs.push(job);
+                            }
                         }
                     }
                 }
-            }
-            match index_iter.next() {
-                None => compjobs.clear(),
-                Some((ts, (image, pos))) => {
-                    let mut job = compjobs.pop().unwrap();
-                    job.ts = *ts;
-                    job.image = *image;
-                    job.pos = *pos;
-                    commitq.insert(*ts, None);
-                    running_jobs.spawn(compress_task(
-                        self.indexed,
-                        Arc::clone(&self.mmap),
-                        job,
-                    ));
+                match index_iter.next() {
+                    None => compjobs.clear(),
+                    Some((ts, (image, pos))) => {
+                        let mut job = compjobs.pop().unwrap();
+                        job.ts = *ts;
+                        job.image = *image;
+                        job.pos = *pos;
+                        commitq.insert(*ts, None);
+                        running_jobs.spawn(compress_task(
+                            self.indexed,
+                            Arc::clone(&self.mmap),
+                            job,
+                        ));
+                    }
                 }
             }
-        }
-        output.flush()?;
-        Ok(())
+            output.flush()?;
+            Ok(())
+        };
+        let res = f().await;
+        mem::drop(unsafe { Box::from_raw(pdict) });
+        res
     }
 }

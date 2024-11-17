@@ -22,7 +22,7 @@ chrono = { version = "^0.4.24", features = ["serde"]}
 combine = "4"
 compact_str = { version = "0.7", features = ["serde"] }
 crossbeam = "0.8"
-cross-krb5 = { version = "0.4", default_features = false }
+cross-krb5 = { version = "0.4", default-features = false }
 digest = "0.10"
 dirs = "5"
 diligent-date-parser = "0.1.4"
@@ -55,7 +55,7 @@ parking_lot = "0.12.1"
 pin-utils = "0.1"
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
 plotters-backend = "0.3"
-plotters = { version = "0.3", default_features = false, features = ["datetime", "line_series", "ttf"] }
+plotters = { version = "0.3", default-features = false, features = ["datetime", "line_series", "ttf"] }
 radix_trie = "0.2"
 rand = "0.8.5"
 rayon = "1"

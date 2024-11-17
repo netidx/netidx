@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
-use netidx_archive::recorder::{Config, Recorder};
+use netidx_archive::{config::Config, recorder::Recorder};
 use std::{
     fs,
-    path::{self, PathBuf}, time::Duration,
+    path::{self, PathBuf},
+    time::Duration,
 };
 use tokio::signal::ctrl_c;
 

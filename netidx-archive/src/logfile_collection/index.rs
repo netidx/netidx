@@ -1,4 +1,4 @@
-use super::Config;
+use crate::config::Config;
 use anyhow::Result;
 use chrono::prelude::*;
 use log::{debug, info, warn};
@@ -64,7 +64,9 @@ impl File {
                     info!("list succeeded with {}", &stdout);
                     for name in stdout.split("\n") {
                         match name.parse::<DateTime<Utc>>() {
-                            Err(e) => warn!("failed to parse list ts \'{}\', {}", name, e),
+                            Err(e) => {
+                                warn!("failed to parse list ts \'{}\', {}", name, e)
+                            }
                             Ok(ts) => files.push(File::Historical(ts)),
                         }
                     }
@@ -85,9 +87,9 @@ impl File {
 }
 
 #[derive(Debug, Clone)]
-pub struct LogfileIndex(Arc<Vec<File>>);
+pub struct ArchiveIndex(Arc<Vec<File>>);
 
-impl LogfileIndex {
+impl ArchiveIndex {
     pub fn new(config: &Config, shard: &str) -> Result<Self> {
         Ok(Self(Arc::new(File::read(&config, shard)?)))
     }

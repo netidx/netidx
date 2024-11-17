@@ -1,15 +1,13 @@
 use super::{
-    logfile_collection::LogfileCollection,
-    logfile_index::LogfileIndex,
+    logfile_collection::index::ArchiveIndex,
+    logfile_collection::reader::ArchiveCollectionReader,
     publish::{parse_bound, parse_filter},
     Shards,
 };
 use crate::{
+    config::{Config, PublishConfig},
     logfile::{ArchiveReader, BatchItem, Id, Seek, CURSOR_BATCH_POOL, IMG_POOL},
-    recorder::{
-        publish::{END_DOC, FILTER_DOC, START_DOC},
-        Config, PublishConfig,
-    },
+    recorder::publish::{END_DOC, FILTER_DOC, START_DOC},
     recorder_client::{OneshotReply, OneshotReplyShard, PATHMAPS, SHARDS},
 };
 use anyhow::Result;
@@ -104,7 +102,7 @@ impl OneshotConfig {
 async fn do_oneshot(
     shard: ArcStr,
     head: Option<ArchiveReader>,
-    index: LogfileIndex,
+    index: ArchiveIndex,
     pathindex: ArchiveReader,
     config: Arc<Config>,
     limit: usize,
@@ -131,7 +129,7 @@ async fn do_oneshot(
     }
     debug!("opening logfile collection");
     let mut log =
-        LogfileCollection::new(index, config, shard, head, args.start, args.end);
+        ArchiveCollectionReader::new(index, config, shard, head, args.start, args.end);
     debug!("seeking to beginning");
     log.seek(Seek::Beginning)?;
     debug!("reimaging");

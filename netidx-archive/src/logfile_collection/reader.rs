@@ -1,9 +1,7 @@
 use crate::{
+    config::Config,
     logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek, IMG_POOL},
-    recorder::{
-        logfile_index::{File, LogfileIndex},
-        Config,
-    },
+    logfile_collection::index::{ArchiveIndex, File},
 };
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -166,8 +164,8 @@ impl DataSource {
     }
 }
 
-pub struct LogfileCollection {
-    index: LogfileIndex,
+pub struct ArchiveCollectionReader {
+    index: ArchiveIndex,
     source: Option<DataSource>,
     head: Option<ArchiveReader>,
     pos: Cursor,
@@ -175,7 +173,7 @@ pub struct LogfileCollection {
     shard: ArcStr,
 }
 
-impl Drop for LogfileCollection {
+impl Drop for ArchiveCollectionReader {
     fn drop(&mut self) {
         self.source = None;
         self.head = None;
@@ -186,9 +184,9 @@ impl Drop for LogfileCollection {
     }
 }
 
-impl LogfileCollection {
+impl ArchiveCollectionReader {
     pub fn new(
-        index: LogfileIndex,
+        index: ArchiveIndex,
         config: Arc<Config>,
         shard: ArcStr,
         head: Option<ArchiveReader>,
@@ -261,9 +259,7 @@ impl LogfileCollection {
                         File::Historical(end) => {
                             match self.pos.end() {
                                 Bound::Unbounded => (),
-                                Bound::Excluded(t) | Bound::Included(t)
-                                    if t <= &end =>
-                                {
+                                Bound::Excluded(t) | Bound::Included(t) if t <= &end => {
                                     break Ok(empty)
                                 }
                                 Bound::Excluded(_) | Bound::Included(_) => (),
@@ -358,7 +354,7 @@ impl LogfileCollection {
     }
 
     /// tell the collection that the log file has been rotated
-    pub fn log_rotated(&mut self, ts: DateTime<Utc>, index: LogfileIndex) {
+    pub fn log_rotated(&mut self, ts: DateTime<Utc>, index: ArchiveIndex) {
         if let Some(d) = self.source.as_mut() {
             if d.file == File::Head {
                 d.file = File::Historical(ts);

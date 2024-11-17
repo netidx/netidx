@@ -1,8 +1,9 @@
-use super::{
-    put_file, ArchiveCmds, BCastMsg, Config, LogfileIndex, RecordConfig, RotateDirective,
-    ShardId, Shards,
+use crate::{
+    config::{ArchiveCmds, Config, RecordConfig, RotateDirective},
+    logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL},
+    logfile_collection::index::ArchiveIndex,
+    recorder::{put_file, BCastMsg, ShardId, Shards},
 };
-use crate::logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use chrono::prelude::*;
@@ -290,11 +291,11 @@ pub(super) async fn run(
                     last_image = 0;
                     last_flush = 0;
                     task::block_in_place(|| write_image(&mut archive, &by_subid, &image, now))
-            .context("writing image")?;
+                        .context("writing image")?;
                     let reader = archive.reader().context("getting reader")?;
                     shards.heads.write().insert(shard_id, reader.clone());
-                    let index = task::block_in_place(|| LogfileIndex::new(&config, &shard_name))
-            .context("opening logfile index")?;
+                    let index = task::block_in_place(|| ArchiveIndex::new(&config, &shard_name))
+                        .context("opening logfile index")?;
                     shards.indexes.write().insert(shard_id, index);
                     let _ = bcast.send(BCastMsg::LogRotated(now));
                     let _ = bcast.send(BCastMsg::NewCurrent(reader));
@@ -354,14 +355,14 @@ pub(super) async fn run(
                             }
                         }
                         archive.add_batch(false, now, &tbatch)
-                .context("adding archive batch")?;
+                            .context("adding archive batch")?;
                         let _ = bcast.send(BCastMsg::Batch(now, Arc::new(tbatch)));
                         match record_config.image_frequency {
                             None => (),
                             Some(freq) if archive.len() - last_image < freq => (),
                             Some(_) => {
                                 write_image(&mut archive, &by_subid, &image, Utc::now())
-                    .context("writing image")?;
+                                    .context("writing image")?;
                                 last_image = archive.len();
                             }
                         }
