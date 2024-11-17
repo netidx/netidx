@@ -52,25 +52,35 @@ pub struct ArchiveCollectionWriter {
     shard_name: ArcStr,
     base: PathBuf,
     current_path: PathBuf,
-    external_lock: Option<(PathBuf, PathBuf)>,
+    external_lock: bool,
     current: Option<ArchiveWriter>,
     pathindex: ArchiveWriter,
 }
 
 impl ArchiveCollectionWriter {
-    fn open_full<F: AsRef<FilePath>>(
+    /// Open the archive collection with the option of an external
+    /// lock. Use this if the reading and writing process are not the
+    /// same. If `external_lock` is true then the current and
+    /// pathindex files themselves will not be locked, instead
+    /// external lock files will be created. This will allow one
+    /// process to read and publish while another writes.
+    ///
+    /// It is important that you do always open the same collection
+    /// for writing with the same value of external_lock, otherwise
+    /// concurrent writes will likely corrupt the data in the log
+    /// file.
+    fn open_full(
         config: Arc<Config>,
         shard_name: ArcStr,
-        external_lock: Option<(F, F)>,
+        external_lock: bool,
     ) -> Result<Self> {
         let base = config.archive_directory.join(shard_name.as_str());
         let current_path = base.join("current");
         let pathindex_path = base.join("pathindex");
         fs::create_dir_all(&base)?;
-        let external_lock = external_lock.map(|(clock, plock)| {
-            (PathBuf::from(clock.as_ref()), PathBuf::from(plock.as_ref()))
-        });
-        let (current, pathindex) = if let Some((clock, plock)) = external_lock.as_ref() {
+        let (current, pathindex) = if external_lock {
+            let clock = base.join("current.lock");
+            let plock = base.join("pathindex.lock");
             let current = ArchiveWriter::open_external(&current_path, clock)?;
             let pathindex = ArchiveWriter::open_external(&pathindex_path, plock)?;
             (current, pathindex)
@@ -173,8 +183,8 @@ impl ArchiveCollectionWriter {
     /// running any configured post rotate commands.
     pub fn rotate(&mut self, now: DateTime<Utc>) -> Result<()> {
         info!("rotating log file {}", now);
-        drop(self.current.take());
         let now_str = now.to_rfc3339();
+        drop(self.current.take());
         fs::rename(&self.current_path, &self.base.join(&now_str))
             .context("renaming current")?;
         put_file(&self.config.archive_cmds, &self.shard_name, &now_str)?;

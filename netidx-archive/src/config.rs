@@ -93,12 +93,28 @@ pub mod file {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub struct RecordShardConfig {
+        /// The globs defining the path space this shard will
+        /// record. This MUST be disjoint from the path space recorded
+        /// by any other shard.
+        ///
+        /// If spec is empty, then no recorder task will be started
+        /// for the shard, however the shard's `ArchiveCollectionWriter`
+        /// will be available so you can log to the shard directly.
         pub spec: Vec<Chars>,
+        /// override the poll_interval for this shard
         pub poll_interval: Option<Duration>,
+        /// override the image_frequency for this shard
         pub image_frequency: Option<usize>,
+        /// override the flush_frequency for this shard
         pub flush_frequency: Option<usize>,
+        /// override the flush_interval for this shard
         pub flush_interval: Option<Duration>,
+        /// override the rotate_interval for this shard
         pub rotate_interval: Option<RotateDirective>,
+        /// how much channel slack between subscriber and the recorder
+        /// task should this shard have. Higher numbers use more
+        /// memory but will reduce pushback on the publisher when the
+        /// disk is busy.
         #[serde(default = "default_slack")]
         pub slack: usize,
     }
@@ -112,7 +128,7 @@ pub mod file {
                 flush_frequency: None,
                 flush_interval: None,
                 rotate_interval: None,
-                slack: default_slack(),
+                slack: default_slack()
             }
         }
     }

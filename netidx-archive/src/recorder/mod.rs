@@ -1,7 +1,7 @@
 use crate::{
-    config::{Config, ArchiveCmds},
+    config::{ArchiveCmds, Config},
     logfile::{ArchiveReader, ArchiveWriter, BatchItem},
-    logfile_collection::{self, index::ArchiveIndex},
+    logfile_collection::{self, index::ArchiveIndex, writer::ArchiveCollectionWriter},
 };
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -13,9 +13,9 @@ use netidx::{
     subscriber::Subscriber,
 };
 use netidx_core::atomic_id;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde_derive::{Deserialize, Serialize};
-use std::{collections::HashMap, iter, sync::Arc};
+use std::{collections::HashMap, iter, mem, sync::Arc};
 use tokio::{sync::broadcast, task::JoinSet};
 
 mod oneshot;
@@ -40,6 +40,7 @@ pub struct Shards {
     pathindexes: FxHashMap<ShardId, ArchiveReader>,
     heads: RwLock<FxHashMap<ShardId, ArchiveReader>>,
     bcast: FxHashMap<ShardId, broadcast::Sender<BCastMsg>>,
+    writers: Mutex<FxHashMap<ShardId, ArchiveCollectionWriter>>,
 }
 
 impl Shards {
@@ -62,7 +63,7 @@ impl Shards {
     pub fn pathindexes(&self) -> &FxHashMap<ShardId, ArchiveReader> {
         &self.pathindexes
     }
-    
+
     pub fn heads(&self) -> &RwLock<FxHashMap<ShardId, ArchiveReader>> {
         &self.heads
     }
@@ -71,9 +72,11 @@ impl Shards {
         &self.bcast
     }
 
-    fn read(
-        config: &Arc<Config>,
-    ) -> Result<(FxHashMap<ShardId, ArchiveWriter>, Arc<Self>)> {
+    pub fn writers(&self) -> &Mutex<FxHashMap<ShardId, ArchiveCollectionWriter>> {
+        &self.writers
+    }
+
+    fn read(config: &Arc<Config>) -> Result<Arc<Self>> {
         use std::fs;
         let mut t = Self {
             spec: HashMap::default(),
@@ -83,11 +86,12 @@ impl Shards {
             pathindexes: HashMap::default(),
             heads: RwLock::new(HashMap::default()),
             bcast: HashMap::default(),
+            writers: Mutex::new(HashMap::default()),
         };
         for ent in fs::read_dir(&config.archive_directory)? {
             let ent = ent?;
             let name = ArcStr::from(ent.file_name().to_string_lossy());
-            if ent.file_type()?.is_dir() && &name != ".." {
+            if ent.file_type()?.is_dir() && &name != ".." && &name != "." {
                 let id = ShardId::new();
                 t.indexes.write().insert(id, ArchiveIndex::new(&config, &name)?);
                 t.by_id.insert(id, name.clone());
@@ -101,13 +105,10 @@ impl Shards {
                 t.bcast.insert(id, tx);
             }
         }
-        Ok((HashMap::default(), Arc::new(t)))
+        Ok(Arc::new(t))
     }
 
-    fn from_cfg(
-        config: &Arc<Config>,
-    ) -> Result<(FxHashMap<ShardId, ArchiveWriter>, Arc<Self>)> {
-        use std::fs;
+    fn from_cfg(config: &Arc<Config>) -> Result<Arc<Self>> {
         let mut t = Self {
             spec: HashMap::default(),
             by_id: HashMap::default(),
@@ -116,24 +117,24 @@ impl Shards {
             pathindexes: HashMap::default(),
             heads: RwLock::new(HashMap::default()),
             bcast: HashMap::default(),
+            writers: Mutex::new(HashMap::default()),
         };
-        let mut writers = HashMap::default();
+        let mut writers = t.writers.lock();
         for (name, rcfg) in config.record.iter() {
             let id = ShardId::new();
             t.indexes.write().insert(id, ArchiveIndex::new(&config, &name)?);
             t.by_id.insert(id, name.clone());
             t.by_name.insert(name.clone(), id);
             t.spec.insert(id, rcfg.spec.clone());
-            let dir = config.archive_directory.join(&**name);
-            fs::create_dir_all(&dir)?;
-            let writer = ArchiveWriter::open(dir.join("pathindex"))?;
-            let reader = writer.reader()?;
-            t.pathindexes.insert(id, reader);
+            let writer = ArchiveCollectionWriter::open(config.clone(), name.clone())?;
+            t.pathindexes.insert(id, writer.pathindex_reader()?);
+            t.heads.write().insert(id, writer.current_reader()?);
             writers.insert(id, writer);
             let (tx, _) = broadcast::channel(1000);
             t.bcast.insert(id, tx);
         }
-        Ok((writers, Arc::new(t)))
+        drop(writers);
+        Ok(Arc::new(t))
     }
 
     fn remap_rescan_pathindex(&self) -> Result<()> {
@@ -190,11 +191,14 @@ impl Shards {
 pub struct Recorder {
     wait: JoinSet<()>,
     pub config: Arc<Config>,
-    pub shards: Arc<Shards>
+    pub shards: Arc<Shards>,
 }
 
 impl Recorder {
-    async fn start_jobs(&mut self, mut writers: FxHashMap<ShardId, ArchiveWriter>) -> Result<()> {
+    async fn start_jobs(
+        &mut self,
+        mut writers: FxHashMap<ShardId, ArchiveWriter>,
+    ) -> Result<()> {
         let config = self.config.clone();
         let subscriber =
             Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
@@ -288,38 +292,4 @@ impl Recorder {
         t.start_jobs(writers).await?;
         Ok(t)
     }
-}
-
-/// Run archive PUT cmds on the given archive file
-pub fn put_file(
-    cmds: &Option<ArchiveCmds>,
-    shard_name: &str,
-    file_name: &str,
-) -> Result<()> {
-    debug!("would run put, cmd config {:?}", cmds);
-    if let Some(cmds) = cmds {
-        use std::process::Command;
-        info!("running put {:?}", &cmds.put);
-        let args =
-            cmds.put.1.iter().cloned().map(|arg| arg.replace("{shard}", shard_name));
-        let out = Command::new(&cmds.put.0)
-            .args(args.chain(iter::once(file_name.to_string())))
-            .output();
-        match out {
-            Err(e) => warn!("archive put failed for {}, {}", file_name, e),
-            Ok(o) if !o.status.success() => {
-                warn!("archive put failed for {}, {:?}", file_name, o)
-            }
-            Ok(out) => {
-                if out.stdout.len() > 0 {
-                    warn!("archive put stdout {}", String::from_utf8_lossy(&out.stdout));
-                }
-                if out.stderr.len() > 0 {
-                    warn!("archive put stderr {}", String::from_utf8_lossy(&out.stderr));
-                }
-                info!("put completed successfully");
-            }
-        }
-    }
-    Ok(())
 }
