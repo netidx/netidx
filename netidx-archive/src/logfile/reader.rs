@@ -760,7 +760,7 @@ impl ArchiveReader {
         self.check_remap_rescan(false)?;
         let (max_len, dict) = self.train()?;
         let pdict = Box::leak(Box::new(zstd::dict::EncoderDictionary::copy(&dict, 19))) as *mut _;
-        let f = || async {
+        let f = move || async move {
             let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> = BTreeMap::new();
             let index = self.index.read();
             for (ts, pos) in index.deltamap.iter() {
@@ -832,6 +832,8 @@ impl ArchiveReader {
             Ok(())
         };
         let res = f().await;
+        // this is safe because everying using pidict has been awaited
+        // and dropped before this point by f
         mem::drop(unsafe { Box::from_raw(pdict) });
         res
     }
