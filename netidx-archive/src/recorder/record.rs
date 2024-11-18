@@ -180,13 +180,17 @@ fn write_image(
 
 pub(super) async fn run(
     shards: Arc<Shards>,
-    mut archive: ArchiveCollectionWriter,
     subscriber: Subscriber,
     config: Arc<Config>,
     record_config: Arc<RecordConfig>,
     shard_id: ShardId,
     shard_name: ArcStr,
 ) -> Result<()> {
+    let mut archive = shards
+        .writers
+        .lock()
+        .remove(&shard_id)
+        .ok_or_else(|| anyhow!("no writer for shard {shard_name}"))?;
     let (tx_batch, rx_batch) = mpsc::channel(record_config.slack);
     let mut rx_batch = Batched::new(rx_batch, 10000);
     let (tx_list, rx_list) = mpsc::unbounded();

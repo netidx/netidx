@@ -219,7 +219,6 @@ impl Recorder {
             let name = name.clone();
             let id = self.shards.by_name[&name];
             if !self.shards.spec[&id].is_empty() {
-                let archive = self.shards.writers.lock().remove(&id).unwrap();
                 let record_config = Arc::new(cfg.clone());
                 let subscriber = Subscriber::new(
                     config.netidx_config.clone(),
@@ -228,16 +227,9 @@ impl Recorder {
                 let config = config.clone();
                 let shards = self.shards.clone();
                 self.wait.spawn(async move {
-                    let r = record::run(
-                        shards,
-                        archive,
-                        subscriber,
-                        config,
-                        record_config,
-                        id,
-                        name,
-                    )
-                    .await;
+                    let r =
+                        record::run(shards, subscriber, config, record_config, id, name)
+                            .await;
                     if let Err(e) = r {
                         error!("recorder stopped on error {:?}", e);
                     }
