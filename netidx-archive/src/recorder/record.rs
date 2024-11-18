@@ -1,8 +1,8 @@
 use crate::{
-    config::{ArchiveCmds, Config, RecordConfig, RotateDirective},
-    logfile::{ArchiveWriter, BatchItem, Id, BATCH_POOL},
-    logfile_collection::index::ArchiveIndex,
-    recorder::{put_file, BCastMsg, ShardId, Shards},
+    config::{Config, RecordConfig, RotateDirective},
+    logfile::{ArchiveReader, BatchItem, Id, BATCH_POOL},
+    logfile_collection::{index::ArchiveIndex, ArchiveCollectionWriter},
+    recorder::{BCastMsg, ShardId, Shards},
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
@@ -26,7 +26,6 @@ use netidx::{
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Bound,
-    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -143,44 +142,28 @@ async fn wait_list(pending: &mut Option<Fuse<oneshot::Receiver<Lst>>>) -> Lst {
     }
 }
 
-fn rotate_log_file(
-    archive: ArchiveWriter,
-    path: &PathBuf,
-    shard_name: &ArcStr,
-    cmds: &Option<ArchiveCmds>,
-    now: DateTime<Utc>,
-) -> Result<ArchiveWriter> {
-    info!("rotating log file {}", now);
-    drop(archive); // ensure the current file is closed
-    let current_name = path.join(&**shard_name).join("current");
-    let new_name = path.join(&**shard_name).join(now.to_rfc3339());
-    std::fs::rename(&current_name, &new_name).context("renaming current")?;
-    put_file(cmds, shard_name, &now.to_rfc3339())?;
-    ArchiveWriter::open(current_name)
-}
-
 fn write_pathmap(
-    pathindex: &mut ArchiveWriter,
+    archive: &mut ArchiveCollectionWriter,
     to_add: &mut Vec<(Path, SubId)>,
     by_subid: &mut FxHashMap<SubId, Id>,
 ) -> Result<()> {
     task::block_in_place(|| {
         let i = to_add.iter().map(|(ref p, _)| p);
-        pathindex.add_paths(i)
+        archive.add_paths(i)
     })
     .context("adding paths to pathindex")?;
     for (path, subid) in to_add.drain(..) {
         if !by_subid.contains_key(&subid) {
-            let id = pathindex.id_for_path(&path).unwrap();
+            let id = archive.id_for_path(&path).unwrap();
             by_subid.insert(subid, id);
         }
     }
-    pathindex.flush().context("flushing pathindex")?;
+    archive.flush_pathindex().context("flushing pathindex")?;
     Ok(())
 }
 
 fn write_image(
-    archive: &mut ArchiveWriter,
+    archive: &mut ArchiveCollectionWriter,
     by_subid: &FxHashMap<SubId, Id>,
     image: &FxHashMap<SubId, Event>,
     ts: DateTime<Utc>,
@@ -197,7 +180,7 @@ fn write_image(
 
 pub(super) async fn run(
     shards: Arc<Shards>,
-    mut pathindex: ArchiveWriter,
+    mut archive: ArchiveCollectionWriter,
     subscriber: Subscriber,
     config: Arc<Config>,
     record_config: Arc<RecordConfig>,
@@ -211,16 +194,8 @@ pub(super) async fn run(
     let mut image: FxHashMap<SubId, Event> = HashMap::default();
     let mut subscribed: HashMap<Path, Dval> = HashMap::new();
     let bcast = shards.bcast[&shard_id].clone();
-    let mut archive = task::block_in_place(|| {
-        ArchiveWriter::open(config.archive_directory.join(&*shard_name).join("current"))
-    })
-    .context("opening current archive for write")?;
-    {
-        let reader = archive.reader().context("getting current reader")?;
-        shards.heads.write().insert(shard_id, reader.clone());
-        let _ = bcast.send(BCastMsg::NewCurrent(reader));
-    }
-    let flush_frequency = record_config.flush_frequency.map(|f| archive.block_size() * f);
+    let block_size = archive.block_size()?;
+    let flush_frequency = record_config.flush_frequency.map(|f| block_size * f);
     let mut poll = record_config.poll_interval.map(time::interval);
     let mut flush =
         record_config.flush_interval.map(|d| time::interval_at(Instant::now() + d, d));
@@ -235,8 +210,8 @@ pub(super) async fn run(
     let mut to_add: Vec<(Path, SubId)> = Vec::new();
     let mut all_paths: FxHashSet<Path> = HashSet::default();
     let mut remove_paths: Vec<Path> = vec![];
-    let mut last_image = archive.len();
-    let mut last_flush = archive.len();
+    let mut last_image = archive.len()?;
+    let mut last_flush = archive.len()?;
     let mut pending_list: Option<Fuse<oneshot::Receiver<Lst>>> = None;
     let mut batches = 0;
     let mut last_batches = Instant::now();
@@ -259,10 +234,10 @@ pub(super) async fn run(
                 }
             },
             _ = maybe_interval(&mut flush).fuse() => {
-                if archive.len() > last_flush {
+                if archive.len()? > last_flush {
                     task::block_in_place(|| -> Result<()> {
-                        archive.flush().context("flushing archive")?;
-                        Ok(last_flush = archive.len())
+                        archive.flush_current().context("flushing archive")?;
+                        Ok(last_flush = archive.len()?)
                     })?;
                 }
                 let now = Instant::now();
@@ -274,29 +249,25 @@ pub(super) async fn run(
             _ = maybe_interval(&mut rotate).fuse() => {
                 let rotate = match record_config.rotate_interval {
                     RotateDirective::Never => false,
-                    RotateDirective::Size(sz) => archive.len() >= sz,
+                    RotateDirective::Size(sz) => archive.len()? >= sz,
                     RotateDirective::Interval(_) => true,
                 };
                 if rotate {
                     let now = Utc::now();
-                    archive = task::block_in_place(|| {
-                        rotate_log_file(
-                            archive,
-                            &config.archive_directory,
-                            &shard_name,
-                            &config.archive_cmds,
-                            now
-                        )
-                    }).context("rotating log file")?;
-                    last_image = 0;
-                    last_flush = 0;
-                    task::block_in_place(|| write_image(&mut archive, &by_subid, &image, now))
-                        .context("writing image")?;
-                    let reader = archive.reader().context("getting reader")?;
-                    shards.heads.write().insert(shard_id, reader.clone());
-                    let index = task::block_in_place(|| ArchiveIndex::new(&config, &shard_name))
-                        .context("opening logfile index")?;
-                    shards.indexes.write().insert(shard_id, index);
+                    let reader = task::block_in_place(|| -> Result<ArchiveReader> {
+                        archive.rotate(now).context("rotating log file")?;
+                        last_image = 0;
+                        last_flush = 0;
+                        write_image(&mut archive, &by_subid, &image, now)
+                            .context("writing image")?;
+                        let reader = archive.current_reader()
+                            .context("getting reader")?;
+                        shards.heads.write().insert(shard_id, reader.clone());
+                        let index = ArchiveIndex::new(&config, &shard_name)
+                            .context("opening logfile index")?;
+                        shards.indexes.write().insert(shard_id, index);
+                        Ok(reader)
+                    })?;
                     let _ = bcast.send(BCastMsg::LogRotated(now));
                     let _ = bcast.send(BCastMsg::NewCurrent(reader));
                 }
@@ -332,7 +303,7 @@ pub(super) async fn run(
                             by_subid.remove(&dv.id());
                         }
                     }
-                    write_pathmap(&mut pathindex, &mut to_add, &mut by_subid)
+                    write_pathmap(&mut archive, &mut to_add, &mut by_subid)
             .context("writing pathmap")?
                 }
             },
@@ -359,19 +330,19 @@ pub(super) async fn run(
                         let _ = bcast.send(BCastMsg::Batch(now, Arc::new(tbatch)));
                         match record_config.image_frequency {
                             None => (),
-                            Some(freq) if archive.len() - last_image < freq => (),
+                            Some(freq) if archive.len()? - last_image < freq => (),
                             Some(_) => {
                                 write_image(&mut archive, &by_subid, &image, Utc::now())
                                     .context("writing image")?;
-                                last_image = archive.len();
+                                last_image = archive.len()?;
                             }
                         }
                         match flush_frequency {
                             None => (),
-                            Some(freq) if archive.len() - last_flush < freq => (),
+                            Some(freq) if archive.len()? - last_flush < freq => (),
                             Some(_) => {
-                                archive.flush().context("flushing archive")?;
-                                last_flush = archive.len();
+                                archive.flush_current().context("flushing archive")?;
+                                last_flush = archive.len()?;
                             }
                         }
                         Ok(())

@@ -1,3 +1,7 @@
+pub mod index;
 pub mod reader;
 pub mod writer;
-pub mod index;
+
+pub use reader::ArchiveCollectionReader;
+pub use writer::ArchiveCollectionWriter;
+pub use index::{ArchiveIndex, File};

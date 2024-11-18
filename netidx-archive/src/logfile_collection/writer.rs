@@ -7,11 +7,7 @@ use arcstr::ArcStr;
 use chrono::prelude::*;
 use log::{debug, info, warn};
 use netidx::{path::Path, pool::Pooled};
-use std::{
-    fs, iter,
-    path::{Path as FilePath, PathBuf},
-    sync::Arc,
-};
+use std::{fs, iter, path::PathBuf, sync::Arc};
 
 /// Run archive PUT cmds on the given archive file
 pub fn put_file(
@@ -49,7 +45,7 @@ pub fn put_file(
 
 pub struct ArchiveCollectionWriter {
     config: Arc<Config>,
-    shard_name: ArcStr,
+    shard: ArcStr,
     base: PathBuf,
     current_path: PathBuf,
     external_lock: bool,
@@ -58,28 +54,19 @@ pub struct ArchiveCollectionWriter {
 }
 
 impl ArchiveCollectionWriter {
-    /// Open the archive collection with the option of an external
-    /// lock. Use this if the reading and writing process are not the
-    /// same. If `external_lock` is true then the current and
-    /// pathindex files themselves will not be locked, instead
-    /// external lock files will be created. This will allow one
-    /// process to read and publish while another writes.
-    ///
-    /// It is important that you do always open the same collection
-    /// for writing with the same value of external_lock, otherwise
-    /// concurrent writes will likely corrupt the data in the log
-    /// file.
+    const LOCK_FILE: &str = "current.lock";
+
     fn open_full(
         config: Arc<Config>,
-        shard_name: ArcStr,
+        shard: ArcStr,
         external_lock: bool,
     ) -> Result<Self> {
-        let base = config.archive_directory.join(shard_name.as_str());
+        let base = config.archive_directory.join(shard.as_str());
         let current_path = base.join("current");
         let pathindex_path = base.join("pathindex");
         fs::create_dir_all(&base)?;
         let (current, pathindex) = if external_lock {
-            let clock = base.join("current.lock");
+            let clock = base.join(Self::LOCK_FILE);
             let plock = base.join("pathindex.lock");
             let current = ArchiveWriter::open_external(&current_path, clock)?;
             let pathindex = ArchiveWriter::open_external(&pathindex_path, plock)?;
@@ -89,7 +76,7 @@ impl ArchiveCollectionWriter {
         };
         Ok(Self {
             config,
-            shard_name,
+            shard,
             base,
             current_path,
             external_lock,
@@ -98,24 +85,22 @@ impl ArchiveCollectionWriter {
         })
     }
 
-    pub fn open(config: Arc<Config>, shard_name: ArcStr) -> Result<Self> {
-        Self::open_full(config, shard_name, None::<(&FilePath, &FilePath)>)
+    pub fn open(config: Arc<Config>, shard: ArcStr) -> Result<Self> {
+        Self::open_full(config, shard, false)
     }
 
-    /// Open the logfile collection with an external lock file for
-    /// both the current file and the path index. This will allow an
-    /// external process to write an archive file while another
-    /// process reads and/or publishes it.
+    /// Open the archive collection with an external lock. Use this if
+    /// the reading and writing process are not the same. The current
+    /// and pathindex files themselves will not be locked, instead
+    /// external lock files will be created. This will allow one
+    /// process to read and publish while another writes.
     ///
-    /// This could be dangerous, it is up to the caller to coordinate
-    /// the lock file name among writer processes to prevent multiple
-    /// concurrent writers.
-    pub fn open_external<F: AsRef<FilePath>>(
-        config: Arc<Config>,
-        shard_name: ArcStr,
-        external_lock: (F, F),
-    ) -> Result<Self> {
-        Self::open_full(config, shard_name, Some(external_lock))
+    /// It is important that you always open the same collection for
+    /// writing with either `open` or `open_external` but not both,
+    /// otherwise concurrent writes will likely corrupt the data in
+    /// the log file.
+    pub fn open_external(config: Arc<Config>, shard: ArcStr) -> Result<Self> {
+        Self::open_full(config, shard, true)
     }
 
     fn current_mut(&mut self) -> Result<&mut ArchiveWriter> {
@@ -126,8 +111,16 @@ impl ArchiveCollectionWriter {
         self.current.as_ref().ok_or_else(|| anyhow!("missing current, did rotate fail?"))
     }
 
-    pub fn flush(&mut self) -> Result<()> {
+    pub fn flush_all(&mut self) -> Result<()> {
         self.current_mut()?.flush()?;
+        self.pathindex.flush()
+    }
+
+    pub fn flush_current(&mut self) -> Result<()> {
+        self.current_mut()?.flush()
+    }
+
+    pub fn flush_pathindex(&mut self) -> Result<()> {
         self.pathindex.flush()
     }
 
@@ -187,10 +180,14 @@ impl ArchiveCollectionWriter {
         drop(self.current.take());
         fs::rename(&self.current_path, &self.base.join(&now_str))
             .context("renaming current")?;
-        put_file(&self.config.archive_cmds, &self.shard_name, &now_str)?;
-        self.current = Some(match self.external_lock.as_ref() {
-            Some((clock, _)) => ArchiveWriter::open_external(&self.current_path, clock)?,
-            None => ArchiveWriter::open(&self.current_path)?,
+        put_file(&self.config.archive_cmds, &self.shard, &now_str)?;
+        self.current = Some(if self.external_lock {
+            ArchiveWriter::open_external(
+                &self.current_path,
+                self.base.join(Self::LOCK_FILE),
+            )?
+        } else {
+            ArchiveWriter::open(&self.current_path)?
         });
         Ok(())
     }

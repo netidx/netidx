@@ -1,13 +1,13 @@
 use crate::{
-    config::{ArchiveCmds, Config},
-    logfile::{ArchiveReader, ArchiveWriter, BatchItem},
-    logfile_collection::{self, index::ArchiveIndex, writer::ArchiveCollectionWriter},
+    config::Config,
+    logfile::{ArchiveReader, BatchItem},
+    logfile_collection::{self, ArchiveCollectionWriter, ArchiveIndex},
 };
 use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
-use log::{debug, error, info, warn};
+use log::error;
 use netidx::{
     pool::Pooled, publisher::PublisherBuilder, resolver_client::GlobSet,
     subscriber::Subscriber,
@@ -15,7 +15,7 @@ use netidx::{
 use netidx_core::atomic_id;
 use parking_lot::{Mutex, RwLock};
 use serde_derive::{Deserialize, Serialize};
-use std::{collections::HashMap, iter, mem, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use tokio::{sync::broadcast, task::JoinSet};
 
 mod oneshot;
@@ -33,49 +33,17 @@ pub enum BCastMsg {
 }
 
 pub struct Shards {
-    spec: FxHashMap<ShardId, GlobSet>,
-    by_id: FxHashMap<ShardId, ArcStr>,
-    by_name: FxHashMap<ArcStr, ShardId>,
-    indexes: RwLock<FxHashMap<ShardId, ArchiveIndex>>,
-    pathindexes: FxHashMap<ShardId, ArchiveReader>,
-    heads: RwLock<FxHashMap<ShardId, ArchiveReader>>,
-    bcast: FxHashMap<ShardId, broadcast::Sender<BCastMsg>>,
-    writers: Mutex<FxHashMap<ShardId, ArchiveCollectionWriter>>,
+    pub spec: FxHashMap<ShardId, GlobSet>,
+    pub by_id: FxHashMap<ShardId, ArcStr>,
+    pub by_name: FxHashMap<ArcStr, ShardId>,
+    pub indexes: RwLock<FxHashMap<ShardId, ArchiveIndex>>,
+    pub pathindexes: FxHashMap<ShardId, ArchiveReader>,
+    pub heads: RwLock<FxHashMap<ShardId, ArchiveReader>>,
+    pub bcast: FxHashMap<ShardId, broadcast::Sender<BCastMsg>>,
+    pub writers: Mutex<FxHashMap<ShardId, ArchiveCollectionWriter>>,
 }
 
 impl Shards {
-    pub fn spec(&self) -> &FxHashMap<ShardId, GlobSet> {
-        &self.spec
-    }
-
-    pub fn by_id(&self) -> &FxHashMap<ShardId, ArcStr> {
-        &self.by_id
-    }
-
-    pub fn by_name(&self) -> &FxHashMap<ArcStr, ShardId> {
-        &self.by_name
-    }
-
-    pub fn indexes(&self) -> &RwLock<FxHashMap<ShardId, ArchiveIndex>> {
-        &self.indexes
-    }
-
-    pub fn pathindexes(&self) -> &FxHashMap<ShardId, ArchiveReader> {
-        &self.pathindexes
-    }
-
-    pub fn heads(&self) -> &RwLock<FxHashMap<ShardId, ArchiveReader>> {
-        &self.heads
-    }
-
-    pub fn bcast(&self) -> &FxHashMap<ShardId, broadcast::Sender<BCastMsg>> {
-        &self.bcast
-    }
-
-    pub fn writers(&self) -> &Mutex<FxHashMap<ShardId, ArchiveCollectionWriter>> {
-        &self.writers
-    }
-
     fn read(config: &Arc<Config>) -> Result<Arc<Self>> {
         use std::fs;
         let mut t = Self {
@@ -195,10 +163,7 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    async fn start_jobs(
-        &mut self,
-        mut writers: FxHashMap<ShardId, ArchiveWriter>,
-    ) -> Result<()> {
+    async fn start_jobs(&mut self) -> Result<()> {
         let config = self.config.clone();
         let subscriber =
             Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
@@ -253,29 +218,31 @@ impl Recorder {
         for (name, cfg) in config.record.iter() {
             let name = name.clone();
             let id = self.shards.by_name[&name];
-            let pathindex_writer = writers.remove(&id).unwrap();
-            let record_config = Arc::new(cfg.clone());
-            let subscriber = Subscriber::new(
-                config.netidx_config.clone(),
-                config.desired_auth.clone(),
-            )?;
-            let config = config.clone();
-            let shards = self.shards.clone();
-            self.wait.spawn(async move {
-                let r = record::run(
-                    shards,
-                    pathindex_writer,
-                    subscriber,
-                    config,
-                    record_config,
-                    id,
-                    name,
-                )
-                .await;
-                if let Err(e) = r {
-                    error!("recorder stopped on error {:?}", e);
-                }
-            });
+            if !self.shards.spec[&id].is_empty() {
+                let archive = self.shards.writers.lock().remove(&id).unwrap();
+                let record_config = Arc::new(cfg.clone());
+                let subscriber = Subscriber::new(
+                    config.netidx_config.clone(),
+                    config.desired_auth.clone(),
+                )?;
+                let config = config.clone();
+                let shards = self.shards.clone();
+                self.wait.spawn(async move {
+                    let r = record::run(
+                        shards,
+                        archive,
+                        subscriber,
+                        config,
+                        record_config,
+                        id,
+                        name,
+                    )
+                    .await;
+                    if let Err(e) = r {
+                        error!("recorder stopped on error {:?}", e);
+                    }
+                });
+            }
         }
         Ok(())
     }
@@ -283,13 +250,13 @@ impl Recorder {
     /// Start the recorder
     pub async fn start(config: Config) -> Result<Self> {
         let config = Arc::new(config);
-        let (writers, shards) = if config.record.is_empty() {
+        let shards = if config.record.is_empty() {
             Shards::read(&config)?
         } else {
             Shards::from_cfg(&config)?
         };
         let mut t = Self { wait: JoinSet::new(), config, shards };
-        t.start_jobs(writers).await?;
+        t.start_jobs().await?;
         Ok(t)
     }
 }
