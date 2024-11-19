@@ -173,22 +173,71 @@ impl ArchiveCollectionWriter {
     }
 
     /// Rotate the current log file, replacing it with a new one, and
-    /// running any configured post rotate commands.
-    pub fn rotate(&mut self, now: DateTime<Utc>) -> Result<()> {
+    /// running any configured post rotate commands. Returns the path
+    /// to the rotated file.
+    ///
+    /// now must be greater than or equal to the timestamp of the last
+    /// record in current, and should ideally be equal to it.
+    pub fn rotate(&mut self, now: DateTime<Utc>) -> Result<PathBuf> {
         info!("rotating log file {}", now);
         let now_str = now.to_rfc3339();
+        let new_path = self.base.join(&now_str);
         drop(self.current.take());
-        fs::rename(&self.current_path, &self.base.join(&now_str))
-            .context("renaming current")?;
-        put_file(&self.config.archive_cmds, &self.shard, &now_str)?;
+        fs::rename(&self.current_path, &new_path).context("renaming current")?;
+        put_file(&self.config.archive_cmds, &self.shard, &now_str)
+            .context("running post rotate commands")?;
         self.current = Some(if self.external_lock {
             ArchiveWriter::open_external(
                 &self.current_path,
                 self.base.join(Self::LOCK_FILE),
-            )?
+            )
+            .context("open_external current for write")?
         } else {
-            ArchiveWriter::open(&self.current_path)?
+            ArchiveWriter::open(&self.current_path).context("open current for write")?
         });
-        Ok(())
+        Ok(new_path)
+    }
+
+    /// Rotate and compress the current log file in one step,
+    /// replacing it with a new one, and running any configured post
+    /// rotate commands. Returns the path to the rotated file.
+    ///
+    /// now must be greater than or equal to the timestamp of the last
+    /// record in current, and should ideally be equal to it.
+    pub async fn rotate_and_compress(
+        &mut self,
+        now: DateTime<Utc>,
+        window: Option<usize>,
+    ) -> Result<PathBuf> {
+        use tokio::{fs, task};
+        info!("rotate and compress log file {}", now);
+        let now_str = now.to_rfc3339();
+        let new_path = self.base.join(&now_str);
+        let reader = task::block_in_place(|| {
+            drop(self.current.take());
+            ArchiveReader::open(&self.current_path)
+        })
+        .context("open current for read")?;
+        let window = window.unwrap_or(2);
+        let tmp_path = new_path.with_extension("rz");
+        let _ = fs::remove_file(&tmp_path).await;
+        reader.compress(window, &tmp_path).await.context("compressing archive")?;
+        fs::rename(&tmp_path, &new_path).await.context("moving tmp file into place")?;
+        fs::remove_file(&self.current_path).await.context("removing old current")?;
+        self.current = task::block_in_place(|| -> Result<Option<ArchiveWriter>> {
+            put_file(&self.config.archive_cmds, &self.shard, &now_str)
+                .context("running post rotate commands")?;
+            Ok(Some(if self.external_lock {
+                ArchiveWriter::open_external(
+                    &self.current_path,
+                    self.base.join(Self::LOCK_FILE),
+                )
+                .context("open_external current for write")?
+            } else {
+                ArchiveWriter::open(&self.current_path)
+                    .context("open current for write")?
+            }))
+        })?;
+        Ok(new_path)
     }
 }

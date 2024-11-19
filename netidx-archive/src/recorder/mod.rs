@@ -9,7 +9,9 @@ use chrono::prelude::*;
 use fxhash::FxHashMap;
 use log::error;
 use netidx::{
-    pool::Pooled, publisher::PublisherBuilder, resolver_client::GlobSet,
+    pool::Pooled,
+    publisher::{Publisher, PublisherBuilder},
+    resolver_client::GlobSet,
     subscriber::Subscriber,
 };
 use netidx_core::atomic_id;
@@ -163,17 +165,31 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    async fn start_jobs(&mut self) -> Result<()> {
+    async fn start_jobs(
+        &mut self,
+        publisher: Option<Publisher>,
+        subscriber: Option<Subscriber>,
+    ) -> Result<()> {
         let config = self.config.clone();
-        let subscriber =
-            Subscriber::new(config.netidx_config.clone(), config.desired_auth.clone())?;
+        let subscriber = match subscriber {
+            Some(subscriber) => subscriber,
+            None => Subscriber::new(
+                config.netidx_config.clone(),
+                config.desired_auth.clone(),
+            )?,
+        };
         if let Some(publish_config) = config.publish.as_ref() {
             let publish_config = Arc::new(publish_config.clone());
-            let publisher = PublisherBuilder::new(config.netidx_config.clone())
-                .desired_auth(config.desired_auth.clone())
-                .bind_cfg(Some(publish_config.bind.clone()))
-                .build()
-                .await?;
+            let publisher = match publisher {
+                Some(publisher) => publisher,
+                None => {
+                    PublisherBuilder::new(config.netidx_config.clone())
+                        .desired_auth(config.desired_auth.clone())
+                        .bind_cfg(Some(publish_config.bind.clone()))
+                        .build()
+                        .await?
+                }
+            };
             self.wait.spawn({
                 let shards = self.shards.clone();
                 let publish_config = publish_config.clone();
@@ -239,8 +255,12 @@ impl Recorder {
         Ok(())
     }
 
-    /// Start the recorder
-    pub async fn start(config: Config) -> Result<Self> {
+    /// Start the recorder with an existing publisher and subscriber
+    pub async fn start_with(
+        config: Config,
+        publisher: Option<Publisher>,
+        subscriber: Option<Subscriber>,
+    ) -> Result<Self> {
         let config = Arc::new(config);
         let shards = if config.record.is_empty() {
             Shards::read(&config)?
@@ -248,7 +268,12 @@ impl Recorder {
             Shards::from_cfg(&config)?
         };
         let mut t = Self { wait: JoinSet::new(), config, shards };
-        t.start_jobs().await?;
+        t.start_jobs(publisher, subscriber).await?;
         Ok(t)
+    }
+
+    /// Start the recorder
+    pub async fn start(config: Config) -> Result<Self> {
+        Self::start_with(config, None, None).await
     }
 }
