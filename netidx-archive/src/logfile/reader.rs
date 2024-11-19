@@ -40,6 +40,22 @@ use std::{
 use tokio::task::{self, JoinSet};
 use zstd::bulk::{Compressor, Decompressor};
 
+pub struct AlreadyCompressed;
+
+impl fmt::Debug for AlreadyCompressed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+impl fmt::Display for AlreadyCompressed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "file is already compressed")
+    }
+}
+
+impl std::error::Error for AlreadyCompressed {}
+
 #[derive(Debug)]
 pub struct ArchiveIndex {
     path_by_id: IndexMap<Id, Path, FxBuildHasher>,
@@ -706,11 +722,6 @@ impl ArchiveReader {
     /// This function will create an archive with compressed batches
     /// and images. Compressed archives can be read as normal, but can
     /// no longer be written.
-    ///
-    /// This function is only meant to be called by the command line
-    /// tool. It allocates static memory that will not be freed when
-    /// it returns. Do not call it directly unless you are ok with
-    /// this.
     pub async fn compress(
         &self,
         window: usize,
@@ -753,79 +764,92 @@ impl ArchiveReader {
             })
         }
         if self.compressed.is_some() {
-            bail!("archive is already compressed")
+            bail!(AlreadyCompressed)
         }
         self.check_remap_rescan(false)?;
         let (max_len, dict) = self.train()?;
-        let pdict = Box::leak(Box::new(zstd::dict::EncoderDictionary::copy(&dict, 19)));
-        let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> = BTreeMap::new();
-        let index = self.index.read();
-        for (ts, pos) in index.deltamap.iter() {
-            unified_index.insert(*ts, (false, *pos));
-        }
-        for (ts, pos) in index.imagemap.iter() {
-            unified_index.insert(*ts, (true, *pos));
-        }
-        let mut output =
-            ArchiveWriter::open_full(dest, self.indexed, Some(dict), None::<&str>)?;
-        let mut pms = PM_POOL.take();
-        for (id, path) in index.path_by_id.iter() {
-            pms.push(PathMapping(path.clone(), *id));
-        }
-        output.add_raw_pathmappings(pms)?;
-        let ncpus = num_cpus::get();
-        let mut compjobs = (0..ncpus * window)
-            .into_iter()
-            .map(|_| {
-                Ok(CompJob {
-                    ts: DateTime::<Utc>::MIN_UTC,
-                    cbuf: vec![0u8; max_len * 2],
-                    comp: Compressor::with_prepared_dictionary(pdict)?,
-                    image: false,
-                    pos: 0,
+        let pdict =
+            Box::leak(Box::new(zstd::dict::EncoderDictionary::copy(&dict, 19))) as *mut _;
+        let f = move || async move {
+            let mut unified_index: BTreeMap<DateTime<Utc>, (bool, usize)> =
+                BTreeMap::new();
+            let index = self.index.read();
+            for (ts, pos) in index.deltamap.iter() {
+                unified_index.insert(*ts, (false, *pos));
+            }
+            for (ts, pos) in index.imagemap.iter() {
+                unified_index.insert(*ts, (true, *pos));
+            }
+            let mut output =
+                ArchiveWriter::open_full(dest, self.indexed, Some(dict), None::<&str>)?;
+            let mut pms = PM_POOL.take();
+            for (id, path) in index.path_by_id.iter() {
+                pms.push(PathMapping(path.clone(), *id));
+            }
+            output.add_raw_pathmappings(pms)?;
+            let ncpus = num_cpus::get();
+            let mut compjobs = (0..ncpus * window)
+                .into_iter()
+                .map(|_| {
+                    Ok(CompJob {
+                        ts: DateTime::<Utc>::MIN_UTC,
+                        cbuf: vec![0u8; max_len * 2],
+                        comp: Compressor::with_prepared_dictionary(unsafe { &*pdict })?,
+                        image: false,
+                        pos: 0,
+                    })
                 })
-            })
-            .collect::<Result<Vec<CompJob>>>()?;
-        let mut running_jobs: JoinSet<Result<CompJob>> = JoinSet::new();
-        let mut commitq: BTreeMap<DateTime<Utc>, Option<CompJob>> = BTreeMap::new();
-        let mut index_iter = unified_index.iter();
-        'main: loop {
-            while compjobs.is_empty() {
-                let job: CompJob = match running_jobs.join_next().await {
-                    None => break 'main,
-                    Some(res) => res??,
-                };
-                commitq.insert(job.ts, Some(job));
-                while let Some(mut ent) = commitq.first_entry() {
-                    match ent.get_mut().take() {
-                        None => break,
-                        Some(job) => {
-                            ent.remove();
-                            output
-                                .add_batch_raw(job.image, job.ts, &job.cbuf[0..job.pos])
-                                .context("add raw batch")?;
-                            compjobs.push(job);
+                .collect::<Result<Vec<CompJob>>>()?;
+            let mut running_jobs: JoinSet<Result<CompJob>> = JoinSet::new();
+            let mut commitq: BTreeMap<DateTime<Utc>, Option<CompJob>> = BTreeMap::new();
+            let mut index_iter = unified_index.iter();
+            'main: loop {
+                while compjobs.is_empty() {
+                    let job: CompJob = match running_jobs.join_next().await {
+                        None => break 'main,
+                        Some(res) => res??,
+                    };
+                    commitq.insert(job.ts, Some(job));
+                    while let Some(mut ent) = commitq.first_entry() {
+                        match ent.get_mut().take() {
+                            None => break,
+                            Some(job) => {
+                                ent.remove();
+                                output
+                                    .add_batch_raw(
+                                        job.image,
+                                        job.ts,
+                                        &job.cbuf[0..job.pos],
+                                    )
+                                    .context("add raw batch")?;
+                                compjobs.push(job);
+                            }
                         }
                     }
                 }
-            }
-            match index_iter.next() {
-                None => compjobs.clear(),
-                Some((ts, (image, pos))) => {
-                    let mut job = compjobs.pop().unwrap();
-                    job.ts = *ts;
-                    job.image = *image;
-                    job.pos = *pos;
-                    commitq.insert(*ts, None);
-                    running_jobs.spawn(compress_task(
-                        self.indexed,
-                        Arc::clone(&self.mmap),
-                        job,
-                    ));
+                match index_iter.next() {
+                    None => compjobs.clear(),
+                    Some((ts, (image, pos))) => {
+                        let mut job = compjobs.pop().unwrap();
+                        job.ts = *ts;
+                        job.image = *image;
+                        job.pos = *pos;
+                        commitq.insert(*ts, None);
+                        running_jobs.spawn(compress_task(
+                            self.indexed,
+                            Arc::clone(&self.mmap),
+                            job,
+                        ));
+                    }
                 }
             }
-        }
-        output.flush()?;
-        Ok(())
+            output.flush()?;
+            Ok(())
+        };
+        let res = f().await;
+        // this is safe because everying using pidict has been awaited
+        // and dropped before this point by f
+        mem::drop(unsafe { Box::from_raw(pdict) });
+        res
     }
 }

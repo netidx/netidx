@@ -6,7 +6,10 @@ mod writer;
 mod test;
 
 use self::arraymap::ArrayMap;
-pub use self::{reader::ArchiveReader, writer::ArchiveWriter};
+pub use self::{
+    reader::{AlreadyCompressed, ArchiveReader},
+    writer::ArchiveWriter,
+};
 use anyhow::{Context, Error, Result};
 use bytes::{Buf, BufMut};
 use chrono::prelude::*;
@@ -628,10 +631,10 @@ fn scan_records(
         }
     };
     if let Some(deltamap) = deltamap {
-	deltamap.shrink_to_fit();
+        deltamap.shrink_to_fit();
     }
     if let Some(imagemap) = imagemap {
-	imagemap.shrink_to_fit();
+        imagemap.shrink_to_fit();
     }
     res
 }

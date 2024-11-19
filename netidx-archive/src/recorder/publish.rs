@@ -1,10 +1,9 @@
-use super::{
-    logfile_collection::LogfileCollection, logfile_index::LogfileIndex, oneshot::FILTER,
-    ShardId, Shards,
-};
 use crate::{
+    config::{Config, PublishConfig},
     logfile::{ArchiveReader, BatchItem, Id, Seek},
-    recorder::{BCastMsg, Config, PublishConfig},
+    logfile_collection::index::ArchiveIndex,
+    logfile_collection::reader::ArchiveCollectionReader,
+    recorder::{oneshot::FILTER, BCastMsg, ShardId, Shards},
 };
 use anyhow::{Error, Result};
 use arcstr::ArcStr;
@@ -270,7 +269,7 @@ impl NewSessionConfig {
 enum ExternalControl {
     Reindex,
     RemapRescan(Option<DateTime<Utc>>),
-    Reopen(Option<DateTime<Utc>>)
+    Reopen(Option<DateTime<Utc>>),
 }
 
 impl ExternalControl {
@@ -280,7 +279,9 @@ impl ExternalControl {
 
     fn remap_rescan(mut req: RpcCall, ts: Value) -> Option<(ExternalControl, RpcReply)> {
         match ts {
-            Value::DateTime(ts) => Some((ExternalControl::RemapRescan(Some(ts)), req.reply)),
+            Value::DateTime(ts) => {
+                Some((ExternalControl::RemapRescan(Some(ts)), req.reply))
+            }
             Value::Null => Some((ExternalControl::RemapRescan(None), req.reply)),
             _ => rpc_err!(req.reply, "invalid timestamp"),
         }
@@ -307,7 +308,7 @@ struct SessionShard {
     speed: Speed,
     state: Arc<AtomicState>,
     data_base: Path,
-    log: LogfileCollection,
+    log: ArchiveCollectionReader,
     pathindex: ArchiveReader,
     used: bool,
 }
@@ -321,7 +322,7 @@ impl SessionShard {
         config: Arc<Config>,
         publisher: Publisher,
         head: Option<ArchiveReader>,
-        index: LogfileIndex,
+        index: ArchiveIndex,
         pathindex: ArchiveReader,
         session_base: Path,
         filter: GlobSet,
@@ -341,7 +342,7 @@ impl SessionShard {
         }));
         let used =
             pathindex.index().iter_pathmap().any(|(_, path)| filter.is_match(path));
-        let log = LogfileCollection::new(
+        let log = ArchiveCollectionReader::new(
             index,
             config,
             shard,
@@ -525,9 +526,9 @@ impl SessionShard {
             },
             Ok(BCastMsg::TailInvalidated) => {
                 if self.state.load() == State::Tail {
-                    let _ = self.session_bcast.send(SessionBCastMsg::Update(
-                        SessionUpdate::State(State::Play),
-                    ));
+                    let _ = self
+                        .session_bcast
+                        .send(SessionBCastMsg::Update(SessionUpdate::State(State::Play)));
                     self.set_state(State::Play);
                 }
                 Ok(())
@@ -711,11 +712,12 @@ impl SessionShard {
                 match m {
                     Err(e) => break Err(e),
                     Ok(m) => match m {
-                        BCastMsg::Batch(_, _)
-                        | BCastMsg::TailInvalidated => match state.load() {
-                            State::Pause | State::Play => (),
-                            State::Tail => break Ok(m),
-                        },
+                        BCastMsg::Batch(_, _) | BCastMsg::TailInvalidated => {
+                            match state.load() {
+                                State::Pause | State::Play => (),
+                                State::Tail => break Ok(m),
+                            }
+                        }
                         BCastMsg::LogRotated(_) | BCastMsg::NewCurrent(_) => break Ok(m),
                     },
                 }
@@ -1222,11 +1224,9 @@ pub(super) async fn run(
         ts: Value = Value::Null; "timestamp of historical file to reopen, null for head"
     )?;
     let mut ecm_rx = ecm_rx.fuse();
-    let ecm_reply = |res: Result<()>, mut reply: RpcReply| {
-        match res {
-            Ok(()) => reply.send(Value::Ok),
-            Err(e) => reply.send(Value::Error(e.to_string().into())),
-        }
+    let ecm_reply = |res: Result<()>, mut reply: RpcReply| match res {
+        Ok(()) => reply.send(Value::Ok),
+        Err(e) => reply.send(Value::Error(e.to_string().into())),
     };
     let mut poll_members = time::interval(std::time::Duration::from_secs(30));
     loop {
