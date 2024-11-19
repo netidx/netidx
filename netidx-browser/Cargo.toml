@@ -1,6 +1,6 @@
 [package]
 name = "netidx-browser"
-version = "0.26.2"
+version = "0.27.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -29,9 +29,9 @@ krb5_iov = ["netidx/krb5_iov"]
 [dependencies]
 netidx-core = { path = "../netidx-core", version = "0.26.0" }
 netidx-netproto = { path = "../netidx-netproto", version = "0.26.0" }
-netidx = { path = "../netidx", version = "0.26.0", default-features = false }
-netidx-bscript = { path = "../netidx-bscript", version = "0.26.0", default-features = false }
-netidx-protocols = { path = "../netidx-protocols", version = "0.26.0", default-features = false }
+netidx = { path = "../netidx", version = "0.27.0", default-features = false }
+netidx-bscript = { path = "../netidx-bscript", version = "0.27.0", default-features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.27.0", default-features = false }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
