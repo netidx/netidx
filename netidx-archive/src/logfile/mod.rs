@@ -6,7 +6,10 @@ mod writer;
 mod test;
 
 use self::arraymap::ArrayMap;
-pub use self::{reader::ArchiveReader, writer::ArchiveWriter};
+pub use self::{
+    reader::{AlreadyCompressed, ArchiveReader},
+    writer::ArchiveWriter,
+};
 use anyhow::{Context, Error, Result};
 use bytes::{Buf, BufMut};
 use chrono::prelude::*;

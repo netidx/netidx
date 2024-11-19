@@ -1,4 +1,3 @@
-use std::{path::PathBuf, collections::HashSet, future};
 use anyhow::{Context, Result};
 use bytes::BytesMut;
 use chrono::prelude::*;
@@ -9,10 +8,11 @@ use netidx::{
     subscriber::{Event, Subscriber, Value},
 };
 use netidx_archive::{
-    logfile::{self, ArchiveReader, BatchItem, Cursor, Seek},
+    logfile::{self, AlreadyCompressed, ArchiveReader, BatchItem, Cursor, Seek},
     recorder_client::{Client, OneshotReplyShard},
 };
 use netidx_tools_core::ClientParams;
+use std::{collections::HashSet, future, path::PathBuf};
 use structopt::StructOpt;
 use tokio::io::{stdout, AsyncWriteExt};
 
@@ -77,8 +77,11 @@ pub(crate) enum Cmd {
         file: PathBuf,
         #[structopt(long = "metadata-only", about = "don't print the data")]
         metadata: bool,
-	#[structopt(long = "check-index", about = "don't dump data but check all the indexes")]
-	check_index: bool
+        #[structopt(
+            long = "check-index",
+            about = "don't dump data but check all the indexes"
+        )]
+        check_index: bool,
     },
     #[structopt(name = "verify", about = "verify that an archive can be read")]
     Verify { file: PathBuf },
@@ -179,11 +182,9 @@ async fn session(subscriber: Subscriber, params: SessionParams) -> Result<()> {
     let base = params.base;
     let session = subscriber.subscribe(base.append("session"));
     session.wait_subscribed().await?;
-    let session_id =
-        session.write_with_recipt(Value::Null).await?.cast_to::<String>()?;
+    let session_id = session.write_with_recipt(Value::Null).await?.cast_to::<String>()?;
     let session_base = base.append(&session_id);
-    let with_session_base =
-        |path: &str| subscriber.subscribe(session_base.append(path));
+    let with_session_base = |path: &str| subscriber.subscribe(session_base.append(path));
     let session_speed = with_session_base("control/speed/current");
     let session_start = with_session_base("control/start/current");
     let session_end = with_session_base("control/end/current");
@@ -220,7 +221,7 @@ fn verify(file: impl AsRef<std::path::Path>) -> Result<()> {
     Ok(())
 }
 
-async fn compress(file: PathBuf, keep: bool, window: usize) -> Result<()> {
+async fn compress(file: &PathBuf, keep: bool, window: usize) -> Result<()> {
     let hdr = logfile::read_file_header(&file)?;
     if !hdr.indexed {
         index(file.clone(), false).await?
@@ -268,11 +269,7 @@ fn dump(file: PathBuf, metadata: bool, check_index: bool) -> Result<()> {
     println!("delta batches: {}", reader.delta_batches());
     println!("compressed: {}", reader.is_compressed());
     println!("indexed: {}", reader.is_indexed());
-    let filter = if check_index {
-	Some(HashSet::default())
-    } else {
-	None
-    };
+    let filter = if check_index { Some(HashSet::default()) } else { None };
     if !metadata {
         let mut cursor = Cursor::new();
         loop {
@@ -313,10 +310,15 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
         }
         Cmd::Compress { file, window, keep } => {
             for f in file {
-                compress(f, keep, window).await?
+                if let Err(e) = compress(&f, keep, window).await {
+                    match e.downcast_ref::<AlreadyCompressed>() {
+                        None => return Err(e),
+                        Some(_) => eprintln!("skipping already compressed archive {f:?}"),
+                    }
+                }
             }
             Ok(())
-        },
+        }
         Cmd::Dump { file, metadata, check_index } => dump(file, metadata, check_index),
         Cmd::Verify { file } => verify(file),
         Cmd::Compressed { file } => compressed(file),
