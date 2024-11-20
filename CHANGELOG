@@ -1,3 +1,9 @@
+* 0.27.0
+
+- refactor netidx-archive so that the origin can directly write to an
+  archive collection(s) while exposing the recorder interface to
+  netidx.
+
 * 0.26.0
 
 - Fix a bug in write_with_recipt that could cause concurrent write
