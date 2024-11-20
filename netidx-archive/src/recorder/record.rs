@@ -1,7 +1,7 @@
 use crate::{
-    config::{Config, RecordConfig, RotateDirective},
-    logfile::{ArchiveReader, BatchItem, Id, BATCH_POOL},
-    logfile_collection::{index::ArchiveIndex, ArchiveCollectionWriter},
+    config::{RecordConfig, RotateDirective},
+    logfile::{BatchItem, Id, BATCH_POOL},
+    logfile_collection::ArchiveCollectionWriter,
     recorder::{BCastMsg, ShardId, Shards},
 };
 use anyhow::{Context, Result};
@@ -181,7 +181,6 @@ fn write_image(
 pub(super) async fn run(
     shards: Arc<Shards>,
     subscriber: Subscriber,
-    config: Arc<Config>,
     record_config: Arc<RecordConfig>,
     shard_id: ShardId,
     shard_name: ArcStr,
@@ -258,7 +257,7 @@ pub(super) async fn run(
                 };
                 if rotate {
                     let now = Utc::now();
-                    let reader = task::block_in_place(|| -> Result<ArchiveReader> {
+                    task::block_in_place(|| -> Result<()> {
                         archive.rotate(now).context("rotating log file")?;
                         last_image = 0;
                         last_flush = 0;
@@ -266,14 +265,8 @@ pub(super) async fn run(
                             .context("writing image")?;
                         let reader = archive.current_reader()
                             .context("getting reader")?;
-                        shards.heads.write().insert(shard_id, reader.clone());
-                        let index = ArchiveIndex::new(&config, &shard_name)
-                            .context("opening logfile index")?;
-                        shards.indexes.write().insert(shard_id, index);
-                        Ok(reader)
+                        shards.notify_rotated(shard_id, now, reader)
                     })?;
-                    let _ = bcast.send(BCastMsg::LogRotated(now));
-                    let _ = bcast.send(BCastMsg::NewCurrent(reader));
                 }
             },
             r = wait_list(&mut pending_list).fuse() => {

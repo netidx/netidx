@@ -52,8 +52,8 @@ pub mod file {
         pub cluster: String,
     }
 
-    impl PublishConfig {
-        pub fn example() -> Self {
+    impl Default for PublishConfig {
+        fn default() -> Self {
             Self {
                 base: Path::from("/archive"),
                 bind: None,
@@ -63,6 +63,12 @@ pub mod file {
                 cluster_shards: Some(0),
                 cluster: default_cluster(),
             }
+        }
+    }
+
+    impl PublishConfig {
+        pub fn example() -> Self {
+            Self::default()
         }
     }
 
@@ -119,8 +125,8 @@ pub mod file {
         pub slack: usize,
     }
 
-    impl RecordShardConfig {
-        pub fn example() -> Self {
+    impl Default for RecordShardConfig {
+        fn default() -> Self {
             Self {
                 spec: vec![Chars::from("/tmp/**")],
                 poll_interval: None,
@@ -128,8 +134,14 @@ pub mod file {
                 flush_frequency: None,
                 flush_interval: None,
                 rotate_interval: None,
-                slack: default_slack()
+                slack: default_slack(),
             }
+        }
+    }
+
+    impl RecordShardConfig {
+        pub fn example() -> Self {
+            Self::default()
         }
     }
 
@@ -149,8 +161,8 @@ pub mod file {
         pub shards: HashMap<ArcStr, RecordShardConfig>,
     }
 
-    impl RecordConfig {
-        pub fn example() -> Self {
+    impl Default for RecordConfig {
+        fn default() -> Self {
             Self {
                 poll_interval: default_poll_interval(),
                 image_frequency: default_image_frequency(),
@@ -159,6 +171,12 @@ pub mod file {
                 rotate_interval: default_rotate_interval(),
                 shards: HashMap::from([("0".into(), RecordShardConfig::example())]),
             }
+        }
+    }
+
+    impl RecordConfig {
+        pub fn example() -> Self {
+            Self::default()
         }
     }
 
@@ -178,9 +196,9 @@ pub mod file {
         pub publish: Option<PublishConfig>,
     }
 
-    impl Config {
-        pub fn example() -> String {
-            serde_json::to_string_pretty(&Self {
+    impl Default for Config {
+        fn default() -> Self {
+            Self {
                 archive_directory: PathBuf::from("/foo/bar"),
                 archive_cmds: Some(ArchiveCmds {
                     list: (
@@ -200,8 +218,13 @@ pub mod file {
                 desired_auth: None,
                 record: Some(RecordConfig::example()),
                 publish: Some(PublishConfig::example()),
-            })
-            .unwrap()
+            }
+        }
+    }
+
+    impl Config {
+        pub fn example() -> String {
+            serde_json::to_string_pretty(&Self::default()).unwrap()
         }
     }
 }

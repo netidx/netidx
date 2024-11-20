@@ -3,7 +3,7 @@ use crate::{
     logfile::{ArchiveReader, BatchItem},
     logfile_collection::{self, ArchiveCollectionWriter, ArchiveIndex},
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
@@ -35,6 +35,7 @@ pub enum BCastMsg {
 }
 
 pub struct Shards {
+    config: Arc<Config>,
     pub spec: FxHashMap<ShardId, GlobSet>,
     pub by_id: FxHashMap<ShardId, ArcStr>,
     pub by_name: FxHashMap<ArcStr, ShardId>,
@@ -49,6 +50,7 @@ impl Shards {
     fn read(config: &Arc<Config>) -> Result<Arc<Self>> {
         use std::fs;
         let mut t = Self {
+            config: config.clone(),
             spec: HashMap::default(),
             by_id: HashMap::default(),
             by_name: HashMap::default(),
@@ -80,6 +82,7 @@ impl Shards {
 
     fn from_cfg(config: &Arc<Config>) -> Result<Arc<Self>> {
         let mut t = Self {
+            config: config.clone(),
             spec: HashMap::default(),
             by_id: HashMap::default(),
             by_name: HashMap::default(),
@@ -154,6 +157,23 @@ impl Shards {
             let name = self.by_id.get(shard).unwrap();
             *logfile_index = ArchiveIndex::new(config, name)?;
         }
+        Ok(())
+    }
+
+    pub fn notify_rotated(
+        &self,
+        id: ShardId,
+        now: DateTime<Utc>,
+        reader: ArchiveReader,
+    ) -> Result<()> {
+        self.heads.write().insert(id, reader.clone());
+        let name = &self.by_id.get(&id).ok_or_else(|| anyhow!("missing shard id"))?;
+        let index = ArchiveIndex::new(&self.config, name)
+            .context("opening logfile index")?;
+        self.indexes.write().insert(id, index);
+        let bcast = &self.bcast[&id];
+        let _ = bcast.send(BCastMsg::LogRotated(now));
+        let _ = bcast.send(BCastMsg::NewCurrent(reader));
         Ok(())
     }
 }
@@ -240,12 +260,10 @@ impl Recorder {
                     config.netidx_config.clone(),
                     config.desired_auth.clone(),
                 )?;
-                let config = config.clone();
                 let shards = self.shards.clone();
                 self.wait.spawn(async move {
                     let r =
-                        record::run(shards, subscriber, config, record_config, id, name)
-                            .await;
+                        record::run(shards, subscriber, record_config, id, name).await;
                     if let Err(e) = r {
                         error!("recorder stopped on error {:?}", e);
                     }
