@@ -72,7 +72,7 @@ impl FromValue for Speed {
     }
 }
 
-/// A recorder playback session. The session will not time unless it
+/// A recorder playback session. The session will not time out unless this
 /// is dropped.
 pub struct Session {
     base: Path,
