@@ -287,6 +287,12 @@ impl FromStr for Seek {
     }
 }
 
+impl Into<Value> for Seek {
+    fn into(self) -> Value {
+        self.to_string().into()
+    }
+}
+
 impl FromValue for Seek {
     fn from_value(v: Value) -> Result<Self> {
         match v {

@@ -16,6 +16,8 @@ use std::{
     sync::Arc,
 };
 
+use crate::value::{FromValue, Value};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     Subtree,
@@ -159,6 +161,21 @@ impl Pack for Glob {
     }
 }
 
+impl Into<Value> for Glob {
+    fn into(self) -> Value {
+        self.raw.into()
+    }
+}
+
+impl FromValue for Glob {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::String(s) => Self::new(s),
+            x => bail!("Glob::from_value expected String got {x:?}"),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct GlobSetInner {
     raw: Pooled<Vec<Glob>>,
@@ -176,6 +193,19 @@ impl PartialEq for GlobSet {
 }
 
 impl Eq for GlobSet {}
+
+impl Into<Value> for GlobSet {
+    fn into(self) -> Value {
+        (self.0.published_only, self.0.raw.clone()).into()
+    }
+}
+
+impl FromValue for GlobSet {
+    fn from_value(v: Value) -> Result<Self> {
+        let (published_only, globs): (bool, Vec<Glob>) = FromValue::from_value(v)?;
+        Self::new(published_only, globs)
+    }
+}
 
 impl GlobSet {
     /// create a new globset from the specified globs. if
@@ -209,6 +239,11 @@ impl GlobSet {
 
     pub fn published_only(&self) -> bool {
         self.0.published_only
+    }
+
+    /// return the raw glob strings
+    pub fn raw(&self) -> Vec<Chars> {
+        self.0.raw.iter().map(|g| g.raw.clone()).collect()
     }
 
     /// disjoint globsets will never both match a given path. However

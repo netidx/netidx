@@ -1,8 +1,10 @@
-* 0.27.0
+* 0.27.0-0.27.1
 
-- refactor netidx-archive so that the origin can directly write to an
-  archive collection(s) while exposing the recorder interface to
-  netidx.
+- merge #14 refactor netidx-archive so that the origin can directly
+  write to an archive collection(s) while exposing the recorder
+  interface to netidx.
+
+- update dependencies to more recent versions
 
 * 0.26.0
 

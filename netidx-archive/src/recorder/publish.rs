@@ -3,9 +3,9 @@ use crate::{
     logfile::{ArchiveReader, BatchItem, Id, Seek},
     logfile_collection::index::ArchiveIndex,
     logfile_collection::reader::ArchiveCollectionReader,
-    recorder::{oneshot::FILTER, BCastMsg, ShardId, Shards},
+    recorder::{oneshot::FILTER, BCastMsg, ShardId, Shards, State},
 };
-use anyhow::{Error, Result};
+use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
@@ -15,7 +15,6 @@ use netidx::{
     chars::Chars,
     path::Path,
     pool::Pooled,
-    protocol::value::FromValue,
     publisher::{
         self, ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest,
     },
@@ -34,7 +33,6 @@ use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
     ops::Bound,
-    str::FromStr,
     sync::{
         atomic::{AtomicU8, Ordering},
         Arc,
@@ -132,14 +130,6 @@ enum SessionBCastMsg {
     Update(SessionUpdate),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Pack)]
-#[repr(u8)]
-enum State {
-    Play = 0,
-    Pause = 1,
-    Tail = 2,
-}
-
 struct AtomicState(AtomicU8);
 
 impl AtomicState {
@@ -158,42 +148,6 @@ impl AtomicState {
 
     fn store(&self, s: State) {
         self.0.store(s as u8, Ordering::Relaxed)
-    }
-}
-
-impl FromStr for State {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.trim().to_lowercase();
-        if s.as_str() == "play" {
-            Ok(State::Play)
-        } else if s.as_str() == "pause" {
-            Ok(State::Pause)
-        } else if s.as_str() == "tail" {
-            Ok(State::Tail)
-        } else {
-            bail!("expected state [play, pause, tail]")
-        }
-    }
-}
-
-impl FromValue for State {
-    fn from_value(v: Value) -> Result<Self> {
-        Ok(v.cast_to::<Chars>()?.parse::<State>()?)
-    }
-
-    fn get(_: Value) -> Option<Self> {
-        None
-    }
-}
-
-impl State {
-    fn play(&self) -> bool {
-        match self {
-            State::Play => true,
-            State::Pause | State::Tail => false,
-        }
     }
 }
 

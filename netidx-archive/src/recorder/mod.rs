@@ -3,21 +3,24 @@ use crate::{
     logfile::{ArchiveReader, BatchItem},
     logfile_collection::{self, ArchiveCollectionWriter, ArchiveIndex},
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
 use log::error;
 use netidx::{
+    chars::Chars,
     pool::Pooled,
-    publisher::{Publisher, PublisherBuilder},
+    protocol::value::FromValue,
+    publisher::{Publisher, PublisherBuilder, Value},
     resolver_client::GlobSet,
     subscriber::Subscriber,
 };
 use netidx_core::atomic_id;
+use netidx_derive::Pack;
 use parking_lot::{Mutex, RwLock};
 use serde_derive::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, str::FromStr, sync::Arc};
 use tokio::{sync::broadcast, task::JoinSet};
 
 mod oneshot;
@@ -25,6 +28,63 @@ mod publish;
 mod record;
 
 atomic_id!(ShardId);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Pack)]
+#[repr(u8)]
+pub enum State {
+    Play = 0,
+    Pause = 1,
+    Tail = 2,
+}
+
+impl FromStr for State {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim().to_lowercase();
+        if s.as_str() == "play" {
+            Ok(State::Play)
+        } else if s.as_str() == "pause" {
+            Ok(State::Pause)
+        } else if s.as_str() == "tail" {
+            Ok(State::Tail)
+        } else {
+            bail!("expected state [play, pause, tail]")
+        }
+    }
+}
+
+impl Into<Value> for State {
+    fn into(self) -> Value {
+        match self {
+            Self::Play => "play",
+            Self::Pause => "pause",
+            Self::Tail => "tail",
+        }
+        .into()
+    }
+}
+
+impl FromValue for State {
+    fn from_value(v: Value) -> Result<Self> {
+        Ok(v.get_as::<Chars>()
+            .ok_or_else(|| anyhow!("state expected string"))?
+            .parse::<State>()?)
+    }
+
+    fn get(_: Value) -> Option<Self> {
+        None
+    }
+}
+
+impl State {
+    fn play(&self) -> bool {
+        match self {
+            State::Play => true,
+            State::Pause | State::Tail => false,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum BCastMsg {
@@ -168,8 +228,8 @@ impl Shards {
     ) -> Result<()> {
         self.heads.write().insert(id, reader.clone());
         let name = &self.by_id.get(&id).ok_or_else(|| anyhow!("missing shard id"))?;
-        let index = ArchiveIndex::new(&self.config, name)
-            .context("opening logfile index")?;
+        let index =
+            ArchiveIndex::new(&self.config, name).context("opening logfile index")?;
         self.indexes.write().insert(id, index);
         let bcast = &self.bcast[&id];
         let _ = bcast.send(BCastMsg::LogRotated(now));
