@@ -20,27 +20,28 @@ netidx-netproto = { version = "0.26.0", path = "../netidx-netproto" }
 netidx-protocols = { path = "../netidx-protocols", version = "0.27.0", default-features = false }
 netidx-derive = { path = "../netidx-derive", version = "0.22.0" }
 netidx-core = { path = "../netidx-core", version = "0.26.0" }
-tokio = { workspace = true }
 anyhow = { workspace = true }
-bytes = { workspace = true }
-fs3 = { workspace = true }
-memmap2 = { workspace = true }
-fxhash = { workspace = true }
-futures = { workspace = true }
 arcstr = { workspace = true }
-lazy_static = { workspace = true }
-packed_struct = { workspace = true }
-packed_struct_codegen = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
-log = { workspace = true }
-parking_lot = { workspace = true }
-indexmap = { workspace = true }
+derive_builder = { workspace = true }
 diligent-date-parser = { workspace = true }
-serde = { workspace = true }
+fs3 = { workspace = true }
+futures = { workspace = true }
+fxhash = { workspace = true }
+indexmap = { workspace = true }
+lazy_static = { workspace = true }
+log = { workspace = true }
+memmap2 = { workspace = true }
+num_cpus = { workspace = true }
+packed_struct_codegen = { workspace = true }
+packed_struct = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
-num_cpus = { workspace = true }
-zstd = { workspace = true }
+serde = { workspace = true }
 smallvec = { workspace = true }
-rand = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+zstd = { workspace = true }

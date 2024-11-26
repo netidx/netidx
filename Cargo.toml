@@ -23,9 +23,10 @@ combine = "4"
 compact_str = { version = "0.7", features = ["serde"] }
 crossbeam = "0.8"
 cross-krb5 = { version = "0.4", default-features = false }
+derive_builder = "0.20"
 digest = "0.10"
-dirs = "5"
 diligent-date-parser = "0.1.4"
+dirs = "5"
 enumflags2 = "0.7"
 env_logger = "0.11"
 fs3 = "0.5"

@@ -281,7 +281,7 @@ impl SessionBuilder {
         Ok(self)
     }
 
-    /// Set the initial position of the session. The default is at the beginning of start.
+    /// Set the initial position of the session. The default is at the beginning.
     pub fn pos(&mut self, pos: Seek) -> Result<&mut Self> {
         self.pos = Some(pos);
         Ok(self)
@@ -365,6 +365,7 @@ impl Client {
         }
     }
 
+    /// Start a full recorder session
     pub fn session(&self) -> SessionBuilder {
         SessionBuilder::new(
             self.base.clone(),

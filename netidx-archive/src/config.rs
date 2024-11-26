@@ -1,6 +1,7 @@
 use self::file::RecordShardConfig;
 use anyhow::Result;
 use arcstr::ArcStr;
+use derive_builder::Builder;
 use netidx::{
     chars::Chars,
     config::Config as NetIdxCfg,
@@ -13,9 +14,6 @@ use serde_derive::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 pub mod file {
-    use super::RotateDirective;
-    use std::collections::HashMap;
-
     use super::*;
 
     pub fn default_max_sessions() -> usize {
@@ -238,28 +236,42 @@ pub enum RotateDirective {
 }
 
 /// Configuration of the publish part of the recorder
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Builder)]
 pub struct PublishConfig {
     /// The base path to publish under
     pub base: Path,
     /// The publisher bind config. None to use the site default config.
     pub bind: BindCfg,
     /// The maximum number of client sessions
+    #[builder(default = "file::default_max_sessions()")]
     pub max_sessions: usize,
     /// The maximum number of sessions per unique client
+    #[builder(default = "file::default_max_sessions_per_client()")]
     pub max_sessions_per_client: usize,
     /// The maximum number of bytes a oneshot will return
+    #[builder(default = "file::default_oneshot_data_limit()")]
     pub oneshot_data_limit: usize,
     /// How many external shards there are. e.g. instances on other
     /// machines. This is used to sync up the cluster.
+    #[builder(default = "None")]
     pub cluster_shards: Option<usize>,
     /// The cluster name to join, default is "cluster".
+    #[builder(default = "file::default_cluster()")]
     pub cluster: String,
+}
+
+impl PublishConfigBuilder {
+    /// Set the bind parameter to the default bind config from the netidx cfg
+    pub fn cfg(&mut self, cfg: &NetIdxCfg) -> &mut Self {
+        self.bind = Some(cfg.default_bind_config.clone());
+        self
+    }
 }
 
 impl PublishConfig {
     /// create a new PublishConfig with the specified base path and
     /// all other parameters set to the default values.
+    #[deprecated(since = "0.27.2", note = "use PublishConfigBuilder instead")]
     pub fn new(netidx_cfg: &NetIdxCfg, base: Path) -> Self {
         Self {
             base,
@@ -289,32 +301,46 @@ impl PublishConfig {
 }
 
 /// Configuration of the record part of the recorder
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Builder)]
 pub struct RecordConfig {
     /// the path spec globs to record
+    #[builder(try_setter, setter, default = "Self::default_spec()")]
     pub spec: GlobSet,
     /// how often to poll the resolver for structure changes. None
     /// means only once at startup.
+    #[builder(default = "file::default_poll_interval()")]
     pub poll_interval: Option<Duration>,
     /// how often to write a full image. None means never write
     /// images.
+    #[builder(default = "file::default_image_frequency()")]
     pub image_frequency: Option<usize>,
     /// flush the file after the specified number of pages have
     /// been written. None means never flush.
+    #[builder(default = "file::default_flush_frequency()")]
     pub flush_frequency: Option<usize>,
     /// flush the file after the specified elapsed time. None means
     /// flush only on shutdown.
+    #[builder(default = "file::default_flush_interval()")]
     pub flush_interval: Option<Duration>,
     /// rotate the log file at the specified interval or file size or
     /// never.
+    #[builder(default = "file::default_rotate_interval()")]
     pub rotate_interval: RotateDirective,
     /// how much channel slack to allocate
+    #[builder(default = "file::default_slack()")]
     pub slack: usize,
+}
+
+impl RecordConfigBuilder {
+    fn default_spec() -> GlobSet {
+        GlobSet::new(true, [Glob::new("/**".into()).unwrap()]).unwrap()
+    }
 }
 
 impl RecordConfig {
     /// Create a new RecordConfig logging the specified globs with all
     /// other parameters set to the default.
+    #[deprecated(since = "0.27.2", note = "use RecordConfigBuilder instead")]
     pub fn new(spec: GlobSet) -> Self {
         Self {
             spec,
@@ -365,28 +391,52 @@ pub struct ArchiveCmds {
 }
 
 /// Configuration of the recorder
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Builder)]
+#[builder(build_fn(validate = "Self::validate"))]
 pub struct Config {
     /// The directory where the archive files live. The current
-    /// archive will be called 'current', and previous rotated archive
-    /// files will be named with the rfc3339 timestamp that specifies
-    /// when they were rotated (and thus when they ended).
+    /// archive will be called 'current', the path mappings will be
+    /// called 'pathmap', and previous rotated archive files will be
+    /// named the rfc3339 timestamp that specifies when they were
+    /// rotated (and thus when they ended).
     pub archive_directory: PathBuf,
+    #[builder(setter(strip_option), default)]
     pub archive_cmds: Option<ArchiveCmds>,
     /// The netidx config to use
     pub netidx_config: NetIdxCfg,
     /// The netidx desired authentication mechanism to use
+    #[builder(default = "self.default_desired_auth()")]
     pub desired_auth: DesiredAuth,
     /// Record. Each entry in the HashMap is a shard, which will
     /// record independently to an archive directory under the base
     /// directory. E.G. a shard named "0" will record under
     /// ${archive_base}/0. If publish is specified all configured
     /// shards on this instance will be published.
+    #[builder(setter(into), default)]
     pub record: HashMap<ArcStr, RecordConfig>,
     /// If specified this recorder will publish the archive
     /// directory. It is possible for the same archiver to both record
     /// and publish. One of record or publish must be specifed.
+    #[builder(setter(strip_option), default)]
     pub publish: Option<PublishConfig>,
+}
+
+impl ConfigBuilder {
+    fn validate(&self) -> std::result::Result<(), String> {
+        let record_empty = self.record.as_ref().map(|t| t.is_empty()).unwrap_or(true);
+        let publish_empty = self.publish.is_none();
+        if record_empty && publish_empty {
+            Err("config must specify at least record, publish, or both".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn default_desired_auth(&self) -> DesiredAuth {
+        // this will never panic because netidx_config is a required
+        // field and will cause build to fail before this is called
+        self.netidx_config.as_ref().unwrap().default_auth()
+    }
 }
 
 impl TryFrom<file::Config> for Config {

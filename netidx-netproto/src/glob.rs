@@ -9,6 +9,7 @@ use netidx_core::{
     pool::{Pool, Pooled},
     utils,
 };
+use smallvec::SmallVec;
 use std::{
     cmp::{Eq, PartialEq},
     ops::Deref,
@@ -204,6 +205,50 @@ impl FromValue for GlobSet {
     fn from_value(v: Value) -> Result<Self> {
         let (published_only, globs): (bool, Vec<Glob>) = FromValue::from_value(v)?;
         Self::new(published_only, globs)
+    }
+}
+
+impl<'a> TryFrom<&'a [Chars]> for GlobSet {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &[Chars]) -> result::Result<Self, Self::Error> {
+        let v: SmallVec<[Glob; 8]> =
+            value.iter().map(|c| Glob::new(c.clone())).collect::<Result<_>>()?;
+        GlobSet::new(false, v)
+    }
+}
+
+impl<'a> TryFrom<&'a [String]> for GlobSet {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &[String]) -> result::Result<Self, Self::Error> {
+        let v: SmallVec<[Glob; 8]> = value
+            .iter()
+            .map(|c| Glob::new(Chars::from(c.clone())))
+            .collect::<Result<_>>()?;
+        GlobSet::new(false, v)
+    }
+}
+
+impl TryFrom<Vec<Chars>> for GlobSet {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Vec<Chars>) -> result::Result<Self, Self::Error> {
+        let v: SmallVec<[Glob; 8]> =
+            value.into_iter().map(|c| Glob::new(c)).collect::<Result<_>>()?;
+        GlobSet::new(false, v)
+    }
+}
+
+impl TryFrom<Vec<String>> for GlobSet {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Vec<String>) -> result::Result<Self, Self::Error> {
+        let v: SmallVec<[Glob; 8]> = value
+            .into_iter()
+            .map(|c| Glob::new(Chars::from(c)))
+            .collect::<Result<_>>()?;
+        GlobSet::new(false, v)
     }
 }
 
