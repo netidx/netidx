@@ -251,10 +251,14 @@ impl Recorder {
         subscriber: Option<Subscriber>,
     ) -> Result<()> {
         let config = self.config.clone();
-        let subscriber = match subscriber {
-            Some(subscriber) => subscriber,
+        let shared_subscriber = match &subscriber {
+            Some(subscriber) => subscriber.clone(),
             None => Subscriber::new(
-                config.netidx_config.clone(),
+                config
+                    .netidx_config
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("netidx config required"))?
+                    .clone(),
                 config.desired_auth.clone(),
             )?,
         };
@@ -263,17 +267,23 @@ impl Recorder {
             let publisher = match publisher {
                 Some(publisher) => publisher,
                 None => {
-                    PublisherBuilder::new(config.netidx_config.clone())
-                        .desired_auth(config.desired_auth.clone())
-                        .bind_cfg(Some(publish_config.bind.clone()))
-                        .build()
-                        .await?
+                    PublisherBuilder::new(
+                        config
+                            .netidx_config
+                            .as_ref()
+                            .ok_or_else(|| anyhow!("netidx config is required"))?
+                            .clone(),
+                    )
+                    .desired_auth(config.desired_auth.clone())
+                    .bind_cfg(Some(publish_config.bind.clone()))
+                    .build()
+                    .await?
                 }
             };
             self.wait.spawn({
                 let shards = self.shards.clone();
                 let publish_config = publish_config.clone();
-                let subscriber = subscriber.clone();
+                let subscriber = shared_subscriber.clone();
                 let config = config.clone();
                 let publisher = publisher.clone();
                 async move {
@@ -291,7 +301,7 @@ impl Recorder {
                 }
             });
             self.wait.spawn({
-                let subscriber = subscriber.clone();
+                let subscriber = shared_subscriber.clone();
                 let shards = self.shards.clone();
                 let publish_config = publish_config.clone();
                 let config = config.clone();
@@ -315,11 +325,18 @@ impl Recorder {
             let name = name.clone();
             let id = self.shards.by_name[&name];
             if !self.shards.spec[&id].is_empty() {
+                let subscriber = match &subscriber {
+                    Some(subscriber) => subscriber.clone(),
+                    None => Subscriber::new(
+                        config
+                            .netidx_config
+                            .as_ref()
+                            .ok_or_else(|| anyhow!("netidx config required"))?
+                            .clone(),
+                        config.desired_auth.clone(),
+                    )?,
+                };
                 let record_config = Arc::new(cfg.clone());
-                let subscriber = Subscriber::new(
-                    config.netidx_config.clone(),
-                    config.desired_auth.clone(),
-                )?;
                 let shards = self.shards.clone();
                 self.wait.spawn(async move {
                     let r =
@@ -333,7 +350,14 @@ impl Recorder {
         Ok(())
     }
 
-    /// Start the recorder with an existing publisher and subscriber
+    /// Start the recorder with an existing publisher and
+    /// subscriber. If subscriber is specified then it will be used by
+    /// all record shards. If subscriber is not specified then each
+    /// record shard will create it's own subscriber, this has been
+    /// observed to perform better under very high load.
+    ///
+    /// If both publisher and subscriber are specified then config is
+    /// not required to contain the netidx config
     pub async fn start_with(
         config: Config,
         publisher: Option<Publisher>,
