@@ -372,6 +372,7 @@ pub struct Config {
     /// called 'pathmap', and previous rotated archive files will be
     /// named the rfc3339 timestamp that specifies when they were
     /// rotated (and thus when they ended).
+    #[builder(setter(into))]
     pub(crate) archive_directory: PathBuf,
     #[builder(setter(strip_option), default)]
     pub(crate) archive_cmds: Option<ArchiveCmds>,

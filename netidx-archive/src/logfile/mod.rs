@@ -184,7 +184,7 @@ impl Pack for PathMapping {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct BatchItem(pub Id, pub Event);
 
 impl Pack for BatchItem {
