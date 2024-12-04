@@ -120,6 +120,7 @@ impl Drop for ArchiveWriter {
     fn drop(&mut self) {
         let _ = self.flush();
         let _ = self.mmap.flush(); // for the committed header
+        let _ = self.file.unlock(); // unlock the file for writing
     }
 }
 

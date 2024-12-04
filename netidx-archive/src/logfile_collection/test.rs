@@ -24,8 +24,7 @@ fn index_ts(i: i64) -> DateTime<Utc> {
 fn check(reader: &mut ArchiveCollectionReader, ids: &[Id], i: u64) {
     reader.seek(Seek::Beginning).unwrap();
     for j in 0..i {
-        let (n, mut b) = reader.read_deltas(None, 1).unwrap();
-        assert_eq!(n, 1);
+        let (_, mut b) = reader.read_deltas(None, 1).unwrap();
         assert_eq!(b.len(), 1);
         let (ts, mut b) = b.pop_back().unwrap();
         assert_eq!(ts, index_ts(j as i64));
@@ -80,10 +79,12 @@ async fn basic_test() {
         if rotate {
             reader = open_reader(&config, &writer);
         }
+        check(&mut reader, &ids, i);
         let mut batch = BATCH_POOL.take();
         batch.push(BatchItem(ids[0], Event::Update(Value::U64(i))));
         batch.push(BatchItem(ids[1], Event::Update(Value::U64(i))));
         writer.add_batch(false, index_ts(i as i64), &batch).unwrap();
     }
-    check(&mut reader, &ids, 1000)
+    check(&mut reader, &ids, 1000);
+    let _ = fs::remove_dir_all(PATH);
 }

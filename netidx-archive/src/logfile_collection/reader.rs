@@ -281,6 +281,9 @@ impl ArchiveCollectionReader {
     ///
     /// This function will automatically move to the next file in the
     /// collection as long as it's timestamp is within the bounds.
+    ///
+    /// Return a pair of the total number of bytes read and the
+    /// batches read
     pub fn read_deltas(
         &mut self,
         filter: Option<&FxHashSet<Id>>,

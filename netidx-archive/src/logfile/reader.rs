@@ -216,7 +216,7 @@ impl ArchiveReader {
     pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
         let file =
             OpenOptions::new().read(true).open(path.as_ref()).context("open file")?;
-        file.try_lock_shared()?;
+        file.try_lock_shared().context("locking reader for shared access")?;
         Self::open_with(Arc::new(file))
     }
 
@@ -584,6 +584,9 @@ impl ArchiveReader {
     /// advance it by the number of items read. The cursor will not be
     /// invalidated even if no items can be read, however depending on
     /// it's bounds it may never read any more items.
+    ///
+    /// return a pair of the total number of bytes read and the
+    /// batches read.
     pub fn read_deltas(
         &self,
         filter: Option<&FxHashSet<Id>>,
