@@ -19,38 +19,39 @@ krb5_iov = ["cross-krb5/iov"]
 [dependencies]
 netidx-core = { version = "0.26.0", path = "../netidx-core" }
 netidx-netproto = { version = "0.26.0", path = "../netidx-netproto" }
-tokio = { workspace = true }
-cross-krb5 = { workspace = true }
-indexmap = { workspace = true }
-log = { workspace = true }
 anyhow = { workspace = true }
-fxhash = { workspace = true }
-futures = { workspace = true }
-immutable-chunkmap = { workspace = true }
-serde = { workspace = true }
-serde_derive = { workspace = true }
-serde_json = { workspace = true }
-rand = { workspace = true }
-lazy_static = { workspace = true }
-bytes = { workspace = true }
-byteorder = { workspace = true }
-crossbeam = { workspace = true }
-parking_lot = { workspace = true }
-bitflags = { workspace = true }
-if-addrs = { workspace = true }
-dirs = { workspace = true }
-num_cpus = { workspace = true }
-triomphe = { workspace = true }
 arcstr = { workspace = true }
+bitflags = { workspace = true }
+byteorder = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+crossbeam = { workspace = true }
+cross-krb5 = { workspace = true }
+derive_builder = { workspace = true }
+dirs = { workspace = true }
+futures = { workspace = true }
+fxhash = { workspace = true }
+if-addrs = { workspace = true }
+immutable-chunkmap = { workspace = true }
+indexmap = { workspace = true }
+keyring = { workspace = true }
+lazy_static = { workspace = true }
+log = { workspace = true }
+num_cpus = { workspace = true }
+parking_lot = { workspace = true }
+pkcs8 = { workspace = true }
+rand = { workspace = true }
 rustls-pemfile = { workspace = true }
 rustls = { workspace = true }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+smallvec = { workspace = true }
 tokio-rustls = { workspace = true }
+tokio = { workspace = true }
+triomphe = { workspace = true }
 webpki = { workspace = true }
 x509-parser = { workspace = true }
-pkcs8 = { workspace = true }
-keyring = { workspace = true }
-smallvec = { workspace = true }
-chrono = { workspace = true }
 
 [dev-dependencies]
 env_logger = "0.11"

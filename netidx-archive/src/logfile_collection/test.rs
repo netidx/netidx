@@ -79,6 +79,7 @@ async fn basic_test() {
         if rotate {
             reader = open_reader(&config, &writer);
         }
+        // then check we can read the new reader
         check(&mut reader, &ids, i);
         let mut batch = BATCH_POOL.take();
         batch.push(BatchItem(ids[0], Event::Update(Value::U64(i))));

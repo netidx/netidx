@@ -106,6 +106,7 @@ pub mod file {
     use super::{super::config::check_addrs, resolver, Chars, PMap};
     use crate::{path::Path, pool::Pooled};
     use anyhow::Result;
+    use derive_builder::Builder;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::PathBuf,
@@ -151,12 +152,16 @@ pub mod file {
         }
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct Referral {
+        /// The path where the referred cluster attaches to the tree
         pub path: String,
+        /// The time to live in seconds, default forever
         #[serde(default)]
+        #[builder(setter(strip_option), default)]
         pub ttl: Option<u16>,
+        /// The addresses of the cluster in this referral
         pub addrs: Vec<(SocketAddr, RefAuth)>,
     }
 
@@ -212,32 +217,112 @@ pub mod file {
         3600
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    fn default_hello_timeout() -> u64 {
+        10
+    }
+
+    fn default_max_connections() -> usize {
+        768
+    }
+
+    fn default_pid_file() -> PathBuf {
+        "".into()
+    }
+
+    fn default_reader_ttl() -> u64 {
+        60
+    }
+
+    fn default_writer_ttl() -> u64 {
+        120
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct MemberServer {
+        /// The advertised external address and port of this
+        /// server. Usually this is the same as bind_addr, but if you
+        /// have funky networking arrangements (looking at you aws) it
+        /// might not be.
         pub addr: SocketAddr,
+        /// The actual address the server will bind to. Usually the
+        /// same as the IpAddr in the listen address, but could be
+        /// different if you have funky networking going on.
         #[serde(default = "default_bind_addr")]
         pub bind_addr: IpAddr,
+        /// The auth mechanism this member server will use. This *can*
+        /// be different from other member servers in the cluster,
+        /// however that would be a pretty strange choice.
         pub auth: Auth,
+        /// How long, in seconds, to wait for a client hello to finish
+        /// before closing the connection (default 10 seconds).
+        #[serde(default = "default_hello_timeout")]
+        #[builder(default = "default_hello_timeout()")]
         pub hello_timeout: u64,
+        /// How many simultaneous connections to allow (default 768).
+        #[serde(default = "default_max_connections")]
+        #[builder(default = "default_max_connections()")]
         pub max_connections: usize,
+        /// The name to append to the pid file (default ""). If you
+        /// are running more that one server on the same host as the
+        /// same user you may need to set this.
+        #[serde(default = "default_pid_file")]
+        #[builder(default = "default_pid_file()")]
         pub pid_file: PathBuf,
+        /// How long, in seconds, to keep an idle reader client before
+        /// disconnecting (default 60)
+        #[serde(default = "default_reader_ttl")]
+        #[builder(default = "default_reader_ttl()")]
         pub reader_ttl: u64,
+        /// How long, in seconds, to keep an idle writer client before
+        /// disconnecting (default 120).
+        #[serde(default = "default_writer_ttl")]
+        #[builder(default = "default_writer_ttl()")]
         pub writer_ttl: u64,
+        /// The command to run to map netidx names to platform
+        /// names. The command will be passed the netidx name and must
+        /// output the same format as /bin/id on posix platforms. If
+        /// not specified a platform default will be chosen.
         #[serde(default)]
+        #[builder(setter(strip_option), default)]
         pub id_map_command: Option<String>,
+        /// The type of id mapping to perform. Id mapping maps netidx
+        /// names to platform names for the purposes of determining
+        /// group membership. The default type is to call /bin/id with
+        /// the netidx name as an argument and parse it's output. This
+        /// will only work on posix platforms, on other platforms a
+        /// different mapping type should be chosen.
         #[serde(default = "default_id_map_type")]
+        #[builder(default = "default_id_map_type()")]
         pub id_map_type: IdMapType,
+        /// How long, in seconds, to wait for the id map command or socket to
+        /// return an answer for a given user. If the timeout expires
+        /// the request will be denied. (default 3600)
         #[serde(default = "default_id_map_timeout")]
+        #[builder(default = "default_id_map_timeout()")]
         pub id_map_timeout: u64,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct Config {
+        /// A list of referrals to child clusters, if any
+        #[serde(default)]
+        #[builder(default)]
         pub children: Vec<Referral>,
+        /// A referral to the parent cluster, if any
+        #[serde(default)]
+        #[builder(setter(strip_option), default)]
         pub parent: Option<Referral>,
+        /// The member servers in this cluster. At least one is required.
         pub member_servers: Vec<MemberServer>,
+        /// The permissions on this server (default empty). If this is
+        /// not specified the result will depend on the auth type. For
+        /// all strong auth types all operations on the server will be
+        /// denied. For Anonymous all operations on the server are
+        /// always allowed.
+        #[serde(default)]
+        #[builder(default)]
         pub perms: PMap,
     }
 }
@@ -273,8 +358,8 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn parse(s: &str) -> Result<Config> {
-        let cfg: file::Config = from_str(s)?;
+    /// Translate a file::Config into a validated netidx server Config
+    pub fn from_file(cfg: file::Config) -> Result<Config> {
         let addrs = cfg
             .member_servers
             .iter()
@@ -404,6 +489,11 @@ impl Config {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Config { parent, children, perms: cfg.perms, member_servers })
+    }
+
+    /// Parse a file::Config and translate it into a validated netidx server Config
+    pub fn parse(s: &str) -> Result<Config> {
+        Self::from_file(from_str(s)?)
     }
 
     /// Load the cluster config from the specified file.

@@ -15,6 +15,7 @@ use std::{
 
 /// The on disk format, encoded as JSON
 pub mod file {
+    use derive_builder::Builder;
     use crate::chars::Chars;
     use anyhow::Result;
     use std::{
@@ -45,34 +46,62 @@ pub mod file {
         }
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct TlsIdentity {
+        /// The path to the pem file containing the the set of trusted certificates
         pub trusted: String,
+        /// The path to the certificate for this identity
         pub certificate: String,
+        /// The path to the private key corresponding to the
+        /// certificate. If the private_key is encrypted then an askpass
+        /// program must be specified in the Tls struct
         pub private_key: String,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct Tls {
+        /// The name of the default identity, which must appear as a key of identities
         #[serde(default)]
+        #[builder(setter(strip_option), default)]
         pub default_identity: Option<String>,
+        /// The set of identities. The key should be the domain name
+        /// the identity is to be used for. When selecting an identity
+        /// to use, netidx will choose the closest domain name match.
         pub identities: BTreeMap<String, TlsIdentity>,
+        /// The askpass program to run in order to get the key to
+        /// decrypt private keys. The askpass program will be passed
+        /// the path to the private key and is expected to write the
+        /// password to stdout. \r and \n will be trimmed from the end
+        /// of the password. Passwords will be cached, so askpass
+        /// should only need to run once per private key per process.
         #[serde(default)]
+        #[builder(setter(strip_option), default)]
         pub askpass: Option<String>,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct Config {
+        /// The base path of the local resolver server cluster
         pub base: String,
+        /// The addresses of the local resolver server cluster
         pub addrs: Vec<(SocketAddr, Auth)>,
         #[serde(default)]
+        /// The optional tls config. 
+        #[builder(setter(strip_option), default)]
         pub tls: Option<Tls>,
+        /// The default authentication mechanism. If this is Tls then
+        /// you must specify a tls config. Note that this should not
+        /// be Local unless you only want to talk on the Local
+        /// machine. Local machine servers will automatically choose
+        /// Local auth even if the default is Kerberos or Tls.
         #[serde(default)]
         pub default_auth: super::DefaultAuthMech,
+        /// The default publisher bind config on this host
         #[serde(default)]
+        #[builder(setter(strip_option), default)]
         pub default_bind_config: Option<String>,
     }
 
@@ -254,8 +283,9 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn parse(s: &str) -> Result<Config> {
-        let cfg: file::Config = from_str(s)?;
+    /// Transform a file::Config into a validated netidx config. Use
+    /// this if you built a file::Config with the file::ConfigBuilder.
+    pub fn from_file(cfg: file::Config) -> Result<Config> {
         if cfg.addrs.is_empty() {
             bail!("you must specify at least one address");
         }
@@ -315,6 +345,12 @@ impl Config {
         })
     }
 
+    /// Parse and transform a file::Config into a validated netidx Config
+    pub fn parse(s: &str) -> Result<Config> {
+        Self::from_file(from_str(s)?)
+    }
+
+    /// Return the default DesiredAuth as specified by the config.
     pub fn default_auth(&self) -> DesiredAuth {
         match self.default_auth {
             DefaultAuthMech::Anonymous => DesiredAuth::Anonymous,
@@ -329,6 +365,8 @@ impl Config {
         Config::parse(&read_to_string(file)?)
     }
 
+    /// Transform the config into a resolver Referral with a ttl that
+    /// will never expire
     pub fn to_referral(self) -> Referral {
         Referral { path: self.base, ttl: None, addrs: Pooled::orphan(self.addrs) }
     }
