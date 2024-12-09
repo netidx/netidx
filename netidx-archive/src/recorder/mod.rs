@@ -280,6 +280,7 @@ impl Recorder {
                     .await?
                 }
             };
+            let (tx_init, rx_init) = futures::channel::oneshot::channel();
             self.wait.spawn({
                 let shards = self.shards.clone();
                 let publish_config = publish_config.clone();
@@ -293,6 +294,7 @@ impl Recorder {
                         config,
                         publish_config,
                         publisher,
+                        tx_init
                     )
                     .await;
                     if let Err(e) = r {
@@ -300,6 +302,8 @@ impl Recorder {
                     }
                 }
             });
+            rx_init.await.map_err(|_| anyhow!("publisher init failed"))?;
+            let (tx_init, rx_init) = futures::channel::oneshot::channel();
             self.wait.spawn({
                 let subscriber = shared_subscriber.clone();
                 let shards = self.shards.clone();
@@ -313,6 +317,7 @@ impl Recorder {
                         publish_config,
                         publisher,
                         subscriber,
+                        tx_init
                     )
                     .await;
                     if let Err(e) = r {
@@ -320,6 +325,7 @@ impl Recorder {
                     }
                 }
             });
+            rx_init.await.map_err(|_| anyhow!("oneshot init failed"))?;
         }
         for (name, cfg) in config.record.iter() {
             let name = name.clone();
@@ -356,6 +362,10 @@ impl Recorder {
     /// record shard will create it's own subscriber, this has been
     /// observed to perform better under very high load.
     ///
+    /// When this future is ready it is guaranteed that if the config
+    /// specifies a publisher, then the publisher interfaces are fully
+    /// published.
+    ///
     /// If both publisher and subscriber are specified then config is
     /// not required to contain the netidx config
     pub async fn start_with(
@@ -374,7 +384,9 @@ impl Recorder {
         Ok(t)
     }
 
-    /// Start the recorder
+    /// Start the recorder. When this future is ready it is guaranteed
+    /// that if the config specifies a publisher, then the publisher
+    /// interfaces are fully published.
     pub async fn start(config: Config) -> Result<Self> {
         Self::start_with(config, None, None).await
     }

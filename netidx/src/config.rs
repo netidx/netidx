@@ -81,10 +81,13 @@ pub mod file {
         pub askpass: Option<String>,
     }
 
+    const DEFAULT_BASE: &str = "/";
+
     #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct Config {
         /// The base path of the local resolver server cluster
+        #[builder(setter(into), default = "DEFAULT_BASE.into()")]
         pub base: String,
         /// The addresses of the local resolver server cluster
         pub addrs: Vec<(SocketAddr, Auth)>,
@@ -97,11 +100,14 @@ pub mod file {
         /// be Local unless you only want to talk on the Local
         /// machine. Local machine servers will automatically choose
         /// Local auth even if the default is Kerberos or Tls.
+        ///
+        /// The default if not specified is Krb5
         #[serde(default)]
+        #[builder(default)]
         pub default_auth: super::DefaultAuthMech,
         /// The default publisher bind config on this host
         #[serde(default)]
-        #[builder(setter(strip_option), default)]
+        #[builder(setter(into, strip_option), default)]
         pub default_bind_config: Option<String>,
     }
 

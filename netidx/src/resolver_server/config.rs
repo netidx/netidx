@@ -156,6 +156,7 @@ pub mod file {
     #[serde(deny_unknown_fields)]
     pub struct Referral {
         /// The path where the referred cluster attaches to the tree
+        #[builder(setter(into))]
         pub path: String,
         /// The time to live in seconds, default forever
         #[serde(default)]
@@ -267,7 +268,7 @@ pub mod file {
         /// are running more that one server on the same host as the
         /// same user you may need to set this.
         #[serde(default = "default_pid_file")]
-        #[builder(default = "default_pid_file()")]
+        #[builder(setter(into), default = "default_pid_file()")]
         pub pid_file: PathBuf,
         /// How long, in seconds, to keep an idle reader client before
         /// disconnecting (default 60)
@@ -284,7 +285,7 @@ pub mod file {
         /// output the same format as /bin/id on posix platforms. If
         /// not specified a platform default will be chosen.
         #[serde(default)]
-        #[builder(setter(strip_option), default)]
+        #[builder(setter(into, strip_option), default)]
         pub id_map_command: Option<String>,
         /// The type of id mapping to perform. Id mapping maps netidx
         /// names to platform names for the purposes of determining
@@ -358,7 +359,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Translate a file::Config into a validated netidx server Config
+    /// Translate a file::Config into a validated netidx cluster Config
     pub fn from_file(cfg: file::Config) -> Result<Config> {
         let addrs = cfg
             .member_servers
@@ -491,7 +492,7 @@ impl Config {
         Ok(Config { parent, children, perms: cfg.perms, member_servers })
     }
 
-    /// Parse a file::Config and translate it into a validated netidx server Config
+    /// Parse a file::Config and translate it into a validated netidx cluster Config
     pub fn parse(s: &str) -> Result<Config> {
         Self::from_file(from_str(s)?)
     }

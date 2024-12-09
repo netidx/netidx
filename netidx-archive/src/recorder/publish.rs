@@ -8,7 +8,12 @@ use crate::{
 use anyhow::Result;
 use arcstr::ArcStr;
 use chrono::prelude::*;
-use futures::{channel::mpsc, future, prelude::*, select_biased};
+use futures::{
+    channel::mpsc::{self, UnboundedReceiver},
+    future,
+    prelude::*,
+    select_biased,
+};
 use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, error, info, warn};
 use netidx::{
@@ -30,6 +35,7 @@ use netidx_protocols::{
     rpc_err,
 };
 use parking_lot::Mutex;
+use smallvec::{smallvec, SmallVec};
 use std::{
     collections::{HashMap, HashSet},
     ops::Bound,
@@ -265,6 +271,7 @@ struct SessionShard {
     log: ArchiveCollectionReader,
     pathindex: ArchiveReader,
     used: bool,
+    events_rx: Option<UnboundedReceiver<netidx::publisher::Event>>,
 }
 
 impl SessionShard {
@@ -280,6 +287,7 @@ impl SessionShard {
         pathindex: ArchiveReader,
         session_base: Path,
         filter: GlobSet,
+        cfg: Option<NewSessionConfig>,
     ) -> Result<Self> {
         task::block_in_place(|| {
             pathindex.check_remap_rescan(false)?;
@@ -304,7 +312,8 @@ impl SessionShard {
             Bound::Unbounded,
             Bound::Unbounded,
         );
-        Ok(Self {
+        let (events_tx, events_rx) = mpsc::unbounded();
+        let mut t = Self {
             shards,
             id: shard_id,
             session_bcast,
@@ -323,7 +332,19 @@ impl SessionShard {
             log,
             pathindex,
             used,
-        })
+            events_rx: Some(events_rx),
+        };
+        t.publisher.events(events_tx);
+        task::block_in_place(|| t.pathindex.check_remap_rescan(false))?;
+        let mut batch = t.publisher.start_batch();
+        debug!("seeking to the end");
+        t.seek(&mut batch, Seek::End)?;
+        if let Some(cfg) = cfg.clone() {
+            t.apply_config(&mut batch, cfg).await?
+        }
+        batch.commit(None).await;
+        t.publisher.flushed().await;
+        Ok(t)
     }
 
     async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
@@ -655,7 +676,6 @@ impl SessionShard {
         mut self,
         mut bcast: broadcast::Receiver<BCastMsg>,
         mut session_bcast_rx: broadcast::Receiver<SessionBCastMsg>,
-        cfg: Option<NewSessionConfig>,
     ) -> Result<()> {
         async fn read_bcast(
             bcast: &mut broadcast::Receiver<BCastMsg>,
@@ -677,16 +697,8 @@ impl SessionShard {
                 }
             }
         }
-        let (events_tx, mut events_rx) = mpsc::unbounded();
-        self.publisher.events(events_tx);
-        task::block_in_place(|| self.pathindex.check_remap_rescan(false))?;
-        let mut batch = self.publisher.start_batch();
-        debug!("seeking to the end");
-        self.seek(&mut batch, Seek::End)?;
-        if let Some(cfg) = cfg.clone() {
-            self.apply_config(&mut batch, cfg).await?
-        }
-        batch.commit(None).await;
+        let mut events_rx =
+            self.events_rx.take().ok_or_else(|| anyhow!("missing events_rx"))?;
         let state = self.state.clone();
         let mut idle_check = time::interval(std::time::Duration::from_secs(30));
         let mut idle = false;
@@ -915,6 +927,176 @@ impl Controls {
     }
 }
 
+struct Session {
+    cluster: Cluster<ClusterCmd>,
+    controls: Controls,
+    shard_tasks: JoinSet<Result<()>>,
+    control_rx: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    session_bcast: broadcast::Sender<SessionBCastMsg>,
+    session_bcast_rx: broadcast::Receiver<SessionBCastMsg>,
+    session_id: Uuid,
+    publisher: Publisher,
+}
+
+impl Session {
+    async fn new(
+        shards: Arc<Shards>,
+        subscriber: Subscriber,
+        publisher: Publisher,
+        session_id: Uuid,
+        config: Arc<Config>,
+        publish_config: Arc<PublishConfig>,
+        filter: GlobSet,
+        cfg: Option<NewSessionConfig>,
+    ) -> Result<Self> {
+        let (control_tx, control_rx) = mpsc::channel(3);
+        let (session_bcast, session_bcast_rx) = broadcast::channel(1000);
+        let session_base = session_base(&publish_config.base, session_id);
+        debug!("new session base {}", session_base);
+        let cluster = Cluster::new(
+            &publisher,
+            subscriber,
+            session_base.append("cluster"),
+            publish_config.cluster_shards.unwrap_or(0),
+        )
+        .await?;
+        debug!("cluster established");
+        let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
+        let mut shard_tasks: JoinSet<Result<()>> = JoinSet::new();
+        let mut shard_init: SmallVec<
+            [futures::channel::oneshot::Receiver<Result<()>>; 8],
+        > = smallvec![];
+        for (id, pathindex) in shards.pathindexes.iter() {
+            if let Some(spec) = shards.spec.get(id) {
+                if filter.disjoint(spec) {
+                    continue;
+                }
+            }
+            let shards = shards.clone();
+            let id = *id;
+            let pathindex = pathindex.clone();
+            let publisher = publisher.clone();
+            let shard = shards.by_id[&id].clone();
+            let config = config.clone();
+            let session_bcast = session_bcast.clone();
+            let session_bcast_rx = session_bcast.subscribe();
+            let bcast = shards.bcast[&id].subscribe();
+            let head = shards.heads.read().get(&id).cloned();
+            let index = shards.indexes.read()[&id].clone();
+            let session_base = session_base.clone();
+            let filter = filter.clone();
+            let cfg = cfg.clone();
+            let (tx_init, rx_init) = futures::channel::oneshot::channel();
+            shard_init.push(rx_init);
+            shard_tasks.spawn(async move {
+                let t = SessionShard::new(
+                    shards,
+                    session_bcast.clone(),
+                    id,
+                    shard,
+                    config,
+                    publisher,
+                    head,
+                    index,
+                    pathindex,
+                    session_base,
+                    filter,
+                    cfg,
+                )
+                .await;
+                match t {
+                    Ok(t) => {
+                        let _ = tx_init.send(Ok(()));
+                        t.run(bcast, session_bcast_rx).await?;
+                    }
+                    Err(e) => {
+                        let _ = tx_init.send(Err(e));
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            });
+        }
+        future::try_join_all(shard_init)
+            .await
+            .map_err(|_| anyhow!("shard task died before yielding a result"))?
+            .into_iter()
+            .collect::<Result<Vec<()>>>()?;
+        Ok(Self {
+            cluster,
+            controls,
+            shard_tasks,
+            control_rx,
+            session_bcast,
+            session_bcast_rx,
+            session_id,
+            publisher,
+        })
+    }
+
+    async fn run(self) -> Result<()> {
+        let Self {
+            mut cluster,
+            controls,
+            mut shard_tasks,
+            mut control_rx,
+            mut session_bcast,
+            mut session_bcast_rx,
+            session_id,
+            publisher,
+        } = self;
+        loop {
+            select_biased! {
+                r = control_rx.next() => match r {
+                    None => break Ok(()),
+                    Some(batch) => {
+                        controls.process_writes(&mut session_bcast, session_id, batch)
+                    }
+                },
+                cmds = cluster.wait_cmds().fuse() => {
+                    for cmd in cmds? {
+                        let _ = session_bcast.send(SessionBCastMsg::Command(cmd));
+                    }
+                },
+                mut m = session_bcast_rx.recv().fuse() => {
+                    let mut batch = publisher.start_batch();
+                    loop {
+                        match m {
+                            Ok(m) => match m {
+                                SessionBCastMsg::Command(c) => cluster.send_cmd(&c),
+                                SessionBCastMsg::Update(u) => controls.process_update(&mut batch, u),
+                            }
+                            Err(e) => error!("session bcast for session {} error {}", session_id, e),
+                        }
+                        match session_bcast_rx.try_recv() {
+                            Ok(new_m) => { m = Ok(new_m); }
+                            Err(_) => {
+                                batch.commit(None).await;
+                                break
+                            },
+                        }
+                    }
+                }
+                r = shard_tasks.join_next().fuse() => match r {
+                    Some(Ok(Ok(()))) => (),
+                    None => {
+                        info!("session id {} shutting down", session_id);
+                        break Ok(())
+                    }
+                    Some(Ok(Err(e))) => {
+                        error!("shard of session {} failed {}", session_id, e);
+                        let _ = session_bcast.send(SessionBCastMsg::Command(ClusterCmd::Terminate));
+                    }
+                    Some(Err(e)) => {
+                        error!("session {} failed to join shard {}", session_id, e);
+                        bail!("join error")
+                    }
+                },
+            }
+        }
+    }
+}
+
+/*
 async fn session(
     shards: Arc<Shards>,
     subscriber: Subscriber,
@@ -924,6 +1106,7 @@ async fn session(
     publish_config: Arc<PublishConfig>,
     filter: GlobSet,
     cfg: Option<NewSessionConfig>,
+    init: futures::channel::oneshot::Sender<()>,
 ) -> Result<()> {
     let (control_tx, control_rx) = mpsc::channel(3);
     let (mut session_bcast, mut session_bcast_rx) = broadcast::channel(1000);
@@ -939,6 +1122,8 @@ async fn session(
     debug!("cluster established");
     let controls = Controls::new(&session_base, &publisher, &control_tx).await?;
     let mut joinset: JoinSet<Result<()>> = JoinSet::new();
+    let mut shard_init: SmallVec<[futures::channel::oneshot::Receiver<Result<()>>; 8]> =
+        smallvec![];
     for (id, pathindex) in shards.pathindexes.iter() {
         if let Some(spec) = shards.spec.get(id) {
             if filter.disjoint(spec) {
@@ -959,6 +1144,8 @@ async fn session(
         let session_base = session_base.clone();
         let filter = filter.clone();
         let cfg = cfg.clone();
+        let (tx_init, rx_init) = futures::channel::oneshot::channel();
+        shard_init.push(rx_init);
         joinset.spawn(async move {
             let t = SessionShard::new(
                 shards,
@@ -972,12 +1159,27 @@ async fn session(
                 pathindex,
                 session_base,
                 filter,
+                cfg,
             )
-            .await?;
-            t.run(bcast, session_bcast_rx, cfg).await?;
+            .await;
+            match t {
+                Ok(t) => {
+                    let _ = tx_init.send(Ok(()));
+                    t.run(bcast, session_bcast_rx).await?;
+                }
+                Err(e) => {
+                    let _ = tx_init.send(Err(e));
+                }
+            }
             Ok::<(), anyhow::Error>(())
         });
     }
+    future::try_join_all(shard_init)
+        .await
+        .map_err(|_| anyhow!("shard task died before yielding a result"))?
+        .into_iter()
+        .collect::<Result<Vec<()>>>()?;
+    let _ = init.send(());
     let mut control_rx = control_rx.fuse();
     loop {
         select_biased! {
@@ -1029,6 +1231,7 @@ async fn session(
         }
     }
 }
+*/
 
 struct SessionIdsInner {
     max_total: usize,
@@ -1090,11 +1293,12 @@ fn start_session(
     publish_config: Arc<PublishConfig>,
     filter: GlobSet,
     cfg: Option<NewSessionConfig>,
+    reply: Option<RpcReply>,
 ) {
     let subscriber = subscriber.clone();
     let publisher_cl = publisher.clone();
     task::spawn(async move {
-        let res = session(
+        let session = Session::new(
             shards,
             subscriber,
             publisher_cl,
@@ -1105,12 +1309,27 @@ fn start_session(
             cfg,
         )
         .await;
-        match res {
-            Ok(()) => {
-                info!("session {} exited", session_id)
-            }
+        match session {
             Err(e) => {
-                error!("session {} exited {}", session_id, e)
+                error!("session {} initialization failed {e:?}", session_id);
+                if let Some(mut reply) = reply {
+                    let m = Value::Error(format!("initialization failed {e:?}").into());
+                    reply.send(m)
+                }
+            }
+            Ok(session) => {
+                info!("session {} initialized", session_id);
+                if let Some(mut reply) = reply {
+                    reply.send(Value::from(uuid_string(session_id)))
+                }
+                match session.run().await {
+                    Ok(()) => {
+                        info!("session {} exited", session_id)
+                    }
+                    Err(e) => {
+                        error!("session {} exited {}", session_id, e)
+                    }
+                }
             }
         }
         drop(session_token)
@@ -1123,6 +1342,7 @@ pub(super) async fn run(
     config: Arc<Config>,
     publish_config: Arc<PublishConfig>,
     publisher: Publisher,
+    init: futures::channel::oneshot::Sender<()>,
 ) -> Result<()> {
     let sessions = SessionIds::new(
         publish_config.max_sessions,
@@ -1182,6 +1402,8 @@ pub(super) async fn run(
         Ok(()) => reply.send(Value::Ok),
         Err(e) => reply.send(Value::Error(e.to_string().into())),
     };
+    publisher.flushed().await;
+    let _ = init.send(());
     let mut poll_members = time::interval(std::time::Duration::from_secs(30));
     loop {
         select_biased! {
@@ -1225,6 +1447,7 @@ pub(super) async fn run(
                                 config.clone(),
                                 publish_config.clone(),
                                 filter,
+                                None,
                                 None
                             );
                         }
@@ -1260,10 +1483,10 @@ pub(super) async fn run(
                                 config.clone(),
                                 publish_config.clone(),
                                 filter,
-                                Some(cfg)
+                                Some(cfg),
+                                Some(reply)
                             );
                             cluster.send_cmd(&(client, session_id, filter_txt));
-                            reply.send(Value::from(uuid_string(session_id)));
                         }
                     }
                 }

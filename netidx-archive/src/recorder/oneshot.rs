@@ -261,6 +261,7 @@ pub(super) async fn run(
     publish_config: Arc<PublishConfig>,
     publisher: Publisher,
     subscriber: Subscriber,
+    init: futures::channel::oneshot::Sender<()>,
 ) -> Result<()> {
     let cluster_shards = publish_config.cluster_shards.unwrap_or(0);
     let mut cluster: Cluster<ClusterCmd> = Cluster::new(
@@ -284,6 +285,8 @@ pub(super) async fn run(
         end: Value = "Unbounded"; END_DOC,
         filter: Vec<Chars> = vec![Chars::from("/**")]; FILTER_DOC
     )?;
+    publisher.flushed().await;
+    let _ = init.send(());
     loop {
         select_biased! {
             r = wait_complete(&mut pending).fuse() => {

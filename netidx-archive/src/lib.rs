@@ -10,3 +10,6 @@ pub mod logfile;
 pub mod logfile_collection;
 pub mod recorder;
 pub mod recorder_client;
+
+#[cfg(test)]
+mod test;

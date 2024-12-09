@@ -239,6 +239,7 @@ pub enum RotateDirective {
 #[derive(Debug, Clone, Builder)]
 pub struct PublishConfig {
     /// The base path to publish under
+    #[builder(setter(into))]
     pub(crate) base: Path,
     /// The publisher bind config.
     pub(crate) bind: BindCfg,
