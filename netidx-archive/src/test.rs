@@ -1,11 +1,17 @@
 use crate::{
     config::{ConfigBuilder, PublishConfigBuilder, RecordConfigBuilder},
-    recorder::Recorder,
-    recorder_client::Client,
+    logfile::Seek,
+    recorder::{Recorder, State},
+    recorder_client::{Client, Speed},
 };
 use anyhow::{Context, Result};
-use futures::{channel::oneshot, TryFuture};
+use futures::{
+    channel::{mpsc, oneshot},
+    future,
+    prelude::*,
+};
 use netidx::{
+    chars::Chars,
     config::{
         file::{self as client, Auth as CAuth},
         Config as CConfig, DefaultAuthMech,
@@ -19,15 +25,15 @@ use netidx::{
         },
         Server,
     },
-    subscriber::{Subscriber, SubscriberBuilder},
+    subscriber::{Event, Subscriber, SubscriberBuilder, UpdatesFlags},
 };
-use std::time::Duration;
+use std::{fs, time::Duration};
 use tokio::{task, time};
 
 struct Ctx {
     publisher: Publisher,
     subscriber: Subscriber,
-    server: Server,
+    _server: Server,
 }
 
 impl Ctx {
@@ -61,18 +67,28 @@ impl Ctx {
             .config(client_cfg.clone())
             .build()
             .context("building subscriber")?;
-        Ok(Self { server, publisher, subscriber })
+        Ok(Self { _server: server, publisher, subscriber })
     }
 }
 
-const PATH: &str = "test-collection";
+const PATH: &str = "test-recorder";
 const SHARD: &str = "0";
 const BASE: &str = "/recorder";
+const D0: &str = "/test/d0";
+const D1: &str = "/test/d1";
+const N: u64 = 1000;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recorder() -> Result<()> {
+    let _ = fs::remove_dir_all(PATH);
+    eprintln!("creating context");
     let ctx = Ctx::new().await.context("build creating context")?;
-    let record = RecordConfigBuilder::default().build().context("build record config")?;
+    eprintln!("context created");
+    let record = RecordConfigBuilder::default()
+        .try_spec(vec![Chars::from("/test/**")])
+        .context("compiling spec")?
+        .build()
+        .context("build record config")?;
     let publish = PublishConfigBuilder::default()
         .bind("local".parse()?)
         .base(BASE)
@@ -85,38 +101,98 @@ async fn recorder() -> Result<()> {
         .build()
         .context("build config")?;
     let (pub_tx, pub_rx) = oneshot::channel();
+    let (fin_tx, fin_rx) = oneshot::channel();
     let publish = || {
         let publisher = ctx.publisher.clone();
         let ids = [
-            publisher.publish(Path::from("/test/d0"), Value::Null)?,
-            publisher.publish(Path::from("/test/d1"), Value::Null)?,
+            publisher.publish(Path::from(D0), Value::Null)?,
+            publisher.publish(Path::from(D1), Value::Null)?,
         ];
         Ok::<_, anyhow::Error>(async move {
+            eprintln!("starting publisher task");
             publisher.flushed().await;
+            eprintln!("paths published");
             let _ = pub_tx.send(());
-            let mut i: u64 = 0;
-            loop {
+            eprintln!("publisher waiting for clients");
+            future::join_all(ids.iter().map(|pb| publisher.wait_client(pb.id()))).await;
+            eprintln!("publisher got clients");
+            for i in 0..N {
                 let mut b = publisher.start_batch();
                 for id in &ids {
                     id.update(&mut b, i)
                 }
                 b.commit(None).await;
-                time::sleep(Duration::from_millis(250)).await;
-                i += 1
+                eprintln!("published batch {i}");
+                time::sleep(Duration::from_millis(1)).await;
             }
+            let _ = fin_tx.send(());
         })
     };
-    let jh = task::spawn(publish()?);
+    task::spawn(publish()?);
+    eprintln!("waiting for publisher to start");
     pub_rx.await.map_err(|_| anyhow!("publish task died"))?;
-    let recorder = Recorder::start_with(
+    eprintln!("publisher started, starting recorder");
+    let _recorder = Recorder::start_with(
         cfg,
         Some(ctx.publisher.clone()),
         Some(ctx.subscriber.clone()),
     )
     .await
     .context("creating recorder")?;
+    eprintln!("recorder started");
     let client = Client::new(&ctx.subscriber, &Path::from(BASE))
         .context("create record client")?;
-    
-    unimplemented!()
+    fin_rx.await.map_err(|_| anyhow!("publish task died"))?;
+    let session = client
+        .session()
+        .pos(Seek::Beginning)
+        .context("set pos")?
+        .speed(Speed::Unlimited)
+        .build()
+        .await
+        .context("build session")?;
+    eprintln!("recorder client session started");
+    let (tx_up, mut rx_up) = mpsc::channel(10);
+    let tx_up = [(UpdatesFlags::empty(), tx_up)];
+    let (d0, d1) = (
+        ctx.subscriber.subscribe_updates(session.data_path().append(D0), tx_up.clone()),
+        ctx.subscriber.subscribe_updates(session.data_path().append(D1), tx_up),
+    );
+    eprintln!("waiting for initial subscription");
+    future::join_all([d0.wait_subscribed(), d1.wait_subscribed()]).await;
+    eprintln!("initial subscription complete, pressing play");
+    session.set_state(State::Play).await.context("pressing play")?;
+    let mut i = 0;
+    while let Some(up) = rx_up.next().await {
+        eprintln!("received batch {i}: {up:?}");
+        /*
+        if i < 2 {
+            assert_eq!(up.len(), 1);
+            assert_eq!(up[0].1, Event::Update(Value::Null));
+        } else if i == 2 {
+            assert_eq!(up.len(), 4);
+            assert_eq!(up[0].1, Event::Update(Value::Null));
+            assert_eq!(up[1].1, Event::Update(Value::Null));
+            assert_eq!(up[2].0, d0.id());
+            assert_eq!(up[3].0, d1.id());
+            assert_eq!(up[2].1, Event::Update(Value::U64(0)));
+            assert_eq!(up[3].1, Event::Update(Value::U64(0)));
+        } else {
+            assert_eq!(up.len(), 2);
+            assert_eq!(up[0].0, d0.id());
+            assert_eq!(up[1].0, d1.id());
+            if i == 0 {
+                assert_eq!(up[0].1, Event::Update(Value::Null));
+                assert_eq!(up[1].1, Event::Update(Value::Null));
+            } else {
+                assert_eq!(up[0].1, Event::Update(Value::U64(i - 2)));
+                assert_eq!(up[1].1, Event::Update(Value::U64(i - 2)));
+            }
+        }
+        */
+        i += 1;
+    }
+    assert_eq!(i, N);
+    fs::remove_dir_all(PATH)?;
+    Ok(())
 }

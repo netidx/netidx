@@ -50,6 +50,7 @@ use tokio::{
 };
 use triomphe::Arc as TArc;
 
+#[derive(Debug)]
 struct Sub {
     path: Path,
     sub_id: SubId,
@@ -569,6 +570,9 @@ impl ConnectionCtx {
 
     fn send_updates(&mut self) {
         for (id, (c, batch)) in self.by_chan.iter_mut() {
+            if batch.len() == 0 {
+                continue
+            }
             let batch = mem::replace(batch, BATCHES.take());
             if let Err(e) = c.0.try_send(batch) {
                 if e.is_full() {

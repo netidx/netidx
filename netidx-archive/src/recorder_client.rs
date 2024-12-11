@@ -192,7 +192,9 @@ impl Session {
         }
     }
 
-    /// Update the specified channel whenever the position changes
+    /// Update the specified channel whenever the position changes.
+    /// If you are not able to consume the updates fast enough it may
+    /// cause the recorder to slow down delivery of updates
     pub fn pos_updates(&self, mut tx: mpsc::Sender<Option<DateTime<Utc>>>) {
         let (rtx, mut rrx) = mpsc::channel(10);
         self.pos.updates(UpdatesFlags::empty(), rtx);
@@ -306,11 +308,19 @@ impl SessionBuilder {
         Ok(self)
     }
 
+    /// Set the initial speed of playback. The default is 1x real
+    /// time.
+    pub fn speed(&mut self, speed: Speed) -> &mut Self {
+        self.speed = Some(speed);
+        self
+    }
+
+
     /// Start the session. You can call this more than once with the
     /// same builder if you wish to create multiple sessions with the
     /// same parameters.
-    pub async fn start_session(&self) -> Result<Session> {
-        let id = call_rpc!(
+    pub async fn build(&self) -> Result<Session> {
+        let res = call_rpc!(
             &self.proc,
             start: encode_bound(&self.start),
             end: encode_bound(&self.end),
@@ -319,9 +329,11 @@ impl SessionBuilder {
             state: self.state,
             play_after: self.play_after,
             filter: self.filter.as_ref().map(|g| g.raw()).unwrap_or_else(|| vec![Chars::from("/**")])
-        ).await?
-            .get_as::<Chars>()
-            .ok_or_else(|| anyhow!("expected session id to be a string"))?;
+        ).await?;
+        let id = match res {
+            Value::Error(e) => return Err(anyhow!(e)),
+            v => v.get_as::<Chars>().ok_or_else(|| anyhow!("expected a string"))?,
+        };
         Session::new(self.base.append(&id), self.subscriber.clone()).await
     }
 }
