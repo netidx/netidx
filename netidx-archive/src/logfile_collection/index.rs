@@ -38,7 +38,12 @@ impl File {
                 let typ = dir.file_type()?;
                 if typ.is_file() || typ.is_symlink() {
                     let name = dir.file_name();
-                    let name = name.to_string_lossy();
+                    // 'I' stands in for : on windows because windows ... is windows
+                    // Why did I pick I. Maybe I stands for I hate windows. Or maybe I just wanted
+                    // to overload I as many times as I could so that I can express what a joke
+                    // I think windows is.
+                    // These are all very good hypothesis, but in fact I just like the way I looks.
+                    let name = name.to_string_lossy().replace("I", ":");
                     if name == "current" {
                         files.push(File::Head);
                     } else if let Ok(ts) = name.parse::<DateTime<Utc>>() {
