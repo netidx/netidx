@@ -214,7 +214,10 @@ impl ArchiveCollectionWriter {
     ) -> Result<PathBuf> {
         use tokio::{fs, task};
         info!("rotate and compress log file {}", now);
+        #[cfg(unix)]
         let now_str = now.to_rfc3339();
+        #[cfg(windows)]
+        let now_str = now.to_rfc3339().replace(":", "I");
         let new_path = self.base.join(&now_str);
         let reader = task::block_in_place(|| {
             drop(self.current.take());

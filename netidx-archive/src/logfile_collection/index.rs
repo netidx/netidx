@@ -68,6 +68,7 @@ impl File {
                     }
                     info!("list succeeded with {}", &stdout);
                     for name in stdout.split("\n") {
+                        let name = name.replace("I", ":");
                         match name.parse::<DateTime<Utc>>() {
                             Err(e) => {
                                 warn!("failed to parse list ts \'{}\', {}", name, e)
