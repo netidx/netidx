@@ -1,0 +1,12 @@
+[package]
+name = "id-win"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+codegen-units = 1
+opt-level = 3
+lto = true
+debug = false
+
+[dependencies]

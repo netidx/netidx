@@ -559,7 +559,11 @@ mod publisher {
         let _ = env_logger::try_init();
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
+            #[cfg(unix)]
             let server_cfg = ServerConfig::load("../cfg/tls/resolver/resolver.json")
+                .expect("load tls server config");
+            #[cfg(windows)]
+            let server_cfg = ServerConfig::load("../cfg/tls/resolver/resolver-win.json")
                 .expect("load tls server config");
             let mut pub_cfg = ClientConfig::load("../cfg/tls/publisher/client.json")
                 .expect("failed to load tls publisher config");
