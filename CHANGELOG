@@ -1,3 +1,18 @@
+* 0.27.1-2
+
+- Fix a bug in subscriber that caused spurious empty batches to be
+  delivered to an updates channel for subscriptions that aren't
+  updating when other subscriptions not covered by that channel are
+  updating. Could have had potentially serious performance
+  implications in some applications due to lots of spurious
+  wakeups. Sorry.
+
+- Add a recorder session client, for controlling recorders from rust
+  with a nice rusty interface.
+
+- Add unit tests to netidx-archive covering logfile_collections and
+  the full recorder stack using the new session client interface.
+
 * 0.27.0-0.27.1
 
 - merge #14 refactor netidx-archive so that the origin can directly
