@@ -122,7 +122,6 @@ async fn recorder() -> Result<()> {
                     id.update(&mut b, i)
                 }
                 b.commit(None).await;
-                eprintln!("published batch {i}");
                 time::sleep(Duration::from_millis(1)).await;
             }
             let _ = fin_tx.send(());
@@ -132,7 +131,7 @@ async fn recorder() -> Result<()> {
     eprintln!("waiting for publisher to start");
     pub_rx.await.map_err(|_| anyhow!("publish task died"))?;
     eprintln!("publisher started, starting recorder");
-    let _recorder = Recorder::start_with(
+    let recorder = Recorder::start_with(
         cfg,
         Some(ctx.publisher.clone()),
         Some(ctx.subscriber.clone()),
@@ -164,35 +163,34 @@ async fn recorder() -> Result<()> {
     session.set_state(State::Play).await.context("pressing play")?;
     let mut i = 0;
     while let Some(up) = rx_up.next().await {
-        eprintln!("received batch {i}: {up:?}");
-        /*
         if i < 2 {
             assert_eq!(up.len(), 1);
             assert_eq!(up[0].1, Event::Update(Value::Null));
         } else if i == 2 {
             assert_eq!(up.len(), 4);
-            assert_eq!(up[0].1, Event::Update(Value::Null));
-            assert_eq!(up[1].1, Event::Update(Value::Null));
             assert_eq!(up[2].0, d0.id());
             assert_eq!(up[3].0, d1.id());
+            assert_eq!(up[0].1, Event::Update(Value::Null));
+            assert_eq!(up[1].1, Event::Update(Value::Null));
             assert_eq!(up[2].1, Event::Update(Value::U64(0)));
             assert_eq!(up[3].1, Event::Update(Value::U64(0)));
-        } else {
+        } else if i < 1002 {
             assert_eq!(up.len(), 2);
             assert_eq!(up[0].0, d0.id());
             assert_eq!(up[1].0, d1.id());
-            if i == 0 {
-                assert_eq!(up[0].1, Event::Update(Value::Null));
-                assert_eq!(up[1].1, Event::Update(Value::Null));
-            } else {
-                assert_eq!(up[0].1, Event::Update(Value::U64(i - 2)));
-                assert_eq!(up[1].1, Event::Update(Value::U64(i - 2)));
-            }
+            assert_eq!(up[0].1, Event::Update(Value::U64(i - 2)));
+            assert_eq!(up[1].1, Event::Update(Value::U64(i - 2)));
+        } else if i == 1002 {
+            assert_eq!(up.len(), 2);
+            assert_eq!(up[0].1, Event::Update(Value::Null));
+            assert_eq!(up[1].1, Event::Update(Value::Null));
+            break;
+        } else {
+            panic!("unexpected number of batches")
         }
-        */
         i += 1;
     }
-    assert_eq!(i, N);
+    drop(recorder);
     fs::remove_dir_all(PATH)?;
     Ok(())
 }

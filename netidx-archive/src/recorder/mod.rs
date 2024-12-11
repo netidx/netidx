@@ -294,7 +294,7 @@ impl Recorder {
                         config,
                         publish_config,
                         publisher,
-                        tx_init
+                        tx_init,
                     )
                     .await;
                     if let Err(e) = r {
@@ -317,7 +317,7 @@ impl Recorder {
                         publish_config,
                         publisher,
                         subscriber,
-                        tx_init
+                        tx_init,
                     )
                     .await;
                     if let Err(e) = r {
