@@ -1,4 +1,4 @@
-* 0.27.1-2
+* 0.27.2
 
 - Fix a bug in subscriber that caused spurious empty batches to be
   delivered to an updates channel for subscriptions that aren't
