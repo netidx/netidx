@@ -1,6 +1,6 @@
 use crate::{
     config::{ArchiveCmds, Config},
-    logfile::{ArchiveReader, ArchiveWriter, BatchItem, Id},
+    logfile::{ArchiveReader, ArchiveWriter, BatchItem, Id}, logfile_collection::to_name,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
@@ -180,10 +180,7 @@ impl ArchiveCollectionWriter {
     /// record in current, and should ideally be equal to it.
     pub fn rotate(&mut self, now: DateTime<Utc>) -> Result<PathBuf> {
         info!("rotating log file {}", now);
-        #[cfg(unix)]
-        let now_str = now.to_rfc3339();
-        #[cfg(windows)]
-        let now_str = now.to_rfc3339().replace(":", "I");
+        let now_str = to_name(&now);
         let new_path = self.base.join(&now_str);
         drop(self.current.take());
         fs::rename(&self.current_path, &new_path).context("renaming current")?;
@@ -214,10 +211,7 @@ impl ArchiveCollectionWriter {
     ) -> Result<PathBuf> {
         use tokio::{fs, task};
         info!("rotate and compress log file {}", now);
-        #[cfg(unix)]
-        let now_str = now.to_rfc3339();
-        #[cfg(windows)]
-        let now_str = now.to_rfc3339().replace(":", "I");
+        let now_str = to_name(&now);
         let new_path = self.base.join(&now_str);
         let reader = task::block_in_place(|| {
             drop(self.current.take());

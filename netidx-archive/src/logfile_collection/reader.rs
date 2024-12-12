@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek, IMG_POOL},
-    logfile_collection::index::{ArchiveIndex, File},
+    logfile_collection::{index::{ArchiveIndex, File}, to_name},
 };
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -69,7 +69,7 @@ impl DataSource {
                 use std::{iter, process::Command};
                 info!("running get {:?}", &cmds.get);
                 let out = task::block_in_place(|| {
-                    let now = ts.to_rfc3339();
+                    let now = to_name(&ts);
                     let args = cmds
                         .get
                         .1

@@ -1,8 +1,10 @@
-use crate::config::Config;
+use crate::{config::Config, logfile_collection::parse_name};
 use anyhow::Result;
 use chrono::prelude::*;
 use log::{debug, info, warn};
 use std::{cmp::Ordering, path::PathBuf, sync::Arc};
+
+use super::to_name;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum File {
@@ -38,15 +40,10 @@ impl File {
                 let typ = dir.file_type()?;
                 if typ.is_file() || typ.is_symlink() {
                     let name = dir.file_name();
-                    // 'I' stands in for : on windows because windows ... is windows
-                    // Why did I pick I. Maybe I stands for I hate windows. Or maybe I just wanted
-                    // to overload I as many times as I could so that I can express what a joke
-                    // I think windows is.
-                    // These are all very good hypothesis, but in fact I just like the way I looks.
-                    let name = name.to_string_lossy().replace("I", ":");
+                    let name = name.to_string_lossy();
                     if name == "current" {
                         files.push(File::Head);
-                    } else if let Ok(ts) = name.parse::<DateTime<Utc>>() {
+                    } else if let Ok(ts) = parse_name(&name) {
                         files.push(File::Historical(ts));
                     }
                 }
@@ -68,8 +65,7 @@ impl File {
                     }
                     info!("list succeeded with {}", &stdout);
                     for name in stdout.split("\n") {
-                        let name = name.replace("I", ":");
-                        match name.parse::<DateTime<Utc>>() {
+                        match parse_name(&name) {
                             Err(e) => {
                                 warn!("failed to parse list ts \'{}\', {}", name, e)
                             }
@@ -87,7 +83,7 @@ impl File {
     pub(super) fn path(&self, base: &PathBuf, shard: &str) -> PathBuf {
         match self {
             File::Head => base.join(shard).join("current"),
-            File::Historical(h) => base.join(shard).join(h.to_rfc3339()),
+            File::Historical(h) => base.join(shard).join(to_name(h)),
         }
     }
 }
