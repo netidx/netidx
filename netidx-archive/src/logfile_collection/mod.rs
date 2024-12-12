@@ -28,6 +28,6 @@ fn to_name(ts: &DateTime<Utc>) -> String {
 }
 
 #[cfg(windows)]
-fn to_name(ts: DateTime<Utc>) -> String {
+fn to_name(ts: &DateTime<Utc>) -> String {
     ts.to_rfc3339().replace(":", "I")
 }
