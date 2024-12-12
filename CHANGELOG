@@ -5,13 +5,19 @@
   updating when other subscriptions not covered by that channel are
   updating. Could have had potentially serious performance
   implications in some applications due to lots of spurious
-  wakeups. Sorry.
+  wakeups.
 
 - Add a recorder session client, for controlling recorders from rust
-  with a nice rusty interface.
+  with a nice interface.
 
 - Add unit tests to netidx-archive covering logfile_collections and
   the full recorder stack using the new session client interface.
+
+- Fix the tls publish test on windows
+
+- Fix netidx-archive and the recorder on windows. Note, recorder
+  archives written on windows must have their filenames translated
+  before they will work on unix and likewise for unix to windows.
 
 * 0.27.0-0.27.1
 
