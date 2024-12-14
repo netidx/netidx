@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::Result;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use netidx::{
     path::Path,
     pool::Pooled,
@@ -68,8 +68,10 @@ impl Session {
             [futures::channel::oneshot::Receiver<Result<()>>; 8],
         > = smallvec![];
         for (id, pathindex) in shards.pathindexes.iter() {
+            info!("starting shard {id:?} of session {session_id:?}");
             if let Some(spec) = shards.spec.get(id) {
-                if filter.disjoint(spec) {
+                if !spec.is_empty() && filter.disjoint(spec) {
+                    info!("shard {id:?} of session {session_id:?} is disjoint skipping");
                     continue;
                 }
             }
@@ -107,14 +109,25 @@ impl Session {
                 .await;
                 match t {
                     Ok(t) => {
+                        debug!("session init complete for shard {id:?} of session {session_id:?}");
                         let _ = tx_init.send(Ok(()));
-                        t.run(bcast, session_bcast_rx).await?;
+                        match t.run(bcast, session_bcast_rx).await {
+                            Ok(()) => {
+                                info!("shard {id:?} of session {session_id:?} shutting down");
+                                Ok(())
+                            }
+                            Err(e) => {
+                                warn!("shard {id:?} of session {session_id:?} shutting down on error {e:?}");
+                                Err(e)
+                            }
+                        }
                     }
                     Err(e) => {
+                        warn!("session init failed for shard {id:?} of session {session_id:?} {e:?}");
                         let _ = tx_init.send(Err(e));
+                        Ok::<(), anyhow::Error>(())
                     }
                 }
-                Ok::<(), anyhow::Error>(())
             });
         }
         future::try_join_all(shard_init)
@@ -148,7 +161,10 @@ impl Session {
         loop {
             select_biased! {
                 r = control_rx.next() => match r {
-                    None => break Ok(()),
+                    None => {
+                        info!("control channel dropped, exiting session {session_id:?}");
+                        break Ok(())
+                    },
                     Some(batch) => {
                         controls.process_writes(&mut session_bcast, session_id, batch)
                     }

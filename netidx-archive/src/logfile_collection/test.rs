@@ -52,6 +52,7 @@ fn open_reader(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn basic_test() {
+    let _ = env_logger::try_init();
     let _ = fs::remove_dir_all(PATH);
     let paths = [Path::from("/foo/bar"), Path::from("/foo/baz")];
     let record = RecordConfigBuilder::default()

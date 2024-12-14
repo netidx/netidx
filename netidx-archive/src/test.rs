@@ -1,10 +1,11 @@
 use crate::{
     config::{ConfigBuilder, PublishConfigBuilder, RecordConfigBuilder},
-    logfile::Seek,
+    logfile::{BatchItem, Seek, BATCH_POOL},
     recorder::{Recorder, State},
     recorder_client::{Client, Speed},
 };
 use anyhow::{Context, Result};
+use chrono::prelude::*;
 use futures::{
     channel::{mpsc, oneshot},
     future,
@@ -27,6 +28,7 @@ use netidx::{
     },
     subscriber::{Event, Subscriber, SubscriberBuilder, UpdatesFlags},
 };
+use netidx_netproto::glob::GlobSet;
 use std::{fs, time::Duration};
 use tokio::{task, time};
 
@@ -71,16 +73,19 @@ impl Ctx {
     }
 }
 
-const PATH: &str = "test-recorder";
+const PATH0: &str = "test-recorder";
+const PATH1: &str = "test-embedded-recorder";
 const SHARD: &str = "0";
-const BASE: &str = "/recorder";
+const BASE0: &str = "/recorder";
+const BASE1: &str = "/embedded-recorder";
 const D0: &str = "/test/d0";
 const D1: &str = "/test/d1";
 const N: u64 = 1000;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recorder() -> Result<()> {
-    let _ = fs::remove_dir_all(PATH);
+    let _ = env_logger::try_init();
+    let _ = fs::remove_dir_all(PATH0);
     eprintln!("creating context");
     let ctx = Ctx::new().await.context("build creating context")?;
     eprintln!("context created");
@@ -91,13 +96,13 @@ async fn recorder() -> Result<()> {
         .context("build record config")?;
     let publish = PublishConfigBuilder::default()
         .bind("local".parse()?)
-        .base(BASE)
+        .base(BASE0)
         .build()
         .context("publish config")?;
     let cfg = ConfigBuilder::default()
         .record([(SHARD.into(), record)])
         .publish(publish)
-        .archive_directory(PATH)
+        .archive_directory(PATH0)
         .build()
         .context("build config")?;
     let (pub_tx, pub_rx) = oneshot::channel();
@@ -139,7 +144,7 @@ async fn recorder() -> Result<()> {
     .await
     .context("creating recorder")?;
     eprintln!("recorder started");
-    let client = Client::new(&ctx.subscriber, &Path::from(BASE))
+    let client = Client::new(&ctx.subscriber, &Path::from(BASE0))
         .context("create record client")?;
     fin_rx.await.map_err(|_| anyhow!("publish task died"))?;
     let session = client
@@ -191,6 +196,113 @@ async fn recorder() -> Result<()> {
         i += 1;
     }
     drop(recorder);
-    fs::remove_dir_all(PATH)?;
+    fs::remove_dir_all(PATH0)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn embedded_recorder() -> Result<()> {
+    let _ = env_logger::try_init();
+    let _ = fs::remove_dir_all(PATH1);
+    eprintln!("creating context");
+    let ctx = Ctx::new().await.context("build creating context")?;
+    eprintln!("context created");
+    let record = RecordConfigBuilder::default()
+        .spec(GlobSet::new(true, [])?)
+        .build()
+        .context("build record config")?;
+    let publish = PublishConfigBuilder::default()
+        .bind("local".parse()?)
+        .base(BASE1)
+        .build()
+        .context("publish config")?;
+    let cfg = ConfigBuilder::default()
+        .record([(SHARD.into(), record)])
+        .publish(publish)
+        .archive_directory(PATH1)
+        .build()
+        .context("build config")?;
+    eprintln!("starting recorder");
+    let recorder = Recorder::start_with(
+        cfg,
+        Some(ctx.publisher.clone()),
+        Some(ctx.subscriber.clone()),
+    )
+    .await
+    .context("start recorder")?;
+    eprintln!("recorder started");
+    let mut archive = recorder
+        .shards
+        .writers
+        .lock()
+        .remove(&recorder.shards.by_name[SHARD])
+        .ok_or_else(|| anyhow!("missing writer for shard {SHARD}"))?;
+    eprintln!("got record shard");
+    let (fin_tx, fin_rx) = oneshot::channel();
+    task::spawn(async move {
+        eprintln!("record task started");
+        let paths = [Path::from(D0), Path::from(D1)];
+        archive.add_paths(paths.iter()).unwrap();
+        let ids = [
+            archive.id_for_path(&paths[0]).unwrap(),
+            archive.id_for_path(&paths[1]).unwrap(),
+        ];
+        let mut batch = BATCH_POOL.take();
+        for i in 0..N {
+            batch.clear();
+            for id in &ids {
+                batch.push(BatchItem(*id, Event::Update(Value::U64(i))));
+            }
+            archive.add_batch(false, Utc::now(), &batch).unwrap();
+            task::block_in_place(|| archive.flush_all().unwrap());
+        }
+        eprintln!("record task finished");
+        let _ = fin_tx.send(());
+    });
+    eprintln!("connecting to the recorder");
+    let client = Client::new(&ctx.subscriber, &Path::from(BASE1))
+        .context("create record client")?;
+    eprintln!("connected; waiting for write task to finish");
+    fin_rx.await.map_err(|_| anyhow!("publish task died"))?;
+    eprintln!("starting session");
+    let session = client
+        .session()
+        .pos(Seek::Beginning)
+        .context("set pos")?
+        .speed(Speed::Unlimited)
+        .build()
+        .await
+        .context("build session")?;
+    eprintln!("recorder client session started");
+    let (tx_up, mut rx_up) = mpsc::channel(10);
+    let tx_up = [(UpdatesFlags::empty(), tx_up)];
+    let (d0, d1) = (
+        ctx.subscriber.subscribe_updates(session.data_path().append(D0), tx_up.clone()),
+        ctx.subscriber.subscribe_updates(session.data_path().append(D1), tx_up),
+    );
+    eprintln!("waiting for initial subscription");
+    future::join_all([d0.wait_subscribed(), d1.wait_subscribed()]).await;
+    eprintln!("initial subscription complete, pressing play");
+    session.set_state(State::Play).await.context("pressing play")?;
+    let mut i = 0;
+    while let Some(up) = rx_up.next().await {
+        eprintln!("batch {i}: {up:?}");
+        if i < 2 {
+            assert_eq!(up.len(), 1);
+            assert_eq!(up[0].1, Event::Update(Value::Null));
+        } else if i < 1002 {
+            assert_eq!(up.len(), 2);
+            assert_eq!(up[0].0, d0.id());
+            assert_eq!(up[1].0, d1.id());
+            assert_eq!(up[0].1, Event::Update(Value::U64(i - 2)));
+            assert_eq!(up[1].1, Event::Update(Value::U64(i - 2)));
+        }
+        if i == 1001 {
+            break;
+        }
+        i += 1;
+    }
+    drop(recorder);
+    fs::remove_dir_all(PATH1)?;
     Ok(())
 }

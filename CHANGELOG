@@ -1,3 +1,12 @@
+* 0.27.3
+
+- Fix a bug in the recorder that prevented it being used
+  embedded. That is, with an embedded data source writing directly to
+  the logfile_collection but a publisher attached and serving the
+  standard recorder interface.
+
+- Add an embedded recorder test
+
 * 0.27.2
 
 - Fix a bug in subscriber that caused spurious empty batches to be
@@ -18,6 +27,10 @@
 - Fix netidx-archive and the recorder on windows. Note, recorder
   archives written on windows must have their filenames translated
   before they will work on unix and likewise for unix to windows.
+
+- Builder pattern for netidx client and server configs
+
+- Builder pattern for recorder config
 
 * 0.27.0-0.27.1
 
