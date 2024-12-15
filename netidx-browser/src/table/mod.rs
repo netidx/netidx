@@ -5,7 +5,7 @@ use super::{BSCtx, BSCtxRef, BSNode, BWidget};
 use crate::bscript::LocalEvent;
 use futures::channel::oneshot;
 use gio::prelude::*;
-use glib::{self, clone, idle_add_local, source::Continue};
+use glib::{self, clone, idle_add_local, ControlFlow};
 use gtk::{prelude::*, Adjustment, Label, ScrolledWindow};
 use netidx::{path::Path, subscriber::Value};
 use netidx_bscript::vm;
@@ -109,12 +109,12 @@ impl Table {
             TableState::Resolving(path.clone())
         }));
         shared.root.vadjustment().connect_value_changed(clone!(@weak state => move |_| {
-            idle_add_local(clone!(@weak state => @default-return Continue(false), move || {
+            idle_add_local(clone!(@weak state => @default-return ControlFlow::Break, move || {
                 match &*state.borrow() {
                     TableState::Raeified(t) => t.update_subscriptions(),
                     TableState::Refresh {..} | TableState::Resolving(_) => ()
                 }
-                Continue(false)
+                ControlFlow::Break
             }));
         }));
         Table {
@@ -169,10 +169,10 @@ impl Table {
                 }
                 idle_add_local(clone!(@strong table => move || {
                     table.update_subscriptions();
-                    Continue(false)
+                    ControlFlow::Break
                 }));
                 *state.borrow_mut() = TableState::Raeified(table);
-                Continue(false)
+                ControlFlow::Break
             }),
         );
     }
@@ -248,7 +248,7 @@ impl BWidget for Table {
                     t.view().show();
                     idle_add_local(clone!(@strong t => move || {
                         t.update_subscriptions();
-                        Continue(false)
+                        ControlFlow::Continue
                     }));
                 } else {
                     t.view().hide()

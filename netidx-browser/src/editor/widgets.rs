@@ -4,7 +4,7 @@ use super::{
     util::{self, parse_entry, TwoColGrid},
     OnChange, Scope,
 };
-use glib::{clone, prelude::*};
+use glib::{clone, prelude::*, Propagation};
 use gtk::{self, prelude::*};
 use indexmap::IndexMap;
 use netidx::subscriber::Value;
@@ -91,7 +91,7 @@ pub(super) fn expr(
             w.connect_delete_event(clone!(@strong inspector, @strong b => move |_, _| {
                 *inspector.borrow_mut() = None;
                 b.set_active(false);
-                Inhibit(false)
+                Propagation::Proceed
             }));
             w.show_all();
             *inspector.borrow_mut() = Some((w, si));

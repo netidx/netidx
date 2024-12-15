@@ -184,7 +184,7 @@ async fn hello_publisher(
                 move || tls.load(&name)
             })
             .await??;
-            let name = rustls::ServerName::try_from(&**name)?;
+            let name = rustls_pki_types::ServerName::try_from(&**name)?.to_owned();
             channel::write_raw(&mut con, &Hello::Tls(uifo)).await?;
             let tls = ctx.connect(name, con).await?;
             let mut con = Channel::new::<
@@ -571,7 +571,7 @@ impl ConnectionCtx {
     fn send_updates(&mut self) {
         for (id, (c, batch)) in self.by_chan.iter_mut() {
             if batch.len() == 0 {
-                continue
+                continue;
             }
             let batch = mem::replace(batch, BATCHES.take());
             if let Err(e) = c.0.try_send(batch) {

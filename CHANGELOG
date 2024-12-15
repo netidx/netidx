@@ -7,6 +7,21 @@
 
 - Add an embedded recorder test
 
+- Update all dependencies. This turned out to be a bigger deal than it
+  usually is
+
+  In particular rustls had major internal and external changes since
+  we last updated. During this time it became significantly faster
+  than OpenSSL. I haven't evaluated the impact on netidx performance,
+  but I'd be shocked if it was negative. Tests of course pass, but do
+  keep in mind there was quite a bit of churn caused by the various
+  api changes in rustls.
+
+  Updated to the last version of gtk-rs supporting gtk-3. From here,
+  it's port the browser to 4 (a major undertaking), or rewrite it
+  using something like iced. At this point I'm not sure what the right
+  thing is, but whatever it is, it will be a lot of work.
+
 * 0.27.2
 
 - Fix a bug in subscriber that caused spurious empty batches to be
@@ -31,6 +46,9 @@
 - Builder pattern for netidx client and server configs
 
 - Builder pattern for recorder config
+
+- Begin testing on aarch64 MacOS again. Pre release we now test on
+  x86_64 windows, x86_64 linux, aarch64 linux, and aarch64 Mac OS.
 
 * 0.27.0-0.27.1
 

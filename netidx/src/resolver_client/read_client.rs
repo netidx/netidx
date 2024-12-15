@@ -151,8 +151,9 @@ async fn connect(
                 .context("loading tls connector")??;
                 let hello = ClientHello::ReadOnly(AuthRead::Tls);
                 cwt!("hello", channel::write_raw(&mut con, &hello));
-                let name = rustls::ServerName::try_from(&**name)
-                    .context("creating rustls servername")?;
+                let name = rustls_pki_types::ServerName::try_from(&**name)
+                    .context("creating rustls servername")?
+                    .to_owned();
                 let tls = ctx.connect(name, con).await?;
                 let mut con = Channel::new::<
                     ClientCtx,

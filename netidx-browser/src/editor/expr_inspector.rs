@@ -4,7 +4,9 @@ use chrono::prelude::*;
 use fxhash::FxHashMap;
 use gdk::keys;
 use glib::idle_add_local_once;
-use glib::{clone, prelude::*, subclass::prelude::*, thread_guard::ThreadGuard};
+use glib::{
+    clone, prelude::*, subclass::prelude::*, thread_guard::ThreadGuard, Propagation,
+};
 use gtk::{self, prelude::*};
 use netidx::subscriber::Value;
 use netidx_bscript::{expr, vm};
@@ -299,9 +301,9 @@ impl ExprEditor {
                     || kv == keys::constants::Tab
                 {
                     view.emit_show_completion();
-                    Inhibit(true)
+                    Propagation::Stop
                 } else {
-                    Inhibit(false)
+                    Propagation::Proceed
                 }
             });
         }
@@ -374,9 +376,9 @@ impl ExprInspector {
         );
         window.connect_delete_event(clone!(@strong unsaved => move |w, _| {
             if !unsaved.get() || ask_modal(w, "Unsaved changes will be lost") {
-                Inhibit(false)
+                Propagation::Proceed
             } else {
-                Inhibit(true)
+                Propagation::Stop
             }
         }));
         root.pack1(&editor.root, true, false);

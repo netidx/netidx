@@ -14,7 +14,7 @@ use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use gdk::{keys, EventButton, EventKey, RGBA};
 use gio::prelude::*;
-use glib::{self, clone, idle_add_local, signal::Inhibit, source::Continue};
+use glib::{self, clone, idle_add_local, ControlFlow, Propagation};
 use gtk::{
     prelude::*, CellRenderer, CellRendererCombo, CellRendererPixbuf,
     CellRendererProgress, CellRendererSpin, CellRendererText, CellRendererToggle,
@@ -580,9 +580,9 @@ impl RaeifiedTable {
         );
         t.view().set_fixed_height_mode(true);
         t.view().connect_key_press_event(clone!(
-            @weak t => @default-return Inhibit(false), move |_, k| t.handle_key(k)));
+            @weak t => @default-return Propagation::Proceed, move |_, k| t.handle_key(k)));
         t.view().connect_button_press_event(clone!(
-            @weak t => @default-return Inhibit(false), move |_, b| t.handle_button(b)));
+            @weak t => @default-return Propagation::Proceed, move |_, b| t.handle_button(b)));
         t.view().connect_row_activated(
             clone!(@weak t => move |_, p, _| t.handle_row_activated(p)),
         );
@@ -656,9 +656,9 @@ impl RaeifiedTable {
             }
         }
         let t = self;
-        idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
+        idle_add_local(clone!(@weak t => @default-return ControlFlow::Break, move || {
             t.update_subscriptions();
-            Continue(false)
+            ControlFlow::Break
         }));
     }
 
@@ -905,7 +905,7 @@ impl RaeifiedTable {
         self.render_cell_selected(common, cr, i, name);
     }
 
-    fn handle_key(&self, key: &EventKey) -> Inhibit {
+    fn handle_key(&self, key: &EventKey) -> Propagation {
         let clear_selection = || {
             let n = {
                 let mut paths = self.shared.selected.borrow_mut();
@@ -939,10 +939,10 @@ impl RaeifiedTable {
         {
             self.write_dialog()
         }
-        Inhibit(false)
+        Propagation::Proceed
     }
 
-    fn handle_button(&self, ev: &EventButton) -> Inhibit {
+    fn handle_button(&self, ev: &EventButton) -> Propagation {
         let (x, y) = ev.position();
         let n = ev.button();
         let typ = ev.event_type();
@@ -956,7 +956,7 @@ impl RaeifiedTable {
             }
             (None, _) | (Some((_, _, _, _)), _) => (),
         }
-        Inhibit(false)
+        Propagation::Proceed
     }
 
     fn write_dialog(&self) {
@@ -1126,9 +1126,9 @@ impl RaeifiedTable {
                 if self.descriptor.rows.len() > 0 {
                     let t = self;
                     idle_add_local(
-                        clone!(@weak t => @default-return Continue(false), move || {
+                        clone!(@weak t => @default-return ControlFlow::Break, move || {
                             t.update_subscriptions();
-                            Continue(false)
+                            ControlFlow::Break
                         }),
                     );
                 }
@@ -1259,9 +1259,9 @@ impl RaeifiedTable {
     pub(super) fn start_update_task(&self, mut tx: Option<oneshot::Sender<()>>) {
         let sctx = self.disable_sort();
         let t = self;
-        idle_add_local(clone!(@weak t => @default-return Continue(false), move || {
+        idle_add_local(clone!(@weak t => @default-return ControlFlow::Break, move || {
             if t.0.destroyed.get() {
-                Continue(false)
+                ControlFlow::Break
             } else {
                 for _ in 0..1000 {
                     match t.0.update.borrow_mut().pop() {
@@ -1278,7 +1278,7 @@ impl RaeifiedTable {
                     }
                 }
                 if t.0.update.borrow().len() > 0 {
-                    Continue(true)
+                    ControlFlow::Continue
                 } else {
                     if let Some(tx) = tx.take() {
                         let _: result::Result<_, _> = tx.send(());
@@ -1290,7 +1290,7 @@ impl RaeifiedTable {
                     // otherwise updated values might not be drawn
                     // until the user causes damage to the widget.
                     t.view.queue_draw();
-                    Continue(false)
+                    ControlFlow::Break
                 }
             }
         }));

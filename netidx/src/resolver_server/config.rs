@@ -451,7 +451,7 @@ impl Config {
                                 if cert.len() == 0 || cert.len() > 1 {
                                     bail!("certificate should contain exactly 1 cert")
                                 }
-                                match tls::get_names(&cert[0].0)? {
+                                match tls::get_names(&*cert[0])? {
                                     None => {
                                         bail!("server certificate has no subjectAltName name")
                                     }

@@ -3,7 +3,7 @@ mod expr_inspector;
 mod util;
 mod widgets;
 use super::{default_view, BSCtx, WidgetPath, DEFAULT_PROPS};
-use glib::{clone, idle_add_local, prelude::*, GString};
+use glib::{clone, idle_add_local, prelude::*, ControlFlow, GString, Propagation};
 use gtk::{self, prelude::*};
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 use netidx_bscript::expr;
@@ -947,9 +947,9 @@ impl Editor {
     pub(super) fn new(ctx: BSCtx, scope: Path, spec: view::Widget) -> Editor {
         let root = gtk::Paned::new(gtk::Orientation::Vertical);
         idle_add_local(
-            clone!(@weak root => @default-return glib::Continue(false), move || {
+            clone!(@weak root => @default-return ControlFlow::Break, move || {
                 root.set_position(root.allocated_height() / 2);
-                glib::Continue(false)
+                ControlFlow::Break
             }),
         );
         root.set_margin_start(5);
@@ -1059,7 +1059,7 @@ impl Editor {
                                 ctx.borrow().user.backend.render(spec.borrow().clone());
                             }
                             scheduled.set(false);
-                            glib::Continue(false)
+                            ControlFlow::Break
                     }));
                 }
             }
@@ -1291,9 +1291,9 @@ impl Editor {
             if right_click {
                 menu.show_all();
                 menu.popup_at_pointer(Some(&*b));
-                Inhibit(true)
+                Propagation::Stop
             } else {
-                Inhibit(false)
+                Propagation::Proceed
             }
         });
         store.connect_row_deleted(clone!(@strong on_change => move |_, _| {
@@ -1306,7 +1306,7 @@ impl Editor {
                     if let Ok(w) = v.get::<&Widget>() {
                         w.moved(&iter)
                     }
-                    glib::Continue(false)
+                    ControlFlow::Break
                 }));
                 on_change();
         }));

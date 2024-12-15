@@ -22,7 +22,10 @@ use editor::Editor;
 use futures::channel::oneshot;
 use fxhash::{FxBuildHasher, FxHashMap};
 use gdk::{self, prelude::*};
-use glib::{clone, idle_add_local, idle_add_local_once, source::PRIORITY_LOW};
+use glib::{
+    clone, idle_add_local, idle_add_local_once, source::Priority, ControlFlow,
+    Propagation,
+};
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use indexmap::IndexSet;
 use netidx::{
@@ -620,14 +623,14 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
                 lbl.set_markup(&format!(r#"<a href="{}">{}</a>"#, &*target, &*name));
                 lbl.connect_activate_link(clone!(
                 @weak ctx,
-                @strong ask_saved => @default-return Inhibit(false), move |_, uri| {
+                @strong ask_saved => @default-return Propagation::Proceed, move |_, uri| {
                     if !ask_saved() {
-                        return Inhibit(false)
+                        return Propagation::Proceed
                     }
                     ctx.borrow().user.backend.navigate(
                         ViewLoc::Netidx(Path::from(String::from(uri)))
                     );
-                    Inhibit(false)
+                    Propagation::Proceed
                 }));
             }
         }
@@ -638,12 +641,12 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
             rl.set_markup(r#"<a href=""> / </a>"#);
             rl.connect_activate_link(clone!(
                 @weak ctx,
-                @strong ask_saved => @default-return Inhibit(false), move |_, _| {
+                @strong ask_saved => @default-return Propagation::Proceed, move |_, _| {
                     if !ask_saved() {
-                        return Inhibit(false)
+                        return Propagation::Proceed
                     }
                     ctx.borrow().user.backend.navigate(ViewLoc::Netidx(Path::from("/")));
-                    Inhibit(false)
+                    Propagation::Proceed
             }));
             let sep = gtk::Label::new(Some(" > "));
             hbox.add(&sep);
@@ -654,12 +657,12 @@ fn make_crumbs(ctx: &BSCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
             fl.connect_activate_link(clone!(
                 @weak ctx,
                 @strong ask_saved,
-                @strong name => @default-return Inhibit(false), move |_, _| {
+                @strong name => @default-return Propagation::Proceed, move |_, _| {
                     if !ask_saved() {
-                        return Inhibit(false)
+                        return Propagation::Proceed
                     }
                     ctx.borrow().user.backend.navigate(ViewLoc::File(name.clone()));
-                    Inhibit(false)
+                    Propagation::Proceed
             }));
         }
     }
@@ -931,13 +934,13 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let editor_window: Rc<RefCell<Option<gtk::Window>>> = Rc::new(RefCell::new(None));
     let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
     ctx.borrow().user.window.connect_delete_event(clone!(
-        @weak ctx => @default-return Inhibit(false), move |w, _| {
+        @weak ctx => @default-return Propagation::Proceed, move |w, _| {
             let saved = ctx.borrow().user.view_saved.get();
             if saved || ask_modal(w, "Unsaved view will be lost.") {
                 ctx.borrow().user.backend.terminate();
-                Inhibit(false)
+                Propagation::Proceed
             } else {
-                Inhibit(true)
+                Propagation::Stop
             }
     }));
     design_mode.connect_toggled(clone!(
@@ -1011,7 +1014,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         }
     ));
     let raw_view_act =
-        gio::SimpleAction::new_stateful("raw_view", None, false.to_variant());
+        gio::SimpleAction::new_stateful("raw_view", None, &false.to_variant());
     ctx.borrow().user.window.add_action(&raw_view_act);
     raw_view_act.connect_activate(clone!(
         @weak ctx, @strong current_loc  => move |a, _| {
@@ -1032,7 +1035,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
         }
     }));
     let bscript_tracing_act =
-        gio::SimpleAction::new_stateful("bscript_tracing", None, true.to_variant());
+        gio::SimpleAction::new_stateful("bscript_tracing", None, &true.to_variant());
     ctx.borrow().user.window.add_action(&bscript_tracing_act);
     ctx.borrow_mut().dbg_ctx.trace = true;
     bscript_tracing_act.connect_activate(clone!(@weak ctx => move |a, _| {
@@ -1052,15 +1055,15 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 &mut ctx.borrow_mut(),
                 &vm::Event::Variable(scope, name, value),
             );
-            Continue(true)
+            ControlFlow::Continue
         }
         ToGui::UpdateRpc(id, value) => {
             update_single(&current, &mut ctx.borrow_mut(), &vm::Event::Rpc(id, value));
-            Continue(true)
+            ControlFlow::Continue
         }
         ToGui::UpdateTimer(id) => {
             update_single(&current, &mut ctx.borrow_mut(), &vm::Event::Timer(id));
-            Continue(true)
+            ControlFlow::Continue
         }
         ToGui::UpdatePoll(path) => {
             update_single(
@@ -1068,7 +1071,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 &mut ctx.borrow_mut(),
                 &vm::Event::User(LocalEvent::Poll(path)),
             );
-            Continue(true)
+            ControlFlow::Continue
         }
         ToGui::Update(mut batch) => {
             if let Some(root) = &mut *current.borrow_mut() {
@@ -1092,12 +1095,12 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                     });
                 }
             }
-            Continue(true)
+            ControlFlow::Continue
         }
         ToGui::TableResolved(path, table) => {
             let e = vm::Event::User(LocalEvent::TableResolved(path, Rc::new(table)));
             update_single(&current, &mut ctx.borrow_mut(), &e);
-            Continue(true)
+            ControlFlow::Continue
         }
         ToGui::Navigate(loc) => {
             let (saved, window) = {
@@ -1109,12 +1112,12 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             if saved || ask_modal(&window, "Unsaved view will be lost") {
                 ctx.borrow().user.backend.navigate(loc)
             }
-            Continue(true)
+            ControlFlow::Continue
         }
         ToGui::NavigateInWindow(loc) => {
             *ctx.borrow().user.new_window_loc.borrow_mut() = loc;
             app.activate();
-            Continue(true)
+            ControlFlow::Continue
         }
         ToGui::View { loc, spec, generated } => {
             match loc {
@@ -1153,7 +1156,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             let hl = highlight.borrow();
             cur.widget.set_highlight(hl.iter(), true);
             *current.borrow_mut() = Some(cur);
-            Continue(true)
+            ControlFlow::Continue
         }
         ToGui::Highlight(path) => {
             if let Some(cur) = &*current.borrow() {
@@ -1162,11 +1165,11 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 *hl = path;
                 cur.widget.set_highlight(hl.iter(), true);
             }
-            Continue(true)
+            ControlFlow::Continue
         }
         ToGui::ShowError(s) => {
             err_modal(&ctx.borrow().user.window, &s);
-            Continue(true)
+            ControlFlow::Continue
         }
         ToGui::SaveError(s) => {
             err_modal(&ctx.borrow().user.window, &s);
@@ -1174,7 +1177,7 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                 @weak ctx,
                 @strong save_loc,
                 @strong current_spec,
-                @strong save_button => @default-return Continue(false), move || {
+                @strong save_button => @default-return ControlFlow::Break, move || {
                     save_view(
                         &ctx,
                         &save_loc,
@@ -1182,11 +1185,11 @@ fn run_gui(ctx: BSCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                         &save_button,
                         true,
                     );
-                    Continue(false)
+                    ControlFlow::Break
             }));
-            Continue(true)
+            ControlFlow::Continue
         }
-        ToGui::Terminate => Continue(false),
+        ToGui::Terminate => ControlFlow::Continue,
     });
 }
 
@@ -1284,7 +1287,8 @@ fn main() {
             let backend = backend.clone();
             move |app| {
                 let app = app.clone();
-                let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(PRIORITY_LOW);
+                #[allow(deprecated)]
+                let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(Priority::LOW);
                 let raw_view = Arc::new(AtomicBool::new(false));
                 let backend = backend.create_ctx(tx_to_gui, raw_view.clone()).unwrap();
                 let _ = backend.from_gui.unbounded_send(FromGui::Navigate(mem::replace(

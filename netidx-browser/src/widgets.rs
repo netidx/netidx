@@ -5,7 +5,7 @@ use crate::{bscript::LocalEvent, containers, view};
 use anyhow::{bail, Result};
 use futures::channel::oneshot;
 use gdk::{self, prelude::*};
-use glib::{clone, idle_add_local, idle_add_local_once};
+use glib::{clone, idle_add_local, idle_add_local_once, ControlFlow, Propagation};
 use gtk::{self, prelude::*};
 use indexmap::IndexSet;
 use netidx::{chars::Chars, path::Path, protocol::value::FromValue, subscriber::Value};
@@ -34,12 +34,12 @@ fn hover_path(
 ) {
     w.connect_focus(clone!(@strong selected_path, @strong expr => move |_, _| {
         selected_path.set_label(&format!("{}: {}", name, expr));
-        Inhibit(false)
+        Propagation::Proceed
     }));
     w.connect_enter_notify_event(
         clone!(@strong selected_path, @strong expr => move |_, _| {
             selected_path.set_label(&format!("{}: {}", name, expr));
-            Inhibit(false)
+            Propagation::Proceed
         }),
     );
 }
@@ -155,13 +155,13 @@ impl LinkButton {
                     None => {
                         let ev = vm::Event::User(LocalEvent::Event(Value::Null));
                         on_activate_link.borrow_mut().update(&mut ctx.borrow_mut(), &ev);
-                        Inhibit(true)
+                        Propagation::Stop
                     },
                     Some(uri) => {
                         let ev = vm::Event::User(LocalEvent::Event(uri.into()));
                         match on_activate_link.borrow_mut().update(&mut ctx.borrow_mut(), &ev) {
-                            Some(Value::True) => Inhibit(true),
-                            _ => Inhibit(false),
+                            Some(Value::True) => Propagation::Stop,
+                            _ => Propagation::Proceed,
                         }
                     }
                 }
@@ -377,7 +377,7 @@ where
                     on_change.borrow_mut().update(&mut ctx.borrow_mut(), &e);
                     idle_add_local(clone!(@strong ctx, @strong we_set, @strong value, @strong button => move || {
                         Self::we_set_value(&we_set, &button, value.borrow().current(&mut ctx.borrow_mut()));
-                        Continue(false)
+                        ControlFlow::Continue
                     }));
                 }
             }),
@@ -508,7 +508,7 @@ impl ComboBox {
                 idle_add_local(clone!(
                     @strong ctx, @strong selected, @strong combo, @strong we_set => move || {
                         Self::we_set_selected(&we_set, &combo, selected.borrow().current(&mut ctx.borrow_mut()));
-                        Continue(false)
+                        ControlFlow::Continue
                     })
                 );
             }
@@ -622,7 +622,7 @@ impl RadioButton {
                 if group_changing.get() {
                     idle_add_local(clone!(@strong on_toggled, @strong ctx  => move || {
                         on_toggled.borrow_mut().update(&mut ctx.borrow_mut(), &e);
-                        Continue(false)
+                        ControlFlow::Continue
                     }));
                 } else {
                     on_toggled.borrow_mut().update(&mut ctx.borrow_mut(), &e);
@@ -779,23 +779,23 @@ impl Switch {
                 idle_add_local(
                     clone!(@strong ctx, @strong value, @strong switch, @strong we_set => move || {
                         Self::we_set_value(&we_set, &switch, value.borrow().current(&mut ctx.borrow_mut()));
-                        Continue(false)
+                        ControlFlow::Continue
                 }));
             }
-            Inhibit(true)
+            Propagation::Stop
         }));
         switch.connect_focus(clone!(@strong selected_path, @strong spec => move |_, _| {
             selected_path.set_label(
                 &format!("value: {}, on_change: {}", spec.value, spec.on_change)
             );
-            Inhibit(false)
+            Propagation::Stop
         }));
         switch.connect_enter_notify_event(
             clone!(@strong selected_path, @strong spec => move |_, _| {
                 selected_path.set_label(
                     &format!("value: {}, on_change: {}", spec.value, spec.on_change)
                 );
-                Inhibit(false)
+                Propagation::Proceed
             }),
         );
         Self { value, on_change, switch, we_set }
@@ -886,7 +886,7 @@ impl Entry {
             idle_add_local(clone!(
                 @strong ctx, @strong we_changed, @strong text, @strong entry => move || {
                     Self::we_set_text(&we_changed, &entry, text.borrow().current(&mut ctx.borrow_mut()));
-                    Continue(false)
+                    ControlFlow::Continue
                 }));
         }));
         entry.connect_changed(clone!(
@@ -1062,7 +1062,7 @@ impl Image {
             if e.button() == 1 {
                 button_pressed.set(true);
             }
-            Inhibit(true)
+            Propagation::Stop
         }));
         root.connect_button_release_event(clone!(
             @strong button_pressed, @strong on_click, @strong ctx => move |_, e| {
@@ -1073,7 +1073,7 @@ impl Image {
                     &vm::Event::User(LocalEvent::Event(Value::Null))
                 );
             }
-            Inhibit(true)
+            Propagation::Stop
         }));
         hover_path(&image, &selected_path, "on_click", &spec.spec);
         Image { image_spec, on_click, image, root }

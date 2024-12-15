@@ -1,3 +1,4 @@
+use glib::Propagation;
 use gtk::{self, prelude::*};
 use log::warn;
 use std::{fmt::Display, str::FromStr, string::ToString};
@@ -80,15 +81,15 @@ impl TwoColGrid {
 /// removed when that behavior is fixed.
 pub(super) fn expander_touch_enable(root: &gtk::Expander) {
     root.connect_button_press_event(
-        clone!(@weak root => @default-return gtk::Inhibit(false), move |_, ev| {
+        clone!(@weak root => @default-return Propagation::Proceed, move |_, ev| {
             let left_click =
                 gdk::EventType::ButtonPress == ev.event_type()
                 && ev.button() == 1;
             if left_click {
                 root.set_expanded(!root.is_expanded());
-                gtk::Inhibit(true)
+                Propagation::Stop
             } else {
-                gtk::Inhibit(false)
+                Propagation::Proceed
             }
         }),
     );

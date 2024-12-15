@@ -610,7 +610,7 @@ async fn get_tls_uifo(
     let (_, server_con) = tls.get_ref();
     match server_con.peer_certificates() {
         Some([cert, ..]) => {
-            let names = tls::get_names(&cert.0).context("getting tls names")?;
+            let names = tls::get_names(&*cert).context("getting tls names")?;
             Ok(a.1
                 .write()
                 .await

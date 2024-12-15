@@ -1,11 +1,10 @@
 use super::{BSCtx, BSCtxRef, BSNode, BWidget};
 use crate::{bscript::LocalEvent, view};
 use anyhow::{anyhow, Result};
-
 use chrono::prelude::*;
 use futures::channel::oneshot;
 use gdk::{self, cairo, prelude::*};
-use glib::clone;
+use glib::{clone, Propagation};
 use gtk::{self, prelude::*};
 use log::warn;
 use netidx::{
@@ -167,7 +166,7 @@ impl LinePlot {
                 Ok(Err(e)) => warn!("failed to draw lineplot {}", e),
                 Err(_) => warn!("failed to draw lineplot, draw paniced"),
             }
-            gtk::Inhibit(true)
+            Propagation::Stop
         }));
         canvas.connect_size_allocate(clone!(
         @strong allocated_width,

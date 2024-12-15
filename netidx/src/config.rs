@@ -241,7 +241,7 @@ impl Tls {
                     if certs.len() == 0 || certs.len() > 1 {
                         bail!("certificate file should contain 1 cert")
                     }
-                    match tls::get_names(&certs[0].0)? {
+                    match tls::get_names(&*certs[0])? {
                         Some(name) => name.alt_name,
                         None => bail!("certificate has no common name"),
                     }

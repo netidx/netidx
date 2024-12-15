@@ -328,7 +328,7 @@ impl Connection {
 			move || tls.load(&name)
 		    }).await??;
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
-                    let name = rustls::ServerName::try_from(&**name)?;
+                    let name = rustls_pki_types::ServerName::try_from(&**name)?.to_owned();
                     match secret {
                         Some(secret) => {
                             debug!("reusing existing tls session");

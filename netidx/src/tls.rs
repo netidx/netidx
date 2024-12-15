@@ -3,6 +3,10 @@ use anyhow::{Context, Result};
 use fxhash::FxHashMap;
 use log::{debug, info, warn};
 use parking_lot::Mutex;
+use rustls_pki_types::{
+    pem::{PemObject, SectionKind},
+    PrivateKeyDer,
+};
 use smallvec::SmallVec;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -11,13 +15,11 @@ use std::{
 };
 use x509_parser::prelude::GeneralName;
 
-pub(crate) fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
+pub(crate) fn load_certs(path: &str) -> Result<Vec<rustls_pki_types::CertificateDer<'static>>> {
     use std::{fs, io::BufReader};
     Ok(rustls_pemfile::certs(&mut BufReader::new(fs::File::open(path)?))
-        .context("parsing cert pem")?
-        .into_iter()
-        .map(|v| rustls::Certificate(v))
-        .collect())
+        .map(|r| r.map_err(anyhow::Error::from))
+        .collect::<Result<Vec<_>>>()?)
 }
 
 #[derive(Debug)]
@@ -135,33 +137,42 @@ pub fn save_password_for_key(path: &str, password: &str) -> Result<()> {
     Ok(entry.set_password(password)?)
 }
 
-pub fn load_private_key(askpass: Option<&str>, path: &str) -> Result<rustls::PrivateKey> {
+pub fn load_private_key(
+    askpass: Option<&str>,
+    path: &str,
+) -> Result<PrivateKeyDer<'static>> {
     use pkcs8::{
         der::{pem::PemLabel, zeroize::Zeroize},
         EncryptedPrivateKeyInfo, PrivateKeyInfo, SecretDocument,
     };
     debug!("reading key from {}", path);
-    let key = std::fs::read_to_string(path)?;
-    let (label, doc) = match SecretDocument::from_pem(&key) {
+    let doc = std::fs::read_to_string(path)?;
+    let (label, doc) = match SecretDocument::from_pem(&doc) {
         Ok((label, doc)) => (label, doc),
         Err(e) => bail!("failed to load pem {}, error: {}", path, e),
     };
     debug!("key label is {}", label);
     if label == EncryptedPrivateKeyInfo::PEM_LABEL {
-        let key = match EncryptedPrivateKeyInfo::try_from(doc.as_bytes()) {
-            Ok(key) => key,
+        let doc = match EncryptedPrivateKeyInfo::try_from(doc.as_bytes()) {
+            Ok(doc) => doc,
             Err(e) => bail!("failed to parse encrypted key {}", e),
         };
         debug!("decrypting key");
         let mut password = load_key_password(askpass, path)?;
-        let key = match key.decrypt(&password) {
-            Ok(key) => key,
+        let doc = match doc.decrypt(&password) {
+            Ok(doc) => doc,
             Err(e) => bail!("failed to decrypt key {}", e),
         };
         password.zeroize();
-        Ok(rustls::PrivateKey(Vec::from(key.as_bytes())))
+        let key =
+            PrivateKeyDer::from_pem(SectionKind::PrivateKey, Vec::from(doc.as_bytes()))
+                .ok_or_else(|| anyhow!("invalid key"))?;
+        Ok(key)
     } else if label == PrivateKeyInfo::PEM_LABEL {
-        Ok(rustls::PrivateKey(Vec::from(doc.as_bytes())))
+        let key =
+            PrivateKeyDer::from_pem(SectionKind::PrivateKey, Vec::from(doc.as_bytes()))
+                .ok_or_else(|| anyhow!("invalid key"))?;
+        Ok(key)
     } else {
         bail!("expected a key in pem format")
     }
@@ -175,13 +186,12 @@ pub(crate) fn create_tls_connector(
 ) -> Result<tokio_rustls::TlsConnector> {
     let mut root_store = rustls::RootCertStore::empty();
     for cert in load_certs(root_certificates).context("loading root certs")? {
-        root_store.add(&cert).context("adding root cert")?;
+        root_store.add(cert).context("adding root cert")?;
     }
     let certs = load_certs(certificate).context("loading user cert")?;
     let private_key =
         load_private_key(askpass, private_key).context("loading user private key")?;
     let mut config = rustls::ClientConfig::builder()
-        .with_safe_defaults()
         .with_root_certificates(root_store)
         .with_client_auth_cert(certs, private_key)
         .context("building rustls client config")?;
@@ -200,9 +210,9 @@ pub(crate) fn create_tls_acceptor(
         let mut root_store = rustls::RootCertStore::empty();
         debug!("loading CA certificates");
         for cert in load_certs(root_certificates)? {
-            root_store.add(&cert)?;
+            root_store.add(cert)?;
         }
-        rustls::server::AllowAnyAuthenticatedClient::new(root_store).boxed()
+        rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store)).build()?
     };
     debug!("loading server certificate");
     let certs = load_certs(certificate)?;
@@ -210,7 +220,6 @@ pub(crate) fn create_tls_acceptor(
     let private_key = load_private_key(askpass, private_key)?;
     debug!("creating tls acceptor");
     let mut config = rustls::ServerConfig::builder()
-        .with_safe_defaults()
         .with_client_cert_verifier(client_auth)
         .with_single_cert(certs, private_key)?;
     config.session_storage = rustls::server::ServerSessionMemoryCache::new(1024);
@@ -351,4 +360,3 @@ mod test {
         assert_eq!(r, Some(1));
     }
 }
-
