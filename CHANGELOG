@@ -22,6 +22,11 @@
   using something like iced. At this point I'm not sure what the right
   thing is, but whatever it is, it will be a lot of work.
 
+- Fix a bug in the recorder where the recorder would distort the
+  recorded batch structure by combining batches that are processed at
+  the same time. Proving once again that premature optimization is the
+  root of most (all?) evil.
+
 * 0.27.2
 
 - Fix a bug in subscriber that caused spurious empty batches to be

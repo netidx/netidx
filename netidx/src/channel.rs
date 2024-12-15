@@ -181,15 +181,19 @@ impl WriteChannel {
             self.buf.reserve(self.buf.capacity());
         }
         let buf_len = self.buf.remaining();
+        let mut pushed = false;
         if (buf_len - self.boundries.last().copied().unwrap_or(0)) + len > MAX_BATCH {
             let prev_len: usize = self.boundries.iter().sum();
             self.boundries.push(buf_len - prev_len);
+            pushed = true;
         }
         match msg.encode(&mut self.buf) {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.buf.resize(buf_len, 0x0);
-                self.boundries.pop();
+                if pushed {
+                    self.boundries.pop();
+                }
                 Err(Error::from(e))
             }
         }

@@ -301,7 +301,7 @@ pub(super) async fn run(
                         }
                     }
                     write_pathmap(&mut archive, &mut to_add, &mut by_subid)
-            .context("writing pathmap")?
+                        .context("writing pathmap")?
                 }
             },
             batch = rx_batch.next() => match batch {
@@ -310,9 +310,9 @@ pub(super) async fn run(
                 Some(utils::BatchItem::EndBatch) => {
                     batches += 1;
                     let now = Utc::now();
-                    let mut tbatch = BATCH_POOL.take();
                     task::block_in_place(|| -> Result<()> {
                         for mut batch in queued.drain(..) {
+                            let mut tbatch = BATCH_POOL.take();
                             for (subid, ev) in batch.drain(..) {
                                 if record_config.image_frequency.is_some() {
                                     image.insert(subid, ev.clone());
@@ -321,10 +321,10 @@ pub(super) async fn run(
                                     tbatch.push(BatchItem(*id, ev));
                                 }
                             }
+                            archive.add_batch(false, now, &tbatch)
+                                .context("adding archive batch")?;
+                            let _ = bcast.send(BCastMsg::Batch(now, Arc::new(tbatch)));
                         }
-                        archive.add_batch(false, now, &tbatch)
-                            .context("adding archive batch")?;
-                        let _ = bcast.send(BCastMsg::Batch(now, Arc::new(tbatch)));
                         match record_config.image_frequency {
                             None => (),
                             Some(freq) if archive.len()? - last_image < freq => (),

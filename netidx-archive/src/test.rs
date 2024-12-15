@@ -168,24 +168,17 @@ async fn recorder() -> Result<()> {
     session.set_state(State::Play).await.context("pressing play")?;
     let mut i = 0;
     while let Some(up) = rx_up.next().await {
-        if i < 2 {
+        eprintln!("batch: {i} {up:?}");
+        if i < 4 {
             assert_eq!(up.len(), 1);
             assert_eq!(up[0].1, Event::Update(Value::Null));
-        } else if i == 2 {
-            assert_eq!(up.len(), 4);
-            assert_eq!(up[2].0, d0.id());
-            assert_eq!(up[3].0, d1.id());
-            assert_eq!(up[0].1, Event::Update(Value::Null));
-            assert_eq!(up[1].1, Event::Update(Value::Null));
-            assert_eq!(up[2].1, Event::Update(Value::U64(0)));
-            assert_eq!(up[3].1, Event::Update(Value::U64(0)));
-        } else if i < 1002 {
+        } else if i < 1004 {
             assert_eq!(up.len(), 2);
             assert_eq!(up[0].0, d0.id());
             assert_eq!(up[1].0, d1.id());
-            assert_eq!(up[0].1, Event::Update(Value::U64(i - 2)));
-            assert_eq!(up[1].1, Event::Update(Value::U64(i - 2)));
-        } else if i == 1002 {
+            assert_eq!(up[0].1, Event::Update(Value::U64(i - 4)));
+            assert_eq!(up[1].1, Event::Update(Value::U64(i - 4)));
+        } else if i == 1004 {
             assert_eq!(up.len(), 2);
             assert_eq!(up[0].1, Event::Update(Value::Null));
             assert_eq!(up[1].1, Event::Update(Value::Null));
