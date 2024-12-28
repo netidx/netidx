@@ -124,6 +124,7 @@ pub(crate) mod local_auth {
     use bytes::{Bytes, BytesMut};
     use futures::{channel::oneshot, prelude::*, select_biased};
     use fxhash::{FxBuildHasher, FxHashMap};
+    use lltimer::{interval, sleep, timeout};
     use log::{debug, warn};
     use netidx_core::utils::{make_sha3_token, pack};
     use netidx_netproto::resolver::HashMethod;
@@ -144,7 +145,6 @@ pub(crate) mod local_auth {
         io::{AsyncReadExt, AsyncWriteExt},
         net::{UnixListener, UnixStream},
         task::spawn,
-        time::{interval, sleep, timeout},
     };
 
     pub(crate) struct AuthServer {

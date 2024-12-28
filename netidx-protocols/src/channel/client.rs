@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use futures::{channel::mpsc, prelude::*};
+use lltimer as time;
 use netidx::{
     path::Path,
     pool::{Pool, Pooled},
@@ -10,7 +11,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
-use tokio::{sync::Mutex, time};
+use tokio::sync::Mutex;
 
 lazy_static! {
     static ref BATCHES: Pool<Vec<Value>> = Pool::new(100, 10_000);

@@ -17,8 +17,8 @@ use std::{
 use tokio::{
     sync::{oneshot, Mutex},
     task::{self, JoinHandle},
-    time,
 };
+use lltimer as time;
 
 /// Generate a random session name ${base}/uuid
 pub fn session(base: &Path) -> Path {

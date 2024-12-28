@@ -16,7 +16,7 @@ use std::{
     iter,
     marker::PhantomData,
 };
-use tokio::time;
+use lltimer as time;
 use uuid::Uuid;
 
 pub fn uuid_string(id: Uuid) -> String {

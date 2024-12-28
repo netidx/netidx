@@ -8,7 +8,8 @@ use netidx::{
     subscriber::{Subscriber, Value},
 };
 use std::{sync::Arc, time::Duration};
-use tokio::{select, sync::oneshot, task, time};
+use tokio::{select, sync::oneshot, task};
+use lltimer as time;
 
 pub(crate) struct Ctx {
     pub(crate) _server: Server,

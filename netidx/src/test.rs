@@ -8,10 +8,11 @@ mod resolver {
         resolver_client::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
         resolver_server::{config::Config as ServerConfig, Server},
     };
+    use lltimer as time;
     use netidx_netproto::resolver::TargetAuth;
     use rand::{thread_rng, Rng};
     use std::{iter, net::SocketAddr, time::Duration};
-    use tokio::{runtime::Runtime, time};
+    use tokio::runtime::Runtime;
 
     fn p(p: &'static str) -> Path {
         Path::from(p)

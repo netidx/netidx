@@ -28,6 +28,8 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 fxhash = { workspace = true }
+lltimer = { workspace = true }
+pin-project = { workspace = true }
 log = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

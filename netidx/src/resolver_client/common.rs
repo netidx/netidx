@@ -13,7 +13,8 @@ use futures::channel::oneshot;
 use fxhash::FxHashMap;
 use netidx_core::pack::BoundedBytes;
 use std::{fmt::Debug, str::FromStr, time::Duration};
-use tokio::{net::TcpStream, task, time};
+use tokio::{net::TcpStream, task};
+use lltimer as time;
 
 pub(super) const HELLO_TO: Duration = Duration::from_secs(15);
 

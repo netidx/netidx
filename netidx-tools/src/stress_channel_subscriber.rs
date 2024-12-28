@@ -11,7 +11,8 @@ use netidx::{
 use netidx_protocols::pack_channel::client::Connection;
 use std::{sync::Arc, time::Duration};
 use structopt::StructOpt;
-use tokio::time::{self, Instant};
+use tokio::time::Instant;
+use lltimer as time;
 
 #[derive(StructOpt, Debug)]
 pub(super) struct Params {
@@ -53,7 +54,7 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
     } else if p.delay == 0 {
         None
     } else {
-        Some(Duration::from_micros(p.delay))
+        Some(Duration::from_millis(p.delay))
     };
     let subscriber = Subscriber::new(config, auth)?;
     let mut interval = time::interval(Duration::from_secs(1));

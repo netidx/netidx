@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use futures::channel::mpsc;
 use futures::{prelude::*, select_biased};
+use lltimer as time;
 use netidx::{
     config::Config,
     path::Path,
@@ -9,7 +10,7 @@ use netidx::{
 };
 use std::time::Duration;
 use structopt::StructOpt;
-use tokio::time::{self, Instant};
+use tokio::time::Instant;
 
 #[derive(StructOpt, Debug)]
 pub(super) struct Params {

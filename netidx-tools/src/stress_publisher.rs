@@ -7,7 +7,8 @@ use netidx::{
 };
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
-use tokio::{signal, time, task};
+use tokio::{signal, task};
+use lltimer as time;
 
 #[derive(StructOpt, Debug)]
 pub(super) struct Params {

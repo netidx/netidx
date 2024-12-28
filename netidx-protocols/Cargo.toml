@@ -26,6 +26,7 @@ serde_derive = { workspace = true }
 bytes = { workspace = true }
 fxhash = { workspace = true }
 lazy_static = { workspace = true }
+lltimer = { workspace = true }
 log = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }

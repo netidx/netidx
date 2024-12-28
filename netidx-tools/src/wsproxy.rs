@@ -1,10 +1,9 @@
+use crate::publisher;
 use anyhow::{Context, Result};
 use netidx::{
     publisher::PublisherBuilder, resolver_client::DesiredAuth, subscriber::Subscriber,
 };
 use std::time::Duration;
-
-use crate::publisher;
 
 pub(super) async fn run(
     cfg: netidx::config::Config,

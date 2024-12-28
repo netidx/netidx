@@ -46,9 +46,10 @@ use std::{
 use tokio::{
     net::TcpStream,
     task,
-    time::{self, Instant},
+    time::Instant,
 };
 use triomphe::Arc as TArc;
+use lltimer as time;
 
 #[derive(Debug)]
 struct Sub {

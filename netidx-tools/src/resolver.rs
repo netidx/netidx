@@ -9,7 +9,7 @@ use netidx::{
 };
 use std::{collections::HashSet, iter, net::SocketAddr, time::Duration};
 use structopt::StructOpt;
-use tokio::time;
+use lltimer as time;
 
 #[derive(StructOpt, Debug)]
 pub(super) enum ResolverCmd {

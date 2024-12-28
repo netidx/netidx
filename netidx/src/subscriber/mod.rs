@@ -48,9 +48,10 @@ use std::{
 };
 use tokio::{
     task,
-    time::{self, Instant},
+    time::Instant,
 };
 use triomphe::Arc as TArc;
+use lltimer as time;
 
 lazy_static! {
     static ref BATCHES: Pool<Vec<(SubId, Event)>> = Pool::new(64, 16384);

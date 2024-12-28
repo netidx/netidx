@@ -19,6 +19,7 @@ use netidx::{
 };
 use netidx_protocols::rpc::client::Proc;
 use once_cell::sync::Lazy;
+use std::time::Duration;
 use std::{
     collections::{hash_map::Entry, HashMap},
     net::SocketAddr,
@@ -30,7 +31,6 @@ use warp::{
     ws::{Message, WebSocket, Ws},
     Filter, Reply,
 };
-use std::time::Duration;
 
 pub mod config;
 mod protocol;
@@ -49,7 +49,11 @@ struct PubEntry {
 type PendingCall =
     Pin<Box<dyn Future<Output = (u64, Result<Value>)> + Send + Sync + 'static>>;
 
-async fn reply<'a>(tx: &mut SplitSink<WebSocket, Message>, m: &Response, timeout: Option<Duration>) -> Result<()> {
+async fn reply<'a>(
+    tx: &mut SplitSink<WebSocket, Message>,
+    m: &Response,
+    timeout: Option<Duration>,
+) -> Result<()> {
     let s = serde_json::to_string(m)?;
     // CR base1172 for estokes: Here we're only enforcing that the SplitSink write completes within
     // [timeout], with no guarantee on how long it takes to actually flush the message to the client.
@@ -59,7 +63,7 @@ async fn reply<'a>(tx: &mut SplitSink<WebSocket, Message>, m: &Response, timeout
     let fut = tx.send(Message::text(s));
     match timeout {
         None => Ok(fut.await?),
-        Some(timeout) => Ok(tokio::time::timeout(timeout, fut).await??)
+        Some(timeout) => Ok(lltimer::timeout(timeout, fut).await??),
     }
 }
 async fn err(
@@ -203,7 +207,7 @@ impl ClientCtx {
         tx: &mut SplitSink<WebSocket, Message>,
         queued: &mut Vec<result::Result<Message, warp::Error>>,
         calls_pending: &mut FuturesUnordered<PendingCall>,
-        timeout: Option<Duration>
+        timeout: Option<Duration>,
     ) -> Result<()> {
         let mut batch = self.publisher.start_batch();
         for r in queued.drain(..) {
@@ -214,7 +218,9 @@ impl ClientCtx {
             match m.to_str() {
                 Err(_) => err(tx, "expected text", timeout).await?,
                 Ok(txt) => match serde_json::from_str::<Request>(txt) {
-                    Err(e) => err(tx, format!("could not parse message {}", e), timeout).await?,
+                    Err(e) => {
+                        err(tx, format!("could not parse message {}", e), timeout).await?
+                    }
                     Ok(req) => match req {
                         Request::Subscribe { path } => {
                             let id = self.subscribe(path);
@@ -231,7 +237,9 @@ impl ClientCtx {
                         Request::Publish { path, init } => match self.publish(path, init)
                         {
                             Err(e) => err(tx, e.to_string(), timeout).await?,
-                            Ok(id) => reply(tx, &Response::Published { id }, timeout).await?,
+                            Ok(id) => {
+                                reply(tx, &Response::Published { id }, timeout).await?
+                            }
                         },
                         Request::Unpublish { id } => match self.unpublish(id) {
                             Err(e) => err(tx, e.to_string(), timeout).await?,
@@ -248,7 +256,12 @@ impl ClientCtx {
                                 Ok(pending) => calls_pending.push(pending),
                                 Err(e) => {
                                     let error = format!("rpc call failed {}", e);
-                                    reply(tx, &Response::CallFailed { id, error }, timeout).await?
+                                    reply(
+                                        tx,
+                                        &Response::CallFailed { id, error },
+                                        timeout,
+                                    )
+                                    .await?
                                 }
                             }
                         }
@@ -265,7 +278,7 @@ async fn handle_client(
     publisher: Publisher,
     subscriber: Subscriber,
     ws: WebSocket,
-    timeout: Option<Duration>
+    timeout: Option<Duration>,
 ) -> Result<()> {
     static UPDATES: Lazy<Pool<Vec<Update>>> = Lazy::new(|| Pool::new(50, 10000));
     let (tx_up, mut rx_up) = mpsc::channel::<Pooled<Vec<(SubId, Event)>>>(3);
@@ -324,7 +337,9 @@ pub fn filter(
             ws.on_upgrade(move |ws| {
                 let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
                 async move {
-                    if let Err(e) = handle_client(publisher, subscriber, ws, timeout).await {
+                    if let Err(e) =
+                        handle_client(publisher, subscriber, ws, timeout).await
+                    {
                         warn!("client handler exited: {}", e)
                     }
                 }
@@ -341,7 +356,7 @@ pub async fn run(
     config: config::Config,
     publisher: Publisher,
     subscriber: Subscriber,
-    timeout: Option<Duration>
+    timeout: Option<Duration>,
 ) -> Result<()> {
     let routes = filter(publisher, subscriber, "ws", timeout);
     match (&config.cert, &config.key) {

@@ -30,7 +30,8 @@ use netidx::{
 };
 use netidx_netproto::glob::GlobSet;
 use std::{fs, time::Duration};
-use tokio::{task, time};
+use tokio::task;
+use lltimer as time;
 
 struct Ctx {
     publisher: Publisher,

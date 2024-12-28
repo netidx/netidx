@@ -32,7 +32,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tokio::{runtime::Runtime, task, time};
+use tokio::{runtime::Runtime, task};
+use lltimer as time;
 
 lazy_static! {
     static ref UPDATES: Pool<Vec<(SubId, Value)>> = Pool::new(5, 100000);

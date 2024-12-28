@@ -57,3 +57,4 @@ arcstr = { workspace = true }
 combine = { workspace = true }
 dirs = { workspace = true }
 hdrhistogram = { workspace = true }
+lltimer = { workspace = true }

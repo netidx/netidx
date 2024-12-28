@@ -28,7 +28,7 @@ pub(crate) async fn run(config: Option<PathBuf>, example: bool) -> Result<()> {
             }
         }
         drop(recorder);
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        lltimer::sleep(Duration::from_secs(10)).await;
         Ok(())
     }
 }

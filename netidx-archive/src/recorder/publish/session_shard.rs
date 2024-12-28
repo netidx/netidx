@@ -33,7 +33,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{sync::broadcast, task, time};
+use tokio::{sync::broadcast, task};
+use lltimer as time;
 
 pub(super) struct SessionShard {
     shards: Arc<Shards>,

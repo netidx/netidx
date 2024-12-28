@@ -27,7 +27,7 @@ fxhash = { workspace = true }
 indexmap = { workspace = true }
 once_cell = { workspace = true }
 parking_lot = { workspace = true }
-pin-utils = { workspace = true }
+pin-project = { workspace = true }
 rand = { workspace = true }
 rust_decimal = { workspace = true }
 serde_derive = { workspace = true }

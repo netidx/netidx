@@ -36,6 +36,7 @@ immutable-chunkmap = { workspace = true }
 indexmap = { workspace = true }
 keyring = { workspace = true }
 lazy_static = { workspace = true }
+lltimer = { workspace = true }
 log = { workspace = true }
 num_cpus = { workspace = true }
 parking_lot = { workspace = true }

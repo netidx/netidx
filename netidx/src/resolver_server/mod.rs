@@ -46,8 +46,9 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{Mutex, RwLock},
     task,
-    time::{self, Instant},
+    time::Instant,
 };
+use lltimer as time;
 
 lazy_static! {
     static ref WRITE_BATCHES: Pool<Vec<ToWrite>> = Pool::new(100, 10_000);

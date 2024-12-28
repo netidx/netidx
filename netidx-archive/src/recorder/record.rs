@@ -31,8 +31,9 @@ use std::{
 };
 use tokio::{
     task,
-    time::{self, Instant},
+    time::Instant,
 };
+use lltimer as time;
 
 #[derive(Debug)]
 struct CTS(BTreeMap<Path, ChangeTracker>);

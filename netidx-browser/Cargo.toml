@@ -42,6 +42,7 @@ serde_json = { workspace = true }
 bytes = { workspace = true }
 fxhash = { workspace = true }
 anyhow = { workspace = true }
+lltimer = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 base64 = { workspace = true }

@@ -25,7 +25,8 @@ use std::{
     cmp::max, collections::HashSet, fmt::Debug, net::SocketAddr, sync::Arc,
     time::Duration,
 };
-use tokio::{net::TcpStream, task, time};
+use tokio::{net::TcpStream, task};
+use lltimer as time;
 
 // continue with timeout
 macro_rules! cwt {
@@ -61,7 +62,7 @@ async fn connect(
         }
         if n % addrs.len() == 0 && tries > 0 {
             let wait = thread_rng().gen_range(1..12);
-            time::sleep(Duration::from_secs(wait)).await;
+            time::sleep(Duration::from_secs(wait)).await
         }
         n += 1;
         let mut con = match time::timeout(HELLO_TO, TcpStream::connect(&addr)).await {

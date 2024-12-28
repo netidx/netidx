@@ -2,7 +2,6 @@ use super::common::{
     krb5_authentication, DesiredAuth, Response, ResponseChan, FROMWRITEPOOL, HELLO_TO,
     PUBLISHERPOOL, RAWFROMWRITEPOOL,
 };
-
 use crate::{
     channel::{self, Channel, K5CtxWrap},
     chars::Chars,
@@ -33,8 +32,9 @@ use tokio::{
     net::TcpStream,
     sync::broadcast::{self, error::RecvError},
     task,
-    time::{self, Instant, Interval},
+    time::Instant,
 };
+use lltimer::{self as time, Interval};
 
 const TTL: u64 = 120;
 
@@ -323,12 +323,14 @@ impl Connection {
                     debug!("tls auth selected");
                     let tls = self.tls.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
                     let ctx = task::spawn_blocking({
-			let tls = tls.clone();
-			let name = name.clone();
-			move || tls.load(&name)
-		    }).await??;
+                        let tls = tls.clone();
+                        let name = name.clone();
+                        move || tls.load(&name)
+                    })
+                    .await??;
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
-                    let name = rustls_pki_types::ServerName::try_from(&**name)?.to_owned();
+                    let name =
+                        rustls_pki_types::ServerName::try_from(&**name)?.to_owned();
                     match secret {
                         Some(secret) => {
                             debug!("reusing existing tls session");

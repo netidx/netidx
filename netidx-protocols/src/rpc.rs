@@ -407,11 +407,11 @@ pub mod server {
 pub mod client {
     use super::*;
     use fxhash::FxHashSet;
+    use lltimer as time;
     use log::{debug, trace};
     use netidx::subscriber::Event;
     use once_cell::sync::OnceCell;
     use std::collections::HashSet;
-    use tokio::time;
 
     /// Convenience macro for calling rpcs.
     /// `call_rpc!(proc, arg0: 3, arg1: "foo", arg2: vec!["foo", "bar", "baz"])`
@@ -556,7 +556,8 @@ mod test {
 
     use super::server::*;
     use super::*;
-    use tokio::{runtime::Runtime, time};
+    use lltimer as time;
+    use tokio::runtime::Runtime;
 
     #[test]
     fn call_proc() {

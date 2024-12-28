@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use daemonize::Daemonize;
 use futures::{future::join_all, prelude::*, select_biased, stream::SelectAll};
+use lltimer::{sleep, timeout};
 use log::{error, info, warn};
 use netidx::{
     config::Config,
@@ -22,7 +23,7 @@ use tokio::{
     signal::unix::{signal, SignalKind},
     sync::mpsc,
     task,
-    time::{sleep, timeout, Instant},
+    time::Instant,
 };
 
 #[derive(StructOpt, Debug)]

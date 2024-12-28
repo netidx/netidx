@@ -10,6 +10,7 @@ use futures::{
     task::{Context, Poll},
 };
 use fxhash::FxHashMap;
+use pin_project::pin_project;
 use sha3::Sha3_512;
 use std::{
     borrow::Borrow,
@@ -396,8 +397,10 @@ pub enum BatchItem<T> {
     EndBatch,
 }
 
+#[pin_project]
 #[must_use = "streams do nothing unless polled"]
 pub struct Batched<S: Stream> {
+    #[pin]
     stream: S,
     ended: bool,
     max: usize,
@@ -405,16 +408,6 @@ pub struct Batched<S: Stream> {
 }
 
 impl<S: Stream> Batched<S> {
-    // this is safe because,
-    // - Batched doesn't implement Drop
-    // - Batched doesn't implement Unpin
-    // - Batched isn't #[repr(packed)]
-    unsafe_pinned!(stream: S);
-
-    // these are safe because both types are copy
-    unsafe_unpinned!(ended: bool);
-    unsafe_unpinned!(current: usize);
-
     pub fn new(stream: S, max: usize) -> Batched<S> {
         Batched { stream, max, ended: false, current: 0 }
     }
@@ -435,32 +428,33 @@ impl<S: Stream> Batched<S> {
 impl<S: Stream> Stream for Batched<S> {
     type Item = BatchItem<<S as Stream>::Item>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if self.ended {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let proj = self.project();
+        if *proj.ended {
             Poll::Ready(None)
-        } else if self.current >= self.max {
-            *self.current() = 0;
+        } else if *proj.current >= *proj.max {
+            *proj.current = 0;
             Poll::Ready(Some(BatchItem::EndBatch))
         } else {
-            match self.as_mut().stream().poll_next(cx) {
+            match proj.stream.poll_next(cx) {
                 Poll::Ready(Some(v)) => {
-                    *self.as_mut().current() += 1;
+                    *proj.current += 1;
                     Poll::Ready(Some(BatchItem::InBatch(v)))
                 }
                 Poll::Ready(None) => {
-                    *self.as_mut().ended() = true;
-                    if self.current == 0 {
+                    *proj.ended = true;
+                    if *proj.current == 0 {
                         Poll::Ready(None)
                     } else {
-                        *self.current() = 0;
+                        *proj.current = 0;
                         Poll::Ready(Some(BatchItem::EndBatch))
                     }
                 }
                 Poll::Pending => {
-                    if self.current == 0 {
+                    if *proj.current == 0 {
                         Poll::Pending
                     } else {
-                        *self.current() = 0;
+                        *proj.current = 0;
                         Poll::Ready(Some(BatchItem::EndBatch))
                     }
                 }
@@ -486,25 +480,25 @@ impl<Item, S: Stream + Sink<Item>> Sink<Item> for Batched<S> {
         self: Pin<&mut Self>,
         cx: &mut Context,
     ) -> Poll<Result<(), Self::Error>> {
-        self.stream().poll_ready(cx)
+        self.project().stream.poll_ready(cx)
     }
 
     fn start_send(self: Pin<&mut Self>, item: Item) -> Result<(), Self::Error> {
-        self.stream().start_send(item)
+        self.project().stream.start_send(item)
     }
 
     fn poll_flush(
         self: Pin<&mut Self>,
         cx: &mut Context,
     ) -> Poll<Result<(), Self::Error>> {
-        self.stream().poll_flush(cx)
+        self.project().stream.poll_flush(cx)
     }
 
     fn poll_close(
         self: Pin<&mut Self>,
         cx: &mut Context,
     ) -> Poll<Result<(), Self::Error>> {
-        self.stream().poll_close(cx)
+        self.project().stream.poll_close(cx)
     }
 }
 

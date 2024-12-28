@@ -44,7 +44,8 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{task, time};
+use tokio::task;
+use lltimer as time;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, Pack)]

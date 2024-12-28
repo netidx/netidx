@@ -60,8 +60,9 @@ use std::{
 use structopt::StructOpt;
 use tokio::{
     task,
-    time::{self, Instant},
+    time::Instant,
 };
+use lltimer as time;
 
 use crate::rpcs::RpcApi;
 
@@ -819,7 +820,7 @@ struct ContainerInner {
         (Instant, mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)>),
     >,
     timer: OptTimer,
-    timers: BTreeMap<time::Instant, TimerId>,
+    timers: BTreeMap<Instant, TimerId>,
 }
 
 impl ContainerInner {
@@ -1371,7 +1372,7 @@ impl ContainerInner {
     }
 
     fn set_timer(&mut self, id: TimerId, duration: Duration) {
-        let deadline = time::Instant::now() + duration;
+        let deadline = Instant::now() + duration;
         self.timers.insert(deadline, id);
         self.reschedule_timer()
     }

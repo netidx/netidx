@@ -13,6 +13,7 @@ use futures::{
     select_biased,
     stream::{self, FusedStream},
 };
+use lltimer as time;
 use netidx::{
     config::Config,
     path::Path,
@@ -31,10 +32,7 @@ use std::{
     time::{Duration, Instant},
 };
 use structopt::StructOpt;
-use tokio::{
-    io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
-    time,
-};
+use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(StructOpt, Debug)]
 pub(super) struct Params {
