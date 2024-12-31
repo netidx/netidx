@@ -8,7 +8,6 @@
 [docs-url]: https://docs.rs/netidx/latest/netidx/
 [mit-badge]: https://img.shields.io/badge/license-MIT-lightgray.svg?style=flat-square
 [mit-url]: https://github.com/netidx/netidx/blob/master/LICENSE
-[Follow me on X](https://x.com/eestokesOSS)
 
 # What is Netidx
 
