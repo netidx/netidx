@@ -14,11 +14,8 @@ use std::{collections::HashSet, iter, marker::PhantomData, sync::Arc};
 pub struct CachedVals(pub Vec<Option<Value>>);
 
 impl CachedVals {
-    pub fn new<C: Ctx, E: Clone>(
-        from: &[Node<C, E>],
-        ctx: &mut ExecCtx<C, E>,
-    ) -> CachedVals {
-        CachedVals(from.into_iter().map(|s| s.current(ctx)).collect())
+    pub fn new<C: Ctx, E: Clone>(from: &[Node<C, E>]) -> CachedVals {
+        CachedVals(from.into_iter().map(|_| None).collect())
     }
 
     pub fn update<C: Ctx, E: Clone>(
@@ -38,6 +35,24 @@ impl CachedVals {
         })
     }
 
+    pub fn update_diff<C: Ctx, E: Clone>(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Vec<bool> {
+        from.into_iter()
+            .enumerate()
+            .map(|(i, src)| match src.update(ctx, event) {
+                None => false,
+                v @ Some(_) => {
+                    self.0[i] = v;
+                    true
+                }
+            })
+            .collect()
+    }
+
     pub fn flat_iter<'a>(&'a self) -> impl Iterator<Item = Option<Value>> + 'a {
         self.0.iter().flat_map(|v| match v {
             None => Either::Left(iter::once(None)),
@@ -50,19 +65,14 @@ pub struct Any(Option<Value>);
 
 impl<C: Ctx, E: Clone> Register<C, E> for Any {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, _| {
-            Box::new(Any(from.iter().find_map(|s| s.current(ctx))))
-        });
+        let f: InitFn<C, E> =
+            Arc::new(|_, from, _, _| Box::new(Any(from.iter().find_map(|_| None))));
         ctx.functions.insert("any".into(), f);
         ctx.user.register_fn("any".into(), Path::root());
     }
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Any {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        self.0.clone()
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -88,20 +98,14 @@ pub struct Once {
 
 impl<C: Ctx, E: Clone> Register<C, E> for Once {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, _| match from {
-            [s] => Box::new(Once { val: s.current(ctx), invalid: false }),
-            _ => Box::new(Once { val: None, invalid: true }),
-        });
+        let f: InitFn<C, E> =
+            Arc::new(|_, _, _, _| Box::new(Once { val: None, invalid: false }));
         ctx.functions.insert("once".into(), f);
         ctx.user.register_fn("once".into(), Path::root());
     }
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Once {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        self.usage()
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -114,7 +118,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Once {
                 None => {
                     self.invalid = false;
                     self.val = Some(v);
-                    self.usage()
+                    self.output()
                 }
             }),
             exprs => {
@@ -124,7 +128,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Once {
                     up |= e.update(ctx, event).is_some();
                 }
                 if up {
-                    self.usage()
+                    self.output()
                 } else {
                     None
                 }
@@ -134,7 +138,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Once {
 }
 
 impl Once {
-    fn usage(&self) -> Option<Value> {
+    fn output(&self) -> Option<Value> {
         if self.invalid {
             let e = Chars::from("once(v): expected one argument");
             Some(Value::Error(e))
@@ -144,85 +148,69 @@ impl Once {
     }
 }
 
-pub struct Do(Option<Value>);
+pub struct Do;
 
 impl<C: Ctx, E: Clone> Register<C, E> for Do {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, _| {
-            Box::new(Do(from.iter().fold(None, |_, s| s.current(ctx))))
-        });
+        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Do));
         ctx.functions.insert("do".into(), f);
         ctx.user.register_fn("do".into(), Path::root());
     }
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Do {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        self.0.clone()
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        self.0 = from.into_iter().fold(None, |_, src| src.update(ctx, event));
-        self.0.clone()
+        from.into_iter().fold(None, |_, src| src.update(ctx, event))
     }
 }
 
-pub trait CachedCurEval {
+pub trait EvalCached {
     fn eval(from: &CachedVals) -> Option<Value>;
     fn name() -> &'static str;
 }
 
-pub struct CachedCur<T: CachedCurEval + Send + Sync> {
+pub struct CachedArgs<T: EvalCached + Send + Sync> {
     cached: CachedVals,
-    current: Option<Value>,
     t: PhantomData<T>,
 }
 
-impl<C: Ctx, E: Clone, T: CachedCurEval + Send + Sync + 'static> Register<C, E>
-    for CachedCur<T>
+impl<C: Ctx, E: Clone, T: EvalCached + Send + Sync + 'static> Register<C, E>
+    for CachedArgs<T>
 {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, _| {
-            let cached = CachedVals::new(from, ctx);
-            let current = T::eval(&cached);
-            Box::new(CachedCur::<T> { cached, current, t: PhantomData })
+        let f: InitFn<C, E> = Arc::new(|_, from, _, _| {
+            Box::new(CachedArgs::<T> { cached: CachedVals::new(from), t: PhantomData })
         });
         ctx.functions.insert(T::name().into(), f);
         ctx.user.register_fn(T::name().into(), Path::root());
     }
 }
 
-impl<C: Ctx, E: Clone, T: CachedCurEval + Send + Sync + 'static> Apply<C, E>
-    for CachedCur<T>
+impl<C: Ctx, E: Clone, T: EvalCached + Send + Sync + 'static> Apply<C, E>
+    for CachedArgs<T>
 {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        self.current.clone()
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        if !self.cached.update(ctx, from, event) {
-            None
+        if self.cached.update(ctx, from, event) {
+            T::eval(&self.cached)
         } else {
-            let cur = T::eval(&self.cached);
-            self.current = cur.clone();
-            cur
+            None
         }
     }
 }
 
 pub struct AllEv;
 
-impl CachedCurEval for AllEv {
+impl EvalCached for AllEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [] => None,
@@ -244,11 +232,11 @@ impl CachedCurEval for AllEv {
     }
 }
 
-pub type All = CachedCur<AllEv>;
+pub type All = CachedArgs<AllEv>;
 
 pub struct ArrayEv;
 
-impl CachedCurEval for ArrayEv {
+impl EvalCached for ArrayEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         if from.0.iter().all(|v| v.is_some()) {
             Some(Value::Array(Arc::from_iter(
@@ -264,7 +252,7 @@ impl CachedCurEval for ArrayEv {
     }
 }
 
-pub type Array = CachedCur<ArrayEv>;
+pub type Array = CachedArgs<ArrayEv>;
 
 fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     match (lhs, rhs) {
@@ -276,7 +264,7 @@ fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 
 pub struct SumEv;
 
-impl CachedCurEval for SumEv {
+impl EvalCached for SumEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
@@ -289,7 +277,7 @@ impl CachedCurEval for SumEv {
     }
 }
 
-pub type Sum = CachedCur<SumEv>;
+pub type Sum = CachedArgs<SumEv>;
 
 pub struct ProductEv;
 
@@ -301,7 +289,7 @@ fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     }
 }
 
-impl CachedCurEval for ProductEv {
+impl EvalCached for ProductEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
@@ -314,7 +302,7 @@ impl CachedCurEval for ProductEv {
     }
 }
 
-pub type Product = CachedCur<ProductEv>;
+pub type Product = CachedArgs<ProductEv>;
 
 pub struct DivideEv;
 
@@ -326,7 +314,7 @@ fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     }
 }
 
-impl CachedCurEval for DivideEv {
+impl EvalCached for DivideEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
@@ -339,11 +327,11 @@ impl CachedCurEval for DivideEv {
     }
 }
 
-pub type Divide = CachedCur<DivideEv>;
+pub type Divide = CachedArgs<DivideEv>;
 
 pub struct MinEv;
 
-impl CachedCurEval for MinEv {
+impl EvalCached for MinEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = None;
         for v in from.flat_iter() {
@@ -365,11 +353,11 @@ impl CachedCurEval for MinEv {
     }
 }
 
-pub type Min = CachedCur<MinEv>;
+pub type Min = CachedArgs<MinEv>;
 
 pub struct MaxEv;
 
-impl CachedCurEval for MaxEv {
+impl EvalCached for MaxEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = None;
         for v in from.flat_iter() {
@@ -391,11 +379,11 @@ impl CachedCurEval for MaxEv {
     }
 }
 
-pub type Max = CachedCur<MaxEv>;
+pub type Max = CachedArgs<MaxEv>;
 
 pub struct AndEv;
 
-impl CachedCurEval for AndEv {
+impl EvalCached for AndEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = Some(Value::True);
         for v in from.flat_iter() {
@@ -415,11 +403,11 @@ impl CachedCurEval for AndEv {
     }
 }
 
-pub type And = CachedCur<AndEv>;
+pub type And = CachedArgs<AndEv>;
 
 pub struct OrEv;
 
-impl CachedCurEval for OrEv {
+impl EvalCached for OrEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = Some(Value::False);
         for v in from.flat_iter() {
@@ -439,11 +427,11 @@ impl CachedCurEval for OrEv {
     }
 }
 
-pub type Or = CachedCur<OrEv>;
+pub type Or = CachedArgs<OrEv>;
 
 pub struct NotEv;
 
-impl CachedCurEval for NotEv {
+impl EvalCached for NotEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [v] => v.as_ref().map(|v| !(v.clone())),
@@ -456,11 +444,11 @@ impl CachedCurEval for NotEv {
     }
 }
 
-pub type Not = CachedCur<NotEv>;
+pub type Not = CachedArgs<NotEv>;
 
 pub struct IsErrEv;
 
-impl CachedCurEval for IsErrEv {
+impl EvalCached for IsErrEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [v] => v.as_ref().map(|v| match v {
@@ -476,12 +464,12 @@ impl CachedCurEval for IsErrEv {
     }
 }
 
-pub type IsErr = CachedCur<IsErrEv>;
+pub type IsErr = CachedArgs<IsErrEv>;
 
 // CR estokes: document
 pub struct StartsWithEv;
 
-impl CachedCurEval for StartsWithEv {
+impl EvalCached for StartsWithEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(pfx)), Some(Value::String(val))] => {
@@ -501,11 +489,11 @@ impl CachedCurEval for StartsWithEv {
     }
 }
 
-pub type StartsWith = CachedCur<StartsWithEv>;
+pub type StartsWith = CachedArgs<StartsWithEv>;
 
 pub struct IndexEv;
 
-impl CachedCurEval for IndexEv {
+impl EvalCached for IndexEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::Array(elts)), Some(Value::I64(i))] if *i >= 0 => {
@@ -528,12 +516,12 @@ impl CachedCurEval for IndexEv {
     }
 }
 
-pub type Index = CachedCur<IndexEv>;
+pub type Index = CachedArgs<IndexEv>;
 
 // CR estokes: document
 pub struct EndsWithEv;
 
-impl CachedCurEval for EndsWithEv {
+impl EvalCached for EndsWithEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(sfx)), Some(Value::String(val))] => {
@@ -553,12 +541,12 @@ impl CachedCurEval for EndsWithEv {
     }
 }
 
-pub type EndsWith = CachedCur<EndsWithEv>;
+pub type EndsWith = CachedArgs<EndsWithEv>;
 
 // CR estokes: document
 pub struct ContainsEv;
 
-impl CachedCurEval for ContainsEv {
+impl EvalCached for ContainsEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(chs)), Some(Value::String(val))] => {
@@ -578,11 +566,11 @@ impl CachedCurEval for ContainsEv {
     }
 }
 
-pub type Contains = CachedCur<ContainsEv>;
+pub type Contains = CachedArgs<ContainsEv>;
 
 pub struct StripPrefixEv;
 
-impl CachedCurEval for StripPrefixEv {
+impl EvalCached for StripPrefixEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(pfx)), Some(Value::String(val))] => val
@@ -598,11 +586,11 @@ impl CachedCurEval for StripPrefixEv {
     }
 }
 
-pub type StripPrefix = CachedCur<StripPrefixEv>;
+pub type StripPrefix = CachedArgs<StripPrefixEv>;
 
 pub struct StripSuffixEv;
 
-impl CachedCurEval for StripSuffixEv {
+impl EvalCached for StripSuffixEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(sfx)), Some(Value::String(val))] => val
@@ -618,11 +606,11 @@ impl CachedCurEval for StripSuffixEv {
     }
 }
 
-pub type StripSuffix = CachedCur<StripSuffixEv>;
+pub type StripSuffix = CachedArgs<StripSuffixEv>;
 
 pub struct TrimEv;
 
-impl CachedCurEval for TrimEv {
+impl EvalCached for TrimEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(val))] => {
@@ -638,11 +626,11 @@ impl CachedCurEval for TrimEv {
     }
 }
 
-pub type Trim = CachedCur<TrimEv>;
+pub type Trim = CachedArgs<TrimEv>;
 
 pub struct TrimStartEv;
 
-impl CachedCurEval for TrimStartEv {
+impl EvalCached for TrimStartEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(val))] => {
@@ -658,11 +646,11 @@ impl CachedCurEval for TrimStartEv {
     }
 }
 
-pub type TrimStart = CachedCur<TrimStartEv>;
+pub type TrimStart = CachedArgs<TrimStartEv>;
 
 pub struct TrimEndEv;
 
-impl CachedCurEval for TrimEndEv {
+impl EvalCached for TrimEndEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(val))] => {
@@ -678,11 +666,11 @@ impl CachedCurEval for TrimEndEv {
     }
 }
 
-pub type TrimEnd = CachedCur<TrimEndEv>;
+pub type TrimEnd = CachedArgs<TrimEndEv>;
 
 pub struct ReplaceEv;
 
-impl CachedCurEval for ReplaceEv {
+impl EvalCached for ReplaceEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(pat)), Some(Value::String(rep)), Some(Value::String(val))] => {
@@ -700,11 +688,11 @@ impl CachedCurEval for ReplaceEv {
     }
 }
 
-pub type Replace = CachedCur<ReplaceEv>;
+pub type Replace = CachedArgs<ReplaceEv>;
 
 pub struct DirnameEv;
 
-impl CachedCurEval for DirnameEv {
+impl EvalCached for DirnameEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(path))] => match Path::dirname(path) {
@@ -721,11 +709,11 @@ impl CachedCurEval for DirnameEv {
     }
 }
 
-pub type Dirname = CachedCur<DirnameEv>;
+pub type Dirname = CachedArgs<DirnameEv>;
 
 pub struct BasenameEv;
 
-impl CachedCurEval for BasenameEv {
+impl EvalCached for BasenameEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [Some(Value::String(path))] => match Path::basename(path) {
@@ -742,11 +730,11 @@ impl CachedCurEval for BasenameEv {
     }
 }
 
-pub type Basename = CachedCur<BasenameEv>;
+pub type Basename = CachedArgs<BasenameEv>;
 
 pub struct CmpEv;
 
-impl CachedCurEval for CmpEv {
+impl EvalCached for CmpEv {
     fn name() -> &'static str {
         "cmp"
     }
@@ -808,11 +796,11 @@ impl CachedCurEval for CmpEv {
     }
 }
 
-pub type Cmp = CachedCur<CmpEv>;
+pub type Cmp = CachedArgs<CmpEv>;
 
 pub struct IfEv;
 
-impl CachedCurEval for IfEv {
+impl EvalCached for IfEv {
     fn name() -> &'static str {
         "if"
     }
@@ -842,11 +830,11 @@ impl CachedCurEval for IfEv {
     }
 }
 
-pub type If = CachedCur<IfEv>;
+pub type If = CachedArgs<IfEv>;
 
 pub struct FilterEv;
 
-impl CachedCurEval for FilterEv {
+impl EvalCached for FilterEv {
     fn name() -> &'static str {
         "filter"
     }
@@ -868,11 +856,11 @@ impl CachedCurEval for FilterEv {
     }
 }
 
-pub type Filter = CachedCur<FilterEv>;
+pub type Filter = CachedArgs<FilterEv>;
 
 pub struct FilterErrEv;
 
-impl CachedCurEval for FilterErrEv {
+impl EvalCached for FilterErrEv {
     fn name() -> &'static str {
         "filter_err"
     }
@@ -890,7 +878,7 @@ impl CachedCurEval for FilterErrEv {
     }
 }
 
-pub type FilterErr = CachedCur<FilterErrEv>;
+pub type FilterErr = CachedArgs<FilterErrEv>;
 
 pub struct CastEv;
 
@@ -918,7 +906,7 @@ fn with_typ_prefix(
     }
 }
 
-impl CachedCurEval for CastEv {
+impl EvalCached for CastEv {
     fn name() -> &'static str {
         "cast"
     }
@@ -930,11 +918,11 @@ impl CachedCurEval for CastEv {
     }
 }
 
-pub type Cast = CachedCur<CastEv>;
+pub type Cast = CachedArgs<CastEv>;
 
 pub struct IsaEv;
 
-impl CachedCurEval for IsaEv {
+impl EvalCached for IsaEv {
     fn name() -> &'static str {
         "isa"
     }
@@ -986,11 +974,11 @@ impl CachedCurEval for IsaEv {
     }
 }
 
-pub type Isa = CachedCur<IsaEv>;
+pub type Isa = CachedArgs<IsaEv>;
 
 pub struct StringJoinEv;
 
-impl CachedCurEval for StringJoinEv {
+impl EvalCached for StringJoinEv {
     fn name() -> &'static str {
         "string_join"
     }
@@ -1046,11 +1034,11 @@ impl CachedCurEval for StringJoinEv {
     }
 }
 
-pub type StringJoin = CachedCur<StringJoinEv>;
+pub type StringJoin = CachedArgs<StringJoinEv>;
 
 pub struct StringConcatEv;
 
-impl CachedCurEval for StringConcatEv {
+impl EvalCached for StringConcatEv {
     fn name() -> &'static str {
         "string_concat"
     }
@@ -1088,111 +1076,94 @@ impl CachedCurEval for StringConcatEv {
     }
 }
 
-pub type StringConcat = CachedCur<StringConcatEv>;
+pub type StringConcat = CachedArgs<StringConcatEv>;
 
 pub struct Eval<C: Ctx, E> {
-    cached: CachedVals,
-    current: Result<Node<C, E>, Value>,
+    node: Result<Node<C, E>, Value>,
     scope: Path,
-}
-
-impl<C: Ctx, E: Clone> Eval<C, E> {
-    fn compile(&mut self, ctx: &mut ExecCtx<C, E>) {
-        self.current = match &*self.cached.0 {
-            [None] => Err(Value::Null),
-            [Some(v)] => match v {
-                Value::String(s) => match s.parse::<Expr>() {
-                    Ok(spec) => Ok(Node::compile(ctx, self.scope.clone(), spec)),
-                    Err(e) => {
-                        let e = format!("eval(src), error parsing formula {}, {}", s, e);
-                        Err(Value::Error(Chars::from(e)))
-                    }
-                },
-                v => {
-                    let e = format!("eval(src) expected 1 string argument, not {}", v);
-                    Err(Value::Error(Chars::from(e)))
-                }
-            },
-            _ => Err(Value::Error(Chars::from("eval(src) expected 1 argument"))),
-        }
-    }
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for Eval<C, E> {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, scope, _| {
-            let mut t = Eval {
-                cached: CachedVals::new(from, ctx),
-                current: Err(Value::Null),
-                scope,
-            };
-            t.compile(ctx);
-            Box::new(t)
-        });
+        let f: InitFn<C, E> =
+            Arc::new(|_, _, scope, _| Box::new(Eval { node: Err(Value::Null), scope }));
         ctx.functions.insert("eval".into(), f);
         ctx.user.register_fn("eval".into(), Path::root());
     }
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Eval<C, E> {
-    fn current(&self, ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        match &self.current {
-            Ok(s) => s.current(ctx),
-            Err(Value::Null) => None,
-            Err(v) => Some(v.clone()),
-        }
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        if self.cached.update(ctx, from, event) {
-            self.compile(ctx);
-        }
-        match &mut self.current {
-            Ok(s) => s.update(ctx, event),
-            Err(Value::Null) => None,
-            Err(v) => Some(v.clone()),
+        match from {
+            [source] => match source.update(ctx, event) {
+                None => match &mut self.node {
+                    Ok(node) => node.update(ctx, event),
+                    Err(e) => Some(e.clone()),
+                },
+                Some(v) => {
+                    self.node = match v {
+                        Value::String(s) => match s.parse::<Expr>() {
+                            Ok(spec) => Ok(Node::compile(ctx, self.scope.clone(), spec)),
+                            Err(e) => {
+                                let e = format!(
+                                    "eval(src), error parsing formula {}, {}",
+                                    s, e
+                                );
+                                Err(Value::Error(Chars::from(e)))
+                            }
+                        },
+                        v => {
+                            let e = format!(
+                                "eval(src) expected 1 string argument, not {}",
+                                v
+                            );
+                            Err(Value::Error(Chars::from(e)))
+                        }
+                    };
+                    match &mut self.node {
+                        Ok(node) => node.update(ctx, &Event::Init),
+                        Err(e) => Some(e.clone()),
+                    }
+                }
+            },
+            n => {
+                if n.into_iter().fold(false, |u, n| u || n.update(ctx, event).is_some()) {
+                    Some(Value::Error(Chars::from("eval expects 1 argument")))
+                } else {
+                    None
+                }
+            }
         }
     }
 }
 
 pub struct Count {
-    from: CachedVals,
     count: u64,
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for Count {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, _| {
-            Box::new(Count { from: CachedVals::new(from, ctx), count: 0 })
-        });
+        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Count { count: 0 }));
         ctx.functions.insert("count".into(), f);
         ctx.user.register_fn("count".into(), Path::root());
     }
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Count {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        match &*self.from.0 {
-            [] => Some(Value::Error(Chars::from("count(s): requires 1 argument"))),
-            [_] => Some(Value::U64(self.count)),
-            _ => Some(Value::Error(Chars::from("count(s): requires 1 argument"))),
-        }
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        if self.from.update(ctx, from, event) {
+        if from.into_iter().fold(false, |u, n| u || n.update(ctx, event).is_some()) {
             self.count += 1;
-            Apply::<C, E>::current(self, ctx)
+            Some(Value::U64(self.count))
         } else {
             None
         }
@@ -1200,33 +1171,18 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Count {
 }
 
 pub struct Sample {
-    current: Option<Value>,
+    last: Option<Value>,
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for Sample {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, _| {
-            let current = match from {
-                [trigger, source] => match trigger.current(ctx) {
-                    None => None,
-                    Some(_) => source.current(ctx),
-                },
-                _ => Some(Value::Error(Chars::from(
-                    "sample(trigger, source): expected 2 arguments",
-                ))),
-            };
-            Box::new(Sample { current })
-        });
+        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Sample { last: None }));
         ctx.functions.insert("sample".into(), f);
         ctx.user.register_fn("sample".into(), Path::root());
     }
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Sample {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        self.current.clone()
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -1235,101 +1191,72 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Sample {
     ) -> Option<Value> {
         match from {
             [trigger, source] => {
-                source.update(ctx, event);
-                if trigger.update(ctx, event).is_none() {
-                    None
-                } else {
-                    let v = source.current(ctx);
-                    self.current = v.clone();
+                if let Some(v) = source.update(ctx, event) {
+                    self.last = Some(v);
+                }
+                trigger.update(ctx, event).and_then(|_| self.last.clone())
+            }
+            n => {
+                if n.into_iter().fold(false, |u, n| u || n.update(ctx, event).is_some()) {
+                    let v = Some(Value::Error(Chars::from(
+                        "sample(trigger, source): expected 2 arguments",
+                    )));
                     v
-                }
-            }
-            _ => {
-                let v = Some(Value::Error(Chars::from(
-                    "sample(trigger, source): expected 2 arguments",
-                )));
-                self.current = v.clone();
-                v
-            }
-        }
-    }
-}
-
-pub struct Mean {
-    from: CachedVals,
-    total: f64,
-    samples: usize,
-}
-
-impl<C: Ctx, E: Clone> Register<C, E> for Mean {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, _| {
-            Box::new(Mean { from: CachedVals::new(from, ctx), total: 0., samples: 0 })
-        });
-        ctx.functions.insert("mean".into(), f);
-        ctx.user.register_fn("mean".into(), Path::root());
-    }
-}
-
-impl<C: Ctx, E: Clone> Apply<C, E> for Mean {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        match &*self.from.0 {
-            [] => Some(Value::Error(Chars::from("mean(s): requires 1 argument"))),
-            [_] => {
-                if self.samples > 0 {
-                    Some(Value::F64(self.total / (self.samples as f64)))
                 } else {
                     None
                 }
             }
-            _ => Some(Value::Error(Chars::from("mean(s): requires 1 argument"))),
         }
     }
+}
 
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
-        event: &Event<E>,
-    ) -> Option<Value> {
-        if self.from.update(ctx, from, event) {
-            for v in self.from.flat_iter() {
-                if let Some(v) = v {
-                    if let Ok(v) = v.clone().cast_to::<f64>() {
-                        self.total += v;
-                        self.samples += 1;
+pub struct MeanEv;
+
+impl EvalCached for MeanEv {
+    fn eval(from: &CachedVals) -> Option<Value> {
+        let mut total = 0.;
+        let mut samples = 0;
+        let mut error = None;
+        for v in from.flat_iter() {
+            if let Some(v) = v {
+                match v.cast_to::<f64>() {
+                    Ok(v) => {
+                        total += v;
+                        samples += 1;
+                    }
+                    Err(e) => {
+                        error = Some(Value::Error(Chars::from(format!("{e:?}"))));
                     }
                 }
             }
-            Apply::<C, E>::current(self, ctx)
+        }
+        if let Some(e) = error {
+            Some(e)
+        } else if samples == 0 {
+            Some(Value::Error(Chars::from("mean requires at least one argument")))
         } else {
-            None
+            Some(Value::F64(total / samples as f64))
         }
     }
+
+    fn name() -> &'static str {
+        "mean"
+    }
 }
+
+pub type Mean = CachedArgs<MeanEv>;
 
 pub(crate) struct Uniq(Option<Value>);
 
 impl<C: Ctx, E: Clone> Register<C, E> for Uniq {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, _| {
-            let mut t = Uniq(None);
-            match from {
-                [e] => t.0 = e.current(ctx),
-                _ => t.0 = Uniq::usage(),
-            }
-            Box::new(t)
-        });
+        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Uniq(None)));
         ctx.functions.insert("uniq".into(), f);
         ctx.user.register_fn("uniq".into(), Path::root());
     }
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Uniq {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        self.0.as_ref().cloned()
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -1345,14 +1272,9 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Uniq {
                     None
                 }
             }),
-            exprs => {
-                let mut up = false;
-                for e in exprs {
-                    up = e.update(ctx, event).is_some() || up;
-                }
-                self.0 = Uniq::usage();
-                if up {
-                    Apply::<C, E>::current(self, ctx)
+            n => {
+                if n.into_iter().fold(false, |u, n| u || n.update(ctx, event).is_some()) {
+                    Some(Value::Error(Chars::from("uniq(e): expected 1 argument")))
                 } else {
                     None
                 }
@@ -1361,51 +1283,33 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Uniq {
     }
 }
 
-impl Uniq {
-    fn usage() -> Option<Value> {
-        Some(Value::Error(Chars::from("uniq(e): expected 1 argument")))
-    }
-}
-
-fn pathname(invalid: &mut bool, path: Option<Value>) -> Option<Path> {
-    *invalid = false;
-    match path.map(|v| v.cast_to::<String>()) {
-        None => None,
-        Some(Ok(p)) => {
+fn as_path(v: Value) -> Option<Path> {
+    match v.cast_to::<String>() {
+        Err(_) => None,
+        Ok(p) => {
             if Path::is_absolute(&p) {
                 Some(Path::from(p))
             } else {
-                *invalid = true;
                 None
             }
-        }
-        Some(Err(_)) => {
-            *invalid = true;
-            None
         }
     }
 }
 
 pub struct Store {
-    queued: Vec<Value>,
+    args: CachedVals,
     top_id: ExprId,
-    dv: Option<(Path, Dval)>,
-    invalid: bool,
+    dv: Either<(Path, Dval), Vec<Value>>,
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for Store {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
-            let mut t = Store { queued: Vec::new(), dv: None, invalid: false, top_id };
-            match from {
-                [to, val] => {
-                    let to = to.current(ctx);
-                    let val = val.current(ctx);
-                    t.set(ctx, to, val)
-                }
-                _ => t.invalid = true,
-            }
-            Box::new(t)
+        let f: InitFn<C, E> = Arc::new(|_, from, _, top_id| {
+            Box::new(Store {
+                args: CachedVals::new(from),
+                dv: Either::Right(vec![]),
+                top_id,
+            })
         });
         ctx.functions.insert("store".into(), f);
         ctx.user.register_fn("store".into(), Path::root());
@@ -1413,106 +1317,79 @@ impl<C: Ctx, E: Clone> Register<C, E> for Store {
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Store {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        if self.invalid {
-            Some(Value::Error(Chars::from(
-                "store(tgt: absolute path, val): expected 2 arguments",
-            )))
-        } else {
-            None
-        }
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        match from {
-            [path, val] => {
-                let path = path.update(ctx, event);
-                let value = val.update(ctx, event);
-                let value = if path.is_some() && !self.same_path(&path) {
-                    value.or_else(|| val.current(ctx))
-                } else {
-                    value
-                };
-                let up = value.is_some();
-                self.set(ctx, path, value);
-                if up {
-                    Apply::<C, E>::current(self, ctx)
-                } else {
-                    None
-                }
-            }
-            exprs => {
-                let mut up = false;
-                for expr in exprs {
-                    up = expr.update(ctx, event).is_some() || up;
-                }
-                self.invalid = true;
-                if up {
-                    Apply::<C, E>::current(self, ctx)
-                } else {
-                    None
+        fn set(dv: &mut Either<(Path, Dval), Vec<Value>>, val: &Value) {
+            match dv {
+                Either::Right(q) => q.push(val.clone()),
+                Either::Left((_, dv)) => {
+                    dv.write(val.clone());
                 }
             }
         }
+        let updated = self.args.update_diff(ctx, from, event);
+        let (args, updated) = match (&*self.args.0, &*updated) {
+            ([path, value], [path_up, value_up]) => ((path, value), (path_up, value_up)),
+            (_, up) if !up.iter().any(|b| *b) => return None,
+            (_, _) => {
+                return Some(Value::Error(Chars::from(
+                    "set(path, val): expected 2 arguments",
+                )))
+            }
+        };
+        match (args, updated) {
+            ((_, Some(val)), (false, true)) => set(&mut self.dv, val),
+            ((_, None), (false, true)) => (),
+            ((None, Some(val)), (true, true)) => set(&mut self.dv, val),
+            ((Some(path), Some(val)), (true, true)) if self.same_path(path) => {
+                set(&mut self.dv, val)
+            }
+            ((Some(path), _), (true, false)) if self.same_path(path) => (),
+            ((None, _), (true, false)) => (),
+            ((None, None), (_, _)) => (),
+            ((_, _), (false, false)) => (),
+            ((Some(path), val), (true, _)) => match as_path(path.clone()) {
+                None => {
+                    if let Either::Left(_) = &self.dv {
+                        self.dv = Either::Right(vec![]);
+                    }
+                    return Some(Value::Error(Chars::from(format!(
+                        "set(path, val): invalid path {path:?}"
+                    ))));
+                }
+                Some(path) => {
+                    let dv = ctx.user.durable_subscribe(
+                        UpdatesFlags::empty(),
+                        path.clone(),
+                        self.top_id,
+                    );
+                    match &mut self.dv {
+                        Either::Left(_) => (),
+                        Either::Right(q) => {
+                            for v in q.drain(..) {
+                                dv.write(v);
+                            }
+                        }
+                    }
+                    self.dv = Either::Left((path, dv));
+                    if let Some(val) = val {
+                        set(&mut self.dv, val)
+                    }
+                }
+            },
+        }
+        None
     }
 }
 
 impl Store {
-    fn queue(&mut self, v: Value) {
-        self.queued.push(v)
-    }
-
-    fn set<C: Ctx, E>(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        to: Option<Value>,
-        val: Option<Value>,
-    ) {
-        match (pathname(&mut self.invalid, to), val) {
-            (None, None) => (),
-            (None, Some(v)) => match self.dv.as_ref() {
-                None => self.queue(v),
-                Some((_, dv)) => {
-                    dv.write(v);
-                }
-            },
-            (Some(path), val) => {
-                if let Some(v) = val {
-                    self.queue(v)
-                }
-                match &self.dv {
-                    Some((cur, dv)) if &path == cur => {
-                        for v in self.queued.drain(..) {
-                            dv.write(v);
-                        }
-                    }
-                    None | Some((_, _)) => {
-                        if let Some((cur, dv)) = self.dv.take() {
-                            ctx.user.unsubscribe(cur, dv, self.top_id);
-                        }
-                        let dv = ctx.user.durable_subscribe(
-                            UpdatesFlags::empty(),
-                            path.clone(),
-                            self.top_id,
-                        );
-                        for v in self.queued.drain(..) {
-                            dv.write(v);
-                        }
-                        self.dv = Some((path, dv));
-                    }
-                }
-            }
-        }
-    }
-
-    fn same_path(&self, new_path: &Option<Value>) -> bool {
-        match (new_path.as_ref(), self.dv.as_ref()) {
-            (Some(Value::String(p0)), Some((p1, _))) => &**p0 == &**p1,
+    fn same_path(&self, new_path: &Value) -> bool {
+        match (new_path, &self.dv) {
+            (Value::String(p0), Either::Left((p1, _))) => &**p0 == &**p1,
             _ => false,
         }
     }
@@ -1679,7 +1556,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Load {
                 [path] => {
                     let path = path.current(ctx);
                     t.subscribe(ctx, path)
-                },
+                }
                 _ => t.invalid = true,
             }
             Box::new(t)
@@ -1796,7 +1673,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Get {
                 [name] => {
                     let name = name.current(ctx);
                     t.subscribe(ctx, name)
-                },
+                }
                 _ => t.invalid = true,
             }
             Box::new(t)

@@ -100,6 +100,7 @@ impl<E: Clone> DbgCtx<E> {
 
 #[derive(Clone, Debug)]
 pub enum Event<E> {
+    Init,
     Variable(Path, Chars, Value),
     Netidx(SubId, Value),
     Rpc(RpcCallId, Value),
@@ -123,7 +124,6 @@ pub trait Register<C: Ctx, E> {
 }
 
 pub trait Apply<C: Ctx, E> {
-    fn current(&self, ctx: &mut ExecCtx<C, E>) -> Option<Value>;
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -189,6 +189,7 @@ pub fn store_var(
         let mut iter = Path::dirnames(scope);
         loop {
             match iter.next_back() {
+                None => break store_var(variables, true, &Path::root(), name, value),
                 Some(scope) => {
                     if let Some(vars) = variables.get_mut(scope) {
                         if let Some(var) = vars.get_mut(name) {
@@ -197,7 +198,6 @@ pub fn store_var(
                         }
                     }
                 }
-                None => break store_var(variables, true, &Path::root(), name, value),
             }
         }
     }
@@ -359,23 +359,17 @@ impl<C: Ctx, E: Clone> Node<C, E> {
         Self::compile_int(ctx, spec, scope, top_id)
     }
 
-    pub fn current(&self, ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        let (id, res) = match self {
-            Node::Error(spec, v) => (spec.id, Some(v.clone())),
-            Node::Constant(spec, v) => (spec.id, Some(v.clone())),
-            Node::Apply { spec, function, .. } => (spec.id, function.current(ctx)),
-        };
-        if ctx.dbg_ctx.trace {
-            if let Some(v) = &res {
-                ctx.dbg_ctx.add_event(id, None, v.clone());
-            }
-        }
-        res
-    }
-
     pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
         match self {
-            Node::Error(_, _) | Node::Constant(_, _) => None,
+            Node::Error(_, _) => None,
+            Node::Constant(_, v) => match event {
+                Event::Init => Some(v.clone()),
+                Event::Netidx(_, _)
+                | Event::Rpc(_, _)
+                | Event::Timer(_)
+                | Event::User(_)
+                | Event::Variable(_, _, _) => None,
+            },
             Node::Apply { spec, args, function } => {
                 let res = function.update(ctx, args, event);
                 if ctx.dbg_ctx.trace {
