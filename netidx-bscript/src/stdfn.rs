@@ -9,9 +9,10 @@ use netidx::{
     subscriber::{self, Dval, Typ, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
-use std::{collections::HashSet, iter, marker::PhantomData, sync::Arc};
+use smallvec::{smallvec, SmallVec};
+use std::{collections::HashSet, iter, marker::PhantomData, mem, sync::Arc};
 
-pub struct CachedVals(pub Vec<Option<Value>>);
+pub struct CachedVals(pub SmallVec<[Option<Value>; 4]>);
 
 impl CachedVals {
     pub fn new<C: Ctx, E: Clone>(from: &[Node<C, E>]) -> CachedVals {
@@ -40,7 +41,7 @@ impl CachedVals {
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
-    ) -> Vec<bool> {
+    ) -> SmallVec<[bool; 4]> {
         from.into_iter()
             .enumerate()
             .map(|(i, src)| match src.update(ctx, event) {
@@ -1342,6 +1343,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Store {
             }
         };
         match (args, updated) {
+            ((_, _), (false, false)) => (),
             ((_, Some(val)), (false, true)) => set(&mut self.dv, val),
             ((_, None), (false, true)) => (),
             ((None, Some(val)), (true, true)) => set(&mut self.dv, val),
@@ -1351,7 +1353,6 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Store {
             ((Some(path), _), (true, false)) if self.same_path(path) => (),
             ((None, _), (true, false)) => (),
             ((None, None), (_, _)) => (),
-            ((_, _), (false, false)) => (),
             ((Some(path), val), (true, _)) => match as_path(path.clone()) {
                 None => {
                     if let Either::Left(_) = &self.dv {
@@ -1395,19 +1396,14 @@ impl Store {
     }
 }
 
-fn varname(invalid: &mut bool, name: Option<Value>) -> Option<Chars> {
-    *invalid = false;
+fn varname(name: Option<Value>) -> Option<Chars> {
     match name.map(|n| n.cast_to::<Chars>()) {
         None => None,
-        Some(Err(_)) => {
-            *invalid = true;
-            None
-        }
+        Some(Err(_)) => None,
         Some(Ok(n)) => {
             if VNAME.is_match(&n) {
                 Some(n)
             } else {
-                *invalid = true;
                 None
             }
         }
@@ -1415,28 +1411,24 @@ fn varname(invalid: &mut bool, name: Option<Value>) -> Option<Chars> {
 }
 
 pub struct Set {
-    queued: Vec<Value>,
     local: bool,
     scope: Path,
+    args: CachedVals,
+    queue: SmallVec<[Value; 1]>,
     name: Option<Chars>,
-    invalid: bool,
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for Set {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f = |local| -> InitFn<C, E> {
-            Arc::new(move |ctx, from, scope, _| {
-                let mut t =
-                    Set { queued: Vec::new(), local, scope, name: None, invalid: false };
-                match from {
-                    [name, value] => {
-                        let name = name.current(ctx);
-                        let value = value.current(ctx);
-                        t.set(ctx, name, value)
-                    }
-                    _ => t.invalid = true,
-                }
-                Box::new(t)
+            Arc::new(move |_, from, scope, _| {
+                Box::new(Set {
+                    local,
+                    scope,
+                    args: CachedVals::new(from),
+                    queue: smallvec![],
+                    name: None,
+                })
             })
         };
         ctx.functions.insert("set".into(), f(false));
@@ -1447,95 +1439,80 @@ impl<C: Ctx, E: Clone> Register<C, E> for Set {
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Set {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        if self.invalid {
-            Some(Value::Error(Chars::from(
-                "set/let(name: string [a-z][a-z0-9_]+, value): expected 2 arguments",
-            )))
-        } else {
-            None
-        }
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        match from {
-            [name, val] => {
-                let name = name.update(ctx, event);
-                let value = val.update(ctx, event);
-                let value = if name.is_some() && !self.same_name(&name) {
-                    value.or_else(|| val.current(ctx))
-                } else {
-                    value
-                };
-                let up = value.is_some();
-                self.set(ctx, name, value);
-                if up {
-                    Apply::<C, E>::current(self, ctx)
-                } else {
-                    None
-                }
+        let updates = self.args.update_diff(ctx, from, event);
+        let (args, args_up) = match (&*self.args.0, &*updates) {
+            ([name, val], [name_up, val_up]) => ((name, val), (name_up, val_up)),
+            (_, up) if !up.iter().any(|b| *b) => return None,
+            (_, _) => {
+                return Some(Value::Error(Chars::from(
+                    "store(var, val): expected 2 arguments",
+                )))
             }
-            exprs => {
-                let mut up = false;
-                for expr in exprs {
-                    up = expr.update(ctx, event).is_some() || up;
+        };
+        let mut error = None;
+        let set = match (args, args_up) {
+            ((_, _), (false, false)) => None,
+            ((_, Some(val)), (false, true)) => Some(val.clone()),
+            ((Some(name), Some(val)), (true, true)) if self.same_name(name) => {
+                Some(val.clone())
+            }
+            ((name, Some(val)), (true, vset)) => match varname(name.clone()) {
+                Some(name) => {
+                    let vset = *vset || self.name.is_some();
+                    self.name = Some(name);
+                    vset.then(|| val.clone())
                 }
-                self.invalid = true;
-                if up {
-                    Apply::<C, E>::current(self, ctx)
-                } else {
+                None => {
+                    error = Some(Value::Error(Chars::from(format!(
+                        "invalid variable name {name:?}"
+                    ))));
+                    self.name = None;
+                    vset.then(|| val.clone())
+                }
+            },
+            ((Some(name), None), (true, _)) => match varname(Some(name.clone())) {
+                None => {
+                    error = Some(Value::Error(Chars::from(format!(
+                        "invalid variable name {name:?}"
+                    ))));
+                    self.name = None;
                     None
+                }
+                Some(name) => {
+                    self.name = Some(name);
+                    None
+                }
+            },
+            ((_, None), (false, true)) | ((None, None), (_, _)) => None,
+        };
+        match &self.name {
+            None => self.queue.extend(set.into_iter()),
+            Some(name) => {
+                for val in self.queue.drain(..).chain(set.into_iter()) {
+                    ctx.user.set_var(
+                        &mut ctx.variables,
+                        self.local,
+                        self.scope.clone(),
+                        name.clone(),
+                        val,
+                    )
                 }
             }
         }
+        error
     }
 }
 
 impl Set {
-    fn queue_set(&mut self, v: Value) {
-        self.queued.push(v)
-    }
-
-    fn set<C: Ctx, E>(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        name: Option<Value>,
-        value: Option<Value>,
-    ) {
-        if let Some(name) = varname(&mut self.invalid, name) {
-            for v in self.queued.drain(..) {
-                ctx.user.set_var(
-                    &mut ctx.variables,
-                    self.local,
-                    self.scope.clone(),
-                    name.clone(),
-                    v,
-                )
-            }
-            self.name = Some(name);
-        }
-        if let Some(value) = value {
-            match self.name.as_ref() {
-                None => self.queue_set(value),
-                Some(name) => ctx.user.set_var(
-                    &mut ctx.variables,
-                    self.local,
-                    self.scope.clone(),
-                    name.clone(),
-                    value,
-                ),
-            }
-        }
-    }
-
-    fn same_name(&self, new_name: &Option<Value>) -> bool {
-        match (new_name, self.name.as_ref()) {
-            (Some(Value::String(n0)), Some(n1)) => n0 == n1,
+    fn same_name(&self, new_name: &Value) -> bool {
+        match (new_name, &self.var) {
+            (Value::String(n0), Either::Left(n1)) => n0 == n1,
             _ => false,
         }
     }
