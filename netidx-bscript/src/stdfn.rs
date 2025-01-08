@@ -1522,18 +1522,12 @@ pub(crate) struct Load {
     args: CachedVals,
     cur: Option<(Path, Dval)>,
     top_id: ExprId,
-    invalid: bool,
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for Load {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_, from, _, top_id| {
-            Box::new(Load {
-                args: CachedVals::new(from),
-                cur: None,
-                invalid: false,
-                top_id,
-            })
+            Box::new(Load { args: CachedVals::new(from), cur: None, top_id })
         });
         ctx.functions.insert("load".into(), f);
         ctx.user.register_fn("load".into(), Path::root());
@@ -1599,30 +1593,22 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Load {
 }
 
 struct BoundVar {
+    name: Chars,
     scope: Path,
-    value: Value,
 }
 
 pub struct Get {
+    args: CachedVals,
     scope: Path,
     name: Option<Chars>,
     var: Option<BoundVar>,
     top_id: ExprId,
-    invalid: bool,
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for Get {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, scope, top_id| {
-            let mut t = Get { scope, name: None, var: None, invalid: false, top_id };
-            match from {
-                [name] => {
-                    let name = name.current(ctx);
-                    t.subscribe(ctx, name)
-                }
-                _ => t.invalid = true,
-            }
-            Box::new(t)
+        let f: InitFn<C, E> = Arc::new(|_, from, scope, top_id| {
+            Box::new(Get { args: CachedVals::new(from), scope, name: None, var: None, top_id })
         });
         ctx.functions.insert("get".into(), f);
         ctx.user.register_fn("get".into(), Path::root());
@@ -1630,111 +1616,88 @@ impl<C: Ctx, E: Clone> Register<C, E> for Get {
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Get {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        if self.invalid {
-            Get::err()
-        } else {
-            self.var.as_ref().map(|bv| bv.value.clone())
-        }
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        match from {
-            [name] => {
-                let up = match name.update(ctx, event) {
-                    None => false,
-                    Some(target) => {
-                        self.subscribe(ctx, Some(target));
-                        true
+        let updates = self.args.update_diff(ctx, from, event);
+        let (name, name_up) = match (&*self.args.0, &*updates) {
+            ([name], [name_up]) => (name, name_up),
+            (_, up) if !up.iter().any(|b| *b) => return None,
+            (_, _) => {
+                return Some(Value::Error(Chars::from("get(var): expected 1 argument")))
+            }
+        };
+        match (name, name_up) {
+            (_, false) => (),
+            (Some(name), true) if self.same_name(name) => (),
+            (Some(name), true) => {
+                if let Some(bv) = self.var.take() {
+                    ctx.user.unref_var(bv.name, bv.scope, self.top_id);
+                }
+                match varname(Some(name.clone())) {
+                    None => {
+                        self.name = None;
+                        return Some(Value::Error(Chars::from(format!(
+                            "get(var): invalid variable name {name:?}"
+                        ))));
                     }
-                };
-                if self.invalid {
-                    if up {
-                        Get::err()
-                    } else {
-                        None
-                    }
-                } else {
-                    match (self.name.as_ref(), self.var.as_mut(), event) {
-                        (Some(vn), Some(bv), Event::Variable(es, en, v))
-                            if vn == en
-                                && Path::is_parent(es, &self.scope)
-                                && Path::is_parent(&bv.scope, es) =>
-                        {
-                            if &bv.scope != es {
-                                bv.scope = es.clone();
-                            }
-                            bv.value = v.clone();
-                            Some(v.clone())
-                        }
-                        (Some(vn), None, Event::Variable(es, en, v))
-                            if vn == en && Path::is_parent(es, &self.scope) =>
-                        {
-                            self.var =
-                                Some(BoundVar { scope: es.clone(), value: v.clone() });
-                            Some(v.clone())
-                        }
-                        (None, _, _)
-                        | (Some(_), _, Event::Netidx(_, _))
-                        | (Some(_), _, Event::User(_))
-                        | (Some(_), _, Event::Rpc(_, _))
-                        | (Some(_), _, Event::Timer(_))
-                        | (Some(_), _, Event::Variable(_, _, _)) => None,
+                    Some(name) => {
+                        self.var =
+                            ctx.lookup_var(&self.scope, &name).map(|(scope, value)| {
+                                BoundVar {
+                                    scope: scope.clone(),
+                                    value: value.clone(),
+                                    name: name.clone(),
+                                }
+                            });
+                        ctx.user.ref_var(name.clone(), self.scope.clone(), self.top_id);
+                        self.name = Some(name);
                     }
                 }
             }
-            exprs => {
-                let mut up = false;
-                for e in exprs {
-                    up = e.update(ctx, event).is_some() || up;
+            (None, true) => {
+                if let Some(bv) = self.var.take() {
+                    ctx.user.unref_var(bv.name, self.scope.clone(), self.top_id);
                 }
-                self.invalid = true;
-                if up {
-                    Get::err()
-                } else {
-                    None
-                }
+                self.name = None;
             }
+        }
+        match (self.name.as_ref(), self.var.as_mut(), event) {
+            (_, Some(bv), Event::Variable(es, en, v))
+                if &bv.name == en
+                    && Path::is_parent(es, &self.scope)
+                    && Path::is_parent(&bv.scope, es) =>
+            {
+                if &bv.scope != es {
+                    bv.scope = es.clone();
+                }
+                bv.value = v.clone();
+                Some(v.clone())
+            }
+            (Some(vn), None, Event::Variable(es, en, v))
+                if vn == en && Path::is_parent(es, &self.scope) =>
+            {
+                self.var = Some(BoundVar { scope: es.clone(), value: v.clone() });
+                Some(v.clone())
+            }
+            (None, _, _)
+            | (Some(_), _, Event::Netidx(_, _))
+            | (Some(_), _, Event::User(_))
+            | (Some(_), _, Event::Rpc(_, _))
+            | (Some(_), _, Event::Timer(_))
+            | (Some(_), _, Event::Variable(_, _, _)) => None,
         }
     }
 }
 
 impl Get {
-    fn err() -> Option<Value> {
-        Some(Value::Error(Chars::from(
-            "load_var(expr: variable name): expected 1 variable name as argument",
-        )))
-    }
-
-    fn subscribe<C: Ctx, E: Clone>(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        name: Option<Value>,
-    ) {
-        match varname(&mut self.invalid, name) {
-            None => {
-                self.var = None;
-                self.name = None;
-                if let Some(old) = self.name.take() {
-                    ctx.user.unref_var(old.clone(), self.scope.clone(), self.top_id);
-                }
-            }
-            Some(name) if self.name.as_ref() == Some(&name) => (),
-            Some(name) => {
-                if let Some(old) = self.name.take() {
-                    ctx.user.unref_var(old.clone(), self.scope.clone(), self.top_id);
-                }
-                self.var = ctx.lookup_var(&self.scope, &name).map(|(scope, value)| {
-                    BoundVar { scope: scope.clone(), value: value.clone() }
-                });
-                ctx.user.ref_var(name.clone(), self.scope.clone(), self.top_id);
-                self.name = Some(name);
-            }
+    fn same_name(&self, name: &Value) -> bool {
+        match (&self.var, name) {
+            (Some(BoundVar { name: n0, .. }), Value::String(n1)) => n0 == n1,
+            (_, _) => false,
         }
     }
 }

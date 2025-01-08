@@ -105,6 +105,10 @@ where
                             args.push(s.to_expr());
                             Some(ExprKind::Apply { args, function }.to_expr())
                         }
+                        (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Ref { .. }, .. }), _) => {
+                            unreachable!()
+                        }
                     }
                 })
                 .unwrap_or_else(|| ExprKind::Constant(Value::from("")).to_expr())
@@ -154,37 +158,14 @@ where
                 .map(|(function, args)| ExprKind::Apply { function, args }.to_expr()),
         ),
         attempt(
-            (string("let"), spaces().with(fname()), spaces().with(string("<-")), expr())
-                .map(|(_, var, _, e)| {
-                    ExprKind::Apply {
-                        function: "let".into(),
-                        args: vec![
-                            ExprKind::Constant(Value::String(Chars::from(var))).to_expr(),
-                            e,
-                        ],
-                    }
-                    .to_expr()
+            (string("let"), spaces().with(fname()), spaces().with(string("=")), expr())
+                .map(|(_, name, _, value)| {
+                    ExprKind::Bind { name, value: Box::new(value) }.to_expr()
                 }),
         ),
-        attempt((fname(), spaces().with(string("<-")), expr()).map(|(var, _, e)| {
-            ExprKind::Apply {
-                function: "set".into(),
-                args: vec![
-                    ExprKind::Constant(Value::String(Chars::from(var))).to_expr(),
-                    e,
-                ],
-            }
-            .to_expr()
-        })),
         attempt(interpolated()),
         attempt(netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())),
-        fname().skip(close_expr()).map(|var| {
-            ExprKind::Apply {
-                function: "get".into(),
-                args: vec![ExprKind::Constant(Value::String(Chars::from(var))).to_expr()],
-            }
-            .to_expr()
-        }),
+        fname().skip(close_expr()).map(|name| ExprKind::Ref { name }.to_expr()),
     )))
 }
 
@@ -310,14 +291,16 @@ mod tests {
             parse_expr(s).unwrap()
         );
         assert_eq!(
-            ExprKind::Apply {
-                function: "get".into(),
-                args: vec![
-                    ExprKind::Constant(Value::String(Chars::from("sum"))).to_expr()
-                ]
+            ExprKind::Ref { name: "sum".into() }.to_expr(),
+            parse_expr("sum").unwrap()
+        );
+        assert_eq!(
+            ExprKind::Bind {
+                name: "foo".into(),
+                value: Box::new(ExprKind::Constant(Value::I64(42)).to_expr())
             }
             .to_expr(),
-            parse_expr("sum").unwrap()
+            parse_expr("let foo = 42").unwrap()
         );
         let src = ExprKind::Apply {
             args: vec![

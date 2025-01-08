@@ -21,6 +21,8 @@ atomic_id!(ExprId);
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum ExprKind {
     Constant(Value),
+    Bind { name: String, value: Box<Expr> },
+    Ref { name: String },
     Apply { args: Vec<Expr>, function: String },
 }
 
@@ -44,6 +46,22 @@ impl ExprKind {
                 push_indent(indent, buf);
                 write!(buf, "{}", self)
             }
+            ExprKind::Bind { name, value } => {
+                let mut tmp = String::new();
+                push_indent(indent, &mut tmp);
+                write!(tmp, "{}", self)?;
+                if tmp.len() < limit {
+                    buf.push_str(&*tmp);
+                    Ok(())
+                } else {
+                    writeln!(buf, "let {name} =")?;
+                    value.kind.pretty_print(indent + 2, limit, buf)
+                }
+            }
+            ExprKind::Ref { name: _ } => {
+                push_indent(indent, buf);
+                write!(buf, "{}", self)
+            }
             ExprKind::Apply { function, args } => {
                 let mut tmp = String::new();
                 push_indent(indent, &mut tmp);
@@ -55,22 +73,6 @@ impl ExprKind {
                     if function == "string_concat" {
                         buf.push_str(&*tmp);
                         Ok(())
-                    } else if function == "get" && args.len() == 1 && args[0].is_fn() {
-                        buf.push_str(&*tmp);
-                        Ok(())
-                    } else if (function == "set" || function == "let")
-                        && args.len() == 2
-                        && args[0].is_fn()
-                    {
-                        match &args[0].kind {
-                            ExprKind::Constant(Value::String(c)) => {
-                                push_indent(indent, buf);
-                                let local = if function == "let" { "let " } else { "" };
-                                writeln!(buf, "{}{} <-", local, c)?;
-                                args[1].kind.pretty_print(indent + 2, limit, buf)
-                            }
-                            _ => unreachable!(),
-                        }
                     } else if function == "do" {
                         push_indent(indent, buf);
                         writeln!(buf, "{}", "{")?;
@@ -121,6 +123,12 @@ impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ExprKind::Constant(v) => v.fmt_ext(f, &parser::BSCRIPT_ESC, true),
+            ExprKind::Bind { name, value } => {
+                write!(f, "let {name} = {value}")
+            }
+            ExprKind::Ref { name } => {
+                write!(f, "{name}")
+            }
             ExprKind::Apply { args, function } => {
                 if function == "string_concat" && args.len() > 0 {
                     // interpolation
@@ -140,24 +148,6 @@ impl fmt::Display for ExprKind {
                         }
                     }
                     write!(f, "\"")
-                } else if function == "get" && args.len() == 1 && args[0].is_fn() {
-                    // constant variable load
-                    match &args[0].kind {
-                        ExprKind::Constant(Value::String(c)) => write!(f, "{}", c),
-                        _ => unreachable!(),
-                    }
-                } else if (function == "set" || function == "let")
-                    && args.len() == 2
-                    && args[0].is_fn()
-                {
-                    // constant variable store
-                    match &args[0].kind {
-                        ExprKind::Constant(Value::String(c)) => {
-                            let local = if function == "let" { "let " } else { "" };
-                            write!(f, "{}{} <- {}", local, c, &args[1])
-                        }
-                        _ => unreachable!(),
-                    }
                 } else if function == "do" {
                     // do block
                     write!(f, "{}", '{')?;
