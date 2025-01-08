@@ -1414,7 +1414,7 @@ pub struct Set {
     local: bool,
     scope: Path,
     args: CachedVals,
-    queue: SmallVec<[Value; 1]>,
+    queue: SmallVec<[Value; 4]>,
     name: Option<Chars>,
 }
 
@@ -1511,32 +1511,29 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Set {
 
 impl Set {
     fn same_name(&self, new_name: &Value) -> bool {
-        match (new_name, &self.var) {
-            (Value::String(n0), Either::Left(n1)) => n0 == n1,
+        match (new_name, &self.name) {
+            (Value::String(n0), Some(n1)) => n0 == n1,
             _ => false,
         }
     }
 }
 
 pub(crate) struct Load {
-    path: Option<Path>,
-    cur: Option<Dval>,
+    args: CachedVals,
+    cur: Option<(Path, Dval)>,
     top_id: ExprId,
     invalid: bool,
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for Load {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
-            let mut t = Load { path: None, cur: None, invalid: false, top_id };
-            match from {
-                [path] => {
-                    let path = path.current(ctx);
-                    t.subscribe(ctx, path)
-                }
-                _ => t.invalid = true,
-            }
-            Box::new(t)
+        let f: InitFn<C, E> = Arc::new(|_, from, _, top_id| {
+            Box::new(Load {
+                args: CachedVals::new(from),
+                cur: None,
+                invalid: false,
+                top_id,
+            })
         });
         ctx.functions.insert("load".into(), f);
         ctx.user.register_fn("load".into(), Path::root());
@@ -1544,88 +1541,60 @@ impl<C: Ctx, E: Clone> Register<C, E> for Load {
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Load {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        if self.invalid {
-            Load::err()
-        } else {
-            self.cur.as_ref().and_then(|dv| match dv.last() {
-                subscriber::Event::Unsubscribed => {
-                    Some(Value::Error(Chars::from("#LOST")))
-                }
-                subscriber::Event::Update(v) => Some(v),
-            })
-        }
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        match from {
-            [name] => {
-                let up = match name.update(ctx, event) {
-                    None => false,
-                    Some(target) => {
-                        self.subscribe(ctx, Some(target));
-                        true
-                    }
-                };
-                if self.invalid {
-                    if up {
-                        Load::err()
-                    } else {
-                        None
-                    }
-                } else {
-                    self.cur.as_ref().and_then(|dv| match event {
-                        Event::Variable(_, _, _)
-                        | Event::Rpc(_, _)
-                        | Event::Timer(_)
-                        | Event::User(_) => None,
-                        Event::Netidx(id, value) if dv.id() == *id => Some(value.clone()),
-                        Event::Netidx(_, _) => None,
-                    })
-                }
+        let updates = self.args.update_diff(ctx, from, event);
+        let (path, path_up) = match (&*self.args.0, &*updates) {
+            ([path], [path_up]) => (path, path_up),
+            (_, up) if !up.iter().any(|b| *b) => return None,
+            (_, _) => {
+                return Some(Value::Error(Chars::from("load(path): expected 1 argument")))
             }
-            exprs => {
-                let mut up = false;
-                for e in exprs {
-                    up = e.update(ctx, event).is_some() || up;
+        };
+        match (path, path_up) {
+            (Some(_), false) | (None, false) => (),
+            (None, true) => {
+                if let Some((path, dv)) = self.cur.take() {
+                    ctx.user.unsubscribe(path, dv, self.top_id)
                 }
-                self.invalid = true;
-                if up {
-                    Load::err()
-                } else {
-                    None
+                return None;
+            }
+            (Some(path), true) => {
+                if let Some((path, dv)) = self.cur.take() {
+                    ctx.user.unsubscribe(path, dv, self.top_id)
+                }
+                match as_path(path.clone()) {
+                    None => {
+                        return Some(Value::Error(Chars::from(format!(
+                            "load(path): invalid absolute path {path:?}"
+                        ))))
+                    }
+                    Some(path) => {
+                        self.cur = Some((
+                            path.clone(),
+                            ctx.user.durable_subscribe(
+                                UpdatesFlags::BEGIN_WITH_LAST,
+                                path,
+                                self.top_id,
+                            ),
+                        ));
+                    }
                 }
             }
         }
-    }
-}
-
-impl Load {
-    fn subscribe<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>, name: Option<Value>) {
-        if let Some(path) = pathname(&mut self.invalid, name) {
-            if Some(&path) != self.path.as_ref() {
-                if let (Some(path), Some(dv)) = (self.path.take(), self.cur.take()) {
-                    ctx.user.unsubscribe(path, dv, self.top_id);
-                }
-                self.path = Some(path.clone());
-                self.cur = Some(ctx.user.durable_subscribe(
-                    UpdatesFlags::BEGIN_WITH_LAST,
-                    path,
-                    self.top_id,
-                ));
-            }
-        }
-    }
-
-    fn err() -> Option<Value> {
-        Some(Value::Error(Chars::from(
-            "load(expr: path) expected 1 absolute path as argument",
-        )))
+        self.cur.as_ref().and_then(|(_, dv)| match event {
+            Event::Variable(_, _, _)
+            | Event::Rpc(_, _)
+            | Event::Timer(_)
+            | Event::User(_)
+            | Event::Init => None,
+            Event::Netidx(id, value) if dv.id() == *id => Some(value.clone()),
+            Event::Netidx(_, _) => None,
+        })
     }
 }
 
