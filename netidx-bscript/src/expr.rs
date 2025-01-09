@@ -1,5 +1,5 @@
 use crate::parser;
-use netidx::{subscriber::Value, utils};
+use netidx::{chars::Chars, subscriber::Value, utils};
 use regex::Regex;
 use serde::{
     de::{self, Visitor},
@@ -11,6 +11,7 @@ use std::{
     result,
     str::FromStr,
 };
+use triomphe::Arc;
 
 lazy_static! {
     pub static ref VNAME: Regex = Regex::new("^[a-z][a-z0-9_]*$").unwrap();
@@ -21,9 +22,9 @@ atomic_id!(ExprId);
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum ExprKind {
     Constant(Value),
-    Bind { name: String, value: Box<Expr> },
-    Ref { name: String },
-    Apply { args: Vec<Expr>, function: String },
+    Bind { name: Chars, value: Arc<Expr> },
+    Ref { name: Chars },
+    Apply { args: Arc<[Expr]>, function: Chars },
 }
 
 impl ExprKind {
@@ -70,10 +71,10 @@ impl ExprKind {
                     buf.push_str(&*tmp);
                     Ok(())
                 } else {
-                    if function == "string_concat" {
+                    if &**function == "string_concat" {
                         buf.push_str(&*tmp);
                         Ok(())
-                    } else if function == "do" {
+                    } else if &**function == "do" {
                         push_indent(indent, buf);
                         writeln!(buf, "{}", "{")?;
                         for i in 0..args.len() {
@@ -86,7 +87,7 @@ impl ExprKind {
                         }
                         push_indent(indent, buf);
                         writeln!(buf, "{}", "}")
-                    } else if function == "array" {
+                    } else if &**function == "array" {
                         push_indent(indent, buf);
                         writeln!(buf, "{}", "[")?;
                         for i in 0..args.len() {
@@ -130,10 +131,10 @@ impl fmt::Display for ExprKind {
                 write!(f, "{name}")
             }
             ExprKind::Apply { args, function } => {
-                if function == "string_concat" && args.len() > 0 {
+                if &**function == "string_concat" && args.len() > 0 {
                     // interpolation
                     write!(f, "\"")?;
-                    for s in args {
+                    for s in args.iter() {
                         match &s.kind {
                             ExprKind::Constant(Value::String(s)) if s.len() > 0 => {
                                 write!(
@@ -148,7 +149,7 @@ impl fmt::Display for ExprKind {
                         }
                     }
                     write!(f, "\"")
-                } else if function == "do" {
+                } else if &**function == "do" {
                     // do block
                     write!(f, "{}", '{')?;
                     for i in 0..args.len() {
@@ -159,7 +160,7 @@ impl fmt::Display for ExprKind {
                         }
                     }
                     write!(f, "{}", '}')
-                } else if function == "array" {
+                } else if &**function == "array" {
                     write!(f, "{}", '[')?;
                     for i in 0..args.len() {
                         if i < args.len() - 1 {
@@ -266,12 +267,17 @@ impl Expr {
         Expr { id: ExprId::new(), kind }
     }
 
+    /* CR estokes: reevaluate this
     pub fn is_fn(&self) -> bool {
         match &self.kind {
             ExprKind::Constant(Value::String(c)) => VNAME.is_match(&*c),
-            ExprKind::Constant(_) | ExprKind::Apply { .. } => false,
+            ExprKind::Constant(_)
+            | ExprKind::Bind { .. }
+            | ExprKind::Ref { .. }
+            | ExprKind::Apply { .. } => false,
         }
     }
+    */
 
     pub fn to_string_pretty(&self, col_limit: usize) -> String {
         self.kind.to_string_pretty(col_limit)
@@ -355,46 +361,46 @@ mod tests {
                 && s != "store"
                 && s != "load_var"
                 && s != "store_var"
-        })) -> String {
-            s
+        })) -> Chars {
+            Chars::from(s)
         }
     }
 
-    fn valid_fname() -> impl Strategy<Value = String> {
+    fn valid_fname() -> impl Strategy<Value = Chars> {
         prop_oneof![
-            Just(String::from("any")),
-            Just(String::from("array")),
-            Just(String::from("all")),
-            Just(String::from("sum")),
-            Just(String::from("product")),
-            Just(String::from("divide")),
-            Just(String::from("mean")),
-            Just(String::from("min")),
-            Just(String::from("max")),
-            Just(String::from("and")),
-            Just(String::from("or")),
-            Just(String::from("not")),
-            Just(String::from("cmp")),
-            Just(String::from("if")),
-            Just(String::from("filter")),
-            Just(String::from("cast")),
-            Just(String::from("isa")),
-            Just(String::from("eval")),
-            Just(String::from("count")),
-            Just(String::from("sample")),
-            Just(String::from("string_join")),
-            Just(String::from("string_concat")),
-            Just(String::from("navigate")),
-            Just(String::from("confirm")),
-            Just(String::from("load")),
-            Just(String::from("get")),
-            Just(String::from("store")),
-            Just(String::from("set")),
-            Just(String::from("let")),
+            Just(Chars::from("any")),
+            Just(Chars::from("array")),
+            Just(Chars::from("all")),
+            Just(Chars::from("sum")),
+            Just(Chars::from("product")),
+            Just(Chars::from("divide")),
+            Just(Chars::from("mean")),
+            Just(Chars::from("min")),
+            Just(Chars::from("max")),
+            Just(Chars::from("and")),
+            Just(Chars::from("or")),
+            Just(Chars::from("not")),
+            Just(Chars::from("cmp")),
+            Just(Chars::from("if")),
+            Just(Chars::from("filter")),
+            Just(Chars::from("cast")),
+            Just(Chars::from("isa")),
+            Just(Chars::from("eval")),
+            Just(Chars::from("count")),
+            Just(Chars::from("sample")),
+            Just(Chars::from("string_join")),
+            Just(Chars::from("string_concat")),
+            Just(Chars::from("navigate")),
+            Just(Chars::from("confirm")),
+            Just(Chars::from("load")),
+            Just(Chars::from("get")),
+            Just(Chars::from("store")),
+            Just(Chars::from("set")),
+            Just(Chars::from("let")),
         ]
     }
 
-    fn fname() -> impl Strategy<Value = String> {
+    fn fname() -> impl Strategy<Value = Chars> {
         prop_oneof![random_fname(), valid_fname(),]
     }
 
@@ -402,12 +408,12 @@ mod tests {
         let leaf = value().prop_map(|v| ExprKind::Constant(v).to_expr());
         leaf.prop_recursive(100, 1000000, 10, |inner| {
             prop_oneof![(collection::vec(inner, (0, 10)), fname()).prop_map(|(s, f)| {
-                ExprKind::Apply { function: f, args: s }.to_expr()
+                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
             })]
         })
     }
 
-    fn acc_strings(args: &Vec<Expr>) -> Vec<Expr> {
+    fn acc_strings(args: &[Expr]) -> Arc<[Expr]> {
         let mut v: Vec<Expr> = Vec::new();
         for s in args {
             let s = s.clone();
@@ -429,7 +435,7 @@ mod tests {
                 _ => v.push(s),
             }
         }
-        v
+        Arc::from(v)
     }
 
     fn check(s0: &Expr, s1: &Expr) -> bool {
@@ -447,14 +453,14 @@ mod tests {
             (
                 ExprKind::Apply { args: srs0, function: fn0 },
                 ExprKind::Constant(Value::String(c1)),
-            ) if fn0 == "string_concat" => match &acc_strings(srs0)[..] {
+            ) if &**fn0 == "string_concat" => match &acc_strings(srs0)[..] {
                 [Expr { kind: ExprKind::Constant(Value::String(c0)), .. }] => c0 == c1,
                 _ => false,
             },
             (
                 ExprKind::Apply { args: srs0, function: fn0 },
                 ExprKind::Apply { args: srs1, function: fn1 },
-            ) if fn0 == fn1 && fn0.as_str() == "string_concat" => {
+            ) if &*fn0 == fn1 && &**fn0 == "string_concat" => {
                 let srs0 = acc_strings(srs0);
                 srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
             }

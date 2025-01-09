@@ -30,6 +30,7 @@ regex = { workspace = true }
 serde_derive = { workspace = true }
 serde = { workspace = true }
 smallvec = { workspace = true }
+triomphe = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

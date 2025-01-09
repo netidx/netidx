@@ -12,6 +12,7 @@ use combine::{
 };
 use netidx::{chars::Chars, publisher::Value};
 use netidx_netproto::value_parser::{close_expr, escaped_string, value as netidx_value};
+use triomphe::Arc;
 
 pub static BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
 
@@ -75,21 +76,26 @@ where
             ))),
         ))
         .map(|toks: Vec<Intp>| {
+            let mut argvec = vec![];
             toks.into_iter()
                 .fold(None, |src, tok| -> Option<Expr> {
                     match (src, tok) {
                         (None, t @ Intp::Lit(_)) => Some(t.to_expr()),
-                        (None, Intp::Expr(s)) => Some(
-                            ExprKind::Apply {
-                                args: vec![s],
-                                function: "string_concat".into(),
-                            }
-                            .to_expr(),
-                        ),
-                        (Some(src @ Expr { kind: ExprKind::Constant(_), .. }), s) => {
+                        (None, Intp::Expr(s)) => {
+                            argvec.push(s);
                             Some(
                                 ExprKind::Apply {
-                                    args: vec![src, s.to_expr()],
+                                    args: Arc::from(argvec.clone()),
+                                    function: "string_concat".into(),
+                                }
+                                .to_expr(),
+                            )
+                        }
+                        (Some(src @ Expr { kind: ExprKind::Constant(_), .. }), s) => {
+                            argvec.extend([src, s.to_expr()]);
+                            Some(
+                                ExprKind::Apply {
+                                    args: Arc::from(argvec.clone()),
                                     function: "string_concat".into(),
                                 }
                                 .to_expr(),
@@ -97,13 +103,19 @@ where
                         }
                         (
                             Some(Expr {
-                                kind: ExprKind::Apply { mut args, function },
+                                kind: ExprKind::Apply { args: _, function },
                                 ..
                             }),
                             s,
                         ) => {
-                            args.push(s.to_expr());
-                            Some(ExprKind::Apply { args, function }.to_expr())
+                            argvec.push(s.to_expr());
+                            Some(
+                                ExprKind::Apply {
+                                    args: Arc::from(argvec.clone()),
+                                    function,
+                                }
+                                .to_expr(),
+                            )
                         }
                         (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::Ref { .. }, .. }), _) => {
@@ -136,7 +148,9 @@ where
                 spaces().with(token('}')),
                 spaces().with(sep_by(expr(), attempt(spaces().with(token(';'))))),
             )
-            .map(|args| ExprKind::Apply { function: "do".into(), args }.to_expr()),
+            .map(|args: Vec<Expr>| {
+                ExprKind::Apply { function: "do".into(), args: Arc::from(args) }.to_expr()
+            }),
         ),
         attempt(
             between(
@@ -144,7 +158,10 @@ where
                 spaces().with(token(']')),
                 spaces().with(sep_by(expr(), attempt(spaces().with(token(','))))),
             )
-            .map(|args| ExprKind::Apply { function: "array".into(), args }.to_expr()),
+            .map(|args: Vec<Expr>| {
+                ExprKind::Apply { function: "array".into(), args: Arc::from(args) }
+                    .to_expr()
+            }),
         ),
         attempt(
             (
@@ -155,17 +172,23 @@ where
                     spaces().with(sep_by(expr(), attempt(spaces().with(token(','))))),
                 ),
             )
-                .map(|(function, args)| ExprKind::Apply { function, args }.to_expr()),
+                .map(|(f, args): (String, Vec<Expr>)| {
+                    ExprKind::Apply { function: Chars::from(f), args: Arc::from(args) }
+                        .to_expr()
+                }),
         ),
         attempt(
             (string("let"), spaces().with(fname()), spaces().with(string("=")), expr())
                 .map(|(_, name, _, value)| {
-                    ExprKind::Bind { name, value: Box::new(value) }.to_expr()
+                    ExprKind::Bind { name: Chars::from(name), value: Arc::new(value) }
+                        .to_expr()
                 }),
         ),
         attempt(interpolated()),
         attempt(netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())),
-        fname().skip(close_expr()).map(|name| ExprKind::Ref { name }.to_expr()),
+        fname()
+            .skip(close_expr())
+            .map(|name| ExprKind::Ref { name: Chars::from(name) }.to_expr()),
     )))
 }
 
@@ -195,69 +218,72 @@ mod tests {
         assert_eq!(
             ExprKind::Apply {
                 function: "load".into(),
-                args: vec![ExprKind::Constant(Value::String(p)).to_expr()]
+                args: Arc::from_iter([ExprKind::Constant(Value::String(p)).to_expr()])
             }
             .to_expr(),
             parse_expr(s).unwrap()
         );
         let p = ExprKind::Apply {
             function: "load".into(),
-            args: vec![ExprKind::Apply {
-                args: vec![
+            args: Arc::from_iter([ExprKind::Apply {
+                args: Arc::from_iter([
                     ExprKind::Constant(Value::from("/foo/")).to_expr(),
                     ExprKind::Apply {
                         function: "get".into(),
-                        args: vec![ExprKind::Apply {
-                            args: vec![
+                        args: Arc::from_iter([ExprKind::Apply {
+                            args: Arc::from_iter([
                                 ExprKind::Apply {
                                     function: "get".into(),
-                                    args: vec![
-                                        ExprKind::Constant(Value::from("sid")).to_expr()
-                                    ],
+                                    args: Arc::from_iter([ExprKind::Constant(
+                                        Value::from("sid"),
+                                    )
+                                    .to_expr()]),
                                 }
                                 .to_expr(),
                                 ExprKind::Constant(Value::from("_var")).to_expr(),
-                            ],
+                            ]),
                             function: "string_concat".into(),
                         }
-                        .to_expr()],
+                        .to_expr()]),
                     }
                     .to_expr(),
                     ExprKind::Constant(Value::from("/baz")).to_expr(),
-                ],
+                ]),
                 function: "string_concat".into(),
             }
-            .to_expr()],
+            .to_expr()]),
         }
         .to_expr();
         let s = r#"load("/foo/[get("[sid]_var")]/baz")"#;
         assert_eq!(p, parse_expr(s).unwrap());
         let s = r#""[true]""#;
         let p = ExprKind::Apply {
-            args: vec![ExprKind::Constant(Value::True).to_expr()],
+            args: Arc::from_iter([ExprKind::Constant(Value::True).to_expr()]),
             function: "string_concat".into(),
         }
         .to_expr();
         assert_eq!(p, parse_expr(s).unwrap());
         let s = r#"a(a(a(get("[true]"))))"#;
         let p = ExprKind::Apply {
-            args: vec![ExprKind::Apply {
-                args: vec![ExprKind::Apply {
-                    args: vec![ExprKind::Apply {
-                        args: vec![ExprKind::Apply {
-                            args: vec![ExprKind::Constant(Value::True).to_expr()],
+            args: Arc::from_iter([ExprKind::Apply {
+                args: Arc::from_iter([ExprKind::Apply {
+                    args: Arc::from_iter([ExprKind::Apply {
+                        args: Arc::from_iter([ExprKind::Apply {
+                            args: Arc::from_iter([
+                                ExprKind::Constant(Value::True).to_expr()
+                            ]),
                             function: "string_concat".into(),
                         }
-                        .to_expr()],
+                        .to_expr()]),
                         function: "get".into(),
                     }
-                    .to_expr()],
+                    .to_expr()]),
                     function: "a".into(),
                 }
-                .to_expr()],
+                .to_expr()]),
                 function: "a".into(),
             }
-            .to_expr()],
+            .to_expr()]),
             function: "a".into(),
         }
         .to_expr();
@@ -269,22 +295,22 @@ mod tests {
         let s = r#"load(concat_path("foo", "bar", baz))"#;
         assert_eq!(
             ExprKind::Apply {
-                args: vec![ExprKind::Apply {
-                    args: vec![
+                args: Arc::from_iter([ExprKind::Apply {
+                    args: Arc::from_iter([
                         ExprKind::Constant(Value::String(Chars::from("foo"))).to_expr(),
                         ExprKind::Constant(Value::String(Chars::from("bar"))).to_expr(),
                         ExprKind::Apply {
-                            args: vec![ExprKind::Constant(Value::String(Chars::from(
-                                "baz"
-                            )))
-                            .to_expr()],
+                            args: Arc::from_iter([ExprKind::Constant(Value::String(
+                                Chars::from("baz")
+                            ))
+                            .to_expr()]),
                             function: "get".into(),
                         }
                         .to_expr()
-                    ],
-                    function: String::from("concat_path"),
+                    ]),
+                    function: Chars::from("concat_path"),
                 }
-                .to_expr()],
+                .to_expr()]),
                 function: "load".into(),
             }
             .to_expr(),
@@ -297,41 +323,44 @@ mod tests {
         assert_eq!(
             ExprKind::Bind {
                 name: "foo".into(),
-                value: Box::new(ExprKind::Constant(Value::I64(42)).to_expr())
+                value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
             }
             .to_expr(),
             parse_expr("let foo = 42").unwrap()
         );
         let src = ExprKind::Apply {
-            args: vec![
+            args: Arc::from_iter([
                 ExprKind::Constant(Value::F32(1.)).to_expr(),
                 ExprKind::Apply {
-                    args: vec![ExprKind::Constant(Value::String(Chars::from(
-                        "/foo/bar",
-                    )))
-                    .to_expr()],
+                    args: Arc::from_iter([ExprKind::Constant(Value::String(
+                        Chars::from("/foo/bar"),
+                    ))
+                    .to_expr()]),
                     function: "load".into(),
                 }
                 .to_expr(),
                 ExprKind::Apply {
-                    args: vec![
+                    args: Arc::from_iter([
                         ExprKind::Constant(Value::F32(675.6)).to_expr(),
                         ExprKind::Apply {
-                            args: vec![ExprKind::Constant(Value::String(Chars::from(
-                                "/foo/baz",
-                            )))
-                            .to_expr()],
+                            args: Arc::from_iter([ExprKind::Constant(Value::String(
+                                Chars::from("/foo/baz"),
+                            ))
+                            .to_expr()]),
                             function: "load".into(),
                         }
                         .to_expr(),
-                    ],
-                    function: String::from("max"),
+                    ]),
+                    function: Chars::from("max"),
                 }
                 .to_expr(),
-                ExprKind::Apply { args: vec![], function: String::from("rand") }
-                    .to_expr(),
-            ],
-            function: String::from("sum"),
+                ExprKind::Apply {
+                    args: Arc::from_iter([]),
+                    function: Chars::from("rand"),
+                }
+                .to_expr(),
+            ]),
+            function: Chars::from("sum"),
         }
         .to_expr();
         let chs =
