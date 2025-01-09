@@ -5,17 +5,15 @@ use crate::{
 };
 use arcstr::ArcStr;
 use chrono::prelude::*;
-use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
+use fxhash::{FxBuildHasher, FxHashMap};
 use netidx::{
     chars::Chars,
     path::Path,
     subscriber::{Dval, SubId, UpdatesFlags, Value},
-    utils::Either,
 };
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
-    intrinsics::atomic_cxchg_acquire_relaxed,
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -143,9 +141,9 @@ pub trait Ctx {
         ref_by: ExprId,
     ) -> Dval;
     fn unsubscribe(&mut self, path: Path, dv: Dval, ref_by: ExprId);
-    fn ref_var(&mut self, name: Chars, scope: Path, ref_by: ExprId);
-    fn unref_var(&mut self, name: Chars, scope: Path, ref_by: ExprId);
-    fn register_fn(&mut self, name: Chars, scope: Path);
+    fn ref_var(&mut self, scope: Path, name: Chars, index: usize, ref_by: ExprId);
+    fn unref_var(&mut self, scope: Path, name: Chars, index: usize, ref_by: ExprId);
+    fn register_fn(&mut self, scope: Path, name: Chars);
     fn set_var(&mut self, scope: Path, name: Chars, index: usize, value: Value);
 
     /// For a given name, this must have at most one outstanding call
@@ -251,7 +249,6 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
         stdfn::Eval::register(&mut t);
         stdfn::FilterErr::register(&mut t);
         stdfn::Filter::register(&mut t);
-        stdfn::Get::register(&mut t);
         stdfn::If::register(&mut t);
         stdfn::Index::register(&mut t);
         stdfn::Isa::register(&mut t);
@@ -267,7 +264,6 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
         stdfn::Replace::register(&mut t);
         stdfn::RpcCall::register(&mut t);
         stdfn::Sample::register(&mut t);
-        stdfn::Set::register(&mut t);
         stdfn::StartsWith::register(&mut t);
         stdfn::Store::register(&mut t);
         stdfn::StringConcat::register(&mut t);
@@ -344,7 +340,8 @@ impl<C: Ctx, E: Clone> Node<C, E> {
     ) -> Self {
         match &spec {
             Expr { kind: ExprKind::Constant(v), id: _ } => {
-                Node::Constant(spec, v.clone())
+                let v = v.clone();
+                Node::Constant(spec, v)
             }
             Expr { kind: ExprKind::Apply { args, function }, id } => {
                 let scope = if &**function == "do" && id != &top_id {
@@ -395,20 +392,18 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                     Node::Bind { spec, scope, name, index, node: Box::new(node) }
                 }
             }
-            Expr { kind: ExprKind::Ref { name }, id: _ } => {
+            Expr { kind: ExprKind::Ref { name }, id } => {
                 match ctx.lookup_var(scope, name) {
                     None => {
-                        let error = Some(Value::Error(Chars::from(format!(
-                            "variable {name} is not defined"
-                        ))));
+                        let m = format!("variable {name} is not defined");
+                        let error = Some(Value::Error(Chars::from(m)));
                         Node::Error { spec, error, children: vec![] }
                     }
-                    Some((scope, index)) => Node::Ref {
-                        spec: spec.clone(),
-                        scope: scope.clone(),
-                        name: name.clone(),
-                        index,
-                    },
+                    Some((scope, index)) => {
+                        let scope = scope.clone();
+                        ctx.user.ref_var(scope.clone(), name.clone(), index, *id);
+                        Node::Ref { spec: spec.clone(), scope, name: name.clone(), index }
+                    }
                 }
             }
         }
@@ -421,7 +416,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
 
     pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
         match self {
-            Node::Error(_, _) => None,
+            Node::Error { .. } => None,
             Node::Constant(spec, v) => match event {
                 Event::Init => {
                     if ctx.dbg_ctx.trace {

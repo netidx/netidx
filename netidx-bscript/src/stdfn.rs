@@ -6,11 +6,11 @@ use fxhash::{FxBuildHasher, FxHashSet};
 use netidx::{
     chars::Chars,
     path::Path,
-    subscriber::{self, Dval, Typ, UpdatesFlags, Value},
+    subscriber::{Dval, Typ, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
-use smallvec::{smallvec, SmallVec};
-use std::{collections::HashSet, iter, marker::PhantomData, mem, sync::Arc};
+use smallvec::SmallVec;
+use std::{collections::HashSet, iter, marker::PhantomData, sync::Arc};
 
 pub struct CachedVals(pub SmallVec<[Option<Value>; 4]>);
 
@@ -69,7 +69,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Any {
         let f: InitFn<C, E> =
             Arc::new(|_, from, _, _| Box::new(Any(from.iter().find_map(|_| None))));
         ctx.functions.insert("any".into(), f);
-        ctx.user.register_fn("any".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "any".into());
     }
 }
 
@@ -102,7 +102,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Once {
         let f: InitFn<C, E> =
             Arc::new(|_, _, _, _| Box::new(Once { val: None, invalid: false }));
         ctx.functions.insert("once".into(), f);
-        ctx.user.register_fn("once".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "once".into());
     }
 }
 
@@ -155,7 +155,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Do {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Do));
         ctx.functions.insert("do".into(), f);
-        ctx.user.register_fn("do".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "do".into());
     }
 }
 
@@ -188,7 +188,7 @@ impl<C: Ctx, E: Clone, T: EvalCached + Send + Sync + 'static> Register<C, E>
             Box::new(CachedArgs::<T> { cached: CachedVals::new(from), t: PhantomData })
         });
         ctx.functions.insert(T::name().into(), f);
-        ctx.user.register_fn(T::name().into(), Path::root());
+        ctx.user.register_fn(Path::root(), T::name().into());
     }
 }
 
@@ -1086,10 +1086,11 @@ pub struct Eval<C: Ctx, E> {
 
 impl<C: Ctx, E: Clone> Register<C, E> for Eval<C, E> {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> =
-            Arc::new(|_, _, scope, _| Box::new(Eval { node: Err(Value::Null), scope }));
+        let f: InitFn<C, E> = Arc::new(|_, _, scope, _| {
+            Box::new(Eval { node: Err(Value::Null), scope: scope.clone() })
+        });
         ctx.functions.insert("eval".into(), f);
-        ctx.user.register_fn("eval".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "eval".into());
     }
 }
 
@@ -1109,7 +1110,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Eval<C, E> {
                 Some(v) => {
                     self.node = match v {
                         Value::String(s) => match s.parse::<Expr>() {
-                            Ok(spec) => Ok(Node::compile(ctx, self.scope.clone(), spec)),
+                            Ok(spec) => Ok(Node::compile(ctx, &self.scope, spec)),
                             Err(e) => {
                                 let e = format!(
                                     "eval(src), error parsing formula {}, {}",
@@ -1151,7 +1152,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Count {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Count { count: 0 }));
         ctx.functions.insert("count".into(), f);
-        ctx.user.register_fn("count".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "count".into());
     }
 }
 
@@ -1179,7 +1180,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Sample {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Sample { last: None }));
         ctx.functions.insert("sample".into(), f);
-        ctx.user.register_fn("sample".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "sample".into());
     }
 }
 
@@ -1253,7 +1254,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Uniq {
     fn register(ctx: &mut ExecCtx<C, E>) {
         let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Uniq(None)));
         ctx.functions.insert("uniq".into(), f);
-        ctx.user.register_fn("uniq".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "uniq".into());
     }
 }
 
@@ -1313,7 +1314,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Store {
             })
         });
         ctx.functions.insert("store".into(), f);
-        ctx.user.register_fn("store".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "store".into());
     }
 }
 
@@ -1410,114 +1411,6 @@ fn varname(name: Option<Value>) -> Option<Chars> {
     }
 }
 
-pub struct Set {
-    local: bool,
-    scope: Path,
-    args: CachedVals,
-    queue: SmallVec<[Value; 4]>,
-    name: Option<Chars>,
-}
-
-impl<C: Ctx, E: Clone> Register<C, E> for Set {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f = |local| -> InitFn<C, E> {
-            Arc::new(move |_, from, scope, _| {
-                Box::new(Set {
-                    local,
-                    scope,
-                    args: CachedVals::new(from),
-                    queue: smallvec![],
-                    name: None,
-                })
-            })
-        };
-        ctx.functions.insert("set".into(), f(false));
-        ctx.user.register_fn("set".into(), Path::root());
-        ctx.functions.insert("let".into(), f(true));
-        ctx.user.register_fn("let".into(), Path::root());
-    }
-}
-
-impl<C: Ctx, E: Clone> Apply<C, E> for Set {
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
-        event: &Event<E>,
-    ) -> Option<Value> {
-        let updates = self.args.update_diff(ctx, from, event);
-        let (args, args_up) = match (&*self.args.0, &*updates) {
-            ([name, val], [name_up, val_up]) => ((name, val), (name_up, val_up)),
-            (_, up) if !up.iter().any(|b| *b) => return None,
-            (_, _) => {
-                return Some(Value::Error(Chars::from(
-                    "store(var, val): expected 2 arguments",
-                )))
-            }
-        };
-        let mut error = None;
-        let set = match (args, args_up) {
-            ((_, _), (false, false)) => None,
-            ((_, Some(val)), (false, true)) => Some(val.clone()),
-            ((Some(name), Some(val)), (true, true)) if self.same_name(name) => {
-                Some(val.clone())
-            }
-            ((name, Some(val)), (true, vset)) => match varname(name.clone()) {
-                Some(name) => {
-                    let vset = *vset || self.name.is_some();
-                    self.name = Some(name);
-                    vset.then(|| val.clone())
-                }
-                None => {
-                    error = Some(Value::Error(Chars::from(format!(
-                        "invalid variable name {name:?}"
-                    ))));
-                    self.name = None;
-                    vset.then(|| val.clone())
-                }
-            },
-            ((Some(name), None), (true, _)) => match varname(Some(name.clone())) {
-                None => {
-                    error = Some(Value::Error(Chars::from(format!(
-                        "invalid variable name {name:?}"
-                    ))));
-                    self.name = None;
-                    None
-                }
-                Some(name) => {
-                    self.name = Some(name);
-                    None
-                }
-            },
-            ((_, None), (false, true)) | ((None, None), (_, _)) => None,
-        };
-        match &self.name {
-            None => self.queue.extend(set.into_iter()),
-            Some(name) => {
-                for val in self.queue.drain(..).chain(set.into_iter()) {
-                    ctx.user.set_var(
-                        &mut ctx.variables,
-                        self.local,
-                        self.scope.clone(),
-                        name.clone(),
-                        val,
-                    )
-                }
-            }
-        }
-        error
-    }
-}
-
-impl Set {
-    fn same_name(&self, new_name: &Value) -> bool {
-        match (new_name, &self.name) {
-            (Value::String(n0), Some(n1)) => n0 == n1,
-            _ => false,
-        }
-    }
-}
-
 pub(crate) struct Load {
     args: CachedVals,
     cur: Option<(Path, Dval)>,
@@ -1530,7 +1423,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Load {
             Box::new(Load { args: CachedVals::new(from), cur: None, top_id })
         });
         ctx.functions.insert("load".into(), f);
-        ctx.user.register_fn("load".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "load".into());
     }
 }
 
@@ -1581,7 +1474,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Load {
             }
         }
         self.cur.as_ref().and_then(|(_, dv)| match event {
-            Event::Variable(_, _, _)
+            Event::Variable { .. }
             | Event::Rpc(_, _)
             | Event::Timer(_)
             | Event::User(_)
@@ -1589,116 +1482,6 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Load {
             Event::Netidx(id, value) if dv.id() == *id => Some(value.clone()),
             Event::Netidx(_, _) => None,
         })
-    }
-}
-
-struct BoundVar {
-    name: Chars,
-    scope: Path,
-}
-
-pub struct Get {
-    args: CachedVals,
-    scope: Path,
-    name: Option<Chars>,
-    var: Option<BoundVar>,
-    top_id: ExprId,
-}
-
-impl<C: Ctx, E: Clone> Register<C, E> for Get {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from, scope, top_id| {
-            Box::new(Get { args: CachedVals::new(from), scope, name: None, var: None, top_id })
-        });
-        ctx.functions.insert("get".into(), f);
-        ctx.user.register_fn("get".into(), Path::root());
-    }
-}
-
-impl<C: Ctx, E: Clone> Apply<C, E> for Get {
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
-        event: &Event<E>,
-    ) -> Option<Value> {
-        let updates = self.args.update_diff(ctx, from, event);
-        let (name, name_up) = match (&*self.args.0, &*updates) {
-            ([name], [name_up]) => (name, name_up),
-            (_, up) if !up.iter().any(|b| *b) => return None,
-            (_, _) => {
-                return Some(Value::Error(Chars::from("get(var): expected 1 argument")))
-            }
-        };
-        match (name, name_up) {
-            (_, false) => (),
-            (Some(name), true) if self.same_name(name) => (),
-            (Some(name), true) => {
-                if let Some(bv) = self.var.take() {
-                    ctx.user.unref_var(bv.name, bv.scope, self.top_id);
-                }
-                match varname(Some(name.clone())) {
-                    None => {
-                        self.name = None;
-                        return Some(Value::Error(Chars::from(format!(
-                            "get(var): invalid variable name {name:?}"
-                        ))));
-                    }
-                    Some(name) => {
-                        self.var =
-                            ctx.lookup_var(&self.scope, &name).map(|(scope, value)| {
-                                BoundVar {
-                                    scope: scope.clone(),
-                                    value: value.clone(),
-                                    name: name.clone(),
-                                }
-                            });
-                        ctx.user.ref_var(name.clone(), self.scope.clone(), self.top_id);
-                        self.name = Some(name);
-                    }
-                }
-            }
-            (None, true) => {
-                if let Some(bv) = self.var.take() {
-                    ctx.user.unref_var(bv.name, self.scope.clone(), self.top_id);
-                }
-                self.name = None;
-            }
-        }
-        match (self.name.as_ref(), self.var.as_mut(), event) {
-            (_, Some(bv), Event::Variable(es, en, v))
-                if &bv.name == en
-                    && Path::is_parent(es, &self.scope)
-                    && Path::is_parent(&bv.scope, es) =>
-            {
-                if &bv.scope != es {
-                    bv.scope = es.clone();
-                }
-                bv.value = v.clone();
-                Some(v.clone())
-            }
-            (Some(vn), None, Event::Variable(es, en, v))
-                if vn == en && Path::is_parent(es, &self.scope) =>
-            {
-                self.var = Some(BoundVar { scope: es.clone(), value: v.clone() });
-                Some(v.clone())
-            }
-            (None, _, _)
-            | (Some(_), _, Event::Netidx(_, _))
-            | (Some(_), _, Event::User(_))
-            | (Some(_), _, Event::Rpc(_, _))
-            | (Some(_), _, Event::Timer(_))
-            | (Some(_), _, Event::Variable(_, _, _)) => None,
-        }
-    }
-}
-
-impl Get {
-    fn same_name(&self, name: &Value) -> bool {
-        match (&self.var, name) {
-            (Some(BoundVar { name: n0, .. }), Value::String(n1)) => n0 == n1,
-            (_, _) => false,
-        }
     }
 }
 
