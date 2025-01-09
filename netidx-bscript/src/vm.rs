@@ -10,10 +10,12 @@ use netidx::{
     chars::Chars,
     path::Path,
     subscriber::{Dval, SubId, UpdatesFlags, Value},
+    utils::Either,
 };
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
+    intrinsics::atomic_cxchg_acquire_relaxed,
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -283,7 +285,11 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
 }
 
 pub enum Node<C: Ctx, E> {
-    Error(Expr, Value),
+    Error {
+        spec: Expr,
+        error: Option<Value>,
+        children: Vec<Node<C, E>>,
+    },
     Constant(Expr, Value),
     Bind {
         spec: Expr,
@@ -308,7 +314,7 @@ pub enum Node<C: Ctx, E> {
 impl<C: Ctx, E> fmt::Display for Node<C, E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Node::Error(s, _)
+            Node::Error { spec: s, .. }
             | Node::Constant(s, _)
             | Node::Bind { spec: s, .. }
             | Node::Ref { spec: s, .. }
@@ -320,15 +326,25 @@ impl<C: Ctx, E> fmt::Display for Node<C, E> {
 }
 
 impl<C: Ctx, E: Clone> Node<C, E> {
+    pub fn is_err(&self) -> bool {
+        match self {
+            Node::Error { .. } => true,
+            Node::Apply { .. }
+            | Node::Bind { .. }
+            | Node::Constant(_, _)
+            | Node::Ref { .. } => false,
+        }
+    }
+
     pub fn compile_int(
         ctx: &mut ExecCtx<C, E>,
-        spec: &Expr,
+        spec: Expr,
         scope: &Path,
         top_id: ExprId,
     ) -> Self {
         match &spec {
             Expr { kind: ExprKind::Constant(v), id: _ } => {
-                Node::Constant(spec.clone(), v.clone())
+                Node::Constant(spec, v.clone())
             }
             Expr { kind: ExprKind::Apply { args, function }, id } => {
                 let scope = if &**function == "do" && id != &top_id {
@@ -336,25 +352,32 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 } else {
                     scope
                 };
-                let args: Vec<Node<C, E>> = args
-                    .iter()
-                    .map(|spec| Node::compile_int(ctx, spec, scope, top_id))
-                    .collect();
+                let (error, args): (bool, Vec<Node<C, E>>) =
+                    args.iter().fold((false, vec![]), |(e, mut nodes), spec| {
+                        let n = Node::compile_int(ctx, spec.clone(), scope, top_id);
+                        let e = e || n.is_err();
+                        nodes.push(n);
+                        (e, nodes)
+                    });
                 match ctx.functions.get(function).map(Arc::clone) {
                     None => {
                         let e = Value::Error(Chars::from(format!(
                             "unknown function {}",
                             function
                         )));
-                        Node::Error(spec.clone(), e)
+                        Node::Error { spec, error: Some(e), children: args }
                     }
                     Some(init) => {
-                        let function = init(ctx, &args, scope, top_id);
-                        Node::Apply { spec: spec.clone(), args, function }
+                        if error {
+                            Node::Error { spec, error: None, children: args }
+                        } else {
+                            let function = init(ctx, &args, scope, top_id);
+                            Node::Apply { spec, args, function }
+                        }
                     }
                 }
             }
-            Expr { kind: ExprKind::Bind { name, value }, id } => {
+            Expr { kind: ExprKind::Bind { name, value }, id: _ } => {
                 let index_ref = ctx
                     .variables
                     .entry(scope.clone())
@@ -363,26 +386,23 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                     .or_insert(0);
                 let index = *index_ref;
                 *index_ref += 1;
-                let node = {
-                    let scope = scope.append(&format!("let{id:?}"));
-                    Box::new(Node::compile_int(ctx, value, &scope, top_id))
-                };
-                Node::Bind {
-                    spec: spec.clone(),
-                    scope: scope.clone(),
-                    name: name.clone(),
-                    index,
-                    node,
+                let node = Node::compile_int(ctx, (**value).clone(), &scope, top_id);
+                if node.is_err() {
+                    Node::Error { spec, error: None, children: vec![node] }
+                } else {
+                    let name = name.clone();
+                    let scope = scope.clone();
+                    Node::Bind { spec, scope, name, index, node: Box::new(node) }
                 }
             }
             Expr { kind: ExprKind::Ref { name }, id: _ } => {
                 match ctx.lookup_var(scope, name) {
-                    None => Node::Error(
-                        spec.clone(),
-                        Value::Error(Chars::from(format!(
+                    None => {
+                        let error = Some(Value::Error(Chars::from(format!(
                             "variable {name} is not defined"
-                        ))),
-                    ),
+                        ))));
+                        Node::Error { spec, error, children: vec![] }
+                    }
                     Some((scope, index)) => Node::Ref {
                         spec: spec.clone(),
                         scope: scope.clone(),
@@ -394,7 +414,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
         }
     }
 
-    pub fn compile(ctx: &mut ExecCtx<C, E>, scope: &Path, spec: &Expr) -> Self {
+    pub fn compile(ctx: &mut ExecCtx<C, E>, scope: &Path, spec: Expr) -> Self {
         let top_id = spec.id;
         Self::compile_int(ctx, spec, scope, top_id)
     }
@@ -402,8 +422,13 @@ impl<C: Ctx, E: Clone> Node<C, E> {
     pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
         match self {
             Node::Error(_, _) => None,
-            Node::Constant(_, v) => match event {
-                Event::Init => Some(v.clone()),
+            Node::Constant(spec, v) => match event {
+                Event::Init => {
+                    if ctx.dbg_ctx.trace {
+                        ctx.dbg_ctx.add_event(spec.id, Some(event.clone()), v.clone())
+                    }
+                    Some(v.clone())
+                }
                 Event::Netidx(_, _)
                 | Event::Rpc(_, _)
                 | Event::Timer(_)
@@ -414,7 +439,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 let res = function.update(ctx, args, event);
                 if ctx.dbg_ctx.trace {
                     if let Some(v) = &res {
-                        ctx.dbg_ctx.add_event(spec.id, Some(event.clone()), v.clone());
+                        ctx.dbg_ctx.add_event(spec.id, Some(event.clone()), v.clone())
                     }
                 }
                 res
