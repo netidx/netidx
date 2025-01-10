@@ -2,7 +2,9 @@ use crate::{
     expr::{Expr, ExprId, VNAME},
     vm::{Apply, Ctx, Event, ExecCtx, InitFn, Node, Register},
 };
-use fxhash::{FxBuildHasher, FxHashSet};
+use anyhow::bail;
+use anyhow::{anyhow, Result};
+use fxhash::FxHashSet;
 use netidx::{
     chars::Chars,
     path::Path,
@@ -11,6 +13,17 @@ use netidx::{
 use netidx_core::utils::Either;
 use smallvec::SmallVec;
 use std::{collections::HashSet, iter, marker::PhantomData, sync::Arc};
+
+macro_rules! errf {
+    ($pat:expr, $($arg:expr),*) => { Some(Value::Error(Chars::from(format!($pat, $($arg),*)))) };
+    ($pat:expr) => { Some(Value::Error(Chars::from(format!($pat)))) };
+}
+
+macro_rules! err {
+    ($pat:expr) => {
+        Some(Value::Error(Chars::from($pat)))
+    };
+}
 
 pub struct CachedVals(pub SmallVec<[Option<Value>; 4]>);
 
@@ -93,14 +106,12 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Any {
 }
 
 pub struct Once {
-    val: Option<Value>,
-    invalid: bool,
+    val: bool,
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for Once {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> =
-            Arc::new(|_, _, _, _| Box::new(Once { val: None, invalid: false }));
+        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Once { val: false }));
         ctx.functions.insert("once".into(), f);
         ctx.user.register_fn(Path::root(), "once".into());
     }
@@ -114,37 +125,21 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Once {
         event: &Event<E>,
     ) -> Option<Value> {
         match from {
-            [s] => s.update(ctx, event).and_then(|v| match self.val {
-                Some(_) => None,
-                None => {
-                    self.invalid = false;
-                    self.val = Some(v);
-                    self.output()
+            [s] => s.update(ctx, event).and_then(|v| {
+                if self.val {
+                    None
+                } else {
+                    self.val = true;
+                    Some(v.clone())
                 }
             }),
-            exprs => {
-                self.invalid = true;
-                let mut up = false;
-                for e in exprs {
-                    up |= e.update(ctx, event).is_some();
-                }
-                if up {
-                    self.output()
+            n => {
+                if n.into_iter().fold(false, |u, n| u || n.update(ctx, event).is_some()) {
+                    err!("once(v): expected one argument")
                 } else {
                     None
                 }
             }
-        }
-    }
-}
-
-impl Once {
-    fn output(&self) -> Option<Value> {
-        if self.invalid {
-            let e = Chars::from("once(v): expected one argument");
-            Some(Value::Error(e))
-        } else {
-            self.val.clone()
         }
     }
 }
@@ -436,7 +431,7 @@ impl EvalCached for NotEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [v] => v.as_ref().map(|v| !(v.clone())),
-            _ => Some(Value::Error(Chars::from("not expected 1 argument"))),
+            _ => err!("not expected 1 argument"),
         }
     }
 
@@ -456,7 +451,7 @@ impl EvalCached for IsErrEv {
                 Value::Error(_) => Value::True,
                 _ => Value::False,
             }),
-            _ => Some(Value::Error(Chars::from("is_error expected 1 argument"))),
+            _ => err!("is_error expected 1 argument"),
         }
     }
 
@@ -481,7 +476,7 @@ impl EvalCached for StartsWithEv {
                 }
             }
             [None, _] | [_, None] => None,
-            _ => Some(Value::Error(Chars::from("starts_with expected 2 arguments"))),
+            _ => err!("starts_with expected 2 arguments"),
         }
     }
 
@@ -502,13 +497,11 @@ impl EvalCached for IndexEv {
                 if i < elts.len() {
                     Some(elts[i].clone())
                 } else {
-                    Some(Value::Error(Chars::from("array index out of bounds")))
+                    err!("array index out of bounds")
                 }
             }
             [None, _] | [_, None] => None,
-            _ => Some(Value::Error(Chars::from(
-                "index(array, index): expected an array and a positive index",
-            ))),
+            _ => err!("index(array, index): expected an array and a positive index"),
         }
     }
 
@@ -533,7 +526,7 @@ impl EvalCached for EndsWithEv {
                 }
             }
             [None, _] | [_, None] => None,
-            _ => Some(Value::Error(Chars::from("ends_with expected 2 arguments"))),
+            _ => err!("ends_with expected 2 arguments"),
         }
     }
 
@@ -558,7 +551,7 @@ impl EvalCached for ContainsEv {
                 }
             }
             [None, _] | [_, None] => None,
-            _ => Some(Value::Error(Chars::from("contains expected 2 arguments"))),
+            _ => err!("contains expected 2 arguments"),
         }
     }
 
@@ -578,7 +571,7 @@ impl EvalCached for StripPrefixEv {
                 .strip_prefix(&**pfx)
                 .map(|s| Value::String(Chars::from(String::from(s)))),
             [None, _] | [_, None] => None,
-            _ => Some(Value::Error(Chars::from("strip_prefix expected 2 arguments"))),
+            _ => err!("strip_prefix expected 2 arguments"),
         }
     }
 
@@ -598,7 +591,7 @@ impl EvalCached for StripSuffixEv {
                 .strip_suffix(&**sfx)
                 .map(|s| Value::String(Chars::from(String::from(s)))),
             [None, _] | [_, None] => None,
-            _ => Some(Value::Error(Chars::from("strip_suffix expected 2 arguments"))),
+            _ => err!("strip_suffix expected 2 arguments"),
         }
     }
 
@@ -618,7 +611,7 @@ impl EvalCached for TrimEv {
                 Some(Value::String(Chars::from(String::from(val.trim()))))
             }
             [None] => None,
-            _ => Some(Value::Error(Chars::from("trim expected 1 arguments"))),
+            _ => err!("trim expected 1 arguments"),
         }
     }
 
@@ -638,7 +631,7 @@ impl EvalCached for TrimStartEv {
                 Some(Value::String(Chars::from(String::from(val.trim_start()))))
             }
             [None] => None,
-            _ => Some(Value::Error(Chars::from("trim_start expected 1 arguments"))),
+            _ => err!("trim_start expected 1 arguments"),
         }
     }
 
@@ -658,7 +651,7 @@ impl EvalCached for TrimEndEv {
                 Some(Value::String(Chars::from(String::from(val.trim_end()))))
             }
             [None] => None,
-            _ => Some(Value::Error(Chars::from("trim_start expected 1 arguments"))),
+            _ => err!("trim_start expected 1 arguments"),
         }
     }
 
@@ -680,7 +673,7 @@ impl EvalCached for ReplaceEv {
                 ))))
             }
             [None, _, _] | [_, None, _] | [_, _, None] => None,
-            _ => Some(Value::Error(Chars::from("replace expected 3 arguments"))),
+            _ => err!("replace expected 3 arguments"),
         }
     }
 
@@ -701,7 +694,7 @@ impl EvalCached for DirnameEv {
                 Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
             },
             [None] => None,
-            _ => Some(Value::Error(Chars::from("dirname expected 1 argument"))),
+            _ => err!("dirname expected 1 argument"),
         }
     }
 
@@ -722,7 +715,7 @@ impl EvalCached for BasenameEv {
                 Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
             },
             [None] => None,
-            _ => Some(Value::Error(Chars::from("basename expected 1 argument"))),
+            _ => err!("basename expected 1 argument"),
         }
     }
 
@@ -783,16 +776,13 @@ impl EvalCached for CmpEv {
                             }
                         }
                         op => Value::Error(Chars::from(format!(
-                            "invalid op {}, expected eq, lt, gt, lte, or gte",
-                            op
+                            "invalid op {op}, expected eq, lt, gt, lte, or gte"
                         ))),
                     }),
                 },
-                Some(_) => Some(Value::Error(Chars::from(
-                    "cmp(op, v0, v1): expected op to be a string",
-                ))),
+                Some(_) => err!("cmp(op, v0, v1): expected op to be a string"),
             },
-            _ => Some(Value::Error(Chars::from("cmp(op, v0, v1): expected 3 arguments"))),
+            _ => err!("cmp(op, v0, v1): expected 3 arguments"),
         }
     }
 }
@@ -812,21 +802,21 @@ impl EvalCached for IfEv {
                 None => None,
                 Some(Value::True) => b1.clone(),
                 Some(Value::False) => None,
-                _ => Some(Value::Error(Chars::from(
-                    "if(predicate, caseIf, [caseElse]): expected boolean condition",
-                ))),
+                _ => {
+                    err!("if(predicate, caseIf, [caseElse]): expected boolean condition")
+                }
             },
             [cond, b1, b2] => match cond {
                 None => None,
                 Some(Value::True) => b1.clone(),
                 Some(Value::False) => b2.clone(),
-                _ => Some(Value::Error(Chars::from(
-                    "if(predicate, caseIf, [caseElse]): expected boolean condition",
-                ))),
+                _ => {
+                    err!("if(predicate, caseIf, [caseElse]): expected boolean condition")
+                }
             },
-            _ => Some(Value::Error(Chars::from(
-                "if(predicate, caseIf, [caseElse]): expected at least 2 arguments",
-            ))),
+            _ => {
+                err!("if(predicate, caseIf, [caseElse]): expected at least 2 arguments")
+            }
         }
     }
 }
@@ -846,13 +836,9 @@ impl EvalCached for FilterEv {
                 None => None,
                 Some(Value::True) => s.clone(),
                 Some(Value::False) => None,
-                _ => Some(Value::Error(Chars::from(
-                    "filter(predicate, source) expected boolean predicate",
-                ))),
+                _ => err!("filter(predicate, source) expected boolean predicate"),
             },
-            _ => Some(Value::Error(Chars::from(
-                "filter(predicate, source): expected 2 arguments",
-            ))),
+            _ => err!("filter(predicate, source): expected 2 arguments"),
         }
     }
 }
@@ -872,9 +858,7 @@ impl EvalCached for FilterErrEv {
                 None | Some(Value::Error(_)) => None,
                 Some(_) => s.clone(),
             },
-            _ => {
-                Some(Value::Error(Chars::from("filter_err(source): expected 1 argument")))
-            }
+            _ => err!("filter_err(source): expected 1 argument"),
         }
     }
 }
@@ -893,17 +877,11 @@ fn with_typ_prefix(
             None => None,
             Some(Value::String(s)) => match s.parse::<Typ>() {
                 Ok(typ) => f(typ, src),
-                Err(e) => Some(Value::Error(Chars::from(format!(
-                    "{}: invalid type {}, {}",
-                    name, s, e
-                )))),
+                Err(e) => errf!("{name}: invalid type {s}, {e}"),
             },
-            _ => Some(Value::Error(Chars::from(format!(
-                "{} expected typ as string",
-                name
-            )))),
+            _ => errf!("{name} expected typ as string"),
         },
-        _ => Some(Value::Error(Chars::from(format!("{} expected 2 arguments", name)))),
+        _ => errf!("{name} expected 2 arguments"),
     }
 }
 
@@ -987,9 +965,9 @@ impl EvalCached for StringJoinEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         use bytes::BytesMut;
         match &from.0[..] {
-            [_] | [] => Some(Value::Error(Chars::from(
-                "string_join(sep, s0, s1, ...): expected at least 2 arguments",
-            ))),
+            [_] | [] => {
+                err!("string_join(sep, s0, s1, ...): expected at least 2 arguments")
+            }
             [None, ..] => None,
             [Some(sep), parts @ ..] => {
                 // this is fairly common, so we check it before doing any real work
@@ -1002,11 +980,7 @@ impl EvalCached for StringJoinEv {
                     Value::String(c) => c.clone(),
                     sep => match sep.clone().cast_to::<Chars>().ok() {
                         Some(c) => c,
-                        None => {
-                            return Some(Value::Error(Chars::from(
-                                "string_join, separator must be a string",
-                            )))
-                        }
+                        None => return err!("string_join, separator must be a string"),
                     },
                 };
                 let mut res = BytesMut::new();
@@ -1016,9 +990,7 @@ impl EvalCached for StringJoinEv {
                         v => match v.clone().cast_to::<Chars>().ok() {
                             Some(c) => c,
                             None => {
-                                return Some(Value::Error(Chars::from(
-                                    "string_join, components must be strings",
-                                )))
+                                return err!("string_join, components must be strings")
                             }
                         },
                     };
@@ -1047,9 +1019,7 @@ impl EvalCached for StringConcatEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         use bytes::BytesMut;
         match &from.0[..] {
-            [] => Some(Value::Error(Chars::from(
-                "string_concat: expected at least 1 argument",
-            ))),
+            [] => err!("string_concat: expected at least 1 argument",),
             parts => {
                 // this is a fairly common case, so we check it before doing any real work
                 for p in parts {
@@ -1064,9 +1034,7 @@ impl EvalCached for StringConcatEv {
                         v => match v.clone().cast_to::<Chars>().ok() {
                             Some(c) => res.extend_from_slice(c.bytes()),
                             None => {
-                                return Some(Value::Error(Chars::from(
-                                    "string_concat: arguments must be strings",
-                                )))
+                                return err!("string_concat: arguments must be strings",)
                             }
                         },
                     }
@@ -1112,18 +1080,14 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Eval<C, E> {
                         Value::String(s) => match s.parse::<Expr>() {
                             Ok(spec) => Ok(Node::compile(ctx, &self.scope, spec)),
                             Err(e) => {
-                                let e = format!(
-                                    "eval(src), error parsing formula {}, {}",
-                                    s, e
-                                );
+                                let e =
+                                    format!("eval(src), error parsing formula {s}, {e}");
                                 Err(Value::Error(Chars::from(e)))
                             }
                         },
                         v => {
-                            let e = format!(
-                                "eval(src) expected 1 string argument, not {}",
-                                v
-                            );
+                            let e =
+                                format!("eval(src) expected 1 string argument, not {v}");
                             Err(Value::Error(Chars::from(e)))
                         }
                     };
@@ -1135,7 +1099,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Eval<C, E> {
             },
             n => {
                 if n.into_iter().fold(false, |u, n| u || n.update(ctx, event).is_some()) {
-                    Some(Value::Error(Chars::from("eval expects 1 argument")))
+                    err!("eval expects 1 argument")
                 } else {
                     None
                 }
@@ -1200,10 +1164,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Sample {
             }
             n => {
                 if n.into_iter().fold(false, |u, n| u || n.update(ctx, event).is_some()) {
-                    let v = Some(Value::Error(Chars::from(
-                        "sample(trigger, source): expected 2 arguments",
-                    )));
-                    v
+                    err!("sample(trigger, source): expected 2 arguments")
                 } else {
                     None
                 }
@@ -1222,12 +1183,10 @@ impl EvalCached for MeanEv {
         for v in from.flat_iter() {
             if let Some(v) = v {
                 match v.cast_to::<f64>() {
+                    Err(e) => error = errf!("{e:?}"),
                     Ok(v) => {
                         total += v;
                         samples += 1;
-                    }
-                    Err(e) => {
-                        error = Some(Value::Error(Chars::from(format!("{e:?}"))));
                     }
                 }
             }
@@ -1235,7 +1194,7 @@ impl EvalCached for MeanEv {
         if let Some(e) = error {
             Some(e)
         } else if samples == 0 {
-            Some(Value::Error(Chars::from("mean requires at least one argument")))
+            err!("mean requires at least one argument")
         } else {
             Some(Value::F64(total / samples as f64))
         }
@@ -1276,7 +1235,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Uniq {
             }),
             n => {
                 if n.into_iter().fold(false, |u, n| u || n.update(ctx, event).is_some()) {
-                    Some(Value::Error(Chars::from("uniq(e): expected 1 argument")))
+                    err!("uniq(e): expected 1 argument")
                 } else {
                     None
                 }
@@ -1337,11 +1296,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Store {
         let (args, updated) = match (&*self.args.0, &*updated) {
             ([path, value], [path_up, value_up]) => ((path, value), (path_up, value_up)),
             (_, up) if !up.iter().any(|b| *b) => return None,
-            (_, _) => {
-                return Some(Value::Error(Chars::from(
-                    "set(path, val): expected 2 arguments",
-                )))
-            }
+            (_, _) => return err!("set(path, val): expected 2 arguments"),
         };
         match (args, updated) {
             ((_, _), (false, false)) => (),
@@ -1359,9 +1314,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Store {
                     if let Either::Left(_) = &self.dv {
                         self.dv = Either::Right(vec![]);
                     }
-                    return Some(Value::Error(Chars::from(format!(
-                        "set(path, val): invalid path {path:?}"
-                    ))));
+                    return errf!("set(path, val): invalid path {path:?}");
                 }
                 Some(path) => {
                     let dv = ctx.user.durable_subscribe(
@@ -1438,9 +1391,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Load {
         let (path, path_up) = match (&*self.args.0, &*updates) {
             ([path], [path_up]) => (path, path_up),
             (_, up) if !up.iter().any(|b| *b) => return None,
-            (_, _) => {
-                return Some(Value::Error(Chars::from("load(path): expected 1 argument")))
-            }
+            (_, _) => return err!("load(path): expected 1 argument"),
         };
         match (path, path_up) {
             (Some(_), false) | (None, false) => (),
@@ -1455,11 +1406,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Load {
                     ctx.user.unsubscribe(path, dv, self.top_id)
                 }
                 match as_path(path.clone()) {
-                    None => {
-                        return Some(Value::Error(Chars::from(format!(
-                            "load(path): invalid absolute path {path:?}"
-                        ))))
-                    }
+                    None => return errf!("load(path): invalid absolute path {path:?}"),
                     Some(path) => {
                         self.cur = Some((
                             path.clone(),
@@ -1491,147 +1438,82 @@ pub(crate) struct RpcCall {
     args: CachedVals,
     top_id: ExprId,
     pending: FxHashSet<RpcCallId>,
-    current: Option<Value>,
-    triggered: bool,
-    invalid: bool,
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for RpcCall {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, top_id| {
-            let triggered = match from {
-                [trigger, ..] => trigger.current(ctx).is_some(),
-                _ => false,
-            };
-            let mut t = RpcCall {
-                args: CachedVals::new(
-                    match from {
-                        [_, rest @ ..] => rest,
-                        [] => &[],
-                    },
-                    ctx,
-                ),
-                current: None,
+        let f: InitFn<C, E> = Arc::new(|_, from, _, top_id| {
+            Box::new(RpcCall {
+                args: CachedVals::new(from),
                 top_id,
-                pending: HashSet::with_hasher(FxBuildHasher::default()),
-                triggered,
-                invalid: false,
-            };
-            t.maybe_call(ctx);
-            Box::new(t)
+                pending: HashSet::default(),
+            })
         });
         ctx.functions.insert("call".into(), f);
-        ctx.user.register_fn("call".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "call".into());
     }
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        self.current.clone()
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        match event {
-            Event::Rpc(id, v) if self.pending.remove(&id) => {
-                self.current = Some(v.clone());
-                Apply::<C, E>::current(self, ctx)
+        fn parse_args(path: &Value, args: &Value) -> Result<(Path, Vec<(Chars, Value)>)> {
+            let path = as_path(path.clone()).ok_or_else(|| anyhow!("invalid path"))?;
+            let args = match args {
+                Value::Array(args) => args
+                    .into_iter()
+                    .map(|v| match v {
+                        Value::Array(p) => match &**p {
+                            [Value::String(name), value] => {
+                                Ok((name.clone(), value.clone()))
+                            }
+                            _ => Err(anyhow!(
+                                "rpc args expected to be a [name, value] pair"
+                            )),
+                        },
+                        _ => Err(anyhow!("rpc args expected to be a [name, value] pair")),
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                _ => bail!("rpc args expected to be an array"),
+            };
+            Ok((path, args))
+        }
+        let updates = self.args.update_diff(ctx, from, event);
+        let ((path, args), (path_up, args_up)) = match (&*self.args.0, &*updates) {
+            ([path, args], [path_up, args_up]) => ((path, args), (path_up, args_up)),
+            (_, up) if !up.iter().any(|b| *b) => {
+                return err!("call(path, args): expected 2 arguments")
             }
-            event => match from {
-                [trigger, args @ ..] => {
-                    self.args.update(ctx, args, event);
-                    if trigger.update(ctx, event).is_some() {
-                        self.triggered = true;
-                    }
-                    let triggered = self.triggered;
-                    self.maybe_call(ctx);
-                    if triggered && self.invalid {
-                        Apply::<C, E>::current(self, ctx)
-                    } else {
-                        None
-                    }
-                }
-                [] => {
-                    self.invalid();
-                    Apply::<C, E>::current(self, ctx)
+            (_, _) => return None,
+        };
+        match ((path, args), (path_up, args_up)) {
+            ((Some(path), Some(args)), (_, true))
+            | ((Some(path), Some(args)), (true, _)) => match parse_args(path, args) {
+                Err(e) => return errf!("{e}"),
+                Ok((path, args)) => {
+                    let id = RpcCallId::new();
+                    self.pending.insert(id);
+                    ctx.user.call_rpc(path, args, self.top_id, id);
                 }
             },
+            ((None, _), (_, _)) | ((_, None), (_, _)) | ((_, _), (false, false)) => (),
         }
-    }
-}
-
-impl RpcCall {
-    fn invalid(&mut self) {
-        let m = "call(trigger, rpc, kwargs): expected at least 2 arguments, and an even number of kwargs";
-        self.current = Some(Value::Error(Chars::from(m)));
-        self.invalid = true;
-    }
-
-    fn get_args(&mut self) -> Option<(Path, Vec<(Chars, Value)>)> {
-        self.current = None;
-        self.invalid = false;
-        let len = self.args.0.len();
-        if len == 0 || (len > 1 && len.is_power_of_two()) {
-            self.invalid();
-            None
-        } else if self.args.0.iter().any(|v| v.is_none()) {
-            None
-        } else {
-            match &self.args.0[..] {
-                [] => {
-                    self.invalid();
+        match event {
+            Event::Init
+            | Event::Netidx(_, _)
+            | Event::Timer(_)
+            | Event::User(_)
+            | Event::Variable { .. } => None,
+            Event::Rpc(id, val) => {
+                if self.pending.remove(id) {
+                    Some(val.clone())
+                } else {
                     None
                 }
-                [path, args @ ..] => {
-                    match path.as_ref().unwrap().clone().cast_to::<Chars>() {
-                        Err(_) => {
-                            self.invalid();
-                            None
-                        }
-                        Ok(name) => {
-                            let mut iter = args.into_iter();
-                            let mut args = Vec::new();
-                            loop {
-                                match iter.next() {
-                                    None | Some(None) => break,
-                                    Some(Some(name)) => {
-                                        match name.clone().cast_to::<Chars>() {
-                                            Err(_) => {
-                                                self.invalid();
-                                                return None;
-                                            }
-                                            Ok(name) => match iter.next() {
-                                                None | Some(None) => {
-                                                    self.invalid();
-                                                    return None;
-                                                }
-                                                Some(Some(val)) => {
-                                                    args.push((name, val.clone()));
-                                                }
-                                            },
-                                        }
-                                    }
-                                }
-                            }
-                            Some((Path::from(name), args))
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn maybe_call<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>) {
-        if self.triggered {
-            if let Some((name, args)) = self.get_args() {
-                self.triggered = false;
-                let id = RpcCallId::new();
-                self.pending.insert(id);
-                ctx.user.call_rpc(Path::from(name), args, self.top_id, id);
             }
         }
     }
