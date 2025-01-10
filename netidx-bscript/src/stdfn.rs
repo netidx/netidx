@@ -1471,11 +1471,9 @@ impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
                             [Value::String(name), value] => {
                                 Ok((name.clone(), value.clone()))
                             }
-                            _ => Err(anyhow!(
-                                "rpc args expected to be a [name, value] pair"
-                            )),
+                            _ => Err(anyhow!("rpc args expected [name, value] pair")),
                         },
-                        _ => Err(anyhow!("rpc args expected to be a [name, value] pair")),
+                        _ => Err(anyhow!("rpc args expected [name, value] pair")),
                     })
                     .collect::<Result<Vec<_>>>()?,
                 _ => bail!("rpc args expected to be an array"),
