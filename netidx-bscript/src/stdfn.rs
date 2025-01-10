@@ -8,11 +8,15 @@ use fxhash::FxHashSet;
 use netidx::{
     chars::Chars,
     path::Path,
+    publisher::FromValue,
     subscriber::{Dval, Typ, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
 use smallvec::SmallVec;
-use std::{collections::HashSet, iter, marker::PhantomData, sync::Arc};
+use std::{
+    collections::HashSet, iter, marker::PhantomData, ops::SubAssign, sync::Arc,
+    time::Duration,
+};
 
 macro_rules! errf {
     ($pat:expr, $($arg:expr),*) => { Some(Value::Error(Chars::from(format!($pat, $($arg),*)))) };
@@ -22,6 +26,26 @@ macro_rules! errf {
 macro_rules! err {
     ($pat:expr) => {
         Some(Value::Error(Chars::from($pat)))
+    };
+}
+
+macro_rules! arity1 {
+    ($from:expr, $updates:expr, $usage:expr) => {
+        match (&*$from, &*$updates) {
+            ([arg], [arg_up]) => (arg, arg_up),
+            (_, up) if !up.iter().any(|b| *b) => return None,
+            (_, _) => return err!($usage),
+        }
+    };
+}
+
+macro_rules! arity2 {
+    ($from:expr, $updates:expr, $usage:expr) => {
+        match (&*$from, &*$updates) {
+            ([arg0, arg1], [arg0_up, arg1_up]) => ((arg0, arg1), (arg0_up, arg1_up)),
+            (_, up) if !up.iter().any(|b| *b) => return None,
+            (_, _) => return err!($usage),
+        }
     };
 }
 
@@ -1019,7 +1043,7 @@ impl EvalCached for StringConcatEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         use bytes::BytesMut;
         match &from.0[..] {
-            [] => err!("string_concat: expected at least 1 argument",),
+            [] => err!("string_concat: expected at least 1 argument"),
             parts => {
                 // this is a fairly common case, so we check it before doing any real work
                 for p in parts {
@@ -1034,7 +1058,7 @@ impl EvalCached for StringConcatEv {
                         v => match v.clone().cast_to::<Chars>().ok() {
                             Some(c) => res.extend_from_slice(c.bytes()),
                             None => {
-                                return err!("string_concat: arguments must be strings",)
+                                return err!("string_concat: arguments must be strings")
                             }
                         },
                     }
@@ -1292,12 +1316,9 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Store {
                 }
             }
         }
-        let updated = self.args.update_diff(ctx, from, event);
-        let (args, updated) = match (&*self.args.0, &*updated) {
-            ([path, value], [path_up, value_up]) => ((path, value), (path_up, value_up)),
-            (_, up) if !up.iter().any(|b| *b) => return None,
-            (_, _) => return err!("set(path, val): expected 2 arguments"),
-        };
+        let up = self.args.update_diff(ctx, from, event);
+        let (args, updated) =
+            arity2!(self.args.0, up, "set(path, val): expected 2 arguments");
         match (args, updated) {
             ((_, _), (false, false)) => (),
             ((_, Some(val)), (false, true)) => set(&mut self.dv, val),
@@ -1387,12 +1408,8 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Load {
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        let updates = self.args.update_diff(ctx, from, event);
-        let (path, path_up) = match (&*self.args.0, &*updates) {
-            ([path], [path_up]) => (path, path_up),
-            (_, up) if !up.iter().any(|b| *b) => return None,
-            (_, _) => return err!("load(path): expected 1 argument"),
-        };
+        let up = self.args.update_diff(ctx, from, event);
+        let (path, path_up) = arity1!(self.args.0, up, "load(path): expected 1 argument");
         match (path, path_up) {
             (Some(_), false) | (None, false) => (),
             (None, true) => {
@@ -1423,7 +1440,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Load {
         self.cur.as_ref().and_then(|(_, dv)| match event {
             Event::Variable { .. }
             | Event::Rpc(_, _)
-            | Event::Timer(_)
+            | Event::Timer(_, _)
             | Event::User(_)
             | Event::Init => None,
             Event::Netidx(id, value) if dv.id() == *id => Some(value.clone()),
@@ -1465,7 +1482,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
             let path = as_path(path.clone()).ok_or_else(|| anyhow!("invalid path"))?;
             let args = match args {
                 Value::Array(args) => args
-                    .into_iter()
+                    .iter()
                     .map(|v| match v {
                         Value::Array(p) => match &**p {
                             [Value::String(name), value] => {
@@ -1480,14 +1497,9 @@ impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
             };
             Ok((path, args))
         }
-        let updates = self.args.update_diff(ctx, from, event);
-        let ((path, args), (path_up, args_up)) = match (&*self.args.0, &*updates) {
-            ([path, args], [path_up, args_up]) => ((path, args), (path_up, args_up)),
-            (_, up) if !up.iter().any(|b| *b) => {
-                return err!("call(path, args): expected 2 arguments")
-            }
-            (_, _) => return None,
-        };
+        let up = self.args.update_diff(ctx, from, event);
+        let ((path, args), (path_up, args_up)) =
+            arity2!(self.args.0, up, "call(path, args): expected 2 arguments");
         match ((path, args), (path_up, args_up)) {
             ((Some(path), Some(args)), (_, true))
             | ((Some(path), Some(args)), (true, _)) => match parse_args(path, args) {
@@ -1503,7 +1515,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
         match event {
             Event::Init
             | Event::Netidx(_, _)
-            | Event::Timer(_)
+            | Event::Timer(_, _)
             | Event::User(_)
             | Event::Variable { .. } => None,
             Event::Rpc(id, val) => {
@@ -1520,283 +1532,210 @@ impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
 atomic_id!(TimerId);
 
 pub(crate) struct AfterIdle {
-    timeout: Option<Value>,
-    cur: Option<Value>,
-    updated: bool,
-    timer_set: bool,
-    id: TimerId,
+    args: CachedVals,
+    id: Option<TimerId>,
     eid: ExprId,
-    invalid: bool,
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for AfterIdle {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, eid| match from {
-            [timeout, cur] => {
-                let mut t = AfterIdle {
-                    timeout: timeout.current(ctx),
-                    cur: cur.current(ctx),
-                    updated: false,
-                    timer_set: false,
-                    id: TimerId::new(),
-                    eid,
-                    invalid: false,
-                };
-                t.maybe_set_timer(ctx);
-                Box::new(t)
-            }
-            _ => Box::new(AfterIdle {
-                timeout: None,
-                cur: None,
-                updated: false,
-                timer_set: false,
-                id: TimerId::new(),
-                eid,
-                invalid: true,
-            }),
+        let f: InitFn<C, E> = Arc::new(|_, from, _, eid| {
+            Box::new(AfterIdle { args: CachedVals::new(from), id: None, eid })
         });
         ctx.functions.insert("after_idle".into(), f);
-        ctx.user.register_fn("after_idle".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "after_idle".into());
     }
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for AfterIdle {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        self.usage()
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        match from {
-            [timeout, cur] => {
-                if let Some(timeout) = timeout.update(ctx, event) {
-                    self.timeout = Some(timeout);
-                    self.maybe_set_timer(ctx);
+        let up = self.args.update_diff(ctx, from, event);
+        let ((timeout, val), (timeout_up, val_up)) =
+            arity2!(self.args.0, up, "after_idle(timeout, cur): expected 2 arguments");
+        match ((timeout, val), (timeout_up, val_up)) {
+            ((Some(secs), _), (true, _)) => match secs.clone().cast_to::<Duration>() {
+                Err(e) => {
+                    self.id = None;
+                    return errf!("after_idle(timeout, cur): expected duration {e:?}");
                 }
-                if let Some(cur) = cur.update(ctx, event) {
-                    self.updated = true;
-                    self.cur = Some(cur);
-                    self.maybe_set_timer(ctx);
+                Ok(dur) => {
+                    let id = TimerId::new();
+                    self.id = Some(id);
+                    ctx.user.set_timer(id, dur, self.eid);
+                    return None;
                 }
-                match event {
-                    Event::Variable(_, _, _)
-                    | Event::Netidx(_, _)
-                    | Event::Rpc(_, _)
-                    | Event::User(_) => self.usage(),
-                    Event::Timer(id) => {
-                        if id != &self.id {
-                            self.usage()
-                        } else {
-                            self.timer_set = false;
-                            if self.updated {
-                                self.maybe_set_timer(ctx);
-                                self.usage()
-                            } else {
-                                self.cur.clone()
-                            }
-                        }
-                    }
-                }
+            },
+            ((Some(_), Some(val)), (false, true)) if self.id.is_none() => {
+                return Some(val.clone())
             }
-            exprs => {
-                let mut up = false;
-                self.invalid = true;
-                for expr in exprs {
-                    up |= expr.update(ctx, event).is_some();
-                }
-                if up {
-                    self.usage()
-                } else {
+            ((None, _), (_, _))
+            | ((_, None), (_, _))
+            | ((Some(_), Some(_)), (false, _)) => (),
+        };
+        match event {
+            Event::Init
+            | Event::Variable { .. }
+            | Event::Netidx(_, _)
+            | Event::Rpc(_, _)
+            | Event::User(_) => None,
+            Event::Timer(id, _) => {
+                if self.id != Some(*id) {
                     None
+                } else {
+                    self.id = None;
+                    self.args.0.get(1).and_then(|v| v.clone())
                 }
             }
         }
     }
 }
 
-impl AfterIdle {
-    fn maybe_set_timer<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>) {
-        use std::time::Duration;
-        if !self.invalid && !self.timer_set {
-            match (&self.timeout, &self.cur) {
-                (Some(timeout), Some(_)) => match timeout.clone().cast_to::<f64>() {
-                    Err(_) => {
-                        self.invalid = true;
-                    }
-                    Ok(timeout) => {
-                        self.invalid = false;
-                        self.updated = false;
-                        self.timer_set = true;
-                        ctx.user.set_timer(
-                            self.id,
-                            Duration::from_secs_f64(timeout),
-                            self.eid,
-                        );
-                    }
-                },
-                (_, _) => (),
-            }
+#[derive(Clone, Copy)]
+enum Repeat {
+    Yes,
+    No,
+    N(u64),
+}
+
+impl FromValue for Repeat {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::True => Ok(Repeat::Yes),
+            Value::False => Ok(Repeat::No),
+            v => match v.cast_to::<u64>() {
+                Ok(n) => Ok(Repeat::N(n)),
+                Err(_) => bail!("could not cast to repeat"),
+            },
         }
     }
+}
 
-    fn usage(&self) -> Option<Value> {
-        if self.invalid {
-            Some(Value::Error(Chars::from(
-                "after_idle(timeout: f64, v: any): expected two arguments",
-            )))
-        } else {
-            None
+impl SubAssign<u64> for Repeat {
+    fn sub_assign(&mut self, rhs: u64) {
+        match self {
+            Repeat::Yes | Repeat::No => (),
+            Repeat::N(n) => *n -= rhs,
+        }
+    }
+}
+
+impl Repeat {
+    fn will_repeat(&self) -> bool {
+        match self {
+            Repeat::No => false,
+            Repeat::Yes => true,
+            Repeat::N(n) => *n > 0,
         }
     }
 }
 
 pub(crate) struct Timer {
-    id: TimerId,
+    args: CachedVals,
+    timeout: Option<Duration>,
+    repeat: Repeat,
+    id: Option<TimerId>,
     eid: ExprId,
-    timeout: Option<Value>,
-    repeat: Option<Value>,
-    timer_set: bool,
-    invalid: bool,
 }
 
 impl<C: Ctx, E: Clone> Register<C, E> for Timer {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|ctx, from, _, eid| match from {
-            [timeout, repeat] => {
-                let mut t = Self {
-                    id: TimerId::new(),
-                    eid,
-                    timeout: timeout.current(ctx),
-                    repeat: match repeat.current(ctx) {
-                        Some(Value::False) => Some(1.into()),
-                        v => v,
-                    },
-                    timer_set: false,
-                    invalid: false,
-                };
-                t.maybe_set_timer(ctx);
-                Box::new(t)
-            }
-            _ => Box::new(Self {
-                id: TimerId::new(),
-                eid,
+        let f: InitFn<C, E> = Arc::new(|_, from, _, eid| {
+            Box::new(Self {
+                args: CachedVals::new(from),
                 timeout: None,
-                repeat: None,
-                timer_set: false,
-                invalid: true,
-            }),
+                repeat: Repeat::No,
+                id: None,
+                eid,
+            })
         });
         ctx.functions.insert("timer".into(), f);
-        ctx.user.register_fn("timer".into(), Path::root());
+        ctx.user.register_fn(Path::root(), "timer".into());
     }
 }
 
 impl<C: Ctx, E: Clone> Apply<C, E> for Timer {
-    fn current(&self, _ctx: &mut ExecCtx<C, E>) -> Option<Value> {
-        self.usage()
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        match from {
-            [timeout, repeat] => {
-                if let Some(timeout) = timeout.update(ctx, event) {
-                    self.timeout = Some(timeout);
-                    self.maybe_set_timer(ctx);
-                }
-                if let Some(repeat) = repeat.update(ctx, event) {
-                    self.repeat = Some(repeat);
-                    self.maybe_set_timer(ctx);
-                }
-                match event {
-                    Event::Variable(_, _, _)
-                    | Event::Netidx(_, _)
-                    | Event::Rpc(_, _)
-                    | Event::User(_) => self.usage(),
-                    Event::Timer(id) => {
-                        if id != &self.id {
-                            self.usage()
-                        } else {
-                            self.timer_set = false;
-                            self.maybe_set_timer(ctx);
-                            Some(Value::Null)
-                        }
-                    }
-                }
-            }
-            exprs => {
-                let mut up = false;
-                self.invalid = true;
-                for expr in exprs {
-                    up |= expr.update(ctx, event).is_some();
-                }
-                if up {
-                    self.usage()
-                } else {
-                    None
-                }
-            }
+        macro_rules! error {
+            () => {{
+                self.id = None;
+                self.timeout = None;
+                self.repeat = Repeat::No;
+                return err!("timer(per, rep): expected duration, bool or number >= 0");
+            }};
         }
-    }
-}
-
-impl Timer {
-    fn maybe_set_timer<C: Ctx, E>(&mut self, ctx: &mut ExecCtx<C, E>) {
-        use std::time::Duration;
-        if !self.invalid && !self.timer_set {
-            match (&self.timeout, &self.repeat) {
-                (None, _) | (_, None) => (),
-                (Some(timeout), Some(repeat)) => {
-                    let timeout = timeout.clone().cast_to::<f64>();
-                    let repeat = match repeat {
-                        Value::Null => Ok(None),
-                        Value::True => Ok(None),
-                        Value::False => Ok(Some(0)),
-                        v => v.clone().cast_to::<u64>().map(|v| Some(v)),
-                    };
-                    match (timeout, repeat) {
-                        (Ok(timeout), Ok(repeat)) => {
-                            let go = match repeat {
-                                None => true,
-                                Some(n) => {
-                                    if n == 0 {
-                                        false
-                                    } else {
-                                        self.repeat = Some((n - 1).into());
-                                        true
-                                    }
-                                }
-                            };
-                            if go {
-                                self.timer_set = true;
-                                let d = Duration::from_secs_f64(timeout);
-                                ctx.user.set_timer(self.id, d, self.eid);
+        macro_rules! schedule {
+            ($dur:expr) => {{
+                let id = TimerId::new();
+                self.id = Some(id);
+                ctx.user.set_timer(id, $dur, self.eid);
+            }};
+        }
+        let up = self.args.update_diff(ctx, from, event);
+        let ((timeout, repeat), (timeout_up, repeat_up)) =
+            arity2!(self.args.0, up, "timer(period, repeat): expected 2 arguments");
+        match ((timeout, repeat), (timeout_up, repeat_up)) {
+            ((None, Some(r)), (true, true)) | ((_, Some(r)), (false, true)) => {
+                match r.clone().cast_to::<Repeat>() {
+                    Err(_) => error!(),
+                    Ok(repeat) => {
+                        self.repeat = repeat;
+                        if let Some(dur) = self.timeout {
+                            if self.id.is_none() && repeat.will_repeat() {
+                                schedule!(dur)
                             }
                         }
-                        (_, _) => {
-                            self.invalid = true;
-                        }
                     }
                 }
             }
+            ((Some(s), None), (true, _)) => match s.clone().cast_to::<Duration>() {
+                Err(_) => error!(),
+                Ok(dur) => self.timeout = Some(dur),
+            },
+            ((Some(s), Some(r)), (true, _)) => {
+                match (s.clone().cast_to::<Duration>(), r.clone().cast_to::<Repeat>()) {
+                    (Err(_), _) | (_, Err(_)) => error!(),
+                    (Ok(dur), Ok(repeat)) => {
+                        self.timeout = Some(dur);
+                        self.repeat = repeat;
+                        schedule!(dur)
+                    }
+                }
+            }
+            ((_, _), (false, false))
+            | ((None, None), (_, _))
+            | ((None, _), (true, false))
+            | ((_, None), (false, true)) => (),
         }
-    }
-
-    fn usage(&self) -> Option<Value> {
-        if self.invalid {
-            Some(Value::Error(Chars::from(
-                "timer(timeout: f64, repeat): expected two arguments",
-            )))
-        } else {
-            None
+        match event {
+            Event::Init
+            | Event::Variable { .. }
+            | Event::Netidx(_, _)
+            | Event::Rpc(_, _)
+            | Event::User(_) => None,
+            Event::Timer(id, now) => {
+                if self.id != Some(*id) {
+                    None
+                } else {
+                    self.id = None;
+                    self.repeat -= 1;
+                    if let Some(dur) = self.timeout {
+                        if self.repeat.will_repeat() {
+                            schedule!(dur)
+                        }
+                    }
+                    Some(now.clone())
+                }
+            }
         }
     }
 }

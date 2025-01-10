@@ -104,7 +104,7 @@ pub enum Event<E> {
     Variable { scope: Path, name: Chars, index: usize, value: Value },
     Netidx(SubId, Value),
     Rpc(RpcCallId, Value),
-    Timer(TimerId),
+    Timer(TimerId, Value),
     User(E),
 }
 
