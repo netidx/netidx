@@ -99,12 +99,11 @@ impl CachedVals {
     }
 }
 
-pub struct Any(Option<Value>);
+pub struct Any;
 
 impl<C: Ctx, E: Clone> Register<C, E> for Any {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> =
-            Arc::new(|_, from, _, _| Box::new(Any(from.iter().find_map(|_| None))));
+        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Any));
         ctx.functions.insert("any".into(), f);
         ctx.user.register_fn(Path::root(), "any".into());
     }
@@ -117,15 +116,9 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Any {
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        let res =
-            from.into_iter().filter_map(|s| s.update(ctx, event)).fold(None, |res, v| {
-                match res {
-                    None => Some(v),
-                    Some(_) => res,
-                }
-            });
-        self.0 = res.clone();
-        res
+        from.iter_mut()
+            .filter_map(|s| s.update(ctx, event))
+            .fold(None, |r, v| r.or(Some(v)))
     }
 }
 
@@ -154,7 +147,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Once {
                     None
                 } else {
                     self.val = true;
-                    Some(v.clone())
+                    Some(v)
                 }
             }),
             n => {
@@ -259,9 +252,7 @@ pub struct ArrayEv;
 impl EvalCached for ArrayEv {
     fn eval(from: &CachedVals) -> Option<Value> {
         if from.0.iter().all(|v| v.is_some()) {
-            Some(Value::Array(Arc::from_iter(
-                from.0.iter().filter_map(|v| v.as_ref().map(|v| v.clone())),
-            )))
+            Some(Value::Array(Arc::from_iter(from.0.iter().filter_map(|v| v.clone()))))
         } else {
             None
         }
