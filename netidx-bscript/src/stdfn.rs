@@ -1,5 +1,5 @@
 use crate::{
-    expr::{Expr, ExprId, VNAME},
+    expr::{Expr, ExprId},
     vm::{Apply, Ctx, Event, ExecCtx, InitFn, Node, Register},
 };
 use anyhow::bail;
@@ -1367,20 +1367,6 @@ impl Store {
         match (new_path, &self.dv) {
             (Value::String(p0), Either::Left((p1, _))) => &**p0 == &**p1,
             _ => false,
-        }
-    }
-}
-
-fn varname(name: Option<Value>) -> Option<Chars> {
-    match name.map(|n| n.cast_to::<Chars>()) {
-        None => None,
-        Some(Err(_)) => None,
-        Some(Ok(n)) => {
-            if VNAME.is_match(&n) {
-                Some(n)
-            } else {
-                None
-            }
         }
     }
 }

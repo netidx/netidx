@@ -426,7 +426,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 }
                 Event::Netidx(_, _)
                 | Event::Rpc(_, _)
-                | Event::Timer(_)
+                | Event::Timer(_, _)
                 | Event::User(_)
                 | Event::Variable { .. } => None,
             },
@@ -460,7 +460,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 Event::Init
                 | Event::Netidx(_, _)
                 | Event::Rpc(_, _)
-                | Event::Timer(_)
+                | Event::Timer(_, _)
                 | Event::User(_)
                 | Event::Variable { .. } => None,
             },
