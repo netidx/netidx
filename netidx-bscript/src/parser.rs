@@ -1,22 +1,31 @@
-use crate::expr::{Expr, ExprId, ExprKind};
+use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use combine::{
-    attempt, between, choice, many,
+    attempt, between, choice, many, optional,
     parser::{
         char::{spaces, string},
         combinator::recognize,
         range::{take_while, take_while1},
     },
-    sep_by,
+    sep_by, sep_by1,
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
-use netidx::{chars::Chars, publisher::Value};
+use netidx::{chars::Chars, publisher::Value, utils::Either};
 use netidx_netproto::value_parser::{close_expr, escaped_string, value as netidx_value};
 use triomphe::Arc;
 
 pub static BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
 
-fn fname<I>() -> impl Parser<I, Output = String>
+fn spstring<'a, I>(s: &'static str) -> impl Parser<I, Output = &'a str>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(string(s))
+}
+
+fn fname<I>() -> impl Parser<I, Output = Chars>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -28,13 +37,59 @@ where
             (c.is_alphanumeric() && (c.is_numeric() || c.is_lowercase())) || c == '_'
         }),
     ))
-    .then(|s| {
+    .then(|s: String| {
         if s == "true" || s == "false" || s == "ok" || s == "null" {
             unexpected_any("can't use keyword as a function or variable name").left()
         } else {
             value(s).right()
         }
     })
+    .map(Chars::from)
+}
+
+fn spfname<I>() -> impl Parser<I, Output = Chars>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(fname())
+}
+
+fn modpath<I>() -> impl Parser<I, Output = ModPath>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    sep_by1(fname(), string("::")).map(|v: Vec<Chars>| ModPath(Arc::from(v)))
+}
+
+fn spmodpath<I>() -> impl Parser<I, Output = ModPath>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(modpath())
+}
+
+fn csep<I>() -> impl Parser<I, Output = char>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    attempt(spaces().with(token(',')))
+}
+
+fn sptoken<I>(t: char) -> impl Parser<I, Output = char>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(token(t))
 }
 
 fn interpolated_<I>() -> impl Parser<I, Output = Expr>
@@ -58,73 +113,72 @@ where
             }
         }
     }
-    spaces()
-        .with(between(
-            token('"'),
-            token('"'),
-            many(choice((
-                attempt(between(token('['), token(']'), expr()).map(Intp::Expr)),
-                escaped_string(&BSCRIPT_ESC)
-                    .then(|s| {
-                        if s.is_empty() {
-                            unexpected_any("empty string").right()
-                        } else {
-                            value(s).left()
-                        }
-                    })
-                    .map(Intp::Lit),
-            ))),
-        ))
-        .map(|toks: Vec<Intp>| {
-            let mut argvec = vec![];
-            toks.into_iter()
-                .fold(None, |src, tok| -> Option<Expr> {
-                    match (src, tok) {
-                        (None, t @ Intp::Lit(_)) => Some(t.to_expr()),
-                        (None, Intp::Expr(s)) => {
-                            argvec.push(s);
-                            Some(
-                                ExprKind::Apply {
-                                    args: Arc::from(argvec.clone()),
-                                    function: "string_concat".into(),
-                                }
-                                .to_expr(),
-                            )
-                        }
-                        (Some(src @ Expr { kind: ExprKind::Constant(_), .. }), s) => {
-                            argvec.extend([src, s.to_expr()]);
-                            Some(
-                                ExprKind::Apply {
-                                    args: Arc::from(argvec.clone()),
-                                    function: "string_concat".into(),
-                                }
-                                .to_expr(),
-                            )
-                        }
-                        (
-                            Some(Expr {
-                                kind: ExprKind::Apply { args: _, function },
-                                ..
-                            }),
-                            s,
-                        ) => {
-                            argvec.push(s.to_expr());
-                            Some(
-                                ExprKind::Apply {
-                                    args: Arc::from(argvec.clone()),
-                                    function,
-                                }
-                                .to_expr(),
-                            )
-                        }
-                        (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
-                        | (Some(Expr { kind: ExprKind::Ref { .. }, .. }), _) => {
-                            unreachable!()
-                        }
+    between(
+        token('"'),
+        token('"'),
+        many(choice((
+            attempt(between(token('['), sptoken(']'), expr()).map(Intp::Expr)),
+            escaped_string(&BSCRIPT_ESC)
+                .then(|s| {
+                    if s.is_empty() {
+                        unexpected_any("empty string").right()
+                    } else {
+                        value(s).left()
                     }
                 })
-                .unwrap_or_else(|| ExprKind::Constant(Value::from("")).to_expr())
-        })
+                .map(Intp::Lit),
+        ))),
+    )
+    .map(|toks: Vec<Intp>| {
+        let mut argvec = vec![];
+        toks.into_iter()
+            .fold(None, |src, tok| -> Option<Expr> {
+                match (src, tok) {
+                    (None, t @ Intp::Lit(_)) => Some(t.to_expr()),
+                    (None, Intp::Expr(s)) => {
+                        argvec.push(s);
+                        Some(
+                            ExprKind::Apply {
+                                args: Arc::from(argvec.clone()),
+                                function: ["str", "concat"].into(),
+                            }
+                            .to_expr(),
+                        )
+                    }
+                    (Some(src @ Expr { kind: ExprKind::Constant(_), .. }), s) => {
+                        argvec.extend([src, s.to_expr()]);
+                        Some(
+                            ExprKind::Apply {
+                                args: Arc::from(argvec.clone()),
+                                function: ["str", "concat"].into(),
+                            }
+                            .to_expr(),
+                        )
+                    }
+                    (
+                        Some(Expr {
+                            kind: ExprKind::Apply { args: _, function }, ..
+                        }),
+                        s,
+                    ) => {
+                        argvec.push(s.to_expr());
+                        Some(
+                            ExprKind::Apply { args: Arc::from(argvec.clone()), function }
+                                .to_expr(),
+                        )
+                    }
+                    (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Module { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Use { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Connect { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Ref { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
+                        unreachable!()
+                    }
+                }
+            })
+            .unwrap_or_else(|| ExprKind::Constant(Value::from("")).to_expr())
+    })
 }
 
 parser! {
@@ -135,6 +189,170 @@ parser! {
     }
 }
 
+fn module<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        optional(string("pub")).map(|o| o.is_some()),
+        spstring("mod").with(spfname()),
+        spaces().with(choice((
+            token(';').map(|_| None),
+            between(token('{'), sptoken('}'), many(expr()))
+                .map(|m: Vec<Expr>| Some(Arc::from(m))),
+        ))),
+    )
+        .map(|(export, name, value)| ExprKind::Module { name, export, value }.to_expr())
+}
+
+fn use_module<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    string("use")
+        .with(spmodpath())
+        .skip(sptoken(';'))
+        .map(|name| ExprKind::Use { name }.to_expr())
+}
+
+fn alist<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    between(
+        token('{'),
+        sptoken('}'),
+        sep_by((spfname(), sptoken(':').with(expr())), csep()),
+    )
+    .map(|args: Vec<(Chars, Expr)>| {
+        let args = args
+            .into_iter()
+            .map(|(name, expr)| {
+                let key = ExprKind::Constant(name.into()).to_expr();
+                let args = [key, expr].into_iter().collect();
+                ExprKind::Apply { function: ["array"].into(), args }.to_expr()
+            })
+            .collect();
+        ExprKind::Apply { function: ["array"].into(), args }.to_expr()
+    })
+}
+
+fn do_block<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    between(token('{'), sptoken('}'), many(expr())).map(|args: Vec<Expr>| {
+        ExprKind::Apply { function: ["do"].into(), args: Arc::from(args) }.to_expr()
+    })
+}
+
+fn array<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    between(token('['), sptoken(']'), sep_by(expr(), csep())).map(|args: Vec<Expr>| {
+        ExprKind::Apply { function: ["array"].into(), args: Arc::from(args) }.to_expr()
+    })
+}
+
+fn apply<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (modpath(), between(sptoken('('), sptoken(')'), sep_by(expr(), csep()))).map(
+        |(function, args): (ModPath, Vec<Expr>)| {
+            ExprKind::Apply { function, args: Arc::from(args) }.to_expr()
+        },
+    )
+}
+
+fn lambda<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        between(
+            token('|'),
+            sptoken('|'),
+            choice((
+                spstring("@args").map(|_| (vec![], true)),
+                attempt((
+                    sep_by1(spfname(), csep()).skip(sptoken(',')),
+                    spstring("@args").map(|_| true),
+                )),
+                sep_by(spfname(), csep()).map(|args| (args, false)),
+            )),
+        ),
+        expr(),
+    )
+        .map(|((args, vargs), body)| {
+            let args = Arc::from_iter(args.into_iter().map(Chars::from));
+            ExprKind::Lambda { args, vargs, body: Arc::new(body) }.to_expr()
+        })
+}
+
+fn letbind<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        optional(string("pub")).map(|o| o.is_some()),
+        spaces()
+            .with(string("let"))
+            .with(spaces())
+            .with(fname())
+            .skip(spaces().with(string("="))),
+        expr().skip(spaces()).skip(token(';')),
+    )
+        .map(|(export, name, value)| {
+            ExprKind::Bind { export, name, value: Arc::new(value) }.to_expr()
+        })
+}
+
+fn connect<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (modpath().skip(spaces()).skip(string("<-")), expr().skip(spaces()).skip(token(';')))
+        .map(|(name, e)| ExprKind::Connect { name, value: Arc::new(e) }.to_expr())
+}
+
+fn literal<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())
+}
+
+fn reference<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    modpath().skip(close_expr()).map(|name| ExprKind::Ref { name }.to_expr())
+}
+
 fn expr_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -142,53 +360,18 @@ where
     I::Range: Range,
 {
     spaces().with(choice((
-        attempt(
-            between(
-                spaces().with(token('{')),
-                spaces().with(token('}')),
-                spaces().with(sep_by(expr(), attempt(spaces().with(token(';'))))),
-            )
-            .map(|args: Vec<Expr>| {
-                ExprKind::Apply { function: "do".into(), args: Arc::from(args) }.to_expr()
-            }),
-        ),
-        attempt(
-            between(
-                spaces().with(token('[')),
-                spaces().with(token(']')),
-                spaces().with(sep_by(expr(), attempt(spaces().with(token(','))))),
-            )
-            .map(|args: Vec<Expr>| {
-                ExprKind::Apply { function: "array".into(), args: Arc::from(args) }
-                    .to_expr()
-            }),
-        ),
-        attempt(
-            (
-                fname(),
-                between(
-                    spaces().with(token('(')),
-                    spaces().with(token(')')),
-                    spaces().with(sep_by(expr(), attempt(spaces().with(token(','))))),
-                ),
-            )
-                .map(|(f, args): (String, Vec<Expr>)| {
-                    ExprKind::Apply { function: Chars::from(f), args: Arc::from(args) }
-                        .to_expr()
-                }),
-        ),
-        attempt(
-            (string("let"), spaces().with(fname()), spaces().with(string("=")), expr())
-                .map(|(_, name, _, value)| {
-                    ExprKind::Bind { name: Chars::from(name), value: Arc::new(value) }
-                        .to_expr()
-                }),
-        ),
+        attempt(module()),
+        attempt(use_module()),
+        attempt(alist()),
+        attempt(do_block()),
+        attempt(array()),
+        attempt(apply()),
+        attempt(lambda()),
+        attempt(letbind()),
+        attempt(connect()),
         attempt(interpolated()),
-        attempt(netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())),
-        fname()
-            .skip(close_expr())
-            .map(|name| ExprKind::Ref { name: Chars::from(name) }.to_expr()),
+        attempt(literal()),
+        reference(),
     )))
 }
 

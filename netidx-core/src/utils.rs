@@ -554,6 +554,7 @@ impl Ord for Addr {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub enum Either<T, U> {
     Left(T),
     Right(U),

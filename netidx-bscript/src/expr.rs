@@ -1,5 +1,9 @@
 use crate::parser;
-use netidx::{chars::Chars, subscriber::Value, utils};
+use netidx::{
+    chars::Chars,
+    subscriber::Value,
+    utils::{self, Either},
+};
 use regex::Regex;
 use serde::{
     de::{self, Visitor},
@@ -20,11 +24,30 @@ lazy_static! {
 atomic_id!(ExprId);
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
+pub struct ModPath(pub Arc<[Chars]>);
+
+impl<A> FromIterator<A> for ModPath where A: Into<Chars> {
+    fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self {
+        ModPath(Arc::from_iter(iter.into_iter().map(|s| s.into())))
+    }
+}
+
+impl<S, I> From<I> for ModPath where S: Into<Chars>, I: IntoIterator<Item = S> {
+    fn from(value: I) -> Self {
+        ModPath(Arc::from_iter(value.into_iter().map(|s| s.into())))
+    }
+}
+
+#[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum ExprKind {
     Constant(Value),
-    Bind { name: Chars, value: Arc<Expr> },
-    Ref { name: Chars },
-    Apply { args: Arc<[Expr]>, function: Chars },
+    Module { name: Chars, export: bool, value: Option<Arc<[Expr]>> },
+    Use { name: ModPath },
+    Bind { name: Chars, export: bool, value: Arc<Expr> },
+    Ref { name: ModPath },
+    Connect { name: ModPath, value: Arc<Expr> },
+    Lambda { args: Arc<[Chars]>, vargs: bool, body: Arc<Expr> },
+    Apply { args: Arc<[Expr]>, function: ModPath },
 }
 
 impl ExprKind {
