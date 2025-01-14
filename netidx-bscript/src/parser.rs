@@ -313,12 +313,8 @@ where
 {
     (
         optional(string("pub")).map(|o| o.is_some()),
-        spaces()
-            .with(string("let"))
-            .with(spaces())
-            .with(fname())
-            .skip(spaces().with(string("="))),
-        expr().skip(spaces()).skip(token(';')),
+        spstring("let").with(spfname()).skip(spstring("=")),
+        expr().skip(sptoken(';')),
     )
         .map(|(export, name, value)| {
             ExprKind::Bind { export, name, value: Arc::new(value) }.to_expr()
@@ -331,7 +327,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (modpath().skip(spaces()).skip(string("<-")), expr().skip(spaces()).skip(token(';')))
+    (modpath().skip(spstring("<-")), expr().skip(sptoken(';')))
         .map(|(name, e)| ExprKind::Connect { name, value: Arc::new(e) }.to_expr())
 }
 
@@ -350,7 +346,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    modpath().skip(close_expr()).map(|name| ExprKind::Ref { name }.to_expr())
+    modpath().map(|name| ExprKind::Ref { name }.to_expr())
 }
 
 fn expr_<I>() -> impl Parser<I, Output = Expr>

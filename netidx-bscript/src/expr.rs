@@ -1,9 +1,5 @@
 use crate::parser;
-use netidx::{
-    chars::Chars,
-    subscriber::Value,
-    utils::{self, Either},
-};
+use netidx::{chars::Chars, subscriber::Value, utils};
 use regex::Regex;
 use serde::{
     de::{self, Visitor},
@@ -11,7 +7,7 @@ use serde::{
 };
 use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
-    fmt::{self, Write},
+    fmt::{self, Display, Write},
     result,
     str::FromStr,
 };
@@ -26,17 +22,52 @@ atomic_id!(ExprId);
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub struct ModPath(pub Arc<[Chars]>);
 
-impl<A> FromIterator<A> for ModPath where A: Into<Chars> {
+impl Display for ModPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let len = self.0.len();
+        for i in 0..len {
+            write!(f, "{}", &self.0[i])?;
+            if i < len - 1 {
+                write!(f, "::")?
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<A> FromIterator<A> for ModPath
+where
+    A: Into<Chars>,
+{
     fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self {
         ModPath(Arc::from_iter(iter.into_iter().map(|s| s.into())))
     }
 }
 
-impl<S, I> From<I> for ModPath where S: Into<Chars>, I: IntoIterator<Item = S> {
+impl<S, I> From<I> for ModPath
+where
+    S: Into<Chars>,
+    I: IntoIterator<Item = S>,
+{
     fn from(value: I) -> Self {
         ModPath(Arc::from_iter(value.into_iter().map(|s| s.into())))
     }
 }
+
+impl PartialEq<[&str]> for ModPath {
+    fn eq(&self, other: &[&str]) -> bool {
+        self.0.len() == other.len()
+            && self.0.iter().zip(other.iter()).all(|(s0, s1)| &**s0 == *s1)
+    }
+}
+
+impl<const L: usize> PartialEq<[&str; L]> for ModPath {
+    fn eq(&self, other: &[&str; L]) -> bool {
+        self.0.len() == L && self.0.iter().zip(other.iter()).all(|(s0, s1)| &**s0 == *s1)
+    }
+}
+
+impl Eq for ModPath {}
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum ExprKind {
@@ -65,77 +96,104 @@ impl ExprKind {
         fn push_indent(indent: usize, buf: &mut String) {
             buf.extend((0..indent).into_iter().map(|_| ' '));
         }
-        match self {
-            ExprKind::Constant(_) => {
-                push_indent(indent, buf);
-                write!(buf, "{}", self)
-            }
-            ExprKind::Bind { name, value } => {
-                let mut tmp = String::new();
-                push_indent(indent, &mut tmp);
-                write!(tmp, "{}", self)?;
-                if tmp.len() < limit {
-                    buf.push_str(&*tmp);
-                    Ok(())
+        fn pretty_print_exprs(
+            indent: usize,
+            limit: usize,
+            buf: &mut String,
+            exprs: &[Expr],
+            open: &str,
+            close: &str,
+            sep: &str,
+        ) -> fmt::Result {
+            writeln!(buf, "{}", open)?;
+            for i in 0..exprs.len() {
+                exprs[i].kind.pretty_print(indent + 2, limit, buf)?;
+                if i < exprs.len() - 1 {
+                    writeln!(buf, "{}", sep)?
                 } else {
-                    writeln!(buf, "let {name} =")?;
-                    value.kind.pretty_print(indent + 2, limit, buf)
+                    writeln!(buf, "")?
                 }
             }
-            ExprKind::Ref { name: _ } => {
+            push_indent(indent, buf);
+            writeln!(buf, "{}", close)
+        }
+        macro_rules! try_single_line {
+            ($trunc:ident) => {{
+                let len = buf.len();
                 push_indent(indent, buf);
-                write!(buf, "{}", self)
+                write!(buf, "{}", self)?;
+                if buf.len() - len <= limit {
+                    return Ok(());
+                } else {
+                    if $trunc {
+                        buf.truncate(len + indent)
+                    }
+                    len + indent
+                }
+            }};
+        }
+        let exp = |export| if export { "pub " } else { "" };
+        match self {
+            ExprKind::Constant(_)
+            | ExprKind::Use { name: _ }
+            | ExprKind::Ref { name: _ }
+            | ExprKind::Module { name: _, export: _, value: None } => {
+                push_indent(indent, buf);
+                write!(buf, "{self}")
+            }
+            ExprKind::Bind { export, name, value } => {
+                try_single_line!(true);
+                writeln!(buf, "{}let {name} =", exp(*export))?;
+                value.kind.pretty_print(indent + 2, limit, buf)?;
+                write!(buf, ";")
+            }
+            ExprKind::Module { name, export, value: Some(exprs) } => {
+                try_single_line!(true);
+                write!(buf, "{}mod {name} ", exp(*export))?;
+                pretty_print_exprs(indent, limit, buf, exprs, "{", "}", "")
+            }
+            ExprKind::Connect { name, value } => {
+                try_single_line!(true);
+                writeln!(buf, "{name} <- ")?;
+                value.kind.pretty_print(indent + 2, limit, buf)?;
+                write!(buf, ";")
             }
             ExprKind::Apply { function, args } => {
-                let mut tmp = String::new();
-                push_indent(indent, &mut tmp);
-                write!(tmp, "{}", self)?;
-                if tmp.len() < limit {
-                    buf.push_str(&*tmp);
+                let len = try_single_line!(false);
+                if function == &["str", "concat"] {
                     Ok(())
+                } else if function == &["do"] {
+                    buf.truncate(len);
+                    pretty_print_exprs(indent, limit, buf, args, "{", "}", "")
+                } else if function == &["array"] {
+                    buf.truncate(len);
+                    pretty_print_exprs(indent, limit, buf, args, "[", "]", ",")
                 } else {
-                    if &**function == "string_concat" {
-                        buf.push_str(&*tmp);
-                        Ok(())
-                    } else if &**function == "do" {
-                        push_indent(indent, buf);
-                        writeln!(buf, "{}", "{")?;
-                        for i in 0..args.len() {
-                            args[i].kind.pretty_print(indent + 2, limit, buf)?;
-                            if i < args.len() - 1 {
-                                writeln!(buf, ";")?
-                            } else {
-                                writeln!(buf, "")?
-                            }
-                        }
-                        push_indent(indent, buf);
-                        writeln!(buf, "{}", "}")
-                    } else if &**function == "array" {
-                        push_indent(indent, buf);
-                        writeln!(buf, "{}", "[")?;
-                        for i in 0..args.len() {
-                            args[i].kind.pretty_print(indent + 2, limit, buf)?;
-                            if i < args.len() - 1 {
-                                writeln!(buf, ",")?
-                            } else {
-                                writeln!(buf, "")?
-                            }
-                        }
-                        push_indent(indent, buf);
-                        writeln!(buf, "{}", "]")
-                    } else {
-                        push_indent(indent, buf);
-                        writeln!(buf, "{}(", function)?;
-                        for i in 0..args.len() {
-                            args[i].kind.pretty_print(indent + 2, limit, buf)?;
-                            if i < args.len() - 1 {
-                                writeln!(buf, ", ")?;
-                            } else {
-                                writeln!(buf, "")?;
-                            }
-                        }
-                        push_indent(indent, buf);
-                        writeln!(buf, ")")
+                    buf.truncate(len);
+                    write!(buf, "{function}")?;
+                    pretty_print_exprs(indent, limit, buf, args, "(", ")", ",")
+                }
+            }
+            ExprKind::Lambda { args, vargs, body } => {
+                try_single_line!(true);
+                write!(buf, "|")?;
+                for i in 0..args.len() {
+                    write!(buf, "{}", &args[i])?;
+                    if *vargs || i < args.len() - 1 {
+                        write!(buf, ", ")?
+                    }
+                }
+                if *vargs {
+                    write!(buf, "@args")?;
+                }
+                write!(buf, "| ")?;
+                match &body.kind {
+                    ExprKind::Apply { args, function } if function == &["do"] => {
+                        pretty_print_exprs(indent, limit, buf, args, "{", "}", "")
+                    }
+                    _ => {
+                        writeln!(buf, "")?;
+                        body.kind.pretty_print(indent + 2, limit, buf)
                     }
                 }
             }
@@ -145,16 +203,60 @@ impl ExprKind {
 
 impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn print_exprs(
+            f: &mut fmt::Formatter,
+            exprs: &[Expr],
+            open: &str,
+            close: &str,
+            sep: &str,
+        ) -> fmt::Result {
+            write!(f, "{}", open)?;
+            for i in 0..exprs.len() {
+                write!(f, "{}", &exprs[i])?;
+                if i < exprs.len() - 1 {
+                    write!(f, "{}", sep)?
+                }
+            }
+            write!(f, "{}", close)
+        }
+        let exp = |export| if export { "pub " } else { "" };
         match self {
             ExprKind::Constant(v) => v.fmt_ext(f, &parser::BSCRIPT_ESC, true),
-            ExprKind::Bind { name, value } => {
-                write!(f, "let {name} = {value}")
+            ExprKind::Bind { export, name, value } => {
+                write!(f, "{}let {name} = {value};", exp(*export))
+            }
+            ExprKind::Connect { name, value } => {
+                write!(f, "{name} <- {value};")
+            }
+            ExprKind::Use { name } => {
+                write!(f, "use {name};")
             }
             ExprKind::Ref { name } => {
                 write!(f, "{name}")
             }
+            ExprKind::Module { name, export, value } => {
+                write!(f, "{}mod {name}", exp(*export))?;
+                match value {
+                    Some(exprs) => print_exprs(f, &**exprs, "{", "}", ""),
+                    None => write!(f, ";"),
+                }
+            }
+            ExprKind::Lambda { args, vargs, body } => {
+                write!(f, "|")?;
+                for i in 0..args.len() {
+                    write!(f, "{}", args[i])?;
+                    if !vargs || i < args.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                if !vargs {
+                    write!(f, "@args")?;
+                }
+                write!(f, "| ")?;
+                write!(f, "{body}")
+            }
             ExprKind::Apply { args, function } => {
-                if &**function == "string_concat" && args.len() > 0 {
+                if function == &["str", "concat"] && args.len() > 0 {
                     // interpolation
                     write!(f, "\"")?;
                     for s in args.iter() {
@@ -172,37 +274,13 @@ impl fmt::Display for ExprKind {
                         }
                     }
                     write!(f, "\"")
-                } else if &**function == "do" {
-                    // do block
-                    write!(f, "{}", '{')?;
-                    for i in 0..args.len() {
-                        if i < args.len() - 1 {
-                            write!(f, "{};", &args[i])?
-                        } else {
-                            write!(f, "{}", &args[i])?
-                        }
-                    }
-                    write!(f, "{}", '}')
-                } else if &**function == "array" {
-                    write!(f, "{}", '[')?;
-                    for i in 0..args.len() {
-                        if i < args.len() - 1 {
-                            write!(f, "{},", &args[i])?
-                        } else {
-                            write!(f, "{}", &args[i])?
-                        }
-                    }
-                    write!(f, "{}", ']')
+                } else if function == &["do"] {
+                    print_exprs(f, &**args, "{", "}", "")
+                } else if function == &["array"] {
+                    print_exprs(f, &**args, "[", "]", ",")
                 } else {
-                    // it's a normal function
-                    write!(f, "{}(", function)?;
-                    for i in 0..args.len() {
-                        write!(f, "{}", &args[i])?;
-                        if i < args.len() - 1 {
-                            write!(f, ", ")?;
-                        }
-                    }
-                    write!(f, ")")
+                    write!(f, "{}", function)?;
+                    print_exprs(f, &**args, "(", ")", ",")
                 }
             }
         }
