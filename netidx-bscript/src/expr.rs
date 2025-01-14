@@ -210,14 +210,14 @@ impl fmt::Display for ExprKind {
             close: &str,
             sep: &str,
         ) -> fmt::Result {
-            write!(f, "{}", open)?;
+            write!(f, "{open}")?;
             for i in 0..exprs.len() {
                 write!(f, "{}", &exprs[i])?;
                 if i < exprs.len() - 1 {
-                    write!(f, "{}", sep)?
+                    write!(f, "{sep}")?
                 }
             }
-            write!(f, "{}", close)
+            write!(f, "{close}")
         }
         let exp = |export| if export { "pub " } else { "" };
         match self {
@@ -262,14 +262,11 @@ impl fmt::Display for ExprKind {
                     for s in args.iter() {
                         match &s.kind {
                             ExprKind::Constant(Value::String(s)) if s.len() > 0 => {
-                                write!(
-                                    f,
-                                    "{}",
-                                    utils::escape(&*s, '\\', &parser::BSCRIPT_ESC)
-                                )?;
+                                let es = utils::escape(&*s, '\\', &parser::BSCRIPT_ESC);
+                                write!(f, "{es}",)?;
                             }
                             s => {
-                                write!(f, "[{}]", s)?;
+                                write!(f, "[{s}]")?;
                             }
                         }
                     }
@@ -279,7 +276,7 @@ impl fmt::Display for ExprKind {
                 } else if function == &["array"] {
                     print_exprs(f, &**args, "[", "]", ",")
                 } else {
-                    write!(f, "{}", function)?;
+                    write!(f, "{function}")?;
                     print_exprs(f, &**args, "(", ")", ",")
                 }
             }
