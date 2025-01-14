@@ -19,7 +19,7 @@ lazy_static! {
 
 atomic_id!(ExprId);
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct ModPath(pub Arc<[Chars]>);
 
 impl Display for ModPath {
@@ -66,8 +66,6 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
         self.0.len() == L && self.0.iter().zip(other.iter()).all(|(s0, s1)| &**s0 == *s1)
     }
 }
-
-impl Eq for ModPath {}
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum ExprKind {
@@ -459,46 +457,46 @@ mod tests {
                 && s != "store"
                 && s != "load_var"
                 && s != "store_var"
-        })) -> Chars {
-            Chars::from(s)
+        })) -> ModPath {
+            ModPath::from([s])
         }
     }
 
-    fn valid_fname() -> impl Strategy<Value = Chars> {
+    fn valid_fname() -> impl Strategy<Value = ModPath> {
         prop_oneof![
-            Just(Chars::from("any")),
-            Just(Chars::from("array")),
-            Just(Chars::from("all")),
-            Just(Chars::from("sum")),
-            Just(Chars::from("product")),
-            Just(Chars::from("divide")),
-            Just(Chars::from("mean")),
-            Just(Chars::from("min")),
-            Just(Chars::from("max")),
-            Just(Chars::from("and")),
-            Just(Chars::from("or")),
-            Just(Chars::from("not")),
-            Just(Chars::from("cmp")),
-            Just(Chars::from("if")),
-            Just(Chars::from("filter")),
-            Just(Chars::from("cast")),
-            Just(Chars::from("isa")),
-            Just(Chars::from("eval")),
-            Just(Chars::from("count")),
-            Just(Chars::from("sample")),
-            Just(Chars::from("string_join")),
-            Just(Chars::from("string_concat")),
-            Just(Chars::from("navigate")),
-            Just(Chars::from("confirm")),
-            Just(Chars::from("load")),
-            Just(Chars::from("get")),
-            Just(Chars::from("store")),
-            Just(Chars::from("set")),
-            Just(Chars::from("let")),
+            Just(ModPath::from(["any"])),
+            Just(ModPath::from(["array"])),
+            Just(ModPath::from(["all"])),
+            Just(ModPath::from(["sum"])),
+            Just(ModPath::from(["product"])),
+            Just(ModPath::from(["divide"])),
+            Just(ModPath::from(["mean"])),
+            Just(ModPath::from(["min"])),
+            Just(ModPath::from(["max"])),
+            Just(ModPath::from(["and"])),
+            Just(ModPath::from(["or"])),
+            Just(ModPath::from(["not"])),
+            Just(ModPath::from(["cmp"])),
+            Just(ModPath::from(["if"])),
+            Just(ModPath::from(["filter"])),
+            Just(ModPath::from(["cast"])),
+            Just(ModPath::from(["isa"])),
+            Just(ModPath::from(["eval"])),
+            Just(ModPath::from(["count"])),
+            Just(ModPath::from(["sample"])),
+            Just(ModPath::from(["str", "join"])),
+            Just(ModPath::from(["str", "concat"])),
+            Just(ModPath::from(["navigate"])),
+            Just(ModPath::from(["confirm"])),
+            Just(ModPath::from(["load"])),
+            Just(ModPath::from(["get"])),
+            Just(ModPath::from(["store"])),
+            Just(ModPath::from(["set"])),
+            Just(ModPath::from(["let"])),
         ]
     }
 
-    fn fname() -> impl Strategy<Value = Chars> {
+    fn fname() -> impl Strategy<Value = ModPath> {
         prop_oneof![random_fname(), valid_fname(),]
     }
 
@@ -551,14 +549,14 @@ mod tests {
             (
                 ExprKind::Apply { args: srs0, function: fn0 },
                 ExprKind::Constant(Value::String(c1)),
-            ) if &**fn0 == "string_concat" => match &acc_strings(srs0)[..] {
+            ) if fn0 == &["str", "concat"] => match &acc_strings(srs0)[..] {
                 [Expr { kind: ExprKind::Constant(Value::String(c0)), .. }] => c0 == c1,
                 _ => false,
             },
             (
                 ExprKind::Apply { args: srs0, function: fn0 },
                 ExprKind::Apply { args: srs1, function: fn1 },
-            ) if &*fn0 == fn1 && &**fn0 == "string_concat" => {
+            ) if fn0 == fn1 && fn0 == &["str", "concat"] => {
                 let srs0 = acc_strings(srs0);
                 srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
             }
