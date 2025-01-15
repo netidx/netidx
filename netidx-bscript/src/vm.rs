@@ -1,6 +1,6 @@
 pub use crate::stdfn::{RpcCallId, TimerId};
 use crate::{
-    expr::{Expr, ExprId, ExprKind},
+    expr::{Expr, ExprId, ExprKind, ModPath},
     stdfn,
 };
 use arcstr::ArcStr;
@@ -101,7 +101,7 @@ impl<E: Clone> DbgCtx<E> {
 #[derive(Clone, Debug)]
 pub enum Event<E> {
     Init,
-    Variable { scope: Path, name: Chars, index: usize, value: Value },
+    Variable { name: ModPath, index: usize, value: Value },
     Netidx(SubId, Value),
     Rpc(RpcCallId, Value),
     Timer(TimerId, Value),
@@ -118,10 +118,6 @@ pub type InitFn<C, E> = Arc<
         + Send
         + Sync,
 >;
-
-pub trait Register<C: Ctx, E> {
-    fn register(ctx: &mut ExecCtx<C, E>);
-}
 
 pub trait Apply<C: Ctx, E> {
     fn update(
@@ -141,10 +137,10 @@ pub trait Ctx {
         ref_by: ExprId,
     ) -> Dval;
     fn unsubscribe(&mut self, path: Path, dv: Dval, ref_by: ExprId);
-    fn ref_var(&mut self, scope: Path, name: Chars, index: usize, ref_by: ExprId);
-    fn unref_var(&mut self, scope: Path, name: Chars, index: usize, ref_by: ExprId);
-    fn register_fn(&mut self, scope: Path, name: Chars);
-    fn set_var(&mut self, scope: Path, name: Chars, index: usize, value: Value);
+    fn ref_var(&mut self, name: ModPath, index: usize, ref_by: ExprId);
+    fn unref_var(&mut self, name: ModPath, index: usize, ref_by: ExprId);
+    fn register_fn(&mut self, name: ModPath);
+    fn set_var(&mut self, name: ModPath, index: usize, value: Value);
 
     /// For a given name, this must have at most one outstanding call
     /// at a time, and must preserve the order of the calls. Calls to
@@ -196,9 +192,9 @@ pub fn store_var(
     }
 }
 
-pub struct ExecCtx<C: Ctx + 'static, E: 'static> {
-    pub functions: FxHashMap<Chars, InitFn<C, E>>,
-    pub variables: FxHashMap<Path, FxHashMap<Chars, usize>>,
+pub struct ExecCtx<C: Ctx, E> {
+    builtins: FxHashMap<&'static str, InitFn<C, E>>,
+    root: Node<C, E>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }
@@ -221,10 +217,25 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
         self.user.clear();
     }
 
+    pub fn register_builtin(&mut self, name: &'static str, f: InitFn<C, E>) {
+        self.builtins.insert(name, f);
+    }
+
     pub fn no_std(user: C) -> Self {
         ExecCtx {
-            functions: HashMap::default(),
-            variables: HashMap::default(),
+            builtins: FxHashMap::default(),
+            root: Node {
+                spec: ExprKind::Module {
+                    export: false,
+                    name: "root".into(),
+                    value: None,
+                }
+                .to_expr(),
+                kind: NodeKind::Module {
+                    path: ModPath::from([]),
+                    children: FxHashMap::default(),
+                },
+            },
             dbg_ctx: DbgCtx::new(),
             user,
         }
@@ -280,62 +291,43 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
     }
 }
 
-pub enum Node<C: Ctx, E> {
-    Error {
-        spec: Expr,
-        error: Option<Value>,
-        children: Vec<Node<C, E>>,
-    },
-    Constant(Expr, Value),
-    Bind {
-        spec: Expr,
-        scope: Path,
-        name: Chars,
-        index: usize,
-        node: Box<Node<C, E>>,
-    },
-    Ref {
-        spec: Expr,
-        scope: Path,
-        name: Chars,
-        index: usize,
-    },
-    Apply {
-        spec: Expr,
-        args: Vec<Node<C, E>>,
-        function: Box<dyn Apply<C, E> + Send + Sync>,
-    },
+pub enum NodeKind<C: Ctx, E> {
+    Constant(Value),
+    Module { path: ModPath, children: FxHashMap<Chars, Vec<Node<C, E>>> },
+    Error { error: Option<Value>, children: Vec<Node<C, E>> },
+    Bind { name: ModPath, index: usize, node: Box<Node<C, E>> },
+    Ref { name: ModPath, index: usize },
+    Connect { name: ModPath, index: usize, node: Box<Node<C, E>> },
+    Lambda(InitFn<C, E>),
+    Apply { args: Vec<Node<C, E>>, function: Box<dyn Apply<C, E> + Send + Sync> },
+}
+
+pub struct Node<C: Ctx, E> {
+    spec: Expr,
+    kind: NodeKind<C, E>,
 }
 
 impl<C: Ctx, E> fmt::Display for Node<C, E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Node::Error { spec: s, .. }
-            | Node::Constant(s, _)
-            | Node::Bind { spec: s, .. }
-            | Node::Ref { spec: s, .. }
-            | Node::Apply { spec: s, .. } => {
-                write!(f, "{}", s)
-            }
-        }
+        write!(f, "{}", &self.spec)
     }
 }
 
 impl<C: Ctx, E: Clone> Node<C, E> {
     pub fn is_err(&self) -> bool {
-        match self {
-            Node::Error { .. } => true,
-            Node::Apply { .. }
-            | Node::Bind { .. }
-            | Node::Constant(_, _)
-            | Node::Ref { .. } => false,
+        match &self.kind {
+            NodeKind::Error { .. } => true,
+            NodeKind::Apply { .. }
+            | NodeKind::Bind { .. }
+            | NodeKind::Constant(_)
+            | NodeKind::Ref { .. } => false,
         }
     }
 
     pub fn compile_int(
         ctx: &mut ExecCtx<C, E>,
         spec: Expr,
-        scope: &Path,
+        scope: &ModPath,
         top_id: ExprId,
     ) -> Self {
         match &spec {

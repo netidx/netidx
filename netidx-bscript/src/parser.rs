@@ -10,8 +10,8 @@ use combine::{
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
-use netidx::{chars::Chars, publisher::Value, utils::Either};
-use netidx_netproto::value_parser::{close_expr, escaped_string, value as netidx_value};
+use netidx::{chars::Chars, path::Path, publisher::Value, utils::Either};
+use netidx_netproto::value_parser::{escaped_string, value as netidx_value};
 use triomphe::Arc;
 
 pub static BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
@@ -62,7 +62,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    sep_by1(fname(), string("::")).map(|v: Vec<Chars>| ModPath(Arc::from(v)))
+    sep_by1(fname(), string("::")).map(|v: Vec<Chars>| ModPath(Path::from_iter(v)))
 }
 
 fn spmodpath<I>() -> impl Parser<I, Output = ModPath>
@@ -297,7 +297,10 @@ where
                 sep_by(spfname(), csep()).map(|args| (args, false)),
             )),
         ),
-        expr(),
+        choice((
+            attempt(sptoken('\'').with(fname()).map(Either::Right)),
+            expr().map(Either::Left),
+        )),
     )
         .map(|((args, vargs), body)| {
             let args = Arc::from_iter(args.into_iter().map(Chars::from));
@@ -396,23 +399,23 @@ mod tests {
         let s = r#"load("/foo bar baz/\"zam\"/)_ xyz+ ")"#;
         assert_eq!(
             ExprKind::Apply {
-                function: "load".into(),
+                function: ["load"].into(),
                 args: Arc::from_iter([ExprKind::Constant(Value::String(p)).to_expr()])
             }
             .to_expr(),
             parse_expr(s).unwrap()
         );
         let p = ExprKind::Apply {
-            function: "load".into(),
+            function: ["load"].into(),
             args: Arc::from_iter([ExprKind::Apply {
                 args: Arc::from_iter([
                     ExprKind::Constant(Value::from("/foo/")).to_expr(),
                     ExprKind::Apply {
-                        function: "get".into(),
+                        function: ["get"].into(),
                         args: Arc::from_iter([ExprKind::Apply {
                             args: Arc::from_iter([
                                 ExprKind::Apply {
-                                    function: "get".into(),
+                                    function: ["get"].into(),
                                     args: Arc::from_iter([ExprKind::Constant(
                                         Value::from("sid"),
                                     )
@@ -421,14 +424,14 @@ mod tests {
                                 .to_expr(),
                                 ExprKind::Constant(Value::from("_var")).to_expr(),
                             ]),
-                            function: "string_concat".into(),
+                            function: ["str", "concat"].into(),
                         }
                         .to_expr()]),
                     }
                     .to_expr(),
                     ExprKind::Constant(Value::from("/baz")).to_expr(),
                 ]),
-                function: "string_concat".into(),
+                function: ["str", "concat"].into(),
             }
             .to_expr()]),
         }
@@ -438,7 +441,7 @@ mod tests {
         let s = r#""[true]""#;
         let p = ExprKind::Apply {
             args: Arc::from_iter([ExprKind::Constant(Value::True).to_expr()]),
-            function: "string_concat".into(),
+            function: ["str", "concat"].into(),
         }
         .to_expr();
         assert_eq!(p, parse_expr(s).unwrap());
@@ -451,19 +454,19 @@ mod tests {
                             args: Arc::from_iter([
                                 ExprKind::Constant(Value::True).to_expr()
                             ]),
-                            function: "string_concat".into(),
+                            function: ["str", "concat"].into(),
                         }
                         .to_expr()]),
-                        function: "get".into(),
+                        function: ["get"].into(),
                     }
                     .to_expr()]),
-                    function: "a".into(),
+                    function: ["a"].into(),
                 }
                 .to_expr()]),
-                function: "a".into(),
+                function: ["a"].into(),
             }
             .to_expr()]),
-            function: "a".into(),
+            function: ["a"].into(),
         }
         .to_expr();
         assert_eq!(p, parse_expr(s).unwrap());
@@ -483,29 +486,30 @@ mod tests {
                                 Chars::from("baz")
                             ))
                             .to_expr()]),
-                            function: "get".into(),
+                            function: ["get"].into(),
                         }
                         .to_expr()
                     ]),
-                    function: Chars::from("concat_path"),
+                    function: ["path", "concat"].into(),
                 }
                 .to_expr()]),
-                function: "load".into(),
+                function: ["load"].into(),
             }
             .to_expr(),
             parse_expr(s).unwrap()
         );
         assert_eq!(
-            ExprKind::Ref { name: "sum".into() }.to_expr(),
+            ExprKind::Ref { name: ["sum"].into() }.to_expr(),
             parse_expr("sum").unwrap()
         );
         assert_eq!(
             ExprKind::Bind {
+                export: false,
                 name: "foo".into(),
                 value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
             }
             .to_expr(),
-            parse_expr("let foo = 42").unwrap()
+            parse_expr("let foo = 42;").unwrap()
         );
         let src = ExprKind::Apply {
             args: Arc::from_iter([
@@ -515,7 +519,7 @@ mod tests {
                         Chars::from("/foo/bar"),
                     ))
                     .to_expr()]),
-                    function: "load".into(),
+                    function: ["load"].into(),
                 }
                 .to_expr(),
                 ExprKind::Apply {
@@ -526,20 +530,17 @@ mod tests {
                                 Chars::from("/foo/baz"),
                             ))
                             .to_expr()]),
-                            function: "load".into(),
+                            function: ["load"].into(),
                         }
                         .to_expr(),
                     ]),
-                    function: Chars::from("max"),
+                    function: ["max"].into(),
                 }
                 .to_expr(),
-                ExprKind::Apply {
-                    args: Arc::from_iter([]),
-                    function: Chars::from("rand"),
-                }
-                .to_expr(),
+                ExprKind::Apply { args: Arc::from_iter([]), function: ["rand"].into() }
+                    .to_expr(),
             ]),
-            function: Chars::from("sum"),
+            function: ["sum"].into(),
         }
         .to_expr();
         let chs =

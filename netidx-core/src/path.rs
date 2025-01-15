@@ -7,6 +7,7 @@ use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use std::{
     borrow::{Borrow, Cow},
+    cell::RefCell,
     cmp::{Eq, Ord, PartialEq, PartialOrd},
     convert::{AsRef, From},
     fmt,
@@ -141,6 +142,26 @@ impl From<ArcStr> for Path {
         } else {
             Path(ArcStr::from(canonize(&*s)))
         }
+    }
+}
+
+impl<C: Borrow<str>> FromIterator<C> for Path {
+    fn from_iter<T: IntoIterator<Item = C>>(iter: T) -> Self {
+        thread_local! {
+            static BUF: RefCell<String> = RefCell::new(String::new());
+        }
+        BUF.with_borrow_mut(|buf| {
+            buf.clear();
+            buf.push(SEP);
+            for c in iter {
+                utils::escape_to(c.borrow(), buf, ESC, &[SEP]);
+                buf.push(SEP)
+            }
+            if buf.len() > 1 {
+                buf.pop(); // remove trailing sep
+            }
+            Self(ArcStr::from(buf.as_str()))
+        })
     }
 }
 
@@ -285,14 +306,19 @@ impl Path {
     /// strips prefix from path at the separator boundry, including
     /// the separator. Returns None if prefix is not a parent of path
     /// (even if it happens to be a prefix).
-    pub fn strip_prefix<'a, T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(prefix: &T, path: &'a U) -> Option<&'a str> {
+    pub fn strip_prefix<'a, T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(
+        prefix: &T,
+        path: &'a U,
+    ) -> Option<&'a str> {
         if Path::is_parent(prefix, path) {
-            path.as_ref().strip_prefix(prefix.as_ref()).map(|s| s.strip_prefix("/").unwrap_or(s))
+            path.as_ref()
+                .strip_prefix(prefix.as_ref())
+                .map(|s| s.strip_prefix("/").unwrap_or(s))
         } else {
             None
         }
     }
-    
+
     /// finds the longest common parent of the two specified paths, /
     /// in the case they are completely disjoint.
     pub fn lcp<'a, T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(

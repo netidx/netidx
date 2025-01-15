@@ -1,11 +1,17 @@
 use crate::parser;
-use netidx::{chars::Chars, subscriber::Value, utils};
+use netidx::{
+    chars::Chars,
+    path::Path,
+    subscriber::Value,
+    utils::{self, Either},
+};
 use regex::Regex;
 use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
 };
 use std::{
+    borrow::Borrow,
     cmp::{Ordering, PartialEq, PartialOrd},
     fmt::{self, Display, Write},
     result,
@@ -20,13 +26,13 @@ lazy_static! {
 atomic_id!(ExprId);
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
-pub struct ModPath(pub Arc<[Chars]>);
+pub struct ModPath(pub Path);
 
 impl Display for ModPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let len = self.0.len();
-        for i in 0..len {
-            write!(f, "{}", &self.0[i])?;
+        let len = Path::levels(&self.0);
+        for (i, part) in Path::parts(&self.0).enumerate() {
+            write!(f, "{part}")?;
             if i < len - 1 {
                 write!(f, "::")?
             }
@@ -37,33 +43,34 @@ impl Display for ModPath {
 
 impl<A> FromIterator<A> for ModPath
 where
-    A: Into<Chars>,
+    A: Borrow<str>,
 {
     fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self {
-        ModPath(Arc::from_iter(iter.into_iter().map(|s| s.into())))
+        ModPath(Path::from_iter(iter))
     }
 }
 
-impl<S, I> From<I> for ModPath
+impl<I, A> From<I> for ModPath
 where
-    S: Into<Chars>,
-    I: IntoIterator<Item = S>,
+    A: Borrow<str>,
+    I: IntoIterator<Item = A>,
 {
     fn from(value: I) -> Self {
-        ModPath(Arc::from_iter(value.into_iter().map(|s| s.into())))
+        ModPath::from_iter(value)
     }
 }
 
 impl PartialEq<[&str]> for ModPath {
     fn eq(&self, other: &[&str]) -> bool {
-        self.0.len() == other.len()
-            && self.0.iter().zip(other.iter()).all(|(s0, s1)| &**s0 == *s1)
+        Path::levels(&self.0) == other.len()
+            && Path::parts(&self.0).zip(other.iter()).all(|(s0, s1)| s0 == *s1)
     }
 }
 
 impl<const L: usize> PartialEq<[&str; L]> for ModPath {
     fn eq(&self, other: &[&str; L]) -> bool {
-        self.0.len() == L && self.0.iter().zip(other.iter()).all(|(s0, s1)| &**s0 == *s1)
+        Path::levels(&self.0) == L
+            && Path::parts(&self.0).zip(other.iter()).all(|(s0, s1)| s0 == *s1)
     }
 }
 
@@ -75,7 +82,7 @@ pub enum ExprKind {
     Bind { name: Chars, export: bool, value: Arc<Expr> },
     Ref { name: ModPath },
     Connect { name: ModPath, value: Arc<Expr> },
-    Lambda { args: Arc<[Chars]>, vargs: bool, body: Arc<Expr> },
+    Lambda { args: Arc<[Chars]>, vargs: bool, body: Arc<Either<Expr, Chars>> },
     Apply { args: Arc<[Expr]>, function: ModPath },
 }
 
@@ -185,14 +192,19 @@ impl ExprKind {
                     write!(buf, "@args")?;
                 }
                 write!(buf, "| ")?;
-                match &body.kind {
-                    ExprKind::Apply { args, function } if function == &["do"] => {
-                        pretty_print_exprs(indent, limit, buf, args, "{", "}", "")
+                match &body {
+                    Either::Right(builtin) => {
+                        write!(buf, "'{builtin}")
                     }
-                    _ => {
-                        writeln!(buf, "")?;
-                        body.kind.pretty_print(indent + 2, limit, buf)
-                    }
+                    Either::Left(body) => match &body.kind {
+                        ExprKind::Apply { args, function } if function == &["do"] => {
+                            pretty_print_exprs(indent, limit, buf, args, "{", "}", "")
+                        }
+                        _ => {
+                            writeln!(buf, "")?;
+                            body.kind.pretty_print(indent + 2, limit, buf)
+                        }
+                    },
                 }
             }
         }
@@ -251,7 +263,10 @@ impl fmt::Display for ExprKind {
                     write!(f, "@args")?;
                 }
                 write!(f, "| ")?;
-                write!(f, "{body}")
+                match body {
+                    Either::Left(body) => write!(f, "{body}"),
+                    Either::Right(builtin) => write!(f, "'{builtin}"),
+                }
             }
             ExprKind::Apply { args, function } => {
                 if function == &["str", "concat"] && args.len() > 0 {
@@ -458,41 +473,41 @@ mod tests {
                 && s != "load_var"
                 && s != "store_var"
         })) -> ModPath {
-            ModPath::from([s])
+            ModPath::from_iter([s])
         }
     }
 
     fn valid_fname() -> impl Strategy<Value = ModPath> {
         prop_oneof![
-            Just(ModPath::from(["any"])),
-            Just(ModPath::from(["array"])),
-            Just(ModPath::from(["all"])),
-            Just(ModPath::from(["sum"])),
-            Just(ModPath::from(["product"])),
-            Just(ModPath::from(["divide"])),
-            Just(ModPath::from(["mean"])),
-            Just(ModPath::from(["min"])),
-            Just(ModPath::from(["max"])),
-            Just(ModPath::from(["and"])),
-            Just(ModPath::from(["or"])),
-            Just(ModPath::from(["not"])),
-            Just(ModPath::from(["cmp"])),
-            Just(ModPath::from(["if"])),
-            Just(ModPath::from(["filter"])),
-            Just(ModPath::from(["cast"])),
-            Just(ModPath::from(["isa"])),
-            Just(ModPath::from(["eval"])),
-            Just(ModPath::from(["count"])),
-            Just(ModPath::from(["sample"])),
-            Just(ModPath::from(["str", "join"])),
-            Just(ModPath::from(["str", "concat"])),
-            Just(ModPath::from(["navigate"])),
-            Just(ModPath::from(["confirm"])),
-            Just(ModPath::from(["load"])),
-            Just(ModPath::from(["get"])),
-            Just(ModPath::from(["store"])),
-            Just(ModPath::from(["set"])),
-            Just(ModPath::from(["let"])),
+            Just(ModPath::from_iter(["any"])),
+            Just(ModPath::from_iter(["array"])),
+            Just(ModPath::from_iter(["all"])),
+            Just(ModPath::from_iter(["sum"])),
+            Just(ModPath::from_iter(["product"])),
+            Just(ModPath::from_iter(["divide"])),
+            Just(ModPath::from_iter(["mean"])),
+            Just(ModPath::from_iter(["min"])),
+            Just(ModPath::from_iter(["max"])),
+            Just(ModPath::from_iter(["and"])),
+            Just(ModPath::from_iter(["or"])),
+            Just(ModPath::from_iter(["not"])),
+            Just(ModPath::from_iter(["cmp"])),
+            Just(ModPath::from_iter(["if"])),
+            Just(ModPath::from_iter(["filter"])),
+            Just(ModPath::from_iter(["cast"])),
+            Just(ModPath::from_iter(["isa"])),
+            Just(ModPath::from_iter(["eval"])),
+            Just(ModPath::from_iter(["count"])),
+            Just(ModPath::from_iter(["sample"])),
+            Just(ModPath::from_iter(["str", "join"])),
+            Just(ModPath::from_iter(["str", "concat"])),
+            Just(ModPath::from_iter(["navigate"])),
+            Just(ModPath::from_iter(["confirm"])),
+            Just(ModPath::from_iter(["load"])),
+            Just(ModPath::from_iter(["get"])),
+            Just(ModPath::from_iter(["store"])),
+            Just(ModPath::from_iter(["set"])),
+            Just(ModPath::from_iter(["let"])),
         ]
     }
 
