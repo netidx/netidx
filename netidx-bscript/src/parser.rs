@@ -250,7 +250,7 @@ where
     I::Range: Range,
 {
     between(token('{'), sptoken('}'), many(expr())).map(|args: Vec<Expr>| {
-        ExprKind::Apply { function: ["do"].into(), args: Arc::from(args) }.to_expr()
+        ExprKind::Do { exprs: Arc::from(args) }.to_expr()
     })
 }
 

@@ -6,6 +6,7 @@ use crate::{
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use fxhash::{FxBuildHasher, FxHashMap};
+use immutable_chunkmap::map;
 use netidx::{
     chars::Chars,
     path::Path,
@@ -14,9 +15,12 @@ use netidx::{
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
-    sync::{Arc, Weak},
+    sync::{self, Weak},
     time::Duration,
 };
+use triomphe::Arc;
+
+type Map<K, V> = map::Map<K, V, 16>;
 
 pub struct DbgCtx<E> {
     pub trace: bool,
@@ -52,10 +56,12 @@ impl<E: Clone> DbgCtx<E> {
     pub fn add_watch(
         &mut self,
         id: ExprId,
-        watch: &Arc<dyn Fn(&DateTime<Local>, &Option<Event<E>>, &Value) + Send + Sync>,
+        watch: &sync::Arc<
+            dyn Fn(&DateTime<Local>, &Option<Event<E>>, &Value) + Send + Sync,
+        >,
     ) {
         let watches = self.watch.entry(id).or_insert_with(Vec::new);
-        watches.push(Arc::downgrade(watch));
+        watches.push(sync::Arc::downgrade(watch));
     }
 
     pub fn add_event(&mut self, id: ExprId, event: Option<Event<E>>, value: Value) {
@@ -192,8 +198,11 @@ pub fn store_var(
     }
 }
 
+
+
 pub struct ExecCtx<C: Ctx, E> {
-    builtins: FxHashMap<&'static str, InitFn<C, E>>,
+    functions: FxHashMap<ModPath, InitFn<C, E>>,
+    variables: FxHashMap<ModPath, usize>,
     root: Node<C, E>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
@@ -217,13 +226,14 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
         self.user.clear();
     }
 
-    pub fn register_builtin(&mut self, name: &'static str, f: InitFn<C, E>) {
-        self.builtins.insert(name, f);
+    pub fn register_builtin(&mut self, name: ModPath, f: InitFn<C, E>) {
+        self.functions.insert(name, f);
     }
 
     pub fn no_std(user: C) -> Self {
         ExecCtx {
-            builtins: FxHashMap::default(),
+            functions: FxHashMap::default(),
+            variables: FxHashMap::default(),
             root: Node {
                 spec: ExprKind::Module {
                     export: false,
@@ -293,13 +303,33 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
 
 pub enum NodeKind<C: Ctx, E> {
     Constant(Value),
-    Module { path: ModPath, children: FxHashMap<Chars, Vec<Node<C, E>>> },
-    Error { error: Option<Value>, children: Vec<Node<C, E>> },
-    Bind { name: ModPath, index: usize, node: Box<Node<C, E>> },
-    Ref { name: ModPath, index: usize },
-    Connect { name: ModPath, index: usize, node: Box<Node<C, E>> },
+    Module {
+        name: ModPath,
+        children: Vec<Node<C, E>>,
+    },
+    Do {
+        children: Vec<Node<C, E>>,
+    },
+    Bind {
+        name: ModPath,
+        index: usize,
+        node: Box<Node<C, E>>,
+    },
+    Ref {
+        name: ModPath,
+        index: usize,
+    },
+    Connect {
+        name: ModPath,
+        index: usize,
+        node: Box<Node<C, E>>,
+    },
     Lambda(InitFn<C, E>),
-    Apply { args: Vec<Node<C, E>>, function: Box<dyn Apply<C, E> + Send + Sync> },
+    Apply {
+        args: Vec<Node<C, E>>,
+        function: Box<dyn Apply<C, E> + Send + Sync>,
+    },
+    Error { error: Option<Chars>, children: Vec<Node<C, E>> }
 }
 
 pub struct Node<C: Ctx, E> {
@@ -332,8 +362,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
     ) -> Self {
         match &spec {
             Expr { kind: ExprKind::Constant(v), id: _ } => {
-                let v = v.clone();
-                Node::Constant(spec, v)
+                Node { kind: NodeKind::Constant(v.clone()), spec }
             }
             Expr { kind: ExprKind::Apply { args, function }, id } => {
                 let scope = if &**function == "do" && id != &top_id {

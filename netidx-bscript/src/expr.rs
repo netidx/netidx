@@ -78,6 +78,7 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
 pub enum ExprKind {
     Constant(Value),
     Module { name: Chars, export: bool, value: Option<Arc<[Expr]>> },
+    Do { exprs: Arc<[Expr]> },
     Use { name: ModPath },
     Bind { name: Chars, export: bool, value: Arc<Expr> },
     Ref { name: ModPath },
@@ -157,6 +158,10 @@ impl ExprKind {
                 write!(buf, "{}mod {name} ", exp(*export))?;
                 pretty_print_exprs(indent, limit, buf, exprs, "{", "}", "")
             }
+            ExprKind::Do { exprs } => {
+                try_single_line!(true);
+                pretty_print_exprs(indent, limit, buf, exprs, "{", "}", "")
+            }
             ExprKind::Connect { name, value } => {
                 try_single_line!(true);
                 writeln!(buf, "{name} <- ")?;
@@ -167,9 +172,6 @@ impl ExprKind {
                 let len = try_single_line!(false);
                 if function == &["str", "concat"] {
                     Ok(())
-                } else if function == &["do"] {
-                    buf.truncate(len);
-                    pretty_print_exprs(indent, limit, buf, args, "{", "}", "")
                 } else if function == &["array"] {
                     buf.truncate(len);
                     pretty_print_exprs(indent, limit, buf, args, "[", "]", ",")
@@ -251,6 +253,7 @@ impl fmt::Display for ExprKind {
                     None => write!(f, ";"),
                 }
             }
+            ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", ""),
             ExprKind::Lambda { args, vargs, body } => {
                 write!(f, "|")?;
                 for i in 0..args.len() {
@@ -284,8 +287,6 @@ impl fmt::Display for ExprKind {
                         }
                     }
                     write!(f, "\"")
-                } else if function == &["do"] {
-                    print_exprs(f, &**args, "{", "}", "")
                 } else if function == &["array"] {
                     print_exprs(f, &**args, "[", "]", ",")
                 } else {
