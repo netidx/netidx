@@ -14,7 +14,6 @@ use netidx::{
     subscriber::{Dval, SubId, UpdatesFlags, Value},
 };
 use std::{
-    cell::RefCell,
     collections::{HashMap, VecDeque},
     fmt, iter,
     sync::{self, Weak},
@@ -208,6 +207,12 @@ struct Bind<C: Ctx, E> {
     fun: Option<InitFn<C, E>>,
 }
 
+impl<C: Ctx, E> Default for Bind<C, E> {
+    fn default() -> Self {
+        Self { index: 0, export: false, fun: None }
+    }
+}
+
 impl<C: Ctx, E> Clone for Bind<C, E> {
     fn clone(&self) -> Self {
         Self {
@@ -349,6 +354,22 @@ pub struct Node<C: Ctx, E> {
     kind: NodeKind<C, E>,
 }
 
+impl<C: Ctx, E> Node<C, E> {
+    fn find_lambda(&self) -> Option<&InitFn<C, E>> {
+        match &self.kind {
+            NodeKind::Constant(_)
+            | NodeKind::Bind { .. }
+            | NodeKind::Ref { .. }
+            | NodeKind::Connect { .. }
+            | NodeKind::Apply { .. }
+            | NodeKind::Error { .. }
+            | NodeKind::Module { .. } => None,
+            NodeKind::Lambda(init) => Some(init),
+            NodeKind::Do { children } => children.last().and_then(|t| t.find_lambda()),
+        }
+    }
+}
+
 impl<C: Ctx, E> fmt::Display for Node<C, E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", &self.spec)
@@ -435,21 +456,21 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 Node { spec, kind }
             }
             Expr { kind: ExprKind::Bind { export, name, value }, id: _ } => {
-                let index_ref = ctx
-                    .variables
-                    .entry(scope.clone())
-                    .or_insert_with(HashMap::default)
-                    .entry(name.clone())
-                    .or_insert(0);
-                let index = *index_ref;
-                *index_ref += 1;
+                let bind = ctx
+                    .binds
+                    .get_or_default_cow(scope.clone())
+                    .get_or_default_cow(CompactString::from(&**name));
                 let node = Node::compile_int(ctx, (**value).clone(), &scope, top_id);
+                let index = bind.index;
+                bind.index += 1;
+                bind.fun = node.find_lambda().map(Arc::clone);
                 if node.is_err() {
-                    Node::Error { spec, error: None, children: vec![node] }
+                    let kind = NodeKind::Error { error: None, children: vec![node] };
+                    Node { spec, kind }
                 } else {
-                    let name = name.clone();
-                    let scope = scope.clone();
-                    Node::Bind { spec, scope, name, index, node: Box::new(node) }
+                    let node = Box::new(node);
+                    let kind = NodeKind::Bind { index, name: name.clone(), node };
+                    Node { spec, kind }
                 }
             }
             Expr { kind: ExprKind::Ref { name }, id } => {
