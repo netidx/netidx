@@ -398,9 +398,9 @@ impl<C: Ctx, E: Clone> Node<C, E> {
         top_id: ExprId,
     ) -> Self {
         macro_rules! compile_subexprs {
-            ($exprs:expr) => {
-                $exprs.iter().fold((false, vec![]), |(e, nodes), spec| {
-                    let n = Node::compile_int(ctx, spec.clone(), &scope, top_id);
+            ($scope:expr, $exprs:expr) => {
+                $exprs.iter().fold((false, vec![]), |(e, mut nodes), spec| {
+                    let n = Node::compile_int(ctx, spec.clone(), &$scope, top_id);
                     let e = e || n.is_err();
                     nodes.push(n);
                     (e, nodes)
@@ -412,8 +412,8 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 Node { kind: NodeKind::Constant(v.clone()), spec }
             }
             Expr { kind: ExprKind::Do { exprs }, id } => {
-                let scope = scope.append(&format_compact!("{id:?}"));
-                let (error, children) = compile_subexprs!(exprs);
+                let scope = ModPath(scope.append(&format_compact!("{id:?}")));
+                let (error, children) = compile_subexprs!(scope, exprs);
                 if error {
                     Node { kind: NodeKind::Error { error: None, children }, spec }
                 } else {
@@ -433,7 +433,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 unimplemented!()
             }
             Expr { kind: ExprKind::Apply { args, function }, id } => {
-                let (error, args) = compile_subexprs!(args);
+                let (error, args) = compile_subexprs!(scope, args);
                 let kind = match ctx.lookup_bind(scope, function) {
                     Some((scope, Bind { fun: None, .. })) => {
                         let e =
