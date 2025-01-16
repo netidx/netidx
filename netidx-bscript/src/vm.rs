@@ -267,6 +267,7 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
     pub fn no_std(user: C) -> Self {
         ExecCtx {
             binds: Map::new(),
+            used: Map::new(),
             root: Node {
                 spec: ExprKind::Module {
                     export: false,
@@ -274,7 +275,7 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
                     value: None,
                 }
                 .to_expr(),
-                kind: NodeKind::Module { name: ModPath(Path::root()), children: vec![] },
+                kind: NodeKind::Module { name: Chars::from("root"), children: vec![] },
             },
             dbg_ctx: DbgCtx::new(),
             user,
@@ -412,24 +413,26 @@ impl<C: Ctx, E: Clone> Node<C, E> {
             }
             Expr { kind: ExprKind::Apply { args, function }, id } => {
                 let (error, args) = compile_subexprs!(args);
-
-                match ctx.lookup_bind() {
-                    None => {
-                        let e = Value::Error(Chars::from(format!(
-                            "unknown function {}",
-                            function
-                        )));
-                        Node::Error { spec, error: Some(e), children: args }
+                let kind = match ctx.lookup_bind(scope, function) {
+                    Some((scope, Bind { fun: None, .. })) => {
+                        let e =
+                            Chars::from(format!("{scope}::{function} is not a function"));
+                        NodeKind::Error { error: Some(e), children: args }
                     }
-                    Some(bind) => {
+                    None => {
+                        let e = Chars::from(format!("unknown function {}", function));
+                        NodeKind::Error { error: Some(e), children: args }
+                    }
+                    Some((_, Bind { fun: Some(init), .. })) => {
                         if error {
-                            Node::Error { spec, error: None, children: args }
+                            NodeKind::Error { error: None, children: args }
                         } else {
                             let function = init(ctx, &args, scope, top_id);
-                            Node::Apply { spec, args, function }
+                            NodeKind::Apply { args, function }
                         }
                     }
-                }
+                };
+                Node { spec, kind }
             }
             Expr { kind: ExprKind::Bind { export, name, value }, id: _ } => {
                 let index_ref = ctx
