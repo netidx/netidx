@@ -421,7 +421,22 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 }
             }
             Expr { kind: ExprKind::Module { name, export, value }, id } => {
-                unimplemented!()
+                let scope = ModPath(scope.append(&name));
+                let kind = match value {
+                    None => NodeKind::Error {
+                        error: Some(Chars::from("module loading is not implemented")),
+                        children: vec![],
+                    },
+                    Some(exprs) => {
+                        let (error, children) = compile_subexprs!(scope, exprs);
+                        if error {
+                            NodeKind::Error { error: None, children }
+                        } else {
+                            NodeKind::Module { name: name.clone(), children }
+                        }
+                    }
+                };
+                Node { spec, kind }
             }
             Expr { kind: ExprKind::Use { name }, id } => {
                 unimplemented!()
