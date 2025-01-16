@@ -146,9 +146,9 @@ pub trait Ctx {
         ref_by: ExprId,
     ) -> Dval;
     fn unsubscribe(&mut self, path: Path, dv: Dval, ref_by: ExprId);
-    fn ref_var(&mut self, name: ModPath, index: usize, ref_by: ExprId);
-    fn unref_var(&mut self, name: ModPath, index: usize, ref_by: ExprId);
-    fn register_fn(&mut self, name: ModPath);
+    fn ref_var(&mut self, scope: ModPath, name: ModPath, index: usize, ref_by: ExprId);
+    fn unref_var(&mut self, scope: ModPath, name: ModPath, index: usize, ref_by: ExprId);
+    fn register_fn(&mut self, scope: ModPath, name: ModPath);
     fn set_var(&mut self, name: ModPath, index: usize, value: Value);
 
     /// For a given name, this must have at most one outstanding call
@@ -445,6 +445,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                         NodeKind::Error { error: Some(e), children: args }
                     }
                     Some((_, Bind { fun: Some(init), .. })) => {
+                        let init = Arc::clone(init);
                         if error {
                             NodeKind::Error { error: None, children: args }
                         } else {
@@ -456,11 +457,11 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 Node { spec, kind }
             }
             Expr { kind: ExprKind::Bind { export, name, value }, id: _ } => {
+                let node = Node::compile_int(ctx, (**value).clone(), &scope, top_id);
                 let bind = ctx
                     .binds
                     .get_or_default_cow(scope.clone())
                     .get_or_default_cow(CompactString::from(&**name));
-                let node = Node::compile_int(ctx, (**value).clone(), &scope, top_id);
                 let index = bind.index;
                 bind.index += 1;
                 bind.fun = node.find_lambda().map(Arc::clone);
@@ -474,17 +475,26 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 }
             }
             Expr { kind: ExprKind::Ref { name }, id } => {
-                match ctx.lookup_var(scope, name) {
+                match ctx.lookup_bind(scope, name) {
                     None => {
-                        let m = format!("variable {name} is not defined");
-                        let error = Some(Value::Error(Chars::from(m)));
-                        Node::Error { spec, error, children: vec![] }
+                        let e = Some(Chars::from(format!("variable {name} not defined")));
+                        let kind = NodeKind::Error { error: e, children: vec![] };
+                        Node { spec, kind }
                     }
-                    Some((scope, index)) => {
-                        let scope = scope.clone();
-                        ctx.user.ref_var(scope.clone(), name.clone(), index, *id);
-                        Node::Ref { spec: spec.clone(), scope, name: name.clone(), index }
-                    }
+                    Some((scope, bind)) => match &bind.fun {
+                        Some(_) => {
+                            let e = Some(Chars::from(format!("{name} is a function")));
+                            let kind = NodeKind::Error { error: e, children: vec![] };
+                            Node { spec, kind }
+                        }
+                        None => {
+                            let index = bind.index;
+                            let scope = scope.clone();
+                            ctx.user.ref_var(scope, name.clone(), index, *id);
+                            let kind = NodeKind::Ref { index, name: name.clone() };
+                            Node { spec, kind }
+                        }
+                    },
                 }
             }
         }
