@@ -17,8 +17,9 @@ use std::{
     str::{self, FromStr},
 };
 
-pub static ESC: char = '\\';
-pub static SEP: char = '/';
+pub const ESC: char = '\\';
+pub const SEP: char = '/';
+pub const ROOT: &str = "/";
 
 fn is_canonical(s: &str) -> bool {
     for _ in Path::parts(s).filter(|p| *p == "") {
@@ -239,6 +240,10 @@ impl<'a> DoubleEndedIterator for DirNames<'a> {
 }
 
 impl Path {
+    pub const ESC: char = ESC;
+    pub const SEP: char = SEP;
+    pub const ROOT: &str = ROOT;
+
     /// create a path from a non static str by copying the contents of the str
     pub fn from_str(s: &str) -> Self {
         if is_canonical(s) {

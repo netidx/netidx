@@ -5,22 +5,22 @@ use crate::{
 };
 use arcstr::ArcStr;
 use chrono::prelude::*;
+use compact_str::{format_compact, CompactString};
 use fxhash::{FxBuildHasher, FxHashMap};
-use immutable_chunkmap::map;
+use immutable_chunkmap::map::MapS as Map;
 use netidx::{
     chars::Chars,
     path::Path,
     subscriber::{Dval, SubId, UpdatesFlags, Value},
 };
 use std::{
+    cell::RefCell,
     collections::{HashMap, VecDeque},
-    fmt,
+    fmt, iter,
     sync::{self, Weak},
     time::Duration,
 };
 use triomphe::Arc;
-
-type Map<K, V> = map::Map<K, V, 16>;
 
 pub struct DbgCtx<E> {
     pub trace: bool,
@@ -114,6 +114,10 @@ pub enum Event<E> {
     User(E),
 }
 
+pub trait Register<C: Ctx, E> {
+    fn register(ctx: &mut ExecCtx<C, E>);
+}
+
 pub type InitFn<C, E> = Arc<
     dyn Fn(
             &mut ExecCtx<C, E>,
@@ -198,22 +202,56 @@ pub fn store_var(
     }
 }
 
+struct Bind<C: Ctx, E> {
+    index: usize,
+    export: bool,
+    fun: Option<InitFn<C, E>>,
+}
 
+impl<C: Ctx, E> Clone for Bind<C, E> {
+    fn clone(&self) -> Self {
+        Self {
+            index: self.index,
+            export: self.export,
+            fun: self.fun.as_ref().map(|fun| Arc::clone(fun)),
+        }
+    }
+}
 
 pub struct ExecCtx<C: Ctx, E> {
-    functions: FxHashMap<ModPath, InitFn<C, E>>,
-    variables: FxHashMap<ModPath, usize>,
+    binds: Map<ModPath, Map<CompactString, Bind<C, E>>>,
+    used: Map<ModPath, Arc<Vec<ModPath>>>,
     root: Node<C, E>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }
 
 impl<C: Ctx, E: Clone> ExecCtx<C, E> {
-    pub fn lookup_var(&self, scope: &Path, name: &Chars) -> Option<(&Path, usize)> {
-        for scope in Path::dirnames(scope).rev() {
-            if let Some((scope, vars)) = self.variables.get_key_value(scope) {
-                if let Some(index) = vars.get(name) {
-                    return Some((scope, *index));
+    pub fn lookup_bind(
+        &self,
+        scope: &ModPath,
+        name: &ModPath,
+    ) -> Option<(&ModPath, &Bind<C, E>)> {
+        let mut buf = CompactString::from("");
+        let name_scope = Path::dirname(&**name);
+        let name = Path::basename(&**name)?;
+        for scope in Path::dirnames(&**scope).rev() {
+            let used = self.used.get(scope);
+            let used = iter::once(scope)
+                .chain(used.iter().flat_map(|s| s.iter().map(|p| &***p)));
+            for scope in used {
+                let scope = name_scope
+                    .map(|ns| {
+                        buf.clear();
+                        buf.push_str(scope);
+                        buf.push_str(ns);
+                        buf.as_str()
+                    })
+                    .unwrap_or(scope);
+                if let Some((scope, vars)) = self.binds.get_full(scope) {
+                    if let Some(bind) = vars.get(name) {
+                        return Some((scope, bind));
+                    }
                 }
             }
         }
@@ -221,19 +259,14 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
     }
 
     pub fn clear(&mut self) {
-        self.variables.clear();
+        self.binds = Map::new();
         self.dbg_ctx.clear();
         self.user.clear();
     }
 
-    pub fn register_builtin(&mut self, name: ModPath, f: InitFn<C, E>) {
-        self.functions.insert(name, f);
-    }
-
     pub fn no_std(user: C) -> Self {
         ExecCtx {
-            functions: FxHashMap::default(),
-            variables: FxHashMap::default(),
+            binds: Map::new(),
             root: Node {
                 spec: ExprKind::Module {
                     export: false,
@@ -241,10 +274,7 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
                     value: None,
                 }
                 .to_expr(),
-                kind: NodeKind::Module {
-                    path: ModPath::from([]),
-                    children: FxHashMap::default(),
-                },
+                kind: NodeKind::Module { name: ModPath(Path::root()), children: vec![] },
             },
             dbg_ctx: DbgCtx::new(),
             user,
@@ -303,33 +333,14 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
 
 pub enum NodeKind<C: Ctx, E> {
     Constant(Value),
-    Module {
-        name: ModPath,
-        children: Vec<Node<C, E>>,
-    },
-    Do {
-        children: Vec<Node<C, E>>,
-    },
-    Bind {
-        name: ModPath,
-        index: usize,
-        node: Box<Node<C, E>>,
-    },
-    Ref {
-        name: ModPath,
-        index: usize,
-    },
-    Connect {
-        name: ModPath,
-        index: usize,
-        node: Box<Node<C, E>>,
-    },
+    Module { name: Chars, children: Vec<Node<C, E>> },
+    Do { children: Vec<Node<C, E>> },
+    Bind { name: Chars, index: usize, node: Box<Node<C, E>> },
+    Ref { name: ModPath, index: usize },
+    Connect { name: ModPath, index: usize, node: Box<Node<C, E>> },
     Lambda(InitFn<C, E>),
-    Apply {
-        args: Vec<Node<C, E>>,
-        function: Box<dyn Apply<C, E> + Send + Sync>,
-    },
-    Error { error: Option<Chars>, children: Vec<Node<C, E>> }
+    Apply { args: Vec<Node<C, E>>, function: Box<dyn Apply<C, E> + Send + Sync> },
+    Error { error: Option<Chars>, children: Vec<Node<C, E>> },
 }
 
 pub struct Node<C: Ctx, E> {
@@ -348,6 +359,10 @@ impl<C: Ctx, E: Clone> Node<C, E> {
         match &self.kind {
             NodeKind::Error { .. } => true,
             NodeKind::Apply { .. }
+            | NodeKind::Do { .. }
+            | NodeKind::Module { .. }
+            | NodeKind::Lambda(_)
+            | NodeKind::Connect { .. }
             | NodeKind::Bind { .. }
             | NodeKind::Constant(_)
             | NodeKind::Ref { .. } => false,
@@ -360,24 +375,45 @@ impl<C: Ctx, E: Clone> Node<C, E> {
         scope: &ModPath,
         top_id: ExprId,
     ) -> Self {
+        macro_rules! compile_subexprs {
+            ($exprs:expr) => {
+                $exprs.iter().fold((false, vec![]), |(e, nodes), spec| {
+                    let n = Node::compile_int(ctx, spec.clone(), &scope, top_id);
+                    let e = e || n.is_err();
+                    nodes.push(n);
+                    (e, nodes)
+                })
+            };
+        }
         match &spec {
             Expr { kind: ExprKind::Constant(v), id: _ } => {
                 Node { kind: NodeKind::Constant(v.clone()), spec }
             }
-            Expr { kind: ExprKind::Apply { args, function }, id } => {
-                let scope = if &**function == "do" && id != &top_id {
-                    &scope.append(&format!("do{:?}", id))
+            Expr { kind: ExprKind::Do { exprs }, id } => {
+                let scope = scope.append(&format_compact!("{id:?}"));
+                let (error, children) = compile_subexprs!(exprs);
+                if error {
+                    Node { kind: NodeKind::Error { error: None, children }, spec }
                 } else {
-                    scope
-                };
-                let (error, args): (bool, Vec<Node<C, E>>) =
-                    args.iter().fold((false, vec![]), |(e, mut nodes), spec| {
-                        let n = Node::compile_int(ctx, spec.clone(), scope, top_id);
-                        let e = e || n.is_err();
-                        nodes.push(n);
-                        (e, nodes)
-                    });
-                match ctx.functions.get(function).map(Arc::clone) {
+                    Node { kind: NodeKind::Do { children }, spec }
+                }
+            }
+            Expr { kind: ExprKind::Module { name, export, value }, id } => {
+                unimplemented!()
+            }
+            Expr { kind: ExprKind::Use { name }, id } => {
+                unimplemented!()
+            }
+            Expr { kind: ExprKind::Connect { name, value }, id } => {
+                unimplemented!()
+            }
+            Expr { kind: ExprKind::Lambda { args, vargs, body }, id } => {
+                unimplemented!()
+            }
+            Expr { kind: ExprKind::Apply { args, function }, id } => {
+                let (error, args) = compile_subexprs!(args);
+
+                match ctx.lookup_bind() {
                     None => {
                         let e = Value::Error(Chars::from(format!(
                             "unknown function {}",
@@ -385,7 +421,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                         )));
                         Node::Error { spec, error: Some(e), children: args }
                     }
-                    Some(init) => {
+                    Some(bind) => {
                         if error {
                             Node::Error { spec, error: None, children: args }
                         } else {
@@ -395,7 +431,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                     }
                 }
             }
-            Expr { kind: ExprKind::Bind { name, value }, id: _ } => {
+            Expr { kind: ExprKind::Bind { export, name, value }, id: _ } => {
                 let index_ref = ctx
                     .variables
                     .entry(scope.clone())

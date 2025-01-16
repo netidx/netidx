@@ -14,6 +14,7 @@ use std::{
     borrow::Borrow,
     cmp::{Ordering, PartialEq, PartialOrd},
     fmt::{self, Display, Write},
+    ops::Deref,
     result,
     str::FromStr,
 };
@@ -27,6 +28,26 @@ atomic_id!(ExprId);
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct ModPath(pub Path);
+
+impl ModPath {
+    fn append(&self, other: &ModPath) -> ModPath {
+        ModPath(self.0.append(&**other))
+    }
+}
+
+impl Borrow<str> for ModPath {
+    fn borrow(&self) -> &str {
+        self.0.borrow()
+    }
+}
+
+impl Deref for ModPath {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 impl Display for ModPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

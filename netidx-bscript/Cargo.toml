@@ -21,6 +21,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 combine = { workspace = true }
+compact_str = { workspace = true }
 fxhash = { workspace = true }
 immutable-chunkmap = { workspace = true }
 lazy_static = { workspace = true }
