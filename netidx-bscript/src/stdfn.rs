@@ -13,8 +13,9 @@ use netidx::{
 };
 use netidx_core::utils::Either;
 use smallvec::SmallVec;
+use triomphe::Arc;
 use std::{
-    collections::HashSet, iter, marker::PhantomData, ops::SubAssign, sync::Arc,
+    collections::HashSet, iter, marker::PhantomData, ops::SubAssign,
     time::Duration,
 };
 
@@ -103,7 +104,7 @@ pub struct Any;
 
 impl<C: Ctx, E: Clone> Register<C, E> for Any {
     fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Any));
+        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Ok(Box::new(Any)));
         ctx.functions.insert("any".into(), f);
         ctx.user.register_fn(Path::root(), "any".into());
     }
@@ -1426,8 +1427,6 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Load {
     }
 }
 
-atomic_id!(RpcCallId);
-
 pub(crate) struct RpcCall {
     args: CachedVals,
     top_id: ExprId,
@@ -1505,8 +1504,6 @@ impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
         }
     }
 }
-
-atomic_id!(TimerId);
 
 pub(crate) struct AfterIdle {
     args: CachedVals,
