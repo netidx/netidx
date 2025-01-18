@@ -215,7 +215,7 @@ impl ExprKind {
                     write!(buf, "@args")?;
                 }
                 write!(buf, "| ")?;
-                match &body {
+                match &**body {
                     Either::Right(builtin) => {
                         write!(buf, "'{builtin}")
                     }
@@ -287,7 +287,7 @@ impl fmt::Display for ExprKind {
                     write!(f, "@args")?;
                 }
                 write!(f, "| ")?;
-                match body {
+                match &**body {
                     Either::Left(body) => write!(f, "{body}"),
                     Either::Right(builtin) => write!(f, "'{builtin}"),
                 }

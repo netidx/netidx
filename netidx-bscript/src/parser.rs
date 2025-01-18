@@ -168,6 +168,7 @@ where
                         )
                     }
                     (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Do { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Module { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Use { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Connect { .. }, .. }), _)
@@ -249,9 +250,8 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    between(token('{'), sptoken('}'), many(expr())).map(|args: Vec<Expr>| {
-        ExprKind::Do { exprs: Arc::from(args) }.to_expr()
-    })
+    between(token('{'), sptoken('}'), many(expr()))
+        .map(|args: Vec<Expr>| ExprKind::Do { exprs: Arc::from(args) }.to_expr())
 }
 
 fn array<I>() -> impl Parser<I, Output = Expr>

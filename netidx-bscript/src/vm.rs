@@ -9,6 +9,7 @@ use netidx::{
     chars::Chars,
     path::Path,
     subscriber::{Dval, SubId, UpdatesFlags, Value},
+    utils::Either,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -103,6 +104,7 @@ impl<E: Clone> DbgCtx<E> {
 atomic_id!(TimerId);
 atomic_id!(RpcCallId);
 atomic_id!(BindId);
+atomic_id!(LambdaId);
 
 #[derive(Clone, Debug)]
 pub enum Event<E> {
@@ -118,11 +120,11 @@ pub trait Register<C: Ctx, E> {
     fn register(ctx: &mut ExecCtx<C, E>);
 }
 
-pub type InitFn<C, E> = Arc<
-    dyn Fn(
-            &mut ExecCtx<C, E>,
-            &[Node<C, E>],
-            &ModPath,
+pub type InitFn<C, E> = sync::Arc<
+    dyn for<'a, 'b, 'c> Fn(
+            &'a mut ExecCtx<C, E>,
+            &'b [Node<C, E>],
+            &'c ModPath,
             ExprId,
         ) -> Result<Box<dyn Apply<C, E> + Send + Sync>>
         + Send
@@ -150,7 +152,7 @@ pub trait Ctx {
     fn ref_var(&mut self, id: BindId, ref_by: ExprId);
     fn unref_var(&mut self, id: BindId, ref_by: ExprId);
     fn register_fn(&mut self, scope: ModPath, name: ModPath);
-    fn set_var(&mut self, name: ModPath, index: usize, value: Value);
+    fn set_var(&mut self, id: BindId, value: Value);
 
     /// For a given name, this must have at most one outstanding call
     /// at a time, and must preserve the order of the calls. Calls to
@@ -219,7 +221,7 @@ impl<C: Ctx, E> Clone for Bind<C, E> {
         Self {
             id: self.id,
             export: self.export,
-            fun: self.fun.as_ref().map(|fun| Arc::clone(fun)),
+            fun: self.fun.as_ref().map(|fun| sync::Arc::clone(fun)),
         }
     }
 }
@@ -228,6 +230,7 @@ pub struct ExecCtx<C: Ctx, E> {
     binds: Map<ModPath, Map<CompactString, Bind<C, E>>>,
     used: Map<ModPath, Arc<Vec<ModPath>>>,
     modules: Set<ModPath>,
+    builtins: FxHashMap<Chars, InitFn<C, E>>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }
@@ -286,13 +289,14 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
             binds: Map::new(),
             used: Map::new(),
             modules: Set::new(),
+            builtins: FxHashMap::default(),
             dbg_ctx: DbgCtx::new(),
             user,
         }
     }
 
     pub fn new(user: C) -> Self {
-        let mut t = ExecCtx::no_std(user);
+        let t = ExecCtx::no_std(user);
         /*
         stdfn::AfterIdle::register(&mut t);
         stdfn::All::register(&mut t);
@@ -343,6 +347,57 @@ impl<C: Ctx, E: Clone> ExecCtx<C, E> {
     }
 }
 
+struct Lambda<C: Ctx, E> {
+    id: LambdaId,
+    argids: Vec<BindId>,
+    body: Node<C, E>,
+}
+
+impl<C: Ctx, E: Clone> Apply<C, E> for Lambda<C, E> {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        for (arg, id) in from.iter_mut().zip(&self.argids) {
+            if let Some(v) = arg.update(ctx, event) {
+                ctx.user.set_var(*id, v)
+            }
+        }
+        self.body.update(ctx, event)
+    }
+}
+
+impl<C: Ctx, E: Clone> Lambda<C, E> {
+    fn new(
+        ctx: &mut ExecCtx<C, E>,
+        argspec: Arc<[Chars]>,
+        args: &[Node<C, E>],
+        scope: &ModPath,
+        tid: ExprId,
+        body: Expr,
+    ) -> Result<Self> {
+        if args.len() != argspec.len() {
+            bail!("arity mismatch, expected {} arguments", argspec.len())
+        }
+        let id = LambdaId::new();
+        let mut argids = vec![];
+        let scope = ModPath(scope.0.append(&format_compact!("{id:?}")));
+        let binds = ctx.binds.get_or_default_cow(scope.clone());
+        for (name, node) in argspec.iter().zip(args.iter()) {
+            let bind = binds.get_or_default_cow(CompactString::from(&**name));
+            argids.push(bind.id);
+            bind.fun = node.find_lambda();
+        }
+        let body = Node::compile_int(ctx, body, &scope, tid);
+        match body.extract_err() {
+            Some(e) => bail!("{e}"),
+            None => Ok(Self { id, argids, body }),
+        }
+    }
+}
+
 pub enum NodeKind<C: Ctx, E> {
     Constant(Value),
     Module(Vec<Node<C, E>>),
@@ -361,8 +416,14 @@ pub struct Node<C: Ctx, E> {
     kind: NodeKind<C, E>,
 }
 
-impl<C: Ctx, E> Node<C, E> {
-    fn find_lambda(&self) -> Option<&InitFn<C, E>> {
+impl<C: Ctx, E> fmt::Display for Node<C, E> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", &self.spec)
+    }
+}
+
+impl<C: Ctx, E: Clone> Node<C, E> {
+    fn find_lambda(&self) -> Option<InitFn<C, E>> {
         match &self.kind {
             NodeKind::Constant(_)
             | NodeKind::Use
@@ -372,19 +433,11 @@ impl<C: Ctx, E> Node<C, E> {
             | NodeKind::Apply { .. }
             | NodeKind::Error { .. }
             | NodeKind::Module(_) => None,
-            NodeKind::Lambda(init) => Some(init),
+            NodeKind::Lambda(init) => Some(sync::Arc::clone(init)),
             NodeKind::Do(children) => children.last().and_then(|t| t.find_lambda()),
         }
     }
-}
 
-impl<C: Ctx, E> fmt::Display for Node<C, E> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", &self.spec)
-    }
-}
-
-impl<C: Ctx, E: Clone> Node<C, E> {
     pub fn is_err(&self) -> bool {
         match &self.kind {
             NodeKind::Error { .. } => true,
@@ -397,6 +450,30 @@ impl<C: Ctx, E: Clone> Node<C, E> {
             | NodeKind::Bind(_, _)
             | NodeKind::Constant(_)
             | NodeKind::Ref(_) => false,
+        }
+    }
+
+    /// extracts the first error
+    pub fn extract_err(&self) -> Option<Chars> {
+        match &self.kind {
+            NodeKind::Error { error: Some(e), .. } => Some(e.clone()),
+            NodeKind::Error { children, .. } => {
+                for node in children {
+                    if let Some(e) = node.extract_err() {
+                        return Some(e);
+                    }
+                }
+                None
+            }
+            NodeKind::Apply { .. }
+            | NodeKind::Use
+            | NodeKind::Do(_)
+            | NodeKind::Module(_)
+            | NodeKind::Lambda(_)
+            | NodeKind::Connect(_, _)
+            | NodeKind::Bind(_, _)
+            | NodeKind::Constant(_)
+            | NodeKind::Ref(_) => None,
         }
     }
 
@@ -549,22 +626,27 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 }
             }
             Expr { kind: ExprKind::Lambda { args, vargs, body }, id: _ } => {
+                use sync::Arc;
+                if args.len() != args.iter().collect::<Set<_>>().len() {
+                    return error!("arguments must have unique names");
+                }
                 let argspec = args.clone();
                 let vargs = *vargs;
-                let body = body.clone();
-                let init: InitFn<C, E> = Arc::new(move |ctx, args, scope, top_id| {
-                    if args.len() < argspec.len() {
-                        bail!(
-                            "missing required arguments, expected at least {} arguments",
-                            argspec.len()
-                        )
-                    }
-                    if args.len() > argspec.len() && !vargs {
-                        bail!("too many arguments, expected {} arguments", argspec.len())
-                    }
-                    unimplemented!()
-                });
-                Node { spec, kind: NodeKind::Lambda(init) }
+                let body = (**body).clone();
+                let f: InitFn<C, E> =
+                    Arc::new(move |ctx, args, scope, tid| match body.clone() {
+                        Either::Left(body) => Ok(Box::new(Lambda::new(
+                            ctx, argspec, args, scope, tid, body,
+                        )?)),
+                        Either::Right(builtin) => match ctx.builtins.get(&builtin) {
+                            None => bail!("unknown builtin function {builtin}"),
+                            Some(init) => {
+                                let init = Arc::clone(init);
+                                init(ctx, args, scope, tid)
+                            }
+                        },
+                    });
+                Node { spec, kind: NodeKind::Lambda(f) }
             }
             Expr { kind: ExprKind::Apply { args, function }, id } => {
                 let (error, args) = compile_subexprs!(scope, args);
@@ -574,7 +656,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                         error!("{function} is not a function")
                     }
                     Some((_, Bind { fun: Some(init), .. })) => {
-                        let init = Arc::clone(init);
+                        let init = sync::Arc::clone(init);
                         if error {
                             error!("", args)
                         } else if let Some(e) = args.iter().find(|e| !e.args_ok()) {
@@ -604,7 +686,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
                 if existing {
                     bind.id = BindId::new();
                 }
-                bind.fun = node.find_lambda().map(Arc::clone);
+                bind.fun = node.find_lambda();
                 if node.is_err() {
                     error!("", vec![node])
                 } else {
@@ -627,7 +709,7 @@ impl<C: Ctx, E: Clone> Node<C, E> {
         }
     }
 
-    pub fn compile(ctx: &mut ExecCtx<C, E>, scope: &Path, spec: Expr) -> Self {
+    pub fn compile(ctx: &mut ExecCtx<C, E>, scope: &ModPath, spec: Expr) -> Self {
         let top_id = spec.id;
         Self::compile_int(ctx, spec, scope, top_id)
     }
