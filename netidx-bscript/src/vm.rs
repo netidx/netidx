@@ -1,9 +1,8 @@
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use anyhow::{bail, Result};
-use arcstr::ArcStr;
 use chrono::prelude::*;
 use compact_str::{format_compact, CompactString};
-use fxhash::{FxBuildHasher, FxHashMap};
+use fxhash::FxHashMap;
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::{
     chars::Chars,
@@ -22,12 +21,11 @@ use triomphe::Arc;
 pub struct DbgCtx<E> {
     pub trace: bool,
     events: VecDeque<(ExprId, (DateTime<Local>, Option<Event<E>>, Value))>,
-    watch: HashMap<
+    watch: FxHashMap<
         ExprId,
         Vec<Weak<dyn Fn(&DateTime<Local>, &Option<Event<E>>, &Value) + Send + Sync>>,
-        FxBuildHasher,
     >,
-    current: HashMap<ExprId, (Option<Event<E>>, Value), FxBuildHasher>,
+    current: FxHashMap<ExprId, (Option<Event<E>>, Value)>,
 }
 
 impl<E: Clone> DbgCtx<E> {
@@ -35,8 +33,8 @@ impl<E: Clone> DbgCtx<E> {
         DbgCtx {
             trace: false,
             events: VecDeque::new(),
-            watch: HashMap::with_hasher(FxBuildHasher::default()),
-            current: HashMap::with_hasher(FxBuildHasher::default()),
+            watch: HashMap::default(),
+            current: HashMap::default(),
         }
     }
 
@@ -116,10 +114,6 @@ pub enum Event<E> {
     User(E),
 }
 
-pub trait Register<C: Ctx + 'static, E: Clone + 'static> {
-    fn register(ctx: &mut ExecCtx<C, E>);
-}
-
 pub type InitFn<C, E> = sync::Arc<
     dyn for<'a, 'b, 'c> Fn(
             &'a mut ExecCtx<C, E>,
@@ -131,7 +125,14 @@ pub type InitFn<C, E> = sync::Arc<
         + Sync,
 >;
 
-pub trait Apply<C: Ctx + 'static, E: Clone + 'static> {
+pub trait Init<C: Ctx, E: Clone> {
+    const ARITY: Arity;
+    const NAME: &str;
+
+    fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E>;
+}
+
+pub trait Apply<C: Ctx, E: Clone> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -169,39 +170,11 @@ pub trait Ctx {
     fn set_timer(&mut self, id: TimerId, timeout: Duration, ref_by: ExprId);
 }
 
-pub fn store_var(
-    variables: &mut FxHashMap<Path, FxHashMap<Chars, Value>>,
-    local: bool,
-    scope: &Path,
-    name: &Chars,
-    value: Value,
-) -> (bool, Path) {
-    if local {
-        let mut new = false;
-        variables
-            .entry(scope.clone())
-            .or_insert_with(|| {
-                new = true;
-                HashMap::with_hasher(FxBuildHasher::default())
-            })
-            .insert(name.clone(), value);
-        (new, scope.clone())
-    } else {
-        let mut iter = Path::dirnames(scope);
-        loop {
-            match iter.next_back() {
-                None => break store_var(variables, true, &Path::root(), name, value),
-                Some(scope) => {
-                    if let Some(vars) = variables.get_mut(scope) {
-                        if let Some(var) = vars.get_mut(name) {
-                            *var = value;
-                            break (false, Path::from(ArcStr::from(scope)));
-                        }
-                    }
-                }
-            }
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+pub enum Arity {
+    Any,
+    AtLeast(usize),
+    Exactly(usize),
 }
 
 struct Bind<C: Ctx + 'static, E: Clone + 'static> {
@@ -230,7 +203,7 @@ pub struct ExecCtx<C: Ctx + 'static, E: Clone + 'static> {
     binds: Map<ModPath, Map<CompactString, Bind<C, E>>>,
     used: Map<ModPath, Arc<Vec<ModPath>>>,
     modules: Set<ModPath>,
-    builtins: FxHashMap<Chars, InitFn<C, E>>,
+    builtins: FxHashMap<&'static str, (Arity, InitFn<C, E>)>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }
@@ -280,11 +253,13 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
 
     pub fn clear(&mut self) {
         self.binds = Map::new();
+        self.used = Map::new();
+        self.modules = Set::new();
         self.dbg_ctx.clear();
         self.user.clear();
     }
 
-    pub fn no_std(user: C) -> Self {
+    pub fn new(user: C) -> Self {
         ExecCtx {
             binds: Map::new(),
             used: Map::new(),
@@ -295,55 +270,9 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
         }
     }
 
-    pub fn new(user: C) -> Self {
-        let t = ExecCtx::no_std(user);
-        /*
-        stdfn::AfterIdle::register(&mut t);
-        stdfn::All::register(&mut t);
-        stdfn::And::register(&mut t);
-        stdfn::Any::register(&mut t);
-        stdfn::Array::register(&mut t);
-        stdfn::Basename::register(&mut t);
-        stdfn::Cast::register(&mut t);
-        stdfn::Cmp::register(&mut t);
-        stdfn::Contains::register(&mut t);
-        stdfn::Count::register(&mut t);
-        stdfn::Dirname::register(&mut t);
-        stdfn::Divide::register(&mut t);
-        stdfn::Do::register(&mut t);
-        stdfn::EndsWith::register(&mut t);
-        stdfn::Eval::register(&mut t);
-        stdfn::FilterErr::register(&mut t);
-        stdfn::Filter::register(&mut t);
-        stdfn::If::register(&mut t);
-        stdfn::Index::register(&mut t);
-        stdfn::Isa::register(&mut t);
-        stdfn::IsErr::register(&mut t);
-        stdfn::Load::register(&mut t);
-        stdfn::Max::register(&mut t);
-        stdfn::Mean::register(&mut t);
-        stdfn::Min::register(&mut t);
-        stdfn::Not::register(&mut t);
-        stdfn::Once::register(&mut t);
-        stdfn::Or::register(&mut t);
-        stdfn::Product::register(&mut t);
-        stdfn::Replace::register(&mut t);
-        stdfn::RpcCall::register(&mut t);
-        stdfn::Sample::register(&mut t);
-        stdfn::StartsWith::register(&mut t);
-        stdfn::Store::register(&mut t);
-        stdfn::StringConcat::register(&mut t);
-        stdfn::StringJoin::register(&mut t);
-        stdfn::StripPrefix::register(&mut t);
-        stdfn::StripSuffix::register(&mut t);
-        stdfn::Sum::register(&mut t);
-        stdfn::Timer::register(&mut t);
-        stdfn::TrimEnd::register(&mut t);
-        stdfn::Trim::register(&mut t);
-        stdfn::TrimStart::register(&mut t);
-        stdfn::Uniq::register(&mut t);
-        */
-        t
+    pub fn register_builtin<T: Init<C, E>>(&mut self) {
+        let f = T::init(self);
+        self.builtins.insert(T::NAME, (T::ARITY, f));
     }
 }
 
@@ -648,11 +577,24 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                             tid,
                             body,
                         )?)),
-                        Either::Right(builtin) => match ctx.builtins.get(&builtin) {
+                        Either::Right(builtin) => match ctx.builtins.get(&*builtin) {
                             None => bail!("unknown builtin function {builtin}"),
-                            Some(init) => {
+                            Some((arity, init)) => {
                                 let init = Arc::clone(init);
-                                init(ctx, args, scope, tid)
+                                let l = args.len();
+                                match *arity {
+                                    Arity::Any => init(ctx, args, scope, tid),
+                                    Arity::AtLeast(n) if l >= n => {
+                                        init(ctx, args, scope, tid)
+                                    }
+                                    Arity::AtLeast(n) => {
+                                        bail!("expected at least {n} args")
+                                    }
+                                    Arity::Exactly(n) if l == n => {
+                                        init(ctx, args, scope, tid)
+                                    }
+                                    Arity::Exactly(n) => bail!("expected {n} arguments"),
+                                }
                             }
                         },
                     });

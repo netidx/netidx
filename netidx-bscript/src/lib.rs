@@ -6,4 +6,4 @@
 mod parser;
 pub mod expr;
 pub mod vm;
-//pub mod stdfn;
+pub mod stdfn;

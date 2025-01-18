@@ -1,9 +1,8 @@
 use crate::{
-    expr::{Expr, ExprId},
-    vm::{Apply, Ctx, Event, ExecCtx, InitFn, Node, Register},
+    expr::{Expr, ExprId, ModPath},
+    vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node, RpcCallId, TimerId},
 };
-use anyhow::bail;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use fxhash::FxHashSet;
 use netidx::{
     chars::Chars,
@@ -13,9 +12,8 @@ use netidx::{
 };
 use netidx_core::utils::Either;
 use smallvec::SmallVec;
-use triomphe::Arc;
 use std::{
-    collections::HashSet, iter, marker::PhantomData, ops::SubAssign,
+    collections::HashSet, iter, marker::PhantomData, ops::SubAssign, sync::Arc,
     time::Duration,
 };
 
@@ -102,11 +100,12 @@ impl CachedVals {
 
 pub struct Any;
 
-impl<C: Ctx, E: Clone> Register<C, E> for Any {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Ok(Box::new(Any)));
-        ctx.functions.insert("any".into(), f);
-        ctx.user.register_fn(Path::root(), "any".into());
+impl<C: Ctx, E: Clone> Init<C, E> for Any {
+    const NAME: &str = "any";
+    const ARITY: Arity = Arity::Any;
+
+    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, _, _, _| Ok(Box::new(Any)))
     }
 }
 
@@ -127,11 +126,12 @@ pub struct Once {
     val: bool,
 }
 
-impl<C: Ctx, E: Clone> Register<C, E> for Once {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Once { val: false }));
-        ctx.functions.insert("once".into(), f);
-        ctx.user.register_fn(Path::root(), "once".into());
+impl<C: Ctx, E: Clone> Init<C, E> for Once {
+    const NAME: &str = "once";
+    const ARITY: Arity = Arity::Any;
+
+    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, _, _, _| Ok(Box::new(Once { val: false })))
     }
 }
 
@@ -151,41 +151,16 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Once {
                     Some(v)
                 }
             }),
-            n => {
-                if n.into_iter().fold(false, |u, n| u || n.update(ctx, event).is_some()) {
-                    err!("once(v): expected one argument")
-                } else {
-                    None
-                }
-            }
+            _ => None,
         }
     }
 }
 
-pub struct Do;
-
-impl<C: Ctx, E: Clone> Register<C, E> for Do {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Do));
-        ctx.functions.insert("do".into(), f);
-        ctx.user.register_fn(Path::root(), "do".into());
-    }
-}
-
-impl<C: Ctx, E: Clone> Apply<C, E> for Do {
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
-        event: &Event<E>,
-    ) -> Option<Value> {
-        from.into_iter().fold(None, |_, src| src.update(ctx, event))
-    }
-}
-
 pub trait EvalCached {
+    const NAME: &str;
+    const ARITY: Arity;
+
     fn eval(from: &CachedVals) -> Option<Value>;
-    fn name() -> &'static str;
 }
 
 pub struct CachedArgs<T: EvalCached + Send + Sync> {
@@ -193,15 +168,17 @@ pub struct CachedArgs<T: EvalCached + Send + Sync> {
     t: PhantomData<T>,
 }
 
-impl<C: Ctx, E: Clone, T: EvalCached + Send + Sync + 'static> Register<C, E>
+impl<C: Ctx, E: Clone, T: EvalCached + Send + Sync + 'static> Init<C, E>
     for CachedArgs<T>
 {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from, _, _| {
-            Box::new(CachedArgs::<T> { cached: CachedVals::new(from), t: PhantomData })
-        });
-        ctx.functions.insert(T::name().into(), f);
-        ctx.user.register_fn(Path::root(), T::name().into());
+    const NAME: &str = T::NAME;
+    const ARITY: Arity = T::ARITY;
+
+    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, from, _, _| {
+            let t = CachedArgs::<T> { cached: CachedVals::new(from), t: PhantomData };
+            Ok(Box::new(t))
+        })
     }
 }
 
@@ -225,6 +202,9 @@ impl<C: Ctx, E: Clone, T: EvalCached + Send + Sync + 'static> Apply<C, E>
 pub struct AllEv;
 
 impl EvalCached for AllEv {
+    const NAME: &str = "all";
+    const ARITY: Arity = Arity::Any;
+
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [] => None,
@@ -240,10 +220,6 @@ impl EvalCached for AllEv {
             },
         }
     }
-
-    fn name() -> &'static str {
-        "all"
-    }
 }
 
 pub type All = CachedArgs<AllEv>;
@@ -251,16 +227,15 @@ pub type All = CachedArgs<AllEv>;
 pub struct ArrayEv;
 
 impl EvalCached for ArrayEv {
+    const NAME: &str = "array";
+    const ARITY: Arity = Arity::Any;
+
     fn eval(from: &CachedVals) -> Option<Value> {
         if from.0.iter().all(|v| v.is_some()) {
             Some(Value::Array(Arc::from_iter(from.0.iter().filter_map(|v| v.clone()))))
         } else {
             None
         }
-    }
-
-    fn name() -> &'static str {
-        "array"
     }
 }
 
@@ -277,15 +252,14 @@ fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 pub struct SumEv;
 
 impl EvalCached for SumEv {
+    const NAME: &str = "sum";
+    const ARITY: Arity = Arity::Any;
+
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
             res => add_vals(res, v.clone()),
         })
-    }
-
-    fn name() -> &'static str {
-        "sum"
     }
 }
 
@@ -302,15 +276,14 @@ fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 }
 
 impl EvalCached for ProductEv {
+    const NAME: &str = "product";
+    const ARITY: Arity = Arity::Any;
+
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
             res => prod_vals(res, v.clone()),
         })
-    }
-
-    fn name() -> &'static str {
-        "product"
     }
 }
 
@@ -327,15 +300,14 @@ fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 }
 
 impl EvalCached for DivideEv {
+    const NAME: &str = "divide";
+    const ARITY: Arity = Arity::Any;
+
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
             res => div_vals(res, v.clone()),
         })
-    }
-
-    fn name() -> &'static str {
-        "divide"
     }
 }
 
@@ -344,6 +316,9 @@ pub type Divide = CachedArgs<DivideEv>;
 pub struct MinEv;
 
 impl EvalCached for MinEv {
+    const NAME: &str = "min";
+    const ARITY: Arity = Arity::Any;
+
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = None;
         for v in from.flat_iter() {
@@ -359,10 +334,6 @@ impl EvalCached for MinEv {
         }
         res
     }
-
-    fn name() -> &'static str {
-        "min"
-    }
 }
 
 pub type Min = CachedArgs<MinEv>;
@@ -370,6 +341,9 @@ pub type Min = CachedArgs<MinEv>;
 pub struct MaxEv;
 
 impl EvalCached for MaxEv {
+    const NAME: &str = "max";
+    const ARITY: Arity = Arity::Any;
+
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = None;
         for v in from.flat_iter() {
@@ -385,10 +359,6 @@ impl EvalCached for MaxEv {
         }
         res
     }
-
-    fn name() -> &'static str {
-        "max"
-    }
 }
 
 pub type Max = CachedArgs<MaxEv>;
@@ -396,6 +366,9 @@ pub type Max = CachedArgs<MaxEv>;
 pub struct AndEv;
 
 impl EvalCached for AndEv {
+    const NAME: &str = "and";
+    const ARITY: Arity = Arity::Any;
+
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = Some(Value::True);
         for v in from.flat_iter() {
@@ -409,10 +382,6 @@ impl EvalCached for AndEv {
         }
         res
     }
-
-    fn name() -> &'static str {
-        "and"
-    }
 }
 
 pub type And = CachedArgs<AndEv>;
@@ -420,6 +389,9 @@ pub type And = CachedArgs<AndEv>;
 pub struct OrEv;
 
 impl EvalCached for OrEv {
+    const NAME: &str = "or";
+    const ARITY: Arity = Arity::Any;
+
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = Some(Value::False);
         for v in from.flat_iter() {
@@ -433,10 +405,6 @@ impl EvalCached for OrEv {
         }
         res
     }
-
-    fn name() -> &'static str {
-        "or"
-    }
 }
 
 pub type Or = CachedArgs<OrEv>;
@@ -444,15 +412,11 @@ pub type Or = CachedArgs<OrEv>;
 pub struct NotEv;
 
 impl EvalCached for NotEv {
-    fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [v] => v.as_ref().map(|v| !(v.clone())),
-            _ => err!("not expected 1 argument"),
-        }
-    }
+    const NAME: &str = "not";
+    const ARITY: Arity = Arity::Exactly(1);
 
-    fn name() -> &'static str {
-        "not"
+    fn eval(from: &CachedVals) -> Option<Value> {
+        from.0[0].as_ref().map(|v| !(v.clone()))
     }
 }
 
@@ -461,43 +425,37 @@ pub type Not = CachedArgs<NotEv>;
 pub struct IsErrEv;
 
 impl EvalCached for IsErrEv {
-    fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [v] => v.as_ref().map(|v| match v {
-                Value::Error(_) => Value::True,
-                _ => Value::False,
-            }),
-            _ => err!("is_error expected 1 argument"),
-        }
-    }
+    const NAME: &str = "is_error";
+    const ARITY: Arity = Arity::Exactly(1);
 
-    fn name() -> &'static str {
-        "is_error"
+    fn eval(from: &CachedVals) -> Option<Value> {
+        from.0[0].as_ref().map(|v| match v {
+            Value::Error(_) => Value::True,
+            _ => Value::False,
+        })
     }
 }
 
 pub type IsErr = CachedArgs<IsErrEv>;
 
-// CR estokes: document
 pub struct StartsWithEv;
 
 impl EvalCached for StartsWithEv {
+    const NAME: &str = "starts_with";
+    const ARITY: Arity = Arity::Exactly(2);
+
     fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [Some(Value::String(pfx)), Some(Value::String(val))] => {
+        match (&from.0[0], &from.0[1]) {
+            (Some(Value::String(pfx)), Some(Value::String(val))) => {
                 if val.starts_with(&**pfx) {
                     Some(Value::True)
                 } else {
                     Some(Value::False)
                 }
             }
-            [None, _] | [_, None] => None,
-            _ => err!("starts_with expected 2 arguments"),
+            (None, _) | (_, None) => None,
+            _ => err!("starts_with string arguments"),
         }
-    }
-
-    fn name() -> &'static str {
-        "starts_with"
     }
 }
 
@@ -506,9 +464,12 @@ pub type StartsWith = CachedArgs<StartsWithEv>;
 pub struct IndexEv;
 
 impl EvalCached for IndexEv {
+    const NAME: &str = "index";
+    const ARITY: Arity = Arity::Exactly(2);
+
     fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [Some(Value::Array(elts)), Some(Value::I64(i))] if *i >= 0 => {
+        match (&from.0[0], &from.0[1]) {
+            (Some(Value::Array(elts)), Some(Value::I64(i))) if *i >= 0 => {
                 let i = *i as usize;
                 if i < elts.len() {
                     Some(elts[i].clone())
@@ -516,13 +477,9 @@ impl EvalCached for IndexEv {
                     err!("array index out of bounds")
                 }
             }
-            [None, _] | [_, None] => None,
+            (None, _) | (_, None) => None,
             _ => err!("index(array, index): expected an array and a positive index"),
         }
-    }
-
-    fn name() -> &'static str {
-        "index"
     }
 }
 
@@ -532,22 +489,21 @@ pub type Index = CachedArgs<IndexEv>;
 pub struct EndsWithEv;
 
 impl EvalCached for EndsWithEv {
+    const NAME: &str = "ends_with";
+    const ARITY: Arity = Arity::Exactly(2);
+
     fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [Some(Value::String(sfx)), Some(Value::String(val))] => {
+        match (&from.0[0], &from.0[1]) {
+            (Some(Value::String(sfx)), Some(Value::String(val))) => {
                 if val.ends_with(&**sfx) {
                     Some(Value::True)
                 } else {
                     Some(Value::False)
                 }
             }
-            [None, _] | [_, None] => None,
-            _ => err!("ends_with expected 2 arguments"),
+            (None, _) | (_, None) => None,
+            _ => err!("ends_with string arguments"),
         }
-    }
-
-    fn name() -> &'static str {
-        "ends_with"
     }
 }
 
@@ -557,22 +513,21 @@ pub type EndsWith = CachedArgs<EndsWithEv>;
 pub struct ContainsEv;
 
 impl EvalCached for ContainsEv {
+    const NAME: &str = "contains";
+    const ARITY: Arity = Arity::Exactly(2);
+
     fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [Some(Value::String(chs)), Some(Value::String(val))] => {
+        match (&from.0[0], &from.0[1]) {
+            (Some(Value::String(chs)), Some(Value::String(val))) => {
                 if val.contains(&**chs) {
                     Some(Value::True)
                 } else {
                     Some(Value::False)
                 }
             }
-            [None, _] | [_, None] => None,
-            _ => err!("contains expected 2 arguments"),
+            (None, _) | (_, None) => None,
+            _ => err!("contains expected string"),
         }
-    }
-
-    fn name() -> &'static str {
-        "contains"
     }
 }
 
@@ -581,18 +536,17 @@ pub type Contains = CachedArgs<ContainsEv>;
 pub struct StripPrefixEv;
 
 impl EvalCached for StripPrefixEv {
+    const NAME: &str = "strip_prefix";
+    const ARITY: Arity = Arity::Exactly(2);
+
     fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [Some(Value::String(pfx)), Some(Value::String(val))] => val
+        match (&from.0[0], &from.0[1]) {
+            (Some(Value::String(pfx)), Some(Value::String(val))) => val
                 .strip_prefix(&**pfx)
                 .map(|s| Value::String(Chars::from(String::from(s)))),
-            [None, _] | [_, None] => None,
-            _ => err!("strip_prefix expected 2 arguments"),
+            (None, _) | (_, None) => None,
+            _ => err!("strip_prefix expected string"),
         }
-    }
-
-    fn name() -> &'static str {
-        "strip_prefix"
     }
 }
 
@@ -601,18 +555,17 @@ pub type StripPrefix = CachedArgs<StripPrefixEv>;
 pub struct StripSuffixEv;
 
 impl EvalCached for StripSuffixEv {
+    const NAME: &str = "strip_suffix";
+    const ARITY: Arity = Arity::Exactly(2);
+
     fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [Some(Value::String(sfx)), Some(Value::String(val))] => val
+        match (&from.0[0], &from.0[1]) {
+            (Some(Value::String(sfx)), Some(Value::String(val))) => val
                 .strip_suffix(&**sfx)
                 .map(|s| Value::String(Chars::from(String::from(s)))),
-            [None, _] | [_, None] => None,
-            _ => err!("strip_suffix expected 2 arguments"),
+            (None, _) | (_, None) => None,
+            _ => err!("strip_suffix expected string"),
         }
-    }
-
-    fn name() -> &'static str {
-        "strip_suffix"
     }
 }
 
@@ -621,18 +574,17 @@ pub type StripSuffix = CachedArgs<StripSuffixEv>;
 pub struct TrimEv;
 
 impl EvalCached for TrimEv {
+    const NAME: &str = "trim";
+    const ARITY: Arity = Arity::Exactly(1);
+
     fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [Some(Value::String(val))] => {
+        match &from.0[0] {
+            Some(Value::String(val)) => {
                 Some(Value::String(Chars::from(String::from(val.trim()))))
             }
-            [None] => None,
-            _ => err!("trim expected 1 arguments"),
+            None => None,
+            _ => err!("trim expected string"),
         }
-    }
-
-    fn name() -> &'static str {
-        "trim"
     }
 }
 
@@ -641,18 +593,17 @@ pub type Trim = CachedArgs<TrimEv>;
 pub struct TrimStartEv;
 
 impl EvalCached for TrimStartEv {
+    const NAME: &str = "trim_start";
+    const ARITY: Arity = Arity::Exactly(1);
+
     fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [Some(Value::String(val))] => {
+        match &from.0[0] {
+            Some(Value::String(val)) => {
                 Some(Value::String(Chars::from(String::from(val.trim_start()))))
             }
-            [None] => None,
-            _ => err!("trim_start expected 1 arguments"),
+            None => None,
+            _ => err!("trim_start expected string"),
         }
-    }
-
-    fn name() -> &'static str {
-        "trim_start"
     }
 }
 
@@ -661,18 +612,17 @@ pub type TrimStart = CachedArgs<TrimStartEv>;
 pub struct TrimEndEv;
 
 impl EvalCached for TrimEndEv {
+    const NAME: &str = "trim_end";
+    const ARITY: Arity = Arity::Exactly(1);
+
     fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [Some(Value::String(val))] => {
+        match &from.0[0] {
+            Some(Value::String(val)) => {
                 Some(Value::String(Chars::from(String::from(val.trim_end()))))
             }
-            [None] => None,
-            _ => err!("trim_start expected 1 arguments"),
+            None => None,
+            _ => err!("trim_start expected string"),
         }
-    }
-
-    fn name() -> &'static str {
-        "trim_end"
     }
 }
 
@@ -681,20 +631,21 @@ pub type TrimEnd = CachedArgs<TrimEndEv>;
 pub struct ReplaceEv;
 
 impl EvalCached for ReplaceEv {
-    fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [Some(Value::String(pat)), Some(Value::String(rep)), Some(Value::String(val))] => {
-                Some(Value::String(Chars::from(String::from(
-                    val.replace(&**pat, &**rep),
-                ))))
-            }
-            [None, _, _] | [_, None, _] | [_, _, None] => None,
-            _ => err!("replace expected 3 arguments"),
-        }
-    }
+    const NAME: &str = "replace";
+    const ARITY: Arity = Arity::Exactly(3);
 
-    fn name() -> &'static str {
-        "replace"
+    fn eval(from: &CachedVals) -> Option<Value> {
+        match (&from.0[0], &from.0[1], &from.0[2]) {
+            (
+                Some(Value::String(pat)),
+                Some(Value::String(rep)),
+                Some(Value::String(val)),
+            ) => Some(Value::String(Chars::from(String::from(
+                val.replace(&**pat, &**rep),
+            )))),
+            (None, _, _) | (_, None, _) | (_, _, None) => None,
+            _ => err!("replace expected string"),
+        }
     }
 }
 
@@ -703,19 +654,18 @@ pub type Replace = CachedArgs<ReplaceEv>;
 pub struct DirnameEv;
 
 impl EvalCached for DirnameEv {
+    const NAME: &str = "dirname";
+    const ARITY: Arity = Arity::Exactly(1);
+
     fn eval(from: &CachedVals) -> Option<Value> {
-        match &*from.0 {
-            [Some(Value::String(path))] => match Path::dirname(path) {
+        match &from.0[0] {
+            Some(Value::String(path)) => match Path::dirname(path) {
                 None => Some(Value::Null),
                 Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
             },
-            [None] => None,
-            _ => err!("dirname expected 1 argument"),
+            None => None,
+            _ => err!("dirname expected string"),
         }
-    }
-
-    fn name() -> &'static str {
-        "dirname"
     }
 }
 
@@ -1063,18 +1013,16 @@ impl EvalCached for StringConcatEv {
 
 pub type StringConcat = CachedArgs<StringConcatEv>;
 
-pub struct Eval<C: Ctx, E> {
+pub struct Eval<C: Ctx + 'static, E: Clone + 'static> {
     node: Result<Node<C, E>, Value>,
-    scope: Path,
+    scope: ModPath,
 }
 
-impl<C: Ctx, E: Clone> Register<C, E> for Eval<C, E> {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, _, scope, _| {
+impl<C: Ctx, E: Clone> Init<C, E> for Eval<C, E> {
+    fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, _, scope, _| {
             Box::new(Eval { node: Err(Value::Null), scope: scope.clone() })
-        });
-        ctx.functions.insert("eval".into(), f);
-        ctx.user.register_fn(Path::root(), "eval".into());
+        })
     }
 }
 
@@ -1096,8 +1044,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Eval<C, E> {
                         Value::String(s) => match s.parse::<Expr>() {
                             Ok(spec) => Ok(Node::compile(ctx, &self.scope, spec)),
                             Err(e) => {
-                                let e =
-                                    format!("eval(src), error parsing formula {s}, {e}");
+                                let e = format!("eval(src), error parsing {s}, {e}");
                                 Err(Value::Error(Chars::from(e)))
                             }
                         },
@@ -1128,11 +1075,9 @@ pub struct Count {
     count: u64,
 }
 
-impl<C: Ctx, E: Clone> Register<C, E> for Count {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Count { count: 0 }));
-        ctx.functions.insert("count".into(), f);
-        ctx.user.register_fn(Path::root(), "count".into());
+impl<C: Ctx, E: Clone> Init<C, E> for Count {
+    fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, _, _, _| Box::new(Count { count: 0 }))
     }
 }
 
@@ -1156,11 +1101,9 @@ pub struct Sample {
     last: Option<Value>,
 }
 
-impl<C: Ctx, E: Clone> Register<C, E> for Sample {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Sample { last: None }));
-        ctx.functions.insert("sample".into(), f);
-        ctx.user.register_fn(Path::root(), "sample".into());
+impl<C: Ctx, E: Clone> Init<C, E> for Sample {
+    fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, _, _, _| Box::new(Sample { last: None }))
     }
 }
 
@@ -1225,11 +1168,9 @@ pub type Mean = CachedArgs<MeanEv>;
 
 pub(crate) struct Uniq(Option<Value>);
 
-impl<C: Ctx, E: Clone> Register<C, E> for Uniq {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, _, _, _| Box::new(Uniq(None)));
-        ctx.functions.insert("uniq".into(), f);
-        ctx.user.register_fn(Path::root(), "uniq".into());
+impl<C: Ctx, E: Clone> Init<C, E> for Uniq {
+    fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, _, _, _| Box::new(Uniq(None)))
     }
 }
 
@@ -1279,17 +1220,15 @@ pub struct Store {
     dv: Either<(Path, Dval), Vec<Value>>,
 }
 
-impl<C: Ctx, E: Clone> Register<C, E> for Store {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from, _, top_id| {
+impl<C: Ctx, E: Clone> Init<C, E> for Store {
+    fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, from, _, top_id| {
             Box::new(Store {
                 args: CachedVals::new(from),
                 dv: Either::Right(vec![]),
                 top_id,
             })
-        });
-        ctx.functions.insert("store".into(), f);
-        ctx.user.register_fn(Path::root(), "store".into());
+        })
     }
 }
 
@@ -1369,13 +1308,11 @@ pub(crate) struct Load {
     top_id: ExprId,
 }
 
-impl<C: Ctx, E: Clone> Register<C, E> for Load {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from, _, top_id| {
+impl<C: Ctx, E: Clone> Init<C, E> for Load {
+    fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, from, _, top_id| {
             Box::new(Load { args: CachedVals::new(from), cur: None, top_id })
-        });
-        ctx.functions.insert("load".into(), f);
-        ctx.user.register_fn(Path::root(), "load".into());
+        })
     }
 }
 
@@ -1433,17 +1370,15 @@ pub(crate) struct RpcCall {
     pending: FxHashSet<RpcCallId>,
 }
 
-impl<C: Ctx, E: Clone> Register<C, E> for RpcCall {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from, _, top_id| {
+impl<C: Ctx, E: Clone> Init<C, E> for RpcCall {
+    fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, from, _, top_id| {
             Box::new(RpcCall {
                 args: CachedVals::new(from),
                 top_id,
                 pending: HashSet::default(),
             })
-        });
-        ctx.functions.insert("call".into(), f);
-        ctx.user.register_fn(Path::root(), "call".into());
+        })
     }
 }
 
@@ -1511,13 +1446,11 @@ pub(crate) struct AfterIdle {
     eid: ExprId,
 }
 
-impl<C: Ctx, E: Clone> Register<C, E> for AfterIdle {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from, _, eid| {
+impl<C: Ctx, E: Clone> Init<C, E> for AfterIdle {
+    fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, from, _, eid| {
             Box::new(AfterIdle { args: CachedVals::new(from), id: None, eid })
-        });
-        ctx.functions.insert("after_idle".into(), f);
-        ctx.user.register_fn(Path::root(), "after_idle".into());
+        })
     }
 }
 
@@ -1616,19 +1549,17 @@ pub(crate) struct Timer {
     eid: ExprId,
 }
 
-impl<C: Ctx, E: Clone> Register<C, E> for Timer {
-    fn register(ctx: &mut ExecCtx<C, E>) {
-        let f: InitFn<C, E> = Arc::new(|_, from, _, eid| {
-            Box::new(Self {
+impl<C: Ctx, E: Clone> Init<C, E> for Timer {
+    fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, from, _, eid| {
+            Ok(Box::new(Self {
                 args: CachedVals::new(from),
                 timeout: None,
                 repeat: Repeat::No,
                 id: None,
                 eid,
-            })
-        });
-        ctx.functions.insert("timer".into(), f);
-        ctx.user.register_fn(Path::root(), "timer".into());
+            }))
+        })
     }
 }
 
