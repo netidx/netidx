@@ -352,6 +352,48 @@ where
     modpath().map(|name| ExprKind::Ref { name }.to_expr())
 }
 
+fn blang_<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        attempt(between(sptoken('('), sptoken(')'), blang())),
+        attempt((expr(), spstring("=").with(expr()))).map(|(lhs, rhs)| {
+            ExprKind::Eq { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+        }),
+        attempt((expr(), spstring(">").with(expr()))).map(|(lhs, rhs)| {
+            ExprKind::Gt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+        }),
+        attempt((expr(), spstring("<").with(expr()))).map(|(lhs, rhs)| {
+            ExprKind::Lt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+        }),
+        attempt((expr(), spstring(">=").with(expr()))).map(|(lhs, rhs)| {
+            ExprKind::Gte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+        }),
+        attempt((expr(), spstring("<=").with(expr()))).map(|(lhs, rhs)| {
+            ExprKind::Lte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+        }),
+        attempt((expr(), spstring("&&").with(expr()))).map(|(lhs, rhs)| {
+            ExprKind::And { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+        }),
+        attempt((expr(), spstring("||").with(expr()))).map(|(lhs, rhs)| {
+            ExprKind::Or { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+        }),
+        attempt(sptoken('!').with(expr()))
+            .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
+    ))
+}
+
+parser! {
+    fn blang[I]()(I) -> Expr
+    where [I: RangeStream<Token = char>, I::Range: Range]
+    {
+        blang_()
+    }
+}
+
 fn expr_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -370,6 +412,7 @@ where
         attempt(connect()),
         attempt(interpolated()),
         attempt(literal()),
+        attempt(blang()),
         reference(),
     )))
 }

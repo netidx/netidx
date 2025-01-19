@@ -100,6 +100,15 @@ pub enum ExprKind {
     Connect { name: ModPath, value: Arc<Expr> },
     Lambda { args: Arc<[Chars]>, vargs: bool, body: Arc<Either<Expr, Chars>> },
     Apply { args: Arc<[Expr]>, function: ModPath },
+    Select { arms: Arc<[(Expr, Expr)]> },
+    Eq { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Lt { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Gt { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Lte { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Gte { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    And { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Or { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Not { expr: Arc<Expr> },
 }
 
 impl ExprKind {
@@ -111,6 +120,29 @@ impl ExprKind {
         let mut buf = String::new();
         self.pretty_print(0, col_limit, &mut buf).unwrap();
         buf
+    }
+
+    pub fn is_blang(&self) -> bool {
+        match self {
+            ExprKind::Connect { .. }
+            | ExprKind::Module { .. }
+            | ExprKind::Do { .. }
+            | ExprKind::Use { .. }
+            | ExprKind::Bind { .. }
+            | ExprKind::Ref { .. }
+            | ExprKind::Constant(_)
+            | ExprKind::Lambda { .. }
+            | ExprKind::Apply { .. }
+            | ExprKind::Select { .. } => false,
+            ExprKind::Eq { .. }
+            | ExprKind::Lt { .. }
+            | ExprKind::Gt { .. }
+            | ExprKind::Lte { .. }
+            | ExprKind::Gte { .. }
+            | ExprKind::And { .. }
+            | ExprKind::Or { .. }
+            | ExprKind::Not { .. } => true,
+        }
     }
 
     fn pretty_print(&self, indent: usize, limit: usize, buf: &mut String) -> fmt::Result {
@@ -230,6 +262,14 @@ impl ExprKind {
 
 impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn write_blang(f: &mut fmt::Formatter, op: &str, lhs: &Expr, rhs: &Expr) -> fmt::Result {
+            match (lhs.kind.is_blang(), rhs.kind.is_blang()) {
+                (true, true) => write!(f, "({lhs}) {op} ({rhs})"),
+                (true, false) => write!(f, "({lhs}) {op} {rhs}"),
+                (false, true) => write!(f, "{lhs} {op} ({rhs})"),
+                (false, false) => write!(f, "{lhs} {op} {rhs}")
+            }
+        }
         fn print_exprs(
             f: &mut fmt::Formatter,
             exprs: &[Expr],
@@ -307,6 +347,20 @@ impl fmt::Display for ExprKind {
                 } else {
                     write!(f, "{function}")?;
                     print_exprs(f, &**args, "(", ")", ",")
+                }
+            }
+            ExprKind::Eq { lhs, rhs } => write_blang(f, "=", lhs, rhs),
+            ExprKind::Gt { lhs, rhs } => write_blang(f, ">", lhs, rhs),
+            ExprKind::Lt { lhs, rhs } => write_blang(f, "<", lhs, rhs),
+            ExprKind::Gte { lhs, rhs } => write_blang(f, ">=", lhs, rhs),
+            ExprKind::Lte { lhs, rhs } => write_blang(f, "<=", lhs, rhs),
+            ExprKind::And { lhs, rhs } => write_blang(f, "&&", lhs, rhs),
+            ExprKind::Or { lhs, rhs } => write_blang(f, "||", lhs, rhs),
+            ExprKind::Not { expr } => {
+                if expr.kind.is_blang() {
+                    write!(f, "!({expr})")
+                } else {
+                    write!(f, "!{expr}")
                 }
             }
         }
