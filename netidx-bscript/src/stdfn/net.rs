@@ -1,6 +1,7 @@
 use crate::{
     arity1, arity2, errf,
-    expr::ExprId,
+    expr::{Expr, ExprId},
+    parser,
     stdfn::CachedVals,
     vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node, RpcCallId},
 };
@@ -27,7 +28,7 @@ fn as_path(v: Value) -> Option<Path> {
     }
 }
 
-pub struct Store {
+struct Store {
     args: CachedVals,
     top_id: ExprId,
     dv: Either<(Path, Dval), Vec<Value>>,
@@ -117,7 +118,7 @@ impl Store {
     }
 }
 
-pub(crate) struct Load {
+struct Load {
     args: CachedVals,
     cur: Option<(Path, Dval)>,
     top_id: ExprId,
@@ -182,7 +183,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Load {
     }
 }
 
-pub(crate) struct RpcCall {
+struct RpcCall {
     args: CachedVals,
     top_id: ExprId,
     pending: FxHashSet<RpcCallId>,
@@ -258,4 +259,19 @@ impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
             }
         }
     }
+}
+
+const MOD: &str = r#"
+pub mod net {
+    pub let store = |path, value| 'store;
+    pub let load = |path| 'load;
+    pub let call = |path, args| 'call;
+}
+"#;
+
+pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
+    ctx.register_builtin::<Store>();
+    ctx.register_builtin::<Load>();
+    ctx.register_builtin::<RpcCall>();
+    parser::parse_expr(MOD).unwrap()
 }

@@ -1,4 +1,7 @@
-use crate::expr::{Expr, ExprId, ExprKind, ModPath};
+use crate::{
+    expr::{Expr, ExprId, ExprKind, ModPath},
+    stdfn,
+};
 use anyhow::{bail, Result};
 use chrono::prelude::*;
 use compact_str::{format_compact, CompactString};
@@ -259,15 +262,53 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
         self.user.clear();
     }
 
-    pub fn new(user: C) -> Self {
-        ExecCtx {
+    /// build a new context with only the core library
+    pub fn new_no_std(user: C) -> Self {
+        let mut t = ExecCtx {
             binds: Map::new(),
             used: Map::new(),
             modules: Set::new(),
             builtins: FxHashMap::default(),
             dbg_ctx: DbgCtx::new(),
             user,
+        };
+        let core = stdfn::core::register(&mut t);
+        let root = ModPath(Path::root());
+        let node = Node::compile(&mut t, &root, core);
+        if let Some(e) = node.extract_err() {
+            panic!("error compiling core {e}")
         }
+        let node = Node::compile(
+            &mut t,
+            &root,
+            ExprKind::Use { name: ModPath::from(["core"]) }.to_expr(),
+        );
+        if let Some(e) = node.extract_err() {
+            panic!("error using core {e}")
+        }
+        t
+    }
+
+    /// build a new context with the full standard library
+    pub fn new(user: C) -> Self {
+        let mut t = Self::new_no_std(user);
+        let root = ModPath(Path::root());
+        let net = stdfn::net::register(&mut t);
+        let node = Node::compile(&mut t, &root, net);
+        if let Some(e) = node.extract_err() {
+            panic!("failed to compile the net module {e}")
+        }
+        let str = stdfn::str::register(&mut t);
+        let node = Node::compile(&mut t, &root, str);
+        if let Some(e) = node.extract_err() {
+            panic!("failed to compile the str module {e}")
+        }
+        let time = stdfn::time::register(&mut t);
+        let node = Node::compile(&mut t, &root, time);
+        if let Some(e) = node.extract_err() {
+            panic!("failed to compile the time module {e}")
+        }
+        t
     }
 
     pub fn register_builtin<T: Init<C, E>>(&mut self) {

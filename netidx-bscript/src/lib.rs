@@ -3,7 +3,7 @@
 #[macro_use] extern crate combine;
 #[macro_use] extern crate serde_derive;
 
-mod parser;
+pub mod parser;
 pub mod expr;
 pub mod vm;
 pub mod stdfn;

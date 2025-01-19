@@ -1,11 +1,13 @@
 use crate::{
     err,
+    expr::Expr,
+    parser,
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    vm::Arity,
+    vm::{Arity, Ctx, ExecCtx},
 };
 use netidx::{chars::Chars, path::Path, subscriber::Value};
 
-pub struct StartsWithEv;
+struct StartsWithEv;
 
 impl EvalCached for StartsWithEv {
     const NAME: &str = "starts_with";
@@ -26,9 +28,9 @@ impl EvalCached for StartsWithEv {
     }
 }
 
-pub type StartsWith = CachedArgs<StartsWithEv>;
+type StartsWith = CachedArgs<StartsWithEv>;
 
-pub struct EndsWithEv;
+struct EndsWithEv;
 
 impl EvalCached for EndsWithEv {
     const NAME: &str = "ends_with";
@@ -49,9 +51,9 @@ impl EvalCached for EndsWithEv {
     }
 }
 
-pub type EndsWith = CachedArgs<EndsWithEv>;
+type EndsWith = CachedArgs<EndsWithEv>;
 
-pub struct ContainsEv;
+struct ContainsEv;
 
 impl EvalCached for ContainsEv {
     const NAME: &str = "contains";
@@ -72,9 +74,9 @@ impl EvalCached for ContainsEv {
     }
 }
 
-pub type Contains = CachedArgs<ContainsEv>;
+type Contains = CachedArgs<ContainsEv>;
 
-pub struct StripPrefixEv;
+struct StripPrefixEv;
 
 impl EvalCached for StripPrefixEv {
     const NAME: &str = "strip_prefix";
@@ -91,9 +93,9 @@ impl EvalCached for StripPrefixEv {
     }
 }
 
-pub type StripPrefix = CachedArgs<StripPrefixEv>;
+type StripPrefix = CachedArgs<StripPrefixEv>;
 
-pub struct StripSuffixEv;
+struct StripSuffixEv;
 
 impl EvalCached for StripSuffixEv {
     const NAME: &str = "strip_suffix";
@@ -110,9 +112,9 @@ impl EvalCached for StripSuffixEv {
     }
 }
 
-pub type StripSuffix = CachedArgs<StripSuffixEv>;
+type StripSuffix = CachedArgs<StripSuffixEv>;
 
-pub struct TrimEv;
+struct TrimEv;
 
 impl EvalCached for TrimEv {
     const NAME: &str = "trim";
@@ -129,9 +131,9 @@ impl EvalCached for TrimEv {
     }
 }
 
-pub type Trim = CachedArgs<TrimEv>;
+type Trim = CachedArgs<TrimEv>;
 
-pub struct TrimStartEv;
+struct TrimStartEv;
 
 impl EvalCached for TrimStartEv {
     const NAME: &str = "trim_start";
@@ -148,9 +150,9 @@ impl EvalCached for TrimStartEv {
     }
 }
 
-pub type TrimStart = CachedArgs<TrimStartEv>;
+type TrimStart = CachedArgs<TrimStartEv>;
 
-pub struct TrimEndEv;
+struct TrimEndEv;
 
 impl EvalCached for TrimEndEv {
     const NAME: &str = "trim_end";
@@ -167,9 +169,9 @@ impl EvalCached for TrimEndEv {
     }
 }
 
-pub type TrimEnd = CachedArgs<TrimEndEv>;
+type TrimEnd = CachedArgs<TrimEndEv>;
 
-pub struct ReplaceEv;
+struct ReplaceEv;
 
 impl EvalCached for ReplaceEv {
     const NAME: &str = "replace";
@@ -190,9 +192,9 @@ impl EvalCached for ReplaceEv {
     }
 }
 
-pub type Replace = CachedArgs<ReplaceEv>;
+type Replace = CachedArgs<ReplaceEv>;
 
-pub struct DirnameEv;
+struct DirnameEv;
 
 impl EvalCached for DirnameEv {
     const NAME: &str = "dirname";
@@ -210,9 +212,9 @@ impl EvalCached for DirnameEv {
     }
 }
 
-pub type Dirname = CachedArgs<DirnameEv>;
+type Dirname = CachedArgs<DirnameEv>;
 
-pub struct BasenameEv;
+struct BasenameEv;
 
 impl EvalCached for BasenameEv {
     const NAME: &str = "basename";
@@ -230,9 +232,9 @@ impl EvalCached for BasenameEv {
     }
 }
 
-pub type Basename = CachedArgs<BasenameEv>;
+type Basename = CachedArgs<BasenameEv>;
 
-pub struct StringJoinEv;
+struct StringJoinEv;
 
 impl EvalCached for StringJoinEv {
     const NAME: &str = "string_join";
@@ -281,9 +283,9 @@ impl EvalCached for StringJoinEv {
     }
 }
 
-pub type StringJoin = CachedArgs<StringJoinEv>;
+type StringJoin = CachedArgs<StringJoinEv>;
 
-pub struct StringConcatEv;
+struct StringConcatEv;
 
 impl EvalCached for StringConcatEv {
     const NAME: &str = "string_concat";
@@ -312,4 +314,39 @@ impl EvalCached for StringConcatEv {
     }
 }
 
-pub type StringConcat = CachedArgs<StringConcatEv>;
+type StringConcat = CachedArgs<StringConcatEv>;
+
+const MOD: &str = r#"
+pub mod str {
+    pub let starts_with = |prefix, s| 'starts_with;
+    pub let ends_with = |suffix, s| 'ends_with;
+    pub let contains = |part, s| 'contains;
+    pub let strip_prefix = |prefix, s| 'strip_prefix;
+    pub let strip_suffix = |suffix, s| 'strip_suffix;
+    pub let trim = |s| 'trim;
+    pub let trim_start = |s| 'trim_start;
+    pub let trim_end = |s| 'trim_end;
+    pub let replace = |pattern, replacement, s| 'replace;
+    pub let dirname = |path| 'dirname;
+    pub let basename = |path| 'basename;
+    pub let join = |sep, @args| 'string_join;
+    pub let concat = |s, @args| 'string_concat;
+}
+"#;
+
+pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
+    ctx.register_builtin::<StartsWith>();
+    ctx.register_builtin::<EndsWith>();
+    ctx.register_builtin::<Contains>();
+    ctx.register_builtin::<StripPrefix>();
+    ctx.register_builtin::<StripSuffix>();
+    ctx.register_builtin::<Trim>();
+    ctx.register_builtin::<TrimStart>();
+    ctx.register_builtin::<TrimEnd>();
+    ctx.register_builtin::<Replace>();
+    ctx.register_builtin::<Dirname>();
+    ctx.register_builtin::<Basename>();
+    ctx.register_builtin::<StringJoin>();
+    ctx.register_builtin::<StringConcat>();
+    parser::parse_expr(MOD).unwrap()
+}

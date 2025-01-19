@@ -1,14 +1,11 @@
 use crate::{
-    arity2, err, errf,
-    expr::ExprId,
-    stdfn::CachedVals,
-    vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node, TimerId},
+    arity2, err, errf, expr::{Expr, ExprId}, parser, stdfn::CachedVals, vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node, TimerId}
 };
 use anyhow::{bail, Result};
 use netidx::{chars::Chars, publisher::FromValue, subscriber::Value};
 use std::{ops::SubAssign, sync::Arc, time::Duration};
 
-pub(crate) struct AfterIdle {
+struct AfterIdle {
     args: CachedVals,
     id: Option<TimerId>,
     eid: ExprId,
@@ -112,7 +109,7 @@ impl Repeat {
     }
 }
 
-pub(crate) struct Timer {
+struct Timer {
     args: CachedVals,
     timeout: Option<Duration>,
     repeat: Repeat,
@@ -216,4 +213,17 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Timer {
             }
         }
     }
+}
+
+const MOD: &str = r#"
+pub mod time {
+    pub let after_idle = |timeout, v| 'after_idle;
+    pub let timer = |timeout, repeat| 'timer;
+}
+"#;
+
+pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
+    ctx.register_builtin::<AfterIdle>();
+    ctx.register_builtin::<Timer>();
+    parser::parse_expr(MOD).unwrap()
 }
