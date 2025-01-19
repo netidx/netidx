@@ -1,6 +1,6 @@
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use combine::{
-    attempt, between, choice, many, optional,
+    attempt, between, choice, many, many1, optional,
     parser::{
         char::{spaces, string},
         combinator::recognize,
@@ -173,6 +173,15 @@ where
                     | (Some(Expr { kind: ExprKind::Use { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Connect { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Ref { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Eq { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Lt { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Gt { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Gte { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Lte { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::And { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Or { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Not { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Select { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
                         unreachable!()
                     }
@@ -359,9 +368,12 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(between(sptoken('('), sptoken(')'), blang())),
+        between(token('('), sptoken(')'), blang()),
         attempt((expr(), spstring("=").with(expr()))).map(|(lhs, rhs)| {
             ExprKind::Eq { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+        }),
+        attempt((expr(), spstring("!=").with(expr()))).map(|(lhs, rhs)| {
+            ExprKind::Ne { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
         }),
         attempt((expr(), spstring(">").with(expr()))).map(|(lhs, rhs)| {
             ExprKind::Gt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
@@ -394,6 +406,23 @@ parser! {
     }
 }
 
+fn select<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    string("select")
+        .with(between(
+            sptoken('{'),
+            sptoken('}'),
+            sep_by1((expr(), spstring("=>").with(expr())), sptoken(',')),
+        ))
+        .map(|arms: Vec<(Expr, Expr)>| {
+            ExprKind::Select { arms: Arc::from(arms) }.to_expr()
+        })
+}
+
 fn expr_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -413,6 +442,7 @@ where
         attempt(interpolated()),
         attempt(literal()),
         attempt(blang()),
+        attempt(select()),
         reference(),
     )))
 }

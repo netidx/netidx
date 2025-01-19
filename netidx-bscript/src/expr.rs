@@ -102,6 +102,7 @@ pub enum ExprKind {
     Apply { args: Arc<[Expr]>, function: ModPath },
     Select { arms: Arc<[(Expr, Expr)]> },
     Eq { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Ne { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Lt { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Gt { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Lte { lhs: Arc<Expr>, rhs: Arc<Expr> },
@@ -118,7 +119,7 @@ impl ExprKind {
 
     pub fn to_string_pretty(&self, col_limit: usize) -> String {
         let mut buf = String::new();
-        self.pretty_print(0, col_limit, &mut buf).unwrap();
+        self.pretty_print(0, col_limit, true, &mut buf).unwrap();
         buf
     }
 
@@ -135,6 +136,7 @@ impl ExprKind {
             | ExprKind::Apply { .. }
             | ExprKind::Select { .. } => false,
             ExprKind::Eq { .. }
+            | ExprKind::Ne { .. }
             | ExprKind::Lt { .. }
             | ExprKind::Gt { .. }
             | ExprKind::Lte { .. }
@@ -145,7 +147,13 @@ impl ExprKind {
         }
     }
 
-    fn pretty_print(&self, indent: usize, limit: usize, buf: &mut String) -> fmt::Result {
+    fn pretty_print(
+        &self,
+        indent: usize,
+        limit: usize,
+        newline: bool,
+        buf: &mut String,
+    ) -> fmt::Result {
         fn push_indent(indent: usize, buf: &mut String) {
             buf.extend((0..indent).into_iter().map(|_| ' '));
         }
@@ -160,11 +168,10 @@ impl ExprKind {
         ) -> fmt::Result {
             writeln!(buf, "{}", open)?;
             for i in 0..exprs.len() {
-                exprs[i].kind.pretty_print(indent + 2, limit, buf)?;
+                exprs[i].kind.pretty_print(indent + 2, limit, true, buf)?;
                 if i < exprs.len() - 1 {
+                    buf.pop(); // pop the newline
                     writeln!(buf, "{}", sep)?
-                } else {
-                    writeln!(buf, "")?
                 }
             }
             push_indent(indent, buf);
@@ -173,8 +180,10 @@ impl ExprKind {
         macro_rules! try_single_line {
             ($trunc:ident) => {{
                 let len = buf.len();
-                push_indent(indent, buf);
-                write!(buf, "{}", self)?;
+                if newline {
+                    push_indent(indent, buf);
+                }
+                writeln!(buf, "{}", self)?;
                 if buf.len() - len <= limit {
                     return Ok(());
                 } else {
@@ -185,20 +194,34 @@ impl ExprKind {
                 }
             }};
         }
+        macro_rules! blang {
+            ($sep:literal, $lhs:expr, $rhs:expr) => {{
+                try_single_line!(true);
+                if $lhs.kind.is_blang() {
+                    writeln!(buf, "({}) {}", $lhs, $sep)?;
+                } else {
+                    writeln!(buf, "{} {}", $lhs, $sep)?;
+                }
+                $rhs.kind.pretty_print(indent, limit, true, buf)
+            }};
+        }
         let exp = |export| if export { "pub " } else { "" };
         match self {
             ExprKind::Constant(_)
             | ExprKind::Use { name: _ }
             | ExprKind::Ref { name: _ }
             | ExprKind::Module { name: _, export: _, value: None } => {
-                push_indent(indent, buf);
-                write!(buf, "{self}")
+                if newline {
+                    push_indent(indent, buf);
+                }
+                writeln!(buf, "{self}")
             }
             ExprKind::Bind { export, name, value } => {
                 try_single_line!(true);
-                writeln!(buf, "{}let {name} =", exp(*export))?;
-                value.kind.pretty_print(indent + 2, limit, buf)?;
-                write!(buf, ";")
+                writeln!(buf, "{}let {name} = ", exp(*export))?;
+                value.kind.pretty_print(indent + 2, limit, false, buf)?;
+                buf.pop();
+                writeln!(buf, ";")
             }
             ExprKind::Module { name, export, value: Some(exprs) } => {
                 try_single_line!(true);
@@ -212,8 +235,9 @@ impl ExprKind {
             ExprKind::Connect { name, value } => {
                 try_single_line!(true);
                 writeln!(buf, "{name} <- ")?;
-                value.kind.pretty_print(indent + 2, limit, buf)?;
-                write!(buf, ";")
+                value.kind.pretty_print(indent + 2, limit, false, buf)?;
+                buf.pop();
+                writeln!(buf, ";")
             }
             ExprKind::Apply { function, args } => {
                 let len = try_single_line!(false);
@@ -243,17 +267,55 @@ impl ExprKind {
                 write!(buf, "| ")?;
                 match &**body {
                     Either::Right(builtin) => {
-                        write!(buf, "'{builtin}")
+                        writeln!(buf, "'{builtin}")
                     }
                     Either::Left(body) => match &body.kind {
-                        ExprKind::Apply { args, function } if function == &["do"] => {
-                            pretty_print_exprs(indent, limit, buf, args, "{", "}", "")
+                        ExprKind::Do { exprs } => {
+                            pretty_print_exprs(indent, limit, buf, exprs, "{", "}", "")
                         }
-                        _ => {
-                            writeln!(buf, "")?;
-                            body.kind.pretty_print(indent + 2, limit, buf)
-                        }
+                        _ => body.kind.pretty_print(indent, limit, false, buf),
                     },
+                }
+            }
+            ExprKind::Select { arms } => {
+                try_single_line!(true);
+                writeln!(buf, "select {{")?;
+                for (i, (pred, expr)) in arms.iter().enumerate() {
+                    write!(buf, "{pred} => ")?;
+                    if let ExprKind::Do { exprs } = &expr.kind {
+                        let term = if i < arms.len() - 1 { "}," } else { "}" };
+                        pretty_print_exprs(indent, limit, buf, exprs, "{", term, "")?
+                    } else if i < arms.len() - 1 {
+                        expr.kind.pretty_print(indent, limit, false, buf)?;
+                        buf.pop();
+                        writeln!(buf, ",")?
+                    } else {
+                        expr.kind.pretty_print(indent, limit, false, buf)?;
+                    }
+                }
+                push_indent(indent, buf);
+                writeln!(buf, "}}")
+            }
+            ExprKind::Eq { lhs, rhs } => blang!("=", lhs, rhs),
+            ExprKind::Ne { lhs, rhs } => blang!("!=", lhs, rhs),
+            ExprKind::Lt { lhs, rhs } => blang!("<", lhs, rhs),
+            ExprKind::Gt { lhs, rhs } => blang!(">", lhs, rhs),
+            ExprKind::Lte { lhs, rhs } => blang!("<=", lhs, rhs),
+            ExprKind::Gte { lhs, rhs } => blang!(">=", lhs, rhs),
+            ExprKind::And { lhs, rhs } => blang!("&&", lhs, rhs),
+            ExprKind::Or { lhs, rhs } => blang!("||", lhs, rhs),
+            ExprKind::Not { expr } => {
+                try_single_line!(true);
+                match &expr.kind {
+                    ExprKind::Do { exprs } => {
+                        pretty_print_exprs(indent, limit, buf, exprs, "!{", "}", "")
+                    }
+                    _ => {
+                        writeln!(buf, "!(")?;
+                        expr.kind.pretty_print(indent + 2, limit, true, buf)?;
+                        push_indent(indent, buf);
+                        writeln!(buf, ")")
+                    }
                 }
             }
         }
@@ -262,12 +324,17 @@ impl ExprKind {
 
 impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fn write_blang(f: &mut fmt::Formatter, op: &str, lhs: &Expr, rhs: &Expr) -> fmt::Result {
+        fn write_blang(
+            f: &mut fmt::Formatter,
+            op: &str,
+            lhs: &Expr,
+            rhs: &Expr,
+        ) -> fmt::Result {
             match (lhs.kind.is_blang(), rhs.kind.is_blang()) {
                 (true, true) => write!(f, "({lhs}) {op} ({rhs})"),
                 (true, false) => write!(f, "({lhs}) {op} {rhs}"),
                 (false, true) => write!(f, "{lhs} {op} ({rhs})"),
-                (false, false) => write!(f, "{lhs} {op} {rhs}")
+                (false, false) => write!(f, "{lhs} {op} {rhs}"),
             }
         }
         fn print_exprs(
@@ -349,7 +416,18 @@ impl fmt::Display for ExprKind {
                     print_exprs(f, &**args, "(", ")", ",")
                 }
             }
+            ExprKind::Select { arms } => {
+                write!(f, "select {{")?;
+                for (i, (lhs, rhs)) in arms.iter().enumerate() {
+                    write!(f, "{lhs} => {rhs}")?;
+                    if i < arms.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                write!(f, "}}")
+            }
             ExprKind::Eq { lhs, rhs } => write_blang(f, "=", lhs, rhs),
+            ExprKind::Ne { lhs, rhs } => write_blang(f, "!=", lhs, rhs),
             ExprKind::Gt { lhs, rhs } => write_blang(f, ">", lhs, rhs),
             ExprKind::Lt { lhs, rhs } => write_blang(f, "<", lhs, rhs),
             ExprKind::Gte { lhs, rhs } => write_blang(f, ">=", lhs, rhs),
