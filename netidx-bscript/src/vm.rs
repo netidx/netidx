@@ -755,7 +755,8 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 }
             }
             Expr { kind: ExprKind::Lambda { args, vargs: _, body }, id } => {
-                Node::compile_lambda(spec, args.clone(), (**body).clone(), *id)
+                let (args, body, id) = (args.clone(), (**body).clone(), *id);
+                Node::compile_lambda(spec, args, body, id)
             }
             Expr { kind: ExprKind::Apply { args, function }, id: _ } => {
                 let (error, args) = subexprs!(scope, args);
@@ -815,8 +816,24 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                     },
                 }
             }
+            Expr { kind: ExprKind::Select { arms }, id: _ } => {
+                let (error, arms) =
+                    arms.iter().fold((false, vec![]), |(e, mut nodes), (cspec, spec)| {
+                        let cn = Node::compile_int(ctx, cspec.clone(), scope, top_id);
+                        let n = Node::compile_int(ctx, spec.clone(), scope, top_id);
+                        let e = e || cn.is_err() || n.is_err();
+                        nodes.push((Cached::new(cn), Cached::new(n)));
+                        (e, nodes)
+                    });
+                if error {
+                    let mut v = vec![];
+                    arms.into_iter().for_each(|(cn, n)| v.extend([cn.node, n.node]));
+                    return error!("", v);
+                }
+                Node { spec, kind: NodeKind::Select { arms } }
+            }
             Expr { kind: ExprKind::Not { expr }, id: _ } => {
-                let node = Node::compile_int(ctx, spec, scope, top_id);
+                let node = Node::compile_int(ctx, (**expr).clone(), scope, top_id);
                 if node.is_err() {
                     return error!("", vec![node]);
                 }
