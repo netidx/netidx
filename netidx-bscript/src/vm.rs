@@ -372,6 +372,27 @@ impl<C: Ctx + 'static, E: Clone + 'static> Lambda<C, E> {
     }
 }
 
+pub struct Cached<C: Ctx + 'static, E: Clone + 'static> {
+    pub cached: Option<Value>,
+    pub node: Node<C, E>,
+}
+
+impl<C: Ctx + 'static, E: Clone + 'static> Cached<C, E> {
+    pub fn new(node: Node<C, E>) -> Self {
+        Self { cached: None, node }
+    }
+
+    pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> bool {
+        match self.node.update(ctx, event) {
+            None => false,
+            Some(v) => {
+                self.cached = Some(v);
+                true
+            }
+        }
+    }
+}
+
 pub enum NodeKind<C: Ctx + 'static, E: Clone + 'static> {
     Constant(Value),
     Module(Vec<Node<C, E>>),
@@ -382,6 +403,16 @@ pub enum NodeKind<C: Ctx + 'static, E: Clone + 'static> {
     Connect(BindId, Box<Node<C, E>>),
     Lambda(InitFn<C, E>),
     Apply { args: Vec<Node<C, E>>, function: Box<dyn Apply<C, E> + Send + Sync> },
+    Select { arms: Vec<(Cached<C, E>, Cached<C, E>)> },
+    Eq { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
+    Ne { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
+    Lt { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
+    Gt { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
+    Lte { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
+    Gte { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
+    And { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
+    Or { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
+    Not { node: Box<Cached<C, E>> },
     Error { error: Option<Chars>, children: Vec<Node<C, E>> },
 }
 
@@ -406,7 +437,17 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::Connect(_, _)
             | NodeKind::Apply { .. }
             | NodeKind::Error { .. }
-            | NodeKind::Module(_) => None,
+            | NodeKind::Module(_)
+            | NodeKind::Eq { .. }
+            | NodeKind::Ne { .. }
+            | NodeKind::Lt { .. }
+            | NodeKind::Gt { .. }
+            | NodeKind::Gte { .. }
+            | NodeKind::Lte { .. }
+            | NodeKind::And { .. }
+            | NodeKind::Or { .. }
+            | NodeKind::Not { .. }
+            | NodeKind::Select { .. } => None,
             NodeKind::Lambda(init) => Some(sync::Arc::clone(init)),
             NodeKind::Do(children) => children.last().and_then(|t| t.find_lambda()),
         }
@@ -415,15 +456,25 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
     pub fn is_err(&self) -> bool {
         match &self.kind {
             NodeKind::Error { .. } => true,
-            NodeKind::Apply { .. }
-            | NodeKind::Use
-            | NodeKind::Do(_)
-            | NodeKind::Module(_)
+            NodeKind::Constant(_)
             | NodeKind::Lambda(_)
-            | NodeKind::Connect(_, _)
+            | NodeKind::Do(_)
+            | NodeKind::Use
             | NodeKind::Bind(_, _)
-            | NodeKind::Constant(_)
-            | NodeKind::Ref(_) => false,
+            | NodeKind::Ref(_)
+            | NodeKind::Connect(_, _)
+            | NodeKind::Apply { .. }
+            | NodeKind::Module(_)
+            | NodeKind::Eq { .. }
+            | NodeKind::Ne { .. }
+            | NodeKind::Lt { .. }
+            | NodeKind::Gt { .. }
+            | NodeKind::Gte { .. }
+            | NodeKind::Lte { .. }
+            | NodeKind::And { .. }
+            | NodeKind::Or { .. }
+            | NodeKind::Not { .. }
+            | NodeKind::Select { .. } => false,
         }
     }
 
@@ -439,15 +490,25 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 }
                 None
             }
-            NodeKind::Apply { .. }
-            | NodeKind::Use
-            | NodeKind::Do(_)
-            | NodeKind::Module(_)
+            NodeKind::Constant(_)
             | NodeKind::Lambda(_)
-            | NodeKind::Connect(_, _)
+            | NodeKind::Do(_)
+            | NodeKind::Use
             | NodeKind::Bind(_, _)
-            | NodeKind::Constant(_)
-            | NodeKind::Ref(_) => None,
+            | NodeKind::Ref(_)
+            | NodeKind::Connect(_, _)
+            | NodeKind::Apply { .. }
+            | NodeKind::Module(_)
+            | NodeKind::Eq { .. }
+            | NodeKind::Ne { .. }
+            | NodeKind::Lt { .. }
+            | NodeKind::Gt { .. }
+            | NodeKind::Gte { .. }
+            | NodeKind::Lte { .. }
+            | NodeKind::And { .. }
+            | NodeKind::Or { .. }
+            | NodeKind::Not { .. }
+            | NodeKind::Select { .. } => None,
         }
     }
 
@@ -459,6 +520,16 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::Module(_)
             | NodeKind::Error { .. } => false,
             NodeKind::Do(_)
+            | NodeKind::Eq { .. }
+            | NodeKind::Ne { .. }
+            | NodeKind::Lt { .. }
+            | NodeKind::Gt { .. }
+            | NodeKind::Gte { .. }
+            | NodeKind::Lte { .. }
+            | NodeKind::And { .. }
+            | NodeKind::Or { .. }
+            | NodeKind::Not { .. }
+            | NodeKind::Select { .. }
             | NodeKind::Constant(_)
             | NodeKind::Ref(_)
             | NodeKind::Lambda(_)
@@ -475,6 +546,16 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::Lambda(_)
             | NodeKind::Error { .. } => false,
             NodeKind::Do(_)
+            | NodeKind::Eq { .. }
+            | NodeKind::Ne { .. }
+            | NodeKind::Lt { .. }
+            | NodeKind::Gt { .. }
+            | NodeKind::Gte { .. }
+            | NodeKind::Lte { .. }
+            | NodeKind::And { .. }
+            | NodeKind::Or { .. }
+            | NodeKind::Not { .. }
+            | NodeKind::Select { .. }
             | NodeKind::Constant(_)
             | NodeKind::Ref(_)
             | NodeKind::Apply { .. } => true,
@@ -491,6 +572,16 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::Do(_)
             | NodeKind::Constant(_)
             | NodeKind::Ref(_)
+            | NodeKind::Eq { .. }
+            | NodeKind::Ne { .. }
+            | NodeKind::Lt { .. }
+            | NodeKind::Gt { .. }
+            | NodeKind::Gte { .. }
+            | NodeKind::Lte { .. }
+            | NodeKind::And { .. }
+            | NodeKind::Or { .. }
+            | NodeKind::Not { .. }
+            | NodeKind::Select { .. }
             | NodeKind::Apply { .. } => true,
         }
     }
@@ -503,11 +594,63 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::Module(_)
             | NodeKind::Error { .. } => false,
             NodeKind::Lambda(_)
+            | NodeKind::Eq { .. }
+            | NodeKind::Ne { .. }
+            | NodeKind::Lt { .. }
+            | NodeKind::Gt { .. }
+            | NodeKind::Gte { .. }
+            | NodeKind::Lte { .. }
+            | NodeKind::And { .. }
+            | NodeKind::Or { .. }
+            | NodeKind::Not { .. }
+            | NodeKind::Select { .. }
             | NodeKind::Do(_)
             | NodeKind::Constant(_)
             | NodeKind::Ref(_)
             | NodeKind::Apply { .. } => true,
         }
+    }
+
+    fn compile_lambda(
+        spec: Expr,
+        argspec: Arc<[Chars]>,
+        body: Either<Expr, Chars>,
+        eid: ExprId,
+    ) -> Node<C, E> {
+        use sync::Arc;
+        if argspec.len() != argspec.iter().collect::<Set<_>>().len() {
+            let e = Chars::from("arguments must have unique names");
+            let kind = NodeKind::Error { error: Some(e), children: vec![] };
+            return Node { spec, kind };
+        }
+        let f: InitFn<C, E> = Arc::new(move |ctx, args, scope, tid| match body.clone() {
+            Either::Left(body) => Ok(Box::new(Lambda::new(
+                ctx,
+                argspec.clone(),
+                args,
+                scope,
+                eid,
+                tid,
+                body,
+            )?)),
+            Either::Right(builtin) => match ctx.builtins.get(&*builtin) {
+                None => bail!("unknown builtin function {builtin}"),
+                Some((arity, init)) => {
+                    let init = Arc::clone(init);
+                    let l = args.len();
+                    match *arity {
+                        Arity::Any => init(ctx, args, scope, tid),
+                        Arity::AtLeast(n) if l >= n => init(ctx, args, scope, tid),
+                        Arity::AtLeast(n) => {
+                            bail!("expected at least {n} args")
+                        }
+                        Arity::Exactly(n) if l == n => init(ctx, args, scope, tid),
+                        Arity::Exactly(n) => bail!("expected {n} arguments"),
+                    }
+                }
+            },
+        });
+        Node { spec, kind: NodeKind::Lambda(f) }
     }
 
     pub fn compile_int(
@@ -516,7 +659,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
         scope: &ModPath,
         top_id: ExprId,
     ) -> Self {
-        macro_rules! compile_subexprs {
+        macro_rules! subexprs {
             ($scope:expr, $exprs:expr) => {
                 $exprs.iter().fold((false, vec![]), |(e, mut nodes), spec| {
                     let n = Node::compile_int(ctx, spec.clone(), &$scope, top_id);
@@ -539,13 +682,25 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 Node { spec, kind }
             }}
         }
+        macro_rules! binary_op {
+            ($op:ident, $lhs:expr, $rhs:expr) => {{
+                let lhs = Node::compile_int(ctx, (**$lhs).clone(), scope, top_id);
+                let rhs = Node::compile_int(ctx, (**$rhs).clone(), scope, top_id);
+                if lhs.is_err() || rhs.is_err() {
+                    return error!("", vec![lhs, rhs]);
+                }
+                let lhs = Box::new(Cached::new(lhs));
+                let rhs = Box::new(Cached::new(rhs));
+                Node { spec, kind: NodeKind::$op { lhs, rhs } }
+            }};
+        }
         match &spec {
             Expr { kind: ExprKind::Constant(v), id: _ } => {
                 Node { kind: NodeKind::Constant(v.clone()), spec }
             }
             Expr { kind: ExprKind::Do { exprs }, id } => {
                 let scope = ModPath(scope.append(&format_compact!("{id:?}")));
-                let (error, exp) = compile_subexprs!(scope, exprs);
+                let (error, exp) = subexprs!(scope, exprs);
                 if error {
                     error!("", exp)
                 } else if let Some(e) = exp.iter().find(|e| !e.do_expr_ok()) {
@@ -559,7 +714,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 match value {
                     None => error!("module loading is not implemented"),
                     Some(exprs) => {
-                        let (error, children) = compile_subexprs!(scope, exprs);
+                        let (error, children) = subexprs!(scope, exprs);
                         if error {
                             error!("", children)
                         } else {
@@ -599,50 +754,11 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                     }
                 }
             }
-            Expr { kind: ExprKind::Lambda { args, vargs: _, body }, id: eid } => {
-                use sync::Arc;
-                if args.len() != args.iter().collect::<Set<_>>().len() {
-                    return error!("arguments must have unique names");
-                }
-                let argspec = args.clone();
-                let body = (**body).clone();
-                let eid = *eid;
-                let f: InitFn<C, E> =
-                    Arc::new(move |ctx, args, scope, tid| match body.clone() {
-                        Either::Left(body) => Ok(Box::new(Lambda::new(
-                            ctx,
-                            argspec.clone(),
-                            args,
-                            scope,
-                            eid,
-                            tid,
-                            body,
-                        )?)),
-                        Either::Right(builtin) => match ctx.builtins.get(&*builtin) {
-                            None => bail!("unknown builtin function {builtin}"),
-                            Some((arity, init)) => {
-                                let init = Arc::clone(init);
-                                let l = args.len();
-                                match *arity {
-                                    Arity::Any => init(ctx, args, scope, tid),
-                                    Arity::AtLeast(n) if l >= n => {
-                                        init(ctx, args, scope, tid)
-                                    }
-                                    Arity::AtLeast(n) => {
-                                        bail!("expected at least {n} args")
-                                    }
-                                    Arity::Exactly(n) if l == n => {
-                                        init(ctx, args, scope, tid)
-                                    }
-                                    Arity::Exactly(n) => bail!("expected {n} arguments"),
-                                }
-                            }
-                        },
-                    });
-                Node { spec, kind: NodeKind::Lambda(f) }
+            Expr { kind: ExprKind::Lambda { args, vargs: _, body }, id } => {
+                Node::compile_lambda(spec, args.clone(), (**body).clone(), *id)
             }
             Expr { kind: ExprKind::Apply { args, function }, id: _ } => {
-                let (error, args) = compile_subexprs!(scope, args);
+                let (error, args) = subexprs!(scope, args);
                 match ctx.lookup_bind(scope, function) {
                     None => error!("{function} is undefined"),
                     Some((_, Bind { fun: None, .. })) => {
@@ -699,6 +815,22 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                     },
                 }
             }
+            Expr { kind: ExprKind::Not { expr }, id: _ } => {
+                let node = Node::compile_int(ctx, spec, scope, top_id);
+                if node.is_err() {
+                    return error!("", vec![node]);
+                }
+                let node = Box::new(Cached::new(node));
+                Node { spec, kind: NodeKind::Not { node } }
+            }
+            Expr { kind: ExprKind::Eq { lhs, rhs }, id: _ } => binary_op!(Eq, lhs, rhs),
+            Expr { kind: ExprKind::Ne { lhs, rhs }, id: _ } => binary_op!(Ne, lhs, rhs),
+            Expr { kind: ExprKind::Lt { lhs, rhs }, id: _ } => binary_op!(Lt, lhs, rhs),
+            Expr { kind: ExprKind::Gt { lhs, rhs }, id: _ } => binary_op!(Gt, lhs, rhs),
+            Expr { kind: ExprKind::Lte { lhs, rhs }, id: _ } => binary_op!(Lte, lhs, rhs),
+            Expr { kind: ExprKind::Gte { lhs, rhs }, id: _ } => binary_op!(Gte, lhs, rhs),
+            Expr { kind: ExprKind::And { lhs, rhs }, id: _ } => binary_op!(And, lhs, rhs),
+            Expr { kind: ExprKind::Or { lhs, rhs }, id: _ } => binary_op!(Or, lhs, rhs),
         }
     }
 
