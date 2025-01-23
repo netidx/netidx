@@ -647,7 +647,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
     fn compile_lambda(
         spec: Expr,
         argspec: Arc<[Chars]>,
-        body: Either<Expr, Chars>,
+        body: Either<Arc<Expr>, Chars>,
         eid: ExprId,
     ) -> Node<C, E> {
         use sync::Arc;
@@ -664,7 +664,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 scope,
                 eid,
                 tid,
-                body,
+                (*body).clone(),
             )?)),
             Either::Right(builtin) => match ctx.builtins.get(&*builtin) {
                 None => bail!("unknown builtin function {builtin}"),
@@ -788,7 +788,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 }
             }
             Expr { kind: ExprKind::Lambda { args, vargs: _, body }, id } => {
-                let (args, body, id) = (args.clone(), (**body).clone(), *id);
+                let (args, body, id) = (args.clone(), (*body).clone(), *id);
                 Node::compile_lambda(spec, args, body, id)
             }
             Expr { kind: ExprKind::Apply { args, function }, id: _ } => {

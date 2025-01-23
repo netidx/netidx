@@ -18,6 +18,8 @@ use triomphe::Arc;
 mod test;
 
 pub const BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
+pub const RESERVED: [&str; 8] =
+    ["true", "false", "ok", "null", "mod", "let", "select", "pub"];
 
 fn spstring<'a, I>(s: &'static str) -> impl Parser<I, Output = &'a str>
 where
@@ -41,14 +43,7 @@ where
         }),
     ))
     .then(|s: String| {
-        if s == "true"
-            || s == "false"
-            || s == "ok"
-            || s == "null"
-            || s == "mod"
-            || s == "let"
-            || s == "select"
-        {
+        if RESERVED.contains(&s.as_str()) {
             unexpected_any("can't use keyword as a function or variable name").left()
         } else {
             value(s).right()
@@ -323,12 +318,12 @@ where
         ),
         choice((
             attempt(sptoken('\'').with(fname()).map(Either::Right)),
-            expr().map(Either::Left),
+            expr().map(|e| Either::Left(Arc::new(e))),
         )),
     )
         .map(|((args, vargs), body)| {
             let args = Arc::from_iter(args.into_iter().map(Chars::from));
-            ExprKind::Lambda { args, vargs, body: Arc::new(body) }.to_expr()
+            ExprKind::Lambda { args, vargs, body }.to_expr()
         })
 }
 
@@ -383,12 +378,17 @@ where
     I::Range: Range,
 {
     choice((
+        attempt(spaces().with(module())),
+        attempt(spaces().with(use_module())),
         attempt(spaces().with(alist())),
         attempt(spaces().with(do_block())),
         attempt(spaces().with(array())),
-        attempt(spaces().with(interpolated())),
+        attempt(spaces().with(lambda())),
+        attempt(spaces().with(letbind())),
+        attempt(spaces().with(connect())),
         attempt(spaces().with(select())),
         attempt(spaces().with(apply())),
+        attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
         attempt(spaces().with(reference())),
         attempt(between(sptoken('('), sptoken(')'), arith())),

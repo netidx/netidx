@@ -101,7 +101,7 @@ pub enum ExprKind {
     Bind { name: Chars, export: bool, value: Arc<Expr> },
     Ref { name: ModPath },
     Connect { name: ModPath, value: Arc<Expr> },
-    Lambda { args: Arc<[Chars]>, vargs: bool, body: Arc<Either<Expr, Chars>> },
+    Lambda { args: Arc<[Chars]>, vargs: bool, body: Either<Arc<Expr>, Chars> },
     Apply { args: Arc<[Expr]>, function: ModPath },
     Select { arms: Arc<[(Expr, Expr)]> },
     Eq { lhs: Arc<Expr>, rhs: Arc<Expr> },
@@ -276,7 +276,7 @@ impl ExprKind {
                     write!(buf, "@args")?;
                 }
                 write!(buf, "| ")?;
-                match &**body {
+                match body {
                     Either::Right(builtin) => {
                         writeln!(buf, "'{builtin}")
                     }
@@ -403,7 +403,7 @@ impl fmt::Display for ExprKind {
                     write!(f, "@args")?;
                 }
                 write!(f, "| ")?;
-                match &**body {
+                match body {
                     Either::Left(body) => write!(f, "{body}"),
                     Either::Right(builtin) => write!(f, "'{builtin}"),
                 }

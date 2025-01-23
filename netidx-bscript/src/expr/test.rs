@@ -2,6 +2,7 @@ use super::*;
 use bytes::Bytes;
 use chrono::prelude::*;
 use netidx_core::chars::Chars;
+use parser::RESERVED;
 use proptest::{collection, prelude::*};
 use std::time::Duration;
 
@@ -50,21 +51,24 @@ fn value() -> impl Strategy<Value = Value> {
 }
 
 prop_compose! {
-    fn random_fname()(s in "[a-z][a-z0-9_]*".prop_filter("Filter reserved words", |s| {
-        s != "ok"
-            && s != "true"
-            && s != "false"
-            && s != "null"
-            && s != "load"
-            && s != "store"
-            && s != "load_var"
-            && s != "store_var"
-    })) -> ModPath {
-        ModPath::from_iter([s])
+    fn random_modpart()(s in "[a-z][a-z0-9_]*".prop_filter(
+        "Filter reserved words",
+        |s| !RESERVED.contains(&s.as_str()))
+    ) -> String
+    {
+        s
     }
 }
 
-fn valid_fname() -> impl Strategy<Value = ModPath> {
+fn random_fname() -> impl Strategy<Value = Chars> {
+    random_modpart().prop_map(Chars::from)
+}
+
+fn random_modpath() -> impl Strategy<Value = ModPath> {
+    collection::vec(random_modpart(), (1, 10)).prop_map(ModPath::from_iter)
+}
+
+fn valid_modpath() -> impl Strategy<Value = ModPath> {
     prop_oneof![
         Just(ModPath::from_iter(["any"])),
         Just(ModPath::from_iter(["array"])),
@@ -94,20 +98,133 @@ fn valid_fname() -> impl Strategy<Value = ModPath> {
         Just(ModPath::from_iter(["get"])),
         Just(ModPath::from_iter(["store"])),
         Just(ModPath::from_iter(["set"])),
-        Just(ModPath::from_iter(["let"])),
     ]
 }
 
-fn fname() -> impl Strategy<Value = ModPath> {
-    prop_oneof![random_fname(), valid_fname(),]
+fn modpath() -> impl Strategy<Value = ModPath> {
+    prop_oneof![random_modpath(), valid_modpath()]
+}
+
+fn constant() -> impl Strategy<Value = Expr> {
+    value().prop_map(|v| ExprKind::Constant(v).to_expr())
+}
+
+fn reference() -> impl Strategy<Value = Expr> {
+    modpath().prop_map(|name| ExprKind::Ref { name }.to_expr())
 }
 
 fn expr() -> impl Strategy<Value = Expr> {
-    let leaf = value().prop_map(|v| ExprKind::Constant(v).to_expr());
+    let leaf = prop_oneof![constant(), reference()];
     leaf.prop_recursive(100, 1000000, 10, |inner| {
-        prop_oneof![(collection::vec(inner, (0, 10)), fname()).prop_map(|(s, f)| {
-            ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
-        })]
+        prop_oneof![
+            (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
+                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
+            }),
+            collection::vec(inner.clone(), (0, 10))
+                .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
+            (any::<bool>(), random_fname(), collection::vec(inner.clone(), (0, 10)))
+                .prop_map(|(export, name, body)| ExprKind::Module {
+                    export,
+                    name,
+                    value: Some(Arc::from(body))
+                }
+                .to_expr()),
+            (any::<bool>(), random_fname()).prop_map(|(export, name)| ExprKind::Module {
+                export,
+                name,
+                value: None
+            }
+            .to_expr()),
+            modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
+            (collection::vec(random_fname(), (0, 10)), any::<bool>(), inner.clone())
+                .prop_map(|(args, vargs, body)| {
+                    ExprKind::Lambda {
+                        args: Arc::from_iter(args),
+                        vargs,
+                        body: Either::Left(Arc::new(body)),
+                    }
+                    .to_expr()
+                }),
+            (collection::vec(random_fname(), (0, 10)), any::<bool>(), random_fname())
+                .prop_map(|(args, vargs, body)| {
+                    ExprKind::Lambda {
+                        args: Arc::from_iter(args),
+                        vargs,
+                        body: Either::Right(body),
+                    }
+                    .to_expr()
+                }),
+            (inner.clone(), random_fname(), any::<bool>()).prop_map(|(e, n, exp)| {
+                ExprKind::Bind { export: exp, name: n, value: Arc::new(e) }.to_expr()
+            }),
+            (inner.clone(), modpath()).prop_map(|(e, n)| {
+                ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
+            }),
+            (collection::vec((inner.clone(), inner.clone()), (0, 10))).prop_map(|arms| {
+                ExprKind::Select { arms: Arc::from_iter(arms) }.to_expr()
+            }),
+            inner.clone().prop_map(|e0| ExprKind::Not { expr: Arc::new(e0) }.to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Eq {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Ne {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Lt {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Gt {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Gte {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Lte {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::And {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Or {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Add {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Sub {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Mul {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Div {
+                lhs: Arc::new(e0),
+                rhs: Arc::new(e1)
+            }
+            .to_expr()),
+        ]
     })
 }
 
