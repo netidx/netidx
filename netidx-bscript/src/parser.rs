@@ -1,6 +1,6 @@
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use combine::{
-    attempt, between, choice, many, many1, optional,
+    attempt, between, choice, many, optional,
     parser::{
         char::{spaces, string},
         combinator::recognize,
@@ -174,6 +174,7 @@ where
                     | (Some(Expr { kind: ExprKind::Connect { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Ref { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Eq { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Ne { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Lt { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Gt { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Gte { .. }, .. }), _)
