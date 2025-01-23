@@ -383,7 +383,6 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(between(sptoken('('), sptoken(')'), arith())),
         attempt(spaces().with(alist())),
         attempt(spaces().with(do_block())),
         attempt(spaces().with(array())),
@@ -392,6 +391,7 @@ where
         attempt(spaces().with(apply())),
         attempt(spaces().with(literal())),
         attempt(spaces().with(reference())),
+        attempt(between(sptoken('('), sptoken(')'), arith())),
     ))
 }
 
@@ -402,7 +402,6 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(between(sptoken('('), sptoken(')'), arith())),
         attempt(chainl1(
             arith_term(),
             spstring("+").map(|_| {
@@ -499,8 +498,9 @@ where
                 }
             }),
         )),
-        attempt(sptoken('!').with(arith_term()))
+        attempt(sptoken('!').with(arith()))
             .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
+        attempt(between(sptoken('('), sptoken(')'), arith())),
     ))
 }
 

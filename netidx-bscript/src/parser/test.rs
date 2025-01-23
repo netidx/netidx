@@ -56,7 +56,7 @@ fn interpolated1() {
 }
 
 #[test]
-fn interpolated_expr2() {
+fn interpolated2() {
     let s = r#"a(a(a(get("[true]"))))"#;
     let p = ExprKind::Apply {
         args: Arc::from_iter([ExprKind::Apply {
@@ -286,6 +286,45 @@ fn arith_paren() {
     }
     .to_expr();
     let s = r#"(a / b)"#;
+    assert_eq!(exp, parse_expr(s).unwrap());
+}
+
+#[test]
+fn arith_nested() {
+    let sum = ExprKind::Add {
+        lhs: Arc::new(
+            ExprKind::Add {
+                lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
+                rhs: Arc::new(ExprKind::Ref { name: ["b"].into() }.to_expr()),
+            }
+            .to_expr(),
+        ),
+        rhs: Arc::new(ExprKind::Ref { name: ["c"].into() }.to_expr()),
+    }
+    .to_expr();
+    let sub = ExprKind::Sub {
+        lhs: Arc::new(
+            ExprKind::Sub {
+                lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
+                rhs: Arc::new(ExprKind::Ref { name: ["b"].into() }.to_expr()),
+            }
+            .to_expr(),
+        ),
+        rhs: Arc::new(ExprKind::Ref { name: ["c"].into() }.to_expr()),
+    }
+    .to_expr();
+    let eq = ExprKind::Eq { lhs: Arc::new(sum), rhs: Arc::new(sub) }.to_expr();
+    let exp = ExprKind::And {
+        lhs: Arc::new(eq),
+        rhs: Arc::new(
+            ExprKind::Not {
+                expr: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
+            }
+            .to_expr(),
+        ),
+    }
+    .to_expr();
+    let s = r#"((a + b + c) = (a - b - c)) && (!a)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
