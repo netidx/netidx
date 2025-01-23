@@ -113,6 +113,10 @@ pub enum ExprKind {
     And { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Or { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Not { expr: Arc<Expr> },
+    Add { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Sub { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Mul { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Div { lhs: Arc<Expr>, rhs: Arc<Expr> },
 }
 
 impl ExprKind {
@@ -126,7 +130,7 @@ impl ExprKind {
         buf
     }
 
-    pub fn is_blang(&self) -> bool {
+    pub fn is_binop(&self) -> bool {
         match self {
             ExprKind::Connect { .. }
             | ExprKind::Module { .. }
@@ -146,7 +150,11 @@ impl ExprKind {
             | ExprKind::Gte { .. }
             | ExprKind::And { .. }
             | ExprKind::Or { .. }
-            | ExprKind::Not { .. } => true,
+            | ExprKind::Not { .. }
+            | ExprKind::Add { .. }
+            | ExprKind::Sub { .. }
+            | ExprKind::Mul { .. }
+            | ExprKind::Div { .. } => true,
         }
     }
 
@@ -197,10 +205,10 @@ impl ExprKind {
                 }
             }};
         }
-        macro_rules! blang {
+        macro_rules! binop {
             ($sep:literal, $lhs:expr, $rhs:expr) => {{
                 try_single_line!(true);
-                if $lhs.kind.is_blang() {
+                if $lhs.kind.is_binop() {
                     writeln!(buf, "({}) {}", $lhs, $sep)?;
                 } else {
                     writeln!(buf, "{} {}", $lhs, $sep)?;
@@ -299,14 +307,18 @@ impl ExprKind {
                 push_indent(indent, buf);
                 writeln!(buf, "}}")
             }
-            ExprKind::Eq { lhs, rhs } => blang!("=", lhs, rhs),
-            ExprKind::Ne { lhs, rhs } => blang!("!=", lhs, rhs),
-            ExprKind::Lt { lhs, rhs } => blang!("<", lhs, rhs),
-            ExprKind::Gt { lhs, rhs } => blang!(">", lhs, rhs),
-            ExprKind::Lte { lhs, rhs } => blang!("<=", lhs, rhs),
-            ExprKind::Gte { lhs, rhs } => blang!(">=", lhs, rhs),
-            ExprKind::And { lhs, rhs } => blang!("&&", lhs, rhs),
-            ExprKind::Or { lhs, rhs } => blang!("||", lhs, rhs),
+            ExprKind::Eq { lhs, rhs } => binop!("=", lhs, rhs),
+            ExprKind::Ne { lhs, rhs } => binop!("!=", lhs, rhs),
+            ExprKind::Lt { lhs, rhs } => binop!("<", lhs, rhs),
+            ExprKind::Gt { lhs, rhs } => binop!(">", lhs, rhs),
+            ExprKind::Lte { lhs, rhs } => binop!("<=", lhs, rhs),
+            ExprKind::Gte { lhs, rhs } => binop!(">=", lhs, rhs),
+            ExprKind::And { lhs, rhs } => binop!("&&", lhs, rhs),
+            ExprKind::Or { lhs, rhs } => binop!("||", lhs, rhs),
+            ExprKind::Add { lhs, rhs } => binop!("+", lhs, rhs),
+            ExprKind::Sub { lhs, rhs } => binop!("-", lhs, rhs),
+            ExprKind::Mul { lhs, rhs } => binop!("*", lhs, rhs),
+            ExprKind::Div { lhs, rhs } => binop!("/", lhs, rhs),
             ExprKind::Not { expr } => {
                 try_single_line!(true);
                 match &expr.kind {
@@ -327,13 +339,13 @@ impl ExprKind {
 
 impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fn write_blang(
+        fn write_binop(
             f: &mut fmt::Formatter,
             op: &str,
             lhs: &Expr,
             rhs: &Expr,
         ) -> fmt::Result {
-            match (lhs.kind.is_blang(), rhs.kind.is_blang()) {
+            match (lhs.kind.is_binop(), rhs.kind.is_binop()) {
                 (true, true) => write!(f, "({lhs}) {op} ({rhs})"),
                 (true, false) => write!(f, "({lhs}) {op} {rhs}"),
                 (false, true) => write!(f, "{lhs} {op} ({rhs})"),
@@ -429,16 +441,20 @@ impl fmt::Display for ExprKind {
                 }
                 write!(f, "}}")
             }
-            ExprKind::Eq { lhs, rhs } => write_blang(f, "=", lhs, rhs),
-            ExprKind::Ne { lhs, rhs } => write_blang(f, "!=", lhs, rhs),
-            ExprKind::Gt { lhs, rhs } => write_blang(f, ">", lhs, rhs),
-            ExprKind::Lt { lhs, rhs } => write_blang(f, "<", lhs, rhs),
-            ExprKind::Gte { lhs, rhs } => write_blang(f, ">=", lhs, rhs),
-            ExprKind::Lte { lhs, rhs } => write_blang(f, "<=", lhs, rhs),
-            ExprKind::And { lhs, rhs } => write_blang(f, "&&", lhs, rhs),
-            ExprKind::Or { lhs, rhs } => write_blang(f, "||", lhs, rhs),
+            ExprKind::Eq { lhs, rhs } => write_binop(f, "=", lhs, rhs),
+            ExprKind::Ne { lhs, rhs } => write_binop(f, "!=", lhs, rhs),
+            ExprKind::Gt { lhs, rhs } => write_binop(f, ">", lhs, rhs),
+            ExprKind::Lt { lhs, rhs } => write_binop(f, "<", lhs, rhs),
+            ExprKind::Gte { lhs, rhs } => write_binop(f, ">=", lhs, rhs),
+            ExprKind::Lte { lhs, rhs } => write_binop(f, "<=", lhs, rhs),
+            ExprKind::And { lhs, rhs } => write_binop(f, "&&", lhs, rhs),
+            ExprKind::Or { lhs, rhs } => write_binop(f, "||", lhs, rhs),
+            ExprKind::Add { lhs, rhs } => write_binop(f, "+", lhs, rhs),
+            ExprKind::Sub { lhs, rhs } => write_binop(f, "-", lhs, rhs),
+            ExprKind::Mul { lhs, rhs } => write_binop(f, "*", lhs, rhs),
+            ExprKind::Div { lhs, rhs } => write_binop(f, "/", lhs, rhs),
             ExprKind::Not { expr } => {
-                if expr.kind.is_blang() {
+                if expr.kind.is_binop() {
                     write!(f, "!({expr})")
                 } else {
                     write!(f, "!{expr}")

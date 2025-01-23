@@ -1,6 +1,6 @@
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use combine::{
-    attempt, between, choice, many, optional,
+    attempt, between, chainl1, choice, many, optional,
     parser::{
         char::{spaces, string},
         combinator::recognize,
@@ -17,7 +17,7 @@ use triomphe::Arc;
 #[cfg(test)]
 mod test;
 
-pub static BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
+pub const BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
 
 fn spstring<'a, I>(s: &'static str) -> impl Parser<I, Output = &'a str>
 where
@@ -41,7 +41,14 @@ where
         }),
     ))
     .then(|s: String| {
-        if s == "true" || s == "false" || s == "ok" || s == "null" {
+        if s == "true"
+            || s == "false"
+            || s == "ok"
+            || s == "null"
+            || s == "mod"
+            || s == "let"
+            || s == "select"
+        {
             unexpected_any("can't use keyword as a function or variable name").left()
         } else {
             value(s).right()
@@ -185,6 +192,10 @@ where
                     | (Some(Expr { kind: ExprKind::And { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Or { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Not { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Add { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Sub { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Mul { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Div { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Select { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
                         unreachable!()
@@ -365,48 +376,139 @@ where
     modpath().map(|name| ExprKind::Ref { name }.to_expr())
 }
 
-fn blang_<I>() -> impl Parser<I, Output = Expr>
+fn arith_term<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     choice((
-        between(token('('), sptoken(')'), blang()),
-        attempt((expr(), spstring("=").with(expr()))).map(|(lhs, rhs)| {
-            ExprKind::Eq { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-        }),
-        attempt((expr(), spstring("!=").with(expr()))).map(|(lhs, rhs)| {
-            ExprKind::Ne { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-        }),
-        attempt((expr(), spstring(">").with(expr()))).map(|(lhs, rhs)| {
-            ExprKind::Gt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-        }),
-        attempt((expr(), spstring("<").with(expr()))).map(|(lhs, rhs)| {
-            ExprKind::Lt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-        }),
-        attempt((expr(), spstring(">=").with(expr()))).map(|(lhs, rhs)| {
-            ExprKind::Gte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-        }),
-        attempt((expr(), spstring("<=").with(expr()))).map(|(lhs, rhs)| {
-            ExprKind::Lte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-        }),
-        attempt((expr(), spstring("&&").with(expr()))).map(|(lhs, rhs)| {
-            ExprKind::And { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-        }),
-        attempt((expr(), spstring("||").with(expr()))).map(|(lhs, rhs)| {
-            ExprKind::Or { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-        }),
-        attempt(sptoken('!').with(expr()))
+        attempt(between(sptoken('('), sptoken(')'), arith())),
+        attempt(spaces().with(alist())),
+        attempt(spaces().with(do_block())),
+        attempt(spaces().with(array())),
+        attempt(spaces().with(interpolated())),
+        attempt(spaces().with(select())),
+        attempt(spaces().with(apply())),
+        attempt(spaces().with(literal())),
+        attempt(spaces().with(reference())),
+    ))
+}
+
+fn arith_<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        attempt(between(sptoken('('), sptoken(')'), arith())),
+        attempt(chainl1(
+            arith_term(),
+            spstring("+").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::Add { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(chainl1(
+            arith_term(),
+            spstring("-").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::Sub { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(chainl1(
+            arith_term(),
+            spstring("*").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::Mul { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(chainl1(
+            arith_term(),
+            spstring("/").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::Div { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(chainl1(
+            arith_term(),
+            spstring("=").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::Eq { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(chainl1(
+            arith_term(),
+            spstring("!=").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::Ne { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(chainl1(
+            arith_term(),
+            spstring(">").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::Gt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(chainl1(
+            arith_term(),
+            spstring("<").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::Lt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(chainl1(
+            arith_term(),
+            spstring(">=").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::Gte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(chainl1(
+            arith_term(),
+            spstring("<=").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::Lte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(chainl1(
+            arith_term(),
+            spstring("&&").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::And { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(chainl1(
+            arith_term(),
+            spstring("||").map(|_| {
+                |lhs, rhs| {
+                    ExprKind::Or { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                }
+            }),
+        )),
+        attempt(sptoken('!').with(arith_term()))
             .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
     ))
 }
 
 parser! {
-    fn blang[I]()(I) -> Expr
+    fn arith[I]()(I) -> Expr
     where [I: RangeStream<Token = char>, I::Range: Range]
     {
-        blang_()
+        arith_()
     }
 }
 
@@ -420,7 +522,7 @@ where
         .with(between(
             sptoken('{'),
             sptoken('}'),
-            sep_by1((expr(), spstring("=>").with(expr())), sptoken(',')),
+            sep_by1((expr(), spstring("=>").with(expr())), attempt(sptoken(','))),
         ))
         .map(|arms: Vec<(Expr, Expr)>| {
             ExprKind::Select { arms: Arc::from(arms) }.to_expr()
@@ -433,22 +535,22 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    spaces().with(choice((
-        attempt(module()),
-        attempt(use_module()),
-        attempt(alist()),
-        attempt(do_block()),
-        attempt(array()),
-        attempt(apply()),
-        attempt(lambda()),
-        attempt(letbind()),
-        attempt(connect()),
-        attempt(interpolated()),
-        attempt(literal()),
-        attempt(blang()),
-        attempt(select()),
-        reference(),
-    )))
+    choice((
+        attempt(spaces().with(module())),
+        attempt(spaces().with(use_module())),
+        attempt(spaces().with(alist())),
+        attempt(spaces().with(do_block())),
+        attempt(spaces().with(array())),
+        attempt(spaces().with(lambda())),
+        attempt(spaces().with(letbind())),
+        attempt(spaces().with(connect())),
+        attempt(spaces().with(select())),
+        attempt(spaces().with(apply())),
+        attempt(spaces().with(interpolated())),
+        attempt(spaces().with(literal())),
+        attempt(spaces().with(arith())),
+        attempt(spaces().with(reference())),
+    ))
 }
 
 parser! {
@@ -465,4 +567,3 @@ pub fn parse_expr(s: &str) -> anyhow::Result<Expr> {
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
-

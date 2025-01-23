@@ -414,6 +414,10 @@ pub enum NodeKind<C: Ctx + 'static, E: Clone + 'static> {
     And { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
     Or { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
     Not { node: Box<Cached<C, E>> },
+    Add { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
+    Sub { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
+    Mul { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
+    Div { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
     Error { error: Option<Chars>, children: Vec<Node<C, E>> },
 }
 
@@ -448,6 +452,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::And { .. }
             | NodeKind::Or { .. }
             | NodeKind::Not { .. }
+            | NodeKind::Add { .. }
+            | NodeKind::Sub { .. }
+            | NodeKind::Mul { .. }
+            | NodeKind::Div { .. }
             | NodeKind::Select { .. } => None,
             NodeKind::Lambda(init) => Some(sync::Arc::clone(init)),
             NodeKind::Do(children) => children.last().and_then(|t| t.find_lambda()),
@@ -475,6 +483,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::And { .. }
             | NodeKind::Or { .. }
             | NodeKind::Not { .. }
+            | NodeKind::Add { .. }
+            | NodeKind::Sub { .. }
+            | NodeKind::Mul { .. }
+            | NodeKind::Div { .. }
             | NodeKind::Select { .. } => false,
         }
     }
@@ -509,6 +521,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::And { .. }
             | NodeKind::Or { .. }
             | NodeKind::Not { .. }
+            | NodeKind::Add { .. }
+            | NodeKind::Sub { .. }
+            | NodeKind::Mul { .. }
+            | NodeKind::Div { .. }
             | NodeKind::Select { .. } => None,
         }
     }
@@ -530,6 +546,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::And { .. }
             | NodeKind::Or { .. }
             | NodeKind::Not { .. }
+            | NodeKind::Add { .. }
+            | NodeKind::Sub { .. }
+            | NodeKind::Mul { .. }
+            | NodeKind::Div { .. }
             | NodeKind::Select { .. }
             | NodeKind::Constant(_)
             | NodeKind::Ref(_)
@@ -556,6 +576,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::And { .. }
             | NodeKind::Or { .. }
             | NodeKind::Not { .. }
+            | NodeKind::Add { .. }
+            | NodeKind::Sub { .. }
+            | NodeKind::Mul { .. }
+            | NodeKind::Div { .. }
             | NodeKind::Select { .. }
             | NodeKind::Constant(_)
             | NodeKind::Ref(_)
@@ -582,6 +606,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::And { .. }
             | NodeKind::Or { .. }
             | NodeKind::Not { .. }
+            | NodeKind::Add { .. }
+            | NodeKind::Sub { .. }
+            | NodeKind::Mul { .. }
+            | NodeKind::Div { .. }
             | NodeKind::Select { .. }
             | NodeKind::Apply { .. } => true,
         }
@@ -604,6 +632,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             | NodeKind::And { .. }
             | NodeKind::Or { .. }
             | NodeKind::Not { .. }
+            | NodeKind::Add { .. }
+            | NodeKind::Sub { .. }
+            | NodeKind::Mul { .. }
+            | NodeKind::Div { .. }
             | NodeKind::Select { .. }
             | NodeKind::Do(_)
             | NodeKind::Constant(_)
@@ -849,6 +881,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             Expr { kind: ExprKind::Gte { lhs, rhs }, id: _ } => binary_op!(Gte, lhs, rhs),
             Expr { kind: ExprKind::And { lhs, rhs }, id: _ } => binary_op!(And, lhs, rhs),
             Expr { kind: ExprKind::Or { lhs, rhs }, id: _ } => binary_op!(Or, lhs, rhs),
+            Expr { kind: ExprKind::Add { lhs, rhs }, id: _ } => binary_op!(Add, lhs, rhs),
+            Expr { kind: ExprKind::Sub { lhs, rhs }, id: _ } => binary_op!(Sub, lhs, rhs),
+            Expr { kind: ExprKind::Mul { lhs, rhs }, id: _ } => binary_op!(Mul, lhs, rhs),
+            Expr { kind: ExprKind::Div { lhs, rhs }, id: _ } => binary_op!(Div, lhs, rhs),
         }
     }
 
@@ -874,6 +910,18 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 if lhs_up || rhs_up {
                     return $lhs.cached.as_ref().and_then(|lhs| {
                         $rhs.cached.as_ref().map(|rhs| (lhs $op rhs).into())
+                    })
+                }
+                None
+            }}
+        }
+        macro_rules! binary_op_clone {
+            ($op:tt, $lhs:expr, $rhs:expr) => {{
+                let lhs_up = $lhs.update(ctx, event);
+                let rhs_up = $rhs.update(ctx, event);
+                if lhs_up || rhs_up {
+                    return $lhs.cached.as_ref().and_then(|lhs| {
+                        $rhs.cached.as_ref().map(|rhs| (lhs.clone() $op rhs.clone()).into())
                     })
                 }
                 None
@@ -955,6 +1003,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                     None
                 }
             }
+            NodeKind::Add { lhs, rhs } => binary_op_clone!(+, lhs, rhs),
+            NodeKind::Sub { lhs, rhs } => binary_op_clone!(-, lhs, rhs),
+            NodeKind::Mul { lhs, rhs } => binary_op_clone!(*, lhs, rhs),
+            NodeKind::Div { lhs, rhs } => binary_op_clone!(/, lhs, rhs),
             NodeKind::Select { selected, arms } => {
                 let mut val_up: SmallVec<[bool; 16]> = smallvec![];
                 for (cond, val) in arms.iter_mut() {
