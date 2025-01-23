@@ -13,6 +13,7 @@ use netidx::{
     subscriber::{Dval, SubId, UpdatesFlags, Value},
     utils::Either,
 };
+use smallvec::{smallvec, SmallVec};
 use std::{
     collections::{HashMap, VecDeque},
     fmt, iter,
@@ -403,7 +404,7 @@ pub enum NodeKind<C: Ctx + 'static, E: Clone + 'static> {
     Connect(BindId, Box<Node<C, E>>),
     Lambda(InitFn<C, E>),
     Apply { args: Vec<Node<C, E>>, function: Box<dyn Apply<C, E> + Send + Sync> },
-    Select { arms: Vec<(Cached<C, E>, Cached<C, E>)> },
+    Select { selected: Option<usize>, arms: Vec<(Cached<C, E>, Cached<C, E>)> },
     Eq { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
     Ne { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
     Lt { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
@@ -830,7 +831,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                     arms.into_iter().for_each(|(cn, n)| v.extend([cn.node, n.node]));
                     return error!("", v);
                 }
-                Node { spec, kind: NodeKind::Select { arms } }
+                Node { spec, kind: NodeKind::Select { selected: None, arms } }
             }
             Expr { kind: ExprKind::Not { expr }, id: _ } => {
                 let node = Node::compile_int(ctx, (**expr).clone(), scope, top_id);
@@ -866,6 +867,40 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
     }
 
     pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
+        macro_rules! binary_op {
+            ($op:tt, $lhs:expr, $rhs:expr) => {{
+                let lhs_up = $lhs.update(ctx, event);
+                let rhs_up = $rhs.update(ctx, event);
+                if lhs_up || rhs_up {
+                    return $lhs.cached.as_ref().and_then(|lhs| {
+                        $rhs.cached.as_ref().map(|rhs| (lhs $op rhs).into())
+                    })
+                }
+                None
+            }}
+        }
+        macro_rules! cast_bool {
+            ($v:expr) => {
+                match $v.cached.as_ref().map(|v| v.clone().get_as::<bool>()) {
+                    None => return None,
+                    Some(None) => return Some(Value::Error(Chars::from("expected bool"))),
+                    Some(Some(lhs)) => lhs,
+                }
+            };
+        }
+        macro_rules! binary_boolean_op {
+            ($op:tt, $lhs:expr, $rhs:expr) => {{
+                let lhs_up = $lhs.update(ctx, event);
+                let rhs_up = $rhs.update(ctx, event);
+                if lhs_up || rhs_up {
+                    let lhs = cast_bool!($lhs);
+                    let rhs = cast_bool!($rhs);
+                    Some((lhs $op rhs).into())
+                } else {
+                    None
+                }
+            }}
+        }
         let eid = self.spec.id;
         let res = match &mut self.kind {
             NodeKind::Error { .. } => None,
@@ -904,6 +939,50 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             }
             NodeKind::Do(children) => {
                 children.into_iter().fold(None, |_, n| n.update(ctx, event))
+            }
+            NodeKind::Eq { lhs, rhs } => binary_op!(==, lhs, rhs),
+            NodeKind::Ne { lhs, rhs } => binary_op!(!=, lhs, rhs),
+            NodeKind::Lt { lhs, rhs } => binary_op!(<, lhs, rhs),
+            NodeKind::Gt { lhs, rhs } => binary_op!(>, lhs, rhs),
+            NodeKind::Lte { lhs, rhs } => binary_op!(<=, lhs, rhs),
+            NodeKind::Gte { lhs, rhs } => binary_op!(>=, lhs, rhs),
+            NodeKind::And { lhs, rhs } => binary_boolean_op!(&&, lhs, rhs),
+            NodeKind::Or { lhs, rhs } => binary_boolean_op!(||, lhs, rhs),
+            NodeKind::Not { node } => {
+                if node.update(ctx, event) {
+                    node.cached.clone()
+                } else {
+                    None
+                }
+            }
+            NodeKind::Select { selected, arms } => {
+                let mut val_up: SmallVec<[bool; 16]> = smallvec![];
+                for (cond, val) in arms.iter_mut() {
+                    cond.update(ctx, event);
+                    val_up.push(val.update(ctx, event));
+                }
+                let sel = arms.iter().enumerate().find_map(|(i, (cond, _))| {
+                    cond.cached.as_ref().and_then(|v| match v {
+                        Value::True => Some(i),
+                        _ => None,
+                    })
+                });
+                match (sel, *selected) {
+                    (Some(i), Some(j)) if i == j && val_up[i] => arms[i].1.cached.clone(),
+                    (Some(i), Some(_)) => {
+                        *selected = Some(i);
+                        arms[i].1.cached.clone()
+                    }
+                    (Some(i), None) => {
+                        *selected = Some(i);
+                        arms[i].1.cached.clone()
+                    }
+                    (None, Some(_)) => {
+                        *selected = None;
+                        None
+                    }
+                    (None, None) => None,
+                }
             }
             NodeKind::Use | NodeKind::Lambda(_) => None,
         };

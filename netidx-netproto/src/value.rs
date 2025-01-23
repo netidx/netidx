@@ -853,59 +853,30 @@ impl Not for Value {
 
     fn not(self) -> Self {
         match self {
-            Value::U32(v) => {
-                Value::Error(Chars::from(format!("can't apply not to U32({})", v)))
-            }
-            Value::V32(v) => {
-                Value::Error(Chars::from(format!("can't apply not to V32({})", v)))
-            }
-            Value::I32(v) => {
-                Value::Error(Chars::from(format!("can't apply not to I32({})", v)))
-            }
-            Value::Z32(v) => {
-                Value::Error(Chars::from(format!("can't apply not to Z32({})", v)))
-            }
-            Value::U64(v) => {
-                Value::Error(Chars::from(format!("can't apply not to U64({})", v)))
-            }
-            Value::V64(v) => {
-                Value::Error(Chars::from(format!("can't apply not to V64({})", v)))
-            }
-            Value::I64(v) => {
-                Value::Error(Chars::from(format!("can't apply not to I64({})", v)))
-            }
-            Value::Z64(v) => {
-                Value::Error(Chars::from(format!("can't apply not to Z64({})", v)))
-            }
-            Value::F32(v) => {
-                Value::Error(Chars::from(format!("can't apply not to F32({})", v)))
-            }
-            Value::F64(v) => {
-                Value::Error(Chars::from(format!("can't apply not to F64({})", v)))
-            }
-            Value::Decimal(v) => {
-                Value::Error(Chars::from(format!("can't apply not to Decimal({})", v)))
-            }
-            Value::DateTime(v) => {
-                Value::Error(Chars::from(format!("can't apply not to DateTime({})", v)))
-            }
-            Value::Duration(v) => Value::Error(Chars::from(format!(
-                "can't apply not to Duration({}s)",
-                v.as_secs_f64()
-            ))),
-            Value::String(v) => {
-                Value::Error(Chars::from(format!("can't apply not to String({})", v)))
-            }
-            Value::Bytes(_) => {
-                Value::Error(Chars::from(format!("can't apply not to Bytes")))
-            }
             Value::True => Value::False,
             Value::False => Value::True,
             Value::Null => Value::Null,
-            Value::Ok => Value::Error(Chars::from(format!("can't apply not to Ok"))),
-            Value::Error(v) => {
-                Value::Error(Chars::from(format!("can't apply not to Error({})", v)))
+            Value::U32(v) => Value::U32(!v),
+            Value::V32(v) => Value::V32(!v),
+            Value::I32(v) => Value::I32(!v),
+            Value::Z32(v) => Value::Z32(!v),
+            Value::U64(v) => Value::U64(!v),
+            Value::V64(v) => Value::V64(!v),
+            Value::I64(v) => Value::I64(!v),
+            Value::Z64(v) => Value::Z64(!v),
+            Value::F32(_) => Value::Error(Chars::from("can't apply not to F32")),
+            Value::F64(_) => Value::Error(Chars::from("can't apply not to F64")),
+            Value::Decimal(_) => Value::Error(Chars::from("can't apply not to Decimal")),
+            Value::DateTime(_) => {
+                Value::Error(Chars::from("can't apply not to DateTime"))
             }
+            Value::Duration(_) => {
+                Value::Error(Chars::from("can't apply not to Duration"))
+            }
+            Value::String(_) => Value::Error(Chars::from("can't apply not to String")),
+            Value::Bytes(_) => Value::Error(Chars::from("can't apply not to Bytes")),
+            Value::Ok => Value::Error(Chars::from("can't apply not to Ok")),
+            Value::Error(_) => Value::Error(Chars::from("can't apply not to Error")),
             Value::Array(elts) => {
                 Value::Array(elts.iter().cloned().map(|v| !v).collect())
             }
