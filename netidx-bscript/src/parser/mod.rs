@@ -220,7 +220,7 @@ where
         spstring("mod").with(spfname()),
         spaces().with(choice((
             token(';').map(|_| None),
-            between(token('{'), sptoken('}'), many(expr()))
+            between(token('{'), sptoken('}'), many(modexpr()))
                 .map(|m: Vec<Expr>| Some(Arc::from(m))),
         ))),
     )
@@ -318,7 +318,8 @@ where
         ),
         choice((
             attempt(sptoken('\'').with(fname()).map(Either::Right)),
-            expr().map(|e| Either::Left(Arc::new(e))),
+            between(sptoken('{'), sptoken('}'), sep_by1(expr(), attempt(sptoken(';'))))
+                .map(|e: Vec<Expr>| Either::Left(Arc::from_iter(e))),
         )),
     )
         .map(|((args, vargs), body)| {
@@ -378,20 +379,15 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(spaces().with(module())),
-        attempt(spaces().with(use_module())),
+        attempt(between(sptoken('('), sptoken(')'), arith())),
         attempt(spaces().with(alist())),
         attempt(spaces().with(do_block())),
         attempt(spaces().with(array())),
-        attempt(spaces().with(lambda())),
-        attempt(spaces().with(letbind())),
-        attempt(spaces().with(connect())),
         attempt(spaces().with(select())),
         attempt(spaces().with(apply())),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
         attempt(spaces().with(reference())),
-        attempt(between(sptoken('('), sptoken(')'), arith())),
     ))
 }
 
@@ -536,8 +532,6 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(spaces().with(module())),
-        attempt(spaces().with(use_module())),
         attempt(spaces().with(alist())),
         attempt(spaces().with(do_block())),
         attempt(spaces().with(array())),
@@ -548,7 +542,7 @@ where
         attempt(spaces().with(apply())),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
-        attempt(spaces().with(arith())),
+        attempt(between(sptoken('('), sptoken(')'), arith())),
         attempt(spaces().with(reference())),
     ))
 }
@@ -561,8 +555,39 @@ parser! {
     }
 }
 
+fn modexpr_<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        attempt(spaces().with(module())),
+        attempt(spaces().with(use_module())),
+        attempt(spaces().with(do_block())),
+        attempt(spaces().with(letbind())),
+        attempt(spaces().with(connect())),
+        attempt(spaces().with(apply())),
+    ))
+}
+
+parser! {
+    fn modexpr[I]()(I) -> Expr
+    where [I: RangeStream<Token = char>, I::Range: Range]
+    {
+        modexpr_()
+    }
+}
+
 pub fn parse_expr(s: &str) -> anyhow::Result<Expr> {
     expr()
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
+}
+
+pub fn parse_modexpr(s: &str) -> anyhow::Result<Expr> {
+    modexpr()
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))

@@ -169,7 +169,7 @@ fn arith_eq() {
         rhs: Arc::new(ExprKind::Ref { name: ModPath::from(["b"]) }.to_expr()),
     }
     .to_expr();
-    let s = r#"a = b"#;
+    let s = r#"(a = b)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -180,7 +180,7 @@ fn arith_ne() {
         rhs: Arc::new(ExprKind::Ref { name: ModPath::from(["b"]) }.to_expr()),
     }
     .to_expr();
-    let s = r#"a != b"#;
+    let s = r#"(a != b)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -191,7 +191,7 @@ fn arith_gt() {
         rhs: Arc::new(ExprKind::Ref { name: ModPath::from(["b"]) }.to_expr()),
     }
     .to_expr();
-    let s = r#"a > b"#;
+    let s = r#"(a > b)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -202,7 +202,7 @@ fn arith_lt() {
         rhs: Arc::new(ExprKind::Ref { name: ModPath::from(["b"]) }.to_expr()),
     }
     .to_expr();
-    let s = r#"a < b"#;
+    let s = r#"(a < b)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -213,7 +213,7 @@ fn arith_gte() {
         rhs: Arc::new(ExprKind::Ref { name: ModPath::from(["b"]) }.to_expr()),
     }
     .to_expr();
-    let s = r#"a >= b"#;
+    let s = r#"(a >= b)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -224,7 +224,7 @@ fn arith_lte() {
         rhs: Arc::new(ExprKind::Ref { name: ModPath::from(["b"]) }.to_expr()),
     }
     .to_expr();
-    let s = r#"a <= b"#;
+    let s = r#"(a <= b)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -241,7 +241,7 @@ fn arith_add() {
         rhs: Arc::new(ExprKind::Ref { name: ["c"].into() }.to_expr()),
     }
     .to_expr();
-    let s = r#"a + b + c"#;
+    let s = r#"(a + b + c)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -252,7 +252,7 @@ fn arith_sub() {
         rhs: Arc::new(ExprKind::Ref { name: ModPath::from(["b"]) }.to_expr()),
     }
     .to_expr();
-    let s = r#"a - b"#;
+    let s = r#"(a - b)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -263,7 +263,7 @@ fn arith_mul() {
         rhs: Arc::new(ExprKind::Ref { name: ModPath::from(["b"]) }.to_expr()),
     }
     .to_expr();
-    let s = r#"a * b"#;
+    let s = r#"(a * b)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -274,7 +274,7 @@ fn arith_div() {
         rhs: Arc::new(ExprKind::Ref { name: ModPath::from(["b"]) }.to_expr()),
     }
     .to_expr();
-    let s = r#"a / b"#;
+    let s = r#"(a / b)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -324,7 +324,7 @@ fn arith_nested() {
         ),
     }
     .to_expr();
-    let s = r#"((a + b + c) = (a - b - c)) && (!a)"#;
+    let s = r#"(((a + b + c) = (a - b - c)) && (!a))"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -358,7 +358,7 @@ fn connect() {
         ),
     }
     .to_expr();
-    let s = r#"m::foo <- a + 1;"#;
+    let s = r#"m::foo <- (a + 1);"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -387,7 +387,7 @@ fn inline_module() {
         pub let z = 42;
         let m = 42;
     }"#;
-    assert_eq!(exp, parse_expr(s).unwrap());
+    assert_eq!(exp, parse_modexpr(s).unwrap());
 }
 
 #[test]
@@ -395,14 +395,14 @@ fn external_module() {
     let exp = ExprKind::Module { name: Chars::from("foo"), export: true, value: None }
         .to_expr();
     let s = r#"pub mod foo;"#;
-    assert_eq!(exp, parse_expr(s).unwrap());
+    assert_eq!(exp, parse_modexpr(s).unwrap());
 }
 
 #[test]
 fn usemodule() {
     let exp = ExprKind::Use { name: ModPath::from(["foo"]) }.to_expr();
     let s = r#"use foo;"#;
-    assert_eq!(exp, parse_expr(s).unwrap());
+    assert_eq!(exp, parse_modexpr(s).unwrap());
 }
 
 #[test]
@@ -476,5 +476,27 @@ fn doexpr() {
     }
     .to_expr();
     let s = r#"{ let baz = 42; baz }"#;
+    assert_eq!(exp, parse_expr(s).unwrap());
+}
+
+#[test]
+fn lambda() {
+    let exp = ExprKind::Lambda {
+        args: Arc::from_iter(["foo".into(), "bar".into()]),
+        vargs: false,
+        body: Either::Left(Arc::from_iter([ExprKind::Add {
+            lhs: Arc::new(
+                ExprKind::Add {
+                    lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
+                    rhs: Arc::new(ExprKind::Ref { name: ["b"].into() }.to_expr()),
+                }
+                .to_expr(),
+            ),
+            rhs: Arc::new(ExprKind::Ref { name: ["c"].into() }.to_expr()),
+        }
+        .to_expr()])),
+    }
+    .to_expr();
+    let s = r#"|foo, bar| { (a + b + c) }"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }

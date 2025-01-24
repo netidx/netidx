@@ -101,7 +101,7 @@ pub enum ExprKind {
     Bind { name: Chars, export: bool, value: Arc<Expr> },
     Ref { name: ModPath },
     Connect { name: ModPath, value: Arc<Expr> },
-    Lambda { args: Arc<[Chars]>, vargs: bool, body: Either<Arc<Expr>, Chars> },
+    Lambda { args: Arc<[Chars]>, vargs: bool, body: Either<Arc<[Expr]>, Chars> },
     Apply { args: Arc<[Expr]>, function: ModPath },
     Select { arms: Arc<[(Expr, Expr)]> },
     Eq { lhs: Arc<Expr>, rhs: Arc<Expr> },
@@ -208,12 +208,14 @@ impl ExprKind {
         macro_rules! binop {
             ($sep:literal, $lhs:expr, $rhs:expr) => {{
                 try_single_line!(true);
+                write!(buf, "(")?;
                 if $lhs.kind.is_binop() {
                     writeln!(buf, "({}) {}", $lhs, $sep)?;
                 } else {
                     writeln!(buf, "{} {}", $lhs, $sep)?;
                 }
-                $rhs.kind.pretty_print(indent, limit, true, buf)
+                $rhs.kind.pretty_print(indent, limit, true, buf)?;
+                write!(buf, ")")
             }};
         }
         let exp = |export| if export { "pub " } else { "" };
@@ -280,12 +282,9 @@ impl ExprKind {
                     Either::Right(builtin) => {
                         writeln!(buf, "'{builtin}")
                     }
-                    Either::Left(body) => match &body.kind {
-                        ExprKind::Do { exprs } => {
-                            pretty_print_exprs(indent, limit, buf, exprs, "{", "}", "")
-                        }
-                        _ => body.kind.pretty_print(indent, limit, false, buf),
-                    },
+                    Either::Left(body) => {
+                        pretty_print_exprs(indent, limit, buf, body, "{", "}", ";")
+                    }
                 }
             }
             ExprKind::Select { arms } => {
@@ -345,12 +344,14 @@ impl fmt::Display for ExprKind {
             lhs: &Expr,
             rhs: &Expr,
         ) -> fmt::Result {
+            write!(f, "(")?;
             match (lhs.kind.is_binop(), rhs.kind.is_binop()) {
                 (true, true) => write!(f, "({lhs}) {op} ({rhs})"),
                 (true, false) => write!(f, "({lhs}) {op} {rhs}"),
                 (false, true) => write!(f, "{lhs} {op} ({rhs})"),
                 (false, false) => write!(f, "{lhs} {op} {rhs}"),
-            }
+            }?;
+            write!(f, ")")
         }
         fn print_exprs(
             f: &mut fmt::Formatter,
@@ -404,8 +405,17 @@ impl fmt::Display for ExprKind {
                 }
                 write!(f, "| ")?;
                 match body {
-                    Either::Left(body) => write!(f, "{body}"),
                     Either::Right(builtin) => write!(f, "'{builtin}"),
+                    Either::Left(body) => {
+                        write!(f, "{{")?;
+                        for i in 0..body.len() {
+                            write!(f, "{}", &body[i])?;
+                            if i < body.len() - 1 {
+                                write!(f, ";")?;
+                            }
+                        }
+                        write!(f, "}}")
+                    }
                 }
             }
             ExprKind::Apply { args, function } => {

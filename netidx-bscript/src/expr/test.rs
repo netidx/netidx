@@ -136,12 +136,16 @@ fn expr() -> impl Strategy<Value = Expr> {
             }
             .to_expr()),
             modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
-            (collection::vec(random_fname(), (0, 10)), any::<bool>(), inner.clone())
+            (
+                collection::vec(random_fname(), (0, 10)),
+                any::<bool>(),
+                collection::vec(inner.clone(), (1, 10))
+            )
                 .prop_map(|(args, vargs, body)| {
                     ExprKind::Lambda {
                         args: Arc::from_iter(args),
                         vargs,
-                        body: Either::Left(Arc::new(body)),
+                        body: Either::Left(Arc::from_iter(body)),
                     }
                     .to_expr()
                 }),
