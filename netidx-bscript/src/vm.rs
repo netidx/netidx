@@ -321,7 +321,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
 struct Lambda<C: Ctx + 'static, E: Clone + 'static> {
     eid: ExprId,
     argids: Vec<BindId>,
-    body: Vec<Node<C, E>>,
+    body: Node<C, E>,
 }
 
 impl<C: Ctx + 'static, E: Clone + 'static> Apply<C, E> for Lambda<C, E> {
@@ -339,7 +339,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Apply<C, E> for Lambda<C, E> {
                 ctx.user.set_var(*id, v)
             }
         }
-        self.body.iter_mut().fold(None, |_, n| n.update(ctx, event))
+        self.body.update(ctx, event)
     }
 }
 
@@ -351,7 +351,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Lambda<C, E> {
         scope: &ModPath,
         eid: ExprId,
         tid: ExprId,
-        body: &Arc<[Expr]>,
+        body: Expr,
     ) -> Result<Self> {
         if args.len() != argspec.len() {
             bail!("arity mismatch, expected {} arguments", argspec.len())
@@ -365,17 +365,11 @@ impl<C: Ctx + 'static, E: Clone + 'static> Lambda<C, E> {
             argids.push(bind.id);
             bind.fun = node.find_lambda();
         }
-        let body = body
-            .iter()
-            .map(|e| {
-                let n = Node::compile_int(ctx, e.clone(), &scope, tid);
-                match n.extract_err() {
-                    None => Ok(n),
-                    Some(e) => bail!("{e}"),
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self { argids, eid, body })
+        let body = Node::compile_int(ctx, body, &scope, tid);
+        match body.extract_err() {
+            None => Ok(Self { argids, eid, body }),
+            Some(e) => bail!("{e}"),
+        }
     }
 }
 
@@ -653,7 +647,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
     fn compile_lambda(
         spec: Expr,
         argspec: Arc<[Chars]>,
-        body: Either<Arc<[Expr]>, Chars>,
+        body: Either<Arc<Expr>, Chars>,
         eid: ExprId,
     ) -> Node<C, E> {
         use sync::Arc;
@@ -670,7 +664,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 scope,
                 eid,
                 tid,
-                &body,
+                (*body).clone(),
             )?)),
             Either::Right(builtin) => match ctx.builtins.get(&*builtin) {
                 None => bail!("unknown builtin function {builtin}"),

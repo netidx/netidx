@@ -484,7 +484,29 @@ fn lambda() {
     let exp = ExprKind::Lambda {
         args: Arc::from_iter(["foo".into(), "bar".into()]),
         vargs: false,
-        body: Either::Left(Arc::from_iter([ExprKind::Add {
+        body: Either::Left(Arc::new(
+            ExprKind::Add {
+                lhs: Arc::new(
+                    ExprKind::Add {
+                        lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
+                        rhs: Arc::new(ExprKind::Ref { name: ["b"].into() }.to_expr()),
+                    }
+                    .to_expr(),
+                ),
+                rhs: Arc::new(ExprKind::Ref { name: ["c"].into() }.to_expr()),
+            }
+            .to_expr(),
+        )),
+    }
+    .to_expr();
+    let s = r#"|foo, bar| (a + b + c)"#;
+    assert_eq!(exp, parse_expr(s).unwrap());
+}
+
+#[test]
+fn nested_lambda() {
+    let e = Arc::new(
+        ExprKind::Add {
             lhs: Arc::new(
                 ExprKind::Add {
                     lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
@@ -494,9 +516,21 @@ fn lambda() {
             ),
             rhs: Arc::new(ExprKind::Ref { name: ["c"].into() }.to_expr()),
         }
-        .to_expr()])),
+        .to_expr(),
+    );
+    let exp = ExprKind::Lambda {
+        args: Arc::from_iter([]),
+        vargs: false,
+        body: Either::Left(Arc::new(
+            ExprKind::Lambda {
+                args: Arc::from_iter([]),
+                vargs: false,
+                body: Either::Left(e),
+            }
+            .to_expr(),
+        )),
     }
     .to_expr();
-    let s = r#"|foo, bar| { (a + b + c) }"#;
+    let s = r#"|| || (a + b + c)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }

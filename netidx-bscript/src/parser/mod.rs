@@ -318,8 +318,7 @@ where
         ),
         choice((
             attempt(sptoken('\'').with(fname()).map(Either::Right)),
-            between(sptoken('{'), sptoken('}'), sep_by1(expr(), attempt(sptoken(';'))))
-                .map(|e: Vec<Expr>| Either::Left(Arc::from_iter(e))),
+            expr().map(|e| Either::Left(Arc::new(e))),
         )),
     )
         .map(|((args, vargs), body)| {

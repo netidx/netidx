@@ -2,7 +2,7 @@ use super::*;
 use bytes::Bytes;
 use chrono::prelude::*;
 use netidx_core::chars::Chars;
-use parser::RESERVED;
+use parser::{parse_modexpr, RESERVED};
 use proptest::{collection, prelude::*};
 use std::time::Duration;
 
@@ -113,59 +113,17 @@ fn reference() -> impl Strategy<Value = Expr> {
     modpath().prop_map(|name| ExprKind::Ref { name }.to_expr())
 }
 
-fn expr() -> impl Strategy<Value = Expr> {
+fn arithexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
-    leaf.prop_recursive(100, 1000000, 10, |inner| {
+    leaf.prop_recursive(5, 100, 5, |inner| {
         prop_oneof![
-            (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
-                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
+            (collection::vec((inner.clone(), inner.clone()), (0, 10))).prop_map(|arms| {
+                ExprKind::Select { arms: Arc::from_iter(arms) }.to_expr()
             }),
             collection::vec(inner.clone(), (0, 10))
                 .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
-            (any::<bool>(), random_fname(), collection::vec(inner.clone(), (0, 10)))
-                .prop_map(|(export, name, body)| ExprKind::Module {
-                    export,
-                    name,
-                    value: Some(Arc::from(body))
-                }
-                .to_expr()),
-            (any::<bool>(), random_fname()).prop_map(|(export, name)| ExprKind::Module {
-                export,
-                name,
-                value: None
-            }
-            .to_expr()),
-            modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
-            (
-                collection::vec(random_fname(), (0, 10)),
-                any::<bool>(),
-                collection::vec(inner.clone(), (1, 10))
-            )
-                .prop_map(|(args, vargs, body)| {
-                    ExprKind::Lambda {
-                        args: Arc::from_iter(args),
-                        vargs,
-                        body: Either::Left(Arc::from_iter(body)),
-                    }
-                    .to_expr()
-                }),
-            (collection::vec(random_fname(), (0, 10)), any::<bool>(), random_fname())
-                .prop_map(|(args, vargs, body)| {
-                    ExprKind::Lambda {
-                        args: Arc::from_iter(args),
-                        vargs,
-                        body: Either::Right(body),
-                    }
-                    .to_expr()
-                }),
-            (inner.clone(), random_fname(), any::<bool>()).prop_map(|(e, n, exp)| {
-                ExprKind::Bind { export: exp, name: n, value: Arc::new(e) }.to_expr()
-            }),
-            (inner.clone(), modpath()).prop_map(|(e, n)| {
-                ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
-            }),
-            (collection::vec((inner.clone(), inner.clone()), (0, 10))).prop_map(|arms| {
-                ExprKind::Select { arms: Arc::from_iter(arms) }.to_expr()
+            (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
+                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
             }),
             inner.clone().prop_map(|e0| ExprKind::Not { expr: Arc::new(e0) }.to_expr()),
             (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Eq {
@@ -232,6 +190,111 @@ fn expr() -> impl Strategy<Value = Expr> {
     })
 }
 
+fn expr() -> impl Strategy<Value = Expr> {
+    let leaf = prop_oneof![constant(), reference()];
+    leaf.prop_recursive(100, 10000, 10, |inner| {
+        prop_oneof![
+            arithexpr(),
+            (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
+                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
+            }),
+            collection::vec(inner.clone(), (0, 10))
+                .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
+            (collection::vec(random_fname(), (0, 10)), any::<bool>(), inner.clone())
+                .prop_map(|(args, vargs, body)| {
+                    ExprKind::Lambda {
+                        args: Arc::from_iter(args),
+                        vargs,
+                        body: Either::Left(Arc::new(body)),
+                    }
+                    .to_expr()
+                }),
+            (collection::vec(random_fname(), (0, 10)), any::<bool>(), random_fname())
+                .prop_map(|(args, vargs, body)| {
+                    ExprKind::Lambda {
+                        args: Arc::from_iter(args),
+                        vargs,
+                        body: Either::Right(body),
+                    }
+                    .to_expr()
+                }),
+            (inner.clone(), random_fname(), any::<bool>()).prop_map(|(e, n, exp)| {
+                ExprKind::Bind { export: exp, name: n, value: Arc::new(e) }.to_expr()
+            }),
+            (inner.clone(), modpath()).prop_map(|(e, n)| {
+                ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
+            }),
+            (collection::vec((inner.clone(), inner.clone()), (0, 10))).prop_map(|arms| {
+                ExprKind::Select { arms: Arc::from_iter(arms) }.to_expr()
+            }),
+        ]
+    })
+}
+
+fn modexpr() -> impl Strategy<Value = Expr> {
+    let leaf = expr();
+    leaf.prop_recursive(10, 1000, 100, |inner| {
+        prop_oneof![
+            (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
+                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
+            }),
+            collection::vec(inner.clone(), (0, 10))
+                .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
+            (any::<bool>(), random_fname(), collection::vec(inner.clone(), (0, 10)))
+                .prop_map(|(export, name, body)| ExprKind::Module {
+                    export,
+                    name,
+                    value: Some(Arc::from(body))
+                }
+                .to_expr()),
+            (any::<bool>(), random_fname()).prop_map(|(export, name)| ExprKind::Module {
+                export,
+                name,
+                value: None
+            }
+            .to_expr()),
+            modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
+            (inner.clone(), random_fname(), any::<bool>()).prop_map(|(e, n, exp)| {
+                ExprKind::Bind { export: exp, name: n, value: Arc::new(e) }.to_expr()
+            }),
+            (inner.clone(), modpath()).prop_map(|(e, n)| {
+                ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
+            }),
+        ]
+    })
+}
+
+fn modexpr0() -> impl Strategy<Value = Expr> {
+    prop_oneof![
+        (collection::vec(expr(), (0, 10)), modpath()).prop_map(|(s, f)| {
+            ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
+        }),
+        collection::vec(expr(), (0, 10))
+            .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
+        (any::<bool>(), random_fname(), collection::vec(modexpr(), (0, 10))).prop_map(
+            |(export, name, body)| ExprKind::Module {
+                export,
+                name,
+                value: Some(Arc::from(body))
+            }
+            .to_expr()
+        ),
+        (any::<bool>(), random_fname()).prop_map(|(export, name)| ExprKind::Module {
+            export,
+            name,
+            value: None
+        }
+        .to_expr()),
+        modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
+        (expr(), random_fname(), any::<bool>()).prop_map(|(e, n, exp)| {
+            ExprKind::Bind { export: exp, name: n, value: Arc::new(e) }.to_expr()
+        }),
+        (expr(), modpath()).prop_map(|(e, n)| {
+            ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
+        }),
+    ]
+}
+
 fn acc_strings(args: &[Expr]) -> Arc<[Expr]> {
     let mut v: Vec<Expr> = Vec::new();
     for s in args {
@@ -289,18 +352,101 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         ) if f0 == f1 && srs0.len() == srs1.len() => {
             srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
         }
+        (
+            ExprKind::Eq { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Eq { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        (
+            ExprKind::Ne { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Ne { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        (
+            ExprKind::Lt { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Lt { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        (
+            ExprKind::Gt { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Gt { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        (
+            ExprKind::Lte { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Lte { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        (
+            ExprKind::Gte { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Gte { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        (
+            ExprKind::And { lhs: lhs0, rhs: rhs0 },
+            ExprKind::And { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        (
+            ExprKind::Or { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Or { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        (ExprKind::Not { expr: expr0 }, ExprKind::Not { expr: expr1 }) => {
+            check(expr0, expr1)
+        }
+        (
+            ExprKind::Module { name: name0, export: export0, value: Some(value0) },
+            ExprKind::Module { name: name1, export: export1, value: Some(value1) },
+        ) => {
+            name0 == name1
+                && export0 == export1
+                && value0.len() == value1.len()
+                && value0.iter().zip(value1.iter()).all(|(v0, v1)| check(v0, v1))
+        }
+        (
+            ExprKind::Module { name: name0, export: export0, value: None },
+            ExprKind::Module { name: name1, export: export1, value: None },
+        ) => name0 == name1 && export0 == export1,
+        (ExprKind::Do { exprs: exprs0 }, ExprKind::Do { exprs: exprs1 }) => {
+            exprs0.len() == exprs1.len()
+                && exprs0.iter().zip(exprs1.iter()).all(|(v0, v1)| check(v0, v1))
+        }
+        (ExprKind::Use { name: name0 }, ExprKind::Use { name: name1 }) => name0 == name1,
+        (
+            ExprKind::Bind { name: name0, export: export0, value: value0 },
+            ExprKind::Bind { name: name1, export: export1, value: value1 },
+        ) => name0 == name1 && export0 == export1 && check(value0, value1),
+        (
+            ExprKind::Connect { name: name0, value: value0 },
+            ExprKind::Connect { name: name1, value: value1 },
+        ) => name0 == name1 && check(value0, value1),
+        (ExprKind::Ref { name: name0 }, ExprKind::Ref { name: name1 }) => name0 == name1,
+        (
+            ExprKind::Lambda { args: args0, vargs: vargs0, body: Either::Left(body0) },
+            ExprKind::Lambda { args: args1, vargs: vargs1, body: Either::Left(body1) },
+        ) => args0 == args1 && vargs0 == vargs1 && check(body0, body1),
+        (
+            ExprKind::Lambda { args: args0, vargs: vargs0, body: Either::Right(b0) },
+            ExprKind::Lambda { args: args1, vargs: vargs1, body: Either::Right(b1) },
+        ) => args0 == args1 && vargs0 == vargs1 && b0 == b1,
+        (ExprKind::Select { arms: arms0 }, ExprKind::Select { arms: arms1 }) => {
+            arms0.len() == arms1.len()
+                && arms0
+                    .iter()
+                    .zip(arms1.iter())
+                    .all(|((c0, b0), (c1, b1))| check(c0, c1) && check(b0, b1))
+        }
         (_, _) => false,
     }
 }
 
 proptest! {
     #[test]
-    fn expr_round_trip(s in expr()) {
-        assert!(check(dbg!(&s), &dbg!(dbg!(s.to_string()).parse::<Expr>().unwrap())))
+    fn expr_round_trip(s in modexpr0()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string());
+        let e = dbg!(parse_modexpr(st.as_str()).unwrap());
+        assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_pp_round_trip(s in expr()) {
-        assert!(check(dbg!(&s), &dbg!(dbg!(s.to_string_pretty(80)).parse::<Expr>().unwrap())))
+    fn expr_pp_round_trip(s in modexpr0()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string_pretty(80));
+        let e = dbg!(parse_modexpr(st.as_str()).unwrap());
+        assert!(check(&s, &e))
     }
 }

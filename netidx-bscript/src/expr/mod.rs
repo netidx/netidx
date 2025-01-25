@@ -101,7 +101,7 @@ pub enum ExprKind {
     Bind { name: Chars, export: bool, value: Arc<Expr> },
     Ref { name: ModPath },
     Connect { name: ModPath, value: Arc<Expr> },
-    Lambda { args: Arc<[Chars]>, vargs: bool, body: Either<Arc<[Expr]>, Chars> },
+    Lambda { args: Arc<[Chars]>, vargs: bool, body: Either<Arc<Expr>, Chars> },
     Apply { args: Arc<[Expr]>, function: ModPath },
     Select { arms: Arc<[(Expr, Expr)]> },
     Eq { lhs: Arc<Expr>, rhs: Arc<Expr> },
@@ -128,34 +128,6 @@ impl ExprKind {
         let mut buf = String::new();
         self.pretty_print(0, col_limit, true, &mut buf).unwrap();
         buf
-    }
-
-    pub fn is_binop(&self) -> bool {
-        match self {
-            ExprKind::Connect { .. }
-            | ExprKind::Module { .. }
-            | ExprKind::Do { .. }
-            | ExprKind::Use { .. }
-            | ExprKind::Bind { .. }
-            | ExprKind::Ref { .. }
-            | ExprKind::Constant(_)
-            | ExprKind::Lambda { .. }
-            | ExprKind::Apply { .. }
-            | ExprKind::Select { .. } => false,
-            ExprKind::Eq { .. }
-            | ExprKind::Ne { .. }
-            | ExprKind::Lt { .. }
-            | ExprKind::Gt { .. }
-            | ExprKind::Lte { .. }
-            | ExprKind::Gte { .. }
-            | ExprKind::And { .. }
-            | ExprKind::Or { .. }
-            | ExprKind::Not { .. }
-            | ExprKind::Add { .. }
-            | ExprKind::Sub { .. }
-            | ExprKind::Mul { .. }
-            | ExprKind::Div { .. } => true,
-        }
     }
 
     fn pretty_print(
@@ -209,11 +181,7 @@ impl ExprKind {
             ($sep:literal, $lhs:expr, $rhs:expr) => {{
                 try_single_line!(true);
                 write!(buf, "(")?;
-                if $lhs.kind.is_binop() {
-                    writeln!(buf, "({}) {}", $lhs, $sep)?;
-                } else {
-                    writeln!(buf, "{} {}", $lhs, $sep)?;
-                }
+                writeln!(buf, "{} {}", $lhs, $sep)?;
                 $rhs.kind.pretty_print(indent, limit, true, buf)?;
                 write!(buf, ")")
             }};
@@ -282,9 +250,12 @@ impl ExprKind {
                     Either::Right(builtin) => {
                         writeln!(buf, "'{builtin}")
                     }
-                    Either::Left(body) => {
-                        pretty_print_exprs(indent, limit, buf, body, "{", "}", ";")
-                    }
+                    Either::Left(body) => match &body.kind {
+                        ExprKind::Do { exprs } => {
+                            pretty_print_exprs(indent, limit, buf, exprs, "{", "}", "")
+                        }
+                        _ => body.kind.pretty_print(indent, limit, false, buf),
+                    },
                 }
             }
             ExprKind::Select { arms } => {
@@ -345,12 +316,7 @@ impl fmt::Display for ExprKind {
             rhs: &Expr,
         ) -> fmt::Result {
             write!(f, "(")?;
-            match (lhs.kind.is_binop(), rhs.kind.is_binop()) {
-                (true, true) => write!(f, "({lhs}) {op} ({rhs})"),
-                (true, false) => write!(f, "({lhs}) {op} {rhs}"),
-                (false, true) => write!(f, "{lhs} {op} ({rhs})"),
-                (false, false) => write!(f, "{lhs} {op} {rhs}"),
-            }?;
+            write!(f, "{lhs} {op} {rhs}")?;
             write!(f, ")")
         }
         fn print_exprs(
@@ -396,26 +362,17 @@ impl fmt::Display for ExprKind {
                 write!(f, "|")?;
                 for i in 0..args.len() {
                     write!(f, "{}", args[i])?;
-                    if !vargs || i < args.len() - 1 {
+                    if *vargs || i < args.len() - 1 {
                         write!(f, ", ")?
                     }
                 }
-                if !vargs {
+                if *vargs {
                     write!(f, "@args")?;
                 }
                 write!(f, "| ")?;
                 match body {
                     Either::Right(builtin) => write!(f, "'{builtin}"),
-                    Either::Left(body) => {
-                        write!(f, "{{")?;
-                        for i in 0..body.len() {
-                            write!(f, "{}", &body[i])?;
-                            if i < body.len() - 1 {
-                                write!(f, ";")?;
-                            }
-                        }
-                        write!(f, "}}")
-                    }
+                    Either::Left(body) => write!(f, "{body}"),
                 }
             }
             ExprKind::Apply { args, function } => {
@@ -464,11 +421,7 @@ impl fmt::Display for ExprKind {
             ExprKind::Mul { lhs, rhs } => write_binop(f, "*", lhs, rhs),
             ExprKind::Div { lhs, rhs } => write_binop(f, "/", lhs, rhs),
             ExprKind::Not { expr } => {
-                if expr.kind.is_binop() {
-                    write!(f, "!({expr})")
-                } else {
-                    write!(f, "!{expr}")
-                }
+                write!(f, "(!{expr})")
             }
         }
     }
