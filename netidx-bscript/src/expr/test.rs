@@ -302,7 +302,7 @@ fn modexpr() -> impl Strategy<Value = Expr> {
 
 fn modexpr0() -> impl Strategy<Value = Expr> {
     prop_oneof![
-        (collection::vec(expr(), (0, 10)), modpath()).prop_map(|(s, f)| {
+        (collection::vec(expr(), (0, 10)), modpath_no_concat()).prop_map(|(s, f)| {
             ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
         }),
         collection::vec(expr(), (1, 10))
