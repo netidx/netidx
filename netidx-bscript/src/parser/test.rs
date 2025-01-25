@@ -552,7 +552,7 @@ fn apply_lambda() {
     assert_eq!(e, pe)
 }
 
-/*
+
 #[test]
 fn mod_interpolate() {
     let e = ExprKind::Module {
@@ -572,4 +572,4 @@ fn mod_interpolate() {
     let pe = parse_modexpr(s).unwrap();
     assert_eq!(e, pe)
 }
-*/
+

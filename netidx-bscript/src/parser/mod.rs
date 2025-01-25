@@ -239,30 +239,6 @@ where
         .map(|name| ExprKind::Use { name }.to_expr())
 }
 
-fn alist<I>() -> impl Parser<I, Output = Expr>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    between(
-        token('{'),
-        sptoken('}'),
-        sep_by((spfname(), sptoken(':').with(expr())), csep()),
-    )
-    .map(|args: Vec<(Chars, Expr)>| {
-        let args = args
-            .into_iter()
-            .map(|(name, expr)| {
-                let key = ExprKind::Constant(name.into()).to_expr();
-                let args = [key, expr].into_iter().collect();
-                ExprKind::Apply { function: ["array"].into(), args }.to_expr()
-            })
-            .collect();
-        ExprKind::Apply { function: ["array"].into(), args }.to_expr()
-    })
-}
-
 fn do_block<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -388,7 +364,6 @@ where
 {
     choice((
         attempt(between(sptoken('('), sptoken(')'), arith())),
-        attempt(spaces().with(alist())),
         attempt(spaces().with(do_block())),
         attempt(spaces().with(array())),
         attempt(spaces().with(select())),
@@ -540,7 +515,6 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(spaces().with(alist())),
         attempt(spaces().with(do_block())),
         attempt(spaces().with(array())),
         attempt(spaces().with(lambda())),

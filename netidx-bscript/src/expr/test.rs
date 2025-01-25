@@ -373,9 +373,9 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (
             ExprKind::Or { lhs: lhs0, rhs: rhs0 },
             ExprKind::Or { lhs: lhs1, rhs: rhs1 },
-        ) => dbg!(check(dbg!(lhs0), dbg!(lhs1))) && dbg!(check(dbg!(rhs0), dbg!(rhs1))),
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
         (ExprKind::Not { expr: expr0 }, ExprKind::Not { expr: expr1 }) => {
-            dbg!(check(dbg!(expr0), dbg!(expr1)))
+            check(expr0, expr1)
         }
         (
             ExprKind::Module { name: name0, export: export0, value: Some(value0) },
@@ -391,11 +391,8 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::Module { name: name1, export: export1, value: None },
         ) => name0 == name1 && export0 == export1,
         (ExprKind::Do { exprs: exprs0 }, ExprKind::Do { exprs: exprs1 }) => {
-            dbg!(exprs0.len() == exprs1.len())
-                && exprs0
-                    .iter()
-                    .zip(exprs1.iter())
-                    .all(|(v0, v1)| dbg!(check(dbg!(v0), dbg!(v1))))
+            exprs0.len() == exprs1.len()
+                && exprs0.iter().zip(exprs1.iter()).all(|(v0, v1)| check(v0, v1))
         }
         (ExprKind::Use { name: name0 }, ExprKind::Use { name: name1 }) => name0 == name1,
         (
