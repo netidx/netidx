@@ -307,14 +307,23 @@ where
         between(
             token('|'),
             sptoken('|'),
-            choice((
-                spstring("@args").map(|_| (vec![], true)),
-                attempt((
-                    sep_by1(spfname(), csep()).skip(sptoken(',')),
-                    spstring("@args").map(|_| true),
-                )),
-                sep_by(spfname(), csep()).map(|args| (args, false)),
-            )),
+            sep_by(
+                choice((attempt(spfname()), attempt(spstring("@args")).map(Chars::from))),
+                csep(),
+            )
+            .then(|mut v: Vec<Chars>| {
+                match v.iter().enumerate().find(|(_, a)| &***a == "@args") {
+                    None => value((v, false)).left(),
+                    Some((i, _)) => {
+                        if i == v.len() - 1 {
+                            v.pop();
+                            value((v, true)).left()
+                        } else {
+                            unexpected_any("@args must be the last argument").right()
+                        }
+                    }
+                }
+            }),
         ),
         choice((
             attempt(sptoken('\'').with(fname()).map(Either::Right)),

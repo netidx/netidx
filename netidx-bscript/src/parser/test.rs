@@ -534,3 +534,20 @@ fn nested_lambda() {
     let s = r#"|| || (a + b + c)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
+
+#[test]
+fn apply_lambda() {
+    let e = ExprKind::Apply {
+        args: Arc::from_iter([ExprKind::Lambda {
+            args: Arc::from_iter(["a".into()]),
+            vargs: true,
+            body: Either::Right("a".into()),
+        }
+        .to_expr()]),
+        function: ["a"].into(),
+    }
+    .to_expr();
+    let s = "a(|a, @args| 'a)";
+    let pe = parse_expr(s).unwrap();
+    assert_eq!(e, pe)
+}
