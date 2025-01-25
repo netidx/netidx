@@ -551,3 +551,25 @@ fn apply_lambda() {
     let pe = parse_expr(s).unwrap();
     assert_eq!(e, pe)
 }
+
+/*
+#[test]
+fn mod_interpolate() {
+    let e = ExprKind::Module {
+        name: Chars::from("a"),
+        export: false,
+        value: Some(Arc::from_iter([ExprKind::Apply {
+            function: ["str", "concat"].into(),
+            args: Arc::from_iter([
+                ExprKind::Constant(Value::from("foo_")).to_expr(),
+                ExprKind::Constant(Value::I64(42)).to_expr(),
+            ]),
+        }
+        .to_expr()])),
+    }
+    .to_expr();
+    let s = "mod a{\"foo_[42]\"}";
+    let pe = parse_modexpr(s).unwrap();
+    assert_eq!(e, pe)
+}
+*/

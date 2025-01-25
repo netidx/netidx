@@ -1,6 +1,6 @@
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use combine::{
-    attempt, between, chainl1, choice, many, optional,
+    attempt, between, chainl1, choice, many, many1, optional,
     parser::{
         char::{spaces, string},
         combinator::recognize,
@@ -269,7 +269,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    between(token('{'), sptoken('}'), many(expr()))
+    between(token('{'), sptoken('}'), many1(expr()))
         .map(|args: Vec<Expr>| ExprKind::Do { exprs: Arc::from(args) }.to_expr())
 }
 

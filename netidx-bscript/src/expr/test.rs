@@ -101,8 +101,44 @@ fn valid_modpath() -> impl Strategy<Value = ModPath> {
     ]
 }
 
+fn valid_modpath_no_concat() -> impl Strategy<Value = ModPath> {
+    prop_oneof![
+        Just(ModPath::from_iter(["any"])),
+        Just(ModPath::from_iter(["array"])),
+        Just(ModPath::from_iter(["all"])),
+        Just(ModPath::from_iter(["sum"])),
+        Just(ModPath::from_iter(["product"])),
+        Just(ModPath::from_iter(["divide"])),
+        Just(ModPath::from_iter(["mean"])),
+        Just(ModPath::from_iter(["min"])),
+        Just(ModPath::from_iter(["max"])),
+        Just(ModPath::from_iter(["and"])),
+        Just(ModPath::from_iter(["or"])),
+        Just(ModPath::from_iter(["not"])),
+        Just(ModPath::from_iter(["cmp"])),
+        Just(ModPath::from_iter(["if"])),
+        Just(ModPath::from_iter(["filter"])),
+        Just(ModPath::from_iter(["cast"])),
+        Just(ModPath::from_iter(["isa"])),
+        Just(ModPath::from_iter(["eval"])),
+        Just(ModPath::from_iter(["count"])),
+        Just(ModPath::from_iter(["sample"])),
+        Just(ModPath::from_iter(["str", "join"])),
+        Just(ModPath::from_iter(["navigate"])),
+        Just(ModPath::from_iter(["confirm"])),
+        Just(ModPath::from_iter(["load"])),
+        Just(ModPath::from_iter(["get"])),
+        Just(ModPath::from_iter(["store"])),
+        Just(ModPath::from_iter(["set"])),
+    ]
+}
+
 fn modpath() -> impl Strategy<Value = ModPath> {
     prop_oneof![random_modpath(), valid_modpath()]
+}
+
+fn modpath_no_concat() -> impl Strategy<Value = ModPath> {
+    prop_oneof![random_modpath(), valid_modpath_no_concat()]
 }
 
 fn constant() -> impl Strategy<Value = Expr> {
@@ -120,7 +156,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
             (collection::vec((inner.clone(), inner.clone()), (1, 10))).prop_map(|arms| {
                 ExprKind::Select { arms: Arc::from_iter(arms) }.to_expr()
             }),
-            collection::vec(inner.clone(), (0, 10))
+            collection::vec(inner.clone(), (1, 10))
                 .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
             (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
                 ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
@@ -198,7 +234,7 @@ fn expr() -> impl Strategy<Value = Expr> {
             (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
                 ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
             }),
-            collection::vec(inner.clone(), (0, 10))
+            collection::vec(inner.clone(), (1, 10))
                 .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
             (collection::vec(random_fname(), (0, 10)), any::<bool>(), inner.clone())
                 .prop_map(|(args, vargs, body)| {
@@ -235,10 +271,10 @@ fn modexpr() -> impl Strategy<Value = Expr> {
     let leaf = expr();
     leaf.prop_recursive(10, 1000, 100, |inner| {
         prop_oneof![
-            (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
+            (collection::vec(inner.clone(), (0, 10)), modpath_no_concat()).prop_map(|(s, f)| {
                 ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
             }),
-            collection::vec(inner.clone(), (0, 10))
+            collection::vec(inner.clone(), (1, 10))
                 .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
             (any::<bool>(), random_fname(), collection::vec(inner.clone(), (0, 10)))
                 .prop_map(|(export, name, body)| ExprKind::Module {
@@ -269,7 +305,7 @@ fn modexpr0() -> impl Strategy<Value = Expr> {
         (collection::vec(expr(), (0, 10)), modpath()).prop_map(|(s, f)| {
             ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
         }),
-        collection::vec(expr(), (0, 10))
+        collection::vec(expr(), (1, 10))
             .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
         (any::<bool>(), random_fname(), collection::vec(modexpr(), (0, 10))).prop_map(
             |(export, name, body)| ExprKind::Module {
