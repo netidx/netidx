@@ -575,6 +575,7 @@ where
         attempt(spaces().with(do_block())),
         attempt(spaces().with(letbind())),
         attempt(spaces().with(connect())),
+        attempt(spaces().with(interpolated())),
         attempt(spaces().with(apply())),
     ))
 }

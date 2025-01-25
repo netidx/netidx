@@ -101,44 +101,8 @@ fn valid_modpath() -> impl Strategy<Value = ModPath> {
     ]
 }
 
-fn valid_modpath_no_concat() -> impl Strategy<Value = ModPath> {
-    prop_oneof![
-        Just(ModPath::from_iter(["any"])),
-        Just(ModPath::from_iter(["array"])),
-        Just(ModPath::from_iter(["all"])),
-        Just(ModPath::from_iter(["sum"])),
-        Just(ModPath::from_iter(["product"])),
-        Just(ModPath::from_iter(["divide"])),
-        Just(ModPath::from_iter(["mean"])),
-        Just(ModPath::from_iter(["min"])),
-        Just(ModPath::from_iter(["max"])),
-        Just(ModPath::from_iter(["and"])),
-        Just(ModPath::from_iter(["or"])),
-        Just(ModPath::from_iter(["not"])),
-        Just(ModPath::from_iter(["cmp"])),
-        Just(ModPath::from_iter(["if"])),
-        Just(ModPath::from_iter(["filter"])),
-        Just(ModPath::from_iter(["cast"])),
-        Just(ModPath::from_iter(["isa"])),
-        Just(ModPath::from_iter(["eval"])),
-        Just(ModPath::from_iter(["count"])),
-        Just(ModPath::from_iter(["sample"])),
-        Just(ModPath::from_iter(["str", "join"])),
-        Just(ModPath::from_iter(["navigate"])),
-        Just(ModPath::from_iter(["confirm"])),
-        Just(ModPath::from_iter(["load"])),
-        Just(ModPath::from_iter(["get"])),
-        Just(ModPath::from_iter(["store"])),
-        Just(ModPath::from_iter(["set"])),
-    ]
-}
-
 fn modpath() -> impl Strategy<Value = ModPath> {
     prop_oneof![random_modpath(), valid_modpath()]
-}
-
-fn modpath_no_concat() -> impl Strategy<Value = ModPath> {
-    prop_oneof![random_modpath(), valid_modpath_no_concat()]
 }
 
 fn constant() -> impl Strategy<Value = Expr> {
@@ -267,15 +231,27 @@ fn expr() -> impl Strategy<Value = Expr> {
     })
 }
 
+fn modleaf() -> impl Strategy<Value = Expr> {
+    prop_oneof![
+        (collection::vec(expr(), (0, 10)), modpath()).prop_map(|(s, f)| {
+            ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
+        }),
+        collection::vec(expr(), (1, 10))
+            .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
+        modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
+        (expr(), random_fname(), any::<bool>()).prop_map(|(e, n, exp)| {
+            ExprKind::Bind { export: exp, name: n, value: Arc::new(e) }.to_expr()
+        }),
+        (expr(), modpath()).prop_map(|(e, n)| {
+            ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
+        }),
+    ]
+}
+
 fn modexpr() -> impl Strategy<Value = Expr> {
-    let leaf = expr();
+    let leaf = modleaf();
     leaf.prop_recursive(10, 1000, 100, |inner| {
         prop_oneof![
-            (collection::vec(inner.clone(), (0, 10)), modpath_no_concat()).prop_map(|(s, f)| {
-                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
-            }),
-            collection::vec(inner.clone(), (1, 10))
-                .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
             (any::<bool>(), random_fname(), collection::vec(inner.clone(), (0, 10)))
                 .prop_map(|(export, name, body)| ExprKind::Module {
                     export,
@@ -289,46 +265,8 @@ fn modexpr() -> impl Strategy<Value = Expr> {
                 value: None
             }
             .to_expr()),
-            modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
-            (inner.clone(), random_fname(), any::<bool>()).prop_map(|(e, n, exp)| {
-                ExprKind::Bind { export: exp, name: n, value: Arc::new(e) }.to_expr()
-            }),
-            (inner.clone(), modpath()).prop_map(|(e, n)| {
-                ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
-            }),
         ]
     })
-}
-
-fn modexpr0() -> impl Strategy<Value = Expr> {
-    prop_oneof![
-        (collection::vec(expr(), (0, 10)), modpath_no_concat()).prop_map(|(s, f)| {
-            ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
-        }),
-        collection::vec(expr(), (1, 10))
-            .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
-        (any::<bool>(), random_fname(), collection::vec(modexpr(), (0, 10))).prop_map(
-            |(export, name, body)| ExprKind::Module {
-                export,
-                name,
-                value: Some(Arc::from(body))
-            }
-            .to_expr()
-        ),
-        (any::<bool>(), random_fname()).prop_map(|(export, name)| ExprKind::Module {
-            export,
-            name,
-            value: None
-        }
-        .to_expr()),
-        modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
-        (expr(), random_fname(), any::<bool>()).prop_map(|(e, n, exp)| {
-            ExprKind::Bind { export: exp, name: n, value: Arc::new(e) }.to_expr()
-        }),
-        (expr(), modpath()).prop_map(|(e, n)| {
-            ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
-        }),
-    ]
 }
 
 fn acc_strings(args: &[Expr]) -> Arc<[Expr]> {
@@ -366,7 +304,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             }
             (Value::F32(v0), Value::F32(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-7,
             (Value::F64(v0), Value::F64(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-8,
-            (v0, v1) => dbg!(dbg!(v0) == dbg!(v1)),
+            (v0, v1) => v0 == v1,
         },
         (
             ExprKind::Apply { args: srs0, function: fn0 },
@@ -388,6 +326,22 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         ) if f0 == f1 && srs0.len() == srs1.len() => {
             srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
         }
+        (
+            ExprKind::Add { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Add { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        (
+            ExprKind::Sub { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Sub { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        (
+            ExprKind::Mul { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Mul { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        (
+            ExprKind::Div { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Div { lhs: lhs1, rhs: rhs1 },
+        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
         (
             ExprKind::Eq { lhs: lhs0, rhs: rhs0 },
             ExprKind::Eq { lhs: lhs1, rhs: rhs1 },
@@ -419,9 +373,9 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (
             ExprKind::Or { lhs: lhs0, rhs: rhs0 },
             ExprKind::Or { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(check(dbg!(lhs0), dbg!(lhs1))) && dbg!(check(dbg!(rhs0), dbg!(rhs1))),
         (ExprKind::Not { expr: expr0 }, ExprKind::Not { expr: expr1 }) => {
-            check(expr0, expr1)
+            dbg!(check(dbg!(expr0), dbg!(expr1)))
         }
         (
             ExprKind::Module { name: name0, export: export0, value: Some(value0) },
@@ -437,8 +391,11 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::Module { name: name1, export: export1, value: None },
         ) => name0 == name1 && export0 == export1,
         (ExprKind::Do { exprs: exprs0 }, ExprKind::Do { exprs: exprs1 }) => {
-            exprs0.len() == exprs1.len()
-                && exprs0.iter().zip(exprs1.iter()).all(|(v0, v1)| check(v0, v1))
+            dbg!(exprs0.len() == exprs1.len())
+                && exprs0
+                    .iter()
+                    .zip(exprs1.iter())
+                    .all(|(v0, v1)| dbg!(check(dbg!(v0), dbg!(v1))))
         }
         (ExprKind::Use { name: name0 }, ExprKind::Use { name: name1 }) => name0 == name1,
         (
@@ -471,7 +428,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
 
 proptest! {
     #[test]
-    fn expr_round_trip(s in modexpr0()) {
+    fn expr_round_trip(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(s.to_string());
         let e = dbg!(parse_modexpr(st.as_str()).unwrap());
@@ -479,7 +436,7 @@ proptest! {
     }
 
     #[test]
-    fn expr_pp_round_trip(s in modexpr0()) {
+    fn expr_pp_round_trip(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(s.to_string_pretty(80));
         let e = dbg!(parse_modexpr(st.as_str()).unwrap());
