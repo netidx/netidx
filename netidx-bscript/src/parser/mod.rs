@@ -547,6 +547,7 @@ where
         attempt(spaces().with(module())),
         attempt(spaces().with(use_module())),
         attempt(spaces().with(do_block())),
+        attempt(spaces().with(array())),
         attempt(spaces().with(letbind())),
         attempt(spaces().with(connect())),
         attempt(spaces().with(interpolated())),
