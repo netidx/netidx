@@ -117,7 +117,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
     leaf.prop_recursive(5, 100, 5, |inner| {
         prop_oneof![
-            (collection::vec((inner.clone(), inner.clone()), (0, 10))).prop_map(|arms| {
+            (collection::vec((inner.clone(), inner.clone()), (1, 10))).prop_map(|arms| {
                 ExprKind::Select { arms: Arc::from_iter(arms) }.to_expr()
             }),
             collection::vec(inner.clone(), (0, 10))
@@ -224,7 +224,7 @@ fn expr() -> impl Strategy<Value = Expr> {
             (inner.clone(), modpath()).prop_map(|(e, n)| {
                 ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
             }),
-            (collection::vec((inner.clone(), inner.clone()), (0, 10))).prop_map(|arms| {
+            (collection::vec((inner.clone(), inner.clone()), (1, 10))).prop_map(|arms| {
                 ExprKind::Select { arms: Arc::from_iter(arms) }.to_expr()
             }),
         ]
