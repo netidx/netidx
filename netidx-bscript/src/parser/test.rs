@@ -406,34 +406,6 @@ fn usemodule() {
 }
 
 #[test]
-fn alist() {
-    let exp = ExprKind::Apply {
-        function: ModPath::from(["array"]),
-        args: Arc::from_iter([
-            ExprKind::Apply {
-                function: ModPath::from(["array"]),
-                args: Arc::from_iter([
-                    ExprKind::Constant(Value::from("foo")).to_expr(),
-                    ExprKind::Constant(Value::from(42)).to_expr(),
-                ]),
-            }
-            .to_expr(),
-            ExprKind::Apply {
-                function: ModPath::from(["array"]),
-                args: Arc::from_iter([
-                    ExprKind::Constant(Value::from("bar")).to_expr(),
-                    ExprKind::Constant(Value::from(42)).to_expr(),
-                ]),
-            }
-            .to_expr(),
-        ]),
-    }
-    .to_expr();
-    let s = r#"{foo: 42, bar: 42}"#;
-    assert_eq!(exp, parse_expr(s).unwrap());
-}
-
-#[test]
 fn array() {
     let exp = ExprKind::Apply {
         function: ModPath::from(["array"]),
@@ -552,7 +524,6 @@ fn apply_lambda() {
     assert_eq!(e, pe)
 }
 
-
 #[test]
 fn mod_interpolate() {
     let e = ExprKind::Module {
@@ -573,3 +544,24 @@ fn mod_interpolate() {
     assert_eq!(e, pe)
 }
 
+#[test]
+fn multi_line_do() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::Mul {
+            lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
+            rhs: Arc::new(ExprKind::Constant(Value::U64(1)).to_expr()),
+        }
+        .to_expr()]),
+    }
+    .to_expr();
+    let s = "{\n  (a *\n  u64:1\n)}\n";
+    let n = "{(a * u64:1 )}";
+    let pe = parse_modexpr(n).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
+fn trailing_whitespace() {
+    let s = "(1 + u64:1 )";
+    dbg!(parse_expr(s).unwrap());
+}

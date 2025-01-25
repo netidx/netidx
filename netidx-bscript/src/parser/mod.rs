@@ -371,7 +371,7 @@ where
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
         attempt(spaces().with(reference())),
-    ))
+    )).skip(spaces())
 }
 
 fn arith_<I>() -> impl Parser<I, Output = Expr>
@@ -477,9 +477,8 @@ where
                 }
             }),
         )),
-        attempt(sptoken('!').with(arith()))
+        attempt(sptoken('!').with(arith_term()).skip(spaces()))
             .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
-        attempt(between(sptoken('('), sptoken(')'), arith())),
     ))
 }
 

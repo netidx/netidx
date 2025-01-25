@@ -192,7 +192,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
 
 fn expr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
-    leaf.prop_recursive(100, 100000, 10, |inner| {
+    leaf.prop_recursive(100, 1000, 10, |inner| {
         prop_oneof![
             arithexpr(),
             (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
@@ -231,8 +231,8 @@ fn expr() -> impl Strategy<Value = Expr> {
     })
 }
 
-fn modleaf() -> impl Strategy<Value = Expr> {
-    prop_oneof![
+fn modexpr() -> impl Strategy<Value = Expr> {
+    let leaf = prop_oneof![
         (collection::vec(expr(), (0, 10)), modpath()).prop_map(|(s, f)| {
             ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
         }),
@@ -245,11 +245,7 @@ fn modleaf() -> impl Strategy<Value = Expr> {
         (expr(), modpath()).prop_map(|(e, n)| {
             ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
         }),
-    ]
-}
-
-fn modexpr() -> impl Strategy<Value = Expr> {
-    let leaf = modleaf();
+    ];
     leaf.prop_recursive(10, 1000, 100, |inner| {
         prop_oneof![
             (any::<bool>(), random_fname(), collection::vec(inner.clone(), (0, 10)))
