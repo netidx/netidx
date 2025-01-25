@@ -353,11 +353,11 @@ impl fmt::Display for ExprKind {
             ExprKind::Module { name, export, value } => {
                 write!(f, "{}mod {name}", exp(*export))?;
                 match value {
-                    Some(exprs) => print_exprs(f, &**exprs, "{", "}", ""),
+                    Some(exprs) => print_exprs(f, &**exprs, "{", "}", " "),
                     None => write!(f, ";"),
                 }
             }
-            ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", ""),
+            ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", " "),
             ExprKind::Lambda { args, vargs, body } => {
                 write!(f, "|")?;
                 for i in 0..args.len() {
