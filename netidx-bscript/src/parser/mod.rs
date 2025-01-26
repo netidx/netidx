@@ -363,7 +363,6 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(between(sptoken('('), sptoken(')'), arith())),
         attempt(spaces().with(do_block())),
         attempt(spaces().with(array())),
         attempt(spaces().with(select())),
@@ -371,7 +370,11 @@ where
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
         attempt(spaces().with(reference())),
-    )).skip(spaces())
+        attempt(sptoken('!').with(arith()))
+            .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
+        attempt(between(sptoken('('), sptoken(')'), arith())),
+    ))
+    .skip(spaces())
 }
 
 fn arith_<I>() -> impl Parser<I, Output = Expr>
@@ -381,104 +384,65 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(chainl1(
+        chainl1(
             arith_term(),
-            spstring("+").map(|_| {
-                |lhs, rhs| {
+            choice((
+                attempt(spstring("+")),
+                attempt(spstring("-")),
+                attempt(spstring("*")),
+                attempt(spstring("/")),
+                attempt(spstring("=")),
+                attempt(spstring("!=")),
+                attempt(spstring(">=")),
+                attempt(spstring("<=")),
+                attempt(spstring(">")),
+                attempt(spstring("<")),
+                attempt(spstring("&&")),
+                attempt(spstring("||")),
+            ))
+            .map(|op: &str| match op {
+                "+" => |lhs, rhs| {
                     ExprKind::Add { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
-            }),
-        )),
-        attempt(chainl1(
-            arith_term(),
-            spstring("-").map(|_| {
-                |lhs, rhs| {
+                },
+                "-" => |lhs, rhs| {
                     ExprKind::Sub { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
-            }),
-        )),
-        attempt(chainl1(
-            arith_term(),
-            spstring("*").map(|_| {
-                |lhs, rhs| {
+                },
+                "*" => |lhs, rhs| {
                     ExprKind::Mul { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
-            }),
-        )),
-        attempt(chainl1(
-            arith_term(),
-            spstring("/").map(|_| {
-                |lhs, rhs| {
+                },
+                "/" => |lhs, rhs| {
                     ExprKind::Div { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
-            }),
-        )),
-        attempt(chainl1(
-            arith_term(),
-            spstring("=").map(|_| {
-                |lhs, rhs| {
+                },
+                "=" => |lhs, rhs| {
                     ExprKind::Eq { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
-            }),
-        )),
-        attempt(chainl1(
-            arith_term(),
-            spstring("!=").map(|_| {
-                |lhs, rhs| {
+                },
+                "!=" => |lhs, rhs| {
                     ExprKind::Ne { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
-            }),
-        )),
-        attempt(chainl1(
-            arith_term(),
-            spstring(">").map(|_| {
-                |lhs, rhs| {
+                },
+                ">" => |lhs, rhs| {
                     ExprKind::Gt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
-            }),
-        )),
-        attempt(chainl1(
-            arith_term(),
-            spstring("<").map(|_| {
-                |lhs, rhs| {
+                },
+                "<" => |lhs, rhs| {
                     ExprKind::Lt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
-            }),
-        )),
-        attempt(chainl1(
-            arith_term(),
-            spstring(">=").map(|_| {
-                |lhs, rhs| {
+                },
+                ">=" => |lhs, rhs| {
                     ExprKind::Gte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
-            }),
-        )),
-        attempt(chainl1(
-            arith_term(),
-            spstring("<=").map(|_| {
-                |lhs, rhs| {
+                },
+                "<=" => |lhs, rhs| {
                     ExprKind::Lte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
-            }),
-        )),
-        attempt(chainl1(
-            arith_term(),
-            spstring("&&").map(|_| {
-                |lhs, rhs| {
+                },
+                "&&" => |lhs, rhs| {
                     ExprKind::And { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
-            }),
-        )),
-        attempt(chainl1(
-            arith_term(),
-            spstring("||").map(|_| {
-                |lhs, rhs| {
+                },
+                "||" => |lhs, rhs| {
                     ExprKind::Or { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                }
+                },
+                _ => unreachable!(),
             }),
-        )),
-        attempt(sptoken('!').with(arith_term()).skip(spaces()))
+        ),
+        attempt(sptoken('!').with(arith_term()))
             .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
+        attempt(between(sptoken('('), sptoken(')'), arith())),
     ))
 }
 
@@ -514,6 +478,7 @@ where
     I::Range: Range,
 {
     choice((
+        attempt(spaces().with(arith())),
         attempt(spaces().with(do_block())),
         attempt(spaces().with(array())),
         attempt(spaces().with(lambda())),
@@ -523,7 +488,6 @@ where
         attempt(spaces().with(apply())),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
-        attempt(between(sptoken('('), sptoken(')'), arith())),
         attempt(spaces().with(reference())),
     ))
 }
