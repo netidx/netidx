@@ -1,6 +1,6 @@
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use combine::{
-    attempt, between, chainl1, choice, many, many1, optional,
+    attempt, between, chainl1, choice, many, optional,
     parser::{
         char::{spaces, string},
         combinator::recognize,
@@ -233,10 +233,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    string("use")
-        .with(spmodpath())
-        .skip(sptoken(';'))
-        .map(|name| ExprKind::Use { name }.to_expr())
+    string("use").with(spmodpath()).map(|name| ExprKind::Use { name }.to_expr())
 }
 
 fn do_block<I>() -> impl Parser<I, Output = Expr>
@@ -245,7 +242,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    between(token('{'), sptoken('}'), many1(expr()))
+    between(token('{'), sptoken('}'), sep_by(expr(), sptoken(';')))
         .map(|args: Vec<Expr>| ExprKind::Do { exprs: Arc::from(args) }.to_expr())
 }
 
@@ -321,7 +318,7 @@ where
     (
         optional(string("pub")).map(|o| o.is_some()),
         spstring("let").with(spfname()).skip(spstring("=")),
-        expr().skip(sptoken(';')),
+        expr(),
     )
         .map(|(export, name, value)| {
             ExprKind::Bind { export, name, value: Arc::new(value) }.to_expr()
@@ -334,7 +331,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (modpath().skip(spstring("<-")), expr().skip(sptoken(';')))
+    (modpath().skip(spstring("<-")), expr())
         .map(|(name, e)| ExprKind::Connect { name, value: Arc::new(e) }.to_expr())
 }
 

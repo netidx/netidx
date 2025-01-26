@@ -339,13 +339,13 @@ impl fmt::Display for ExprKind {
         match self {
             ExprKind::Constant(v) => v.fmt_ext(f, &parser::BSCRIPT_ESC, true),
             ExprKind::Bind { export, name, value } => {
-                write!(f, "{}let {name} = {value};", exp(*export))
+                write!(f, "{}let {name} = {value}", exp(*export))
             }
             ExprKind::Connect { name, value } => {
-                write!(f, "{name} <- {value};")
+                write!(f, "{name} <- {value}")
             }
             ExprKind::Use { name } => {
-                write!(f, "use {name};")
+                write!(f, "use {name}")
             }
             ExprKind::Ref { name } => {
                 write!(f, "{name}")
@@ -353,11 +353,11 @@ impl fmt::Display for ExprKind {
             ExprKind::Module { name, export, value } => {
                 write!(f, "{}mod {name}", exp(*export))?;
                 match value {
-                    Some(exprs) => print_exprs(f, &**exprs, "{", "}", " "),
                     None => write!(f, ";"),
+                    Some(exprs) => print_exprs(f, &**exprs, "{", "}", " "),
                 }
             }
-            ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", " "),
+            ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", "; "),
             ExprKind::Lambda { args, vargs, body } => {
                 write!(f, "|")?;
                 for i in 0..args.len() {
@@ -392,10 +392,10 @@ impl fmt::Display for ExprKind {
                     }
                     write!(f, "\"")
                 } else if function == &["array"] {
-                    print_exprs(f, &**args, "[", "]", ",")
+                    print_exprs(f, &**args, "[", "]", ", ")
                 } else {
                     write!(f, "{function}")?;
-                    print_exprs(f, &**args, "(", ")", ",")
+                    print_exprs(f, &**args, "(", ")", ", ")
                 }
             }
             ExprKind::Select { arms } => {

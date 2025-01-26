@@ -192,7 +192,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
 
 fn expr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
-    leaf.prop_recursive(100, 1000, 10, |inner| {
+    leaf.prop_recursive(100, 100000, 10, |inner| {
         prop_oneof![
             arithexpr(),
             (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {

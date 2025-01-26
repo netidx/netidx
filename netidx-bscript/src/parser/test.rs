@@ -358,7 +358,7 @@ fn connect() {
         ),
     }
     .to_expr();
-    let s = r#"m::foo <- (a + 1);"#;
+    let s = r#"m::foo <- (a + 1)"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -384,8 +384,8 @@ fn inline_module() {
     }
     .to_expr();
     let s = r#"pub mod foo {
-        pub let z = 42;
-        let m = 42;
+        pub let z = 42
+        let m = 42
     }"#;
     assert_eq!(exp, parse_modexpr(s).unwrap());
 }
@@ -557,4 +557,10 @@ fn multi_line_do() {
     let s = "{\n  (a *\n  u64:1\n)}\n";
     let pe = parse_modexpr(s).unwrap();
     assert_eq!(e, pe)
+}
+
+#[test]
+fn nested_connect() {
+    let s = "mod a{a <- a <- select {(!u32:0) => u32:0}}";
+    dbg!(parse_modexpr(s).unwrap());
 }
