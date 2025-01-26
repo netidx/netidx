@@ -384,7 +384,7 @@ where
     I::Range: Range,
 {
     choice((
-        chainl1(
+        attempt(chainl1(
             arith_term(),
             choice((
                 attempt(spstring("+")),
@@ -439,7 +439,7 @@ where
                 },
                 _ => unreachable!(),
             }),
-        ),
+        )),
         attempt(sptoken('!').with(arith_term()))
             .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
         attempt(between(sptoken('('), sptoken(')'), arith())),

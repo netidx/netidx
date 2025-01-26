@@ -555,13 +555,6 @@ fn multi_line_do() {
     }
     .to_expr();
     let s = "{\n  (a *\n  u64:1\n)}\n";
-    let n = "{(a * u64:1 )}";
-    let pe = parse_modexpr(n).unwrap();
+    let pe = parse_modexpr(s).unwrap();
     assert_eq!(e, pe)
-}
-
-#[test]
-fn trailing_whitespace() {
-    let s = "(1 + u64:1 )";
-    dbg!(parse_expr(s).unwrap());
 }
