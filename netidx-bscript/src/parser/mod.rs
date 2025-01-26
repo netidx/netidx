@@ -2,7 +2,7 @@ use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use combine::{
     attempt, between, chainl1, choice, many, optional,
     parser::{
-        char::{spaces, string},
+        char::{space, spaces, string},
         combinator::recognize,
         range::{take_while, take_while1},
     },
@@ -216,8 +216,8 @@ where
     I::Range: Range,
 {
     (
-        optional(string("pub")).map(|o| o.is_some()),
-        spstring("mod").with(spfname()),
+        optional(string("pub").skip(space())).map(|o| o.is_some()),
+        spstring("mod").with(space()).with(spfname()),
         spaces().with(choice((
             token(';').map(|_| None),
             between(token('{'), sptoken('}'), many(modexpr()))
@@ -233,7 +233,10 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    string("use").with(spmodpath()).map(|name| ExprKind::Use { name }.to_expr())
+    string("use")
+        .with(space())
+        .with(spmodpath())
+        .map(|name| ExprKind::Use { name }.to_expr())
 }
 
 fn do_block<I>() -> impl Parser<I, Output = Expr>
@@ -316,8 +319,8 @@ where
     I::Range: Range,
 {
     (
-        optional(string("pub")).map(|o| o.is_some()),
-        spstring("let").with(spfname()).skip(spstring("=")),
+        optional(string("pub").skip(space())).map(|o| o.is_some()),
+        spstring("let").with(space()).with(spfname()).skip(spstring("=")),
         expr(),
     )
         .map(|(export, name, value)| {

@@ -564,3 +564,9 @@ fn nested_connect() {
     let s = "mod a{a <- a <- select {(!u32:0) => u32:0}}";
     dbg!(parse_modexpr(s).unwrap());
 }
+
+#[test]
+fn prop0() {
+    let s = "mod a{usea()}";
+    dbg!(parse_modexpr(s).unwrap());
+}
