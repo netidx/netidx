@@ -296,17 +296,20 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             (Value::Duration(d0), Value::Duration(d1)) => {
                 let f0 = d0.as_secs_f64();
                 let f1 = d1.as_secs_f64();
-                f0 == f1 || (f0 != 0. && f1 != 0. && ((f0 - f1).abs() / f0) < 1e-8)
+                dbg!(
+                    dbg!(f0 == f1)
+                        || dbg!((f0 != 0. && f1 != 0. && ((f0 - f1).abs() / f0) < 1e-8))
+                )
             }
-            (Value::F32(v0), Value::F32(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-7,
-            (Value::F64(v0), Value::F64(v1)) => v0 == v1 || (v0 - v1).abs() < 1e-8,
-            (v0, v1) => v0 == v1,
+            (Value::F32(v0), Value::F32(v1)) => dbg!(v0 == v1 || (v0 - v1).abs() < 1e-7),
+            (Value::F64(v0), Value::F64(v1)) => dbg!(v0 == v1 || (v0 - v1).abs() < 1e-8),
+            (v0, v1) => dbg!(v0 == v1),
         },
         (
             ExprKind::Apply { args: srs0, function: fn0 },
             ExprKind::Constant(Value::String(c1)),
         ) if fn0 == &["str", "concat"] => match &acc_strings(srs0)[..] {
-            [Expr { kind: ExprKind::Constant(Value::String(c0)), .. }] => c0 == c1,
+            [Expr { kind: ExprKind::Constant(Value::String(c0)), .. }] => dbg!(c0 == c1),
             _ => false,
         },
         (
@@ -314,106 +317,129 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::Apply { args: srs1, function: fn1 },
         ) if fn0 == fn1 && fn0 == &["str", "concat"] => {
             let srs0 = acc_strings(srs0);
-            srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
+            dbg!(srs0
+                .iter()
+                .zip(srs1.iter())
+                .fold(true, |r, (s0, s1)| r && check(s0, s1)))
         }
         (
             ExprKind::Apply { args: srs0, function: f0 },
             ExprKind::Apply { args: srs1, function: f1 },
         ) if f0 == f1 && srs0.len() == srs1.len() => {
-            srs0.iter().zip(srs1.iter()).fold(true, |r, (s0, s1)| r && check(s0, s1))
+            dbg!(srs0
+                .iter()
+                .zip(srs1.iter())
+                .fold(true, |r, (s0, s1)| r && check(s0, s1)))
         }
         (
             ExprKind::Add { lhs: lhs0, rhs: rhs0 },
             ExprKind::Add { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
             ExprKind::Sub { lhs: lhs0, rhs: rhs0 },
             ExprKind::Sub { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
             ExprKind::Mul { lhs: lhs0, rhs: rhs0 },
             ExprKind::Mul { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
             ExprKind::Div { lhs: lhs0, rhs: rhs0 },
             ExprKind::Div { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
             ExprKind::Eq { lhs: lhs0, rhs: rhs0 },
             ExprKind::Eq { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
             ExprKind::Ne { lhs: lhs0, rhs: rhs0 },
             ExprKind::Ne { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
             ExprKind::Lt { lhs: lhs0, rhs: rhs0 },
             ExprKind::Lt { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
             ExprKind::Gt { lhs: lhs0, rhs: rhs0 },
             ExprKind::Gt { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
             ExprKind::Lte { lhs: lhs0, rhs: rhs0 },
             ExprKind::Lte { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
             ExprKind::Gte { lhs: lhs0, rhs: rhs0 },
             ExprKind::Gte { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
             ExprKind::And { lhs: lhs0, rhs: rhs0 },
             ExprKind::And { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
             ExprKind::Or { lhs: lhs0, rhs: rhs0 },
             ExprKind::Or { lhs: lhs1, rhs: rhs1 },
-        ) => check(lhs0, lhs1) && check(rhs0, rhs1),
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (ExprKind::Not { expr: expr0 }, ExprKind::Not { expr: expr1 }) => {
-            check(expr0, expr1)
+            dbg!(check(expr0, expr1))
         }
         (
             ExprKind::Module { name: name0, export: export0, value: Some(value0) },
             ExprKind::Module { name: name1, export: export1, value: Some(value1) },
         ) => {
-            name0 == name1
-                && export0 == export1
-                && value0.len() == value1.len()
-                && value0.iter().zip(value1.iter()).all(|(v0, v1)| check(v0, v1))
+            dbg!(
+                dbg!(name0 == name1)
+                    && dbg!(export0 == export1)
+                    && dbg!(value0.len() == value1.len())
+                    && dbg!(value0
+                        .iter()
+                        .zip(value1.iter())
+                        .all(|(v0, v1)| check(v0, v1)))
+            )
         }
         (
             ExprKind::Module { name: name0, export: export0, value: None },
             ExprKind::Module { name: name1, export: export1, value: None },
-        ) => name0 == name1 && export0 == export1,
+        ) => dbg!(dbg!(name0 == name1) && dbg!(export0 == export1)),
         (ExprKind::Do { exprs: exprs0 }, ExprKind::Do { exprs: exprs1 }) => {
             exprs0.len() == exprs1.len()
                 && exprs0.iter().zip(exprs1.iter()).all(|(v0, v1)| check(v0, v1))
         }
-        (ExprKind::Use { name: name0 }, ExprKind::Use { name: name1 }) => name0 == name1,
+        (ExprKind::Use { name: name0 }, ExprKind::Use { name: name1 }) => {
+            dbg!(name0 == name1)
+        }
         (
             ExprKind::Bind { name: name0, export: export0, value: value0 },
             ExprKind::Bind { name: name1, export: export1, value: value1 },
-        ) => name0 == name1 && export0 == export1 && check(value0, value1),
+        ) => dbg!(
+            dbg!(name0 == name1)
+                && dbg!(export0 == export1)
+                && dbg!(check(value0, value1))
+        ),
         (
             ExprKind::Connect { name: name0, value: value0 },
             ExprKind::Connect { name: name1, value: value1 },
-        ) => name0 == name1 && check(value0, value1),
-        (ExprKind::Ref { name: name0 }, ExprKind::Ref { name: name1 }) => name0 == name1,
+        ) => dbg!(dbg!(name0 == name1) && dbg!(check(value0, value1))),
+        (ExprKind::Ref { name: name0 }, ExprKind::Ref { name: name1 }) => {
+            dbg!(name0 == name1)
+        }
         (
             ExprKind::Lambda { args: args0, vargs: vargs0, body: Either::Left(body0) },
             ExprKind::Lambda { args: args1, vargs: vargs1, body: Either::Left(body1) },
-        ) => args0 == args1 && vargs0 == vargs1 && check(body0, body1),
+        ) => dbg!(
+            dbg!(args0 == args1) && dbg!(vargs0 == vargs1) && dbg!(check(body0, body1))
+        ),
         (
             ExprKind::Lambda { args: args0, vargs: vargs0, body: Either::Right(b0) },
             ExprKind::Lambda { args: args1, vargs: vargs1, body: Either::Right(b1) },
-        ) => args0 == args1 && vargs0 == vargs1 && b0 == b1,
+        ) => dbg!(dbg!(args0 == args1) && dbg!(vargs0 == vargs1) && dbg!(b0 == b1)),
         (ExprKind::Select { arms: arms0 }, ExprKind::Select { arms: arms1 }) => {
-            arms0.len() == arms1.len()
-                && arms0
-                    .iter()
-                    .zip(arms1.iter())
-                    .all(|((c0, b0), (c1, b1))| check(c0, c1) && check(b0, b1))
+            dbg!(
+                dbg!(arms0.len() == arms1.len())
+                    && dbg!(arms0
+                        .iter()
+                        .zip(arms1.iter())
+                        .all(|((c0, b0), (c1, b1))| check(c0, c1) && check(b0, b1)))
+            )
         }
         (_, _) => false,
     }

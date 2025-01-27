@@ -163,11 +163,14 @@ impl ExprKind {
         macro_rules! try_single_line {
             ($trunc:ident) => {{
                 let len = buf.len();
-                if newline {
+                let (start, indent) = if newline {
                     push_indent(indent, buf);
-                }
+                    (len, indent)
+                } else {
+                    (buf.rfind('\n').unwrap_or(0), 0)
+                };
                 writeln!(buf, "{}", self)?;
-                if buf.len() - len <= limit {
+                if buf.len() - start <= limit {
                     return Ok(());
                 } else {
                     if $trunc {
