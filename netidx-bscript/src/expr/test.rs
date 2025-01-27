@@ -298,7 +298,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                 let f1 = d1.as_secs_f64();
                 dbg!(
                     dbg!(f0 == f1)
-                        || dbg!((f0 != 0. && f1 != 0. && ((f0 - f1).abs() / f0) < 1e-8))
+                        || dbg!(f0 != 0. && f1 != 0. && ((f0 - f1).abs() / f0) < 1e-8)
                 )
             }
             (Value::F32(v0), Value::F32(v1)) => dbg!(v0 == v1 || (v0 - v1).abs() < 1e-7),

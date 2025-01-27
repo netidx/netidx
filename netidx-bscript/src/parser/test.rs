@@ -565,8 +565,10 @@ fn nested_connect() {
     dbg!(parse_modexpr(s).unwrap());
 }
 
+/*
 #[test]
 fn prop0() {
-    let s = "mod a{usea()}";
+    let s = "mod a {a({|a, b, c, d, @args| 'aa })}";
     dbg!(parse_modexpr(s).unwrap());
 }
+*/

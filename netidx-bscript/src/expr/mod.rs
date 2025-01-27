@@ -153,7 +153,9 @@ impl ExprKind {
             for i in 0..exprs.len() {
                 exprs[i].kind.pretty_print(indent + 2, limit, true, buf)?;
                 if i < exprs.len() - 1 {
-                    buf.pop(); // pop the newline
+                    if let Some('\n') = buf.chars().next_back() {
+                        buf.pop(); // pop the newline
+                    }
                     writeln!(buf, "{}", sep)?
                 }
             }
@@ -261,13 +263,16 @@ impl ExprKind {
                 try_single_line!(true);
                 writeln!(buf, "select {{")?;
                 for (i, (pred, expr)) in arms.iter().enumerate() {
-                    write!(buf, "{pred} => ")?;
+                    pred.kind.pretty_print(indent + 2, limit, true, buf)?;
+                    write!(buf, "=> ")?;
                     if let ExprKind::Do { exprs } = &expr.kind {
                         let term = if i < arms.len() - 1 { "}," } else { "}" };
-                        pretty_print_exprs(indent, limit, buf, exprs, "{", term, ";")?
+                        pretty_print_exprs(indent, limit, buf, exprs, "{", term, ";")?;
                     } else if i < arms.len() - 1 {
                         expr.kind.pretty_print(indent, limit, false, buf)?;
-                        buf.pop();
+                        if let Some('\n') = buf.chars().next_back() {
+                            buf.pop();
+                        }
                         writeln!(buf, ",")?
                     } else {
                         expr.kind.pretty_print(indent, limit, false, buf)?;

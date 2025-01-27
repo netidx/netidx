@@ -218,11 +218,11 @@ where
     (
         optional(string("pub").skip(space())).map(|o| o.is_some()),
         spstring("mod").with(space()).with(spfname()),
-        spaces().with(choice((
-            token(';').map(|_| None),
-            between(token('{'), sptoken('}'), many(modexpr()))
+        choice((
+            attempt(sptoken(';')).map(|_| None),
+            between(sptoken('{'), sptoken('}'), many(modexpr()))
                 .map(|m: Vec<Expr>| Some(Arc::from(m))),
-        ))),
+        )),
     )
         .map(|(export, name, value)| ExprKind::Module { name, export, value }.to_expr())
 }
@@ -245,7 +245,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    between(token('{'), sptoken('}'), sep_by(expr(), sptoken(';')))
+    between(token('{'), sptoken('}'), sep_by(expr(), attempt(sptoken(';'))))
         .map(|args: Vec<Expr>| ExprKind::Do { exprs: Arc::from(args) }.to_expr())
 }
 
@@ -302,7 +302,7 @@ where
             }),
         ),
         choice((
-            attempt(sptoken('\'').with(fname()).map(Either::Right)),
+            attempt(sptoken('\'')).with(fname()).map(Either::Right),
             expr().map(|e| Either::Left(Arc::new(e))),
         )),
     )
@@ -464,7 +464,7 @@ where
         .with(between(
             sptoken('{'),
             sptoken('}'),
-            sep_by1((expr(), spstring("=>").with(expr())), attempt(sptoken(','))),
+            sep_by1((expr(), spstring("=>").with(expr())),  csep()),
         ))
         .map(|arms: Vec<(Expr, Expr)>| {
             ExprKind::Select { arms: Arc::from(arms) }.to_expr()
