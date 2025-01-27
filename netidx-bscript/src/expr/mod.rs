@@ -200,9 +200,7 @@ impl ExprKind {
             ExprKind::Bind { export, name, value } => {
                 try_single_line!(true);
                 writeln!(buf, "{}let {name} = ", exp(*export))?;
-                value.kind.pretty_print(indent + 2, limit, false, buf)?;
-                buf.pop();
-                writeln!(buf, ";")
+                value.kind.pretty_print(indent + 2, limit, false, buf)
             }
             ExprKind::Module { name, export, value: Some(exprs) } => {
                 try_single_line!(true);
@@ -211,14 +209,12 @@ impl ExprKind {
             }
             ExprKind::Do { exprs } => {
                 try_single_line!(true);
-                pretty_print_exprs(indent, limit, buf, exprs, "{", "}", "")
+                pretty_print_exprs(indent, limit, buf, exprs, "{", "}", ";")
             }
             ExprKind::Connect { name, value } => {
                 try_single_line!(true);
                 writeln!(buf, "{name} <- ")?;
-                value.kind.pretty_print(indent + 2, limit, false, buf)?;
-                buf.pop();
-                writeln!(buf, ";")
+                value.kind.pretty_print(indent + 2, limit, false, buf)
             }
             ExprKind::Apply { function, args } => {
                 let len = try_single_line!(false);
@@ -252,7 +248,7 @@ impl ExprKind {
                     }
                     Either::Left(body) => match &body.kind {
                         ExprKind::Do { exprs } => {
-                            pretty_print_exprs(indent, limit, buf, exprs, "{", "}", "")
+                            pretty_print_exprs(indent, limit, buf, exprs, "{", "}", ";")
                         }
                         _ => body.kind.pretty_print(indent, limit, false, buf),
                     },
@@ -265,7 +261,7 @@ impl ExprKind {
                     write!(buf, "{pred} => ")?;
                     if let ExprKind::Do { exprs } = &expr.kind {
                         let term = if i < arms.len() - 1 { "}," } else { "}" };
-                        pretty_print_exprs(indent, limit, buf, exprs, "{", term, "")?
+                        pretty_print_exprs(indent, limit, buf, exprs, "{", term, ";")?
                     } else if i < arms.len() - 1 {
                         expr.kind.pretty_print(indent, limit, false, buf)?;
                         buf.pop();
@@ -293,7 +289,7 @@ impl ExprKind {
                 try_single_line!(true);
                 match &expr.kind {
                     ExprKind::Do { exprs } => {
-                        pretty_print_exprs(indent, limit, buf, exprs, "!{", "}", "")
+                        pretty_print_exprs(indent, limit, buf, exprs, "!{", "}", ";")
                     }
                     _ => {
                         writeln!(buf, "!(")?;
