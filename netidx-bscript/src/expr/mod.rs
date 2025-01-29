@@ -32,6 +32,12 @@ atomic_id!(ExprId);
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct ModPath(pub Path);
 
+impl ModPath {
+    pub fn root() -> ModPath {
+        ModPath(Path::root())
+    }
+}
+
 impl Borrow<str> for ModPath {
     fn borrow(&self) -> &str {
         self.0.borrow()

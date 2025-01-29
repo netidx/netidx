@@ -743,24 +743,18 @@ pub struct DurableStats {
 }
 
 pub struct SubscriberBuilder {
-    cfg: Option<Config>,
+    cfg: Config,
     desired_auth: Option<DesiredAuth>,
 }
 
 impl SubscriberBuilder {
-    pub fn new() -> Self {
-        Self { cfg: None, desired_auth: None }
+    pub fn new(cfg: Config) -> Self {
+        Self { cfg, desired_auth: None }
     }
 
-    pub fn build(&mut self) -> Result<Subscriber> {
-        let cfg = self.cfg.take().ok_or_else(|| anyhow!("config is required"))?;
-        let desired_auth = self.desired_auth.take().unwrap_or_else(|| cfg.default_auth());
-        Subscriber::new(cfg, desired_auth)
-    }
-
-    pub fn config(&mut self, cfg: Config) -> &mut Self {
-        self.cfg = Some(cfg);
-        self
+    pub fn build(mut self) -> Result<Subscriber> {
+        let desired_auth = self.desired_auth.take().unwrap_or_else(|| self.cfg.default_auth());
+        Subscriber::new(self.cfg, desired_auth)
     }
 
     pub fn desired_auth(&mut self, auth: DesiredAuth) -> &mut Self {

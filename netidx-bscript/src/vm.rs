@@ -154,9 +154,20 @@ pub trait Ctx {
         ref_by: ExprId,
     ) -> Dval;
     fn unsubscribe(&mut self, path: Path, dv: Dval, ref_by: ExprId);
+    /// This will be called by the compiler whenever a bound variable
+    /// is referenced. The ref_by is the toplevel expression that
+    /// contains the variable reference. When a variable event
+    /// happens, you should update all the toplevel expressions that
+    /// ref that variable.
+    ///
+    /// ref_var will also be called when a bound lambda expression is
+    /// referenced, in that case the ref_by id will be the toplevel
+    /// expression containing the call site.
     fn ref_var(&mut self, id: BindId, ref_by: ExprId);
     fn unref_var(&mut self, id: BindId, ref_by: ExprId);
-    fn register_fn(&mut self, scope: ModPath, name: ModPath);
+
+    /// Called when a variable updates. All expressions that ref the
+    /// id should be updates with a Variable event when this happens.
     fn set_var(&mut self, id: BindId, value: Value);
 
     /// For a given name, this must have at most one outstanding call
@@ -798,7 +809,8 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                     Some((_, Bind { fun: None, .. })) => {
                         error!("{function} is not a function")
                     }
-                    Some((_, Bind { fun: Some(init), .. })) => {
+                    Some((_, Bind { fun: Some(init), id: varid, .. })) => {
+                        let varid = *varid;
                         let init = sync::Arc::clone(init);
                         if error {
                             error!("", args)
@@ -807,10 +819,13 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                         } else {
                             match init(ctx, &args, scope, top_id) {
                                 Err(e) => error!("error in function {function} {e:?}"),
-                                Ok(function) => Node {
-                                    spec,
-                                    kind: NodeKind::Apply { args, function },
-                                },
+                                Ok(function) => {
+                                    ctx.user.ref_var(varid, top_id);
+                                    Node {
+                                        spec,
+                                        kind: NodeKind::Apply { args, function },
+                                    }
+                                }
                             }
                         }
                     }
@@ -836,14 +851,14 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                     Node { spec, kind: NodeKind::Bind(bind.id, Box::new(node)) }
                 }
             }
-            Expr { kind: ExprKind::Ref { name }, id: eid } => {
+            Expr { kind: ExprKind::Ref { name }, id: _ } => {
                 match ctx.lookup_bind(scope, name) {
                     None => error!("{name} not defined"),
                     Some((_, bind)) => match &bind.fun {
                         Some(_) => error!("{name} is a function"),
                         None => {
                             let id = bind.id;
-                            ctx.user.ref_var(id, *eid);
+                            ctx.user.ref_var(id, top_id);
                             Node { spec, kind: NodeKind::Ref(id) }
                         }
                     },

@@ -1035,7 +1035,7 @@ fn rand_port(current: u16) -> u16 {
 
 #[derive(Debug)]
 pub struct PublisherBuilder {
-    config: Option<Config>,
+    config: Config,
     desired_auth: Option<DesiredAuth>,
     bind_cfg: Option<BindCfg>,
     max_clients: usize,
@@ -1045,7 +1045,7 @@ pub struct PublisherBuilder {
 impl PublisherBuilder {
     pub fn new(config: Config) -> Self {
         Self {
-            config: Some(config),
+            config,
             desired_auth: None,
             bind_cfg: None,
             max_clients: 768,
@@ -1053,12 +1053,11 @@ impl PublisherBuilder {
         }
     }
 
-    pub async fn build(&mut self) -> Result<Publisher> {
-        let cfg = self.config.take().unwrap();
-        let desired_auth = self.desired_auth.take().unwrap_or_else(|| cfg.default_auth());
+    pub async fn build(mut self) -> Result<Publisher> {
+        let desired_auth = self.desired_auth.take().unwrap_or_else(|| self.config.default_auth());
         let bind_cfg =
-            self.bind_cfg.take().unwrap_or_else(|| cfg.default_bind_config.clone());
-        Publisher::new(cfg, desired_auth, bind_cfg, self.max_clients, self.slack).await
+            self.bind_cfg.take().unwrap_or_else(|| self.config.default_bind_config.clone());
+        Publisher::new(self.config, desired_auth, bind_cfg, self.max_clients, self.slack).await
     }
 
     /// The desired authentication mechanism you want to use. If not

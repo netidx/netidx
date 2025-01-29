@@ -7,3 +7,6 @@ pub mod parser;
 pub mod expr;
 pub mod vm;
 pub mod stdfn;
+
+#[cfg(test)]
+mod test;
