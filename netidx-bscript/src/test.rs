@@ -10,7 +10,7 @@ use netidx::{
     subscriber::{Subscriber, SubscriberBuilder},
 };
 use smallvec::SmallVec;
-use std::collections::HashMap;
+use std::{collections::HashMap, mem};
 
 struct TestCtx {
     by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
@@ -163,3 +163,69 @@ async fn bind_ref_arith() -> Result<()> {
     assert_eq!(state.ctx.user.var_updates.len(), 0);
     Ok(())
 }
+
+macro_rules! run {
+    ($name:ident, $code:expr, $pred:expr) => {
+        #[tokio::test(flavor = "current_thread")]
+        async fn $name() -> Result<()> {
+            let mut state = TestState::new().await?;
+            let mut n = Node::compile(&mut state.ctx, &ModPath::root(), $code.parse()?);
+            if let Some(e) = n.extract_err() {
+                bail!("compilation failed {e}")
+            }
+            assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
+            let mut fin = false;
+            while state.ctx.user.var_updates.len() > 0 {
+                for (_, id, v) in mem::take(&mut state.ctx.user.var_updates) {
+                    match n.update(&mut state.ctx, &Event::Variable(id, v)) {
+                        None if !fin => (),
+                        Some(v) if $pred(&v) => fin = true,
+                        v => panic!("unexpected result {v:?}"),
+                    }
+                }
+            }
+            Ok(())
+        }
+    };
+}
+
+const SCOPE: &str = r#"
+{
+  let v = (((1 + 1) * 2) / 2) - 1;
+  let x = {
+     let v = 42;
+     v * 2
+  };
+  v + x
+}
+"#;
+
+run!(scope, SCOPE, |v| v == &Value::I64(85));
+
+const CORE_USE: &str = r#"
+{
+  let v = (((1 + 1) * 2) / 2) - 1;
+  let x = {
+     let v = 42;
+     once(v * 2)
+  };
+  [v, x]
+}
+"#;
+
+run!(core_use, CORE_USE, |v: &Value| match v {
+    Value::Array(a) if &**a == &[Value::I64(1), Value::I64(84)] => true,
+    _ => false,
+});
+
+const NAME_MODPATH: &str = r#"
+{
+  let z = "baz";
+  str::join(", ", "foo", "bar", z)
+}
+"#;
+
+run!(name_modpath, NAME_MODPATH, |v: &Value| match v {
+    Value::String(s) => &**s == "foo, bar, baz",
+    _ => false,
+});

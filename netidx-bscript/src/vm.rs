@@ -243,14 +243,13 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
         mut f: F,
     ) -> Option<R> {
         let mut buf = CompactString::from("");
-        let name_scope = dbg!(Path::dirname(&**name));
-        let name = dbg!(Path::basename(&**name))?;
+        let name_scope = Path::dirname(&**name);
+        let name = Path::basename(&**name)?;
         for scope in Path::dirnames(&**scope).rev() {
-            let used = dbg!(self.used.get(dbg!(scope)));
+            let used = self.used.get(scope);
             let used = iter::once(scope)
                 .chain(used.iter().flat_map(|s| s.iter().map(|p| &***p)));
             for scope in used {
-                dbg!(scope);
                 let scope = name_scope
                     .map(|ns| {
                         buf.clear();
@@ -259,7 +258,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
                         buf.as_str()
                     })
                     .unwrap_or(scope);
-                if let Some(res) = f(dbg!(scope), dbg!(name)) {
+                if let Some(res) = f(scope, name) {
                     return Some(res);
                 }
             }
@@ -861,10 +860,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 if node.is_err() {
                     error!("", vec![node])
                 } else {
-                    let res =
-                        Node { spec, kind: NodeKind::Bind(bind.id, Box::new(node)) };
-                    dbg!(&ctx.binds);
-                    res
+                    Node { spec, kind: NodeKind::Bind(bind.id, Box::new(node)) }
                 }
             }
             Expr { kind: ExprKind::Ref { name }, id: _ } => {
