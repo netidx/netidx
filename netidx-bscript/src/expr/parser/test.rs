@@ -1,5 +1,12 @@
 use super::*;
 
+fn parse_expr(s: &str) -> anyhow::Result<Expr> {
+    expr()
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
+}
+
 #[test]
 fn escaped_string() {
     let p = Chars::from(r#"/foo bar baz/"zam"/)_ xyz+ "#);
@@ -10,7 +17,7 @@ fn escaped_string() {
             args: Arc::from_iter([ExprKind::Constant(Value::String(p)).to_expr()])
         }
         .to_expr(),
-        parse_expr(s).unwrap()
+        parse(s).unwrap()
     );
 }
 
@@ -41,7 +48,7 @@ fn interpolated0() {
     }
     .to_expr();
     let s = r#"load("/foo/[get("[sid]_var")]/baz")"#;
-    assert_eq!(p, parse_expr(s).unwrap());
+    assert_eq!(p, parse(s).unwrap());
 }
 
 #[test]
@@ -52,7 +59,7 @@ fn interpolated1() {
         function: ["str", "concat"].into(),
     }
     .to_expr();
-    assert_eq!(p, parse_expr(s).unwrap());
+    assert_eq!(p, parse(s).unwrap());
 }
 
 #[test]
@@ -79,7 +86,7 @@ fn interpolated2() {
         function: ["a"].into(),
     }
     .to_expr();
-    assert_eq!(p, parse_expr(s).unwrap());
+    assert_eq!(p, parse(s).unwrap());
 }
 
 #[test]
@@ -99,7 +106,7 @@ fn apply_path() {
             function: ["load"].into(),
         }
         .to_expr(),
-        parse_expr(s).unwrap()
+        parse(s).unwrap()
     );
 }
 
@@ -120,7 +127,7 @@ fn letbind() {
             value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
         }
         .to_expr(),
-        parse_expr("let foo = 42;").unwrap()
+        parse("let foo = 42").unwrap()
     );
 }
 
@@ -159,7 +166,7 @@ fn nested_apply() {
     }
     .to_expr();
     let s = r#"sum(f32:1., load("/foo/bar"), max(f32:675.6, load("/foo/baz")), rand())"#;
-    assert_eq!(src, parse_expr(s).unwrap());
+    assert_eq!(src, parse(s).unwrap());
 }
 
 #[test]
@@ -359,7 +366,7 @@ fn connect() {
     }
     .to_expr();
     let s = r#"m::foo <- (a + 1)"#;
-    assert_eq!(exp, parse_expr(s).unwrap());
+    assert_eq!(exp, parse(s).unwrap());
 }
 
 #[test]
@@ -387,7 +394,7 @@ fn inline_module() {
         pub let z = 42
         let m = 42
     }"#;
-    assert_eq!(exp, parse_modexpr(s).unwrap());
+    assert_eq!(exp, parse(s).unwrap());
 }
 
 #[test]
@@ -395,14 +402,14 @@ fn external_module() {
     let exp = ExprKind::Module { name: Chars::from("foo"), export: true, value: None }
         .to_expr();
     let s = r#"pub mod foo;"#;
-    assert_eq!(exp, parse_modexpr(s).unwrap());
+    assert_eq!(exp, parse(s).unwrap());
 }
 
 #[test]
 fn usemodule() {
     let exp = ExprKind::Use { name: ModPath::from(["foo"]) }.to_expr();
     let s = r#"use foo;"#;
-    assert_eq!(exp, parse_modexpr(s).unwrap());
+    assert_eq!(exp, parse(s).unwrap());
 }
 
 #[test]
@@ -430,7 +437,7 @@ fn array() {
     }
     .to_expr();
     let s = r#"[["foo", 42], ["bar", 42]]"#;
-    assert_eq!(exp, parse_expr(s).unwrap());
+    assert_eq!(exp, parse(s).unwrap());
 }
 
 #[test]
@@ -448,7 +455,7 @@ fn doexpr() {
     }
     .to_expr();
     let s = r#"{ let baz = 42; baz }"#;
-    assert_eq!(exp, parse_expr(s).unwrap());
+    assert_eq!(exp, parse(s).unwrap());
 }
 
 #[test]
@@ -520,7 +527,7 @@ fn apply_lambda() {
     }
     .to_expr();
     let s = "a(|a, @args| 'a)";
-    let pe = parse_expr(s).unwrap();
+    let pe = parse(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -540,7 +547,7 @@ fn mod_interpolate() {
     }
     .to_expr();
     let s = "mod a{\"foo_[42]\"}";
-    let pe = parse_modexpr(s).unwrap();
+    let pe = parse(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -555,20 +562,22 @@ fn multi_line_do() {
     }
     .to_expr();
     let s = "{\n  (a *\n  u64:1\n)}\n";
-    let pe = parse_modexpr(s).unwrap();
+    let pe = parse(s).unwrap();
     assert_eq!(e, pe)
 }
 
 #[test]
 fn nested_connect() {
     let s = "mod a{a <- a <- select {(!u32:0) => u32:0}}";
-    dbg!(parse_modexpr(s).unwrap());
+    dbg!(parse(s).unwrap());
 }
 
-/*
 #[test]
 fn prop0() {
-    let s = "mod a {a({|a, b, c, d, @args| 'aa })}";
-    dbg!(parse_modexpr(s).unwrap());
+    let s = r#"
+pub mod core {
+    pub let any = |@args| 'any
 }
-*/
+"#;
+    dbg!(parse(s).unwrap());
+}

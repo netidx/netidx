@@ -225,8 +225,14 @@ impl<'a> DoubleEndedIterator for DirNames<'a> {
                         Some(res)
                     }
                     None => {
-                        *self = DirNames::Root(false);
-                        Some("/")
+                        if all == &ROOT {
+                            *self = DirNames::Root(false);
+                            Some("/")
+                        } else {
+                            let res = *all;
+                            *all = &ROOT;
+                            Some(res)
+                        }
                     }
                 }
             }
@@ -458,6 +464,14 @@ impl Path {
     /// assert_eq!(bn.next(), Some("/some/path/ending/in"));
     /// assert_eq!(bn.next(), Some("/some/path/ending/in/foo"));
     /// assert_eq!(bn.next(), None);
+    /// let mut bn = Path::dirnames(&p);
+    /// assert_eq!(bn.next_back(), Some("/some/path/ending/in/foo"));
+    /// assert_eq!(bn.next_back(), Some("/some/path/ending/in"));
+    /// assert_eq!(bn.next_back(), Some("/some/path/ending"));
+    /// assert_eq!(bn.next_back(), Some("/some/path"));
+    /// assert_eq!(bn.next_back(), Some("/some"));
+    /// assert_eq!(bn.next_back(), Some("/"));
+    /// assert_eq!(bn.next_back(), None);
     /// ```
     pub fn dirnames<T: AsRef<str> + ?Sized>(s: &T) -> DirNames {
         let s = s.as_ref();

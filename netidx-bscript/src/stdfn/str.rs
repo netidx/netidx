@@ -1,7 +1,6 @@
 use crate::{
     err,
     expr::Expr,
-    parser,
     stdfn::{CachedArgs, CachedVals, EvalCached},
     vm::{Arity, Ctx, ExecCtx},
 };
@@ -318,19 +317,19 @@ type StringConcat = CachedArgs<StringConcatEv>;
 
 const MOD: &str = r#"
 pub mod str {
-    pub let starts_with = |prefix, s| 'starts_with;
-    pub let ends_with = |suffix, s| 'ends_with;
-    pub let contains = |part, s| 'contains;
-    pub let strip_prefix = |prefix, s| 'strip_prefix;
-    pub let strip_suffix = |suffix, s| 'strip_suffix;
-    pub let trim = |s| 'trim;
-    pub let trim_start = |s| 'trim_start;
-    pub let trim_end = |s| 'trim_end;
-    pub let replace = |pattern, replacement, s| 'replace;
-    pub let dirname = |path| 'dirname;
-    pub let basename = |path| 'basename;
-    pub let join = |sep, @args| 'string_join;
-    pub let concat = |s, @args| 'string_concat;
+    pub let starts_with = |prefix, s| 'starts_with
+    pub let ends_with = |suffix, s| 'ends_with
+    pub let contains = |part, s| 'contains
+    pub let strip_prefix = |prefix, s| 'strip_prefix
+    pub let strip_suffix = |suffix, s| 'strip_suffix
+    pub let trim = |s| 'trim
+    pub let trim_start = |s| 'trim_start
+    pub let trim_end = |s| 'trim_end
+    pub let replace = |pattern, replacement, s| 'replace
+    pub let dirname = |path| 'dirname
+    pub let basename = |path| 'basename
+    pub let join = |sep, @args| 'string_join
+    pub let concat = |s, @args| 'string_concat
 }
 "#;
 
@@ -348,5 +347,5 @@ pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Basename>();
     ctx.register_builtin::<StringJoin>();
     ctx.register_builtin::<StringConcat>();
-    parser::parse_expr(MOD).unwrap()
+    MOD.parse().unwrap()
 }

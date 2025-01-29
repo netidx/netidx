@@ -1,4 +1,3 @@
-use crate::parser;
 use netidx::{
     chars::Chars,
     path::Path,
@@ -22,6 +21,7 @@ use triomphe::Arc;
 
 #[cfg(test)]
 mod test;
+mod parser;
 
 lazy_static! {
     pub static ref VNAME: Regex = Regex::new("^[a-z][a-z0-9_]*$").unwrap();
@@ -545,6 +545,6 @@ impl FromStr for Expr {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
-        parser::parse_expr(s)
+        parser::parse(s)
     }
 }

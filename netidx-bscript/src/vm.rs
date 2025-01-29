@@ -198,6 +198,18 @@ struct Bind<C: Ctx + 'static, E: Clone + 'static> {
     fun: Option<InitFn<C, E>>,
 }
 
+impl<C: Ctx + 'static, E: Clone + 'static> fmt::Debug for Bind<C, E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Bind {{ id: {:?}, export: {}, fun: {} }}",
+            self.id,
+            self.export,
+            self.fun.is_some()
+        )
+    }
+}
+
 impl<C: Ctx + 'static, E: Clone + 'static> Default for Bind<C, E> {
     fn default() -> Self {
         Self { id: BindId::new(), export: false, fun: None }
@@ -231,13 +243,14 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
         mut f: F,
     ) -> Option<R> {
         let mut buf = CompactString::from("");
-        let name_scope = Path::dirname(&**name);
-        let name = Path::basename(&**name)?;
+        let name_scope = dbg!(Path::dirname(&**name));
+        let name = dbg!(Path::basename(&**name))?;
         for scope in Path::dirnames(&**scope).rev() {
-            let used = self.used.get(scope);
+            let used = dbg!(self.used.get(dbg!(scope)));
             let used = iter::once(scope)
                 .chain(used.iter().flat_map(|s| s.iter().map(|p| &***p)));
             for scope in used {
+                dbg!(scope);
                 let scope = name_scope
                     .map(|ns| {
                         buf.clear();
@@ -246,7 +259,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
                         buf.as_str()
                     })
                     .unwrap_or(scope);
-                if let Some(res) = f(scope, name) {
+                if let Some(res) = f(dbg!(scope), dbg!(name)) {
                     return Some(res);
                 }
             }
@@ -714,6 +727,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             };
         }
         macro_rules! error {
+            ("", $children:expr) => {{
+                let kind = NodeKind::Error { error: None, children: $children };
+                Node { spec, kind }
+            }};
             ($fmt:expr, $children:expr, $($arg:expr),*) => {{
                 let e = Chars::from(format!($fmt, $($arg),*));
                 let kind = NodeKind::Error { error: Some(e), children: $children };
@@ -721,10 +738,6 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             }};
             ($fmt:expr) => { error!($fmt, vec![],) };
             ($fmt:expr, $children:expr) => { error!($fmt, $children,) };
-            ("", $children:expr) => {{
-                let kind = NodeKind::Error { error: None, children: $children }
-                Node { spec, kind }
-            }}
         }
         macro_rules! binary_op {
             ($op:ident, $lhs:expr, $rhs:expr) => {{
@@ -743,7 +756,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 Node { kind: NodeKind::Constant(v.clone()), spec }
             }
             Expr { kind: ExprKind::Do { exprs }, id } => {
-                let scope = ModPath(scope.append(&format_compact!("{id:?}")));
+                let scope = ModPath(scope.append(&format_compact!("do{}", id.inner())));
                 let (error, exp) = subexprs!(scope, exprs);
                 if error {
                     error!("", exp)
@@ -848,7 +861,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 if node.is_err() {
                     error!("", vec![node])
                 } else {
-                    Node { spec, kind: NodeKind::Bind(bind.id, Box::new(node)) }
+                    let res =
+                        Node { spec, kind: NodeKind::Bind(bind.id, Box::new(node)) };
+                    dbg!(&ctx.binds);
+                    res
                 }
             }
             Expr { kind: ExprKind::Ref { name }, id: _ } => {

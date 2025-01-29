@@ -2,7 +2,7 @@ use super::*;
 use bytes::Bytes;
 use chrono::prelude::*;
 use netidx_core::chars::Chars;
-use parser::{parse_modexpr, RESERVED};
+use parser::{parse, RESERVED};
 use proptest::{collection, prelude::*};
 use std::time::Duration;
 
@@ -450,7 +450,7 @@ proptest! {
     fn expr_round_trip(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(s.to_string());
-        let e = dbg!(parse_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -458,7 +458,7 @@ proptest! {
     fn expr_pp_round_trip(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(s.to_string_pretty(80));
-        let e = dbg!(parse_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 }

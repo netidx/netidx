@@ -1,7 +1,6 @@
 use crate::{
     arity1, arity2, errf,
     expr::{Expr, ExprId},
-    parser,
     stdfn::CachedVals,
     vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node, RpcCallId},
 };
@@ -263,9 +262,9 @@ impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
 
 const MOD: &str = r#"
 pub mod net {
-    pub let store = |path, value| 'store;
-    pub let load = |path| 'load;
-    pub let call = |path, args| 'call;
+    pub let store = |path, value| 'store
+    pub let load = |path| 'load
+    pub let call = |path, args| 'call
 }
 "#;
 
@@ -273,5 +272,5 @@ pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Store>();
     ctx.register_builtin::<Load>();
     ctx.register_builtin::<RpcCall>();
-    parser::parse_expr(MOD).unwrap()
+    MOD.parse().unwrap()
 }

@@ -1,5 +1,8 @@
 use crate::{
-    err, errf, expr::{Expr, ModPath}, parser, stdfn::{CachedArgs, CachedVals, EvalCached}, vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node}
+    err, errf,
+    expr::{Expr, ModPath},
+    stdfn::{CachedArgs, CachedVals, EvalCached},
+    vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node},
 };
 use anyhow::Result;
 use netidx::{
@@ -629,29 +632,29 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Uniq {
 
 const MOD: &str = r#"
 pub mod core {
-    pub let any = |@args| 'any;
-    pub let once = |v| 'once;
-    pub let all = |@args| 'all;
-    pub let array = |@args| 'array;
-    pub let sum = |@args| 'sum;
-    pub let product = |@args| 'product;
-    pub let divide = |@args| 'divide;
-    pub let min = |@args| 'min;
-    pub let max = |@args| 'max;
-    pub let and = |@args| 'and;
-    pub let or = |@args| 'or;
-    pub let not = |e| 'not;
-    pub let is_err = |e| 'is_error;
-    pub let index = |array, i| 'index;
-    pub let filter = |predicate, v| 'filter;
-    pub let filter_err = |e| 'filter_err;
-    pub let cast = |type, v| 'cast;
-    pub let isa = |type, v| 'isa;
-    pub let eval = |src| 'eval;
-    pub let count = |@args| 'count;
-    pub let sample = |trigger, v| 'sample;
-    pub let mean = |@args| 'mean;
-    pub let uniq = |v| 'uniq;
+    pub let any = |@args| 'any
+    pub let once = |v| 'once
+    pub let all = |@args| 'all
+    pub let array = |@args| 'array
+    pub let sum = |@args| 'sum
+    pub let product = |@args| 'product
+    pub let divide = |@args| 'divide
+    pub let min = |@args| 'min
+    pub let max = |@args| 'max
+    pub let and = |@args| 'and
+    pub let or = |@args| 'or
+    pub let not = |e| 'not
+    pub let is_err = |e| 'is_error
+    pub let index = |array, i| 'index
+    pub let filter = |predicate, v| 'filter
+    pub let filter_err = |e| 'filter_err
+    pub let cast = |type, v| 'cast
+    pub let isa = |type, v| 'isa
+    pub let eval = |src| 'eval
+    pub let count = |@args| 'count
+    pub let sample = |trigger, v| 'sample
+    pub let mean = |@args| 'mean
+    pub let uniq = |v| 'uniq
 }
 "#;
 
@@ -679,5 +682,5 @@ pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Sample>();
     ctx.register_builtin::<Mean>();
     ctx.register_builtin::<Uniq>();
-    parser::parse_expr(MOD).unwrap()
+    MOD.parse().unwrap()
 }

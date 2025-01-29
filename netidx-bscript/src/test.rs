@@ -1,9 +1,8 @@
 use crate::{
-    expr::{ExprId, ModPath},
-    parser,
+    expr::{Expr, ExprId, ModPath},
     vm::{BindId, Ctx, Event, ExecCtx, Node},
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
 use fxhash::FxHashMap;
 use netidx::{
     publisher::{Publisher, PublisherBuilder, Value},
@@ -15,7 +14,7 @@ use std::collections::HashMap;
 
 struct TestCtx {
     by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
-    to_update: Vec<(ExprId, BindId, Value)>,
+    var_updates: Vec<(ExprId, BindId, Value)>,
     resolver: resolver_server::Server,
     publisher: Publisher,
     subscriber: Subscriber,
@@ -29,6 +28,7 @@ impl TestCtx {
                 .member_servers(vec![file::MemberServerBuilder::default()
                     .auth(file::Auth::Anonymous)
                     .addr("127.0.0.1:0".parse()?)
+                    .bind_addr("127.0.0.1".parse()?)
                     .build()?])
                 .build()?;
             let cfg = config::Config::from_file(cfg)?;
@@ -48,7 +48,7 @@ impl TestCtx {
         let subscriber = SubscriberBuilder::new(cfg).build()?;
         Ok(Self {
             by_ref: HashMap::default(),
-            to_update: vec![],
+            var_updates: vec![],
             resolver,
             publisher,
             subscriber,
@@ -69,7 +69,7 @@ impl Ctx for TestCtx {
 
     fn clear(&mut self) {
         self.by_ref.clear();
-        self.to_update.clear();
+        self.var_updates.clear();
     }
 
     fn durable_subscribe(
@@ -100,6 +100,7 @@ impl Ctx for TestCtx {
     }
 
     fn ref_var(&mut self, id: BindId, ref_by: ExprId) {
+        dbg!((id, ref_by));
         let refs = self.by_ref.entry(id).or_default();
         if !refs.contains(&ref_by) {
             refs.push(ref_by);
@@ -111,14 +112,15 @@ impl Ctx for TestCtx {
     }
 
     fn set_var(&mut self, id: BindId, value: Value) {
+        dbg!((id, &value));
         if let Some(refs) = self.by_ref.get(&id) {
             match &**refs {
                 [] => (),
                 [eids @ .., eid] => {
                     for eid in eids {
-                        self.to_update.push((*eid, id, value.clone()));
+                        self.var_updates.push((*eid, id, value.clone()));
                     }
-                    self.to_update.push((*eid, id, value))
+                    self.var_updates.push((*eid, id, value))
                 }
             }
         }
@@ -137,15 +139,27 @@ impl TestState {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn basic_arith() -> Result<()> {
+async fn bind_ref_arith() -> Result<()> {
     let mut state = TestState::new().await?;
-    let e = parser::parse_modexpr("let v = (((1 + 1) * 2) / 2) - 1")?;
+    let e = r#"
+{
+  let v = (((1 + 1) * 2) / 2) - 1;
+  v
+}
+"#
+    .parse::<Expr>()?;
     let eid = e.id;
     let mut n = Node::compile(&mut state.ctx, &ModPath::root(), e);
+    if let Some(e) = n.extract_err() {
+        bail!("compilation failed {e}")
+    }
     assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
-    assert_eq!(state.ctx.user.to_update.len(), 1);
-    let (up_eid, _, v) = &state.ctx.user.to_update[0];
+    assert_eq!(state.ctx.user.var_updates.len(), 1);
+    let (up_eid, _, v) = &state.ctx.user.var_updates[0];
     assert_eq!(up_eid, &eid);
     assert_eq!(v, &Value::I64(1));
+    let (_, id, v) = state.ctx.user.var_updates.pop().unwrap();
+    assert_eq!(n.update(&mut state.ctx, &Event::Variable(id, v)), Some(Value::I64(1)));
+    assert_eq!(state.ctx.user.var_updates.len(), 0);
     Ok(())
 }

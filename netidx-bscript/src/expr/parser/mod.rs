@@ -526,14 +526,7 @@ parser! {
     }
 }
 
-pub fn parse_expr(s: &str) -> anyhow::Result<Expr> {
-    expr()
-        .easy_parse(position::Stream::new(s))
-        .map(|(r, _)| r)
-        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
-}
-
-pub fn parse_modexpr(s: &str) -> anyhow::Result<Expr> {
+pub(super) fn parse(s: &str) -> anyhow::Result<Expr> {
     modexpr()
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)

@@ -1,5 +1,8 @@
 use crate::{
-    arity2, err, errf, expr::{Expr, ExprId}, parser, stdfn::CachedVals, vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node, TimerId}
+    arity2, err, errf,
+    expr::{Expr, ExprId},
+    stdfn::CachedVals,
+    vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node, TimerId},
 };
 use anyhow::{bail, Result};
 use netidx::{chars::Chars, publisher::FromValue, subscriber::Value};
@@ -217,13 +220,13 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Timer {
 
 const MOD: &str = r#"
 pub mod time {
-    pub let after_idle = |timeout, v| 'after_idle;
-    pub let timer = |timeout, repeat| 'timer;
+    pub let after_idle = |timeout, v| 'after_idle
+    pub let timer = |timeout, repeat| 'timer
 }
 "#;
 
 pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<AfterIdle>();
     ctx.register_builtin::<Timer>();
-    parser::parse_expr(MOD).unwrap()
+    MOD.parse().unwrap()
 }
