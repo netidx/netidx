@@ -254,6 +254,9 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
                     .map(|ns| {
                         buf.clear();
                         buf.push_str(scope);
+                        if let Some(Path::SEP) = buf.chars().next_back() {
+                            buf.pop();
+                        }
                         buf.push_str(ns);
                         buf.as_str()
                     })
