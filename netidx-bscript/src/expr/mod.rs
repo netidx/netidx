@@ -21,7 +21,7 @@ use triomphe::Arc;
 
 #[cfg(test)]
 mod test;
-mod parser;
+pub mod parser;
 
 lazy_static! {
     pub static ref VNAME: Regex = Regex::new("^[a-z][a-z0-9_]*$").unwrap();

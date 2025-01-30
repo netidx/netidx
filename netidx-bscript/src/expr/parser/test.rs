@@ -408,7 +408,7 @@ fn external_module() {
 #[test]
 fn usemodule() {
     let exp = ExprKind::Use { name: ModPath::from(["foo"]) }.to_expr();
-    let s = r#"use foo;"#;
+    let s = r#"use foo"#;
     assert_eq!(exp, parse(s).unwrap());
 }
 
@@ -564,20 +564,4 @@ fn multi_line_do() {
     let s = "{\n  (a *\n  u64:1\n)}\n";
     let pe = parse(s).unwrap();
     assert_eq!(e, pe)
-}
-
-#[test]
-fn nested_connect() {
-    let s = "mod a{a <- a <- select {(!u32:0) => u32:0}}";
-    dbg!(parse(s).unwrap());
-}
-
-#[test]
-fn prop0() {
-    let s = r#"
-pub mod core {
-    pub let any = |@args| 'any
-}
-"#;
-    dbg!(parse(s).unwrap());
 }

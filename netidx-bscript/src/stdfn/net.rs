@@ -38,7 +38,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Store {
     const ARITY: Arity = Arity::Exactly(2);
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, _, top_id| {
+        Arc::new(|_, from, top_id| {
             Ok(Box::new(Store {
                 args: CachedVals::new(from),
                 dv: Either::Right(vec![]),
@@ -128,7 +128,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Load {
     const ARITY: Arity = Arity::Exactly(1);
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, _, top_id| {
+        Arc::new(|_, from, top_id| {
             Ok(Box::new(Load { args: CachedVals::new(from), cur: None, top_id }))
         })
     }
@@ -193,7 +193,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for RpcCall {
     const ARITY: Arity = Arity::Exactly(2);
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, _, top_id| {
+        Arc::new(|_, from, top_id| {
             Ok(Box::new(RpcCall {
                 args: CachedVals::new(from),
                 top_id,

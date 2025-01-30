@@ -16,7 +16,7 @@ use netidx::{
 use smallvec::{smallvec, SmallVec};
 use std::{
     collections::{HashMap, VecDeque},
-    fmt, iter,
+    fmt, iter, mem,
     sync::{self, Weak},
     time::Duration,
 };
@@ -122,7 +122,6 @@ pub type InitFn<C, E> = sync::Arc<
     dyn for<'a, 'b, 'c> Fn(
             &'a mut ExecCtx<C, E>,
             &'b [Node<C, E>],
-            &'c ModPath,
             ExprId,
         ) -> Result<Box<dyn Apply<C, E> + Send + Sync>>
         + Send
@@ -226,16 +225,33 @@ impl<C: Ctx + 'static, E: Clone + 'static> Clone for Bind<C, E> {
     }
 }
 
-pub struct ExecCtx<C: Ctx + 'static, E: Clone + 'static> {
+struct Env<C: Ctx + 'static, E: Clone + 'static> {
     binds: Map<ModPath, Map<CompactString, Bind<C, E>>>,
     used: Map<ModPath, Arc<Vec<ModPath>>>,
     modules: Set<ModPath>,
-    builtins: FxHashMap<&'static str, (Arity, InitFn<C, E>)>,
-    pub dbg_ctx: DbgCtx<E>,
-    pub user: C,
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
+impl<C: Ctx + 'static, E: Clone + 'static> Clone for Env<C, E> {
+    fn clone(&self) -> Self {
+        Self {
+            binds: self.binds.clone(),
+            used: self.used.clone(),
+            modules: self.modules.clone(),
+        }
+    }
+}
+
+impl<C: Ctx + 'static, E: Clone + 'static> Env<C, E> {
+    fn new() -> Self {
+        Self { binds: Map::new(), used: Map::new(), modules: Set::new() }
+    }
+
+    fn clear(&mut self) {
+        self.binds = Map::new();
+        self.used = Map::new();
+        self.modules = Set::new();
+    }
+
     fn find_visible<R, F: FnMut(&str, &str) -> Option<R>>(
         &self,
         scope: &ModPath,
@@ -280,11 +296,18 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
                 .and_then(|(scope, vars)| vars.get(name).map(|bind| (scope, bind)))
         })
     }
+}
 
+pub struct ExecCtx<C: Ctx + 'static, E: Clone + 'static> {
+    env: Env<C, E>,
+    builtins: FxHashMap<&'static str, (Arity, InitFn<C, E>)>,
+    pub dbg_ctx: DbgCtx<E>,
+    pub user: C,
+}
+
+impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
     pub fn clear(&mut self) {
-        self.binds = Map::new();
-        self.used = Map::new();
-        self.modules = Set::new();
+        self.env.clear();
         self.dbg_ctx.clear();
         self.user.clear();
     }
@@ -292,9 +315,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
     /// build a new context with only the core library
     pub fn new_no_std(user: C) -> Self {
         let mut t = ExecCtx {
-            binds: Map::new(),
-            used: Map::new(),
-            modules: Set::new(),
+            env: Env::new(),
             builtins: FxHashMap::default(),
             dbg_ctx: DbgCtx::new(),
             user,
@@ -385,7 +406,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Lambda<C, E> {
         let id = LambdaId::new();
         let mut argids = vec![];
         let scope = ModPath(scope.0.append(&format_compact!("{id:?}")));
-        let binds = ctx.binds.get_or_default_cow(scope.clone());
+        let binds = ctx.env.binds.get_or_default_cow(scope.clone());
         for (name, node) in argspec.iter().zip(args.iter()) {
             let bind = binds.get_or_default_cow(CompactString::from(&**name));
             argids.push(bind.id);
@@ -671,8 +692,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
     }
 
     fn compile_lambda(
+        ctx: &mut ExecCtx<C, E>,
         spec: Expr,
         argspec: Arc<[Chars]>,
+        scope: &ModPath,
         body: Either<Arc<Expr>, Chars>,
         eid: ExprId,
     ) -> Node<C, E> {
@@ -682,28 +705,40 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             let kind = NodeKind::Error { error: Some(e), children: vec![] };
             return Node { spec, kind };
         }
-        let f: InitFn<C, E> = Arc::new(move |ctx, args, scope, tid| match body.clone() {
-            Either::Left(body) => Ok(Box::new(Lambda::new(
-                ctx,
-                argspec.clone(),
-                args,
-                scope,
-                eid,
-                tid,
-                (*body).clone(),
-            )?)),
+        // compile the lambda at the call site with the env at the
+        // definition site this ensures all variables and modules are
+        // lexically scoped.
+        let env = ctx.env.clone();
+        let scope = scope.clone();
+        let f: InitFn<C, E> = Arc::new(move |ctx, args, tid| match body.clone() {
+            Either::Left(body) => {
+                let old_env = mem::replace(&mut ctx.env, env.clone());
+                let res = Lambda::new(
+                    ctx,
+                    argspec.clone(),
+                    args,
+                    &scope,
+                    eid,
+                    tid,
+                    (*body).clone(),
+                );
+                // it's ok that definitions in the lambda are dropped, they can't be used
+                // outside the scope of the lambda expression anyway
+                ctx.env = old_env;
+                Ok(Box::new(res?))
+            }
             Either::Right(builtin) => match ctx.builtins.get(&*builtin) {
                 None => bail!("unknown builtin function {builtin}"),
                 Some((arity, init)) => {
                     let init = Arc::clone(init);
                     let l = args.len();
                     match *arity {
-                        Arity::Any => init(ctx, args, scope, tid),
-                        Arity::AtLeast(n) if l >= n => init(ctx, args, scope, tid),
+                        Arity::Any => init(ctx, args, tid),
+                        Arity::AtLeast(n) if l >= n => init(ctx, args, tid),
                         Arity::AtLeast(n) => {
                             bail!("expected at least {n} args")
                         }
-                        Arity::Exactly(n) if l == n => init(ctx, args, scope, tid),
+                        Arity::Exactly(n) if l == n => init(ctx, args, tid),
                         Arity::Exactly(n) => bail!("expected {n} arguments"),
                     }
                 }
@@ -777,23 +812,23 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                         if error {
                             error!("", children)
                         } else {
-                            ctx.modules.insert_cow(scope.clone());
+                            ctx.env.modules.insert_cow(scope.clone());
                             Node { spec, kind: NodeKind::Module(children) }
                         }
                     }
                 }
             }
             Expr { kind: ExprKind::Use { name }, id: _ } => {
-                if !ctx.modules.contains(name) {
+                if !ctx.env.modules.contains(name) {
                     error!("no such module {name}")
                 } else {
-                    let used = ctx.used.get_or_default_cow(scope.clone());
+                    let used = ctx.env.used.get_or_default_cow(scope.clone());
                     Arc::make_mut(used).push(name.clone());
                     Node { spec, kind: NodeKind::Use }
                 }
             }
             Expr { kind: ExprKind::Connect { name, value }, id: _ } => {
-                match ctx.lookup_bind(scope, name) {
+                match ctx.env.lookup_bind(scope, name) {
                     None => error!("{name} is undefined"),
                     Some((_, Bind { fun: Some(_), .. })) => {
                         error!("{name} is a function")
@@ -815,11 +850,11 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             }
             Expr { kind: ExprKind::Lambda { args, vargs: _, body }, id } => {
                 let (args, body, id) = (args.clone(), (*body).clone(), *id);
-                Node::compile_lambda(spec, args, body, id)
+                Node::compile_lambda(ctx, spec, args, scope, body, id)
             }
             Expr { kind: ExprKind::Apply { args, function }, id: _ } => {
                 let (error, args) = subexprs!(scope, args);
-                match ctx.lookup_bind(scope, function) {
+                match ctx.env.lookup_bind(scope, function) {
                     None => error!("{function} is undefined"),
                     Some((_, Bind { fun: None, .. })) => {
                         error!("{function} is not a function")
@@ -832,7 +867,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                         } else if let Some(e) = args.iter().find(|e| !e.args_ok()) {
                             error!("invalid argument \"{e}\"")
                         } else {
-                            match init(ctx, &args, scope, top_id) {
+                            match init(ctx, &args, top_id) {
                                 Err(e) => error!("error in function {function} {e:?}"),
                                 Ok(function) => {
                                     ctx.user.ref_var(varid, top_id);
@@ -854,8 +889,11 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                     Bind::default()
                 };
                 let k = CompactString::from(&**name);
-                let bind =
-                    ctx.binds.get_or_default_cow(scope.clone()).get_or_insert_cow(k, f);
+                let bind = ctx
+                    .env
+                    .binds
+                    .get_or_default_cow(scope.clone())
+                    .get_or_insert_cow(k, f);
                 if existing {
                     bind.id = BindId::new();
                 }
@@ -867,7 +905,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 }
             }
             Expr { kind: ExprKind::Ref { name }, id: _ } => {
-                match ctx.lookup_bind(scope, name) {
+                match ctx.env.lookup_bind(scope, name) {
                     None => error!("{name} not defined"),
                     Some((_, bind)) => match &bind.fun {
                         Some(_) => error!("{name} is a function"),
@@ -920,14 +958,10 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
 
     pub fn compile(ctx: &mut ExecCtx<C, E>, scope: &ModPath, spec: Expr) -> Self {
         let top_id = spec.id;
-        let binds = ctx.binds.clone();
-        let used = ctx.used.clone();
-        let modules = ctx.modules.clone();
+        let env = ctx.env.clone();
         let node = Self::compile_int(ctx, spec, scope, top_id);
         if node.is_err() {
-            ctx.binds = binds;
-            ctx.used = used;
-            ctx.modules = modules;
+            ctx.env = env;
         }
         node
     }

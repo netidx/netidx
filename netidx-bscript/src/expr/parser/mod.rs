@@ -1,6 +1,6 @@
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use combine::{
-    attempt, between, chainl1, choice, many, optional,
+    attempt, between, chainl1, choice, eof, many, many1, optional,
     parser::{
         char::{space, spaces, string},
         combinator::recognize,
@@ -464,7 +464,7 @@ where
         .with(between(
             sptoken('{'),
             sptoken('}'),
-            sep_by1((expr(), spstring("=>").with(expr())),  csep()),
+            sep_by1((expr(), spstring("=>").with(expr())), csep()),
         ))
         .map(|arms: Vec<(Expr, Expr)>| {
             ExprKind::Select { arms: Arc::from(arms) }.to_expr()
@@ -528,6 +528,23 @@ parser! {
 
 pub(super) fn parse(s: &str) -> anyhow::Result<Expr> {
     modexpr()
+        .skip(spaces())
+        .skip(eof())
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
+}
+
+/// Parse one or more toplevel module expressions followed by
+/// (optional) whitespace and then eof. At least one expression is
+/// required otherwise this function will fail.
+///
+/// if you wish to parse a str containing one and only one module
+/// expression just call [str.parse::<Expr>()].
+pub fn parse_many(s: &str) -> anyhow::Result<Vec<Expr>> {
+    many1(modexpr())
+        .skip(spaces())
+        .skip(eof())
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))

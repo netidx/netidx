@@ -8,4 +8,4 @@ pub mod vm;
 pub mod stdfn;
 
 #[cfg(test)]
-mod test;
+mod tests;

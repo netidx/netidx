@@ -19,7 +19,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for AfterIdle {
     const ARITY: Arity = Arity::Exactly(2);
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, _, eid| {
+        Arc::new(|_, from, eid| {
             Ok(Box::new(AfterIdle { args: CachedVals::new(from), id: None, eid }))
         })
     }
@@ -125,7 +125,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Timer {
     const ARITY: Arity = Arity::Exactly(2);
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, _, eid| {
+        Arc::new(|_, from, eid| {
             Ok(Box::new(Self {
                 args: CachedVals::new(from),
                 timeout: None,

@@ -111,7 +111,7 @@ impl<C: Ctx, E: Clone, T: EvalCached + Send + Sync + 'static> Init<C, E>
     const ARITY: Arity = T::ARITY;
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, _, _| {
+        Arc::new(|_, from, _| {
             let t = CachedArgs::<T> { cached: CachedVals::new(from), t: PhantomData };
             Ok(Box::new(t))
         })

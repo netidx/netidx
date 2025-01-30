@@ -18,7 +18,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Any {
     const ARITY: Arity = Arity::Any;
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Any)))
+        Arc::new(|_, _, _| Ok(Box::new(Any)))
     }
 }
 
@@ -44,7 +44,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Once {
     const ARITY: Arity = Arity::Exactly(1);
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Once { val: false })))
+        Arc::new(|_, _, _| Ok(Box::new(Once { val: false })))
     }
 }
 
@@ -453,57 +453,6 @@ impl EvalCached for IsaEv {
 
 type Isa = CachedArgs<IsaEv>;
 
-struct Eval<C: Ctx + 'static, E: Clone + 'static> {
-    node: Result<Node<C, E>, Value>,
-    scope: ModPath,
-}
-
-impl<C: Ctx, E: Clone> Init<C, E> for Eval<C, E> {
-    const NAME: &str = "eval";
-    const ARITY: Arity = Arity::Exactly(1);
-
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, scope, _| {
-            Ok(Box::new(Eval { node: Err(Value::Null), scope: scope.clone() }))
-        })
-    }
-}
-
-impl<C: Ctx, E: Clone> Apply<C, E> for Eval<C, E> {
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
-        event: &Event<E>,
-    ) -> Option<Value> {
-        match from[0].update(ctx, event) {
-            None => match &mut self.node {
-                Ok(node) => node.update(ctx, event),
-                Err(e) => Some(e.clone()),
-            },
-            Some(v) => {
-                self.node = match v {
-                    Value::String(s) => match s.parse::<Expr>() {
-                        Ok(spec) => Ok(Node::compile(ctx, &self.scope, spec)),
-                        Err(e) => {
-                            let e = format!("eval(src), error parsing {s}, {e}");
-                            Err(Value::Error(Chars::from(e)))
-                        }
-                    },
-                    v => {
-                        let e = format!("eval(src) expected 1 string argument, not {v}");
-                        Err(Value::Error(Chars::from(e)))
-                    }
-                };
-                match &mut self.node {
-                    Ok(node) => node.update(ctx, &Event::Init),
-                    Err(e) => Some(e.clone()),
-                }
-            }
-        }
-    }
-}
-
 struct Count {
     count: u64,
 }
@@ -513,7 +462,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Count {
     const ARITY: Arity = Arity::Any;
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Count { count: 0 })))
+        Arc::new(| _, _, _| Ok(Box::new(Count { count: 0 })))
     }
 }
 
@@ -542,7 +491,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Sample {
     const ARITY: Arity = Arity::Exactly(2);
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Sample { last: None })))
+        Arc::new(|_, _, _| Ok(Box::new(Sample { last: None })))
     }
 }
 
@@ -605,7 +554,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Uniq {
     const ARITY: Arity = Arity::Exactly(1);
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Uniq(None))))
+        Arc::new(|_, _, _| Ok(Box::new(Uniq(None))))
     }
 }
 
@@ -650,7 +599,6 @@ pub mod core {
     pub let filter_err = |e| 'filter_err
     pub let cast = |type, v| 'cast
     pub let isa = |type, v| 'isa
-    pub let eval = |src| 'eval
     pub let count = |@args| 'count
     pub let sample = |trigger, v| 'sample
     pub let mean = |@args| 'mean
@@ -677,7 +625,6 @@ pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<FilterErr>();
     ctx.register_builtin::<Cast>();
     ctx.register_builtin::<Isa>();
-    ctx.register_builtin::<Eval<C, E>>();
     ctx.register_builtin::<Count>();
     ctx.register_builtin::<Sample>();
     ctx.register_builtin::<Mean>();

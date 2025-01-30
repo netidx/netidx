@@ -2,7 +2,7 @@ use crate::{
     expr::{Expr, ExprId, ModPath},
     vm::{BindId, Ctx, Event, ExecCtx, Node},
 };
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use fxhash::FxHashMap;
 use netidx::{
     publisher::{Publisher, PublisherBuilder, Value},
@@ -100,7 +100,6 @@ impl Ctx for TestCtx {
     }
 
     fn ref_var(&mut self, id: BindId, ref_by: ExprId) {
-        dbg!((id, ref_by));
         let refs = self.by_ref.entry(id).or_default();
         if !refs.contains(&ref_by) {
             refs.push(ref_by);
@@ -112,7 +111,6 @@ impl Ctx for TestCtx {
     }
 
     fn set_var(&mut self, id: BindId, value: Value) {
-        dbg!((id, &value));
         if let Some(refs) = self.by_ref.get(&id) {
             match &**refs {
                 [] => (),
@@ -169,22 +167,29 @@ macro_rules! run {
         #[tokio::test(flavor = "current_thread")]
         async fn $name() -> Result<()> {
             let mut state = TestState::new().await?;
-            let mut n = Node::compile(&mut state.ctx, &ModPath::root(), $code.parse()?);
+            let mut n =
+                Node::compile(&mut state.ctx, &ModPath::root(), dbg!($code.parse()?));
             if let Some(e) = n.extract_err() {
-                bail!("compilation failed {e}")
+                if $pred(Err(anyhow!("compilation failed {}", dbg!(e)))) {
+                    return Ok(());
+                }
             }
-            assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
+            assert_eq!(dbg!(n.update(&mut state.ctx, &Event::Init)), None);
             let mut fin = false;
-            while state.ctx.user.var_updates.len() > 0 {
+            while dbg!(state.ctx.user.var_updates.len()) > 0 {
                 for (_, id, v) in mem::take(&mut state.ctx.user.var_updates) {
-                    match n.update(&mut state.ctx, &Event::Variable(id, v)) {
+                    match dbg!(n.update(&mut state.ctx, &Event::Variable(id, v))) {
                         None if !fin => (),
-                        Some(v) if $pred(&v) => fin = true,
+                        Some(v) if $pred(Ok(dbg!(&v))) => fin = true,
                         v => panic!("unexpected result {v:?}"),
                     }
                 }
             }
-            Ok(())
+            if !fin {
+                bail!("did not receive expected result")
+            } else {
+                Ok(())
+            }
         }
     };
 }
@@ -200,7 +205,10 @@ const SCOPE: &str = r#"
 }
 "#;
 
-run!(scope, SCOPE, |v| v == &Value::I64(85));
+run!(scope, SCOPE, |v: Result<&Value>| match v {
+    Ok(&Value::I64(85)) => true,
+    _ => false,
+});
 
 const CORE_USE: &str = r#"
 {
@@ -213,8 +221,8 @@ const CORE_USE: &str = r#"
 }
 "#;
 
-run!(core_use, CORE_USE, |v: &Value| match v {
-    Value::Array(a) if &**a == &[Value::I64(1), Value::I64(84)] => true,
+run!(core_use, CORE_USE, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) if &**a == &[Value::I64(1), Value::I64(84)] => true,
     _ => false,
 });
 
@@ -225,8 +233,8 @@ const NAME_MODPATH: &str = r#"
 }
 "#;
 
-run!(name_modpath, NAME_MODPATH, |v: &Value| match v {
-    Value::String(s) => &**s == "foo, bar, baz",
+run!(name_modpath, NAME_MODPATH, |v: Result<&Value>| match v {
+    Ok(Value::String(s)) => &**s == "foo, bar, baz",
     _ => false,
 });
 
@@ -238,4 +246,34 @@ const LAMBDA: &str = r#"
 }
 "#;
 
-run!(lambda, LAMBDA, |v| v == &Value::I64(20));
+run!(lambda, LAMBDA, |v: Result<&Value>| match v {
+    Ok(Value::I64(20)) => true,
+    _ => false,
+});
+
+const STATIC_SCOPE: &str = r#"
+{
+  let f = |x| x + y;
+  let y = 10;
+  f(10)
+}
+"#;
+
+run!(static_scope, STATIC_SCOPE, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const UNDEFINED: &str = r#"
+{
+  let y = 10;
+  let z = x + y;
+  let x = 10;
+  z
+}
+"#;
+
+run!(undefined, UNDEFINED, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
