@@ -229,3 +229,13 @@ run!(name_modpath, NAME_MODPATH, |v: &Value| match v {
     Value::String(s) => &**s == "foo, bar, baz",
     _ => false,
 });
+
+const LAMBDA: &str = r#"
+{
+  let y = 10;
+  let f = |x| x + y;
+  f(10)
+}
+"#;
+
+run!(lambda, LAMBDA, |v| v == &Value::I64(20));
