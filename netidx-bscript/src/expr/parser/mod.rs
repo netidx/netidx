@@ -10,9 +10,17 @@ use combine::{
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
-use netidx::{chars::Chars, path::Path, publisher::Value, utils::Either};
+use netidx::{
+    chars::Chars,
+    path::Path,
+    publisher::{Typ, Value},
+    utils::Either,
+};
 use netidx_netproto::value_parser::{escaped_string, value as netidx_value};
+use smallvec::SmallVec;
 use triomphe::Arc;
+
+use super::Pattern;
 
 #[cfg(test)]
 mod test;
@@ -52,6 +60,24 @@ where
     .map(Chars::from)
 }
 
+fn variant_tag<I>() -> impl Parser<I, Output = Typ>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    recognize((
+        take_while1(|c: char| c.is_alphabetic() && c.is_uppercase()),
+        take_while(|c: char| {
+            (c.is_alphanumeric() && (c.is_numeric() || c.is_lowercase())) || c == '_'
+        }),
+    ))
+    .then(|s: String| match s.parse::<Typ>() {
+        Err(_) => unexpected_any("invalid variant tag").left(),
+        Ok(typ) => value(typ).right(),
+    })
+}
+
 fn spfname<I>() -> impl Parser<I, Output = Chars>
 where
     I: RangeStream<Token = char>,
@@ -67,7 +93,8 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    sep_by1(fname(), string("::")).map(|v: Vec<Chars>| ModPath(Path::from_iter(v)))
+    sep_by1(fname(), string("::"))
+        .map(|v: SmallVec<[Chars; 4]>| ModPath(Path::from_iter(v)))
 }
 
 fn spmodpath<I>() -> impl Parser<I, Output = ModPath>
@@ -134,7 +161,7 @@ where
                 .map(Intp::Lit),
         ))),
     )
-    .map(|toks: Vec<Intp>| {
+    .map(|toks: SmallVec<[Intp; 8]>| {
         let mut argvec = vec![];
         toks.into_iter()
             .fold(None, |src, tok| -> Option<Expr> {
@@ -287,7 +314,7 @@ where
                 choice((attempt(spfname()), attempt(spstring("@args")).map(Chars::from))),
                 csep(),
             )
-            .then(|mut v: Vec<Chars>| {
+            .then(|mut v: SmallVec<[Chars; 4]>| {
                 match v.iter().enumerate().find(|(_, a)| &***a == "@args") {
                     None => value((v, false)).left(),
                     Some((i, _)) => {
@@ -454,6 +481,63 @@ parser! {
     }
 }
 
+fn typ_pattern<I>() -> impl Parser<I, Output = (Typ, Chars)>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with((variant_tag().skip(sptoken('(')), spfname().skip(sptoken(')'))))
+}
+
+fn pattern_guard<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spstring("if").with(space()).with(expr())
+}
+
+fn pattern<I>() -> impl Parser<I, Output = Pattern>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        attempt(sptoken('_')).map(|_| Pattern::Underscore),
+        attempt(
+            (spfname(), optional(space().with(pattern_guard()))).map(|(bind, guard)| {
+                Pattern::Typ { tag: Arc::from_iter([]), bind, guard }
+            }),
+        ),
+        attempt(
+            (
+                sep_by1(typ_pattern(), attempt(sptoken('|'))),
+                optional(space().with(pattern_guard())),
+            )
+                .then(
+                    |(binds, guard): (SmallVec<[(Typ, Chars); 4]>, Option<Expr>)| {
+                        let (tag, mut binds): (SmallVec<[Typ; 8]>, SmallVec<[Chars; 8]>) =
+                            binds.into_iter().unzip();
+                        binds.dedup();
+                        if binds.len() != 1 {
+                            unexpected_any("all binds must be the same").left()
+                        } else {
+                            value(Pattern::Typ {
+                                tag: Arc::from_iter(tag),
+                                bind: binds.pop().unwrap(),
+                                guard,
+                            })
+                            .right()
+                        }
+                    },
+                ),
+        ),
+    ))
+}
+
 fn select<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -461,13 +545,17 @@ where
     I::Range: Range,
 {
     string("select")
-        .with(between(
-            sptoken('{'),
-            sptoken('}'),
-            sep_by1((expr(), spstring("=>").with(expr())), csep()),
+        .with(space())
+        .with((
+            expr(),
+            between(
+                sptoken('{'),
+                sptoken('}'),
+                sep_by1((pattern(), spstring("=>").with(expr())), csep()),
+            ),
         ))
-        .map(|arms: Vec<(Expr, Expr)>| {
-            ExprKind::Select { arms: Arc::from(arms) }.to_expr()
+        .map(|(arg, arms): (Expr, Vec<(Pattern, Expr)>)| {
+            ExprKind::Select { arg: Arc::new(arg), arms: Arc::from(arms) }.to_expr()
         })
 }
 

@@ -1,8 +1,5 @@
 use netidx::{
-    chars::Chars,
-    path::Path,
-    subscriber::Value,
-    utils::{self, Either},
+    chars::Chars, path::Path, publisher::Typ, subscriber::Value, utils::{self, Either}
 };
 use regex::Regex;
 use serde::{
@@ -99,6 +96,16 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
 }
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
+pub enum Pattern {
+    Underscore,
+    Typ {
+        tag: Arc<[Typ]>,
+        bind: Chars,
+        guard: Option<Expr>
+    }
+}
+
+#[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum ExprKind {
     Constant(Value),
     Module { name: Chars, export: bool, value: Option<Arc<[Expr]>> },
@@ -109,7 +116,7 @@ pub enum ExprKind {
     Connect { name: ModPath, value: Arc<Expr> },
     Lambda { args: Arc<[Chars]>, vargs: bool, body: Either<Arc<Expr>, Chars> },
     Apply { args: Arc<[Expr]>, function: ModPath },
-    Select { arms: Arc<[(Expr, Expr)]> },
+    Select { arg: Arc<Expr>, arms: Arc<[(Pattern, Expr)]> },
     Eq { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Ne { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Lt { lhs: Arc<Expr>, rhs: Arc<Expr> },
