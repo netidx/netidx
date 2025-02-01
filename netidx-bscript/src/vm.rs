@@ -1,5 +1,5 @@
 use crate::{
-    expr::{Expr, ExprId, ExprKind, ModPath},
+    expr::{Expr, ExprId, ExprKind, ModPath, Pattern},
     stdfn,
 };
 use anyhow::{bail, Result};
@@ -10,6 +10,7 @@ use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::{
     chars::Chars,
     path::Path,
+    publisher::Typ,
     subscriber::{Dval, SubId, UpdatesFlags, Value},
     utils::Either,
 };
@@ -107,6 +108,7 @@ atomic_id!(TimerId);
 atomic_id!(RpcCallId);
 atomic_id!(BindId);
 atomic_id!(LambdaId);
+atomic_id!(SelectId);
 
 #[derive(Clone, Debug)]
 pub enum Event<E> {
@@ -441,6 +443,80 @@ impl<C: Ctx + 'static, E: Clone + 'static> Cached<C, E> {
     }
 }
 
+pub enum PatternNode<C: Ctx + 'static, E: Clone + 'static> {
+    Underscore,
+    Typ { tag: Arc<[Typ]>, bind: BindId, guard: Option<Cached<C, E>> },
+}
+
+impl<C: Ctx + 'static, E: Clone + 'static> PatternNode<C, E> {
+    fn is_err(&self) -> bool {
+        match self {
+            PatternNode::Underscore
+            | PatternNode::Typ { tag: _, bind: _, guard: None } => false,
+            PatternNode::Typ { tag: _, bind: _, guard: Some(c) } => c.node.is_err(),
+        }
+    }
+
+    fn extract_guard(self) -> Option<Node<C, E>> {
+        match self {
+            PatternNode::Typ { tag: _, bind: _, guard: Some(g) } => Some(g.node),
+            PatternNode::Underscore
+            | PatternNode::Typ { tag: _, bind: _, guard: None } => None,
+        }
+    }
+
+    fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: &Pattern,
+        scope: &ModPath,
+        top_id: ExprId,
+    ) -> Self {
+        match spec {
+            Pattern::Underscore => PatternNode::Underscore,
+            Pattern::Typ { tag, bind, guard } => {
+                let k = CompactString::from(&**bind);
+                let id = ctx
+                    .env
+                    .binds
+                    .get_or_default_cow(scope.clone())
+                    .get_or_default_cow(k)
+                    .id;
+                let guard = guard.as_ref().map(|g| {
+                    Cached::new(Node::compile_int(ctx, g.clone(), &scope, top_id))
+                });
+                PatternNode::Typ { tag: tag.clone(), bind: id, guard }
+            }
+        }
+    }
+
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> bool {
+        match self {
+            PatternNode::Underscore
+            | PatternNode::Typ { tag: _, bind: _, guard: None } => false,
+            PatternNode::Typ { tag: _, bind: _, guard: Some(g) } => g.update(ctx, event),
+        }
+    }
+
+    fn is_match(&mut self, arg: &Value) -> (bool, Option<BindId>) {
+        match self {
+            PatternNode::Underscore => (true, None),
+            PatternNode::Typ { tag, bind, guard: None } => {
+                let typ = Typ::get(arg);
+                (tag.len() == 0 || tag.contains(&typ), Some(*bind))
+            }
+            PatternNode::Typ { tag, bind, guard: Some(g) } => {
+                let typ = Typ::get(arg);
+                let is_match = (tag.len() == 0 || tag.contains(&typ))
+                    && g.cached
+                        .as_ref()
+                        .and_then(|v| v.clone().get_as::<bool>())
+                        .unwrap_or(false);
+                (is_match, Some(*bind))
+            }
+        }
+    }
+}
+
 pub enum NodeKind<C: Ctx + 'static, E: Clone + 'static> {
     Constant(Value),
     Module(Vec<Node<C, E>>),
@@ -450,22 +526,70 @@ pub enum NodeKind<C: Ctx + 'static, E: Clone + 'static> {
     Ref(BindId),
     Connect(BindId, Box<Node<C, E>>),
     Lambda(InitFn<C, E>),
-    Apply { args: Vec<Node<C, E>>, function: Box<dyn Apply<C, E> + Send + Sync> },
-    Select { selected: Option<usize>, arms: Vec<(Cached<C, E>, Cached<C, E>)> },
-    Eq { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    Ne { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    Lt { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    Gt { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    Lte { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    Gte { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    And { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    Or { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    Not { node: Box<Cached<C, E>> },
-    Add { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    Sub { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    Mul { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    Div { lhs: Box<Cached<C, E>>, rhs: Box<Cached<C, E>> },
-    Error { error: Option<Chars>, children: Vec<Node<C, E>> },
+    Apply {
+        args: Vec<Node<C, E>>,
+        function: Box<dyn Apply<C, E> + Send + Sync>,
+    },
+    Select {
+        selected: Option<usize>,
+        arg: Box<Cached<C, E>>,
+        arms: Vec<(PatternNode<C, E>, Cached<C, E>)>,
+    },
+    Eq {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    Ne {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    Lt {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    Gt {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    Lte {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    Gte {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    And {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    Or {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    Not {
+        node: Box<Cached<C, E>>,
+    },
+    Add {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    Sub {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    Mul {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    Div {
+        lhs: Box<Cached<C, E>>,
+        rhs: Box<Cached<C, E>>,
+    },
+    Error {
+        error: Option<Chars>,
+        children: Vec<Node<C, E>>,
+    },
 }
 
 pub struct Node<C: Ctx + 'static, E: Clone + 'static> {
@@ -917,21 +1041,34 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                     },
                 }
             }
-            Expr { kind: ExprKind::Select { arms }, id: _ } => {
+            Expr { kind: ExprKind::Select { arg, arms }, id: _ } => {
+                let arg = Node::compile_int(ctx, (**arg).clone(), scope, top_id);
+                if let Some(e) = arg.extract_err() {
+                    return error!("{e}");
+                }
+                let arg = Box::new(Cached::new(arg));
                 let (error, arms) =
-                    arms.iter().fold((false, vec![]), |(e, mut nodes), (cspec, spec)| {
-                        let cn = Node::compile_int(ctx, cspec.clone(), scope, top_id);
-                        let n = Node::compile_int(ctx, spec.clone(), scope, top_id);
-                        let e = e || cn.is_err() || n.is_err();
-                        nodes.push((Cached::new(cn), Cached::new(n)));
+                    arms.iter().fold((false, vec![]), |(e, mut nodes), (pat, spec)| {
+                        let scope = ModPath(
+                            scope.append(&format_compact!("sel{}", SelectId::new().0)),
+                        );
+                        let pat = PatternNode::compile(ctx, pat, &scope, top_id);
+                        let n = Node::compile_int(ctx, spec.clone(), &scope, top_id);
+                        let e = e || pat.is_err() || n.is_err();
+                        nodes.push((pat, Cached::new(n)));
                         (e, nodes)
                     });
                 if error {
                     let mut v = vec![];
-                    arms.into_iter().for_each(|(cn, n)| v.extend([cn.node, n.node]));
+                    for (pat, n) in arms {
+                        if let Some(g) = pat.extract_guard() {
+                            v.push(g);
+                        }
+                        v.push(n.node)
+                    }
                     return error!("", v);
                 }
-                Node { spec, kind: NodeKind::Select { selected: None, arms } }
+                Node { spec, kind: NodeKind::Select { selected: None, arg, arms } }
             }
             Expr { kind: ExprKind::Not { expr }, id: _ } => {
                 let node = Node::compile_int(ctx, (**expr).clone(), scope, top_id);

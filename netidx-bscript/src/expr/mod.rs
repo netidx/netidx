@@ -1,4 +1,3 @@
-use arcstr::ArcStr;
 use netidx::{
     chars::Chars,
     path::Path,
@@ -577,18 +576,6 @@ impl Expr {
     pub fn new(kind: ExprKind) -> Self {
         Expr { id: ExprId::new(), kind }
     }
-
-    /* CR estokes: reevaluate this
-    pub fn is_fn(&self) -> bool {
-        match &self.kind {
-            ExprKind::Constant(Value::String(c)) => VNAME.is_match(&*c),
-            ExprKind::Constant(_)
-            | ExprKind::Bind { .. }
-            | ExprKind::Ref { .. }
-            | ExprKind::Apply { .. } => false,
-        }
-    }
-    */
 
     pub fn to_string_pretty(&self, col_limit: usize) -> String {
         self.kind.to_string_pretty(col_limit)
