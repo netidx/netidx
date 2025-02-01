@@ -1,10 +1,9 @@
 use crate::{
     err, errf,
-    expr::{Expr, ModPath},
+    expr::Expr,
     stdfn::{CachedArgs, CachedVals, EvalCached},
     vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node},
 };
-use anyhow::Result;
 use netidx::{
     chars::Chars,
     subscriber::{Typ, Value},
@@ -462,7 +461,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Count {
     const ARITY: Arity = Arity::Any;
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(| _, _, _| Ok(Box::new(Count { count: 0 })))
+        Arc::new(|_, _, _| Ok(Box::new(Count { count: 0 })))
     }
 }
 

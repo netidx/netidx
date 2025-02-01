@@ -908,7 +908,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 match ctx.env.lookup_bind(scope, name) {
                     None => error!("{name} not defined"),
                     Some((_, bind)) => match &bind.fun {
-                        Some(_) => error!("{name} is a function"),
+                        Some(init) => Node { spec, kind: NodeKind::Lambda(init.clone()) },
                         None => {
                             let id = bind.id;
                             ctx.user.ref_var(id, top_id);

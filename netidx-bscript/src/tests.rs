@@ -277,3 +277,16 @@ run!(undefined, UNDEFINED, |v: Result<&Value>| match v {
     Err(_) => true,
     _ => false,
 });
+
+const FIRST_CLASS_LAMBDAS: &str = r#"
+{
+  let doit = |x| x + 1;
+  let g = |f, y| f(y) + 1;
+  g(doit, 1)
+}
+"#;
+
+run!(first_class_lambdas, FIRST_CLASS_LAMBDAS, |v: Result<&Value>| match v {
+    Ok(Value::I64(3)) => true,
+    _ => false,
+});
