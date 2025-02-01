@@ -1208,7 +1208,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             NodeKind::Sub { lhs, rhs } => binary_op_clone!(-, lhs, rhs),
             NodeKind::Mul { lhs, rhs } => binary_op_clone!(*, lhs, rhs),
             NodeKind::Div { lhs, rhs } => binary_op_clone!(/, lhs, rhs),
-            NodeKind::Select { selected, arms } => {
+            NodeKind::Select { selected, arg, arms } => {
                 let mut val_up: SmallVec<[bool; 16]> = smallvec![];
                 for (cond, val) in arms.iter_mut() {
                     cond.update(ctx, event);
