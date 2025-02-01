@@ -21,11 +21,12 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     convert, fmt,
     hash::{BuildHasher, Hash},
+    hint::unreachable_unchecked,
     iter, mem,
     num::Wrapping,
     ops::{Add, Div, Mul, Not, Sub},
     panic::{catch_unwind, AssertUnwindSafe},
-    result,
+    ptr, result,
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -323,53 +324,133 @@ impl fmt::Display for Typ {
     }
 }
 
-// This enum is limited to 0x3F cases, because the high 2 bits of the
-// tag are reserved for zero cost wrapper types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// this type is divided into two subtypes.
+// if the high bit of the discrimant is not set, then it is Copy
+// if the high bit of the discrimant is set, then it is not Copy
+//
+// clone will check this bit when deciding what to do, so it is
+// essential that when adding variants you set this bit correctly. If
+// adding a non copy type, you will also need to update the
+// implementation of clone to match and delegate the clone operation
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
+#[repr(u8)]
 pub enum Value {
     /// full 4 byte u32
-    U32(u32),
+    U32(u32) = 0x01,
     /// LEB128 varint, 1 - 5 bytes depending on value
-    V32(u32),
+    V32(u32) = 0x02,
     /// full 4 byte i32
-    I32(i32),
+    I32(i32) = 0x03,
     /// LEB128 varint zigzag encoded, 1 - 5 bytes depending on abs(value)
-    Z32(i32),
+    Z32(i32) = 0x04,
     /// full 8 byte u64
-    U64(u64),
+    U64(u64) = 0x05,
     /// LEB128 varint, 1 - 10 bytes depending on value
-    V64(u64),
+    V64(u64) = 0x06,
     /// full 8 byte i64
-    I64(i64),
+    I64(i64) = 0x07,
     /// LEB128 varint zigzag encoded, 1 - 10 bytes depending on abs(value)
-    Z64(i64),
+    Z64(i64) = 0x08,
     /// 4 byte ieee754 single precision float
-    F32(f32),
+    F32(f32) = 0x09,
     /// 8 byte ieee754 double precision float
-    F64(f64),
-    /// UTC timestamp
-    DateTime(DateTime<Utc>),
-    /// Duration
-    Duration(Duration),
-    /// unicode string, zero copy decode
-    String(Chars),
-    /// byte array, zero copy decode
-    Bytes(Bytes),
-    /// boolean true
-    True,
-    /// boolean false
-    False,
-    /// Empty value
-    Null,
-    /// An explicit ok
-    Ok,
-    /// An explicit error
-    Error(Chars),
-    /// An array of values
-    Array(Arc<[Value]>),
+    F64(f64) = 0x0a,
     /// fixed point decimal type
-    Decimal(Decimal),
+    Decimal(Decimal) = 0x0b,
+    /// UTC timestamp
+    DateTime(DateTime<Utc>) = 0x0c,
+    /// Duration
+    Duration(Duration) = 0x0d,
+    /// boolean true
+    True = 0x0e,
+    /// boolean false
+    False = 0x0f,
+    /// Empty value
+    Null = 0x10,
+    /// An explicit ok
+    Ok = 0x11,
+    /// unicode string
+    String(Chars) = 0x80,
+    /// byte array
+    Bytes(Bytes) = 0x81,
+    /// An explicit error
+    Error(Chars) = 0x82,
+    /// An array of values
+    Array(Arc<[Value]>) = 0x83,
+}
+
+// This will fail to compile if any variant that is supposed to be
+// Copy changes to not Copy. It is never intended to be called, and it
+// will panic if it ever is.
+fn _assert_variants_are_copy(v: &Value) -> Value {
+    let i = match v {
+        // copy types
+        Value::U32(i) | Value::V32(i) => Value::U32(*i),
+        Value::I32(i) | Value::Z32(i) => Value::I32(*i),
+        Value::U64(i) | Value::V64(i) => Value::U64(*i),
+        Value::I64(i) | Value::Z64(i) => Value::I64(*i),
+        Value::F32(i) => Value::F32(*i),
+        Value::F64(i) => Value::F64(*i),
+        Value::Decimal(i) => Value::Decimal(*i),
+        Value::DateTime(i) => Value::DateTime(*i),
+        Value::Duration(i) => Value::Duration(*i),
+        Value::True => Value::True,
+        Value::False => Value::False,
+        Value::Null => Value::Null,
+        Value::Ok => Value::Ok,
+
+        // not copy types
+        Value::String(i) => Value::String(i.clone()),
+        Value::Bytes(i) => Value::Bytes(i.clone()),
+        Value::Error(i) => Value::Error(i.clone()),
+        Value::Array(i) => Value::Array(i.clone()),
+    };
+    panic!("{i}")
+}
+
+// CR estokes: evaluate the performance implications of this new repr
+// which enables this optimized clone implementation
+impl Clone for Value {
+    fn clone(&self) -> Self {
+        if self.is_copy() {
+            // if the high bit is not set the type is copy
+            let mut t = Self::U32(0);
+            unsafe { ptr::copy_nonoverlapping(self, &mut t, 1) };
+            t
+        } else {
+            // otherwise we must delegate to the clone operation
+            match self {
+                Self::String(c) => Self::String(c.clone()),
+                Self::Bytes(b) => Self::Bytes(b.clone()),
+                Self::Error(e) => Self::Error(e.clone()),
+                Self::Array(a) => Self::Array(a.clone()),
+                _ => unsafe { unreachable_unchecked() },
+            }
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        if self.is_copy() {
+            unsafe { ptr::copy_nonoverlapping(source, self, 1) };
+        } else {
+            match source {
+                Self::String(c) => {
+                    *self = Self::String(c.clone());
+                }
+                Self::Bytes(b) => {
+                    *self = Self::Bytes(b.clone());
+                }
+                Self::Error(e) => {
+                    *self = Self::Error(e.clone());
+                }
+                Self::Array(a) => {
+                    *self = Self::Array(a.clone());
+                }
+                _ => unsafe { unreachable_unchecked() },
+            }
+        }
+    }
 }
 
 impl Hash for Value {
@@ -1047,6 +1128,14 @@ pub trait FromValue {
 }
 
 impl Value {
+    pub fn discriminant(&self) -> u8 {
+        unsafe { *<*const _>::from(self).cast::<u8>() }
+    }
+
+    pub fn is_copy(&self) -> bool {
+        self.discriminant() & 0x80 == 0
+    }
+
     pub fn to_string_naked(&self) -> String {
         struct WVal<'a>(&'a Value);
         impl<'a> fmt::Display for WVal<'a> {

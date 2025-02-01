@@ -1,5 +1,10 @@
+use arcstr::ArcStr;
 use netidx::{
-    chars::Chars, path::Path, publisher::Typ, subscriber::Value, utils::{self, Either}
+    chars::Chars,
+    path::Path,
+    publisher::Typ,
+    subscriber::Value,
+    utils::{self, Either},
 };
 use regex::Regex;
 use serde::{
@@ -16,9 +21,9 @@ use std::{
 };
 use triomphe::Arc;
 
+pub mod parser;
 #[cfg(test)]
 mod test;
-pub mod parser;
 
 lazy_static! {
     pub static ref VNAME: Regex = Regex::new("^[a-z][a-z0-9_]*$").unwrap();
@@ -98,11 +103,7 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum Pattern {
     Underscore,
-    Typ {
-        tag: Arc<[Typ]>,
-        bind: Chars,
-        guard: Option<Expr>
-    }
+    Typ { tag: Arc<[Typ]>, bind: Chars, guard: Option<Expr> },
 }
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
@@ -150,30 +151,12 @@ impl ExprKind {
         newline: bool,
         buf: &mut String,
     ) -> fmt::Result {
-        fn push_indent(indent: usize, buf: &mut String) {
-            buf.extend((0..indent).into_iter().map(|_| ' '));
-        }
-        fn pretty_print_exprs(
-            indent: usize,
-            limit: usize,
-            buf: &mut String,
-            exprs: &[Expr],
-            open: &str,
-            close: &str,
-            sep: &str,
-        ) -> fmt::Result {
-            writeln!(buf, "{}", open)?;
-            for i in 0..exprs.len() {
-                exprs[i].kind.pretty_print(indent + 2, limit, true, buf)?;
-                if i < exprs.len() - 1 {
-                    if let Some('\n') = buf.chars().next_back() {
-                        buf.pop(); // pop the newline
-                    }
-                    writeln!(buf, "{}", sep)?
+        macro_rules! kill_newline {
+            ($buf:expr) => {
+                if let Some('\n') = $buf.chars().next_back() {
+                    $buf.pop();
                 }
-            }
-            push_indent(indent, buf);
-            writeln!(buf, "{}", close)
+            };
         }
         macro_rules! try_single_line {
             ($trunc:ident) => {{
@@ -203,6 +186,29 @@ impl ExprKind {
                 $rhs.kind.pretty_print(indent, limit, true, buf)?;
                 write!(buf, ")")
             }};
+        }
+        fn push_indent(indent: usize, buf: &mut String) {
+            buf.extend((0..indent).into_iter().map(|_| ' '));
+        }
+        fn pretty_print_exprs(
+            indent: usize,
+            limit: usize,
+            buf: &mut String,
+            exprs: &[Expr],
+            open: &str,
+            close: &str,
+            sep: &str,
+        ) -> fmt::Result {
+            writeln!(buf, "{}", open)?;
+            for i in 0..exprs.len() {
+                exprs[i].kind.pretty_print(indent + 2, limit, true, buf)?;
+                if i < exprs.len() - 1 {
+                    kill_newline!(buf);
+                    writeln!(buf, "{}", sep)?
+                }
+            }
+            push_indent(indent, buf);
+            writeln!(buf, "{}", close)
         }
         let exp = |export| if export { "pub " } else { "" };
         match self {
@@ -272,20 +278,53 @@ impl ExprKind {
                     },
                 }
             }
-            ExprKind::Select { arms } => {
+            ExprKind::Select { arg, arms } => {
                 try_single_line!(true);
-                writeln!(buf, "select {{")?;
-                for (i, (pred, expr)) in arms.iter().enumerate() {
-                    pred.kind.pretty_print(indent + 2, limit, true, buf)?;
+                write!(buf, "select ")?;
+                arg.kind.pretty_print(indent, limit, false, buf)?;
+                kill_newline!(buf);
+                writeln!(buf, " {{")?;
+                for (i, (pat, expr)) in arms.iter().enumerate() {
+                    match pat {
+                        Pattern::Underscore => write!(buf, "_ ")?,
+                        Pattern::Typ { tag, bind, guard } => {
+                            let len = tag.len();
+                            for (i, tag) in tag.iter().enumerate() {
+                                if i == 0 {
+                                    write!(buf, "{tag:?}({bind})")?;
+                                    if len > 1 {
+                                        writeln!(buf, "")?;
+                                    }
+                                } else {
+                                    if i < len - 1 {
+                                        writeln!(buf, "| {tag:?}({bind})")?;
+                                    } else {
+                                        write!(buf, "| {tag:?}({bind})")?;
+                                    }
+                                }
+                            }
+                            if let Some(guard) = guard {
+                                write!(buf, "if ")?;
+                                guard.kind.pretty_print(indent + 2, limit, false, buf)?;
+                                write!(buf, " ")?;
+                            }
+                        }
+                    }
                     write!(buf, "=> ")?;
                     if let ExprKind::Do { exprs } = &expr.kind {
                         let term = if i < arms.len() - 1 { "}," } else { "}" };
-                        pretty_print_exprs(indent, limit, buf, exprs, "{", term, ";")?;
+                        pretty_print_exprs(
+                            indent + 2,
+                            limit,
+                            buf,
+                            exprs,
+                            "{",
+                            term,
+                            ";",
+                        )?;
                     } else if i < arms.len() - 1 {
-                        expr.kind.pretty_print(indent, limit, false, buf)?;
-                        if let Some('\n') = buf.chars().next_back() {
-                            buf.pop();
-                        }
+                        expr.kind.pretty_print(indent + 2, limit, false, buf)?;
+                        kill_newline!(buf);
                         writeln!(buf, ",")?
                     } else {
                         expr.kind.pretty_print(indent, limit, false, buf)?;
@@ -415,10 +454,24 @@ impl fmt::Display for ExprKind {
                     print_exprs(f, &**args, "(", ")", ", ")
                 }
             }
-            ExprKind::Select { arms } => {
-                write!(f, "select {{")?;
-                for (i, (lhs, rhs)) in arms.iter().enumerate() {
-                    write!(f, "{lhs} => {rhs}")?;
+            ExprKind::Select { arg, arms } => {
+                write!(f, "select {arg} {{")?;
+                for (i, (pat, rhs)) in arms.iter().enumerate() {
+                    match pat {
+                        Pattern::Underscore => write!(f, "_ => {rhs}")?,
+                        Pattern::Typ { tag, bind, guard } => {
+                            for (i, t) in tag.iter().enumerate() {
+                                write!(f, "{t:?}({bind})")?;
+                                if i < tag.len() - 1 {
+                                    write!(f, " | ")?
+                                }
+                            }
+                            if let Some(guard) = guard {
+                                write!(f, " if {guard}")?
+                            }
+                            write!(f, " => {rhs}")?
+                        }
+                    }
                     if i < arms.len() - 1 {
                         write!(f, ", ")?
                     }

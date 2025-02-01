@@ -75,7 +75,7 @@ sourceview4 = "0.5"
 structopt = "0.3"
 tokio-rustls = "0.26"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "fs", "sync", "process", "macros", "signal", "io-std"] }
-triomphe = "0.1"
+triomphe = { version = "0.1" }
 uuid = { version = "1", features = ["v4", "serde"] }
 warp = { version = "0.3", features = ["tls"] }
 webpki = "0.22"

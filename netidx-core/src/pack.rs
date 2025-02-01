@@ -313,6 +313,33 @@ impl Pack for Arc<str> {
     }
 }
 
+impl Pack for triomphe::Arc<str> {
+    fn encoded_len(&self) -> usize {
+        let s: &str = &*self;
+        let len = s.len();
+        varint_len(len as u64) + len
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        let s: &str = &*self;
+        encode_varint(s.len() as u64, buf);
+        Ok(buf.put_slice(self.as_bytes()))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let len = decode_varint(buf)? as usize;
+        if len > buf.remaining() {
+            return Err(PackError::TooBig);
+        }
+        let mut v = vec![0; len];
+        buf.copy_to_slice(&mut v);
+        match String::from_utf8(v) {
+            Ok(s) => Ok(triomphe::Arc::from(s)),
+            Err(_) => Err(PackError::InvalidFormat),
+        }
+    }
+}
+
 impl Pack for ArcStr {
     fn encoded_len(&self) -> usize {
         let s: &str = &*self;
@@ -837,6 +864,48 @@ impl<T: Pack> Pack for Vec<T> {
             self.push(<T as Pack>::decode(buf)?);
         }
         Ok(())
+    }
+}
+
+impl<T: Pack> Pack for Arc<[T]> {
+    fn encoded_len(&self) -> usize {
+        self.iter().fold(varint_len(self.len() as u64), |len, t| {
+            len + <T as Pack>::encoded_len(t)
+        })
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(self.len() as u64, buf);
+        for t in &**self {
+            <T as Pack>::encode(t, buf)?
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let v = <Vec<T> as Pack>::decode(buf)?;
+        Ok(Arc::from(v))
+    }
+}
+
+impl<T: Pack> Pack for triomphe::Arc<[T]> {
+    fn encoded_len(&self) -> usize {
+        self.iter().fold(varint_len(self.len() as u64), |len, t| {
+            len + <T as Pack>::encoded_len(t)
+        })
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(self.len() as u64, buf);
+        for t in &**self {
+            <T as Pack>::encode(t, buf)?
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let v = <Vec<T> as Pack>::decode(buf)?;
+        Ok(triomphe::Arc::from(v))
     }
 }
 
@@ -1470,6 +1539,20 @@ impl<T: Pack> Pack for Arc<T> {
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         Ok(Arc::new(Pack::decode(buf)?))
+    }
+}
+
+impl<T: Pack> Pack for triomphe::Arc<T> {
+    fn encoded_len(&self) -> usize {
+        Pack::encoded_len(&**self)
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        Pack::encode(&**self, buf)
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        Ok(triomphe::Arc::new(Pack::decode(buf)?))
     }
 }
 
