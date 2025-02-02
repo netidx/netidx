@@ -2322,17 +2322,19 @@ impl<T: FromValue, U: FromValue> FromValue for (T, U) {
                 let v0 = $elts[0].clone().cast_to::<T>()?;
                 let v1 = $elts[1].clone().cast_to::<U>()?;
                 Ok((v0, v1))
-            }}
+            }};
         }
         match v {
             Value::Array(a) if a.len() == 2 => convert!(a),
             Value::Array(_) => bail!("not a tuple"),
-            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-                Value::Array(a) if a.len() == 2 => convert!(a),
-                Value::Array(_) => bail!("not a tuple"),
-                _ => bail!("can't cast"),
-            })
-        }        
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) if a.len() == 2 => convert!(a),
+                    Value::Array(_) => bail!("not a tuple"),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2357,15 +2359,25 @@ impl<T: convert::Into<Value>, U: convert::Into<Value>> convert::From<(T, U)> for
 
 impl<T: FromValue, U: FromValue, V: FromValue> FromValue for (T, U, V) {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) if elts.len() == 3 => {
-                let v0 = elts[0].clone().cast_to::<T>()?;
-                let v1 = elts[1].clone().cast_to::<U>()?;
-                let v2 = elts[2].clone().cast_to::<V>()?;
+        macro_rules! convert {
+            ($elts:expr) => {{
+                let v0 = $elts[0].clone().cast_to::<T>()?;
+                let v1 = $elts[1].clone().cast_to::<U>()?;
+                let v2 = $elts[2].clone().cast_to::<V>()?;
                 Ok((v0, v1, v2))
-            }
-            _ => bail!("can't cast"),
-        })
+            }};
+        }
+        match v {
+            Value::Array(a) if a.len() == 3 => convert!(a),
+            Value::Array(_) => bail!("not a triple"),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) if a.len() == 3 => convert!(a),
+                    Value::Array(_) => bail!("not a triple"),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2388,8 +2400,7 @@ impl<T: convert::Into<Value>, U: convert::Into<Value>, V: convert::Into<Value>>
         let v0 = t.into();
         let v1 = u.into();
         let v2 = v.into();
-        let elts = Arc::from([v0, v1, v2]);
-        Value::Array(elts)
+        Value::Array([v0, v1, v2].into())
     }
 }
 
