@@ -813,7 +813,7 @@ impl<T: Pack, const S: usize> Pack for [T; S] {
     }
 }
 
-const MAX_VEC: usize = 2 * 1024 * 1024 * 1024;
+pub const MAX_VEC: usize = 2 * 1024 * 1024 * 1024;
 
 impl<T: Pack> Pack for Vec<T> {
     fn encoded_len(&self) -> usize {

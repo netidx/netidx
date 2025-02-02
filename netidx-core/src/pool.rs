@@ -8,14 +8,7 @@ use parking_lot::Mutex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use indexmap::{IndexMap, IndexSet};
 use std::{
-    borrow::Borrow,
-    cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
-    collections::{HashMap, HashSet, VecDeque},
-    default::Default,
-    fmt::Debug,
-    hash::{BuildHasher, Hash, Hasher},
-    ops::{Deref, DerefMut},
-    sync::{Arc, Weak},
+    borrow::Borrow, cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd}, collections::{HashMap, HashSet, VecDeque}, default::Default, fmt::Debug, hash::{BuildHasher, Hash, Hasher}, hint::unreachable_unchecked, mem::ManuallyDrop, ops::{Deref, DerefMut}, sync::{Arc, Weak}
 };
 use triomphe::Arc as TArc;
 
@@ -269,16 +262,16 @@ impl<T: Poolable + Send + 'static> Pooled<T> {
     #[inline(always)]
     fn get(&self) -> &T {
         match &self.object {
-            Some(ref t) => t,
-            None => unreachable!(),
+            Some(t) => t,
+            None => unsafe { unreachable_unchecked() },
         }
     }
 
     #[inline(always)]
     fn get_mut(&mut self) -> &mut T {
         match &mut self.object {
-            Some(ref mut t) => t,
-            None => unreachable!(),
+            Some(t) => t,
+            None => unsafe { unreachable_unchecked() },
         }
     }
 }
@@ -331,8 +324,19 @@ impl<T: Poolable + Send + 'static> Pooled<T> {
         Pooled { pool: Weak::new(), object: Some(t) }
     }
 
-    pub fn detach(mut self) -> T {
-        self.object.take().unwrap()
+    /// assign the `Pooled` to the specified pool. When it is dropped
+    /// it will be placed in `pool` instead of the pool it was
+    /// originally allocated from. If an orphan is assigned a pool it
+    /// will no longer be orphaned.
+    pub fn assign(&mut self, pool: &Pool<T>) {
+        self.pool = Arc::downgrade(&pool.0);
+    }
+
+    /// detach the object from the pool, returning it.
+    pub fn detach(self) -> T {
+        let mut t = ManuallyDrop::new(self);
+        t.pool = Weak::new();
+        t.object.take().unwrap()
     }
 }
 

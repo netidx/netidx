@@ -28,11 +28,11 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     ptr, result,
     str::FromStr,
-    sync::Arc,
     time::Duration,
 };
+use triomphe::Arc;
 
-use crate::value_parser;
+use crate::{pbuf::PBytes, value_parser};
 
 type Result<T> = result::Result<T, PackError>;
 
@@ -371,11 +371,11 @@ pub enum Value {
     /// An explicit ok
     Ok = 0x11,
     /// unicode string
-    String(Chars) = 0x80,
+    String(ArcStr) = 0x80,
     /// byte array
-    Bytes(Bytes) = 0x81,
+    Bytes(PBytes) = 0x81,
     /// An explicit error
-    Error(Chars) = 0x82,
+    Error(ArcStr) = 0x82,
     /// An array of values
     Array(Arc<[Value]>) = 0x83,
 }
@@ -414,18 +414,30 @@ fn _assert_variants_are_copy(v: &Value) -> Value {
 impl Clone for Value {
     fn clone(&self) -> Self {
         if self.is_copy() {
-            // if the high bit is not set the type is copy
-            let mut t = Self::U32(0);
-            unsafe { ptr::copy_nonoverlapping(self, &mut t, 1) };
-            t
+            unsafe { ptr::read(self) }
         } else {
-            // otherwise we must delegate to the clone operation
             match self {
                 Self::String(c) => Self::String(c.clone()),
                 Self::Bytes(b) => Self::Bytes(b.clone()),
                 Self::Error(e) => Self::Error(e.clone()),
                 Self::Array(a) => Self::Array(a.clone()),
-                _ => unsafe { unreachable_unchecked() },
+                Value::U32(_)
+                | Value::V32(_)
+                | Value::I32(_)
+                | Value::Z32(_)
+                | Value::U64(_)
+                | Value::V64(_)
+                | Value::I64(_)
+                | Value::Z64(_)
+                | Value::F32(_)
+                | Value::F64(_)
+                | Value::Decimal(_)
+                | Value::DateTime(_)
+                | Value::Duration(_)
+                | Value::True
+                | Value::False
+                | Value::Null
+                | Value::Ok => unsafe { unreachable_unchecked() },
             }
         }
     }
@@ -447,7 +459,23 @@ impl Clone for Value {
                 Self::Array(a) => {
                     *self = Self::Array(a.clone());
                 }
-                _ => unsafe { unreachable_unchecked() },
+                Value::U32(_)
+                | Value::V32(_)
+                | Value::I32(_)
+                | Value::Z32(_)
+                | Value::U64(_)
+                | Value::V64(_)
+                | Value::I64(_)
+                | Value::Z64(_)
+                | Value::F32(_)
+                | Value::F64(_)
+                | Value::Decimal(_)
+                | Value::DateTime(_)
+                | Value::Duration(_)
+                | Value::True
+                | Value::False
+                | Value::Null
+                | Value::Ok => unsafe { unreachable_unchecked() },
             }
         }
     }

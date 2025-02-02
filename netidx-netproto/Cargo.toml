@@ -29,6 +29,7 @@ enumflags2 = { workspace = true }
 indexmap = { workspace = true }
 rust_decimal = { workspace = true }
 uuid = { workspace = true }
+triomphe = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"
