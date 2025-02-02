@@ -1,8 +1,9 @@
 use anyhow::{bail, Result as Res};
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::{Buf, BufMut, Bytes};
 use chrono::prelude::*;
+use compact_str::{format_compact, CompactString};
 use fxhash::FxHashMap;
 use indexmap::{IndexMap, IndexSet};
 use netidx_core::{
@@ -22,7 +23,7 @@ use std::{
     convert, fmt,
     hash::{BuildHasher, Hash},
     hint::unreachable_unchecked,
-    iter, mem,
+    iter,
     num::Wrapping,
     ops::{Add, Div, Mul, Not, Sub},
     panic::{catch_unwind, AssertUnwindSafe},
@@ -32,7 +33,7 @@ use std::{
 };
 use triomphe::Arc;
 
-use crate::{pbuf::PBytes, value_parser};
+use crate::{pbuf::PBytes, valarray::ValArray, value_parser};
 
 type Result<T> = result::Result<T, PackError>;
 
@@ -105,7 +106,7 @@ impl Typ {
                 true => Ok(Value::True),
                 false => Ok(Value::False),
             },
-            Typ::String => Ok(Value::String(Chars::from(String::from(s)))),
+            Typ::String => Ok(Value::String(ArcStr::from(s))),
             Typ::Bytes => {
                 let mut tmp = String::from("bytes:");
                 tmp.push_str(s);
@@ -377,7 +378,7 @@ pub enum Value {
     /// An explicit error
     Error(ArcStr) = 0x82,
     /// An array of values
-    Array(Arc<[Value]>) = 0x83,
+    Array(ValArray) = 0x83,
 }
 
 // This will fail to compile if any variant that is supposed to be
@@ -675,10 +676,12 @@ impl PartialOrd for Value {
                         (_, Nan) => Some(Ordering::Greater),
                         (_, _) => l.partial_cmp(&r),
                     },
-                    (_, _) => format!("{}", l).partial_cmp(&format!("{}", r)),
+                    (_, _) => {
+                        format_compact!("{}", l).partial_cmp(&format_compact!("{}", r))
+                    }
                 }
             }
-            (l, r) => format!("{}", l).partial_cmp(&format!("{}", r)),
+            (l, r) => format_compact!("{}", l).partial_cmp(&format_compact!("{}", r)),
         }
     }
 }
@@ -794,37 +797,37 @@ macro_rules! apply_op {
             (Value::Decimal(l), Value::F32(r)) => match Decimal::try_from(r) {
                 Ok(r) => Value::Decimal(l $op r),
                 Err(_) => {
-                    let e = format!("can't parse {} as a decimal", r);
-                    Value::Error(Chars::from(e))
+                    let e = format_compact!("can't parse {} as a decimal", r);
+                    Value::Error(e.as_str().into())
                 },
             },
             (Value::F32(l), Value::Decimal(r)) => match Decimal::try_from(l) {
                 Ok(l) => Value::Decimal(l $op r),
                 Err(_) => {
-                    let e = format!("can't parse {} as a decimal", l);
-                    Value::Error(Chars::from(e))
+                    let e = format_compact!("can't parse {} as a decimal", l);
+                    Value::Error(e.as_str().into())
                 },
             },
             (Value::Decimal(l), Value::F64(r)) => match Decimal::try_from(r) {
                 Ok(r) => Value::Decimal(l $op r),
                 Err(_) => {
-                    let e = format!("can't parse {} as a decimal", r);
-                    Value::Error(Chars::from(e))
+                    let e = format_compact!("can't parse {} as a decimal", r);
+                    Value::Error(e.as_str().into())
                 },
             },
             (Value::F64(l), Value::Decimal(r)) => match Decimal::try_from(l) {
                 Ok(l) => Value::Decimal(l $op r),
                 Err(_) => {
-                    let e = format!("can't parse {} as a decimal", l);
-                    Value::Error(Chars::from(e))
+                    let e = format_compact!("can't parse {} as a decimal", l);
+                    Value::Error(e.as_str().into())
                 },
             },
             (Value::String(s), n) => match s.parse::<Value>() {
-                Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
                 Ok(s) => s $op n,
             }
             (n, Value::String(s)) => match s.parse::<Value>() {
-                Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
                 Ok(s) => n $op s,
             },
             (Value::Array(e0), Value::Array(e1)) => {
@@ -838,26 +841,26 @@ macro_rules! apply_op {
             }
             (l @ Value::Array(_), n) => {
                 match n.cast(Typ::Array) {
-                    None => Value::Error(Chars::from("can't add to array")),
+                    None => Value::Error(literal!("can't add to array")),
                     Some(r) => l $op r,
                 }
             }
             (n, r @ Value::Array(_)) => {
                 match n.cast(Typ::Array) {
-                    None => Value::Error(Chars::from("can't add to array")),
+                    None => Value::Error(literal!("can't add to array")),
                     Some(l) => l $op r,
                 }
             }
             (Value::Bytes(_), _) | (_, Value::Bytes(_)) => {
-                Value::Error(Chars::from("can't add bytes"))
+                Value::Error(literal!("can't add bytes"))
             }
             (Value::Null, _) | (_, Value::Null) => {
-                Value::Error(Chars::from("can't add null"))
+                Value::Error(literal!("can't add null"))
             }
             (Value::Ok, _)
             | (_, Value::Ok)
             | (Value::Error(_), _)
-            | (_, Value::Error(_)) => Value::Error(Chars::from("can't add result types")),
+            | (_, Value::Error(_)) => Value::Error(literal!("can't add result types")),
             (Value::True, n) => Value::U32(1) $op n,
             (n, Value::True) => n $op Value::U32(1),
             (Value::False, n) => Value::U32(0) $op n,
@@ -877,7 +880,7 @@ impl Add for Value {
                 | (Value::Duration(d), Value::DateTime(dt)) => {
                     match chrono::Duration::from_std(d) {
                         Ok(d) => Value::DateTime(dt + d),
-                        Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                        Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
                     }
                 },
             (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 + d1) },
@@ -885,7 +888,7 @@ impl Add for Value {
                 | (_, Value::Duration(_))
                 | (_, Value::DateTime(_))
                 | (Value::DateTime(_), _) => {
-                    Value::Error(Chars::from("can't add to datetime/duration"))
+                    Value::Error(literal!("can't add to datetime/duration"))
                 }
         )
     }
@@ -901,7 +904,7 @@ impl Sub for Value {
                 | (Value::Duration(d), Value::DateTime(dt)) => {
                     match chrono::Duration::from_std(d) {
                         Ok(d) => Value::DateTime(dt - d),
-                        Err(e) => Value::Error(Chars::from(format!("{}", e))),
+                        Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
                     }
                 },
             (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 - d1) },
@@ -909,7 +912,7 @@ impl Sub for Value {
                 | (_, Value::Duration(_))
                 | (_, Value::DateTime(_))
                 | (Value::DateTime(_), _) => {
-                    Value::Error(Chars::from("can't add to datetime/duration"))
+                    Value::Error(literal!("can't add to datetime/duration"))
                 }
         )
     }
@@ -925,7 +928,7 @@ impl Mul for Value {
                 | (_, Value::Duration(_))
                 | (_, Value::DateTime(_))
                 | (Value::DateTime(_), _) => {
-                    Value::Error(Chars::from("can't add to datetime/duration"))
+                    Value::Error(literal!("can't add to datetime/duration"))
                 }
         )
     }
@@ -946,13 +949,13 @@ impl Div for Value {
                     | (_, Value::Duration(_))
                     | (_, Value::DateTime(_))
                     | (Value::DateTime(_), _) => {
-                        Value::Error(Chars::from("can't add to datetime/duration"))
+                        Value::Error(literal!("can't add to datetime/duration"))
                     }
             )
         }));
         match res {
             Ok(r) => r,
-            Err(_) => Value::Error(Chars::from("can't divide by zero")),
+            Err(_) => Value::Error(literal!("can't divide by zero")),
         }
     }
 }
@@ -973,21 +976,17 @@ impl Not for Value {
             Value::V64(v) => Value::V64(!v),
             Value::I64(v) => Value::I64(!v),
             Value::Z64(v) => Value::Z64(!v),
-            Value::F32(_) => Value::Error(Chars::from("can't apply not to F32")),
-            Value::F64(_) => Value::Error(Chars::from("can't apply not to F64")),
-            Value::Decimal(_) => Value::Error(Chars::from("can't apply not to Decimal")),
-            Value::DateTime(_) => {
-                Value::Error(Chars::from("can't apply not to DateTime"))
-            }
-            Value::Duration(_) => {
-                Value::Error(Chars::from("can't apply not to Duration"))
-            }
-            Value::String(_) => Value::Error(Chars::from("can't apply not to String")),
-            Value::Bytes(_) => Value::Error(Chars::from("can't apply not to Bytes")),
-            Value::Ok => Value::Error(Chars::from("can't apply not to Ok")),
-            Value::Error(_) => Value::Error(Chars::from("can't apply not to Error")),
+            Value::F32(_) => Value::Error(literal!("can't apply not to F32")),
+            Value::F64(_) => Value::Error(literal!("can't apply not to F64")),
+            Value::Decimal(_) => Value::Error(literal!("can't apply not to Decimal")),
+            Value::DateTime(_) => Value::Error(literal!("can't apply not to DateTime")),
+            Value::Duration(_) => Value::Error(literal!("can't apply not to Duration")),
+            Value::String(_) => Value::Error(literal!("can't apply not to String")),
+            Value::Bytes(_) => Value::Error(literal!("can't apply not to Bytes")),
+            Value::Ok => Value::Error(literal!("can't apply not to Ok")),
+            Value::Error(_) => Value::Error(literal!("can't apply not to Error")),
             Value::Array(elts) => {
-                Value::Array(elts.iter().cloned().map(|v| !v).collect())
+                Value::Array(ValArray::from_iter_exact(elts.iter().cloned().map(|v| !v)))
             }
         }
     }
@@ -996,28 +995,25 @@ impl Not for Value {
 impl Pack for Value {
     fn encoded_len(&self) -> usize {
         1 + match self {
-            Value::U32(_) => mem::size_of::<u32>(),
+            Value::U32(v) => Pack::encoded_len(v),
             Value::V32(v) => pack::varint_len(*v as u64),
-            Value::I32(_) => mem::size_of::<i32>(),
+            Value::I32(v) => Pack::encoded_len(v),
             Value::Z32(v) => pack::varint_len(pack::i32_zz(*v) as u64),
-            Value::U64(_) => mem::size_of::<u64>(),
+            Value::U64(v) => Pack::encoded_len(v),
             Value::V64(v) => pack::varint_len(*v),
-            Value::I64(_) => mem::size_of::<i64>(),
+            Value::I64(v) => Pack::encoded_len(v),
             Value::Z64(v) => pack::varint_len(pack::i64_zz(*v) as u64),
-            Value::F32(_) => mem::size_of::<f32>(),
-            Value::F64(_) => mem::size_of::<f64>(),
-            Value::DateTime(_) => 12,
-            Value::Duration(_) => 12,
-            Value::String(c) => <Chars as Pack>::encoded_len(c),
-            Value::Bytes(b) => <Bytes as Pack>::encoded_len(b),
+            Value::F32(v) => Pack::encoded_len(v),
+            Value::F64(v) => Pack::encoded_len(v),
+            Value::DateTime(d) => Pack::encoded_len(d),
+            Value::Duration(d) => Pack::encoded_len(d),
+            Value::String(c) => Pack::encoded_len(c),
+            Value::Bytes(b) => Pack::encoded_len(b),
             Value::True | Value::False | Value::Null => 0,
             Value::Ok => 0,
-            Value::Error(c) => <Chars as Pack>::encoded_len(c),
-            Value::Array(elts) => {
-                pack::varint_len(elts.len() as u64)
-                    + elts.iter().fold(0, |sum, v| sum + Pack::encoded_len(v))
-            }
-            Value::Decimal(d) => <Decimal as Pack>::encoded_len(d),
+            Value::Error(c) => Pack::encoded_len(c),
+            Value::Array(elts) => Pack::encoded_len(elts),
+            Value::Decimal(d) => Pack::encoded_len(d),
         }
     }
 
@@ -1027,7 +1023,7 @@ impl Pack for Value {
         match self {
             Value::U32(i) => {
                 buf.put_u8(0);
-                Ok(buf.put_u32(*i))
+                Pack::encode(i, buf)
             }
             Value::V32(i) => {
                 buf.put_u8(1);
@@ -1035,7 +1031,7 @@ impl Pack for Value {
             }
             Value::I32(i) => {
                 buf.put_u8(2);
-                Ok(buf.put_i32(*i))
+                Pack::encode(i, buf)
             }
             Value::Z32(i) => {
                 buf.put_u8(3);
@@ -1043,7 +1039,7 @@ impl Pack for Value {
             }
             Value::U64(i) => {
                 buf.put_u8(4);
-                Ok(buf.put_u64(*i))
+                Pack::encode(i, buf)
             }
             Value::V64(i) => {
                 buf.put_u8(5);
@@ -1051,7 +1047,7 @@ impl Pack for Value {
             }
             Value::I64(i) => {
                 buf.put_u8(6);
-                Ok(buf.put_i64(*i))
+                Pack::encode(i, buf)
             }
             Value::Z64(i) => {
                 buf.put_u8(7);
@@ -1059,27 +1055,27 @@ impl Pack for Value {
             }
             Value::F32(i) => {
                 buf.put_u8(8);
-                Ok(buf.put_f32(*i))
+                Pack::encode(i, buf)
             }
             Value::F64(i) => {
                 buf.put_u8(9);
-                Ok(buf.put_f64(*i))
+                Pack::encode(i, buf)
             }
             Value::DateTime(dt) => {
                 buf.put_u8(10);
-                Ok(<DateTime<Utc> as Pack>::encode(dt, buf)?)
+                Pack::encode(dt, buf)
             }
             Value::Duration(d) => {
                 buf.put_u8(11);
-                Ok(<Duration as Pack>::encode(d, buf)?)
+                Pack::encode(d, buf)
             }
             Value::String(s) => {
                 buf.put_u8(12);
-                <Chars as Pack>::encode(s, buf)
+                Pack::encode(s, buf)
             }
             Value::Bytes(b) => {
                 buf.put_u8(13);
-                <Bytes as Pack>::encode(b, buf)
+                Pack::encode(b, buf)
             }
             Value::True => Ok(buf.put_u8(14)),
             Value::False => Ok(buf.put_u8(15)),
@@ -1087,19 +1083,15 @@ impl Pack for Value {
             Value::Ok => Ok(buf.put_u8(17)),
             Value::Error(e) => {
                 buf.put_u8(18);
-                <Chars as Pack>::encode(e, buf)
+                Pack::encode(e, buf)
             }
             Value::Array(elts) => {
                 buf.put_u8(19);
-                pack::encode_varint(elts.len() as u64, buf);
-                for elt in &**elts {
-                    <Value as Pack>::encode(elt, buf)?
-                }
-                Ok(())
+                Pack::encode(elts, buf)
             }
             Value::Decimal(d) => {
                 buf.put_u8(20);
-                <Decimal as Pack>::encode(d, buf)
+                Pack::encode(d, buf)
             }
         }
     }
@@ -1124,16 +1116,9 @@ impl Pack for Value {
             15 => Ok(Value::False),
             16 => Ok(Value::Null),
             17 => Ok(Value::Ok),
-            18 => Ok(Value::Error(<Chars as Pack>::decode(buf)?)),
-            19 => {
-                let len = pack::decode_varint(buf)? as usize;
-                let mut elts = Vec::with_capacity(len);
-                while elts.len() < len {
-                    elts.push(<Value as Pack>::decode(buf)?);
-                }
-                Ok(Value::Array(Arc::from(elts)))
-            }
-            20 => Ok(Value::Decimal(<Decimal as Pack>::decode(buf)?)),
+            18 => Ok(Value::Error(Pack::decode(buf)?)),
+            19 => Ok(Value::Array(Pack::decode(buf)?)),
+            20 => Ok(Value::Decimal(Pack::decode(buf)?)),
             _ => Err(PackError::UnknownTag),
         }
     }
@@ -1193,7 +1178,7 @@ impl Value {
                 }
             }
             Value::String(s) => write!(f, "{}", s),
-            Value::Bytes(b) => write!(f, "{}", BASE64.encode(&*b)),
+            Value::Bytes(b) => write!(f, "{}", BASE64.encode(b)),
             Value::True => write!(f, "true"),
             Value::False => write!(f, "false"),
             Value::Null => write!(f, "null"),
@@ -1366,12 +1351,12 @@ impl Value {
                     Typ::Bool => {
                         Some(if $v as i64 > 0 { Value::True } else { Value::False })
                     }
-                    Typ::String => Some(Value::String(Chars::from(format!("{}", self)))),
+                    Typ::String => {
+                        Some(Value::String(format_compact!("{}", self).as_str().into()))
+                    }
                     Typ::Bytes => None,
                     Typ::Result => Some(Value::Ok),
-                    Typ::Array => {
-                        Some(Value::Array(Arc::from(Vec::from([self.clone()]))))
-                    }
+                    Typ::Array => Some(Value::Array([self.clone()].into())),
                     Typ::Null => Some(Value::Null),
                 }
             };
@@ -1381,7 +1366,9 @@ impl Value {
                 s.parse::<Value>().ok().and_then(|v| v.cast(typ))
             }
             v @ Value::String(_) => Some(v),
-            v if typ == Typ::String => Some(Value::String(Chars::from(format!("{}", v)))),
+            v if typ == Typ::String => {
+                Some(Value::String(format_compact!("{}", v).as_str().into()))
+            }
             Value::Array(elts) if typ != Typ::Array => {
                 elts.first().and_then(|v| v.clone().cast(typ))
             }
@@ -1404,7 +1391,9 @@ impl Value {
                 Typ::Z64 => v.try_into().ok().map(Value::Z64),
                 Typ::F32 => v.try_into().ok().map(Value::F32),
                 Typ::F64 => v.try_into().ok().map(Value::F64),
-                Typ::String => Some(Value::String(Chars::from(format!("{}", v)))),
+                Typ::String => {
+                    Some(Value::String(format_compact!("{}", v).as_str().into()))
+                }
                 Typ::Bool
                 | Typ::Array
                 | Typ::Bytes
@@ -1470,7 +1459,7 @@ impl Value {
                 Typ::Bool => None,
                 Typ::Bytes => None,
                 Typ::Result => Some(Value::Ok),
-                Typ::Array => Some(Value::Array(Arc::from(Vec::from([self])))),
+                Typ::Array => Some(Value::Array([self].into())),
                 Typ::Null => Some(Value::Null),
                 Typ::String => unreachable!(),
             },
@@ -1491,7 +1480,7 @@ impl Value {
                 Typ::Bool => None,
                 Typ::Bytes => None,
                 Typ::Result => Some(Value::Ok),
-                Typ::Array => Some(Value::Array(Arc::from(Vec::from([self])))),
+                Typ::Array => Some(Value::Array([self].into())),
                 Typ::Null => Some(Value::Null),
                 Typ::String => unreachable!(),
             },
@@ -1514,7 +1503,7 @@ impl Value {
                     Typ::Bool => Some(self),
                     Typ::Bytes => None,
                     Typ::Result => Some(Value::Ok),
-                    Typ::Array => Some(Value::Array(Arc::from(Vec::from([self])))),
+                    Typ::Array => Some(Value::Array([self].into())),
                     Typ::Null => Some(Value::Null),
                     Typ::String => unreachable!(),
                 }
@@ -1538,7 +1527,10 @@ impl Value {
     }
 
     pub fn err<T: std::error::Error>(e: T) -> Value {
-        Value::Error(Chars::from(e.to_string()))
+        use std::fmt::Write;
+        let mut tmp = CompactString::new("");
+        write!(tmp, "{e}").unwrap();
+        Value::Error(tmp.as_str().into())
     }
 
     /// return true if the value is some kind of number, otherwise
@@ -1576,7 +1568,7 @@ impl Value {
         use utils::Either;
         match self {
             Value::Array(elts) => {
-                let mut stack: SmallVec<[(Arc<[Value]>, usize); 8]> = SmallVec::new();
+                let mut stack: SmallVec<[(ValArray, usize); 8]> = SmallVec::new();
                 stack.push((elts, 0));
                 Either::Left(iter::from_fn(move || loop {
                     match stack.last_mut() {
@@ -1732,15 +1724,25 @@ impl convert::From<i16> for Value {
 
 impl FromValue for u32 {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::U32).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::U32(v) => Ok(v),
-            _ => bail!("can't cast"),
-        })
+        match v {
+            Value::U32(v) | Value::V32(v) => Ok(v),
+            Value::U64(v) | Value::V64(v) => Ok(v as u32),
+            Value::I32(v) | Value::Z32(v) => Ok(v as u32),
+            Value::I64(v) | Value::Z64(v) => Ok(v as u32),
+            v => {
+                v.cast(Typ::U32).ok_or_else(|| anyhow!("can't cast")).and_then(
+                    |v| match v {
+                        Value::U32(v) => Ok(v),
+                        _ => bail!("can't cast"),
+                    },
+                )
+            }
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
         match v {
-            Value::U32(v) | Value::V32(v) => Some(v as u32),
+            Value::U32(v) | Value::V32(v) => Some(v),
             Value::U64(v) | Value::V64(v) => Some(v as u32),
             Value::I32(v) | Value::Z32(v) => Some(v as u32),
             Value::I64(v) | Value::Z64(v) => Some(v as u32),
@@ -1757,17 +1759,27 @@ impl convert::From<u32> for Value {
 
 impl FromValue for i32 {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::I32).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::I32(v) => Ok(v),
-            _ => bail!("can't cast"),
-        })
+        match v {
+            Value::I32(v) | Value::Z32(v) => Ok(v),
+            Value::U32(v) | Value::V32(v) => Ok(v as i32),
+            Value::U64(v) | Value::V64(v) => Ok(v as i32),
+            Value::I64(v) | Value::Z64(v) => Ok(v as i32),
+            v => {
+                v.cast(Typ::I32).ok_or_else(|| anyhow!("can't cast")).and_then(
+                    |v| match v {
+                        Value::I32(v) => Ok(v),
+                        _ => bail!("can't cast"),
+                    },
+                )
+            }
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::I32(v) | Value::Z32(v) => Some(v),
             Value::U32(v) | Value::V32(v) => Some(v as i32),
             Value::U64(v) | Value::V64(v) => Some(v as i32),
-            Value::I32(v) | Value::Z32(v) => Some(v as i32),
             Value::I64(v) | Value::Z64(v) => Some(v as i32),
             _ => None,
         }
@@ -1782,16 +1794,26 @@ impl convert::From<i32> for Value {
 
 impl FromValue for u64 {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::U64).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::U64(v) => Ok(v),
-            _ => bail!("can't cast"),
-        })
+        match v {
+            Value::U64(v) | Value::V64(v) => Ok(v),
+            Value::U32(v) | Value::V32(v) => Ok(v as u64),
+            Value::I32(v) | Value::Z32(v) => Ok(v as u64),
+            Value::I64(v) | Value::Z64(v) => Ok(v as u64),
+            v => {
+                v.cast(Typ::U64).ok_or_else(|| anyhow!("can't cast")).and_then(
+                    |v| match v {
+                        Value::U64(v) => Ok(v),
+                        _ => bail!("can't cast"),
+                    },
+                )
+            }
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::U64(v) | Value::V64(v) => Some(v),
             Value::U32(v) | Value::V32(v) => Some(v as u64),
-            Value::U64(v) | Value::V64(v) => Some(v as u64),
             Value::I32(v) | Value::Z32(v) => Some(v as u64),
             Value::I64(v) | Value::Z64(v) => Some(v as u64),
             _ => None,
@@ -1813,16 +1835,26 @@ impl convert::From<usize> for Value {
 
 impl FromValue for usize {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::U64).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::U64(v) => Ok(v as usize),
-            _ => bail!("can't cast"),
-        })
+        match v {
+            Value::U64(v) | Value::V64(v) => Ok(v as usize),
+            Value::U32(v) | Value::V32(v) => Ok(v as usize),
+            Value::I32(v) | Value::Z32(v) => Ok(v as usize),
+            Value::I64(v) | Value::Z64(v) => Ok(v as usize),
+            v => {
+                v.cast(Typ::U64).ok_or_else(|| anyhow!("can't cast")).and_then(
+                    |v| match v {
+                        Value::U64(v) => Ok(v as usize),
+                        _ => bail!("can't cast"),
+                    },
+                )
+            }
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
         match v {
-            Value::U32(v) | Value::V32(v) => Some(v as usize),
             Value::U64(v) | Value::V64(v) => Some(v as usize),
+            Value::U32(v) | Value::V32(v) => Some(v as usize),
             Value::I32(v) | Value::Z32(v) => Some(v as usize),
             Value::I64(v) | Value::Z64(v) => Some(v as usize),
             _ => None,
@@ -1832,18 +1864,28 @@ impl FromValue for usize {
 
 impl FromValue for i64 {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::I64).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::I64(v) => Ok(v),
-            _ => bail!("can't cast"),
-        })
+        match v {
+            Value::I64(v) | Value::Z64(v) => Ok(v),
+            Value::U32(v) | Value::V32(v) => Ok(v as i64),
+            Value::U64(v) | Value::V64(v) => Ok(v as i64),
+            Value::I32(v) | Value::Z32(v) => Ok(v as i64),
+            v => {
+                v.cast(Typ::I64).ok_or_else(|| anyhow!("can't cast")).and_then(
+                    |v| match v {
+                        Value::I64(v) => Ok(v),
+                        _ => bail!("can't cast"),
+                    },
+                )
+            }
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::I64(v) | Value::Z64(v) => Some(v),
             Value::U32(v) | Value::V32(v) => Some(v as i64),
             Value::U64(v) | Value::V64(v) => Some(v as i64),
             Value::I32(v) | Value::Z32(v) => Some(v as i64),
-            Value::I64(v) | Value::Z64(v) => Some(v as i64),
             _ => None,
         }
     }
@@ -1857,15 +1899,23 @@ impl convert::From<i64> for Value {
 
 impl FromValue for f32 {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::F32).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+        match v {
             Value::F32(v) => Ok(v),
-            _ => bail!("can't cast"),
-        })
+            Value::F64(v) => Ok(v as f32),
+            v => {
+                v.cast(Typ::F32).ok_or_else(|| anyhow!("can't cast")).and_then(
+                    |v| match v {
+                        Value::F32(v) => Ok(v),
+                        _ => bail!("can't cast"),
+                    },
+                )
+            }
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
         match v {
-            Value::F32(v) => Some(v as f32),
+            Value::F32(v) => Some(v),
             Value::F64(v) => Some(v as f32),
             _ => None,
         }
@@ -1880,16 +1930,24 @@ impl convert::From<f32> for Value {
 
 impl FromValue for f64 {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::F64).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+        match v {
             Value::F64(v) => Ok(v),
-            _ => bail!("can't cast"),
-        })
+            Value::F32(v) => Ok(v as f64),
+            v => {
+                v.cast(Typ::F64).ok_or_else(|| anyhow!("can't cast")).and_then(
+                    |v| match v {
+                        Value::F64(v) => Ok(v),
+                        _ => bail!("can't cast"),
+                    },
+                )
+            }
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::F64(v) => Some(v),
             Value::F32(v) => Some(v as f64),
-            Value::F64(v) => Some(v as f64),
             _ => None,
         }
     }
@@ -1903,10 +1961,17 @@ impl convert::From<f64> for Value {
 
 impl FromValue for Decimal {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Decimal).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+        match v {
             Value::Decimal(v) => Ok(v),
-            _ => bail!("can't cast"),
-        })
+            v => {
+                v.cast(Typ::Decimal).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                    match v {
+                        Value::Decimal(v) => Ok(v),
+                        _ => bail!("can't cast"),
+                    }
+                })
+            }
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -1925,15 +1990,20 @@ impl convert::From<Decimal> for Value {
 
 impl FromValue for Bytes {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Bytes).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Bytes(b) => Ok(b),
-            _ => bail!("can't cast"),
-        })
+        match v {
+            Value::Bytes(b) => Ok(b.into()),
+            v => v.cast(Typ::Bytes).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Bytes(b) => Ok(b.into()),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
         match v {
-            Value::Bytes(b) => Some(b),
+            Value::Bytes(b) => Some(b.into()),
             _ => None,
         }
     }
@@ -1941,16 +2011,92 @@ impl FromValue for Bytes {
 
 impl convert::From<Bytes> for Value {
     fn from(v: Bytes) -> Value {
-        Value::Bytes(v)
+        Value::Bytes(v.into())
     }
 }
 
 impl FromValue for Chars {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::String).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::String(v) => Ok(v),
-            _ => bail!("can't cast"),
-        })
+        match v {
+            Value::String(v) => Ok(Chars::from(v)),
+            v => v.cast(Typ::String).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::String(v) => Ok(Chars::from(v)),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::String(c) => Some(Chars::from(c)),
+            _ => None,
+        }
+    }
+}
+
+impl convert::From<Chars> for Value {
+    fn from(v: Chars) -> Value {
+        Value::String(ArcStr::from(&*v))
+    }
+}
+
+impl FromValue for Path {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast_to::<ArcStr>().map(Path::from)
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::String(c) => Some(Path::from(c)),
+            _ => None,
+        }
+    }
+}
+
+impl convert::From<Path> for Value {
+    fn from(v: Path) -> Value {
+        Value::String(v.into())
+    }
+}
+
+impl FromValue for String {
+    fn from_value(v: Value) -> Res<Self> {
+        v.cast_to::<ArcStr>().map(|c| String::from(c.as_str()))
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::String(c) => Some(String::from(c.as_str())),
+            _ => None,
+        }
+    }
+}
+
+impl convert::From<String> for Value {
+    fn from(v: String) -> Value {
+        Value::String(v.into())
+    }
+}
+
+impl convert::From<&'static str> for Value {
+    fn from(v: &'static str) -> Value {
+        Value::String(v.into())
+    }
+}
+
+impl FromValue for ArcStr {
+    fn from_value(v: Value) -> Res<Self> {
+        match v {
+            Value::String(s) => Ok(s),
+            v => v.cast(Typ::String).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::String(s) => Ok(s),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -1961,81 +2107,25 @@ impl FromValue for Chars {
     }
 }
 
-impl convert::From<Chars> for Value {
-    fn from(v: Chars) -> Value {
-        Value::String(v)
-    }
-}
-
-impl FromValue for Path {
-    fn from_value(v: Value) -> Res<Self> {
-        v.cast_to::<String>().map(Path::from)
-    }
-
-    fn get(v: Value) -> Option<Self> {
-        match v {
-            Value::String(c) => Some(Path::from(String::from(&*c))),
-            _ => None,
-        }
-    }
-}
-
-impl convert::From<Path> for Value {
-    fn from(v: Path) -> Value {
-        Value::String(Chars::from(String::from(&*v)))
-    }
-}
-
-impl FromValue for String {
-    fn from_value(v: Value) -> Res<Self> {
-        v.cast_to::<Chars>().map(|c| c.into())
-    }
-
-    fn get(v: Value) -> Option<Self> {
-        match v {
-            Value::String(c) => Some(c.into()),
-            _ => None,
-        }
-    }
-}
-
-impl convert::From<String> for Value {
-    fn from(v: String) -> Value {
-        Value::String(Chars::from(v))
-    }
-}
-
-impl convert::From<&'static str> for Value {
-    fn from(v: &'static str) -> Value {
-        Value::String(Chars::from(v))
-    }
-}
-
-impl FromValue for ArcStr {
-    fn from_value(v: Value) -> Res<Self> {
-        v.cast_to::<Chars>().map(|c| ArcStr::from(&*c))
-    }
-
-    fn get(v: Value) -> Option<Self> {
-        match v {
-            Value::String(c) => Some(ArcStr::from(&*c)),
-            _ => None,
-        }
-    }
-}
-
 impl convert::From<ArcStr> for Value {
     fn from(v: ArcStr) -> Value {
-        Value::String(Chars::from(v))
+        Value::String(v)
     }
 }
 
 impl FromValue for DateTime<Utc> {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::DateTime).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+        match v {
             Value::DateTime(d) => Ok(d),
-            _ => bail!("can't cast"),
-        })
+            v => {
+                v.cast(Typ::DateTime).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                    match v {
+                        Value::DateTime(d) => Ok(d),
+                        _ => bail!("can't cast"),
+                    }
+                })
+            }
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2054,10 +2144,17 @@ impl convert::From<DateTime<Utc>> for Value {
 
 impl FromValue for Duration {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Duration).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+        match v {
             Value::Duration(d) => Ok(d),
-            _ => bail!("can't cast"),
-        })
+            v => {
+                v.cast(Typ::Duration).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                    match v {
+                        Value::Duration(d) => Ok(d),
+                        _ => bail!("can't cast"),
+                    }
+                })
+            }
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2076,11 +2173,17 @@ impl convert::From<Duration> for Value {
 
 impl FromValue for bool {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Bool).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+        match v {
             Value::True => Ok(true),
             Value::False => Ok(false),
-            _ => bail!("can't cast"),
-        })
+            v => v.cast(Typ::Bool).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::True => Ok(true),
+                    Value::False => Ok(false),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2102,12 +2205,17 @@ impl convert::From<bool> for Value {
     }
 }
 
-impl FromValue for Arc<[Value]> {
+impl FromValue for ValArray {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) => Ok(elts),
-            _ => bail!("can't cast"),
-        })
+        match v {
+            Value::Array(a) => Ok(a),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(elts) => Ok(elts),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2118,53 +2226,31 @@ impl FromValue for Arc<[Value]> {
     }
 }
 
-impl convert::From<Arc<[Value]>> for Value {
-    fn from(v: Arc<[Value]>) -> Value {
+impl convert::From<ValArray> for Value {
+    fn from(v: ValArray) -> Value {
         Value::Array(v)
     }
 }
 
-/* specialization someday
-
-impl FromValue for Vec<u8> {
-    fn from_value(v: Value) -> Res<Self> {
-        match v {
-            Value::Bytes(b) => Ok(b.to_vec()),
-            Value::String(s) => Ok(Vec::from(s.as_bytes())),
-            Value::Array(elts) => {
-                Ok(elts.iter().map(|v| v.cast_to::<u8>()).collect::<Result<Vec<u8>>>()?)
-            }
-            v => {
-                let s: String = v.cast_to::<String>()?;
-                Ok(s.into_bytes())
-            }
-        }
-    }
-
-    fn get(v: Value) -> Option<Self> {
-        match v {
-            Value::Bytes(b) => Ok(b.to_vec()),
-            Value::String(s) => Ok(Vec::from(s.as_bytes())),
-            Value::Array(elts) => Some(
-                elts.iter()
-                    .map(|v| FromValue::get(v.clone()))
-                    .collect::<Option<Vec<_>>>()?,
-            ),
-            _ => None,
-        }
-    }
-}
-*/
-
 impl<T: FromValue> FromValue for Vec<T> {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) => elts
-                .iter()
-                .map(|v| <T as FromValue>::from_value(v.clone()))
-                .collect::<Res<Vec<_>>>(),
-            _ => bail!("can't cast"),
-        })
+        macro_rules! convert {
+            ($elts:expr) => {
+                $elts
+                    .iter()
+                    .map(|v| <T as FromValue>::from_value(v.clone()))
+                    .collect::<Res<Vec<_>>>()
+            };
+        }
+        match v {
+            Value::Array(a) => Ok(convert!(a)?),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) => Ok(convert!(a)?),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2179,33 +2265,37 @@ impl<T: FromValue> FromValue for Vec<T> {
 
 impl<T: convert::Into<Value>> convert::From<Vec<T>> for Value {
     fn from(v: Vec<T>) -> Value {
-        let v = v.into_iter().map(|e| e.into()).collect::<Vec<Value>>();
-        Value::Array(Arc::from(v))
+        Value::Array(ValArray::from_iter_exact(v.into_iter().map(|e| e.into())))
     }
 }
 
 impl<T: convert::Into<Value> + Clone + Send + Sync> convert::From<Pooled<Vec<T>>>
     for Value
 {
-    fn from(v: Pooled<Vec<T>>) -> Value {
-        let v = v.iter().map(|e| e.clone().into()).collect::<Vec<Value>>();
-        Value::Array(Arc::from(v))
+    fn from(mut v: Pooled<Vec<T>>) -> Value {
+        Value::Array(ValArray::from_iter_exact(v.drain(..).map(|e| e.into())))
     }
 }
 
-impl<A> FromValue for SmallVec<A>
-where
-    A: smallvec::Array,
-    <A as smallvec::Array>::Item: FromValue,
-{
+impl<const S: usize, T: FromValue> FromValue for SmallVec<[T; S]> {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) => elts
-                .iter()
-                .map(|v| FromValue::from_value(v.clone()))
-                .collect::<Res<SmallVec<A>>>(),
-            _ => bail!("can't cast"),
-        })
+        macro_rules! convert {
+            ($elts:expr) => {
+                $elts
+                    .iter()
+                    .map(|v| <T as FromValue>::from_value(v.clone()))
+                    .collect::<Res<SmallVec<_>>>()
+            };
+        }
+        match v {
+            Value::Array(a) => Ok(convert!(a)?),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) => Ok(convert!(a)?),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2213,33 +2303,36 @@ where
             Value::Array(elts) => elts
                 .iter()
                 .map(|v| FromValue::get(v.clone()))
-                .collect::<Option<SmallVec<A>>>(),
+                .collect::<Option<SmallVec<_>>>(),
             _ => None,
         }
     }
 }
 
-impl<A> convert::From<SmallVec<A>> for Value
-where
-    A: smallvec::Array,
-    <A as smallvec::Array>::Item: convert::Into<Value>,
-{
-    fn from(v: SmallVec<A>) -> Self {
-        let v = v.into_iter().map(|e| e.into()).collect::<Vec<Value>>();
-        Value::Array(Arc::from(v))
+impl<const S: usize, T: convert::Into<Value>> convert::From<SmallVec<[T; S]>> for Value {
+    fn from(v: SmallVec<[T; S]>) -> Self {
+        Value::Array(ValArray::from_iter_exact(v.into_iter().map(|e| e.into())))
     }
 }
 
 impl<T: FromValue, U: FromValue> FromValue for (T, U) {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) if elts.len() == 2 => {
-                let v0 = elts[0].clone().cast_to::<T>()?;
-                let v1 = elts[1].clone().cast_to::<U>()?;
+        macro_rules! convert {
+            ($elts:expr) => {{
+                let v0 = $elts[0].clone().cast_to::<T>()?;
+                let v1 = $elts[1].clone().cast_to::<U>()?;
                 Ok((v0, v1))
-            }
-            _ => bail!("can't cast"),
-        })
+            }}
+        }
+        match v {
+            Value::Array(a) if a.len() == 2 => convert!(a),
+            Value::Array(_) => bail!("not a tuple"),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
+                Value::Array(a) if a.len() == 2 => convert!(a),
+                Value::Array(_) => bail!("not a tuple"),
+                _ => bail!("can't cast"),
+            })
+        }        
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2258,8 +2351,7 @@ impl<T: convert::Into<Value>, U: convert::Into<Value>> convert::From<(T, U)> for
     fn from((t, u): (T, U)) -> Value {
         let v0 = t.into();
         let v1 = u.into();
-        let elts = Arc::from([v0, v1]);
-        Value::Array(elts)
+        Value::Array([v0, v1].into())
     }
 }
 

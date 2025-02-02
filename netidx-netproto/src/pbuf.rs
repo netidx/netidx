@@ -3,11 +3,13 @@
 /// arc. This allows us to reduce the size of Value from 5 words to 3
 /// words, while only paying the cost of a double indirection when
 /// accessing a zero copy Bytes.
-
-use bytes::Bytes;
-use netidx_core::pool::{Pool, Poolable, Pooled};
+use bytes::{Buf, BufMut, Bytes};
+use netidx_core::{
+    pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
+    pool::{Pool, Poolable, Pooled},
+};
 use serde::{de::Visitor, Deserialize, Serialize};
-use std::{mem, ops::Deref, sync::LazyLock};
+use std::{borrow::Borrow, mem, ops::Deref, sync::LazyLock};
 use triomphe::Arc;
 
 static POOL: LazyLock<Pool<ArcBytes>> = LazyLock::new(|| Pool::new(8124, 64));
@@ -42,6 +44,24 @@ impl Deref for PBytes {
 
     fn deref(&self) -> &Self::Target {
         &*(self.0).0
+    }
+}
+
+impl Borrow<Bytes> for PBytes {
+    fn borrow(&self) -> &Bytes {
+        &*self
+    }
+}
+
+impl Borrow<[u8]> for PBytes {
+    fn borrow(&self) -> &[u8] {
+        &**self
+    }
+}
+
+impl AsRef<[u8]> for PBytes {
+    fn as_ref(&self) -> &[u8] {
+        &**self
     }
 }
 
@@ -98,5 +118,26 @@ impl<'de> Deserialize<'de> for PBytes {
         D: serde::Deserializer<'de>,
     {
         deserializer.deserialize_bytes(PBytesVisitor)
+    }
+}
+
+impl Pack for PBytes {
+    fn encoded_len(&self) -> usize {
+        let len = self.len();
+        varint_len(len as u64) + len
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(self.len() as u64, buf);
+        Ok(buf.put_slice(&*self))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let len = decode_varint(buf)?;
+        if len as usize > buf.remaining() {
+            Err(PackError::TooBig)
+        } else {
+            Ok(Self::from(buf.copy_to_bytes(len as usize)))
+        }
     }
 }

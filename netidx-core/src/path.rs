@@ -178,6 +178,12 @@ impl FromStr for Path {
     }
 }
 
+impl Into<ArcStr> for Path {
+    fn into(self) -> ArcStr {
+        self.0
+    }
+}
+
 pub enum DirNames<'a> {
     Root(bool),
     Path { cur: &'a str, all: &'a str, base: usize },

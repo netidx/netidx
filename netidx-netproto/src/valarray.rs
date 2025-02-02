@@ -28,7 +28,7 @@ fn assign(len: usize, t: &mut Pooled<ValArrayInner>) {
 }
 
 fn orphan(len: usize) -> Pooled<ValArrayInner> {
-    let iter = (0..len).map(|_| Value::True);
+    let iter = (0..len).map(|_| Value::False);
     Pooled::orphan(ValArrayInner(ThinArc::from_header_and_iter((), iter)))
 }
 
@@ -115,14 +115,50 @@ impl<const S: usize> From<SmallVec<[Value; S]>> for ValArray {
     }
 }
 
+impl<const S: usize> From<[Value; S]> for ValArray {
+    fn from(v: [Value; S]) -> Self {
+        Self::from_iter(v.into_iter())
+    }
+}
+
 impl From<&[Value]> for ValArray {
     fn from(v: &[Value]) -> Self {
         Self::from_iter(v.into_iter().map(|v| v.clone()))
     }
 }
 
+impl FromIterator<Value> for ValArray {
+    fn from_iter<T: IntoIterator<Item = Value>>(iter: T) -> Self {
+        let mut tmp: SmallVec<[Value; 64]> = smallvec![];
+        for v in iter {
+            tmp.push(v);
+        }
+        Self::from(tmp)
+    }
+}
+
+impl Into<Vec<Value>> for ValArray {
+    fn into(self) -> Vec<Value> {
+        let mut tmp = Vec::with_capacity(self.len());
+        for v in self.iter() {
+            tmp.push(v.clone());
+        }
+        tmp
+    }
+}
+
+impl<const S: usize> Into<SmallVec<[Value; S]>> for ValArray {
+    fn into(self) -> SmallVec<[Value; S]> {
+        let mut tmp = smallvec![];
+        for v in self.iter() {
+            tmp.push(v.clone())
+        }
+        tmp
+    }
+}
+
 impl ValArray {
-    pub fn from_iter<I: Iterator<Item = Value> + ExactSizeIterator>(iter: I) -> Self {
+    pub fn from_iter_exact<I: Iterator<Item = Value> + ExactSizeIterator>(iter: I) -> Self {
         let mut res = get_by_size(iter.len());
         res.0.with_arc_mut(|res| {
             let res = Arc::get_mut(res).unwrap();
@@ -131,14 +167,6 @@ impl ValArray {
             }
         });
         Self(res)
-    }
-
-    pub fn from_iter_inexact<I: IntoIterator<Item = Value>>(iter: I) -> Self {
-        let mut tmp: SmallVec<[Value; 64]> = smallvec![];
-        for v in iter {
-            tmp.push(v);
-        }
-        Self::from(tmp)
     }
 }
 
@@ -172,14 +200,7 @@ impl<'de> Visitor<'de> for ValArrayVisitor {
         while let Some(v) = seq.next_element()? {
             tmp.push(v);
         }
-        let mut res = get_by_size(tmp.len());
-        res.0.with_arc_mut(|res| {
-            let res = Arc::get_mut(res).unwrap();
-            for (i, v) in tmp.into_iter().enumerate() {
-                res.slice[i] = v;
-            }
-        });
-        Ok(ValArray(res))
+        Ok(ValArray::from(tmp))
     }
 }
 
