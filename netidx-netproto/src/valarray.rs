@@ -15,7 +15,7 @@ thread_local! {
 }
 
 fn init_pool(len: usize) -> Pool<ValArrayInner> {
-    Pool::new(64 * (64 - len), 64)
+    Pool::new(64 * (65 - len), 64)
 }
 
 fn orphan(len: usize) -> Pooled<ValArrayInner> {
@@ -124,7 +124,7 @@ impl FromIterator<Value> for ValArray {
         for v in iter {
             tmp.push(v);
         }
-        Self::from(tmp)
+        Self::from_iter_exact(tmp.into_iter())
     }
 }
 

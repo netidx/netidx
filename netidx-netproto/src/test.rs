@@ -1,8 +1,7 @@
-use crate::resolver::UserInfo;
+use crate::{resolver::UserInfo, valarray::ValArray};
 use arcstr::ArcStr;
 use bytes::{Bytes, BytesMut};
 use netidx_core::{
-    chars::Chars,
     pack::{Pack, Z64},
     path::Path,
     pool::Pooled,
@@ -10,7 +9,7 @@ use netidx_core::{
 };
 use proptest::{collection, prelude::*, string::string_regex};
 use rust_decimal::Decimal;
-use std::{fmt::Debug, net::SocketAddr, sync::Arc};
+use std::{fmt::Debug, net::SocketAddr};
 
 fn check<T: Pack + Debug + PartialEq>(t: T) {
     let mut bytes = pack(&t).expect("encode failed");
@@ -26,16 +25,12 @@ fn option<T: Clone + Debug, S: Strategy<Value = T>>(
     prop_oneof![Just(None), some.prop_map(Some)]
 }
 
-fn chars() -> impl Strategy<Value = Chars> {
-    any::<String>().prop_map(Chars::from)
-}
-
 fn arcstr() -> impl Strategy<Value = ArcStr> {
     any::<String>().prop_map(ArcStr::from)
 }
 
-fn chars_regex(rex: &str) -> impl Strategy<Value = Chars> {
-    string_regex(rex).unwrap().prop_map(Chars::from)
+fn arcstr_regex(rex: &str) -> impl Strategy<Value = ArcStr> {
+    string_regex(rex).unwrap().prop_map(ArcStr::from)
 }
 
 fn bytes() -> impl Strategy<Value = Bytes> {
@@ -43,7 +38,7 @@ fn bytes() -> impl Strategy<Value = Bytes> {
 }
 
 fn path() -> impl Strategy<Value = Path> {
-    chars().prop_map(Path::from)
+    arcstr().prop_map(Path::from)
 }
 
 fn user_info() -> impl Strategy<Value = UserInfo> {
@@ -118,8 +113,8 @@ mod resolver {
             Just(AuthWrite::Anonymous),
             Just(AuthWrite::Reuse),
             Just(AuthWrite::Local),
-            chars().prop_map(|name| AuthWrite::Tls { name }),
-            chars().prop_map(|spn| AuthWrite::Krb5 { spn })
+            arcstr().prop_map(|name| AuthWrite::Tls { name }),
+            arcstr().prop_map(|spn| AuthWrite::Krb5 { spn })
         ]
     }
 
@@ -127,8 +122,8 @@ mod resolver {
         prop_oneof![
             Just(TargetAuth::Anonymous),
             Just(TargetAuth::Local),
-            chars().prop_map(|name| TargetAuth::Tls { name }),
-            chars().prop_map(|spn| TargetAuth::Krb5 { spn }),
+            arcstr().prop_map(|name| TargetAuth::Tls { name }),
+            arcstr().prop_map(|spn| TargetAuth::Krb5 { spn }),
         ]
     }
 
@@ -156,7 +151,7 @@ mod resolver {
     }
 
     fn glob() -> impl Strategy<Value = Glob> {
-        chars_regex("/[a-zA-Z0-9*/]+").prop_map(|c| Glob::new(c).unwrap())
+        arcstr_regex("/[a-zA-Z0-9*/]+").prop_map(|c| Glob::new(c).unwrap())
     }
 
     fn globset() -> impl Strategy<Value = GlobSet> {
@@ -229,8 +224,8 @@ mod resolver {
     fn auth() -> impl Strategy<Value = Auth> {
         prop_oneof![
             Just(Auth::Anonymous),
-            chars().prop_map(|path| Auth::Local { path }),
-            chars().prop_map(|spn| Auth::Krb5 { spn }),
+            arcstr().prop_map(|path| Auth::Local { path }),
+            arcstr().prop_map(|spn| Auth::Krb5 { spn }),
         ]
     }
 
@@ -293,7 +288,7 @@ mod resolver {
             table().prop_map(FromRead::Table),
             referral().prop_map(FromRead::Referral),
             Just(FromRead::Denied),
-            chars().prop_map(FromRead::Error)
+            arcstr().prop_map(FromRead::Error)
         ]
     }
 
@@ -326,7 +321,7 @@ mod resolver {
             Just(FromWrite::Unpublished),
             referral().prop_map(FromWrite::Referral),
             Just(FromWrite::Denied),
-            chars().prop_map(FromWrite::Error)
+            arcstr().prop_map(FromWrite::Error)
         ]
     }
 
@@ -457,24 +452,24 @@ mod publisher {
             any::<[u8; 16]>().prop_map(|a| Value::Decimal(Decimal::deserialize(a))),
             datetime().prop_map(Value::DateTime),
             duration().prop_map(Value::Duration),
-            chars().prop_map(Value::String),
-            bytes().prop_map(Value::Bytes),
+            arcstr().prop_map(Value::String),
+            bytes().prop_map(|b| Value::Bytes(b.into())),
             Just(Value::True),
             Just(Value::False),
             Just(Value::Null),
             Just(Value::Ok),
-            chars().prop_map(Value::Error),
+            arcstr().prop_map(Value::Error),
         ];
         leaf.prop_recursive(10, 1000, 100, |inner| {
             prop_oneof![collection::vec(inner.clone(), 0..100)
-                .prop_map(|e| Value::Array(Arc::from(e)))]
+                .prop_map(|e| Value::Array(ValArray::from(e)))]
         })
     }
 
     fn from() -> impl Strategy<Value = From> {
         prop_oneof![
-            path().prop_map(From::NoSuchValue),
-            path().prop_map(From::Denied),
+            path().prop_map(|p| From::NoSuchValue(p)),
+            path().prop_map(|p| From::Denied(p)),
             any::<u64>().prop_map(|i| From::Unsubscribed(Id::mk(i))),
             (path(), any::<u64>(), value()).prop_map(|(p, i, v)| From::Subscribed(
                 p,

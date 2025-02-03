@@ -1,9 +1,7 @@
 use crate::glob::GlobSet;
 use arcstr::ArcStr;
 use bytes::{Buf, BufMut, Bytes};
-use smallvec::SmallVec;
 use netidx_core::{
-    chars::Chars,
     pack::{
         len_wrapped_decode, len_wrapped_encode, len_wrapped_len, Pack, PackError, Z64,
     },
@@ -11,6 +9,7 @@ use netidx_core::{
     pool::Pooled,
 };
 use netidx_derive::Pack;
+use smallvec::SmallVec;
 use std::{
     cmp::{Eq, PartialEq},
     hash::{Hash, Hasher},
@@ -44,9 +43,9 @@ pub enum AuthRead {
 pub enum AuthWrite {
     Anonymous,
     Reuse,
-    Krb5 { spn: Chars },
+    Krb5 { spn: ArcStr },
     Local,
-    Tls { name: Chars },
+    Tls { name: ArcStr },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
@@ -117,9 +116,9 @@ pub enum ToRead {
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub enum Auth {
     Anonymous,
-    Local { path: Chars },
-    Krb5 { spn: Chars },
-    Tls { name: Chars },
+    Local { path: ArcStr },
+    Krb5 { spn: ArcStr },
+    Tls { name: ArcStr },
 }
 
 atomic_id!(PublisherId);
@@ -128,8 +127,8 @@ atomic_id!(PublisherId);
 pub enum TargetAuth {
     Anonymous,
     Local,
-    Krb5 { spn: Chars },
-    Tls { name: Chars },
+    Krb5 { spn: ArcStr },
+    Tls { name: ArcStr },
 }
 
 impl TargetAuth {
@@ -240,7 +239,7 @@ pub enum FromRead {
     Table(Table),
     Referral(Referral),
     Denied,
-    Error(Chars),
+    Error(ArcStr),
     ListMatching(ListMatching),
     GetChangeNr(GetChangeNr),
 }
@@ -271,5 +270,5 @@ pub enum FromWrite {
     Unpublished,
     Referral(Referral),
     Denied,
-    Error(Chars),
+    Error(ArcStr),
 }
