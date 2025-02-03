@@ -1,6 +1,5 @@
 mod resolver {
     use crate::{
-        chars::Chars,
         config::Config as ClientConfig,
         path::Path,
         protocol::glob::{Glob, GlobSet},
@@ -8,6 +7,7 @@ mod resolver {
         resolver_client::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
         resolver_server::{config::Config as ServerConfig, Server},
     };
+    use arcstr::literal;
     use netidx_netproto::resolver::TargetAuth;
     use rand::{thread_rng, Rng};
     use std::{iter, net::SocketAddr, time::Duration};
@@ -211,7 +211,7 @@ mod resolver {
             &*l,
             &[p("/app/huge1/sub/x"), p("/app/huge1/sub/y"), p("/app/huge1/sub/z")]
         );
-        let pat = Glob::new(Chars::from("/app/huge*/*")).unwrap();
+        let pat = Glob::new(literal!("/app/huge*/*")).unwrap();
         let pset = GlobSet::new(true, iter::once(pat)).unwrap();
         let mut l = Vec::new();
         for mut b in r.list_matching(&pset).await.unwrap().drain(..) {
