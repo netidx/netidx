@@ -5,9 +5,10 @@ use crate::{
     vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node, RpcCallId},
 };
 use anyhow::{anyhow, bail, Result};
+use arcstr::ArcStr;
+use compact_str::format_compact;
 use fxhash::FxHashSet;
 use netidx::{
-    chars::Chars,
     path::Path,
     subscriber::{Dval, UpdatesFlags, Value},
 };
@@ -210,7 +211,10 @@ impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        fn parse_args(path: &Value, args: &Value) -> Result<(Path, Vec<(Chars, Value)>)> {
+        fn parse_args(
+            path: &Value,
+            args: &Value,
+        ) -> Result<(Path, Vec<(ArcStr, Value)>)> {
             let path = as_path(path.clone()).ok_or_else(|| anyhow!("invalid path"))?;
             let args = match args {
                 Value::Array(args) => args

@@ -11,14 +11,14 @@ pub mod time;
 
 #[macro_export]
 macro_rules! errf {
-    ($pat:expr, $($arg:expr),*) => { Some(Value::Error(Chars::from(format!($pat, $($arg),*)))) };
-    ($pat:expr) => { Some(Value::Error(Chars::from(format!($pat)))) };
+    ($pat:expr, $($arg:expr),*) => { Some(Value::Error(ArcStr::from(format_compact!($pat, $($arg),*).as_str()))) };
+    ($pat:expr) => { Some(Value::Error(ArcStr::from(format_compact!($pat).as_str()))) };
 }
 
 #[macro_export]
 macro_rules! err {
-    ($pat:expr) => {
-        Some(Value::Error(Chars::from($pat)))
+    ($pat:literal) => {
+        Some(Value::Error(literal!($pat)))
     };
 }
 

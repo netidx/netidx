@@ -5,7 +5,9 @@ use crate::{
     vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node, TimerId},
 };
 use anyhow::{bail, Result};
-use netidx::{chars::Chars, publisher::FromValue, subscriber::Value};
+use arcstr::{literal, ArcStr};
+use compact_str::format_compact;
+use netidx::{publisher::FromValue, subscriber::Value};
 use std::{ops::SubAssign, sync::Arc, time::Duration};
 
 struct AfterIdle {

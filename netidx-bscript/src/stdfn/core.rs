@@ -4,11 +4,11 @@ use crate::{
     stdfn::{CachedArgs, CachedVals, EvalCached},
     vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node},
 };
-use netidx::{
-    chars::Chars,
-    subscriber::{Typ, Value},
-};
+use netidx::subscriber::{Typ, Value};
+use netidx_netproto::valarray::ValArray;
 use std::sync::Arc;
+use arcstr::{literal, ArcStr};
+use compact_str::format_compact;
 
 struct Any;
 
@@ -101,7 +101,8 @@ impl EvalCached for ArrayEv {
 
     fn eval(from: &CachedVals) -> Option<Value> {
         if from.0.iter().all(|v| v.is_some()) {
-            Some(Value::Array(Arc::from_iter(from.0.iter().filter_map(|v| v.clone()))))
+            let iter = from.0.iter().map(|v| v.as_ref().unwrap().clone());
+            Some(Value::Array(ValArray::from_iter_exact(iter)))
         } else {
             None
         }

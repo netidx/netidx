@@ -1,10 +1,13 @@
+use std::cell::RefCell;
+
 use crate::{
     err,
     expr::Expr,
     stdfn::{CachedArgs, CachedVals, EvalCached},
     vm::{Arity, Ctx, ExecCtx},
 };
-use netidx::{chars::Chars, path::Path, subscriber::Value};
+use arcstr::{literal, ArcStr};
+use netidx::{path::Path, subscriber::Value};
 
 struct StartsWithEv;
 
@@ -83,9 +86,9 @@ impl EvalCached for StripPrefixEv {
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
-            (Some(Value::String(pfx)), Some(Value::String(val))) => val
-                .strip_prefix(&**pfx)
-                .map(|s| Value::String(Chars::from(String::from(s)))),
+            (Some(Value::String(pfx)), Some(Value::String(val))) => {
+                val.strip_prefix(&**pfx).map(|s| Value::String(s.into()))
+            }
             (None, _) | (_, None) => None,
             _ => err!("strip_prefix expected string"),
         }
@@ -102,9 +105,9 @@ impl EvalCached for StripSuffixEv {
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
-            (Some(Value::String(sfx)), Some(Value::String(val))) => val
-                .strip_suffix(&**sfx)
-                .map(|s| Value::String(Chars::from(String::from(s)))),
+            (Some(Value::String(sfx)), Some(Value::String(val))) => {
+                val.strip_suffix(&**sfx).map(|s| Value::String(s.into()))
+            }
             (None, _) | (_, None) => None,
             _ => err!("strip_suffix expected string"),
         }
@@ -121,9 +124,7 @@ impl EvalCached for TrimEv {
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
-            Some(Value::String(val)) => {
-                Some(Value::String(Chars::from(String::from(val.trim()))))
-            }
+            Some(Value::String(val)) => Some(Value::String(val.trim().into())),
             None => None,
             _ => err!("trim expected string"),
         }
@@ -140,9 +141,7 @@ impl EvalCached for TrimStartEv {
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
-            Some(Value::String(val)) => {
-                Some(Value::String(Chars::from(String::from(val.trim_start()))))
-            }
+            Some(Value::String(val)) => Some(Value::String(val.trim_start().into())),
             None => None,
             _ => err!("trim_start expected string"),
         }
@@ -159,9 +158,7 @@ impl EvalCached for TrimEndEv {
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
-            Some(Value::String(val)) => {
-                Some(Value::String(Chars::from(String::from(val.trim_end()))))
-            }
+            Some(Value::String(val)) => Some(Value::String(val.trim_end().into())),
             None => None,
             _ => err!("trim_start expected string"),
         }
@@ -182,9 +179,7 @@ impl EvalCached for ReplaceEv {
                 Some(Value::String(pat)),
                 Some(Value::String(rep)),
                 Some(Value::String(val)),
-            ) => Some(Value::String(Chars::from(String::from(
-                val.replace(&**pat, &**rep),
-            )))),
+            ) => Some(Value::String(val.replace(&**pat, &**rep).into())),
             (None, _, _) | (_, None, _) | (_, _, None) => None,
             _ => err!("replace expected string"),
         }
@@ -203,7 +198,7 @@ impl EvalCached for DirnameEv {
         match &from.0[0] {
             Some(Value::String(path)) => match Path::dirname(path) {
                 None => Some(Value::Null),
-                Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
+                Some(dn) => Some(Value::String(dn.into())),
             },
             None => None,
             _ => err!("dirname expected string"),
@@ -223,7 +218,7 @@ impl EvalCached for BasenameEv {
         match &from.0[0] {
             Some(Value::String(path)) => match Path::basename(path) {
                 None => Some(Value::Null),
-                Some(dn) => Some(Value::String(Chars::from(String::from(dn)))),
+                Some(dn) => Some(Value::String(dn.into())),
             },
             None => None,
             _ => err!("basename expected string"),
@@ -240,7 +235,9 @@ impl EvalCached for StringJoinEv {
     const ARITY: Arity = Arity::AtLeast(2);
 
     fn eval(from: &CachedVals) -> Option<Value> {
-        use bytes::BytesMut;
+        thread_local! {
+            static BUF: RefCell<String> = RefCell::new(String::new());
+        }
         match &from.0[..] {
             [_] | [] => None,
             [None, ..] => None,
@@ -253,30 +250,34 @@ impl EvalCached for StringJoinEv {
                 }
                 let sep = match sep {
                     Value::String(c) => c.clone(),
-                    sep => match sep.clone().cast_to::<Chars>().ok() {
+                    sep => match sep.clone().cast_to::<ArcStr>().ok() {
                         Some(c) => c,
                         None => return err!("string_join, separator must be a string"),
                     },
                 };
-                let mut res = BytesMut::new();
-                for p in parts {
-                    let c = match p.as_ref().unwrap() {
-                        Value::String(c) => c.clone(),
-                        v => match v.clone().cast_to::<Chars>().ok() {
-                            Some(c) => c,
-                            None => {
-                                return err!("string_join, components must be strings")
-                            }
-                        },
-                    };
-                    if res.is_empty() {
-                        res.extend_from_slice(c.bytes());
-                    } else {
-                        res.extend_from_slice(sep.bytes());
-                        res.extend_from_slice(c.bytes());
+                BUF.with_borrow_mut(|buf| {
+                    buf.clear();
+                    for p in parts {
+                        let c = match p.as_ref().unwrap() {
+                            Value::String(c) => c.clone(),
+                            v => match v.clone().cast_to::<ArcStr>().ok() {
+                                Some(c) => c,
+                                None => {
+                                    return err!(
+                                        "string_join, components must be strings"
+                                    )
+                                }
+                            },
+                        };
+                        if buf.is_empty() {
+                            buf.push_str(c.as_str());
+                        } else {
+                            buf.push_str(sep.as_str());
+                            buf.push_str(c.as_str());
+                        }
                     }
-                }
-                Some(Value::String(Chars::from_bytes(res.freeze()).unwrap()))
+                    Some(Value::String(buf.as_str().into()))
+                })
             }
         }
     }
@@ -291,7 +292,9 @@ impl EvalCached for StringConcatEv {
     const ARITY: Arity = Arity::AtLeast(1);
 
     fn eval(from: &CachedVals) -> Option<Value> {
-        use bytes::BytesMut;
+        thread_local! {
+            static BUF: RefCell<String> = RefCell::new(String::new());
+        }
         let parts = &from.0[..];
         // this is a fairly common case, so we check it before doing any real work
         for p in parts {
@@ -299,17 +302,19 @@ impl EvalCached for StringConcatEv {
                 return None;
             }
         }
-        let mut res = BytesMut::new();
-        for p in parts {
-            match p.as_ref().unwrap() {
-                Value::String(c) => res.extend_from_slice(c.bytes()),
-                v => match v.clone().cast_to::<Chars>().ok() {
-                    Some(c) => res.extend_from_slice(c.bytes()),
-                    None => return err!("string_concat: arguments must be strings"),
-                },
+        BUF.with_borrow_mut(|buf| {
+            buf.clear();
+            for p in parts {
+                match p.as_ref().unwrap() {
+                    Value::String(c) => buf.push_str(c.as_ref()),
+                    v => match v.clone().cast_to::<ArcStr>().ok() {
+                        Some(c) => buf.push_str(c.as_ref()),
+                        None => return err!("string_concat: arguments must be strings"),
+                    },
+                }
             }
-        }
-        Some(Value::String(Chars::from_bytes(res.freeze()).unwrap()))
+            Some(Value::String(buf.as_str().into()))
+        })
     }
 }
 

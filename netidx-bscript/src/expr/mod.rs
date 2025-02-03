@@ -1,10 +1,10 @@
 use netidx::{
-    chars::Chars,
     path::Path,
     publisher::Typ,
     subscriber::Value,
     utils::{self, Either},
 };
+use arcstr::ArcStr;
 use regex::Regex;
 use serde::{
     de::{self, Visitor},
@@ -102,19 +102,19 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum Pattern {
     Underscore,
-    Typ { tag: Arc<[Typ]>, bind: Chars, guard: Option<Expr> },
+    Typ { tag: Arc<[Typ]>, bind: ArcStr, guard: Option<Expr> },
 }
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum ExprKind {
     Constant(Value),
-    Module { name: Chars, export: bool, value: Option<Arc<[Expr]>> },
+    Module { name: ArcStr, export: bool, value: Option<Arc<[Expr]>> },
     Do { exprs: Arc<[Expr]> },
     Use { name: ModPath },
-    Bind { name: Chars, export: bool, value: Arc<Expr> },
+    Bind { name: ArcStr, export: bool, value: Arc<Expr> },
     Ref { name: ModPath },
     Connect { name: ModPath, value: Arc<Expr> },
-    Lambda { args: Arc<[Chars]>, vargs: bool, body: Either<Arc<Expr>, Chars> },
+    Lambda { args: Arc<[ArcStr]>, vargs: bool, body: Either<Arc<Expr>, ArcStr> },
     Apply { args: Arc<[Expr]>, function: ModPath },
     Select { arg: Arc<Expr>, arms: Arc<[(Pattern, Expr)]> },
     Eq { lhs: Arc<Expr>, rhs: Arc<Expr> },

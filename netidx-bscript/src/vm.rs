@@ -3,12 +3,12 @@ use crate::{
     stdfn,
 };
 use anyhow::{bail, Result};
+use arcstr::{ArcStr, literal};
 use chrono::prelude::*;
 use compact_str::{format_compact, CompactString};
 use fxhash::FxHashMap;
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::{
-    chars::Chars,
     path::Path,
     publisher::Typ,
     subscriber::{Dval, SubId, UpdatesFlags, Value},
@@ -177,7 +177,7 @@ pub trait Ctx {
     fn call_rpc(
         &mut self,
         name: Path,
-        args: Vec<(Chars, Value)>,
+        args: Vec<(ArcStr, Value)>,
         ref_by: ExprId,
         id: RpcCallId,
     );
@@ -395,7 +395,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Apply<C, E> for Lambda<C, E> {
 impl<C: Ctx + 'static, E: Clone + 'static> Lambda<C, E> {
     fn new(
         ctx: &mut ExecCtx<C, E>,
-        argspec: Arc<[Chars]>,
+        argspec: Arc<[ArcStr]>,
         args: &[Node<C, E>],
         scope: &ModPath,
         eid: ExprId,
@@ -587,7 +587,7 @@ pub enum NodeKind<C: Ctx + 'static, E: Clone + 'static> {
         rhs: Box<Cached<C, E>>,
     },
     Error {
-        error: Option<Chars>,
+        error: Option<ArcStr>,
         children: Vec<Node<C, E>>,
     },
 }
@@ -663,7 +663,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
     }
 
     /// extracts the first error
-    pub fn extract_err(&self) -> Option<Chars> {
+    pub fn extract_err(&self) -> Option<ArcStr> {
         match &self.kind {
             NodeKind::Error { error: Some(e), .. } => Some(e.clone()),
             NodeKind::Error { children, .. } => {
@@ -818,14 +818,14 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
     fn compile_lambda(
         ctx: &mut ExecCtx<C, E>,
         spec: Expr,
-        argspec: Arc<[Chars]>,
+        argspec: Arc<[ArcStr]>,
         scope: &ModPath,
-        body: Either<Arc<Expr>, Chars>,
+        body: Either<Arc<Expr>, ArcStr>,
         eid: ExprId,
     ) -> Node<C, E> {
         use sync::Arc;
         if argspec.len() != argspec.iter().collect::<Set<_>>().len() {
-            let e = Chars::from("arguments must have unique names");
+            let e = literal!("arguments must have unique names");
             let kind = NodeKind::Error { error: Some(e), children: vec![] };
             return Node { spec, kind };
         }
@@ -893,7 +893,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 Node { spec, kind }
             }};
             ($fmt:expr, $children:expr, $($arg:expr),*) => {{
-                let e = Chars::from(format!($fmt, $($arg),*));
+                let e = ArcStr::from(format_compact!($fmt, $($arg),*).as_str());
                 let kind = NodeKind::Error { error: Some(e), children: $children };
                 Node { spec, kind }
             }};
@@ -1132,7 +1132,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             ($v:expr) => {
                 match $v.cached.as_ref().map(|v| v.clone().get_as::<bool>()) {
                     None => return None,
-                    Some(None) => return Some(Value::Error(Chars::from("expected bool"))),
+                    Some(None) => return Some(Value::Error(literal!("expected bool"))),
                     Some(Some(lhs)) => lhs,
                 }
             };
