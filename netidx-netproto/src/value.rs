@@ -31,7 +31,6 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-use triomphe::Arc;
 
 use crate::{pbuf::PBytes, valarray::ValArray, value_parser};
 
@@ -2408,12 +2407,20 @@ impl<K: FromValue + Eq + Hash, V: FromValue, S: BuildHasher + Default> FromValue
     for HashMap<K, V, S>
 {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) => {
-                elts.iter().map(|v| v.clone().cast_to::<(K, V)>()).collect()
-            }
-            _ => bail!("can't cast"),
-        })
+        macro_rules! convert {
+            ($a:expr) => {
+                $a.iter().map(|v| v.clone().cast_to::<(K, V)>()).collect()
+            };
+        }
+        match v {
+            Value::Array(a) => convert!(a),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) => convert!(a),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2430,18 +2437,26 @@ impl<K: convert::Into<Value>, V: convert::Into<Value>, S: BuildHasher + Default>
     convert::From<HashMap<K, V, S>> for Value
 {
     fn from(h: HashMap<K, V, S>) -> Value {
-        h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
+        Value::Array(ValArray::from_iter_exact(h.into_iter().map(|v| v.into())))
     }
 }
 
 impl<K: FromValue + Ord, V: FromValue> FromValue for BTreeMap<K, V> {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) => {
-                elts.iter().map(|v| v.clone().cast_to::<(K, V)>()).collect()
-            }
-            _ => bail!("can't cast"),
-        })
+        macro_rules! convert {
+            ($a:expr) => {
+                $a.iter().map(|v| v.clone().cast_to::<(K, V)>()).collect()
+            };
+        }
+        match v {
+            Value::Array(a) => convert!(a),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) => convert!(a),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2458,16 +2473,26 @@ impl<K: convert::Into<Value>, V: convert::Into<Value>> convert::From<BTreeMap<K,
     for Value
 {
     fn from(v: BTreeMap<K, V>) -> Self {
-        v.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
+        Value::Array(ValArray::from_iter_exact(v.into_iter().map(|v| v.into())))
     }
 }
 
 impl<K: FromValue + Eq + Hash, S: BuildHasher + Default> FromValue for HashSet<K, S> {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) => elts.iter().map(|v| v.clone().cast_to::<K>()).collect(),
-            _ => bail!("can't cast"),
-        })
+        macro_rules! convert {
+            ($a:expr) => {
+                $a.iter().map(|v| v.clone().cast_to::<K>()).collect()
+            };
+        }
+        match v {
+            Value::Array(a) => convert!(a),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) => convert!(a),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2482,16 +2507,26 @@ impl<K: convert::Into<Value>, S: BuildHasher + Default> convert::From<HashSet<K,
     for Value
 {
     fn from(h: HashSet<K, S>) -> Value {
-        h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
+        Value::Array(ValArray::from_iter_exact(h.into_iter().map(|v| v.into())))
     }
 }
 
 impl<K: FromValue + Ord> FromValue for BTreeSet<K> {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) => elts.iter().map(|v| v.clone().cast_to::<K>()).collect(),
-            _ => bail!("can't cast"),
-        })
+        macro_rules! convert {
+            ($a:expr) => {
+                $a.iter().map(|v| v.clone().cast_to::<K>()).collect()
+            };
+        }
+        match v {
+            Value::Array(a) => convert!(a),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) => convert!(a),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2504,7 +2539,7 @@ impl<K: FromValue + Ord> FromValue for BTreeSet<K> {
 
 impl<K: convert::Into<Value>> convert::From<BTreeSet<K>> for Value {
     fn from(s: BTreeSet<K>) -> Self {
-        s.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
+        Value::Array(ValArray::from_iter_exact(s.into_iter().map(|v| v.into())))
     }
 }
 
@@ -2512,12 +2547,20 @@ impl<K: FromValue + Eq + Hash, V: FromValue, S: BuildHasher + Default> FromValue
     for IndexMap<K, V, S>
 {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) => {
-                elts.iter().map(|v| v.clone().cast_to::<(K, V)>()).collect()
-            }
-            _ => bail!("can't cast"),
-        })
+        macro_rules! convert {
+            ($a:expr) => {
+                $a.iter().map(|v| v.clone().cast_to::<(K, V)>()).collect()
+            };
+        }
+        match v {
+            Value::Array(a) => convert!(a),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) => convert!(a),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2534,19 +2577,28 @@ impl<K: convert::Into<Value>, V: convert::Into<Value>, S: BuildHasher + Default>
     convert::From<IndexMap<K, V, S>> for Value
 {
     fn from(h: IndexMap<K, V, S>) -> Value {
-        h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
+        Value::Array(ValArray::from_iter_exact(h.into_iter().map(|v| v.into())))
     }
 }
 
 impl<K: FromValue + Eq + Hash, S: BuildHasher + Default> FromValue for IndexSet<K, S> {
     fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Array(elts) => elts
-                .iter()
-                .map(|v| v.clone().cast_to::<K>())
-                .collect::<Res<IndexSet<K, S>>>(),
-            _ => bail!("can't cast"),
-        })
+        macro_rules! convert {
+            ($a:expr) => {
+                $a.iter()
+                    .map(|v| v.clone().cast_to::<K>())
+                    .collect::<Res<IndexSet<K, S>>>()
+            };
+        }
+        match v {
+            Value::Array(a) => convert!(a),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) => convert!(a),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -2561,7 +2613,7 @@ impl<K: convert::Into<Value>, S: BuildHasher + Default> convert::From<IndexSet<K
     for Value
 {
     fn from(h: IndexSet<K, S>) -> Value {
-        h.into_iter().map(|v| v.into()).collect::<Vec<Value>>().into()
+        Value::Array(ValArray::from_iter_exact(h.into_iter().map(|v| v.into())))
     }
 }
 
@@ -2614,12 +2666,6 @@ where
     }
 }
 
-impl convert::From<uuid::Uuid> for Value {
-    fn from(id: uuid::Uuid) -> Self {
-        Value::from(id.to_string())
-    }
-}
-
 impl FromValue for uuid::Uuid {
     fn from_value(v: Value) -> Res<Self> {
         match v {
@@ -2633,6 +2679,12 @@ impl FromValue for uuid::Uuid {
     }
 }
 
+impl convert::From<uuid::Uuid> for Value {
+    fn from(id: uuid::Uuid) -> Self {
+        Value::from(id.to_string())
+    }
+}
+
 thread_local! {
     static POOLS: RefCell<FxHashMap<TypeId, Box<dyn Any>>> =
         RefCell::new(HashMap::default());
@@ -2640,8 +2692,8 @@ thread_local! {
 
 impl<T: FromValue + Send + Sync> FromValue for Pooled<Vec<T>> {
     fn from_value(v: Value) -> Res<Self> {
-        match v {
-            Value::Array(elts) => {
+        macro_rules! convert {
+            ($a:expr) => {{
                 let mut t = POOLS.with(|pools| {
                     let mut pools = pools.borrow_mut();
                     let pool: &mut Pool<Vec<T>> = pools
@@ -2651,12 +2703,20 @@ impl<T: FromValue + Send + Sync> FromValue for Pooled<Vec<T>> {
                         .unwrap();
                     pool.take()
                 });
-                for elt in elts.iter() {
+                for elt in $a.iter() {
                     t.push(elt.clone().cast_to::<T>()?)
                 }
                 Ok(t)
-            }
-            _ => bail!("expected an array"),
+            }};
+        }
+        match v {
+            Value::Array(a) => convert!(a),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) => convert!(a),
+                    _ => bail!("can't cast"),
+                }
+            }),
         }
     }
 

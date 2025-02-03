@@ -1,5 +1,6 @@
-use crate::value::Value;
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use crate::{pbuf::PBytes, value::Value};
+use arcstr::ArcStr;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::Bytes;
 use combine::{
     attempt, between, choice, from_str, many1, none_of, not_followed_by, one_of,
@@ -14,8 +15,8 @@ use combine::{
     stream::{position, Range},
     token, EasyParser, ParseError, Parser, RangeStream,
 };
-use netidx_core::{chars::Chars, utils};
-use std::{borrow::Cow, result::Result, str::FromStr, sync::Arc, time::Duration};
+use netidx_core::utils;
+use std::{borrow::Cow, result::Result, str::FromStr, time::Duration};
 
 pub static VAL_ESC: [char; 2] = ['\\', '"'];
 
@@ -150,9 +151,9 @@ where
     spaces().with(choice((
         attempt(
             between(token('['), token(']'), sep_by(value(esc), token(',')))
-                .map(|vals: Vec<Value>| Value::Array(Arc::from(vals))),
+                .map(|vals: Vec<Value>| Value::Array(vals.into())),
         ),
-        attempt(quoted(esc)).map(|s| Value::String(Chars::from(s))),
+        attempt(quoted(esc)).map(|s| Value::String(ArcStr::from(s))),
         attempt(from_str(flt()).map(|v| Value::F64(v))),
         attempt(from_str(int()).map(|v| Value::I64(v))),
         attempt(string("true").skip(close_expr()).map(|_| Value::True)),
@@ -172,11 +173,11 @@ where
         attempt(
             constant("bytes")
                 .with(from_str(base64str()))
-                .map(|Base64Encoded(v)| Value::Bytes(Bytes::from(v))),
+                .map(|Base64Encoded(v)| Value::Bytes(PBytes::new(Bytes::from(v)))),
         ),
         attempt(string("ok").skip(close_expr()).map(|_| Value::Ok)),
         attempt(
-            constant("error").with(quoted(esc)).map(|s| Value::Error(Chars::from(s))),
+            constant("error").with(quoted(esc)).map(|s| Value::Error(ArcStr::from(s))),
         ),
         attempt(
             constant("datetime").with(from_str(quoted(esc))).map(|d| Value::DateTime(d)),
@@ -251,12 +252,12 @@ mod tests {
         assert_eq!(Value::F64(21.2443e-6), parse_value("21.2443e-6").unwrap());
         assert_eq!(Value::F64(3.), parse_value("f64:3.").unwrap());
         assert_eq!(Value::F64(3.), parse_value("3.").unwrap());
-        let c = Chars::from(r#"I've got a lovely "bunch" of (coconuts)"#);
+        let c = ArcStr::from(r#"I've got a lovely "bunch" of (coconuts)"#);
         let s = r#""I've got a lovely \"bunch\" of (coconuts)""#;
         assert_eq!(Value::String(c), parse_value(s).unwrap());
-        let c = Chars::new();
+        let c = ArcStr::new();
         assert_eq!(Value::String(c), parse_value(r#""""#).unwrap());
-        let c = Chars::from(r#"""#);
+        let c = ArcStr::from(r#"""#);
         let s = r#""\"""#;
         assert_eq!(Value::String(c), parse_value(s).unwrap());
         assert_eq!(Value::True, parse_value("true").unwrap());
@@ -265,7 +266,7 @@ mod tests {
         assert_eq!(Value::Null, parse_value("null").unwrap());
         assert_eq!(Value::Ok, parse_value("ok").unwrap());
         assert_eq!(
-            Value::Error(Chars::from("error")),
+            Value::Error(ArcStr::from("error")),
             parse_value(r#"error:"error""#).unwrap()
         );
     }

@@ -54,7 +54,7 @@ impl Scope {
 /// `/marketdata/{IBM,MSFT,AMZN}/last`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Glob {
-    raw: Chars,
+    raw: ArcStr,
     base: Path,
     scope: Scope,
     glob: globset::Glob,
@@ -95,7 +95,7 @@ impl Glob {
         }
     }
 
-    pub fn new(raw: Chars) -> Result<Glob> {
+    pub fn new(raw: ArcStr) -> Result<Glob> {
         if !Path::is_absolute(&raw) {
             bail!("glob paths must be absolute")
         }
@@ -143,22 +143,22 @@ impl Glob {
         self.glob
     }
 
-    pub fn raw(&self) -> &Chars {
+    pub fn raw(&self) -> &ArcStr {
         &self.raw
     }
 }
 
 impl Pack for Glob {
     fn encoded_len(&self) -> usize {
-        <Chars as Pack>::encoded_len(&self.raw)
+        Pack::encoded_len(&self.raw)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> result::Result<(), PackError> {
-        <Chars as Pack>::encode(&self.raw, buf)
+        Pack::encode(&self.raw, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
-        Glob::new(<Chars as Pack>::decode(buf)?).map_err(|_| PackError::InvalidFormat)
+        Glob::new(Pack::decode(buf)?).map_err(|_| PackError::InvalidFormat)
     }
 }
 
@@ -213,7 +213,7 @@ impl<'a> TryFrom<&'a [Chars]> for GlobSet {
 
     fn try_from(value: &[Chars]) -> result::Result<Self, Self::Error> {
         let v: SmallVec<[Glob; 8]> =
-            value.iter().map(|c| Glob::new(c.clone())).collect::<Result<_>>()?;
+            value.iter().map(|c| Glob::new(ArcStr::from(&**c))).collect::<Result<_>>()?;
         GlobSet::new(false, v)
     }
 }
@@ -222,9 +222,19 @@ impl<'a> TryFrom<&'a [String]> for GlobSet {
     type Error = anyhow::Error;
 
     fn try_from(value: &[String]) -> result::Result<Self, Self::Error> {
+        let v: SmallVec<[Glob; 8]> =
+            value.iter().map(|c| Glob::new(ArcStr::from(&**c))).collect::<Result<_>>()?;
+        GlobSet::new(false, v)
+    }
+}
+
+impl<'a> TryFrom<&'a [ArcStr]> for GlobSet {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &[ArcStr]) -> result::Result<Self, Self::Error> {
         let v: SmallVec<[Glob; 8]> = value
             .iter()
-            .map(|c| Glob::new(Chars::from(c.clone())))
+            .map(|c| Glob::new(ArcStr::from(c.clone())))
             .collect::<Result<_>>()?;
         GlobSet::new(false, v)
     }
@@ -234,8 +244,10 @@ impl TryFrom<Vec<Chars>> for GlobSet {
     type Error = anyhow::Error;
 
     fn try_from(value: Vec<Chars>) -> result::Result<Self, Self::Error> {
-        let v: SmallVec<[Glob; 8]> =
-            value.into_iter().map(|c| Glob::new(c)).collect::<Result<_>>()?;
+        let v: SmallVec<[Glob; 8]> = value
+            .into_iter()
+            .map(|c| Glob::new(ArcStr::from(&*c)))
+            .collect::<Result<_>>()?;
         GlobSet::new(false, v)
     }
 }
@@ -246,7 +258,19 @@ impl TryFrom<Vec<String>> for GlobSet {
     fn try_from(value: Vec<String>) -> result::Result<Self, Self::Error> {
         let v: SmallVec<[Glob; 8]> = value
             .into_iter()
-            .map(|c| Glob::new(Chars::from(c)))
+            .map(|c| Glob::new(ArcStr::from(&*c)))
+            .collect::<Result<_>>()?;
+        GlobSet::new(false, v)
+    }
+}
+
+impl TryFrom<Vec<ArcStr>> for GlobSet {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Vec<ArcStr>) -> result::Result<Self, Self::Error> {
+        let v: SmallVec<[Glob; 8]> = value
+            .into_iter()
+            .map(|c| Glob::new(ArcStr::from(c.clone())))
             .collect::<Result<_>>()?;
         GlobSet::new(false, v)
     }
@@ -287,7 +311,7 @@ impl GlobSet {
     }
 
     /// return the raw glob strings
-    pub fn raw(&self) -> Vec<Chars> {
+    pub fn raw(&self) -> Vec<ArcStr> {
         self.0.raw.iter().map(|g| g.raw.clone()).collect()
     }
 

@@ -18,15 +18,6 @@ fn init_pool(len: usize) -> Pool<ValArrayInner> {
     Pool::new(64 * (64 - len), 64)
 }
 
-fn assign(len: usize, t: &mut Pooled<ValArrayInner>) {
-    if len > 0 && len <= 64 {
-        POOLS.with_borrow_mut(|pools| {
-            let pool = pools.entry(len).or_insert_with(|| init_pool(len));
-            t.assign(pool)
-        })
-    }
-}
-
 fn orphan(len: usize) -> Pooled<ValArrayInner> {
     let iter = (0..len).map(|_| Value::False);
     Pooled::orphan(ValArrayInner(ThinArc::from_header_and_iter((), iter)))
