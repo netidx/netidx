@@ -146,6 +146,16 @@ impl From<ArcStr> for Path {
     }
 }
 
+impl From<&ArcStr> for Path {
+    fn from(s: &ArcStr) -> Path {
+        if is_canonical(s) {
+            Path(s.clone())
+        } else {
+            Path(ArcStr::from(canonize(s)))
+        }
+    }
+}
+
 impl<C: Borrow<str>> FromIterator<C> for Path {
     fn from_iter<T: IntoIterator<Item = C>>(iter: T) -> Self {
         thread_local! {

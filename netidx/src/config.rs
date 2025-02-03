@@ -16,8 +16,8 @@ use std::{
 /// The on disk format, encoded as JSON
 pub mod file {
     use derive_builder::Builder;
-    use crate::chars::Chars;
     use anyhow::Result;
+    use arcstr::ArcStr;
     use std::{
         collections::BTreeMap,
         env,
@@ -29,9 +29,9 @@ pub mod file {
     #[serde(deny_unknown_fields)]
     pub enum Auth {
         Anonymous,
-        Krb5(String),
-        Local(String),
-        Tls(String),
+        Krb5(ArcStr),
+        Local(ArcStr),
+        Tls(ArcStr),
     }
 
     impl Into<crate::protocol::resolver::Auth> for Auth {
@@ -39,9 +39,9 @@ pub mod file {
             use crate::protocol::resolver::Auth as A;
             match self {
                 Self::Anonymous => A::Anonymous,
-                Self::Krb5(spn) => A::Krb5 { spn: Chars::from(spn) },
-                Self::Local(path) => A::Local { path: Chars::from(path) },
-                Self::Tls(name) => A::Tls { name: Chars::from(name) },
+                Self::Krb5(spn) => A::Krb5 { spn },
+                Self::Local(path) => A::Local { path },
+                Self::Tls(name) => A::Tls { name },
             }
         }
     }
@@ -317,7 +317,7 @@ impl Config {
                 FAuth::Tls(name) => match &tls {
                     None => bail!("tls auth requires a valid tls configuration"),
                     Some(tls) => {
-                        let mut rev_name = name.clone();
+                        let mut rev_name = String::from(name.as_str());
                         Tls::reverse_domain_name(&mut rev_name);
                         if tls::get_match(&tls.identities, &rev_name).is_none() {
                             bail!(

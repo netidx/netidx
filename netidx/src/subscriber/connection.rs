@@ -35,6 +35,7 @@ use log::{info, trace};
 use parking_lot::Mutex;
 use protocol::resolver::UserInfo;
 use smallvec::SmallVec;
+use std::hint::unreachable_unchecked;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
     mem,
@@ -550,19 +551,22 @@ impl ConnectionCtx {
     // pretty slow, about 250ns, so we go to great lengths to avoid it.
     fn process_updates_batch(&mut self, mut batch: Pooled<Vec<From>>) {
         for m in batch.drain(..) {
-            if let From::Update(i, m) = m {
-                if let Some(sub) = self.subscriptions.get(&i) {
-                    for (chan_id, c) in sub.streams.iter() {
-                        self.by_chan
-                            .entry(*chan_id)
-                            .or_insert_with(|| (c.clone(), BATCHES.take()))
-                            .1
-                            .push((sub.sub_id, Event::Update(m.clone())))
-                    }
-                    if let Some(last) = &sub.last {
-                        *last.lock() = Event::Update(m);
+            match m {
+                From::Update(i, m) => {
+                    if let Some(sub) = self.subscriptions.get(&i) {
+                        for (chan_id, c) in sub.streams.iter() {
+                            self.by_chan
+                                .entry(*chan_id)
+                                .or_insert_with(|| (c.clone(), BATCHES.take()))
+                                .1
+                                .push((sub.sub_id, Event::Update(m.clone())))
+                        }
+                        if let Some(last) = &sub.last {
+                            *last.lock() = Event::Update(m);
+                        }
                     }
                 }
+                _ => unsafe { unreachable_unchecked() }
             }
         }
         self.send_updates()

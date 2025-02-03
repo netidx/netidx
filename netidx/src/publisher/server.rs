@@ -2,9 +2,9 @@ use super::{
     ClId, Client, Event, PublisherInner, PublisherWeak, SendResult, Update, WriteRequest,
     BATCHES,
 };
+use arcstr::literal;
 use crate::{
     channel::{self, Channel, K5CtxWrap, ReadChannel, WriteChannel},
-    chars::Chars,
     pack::BoundedBytes,
     path::Path,
     pool::Pooled,
@@ -136,7 +136,7 @@ fn subscribe(
 
 fn unsubscribe(t: &mut PublisherInner, client: ClId, id: Id) {
     if let Some(ut) = t.by_id.get_mut(&id) {
-	let current_subs = BTreeSet::from_iter(ut.subscribed.iter().copied());
+        let current_subs = BTreeSet::from_iter(ut.subscribed.iter().copied());
         let new_subs =
             BTreeSet::from_iter(ut.subscribed.iter().filter(|a| *a != &client).copied());
         match t.hc_subscribed.entry(new_subs) {
@@ -150,11 +150,11 @@ fn unsubscribe(t: &mut PublisherInner, client: ClId, id: Id) {
                 e.insert(Arc::clone(&ut.subscribed));
             }
         }
-	if let Entry::Occupied(e) = t.hc_subscribed.entry(current_subs) {
-	    if Arc::strong_count(e.get()) == 1 {
-		e.remove();
-	    }
-	}
+        if let Entry::Occupied(e) = t.hc_subscribed.entry(current_subs) {
+            if Arc::strong_count(e.get()) == 1 {
+                e.remove();
+            }
+        }
         let nsubs = ut.subscribed.len();
         if let Some(cl) = t.clients.get_mut(&client) {
             cl.subscribed.remove(&id);
@@ -187,7 +187,7 @@ fn write(
                 Some(v) => v,
                 None => {
                     if r {
-                        let m = Value::Error(Chars::from($m));
+                        let m = Value::Error(literal!($m));
                         con.queue_send(&From::WriteResult(id, m, wid))?
                     }
                     return Ok(());
@@ -583,14 +583,16 @@ impl ClientCtx {
                     }) as BlockedWriteFut
                 },
             ));
-            self.blocked_writes.extend(self.wait_write_res.drain(..).map(|(id, wid, rx)| {
-                Box::pin(async move {
-                    BlockedWrite::Reply(match rx.await {
-                        Ok(v) => From::WriteResult(id, v, wid),
-                        Err(_) => From::WriteResult(id, Value::Ok, wid),
-                    })
-                }) as BlockedWriteFut
-            }));
+            self.blocked_writes.extend(self.wait_write_res.drain(..).map(
+                |(id, wid, rx)| {
+                    Box::pin(async move {
+                        BlockedWrite::Reply(match rx.await {
+                            Ok(v) => From::WriteResult(id, v, wid),
+                            Err(_) => From::WriteResult(id, Value::Ok, wid),
+                        })
+                    }) as BlockedWriteFut
+                },
+            ));
         }
         Ok(())
     }

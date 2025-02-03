@@ -1,14 +1,5 @@
-pub(crate) mod auth;
-pub mod config;
-pub(crate) mod secctx;
-mod shard_store;
-mod store;
-#[cfg(test)]
-mod test;
-
 use crate::{
     channel::{self, Channel, K5CtxWrap},
-    chars::Chars,
     pack::Pack,
     pool::{Pool, Pooled},
     protocol::{
@@ -22,6 +13,7 @@ use crate::{
     tls, utils,
 };
 use anyhow::{Context, Result};
+use arcstr::{ArcStr, literal};
 use auth::{UserInfo, ANONYMOUS};
 use config::{Config, MemberServer};
 use cross_krb5::{AcceptFlags, K5ServerCtx, ServerCtx, Step};
@@ -39,7 +31,7 @@ use std::{
     mem,
     net::SocketAddr,
     ops::Deref,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 use tokio::{
@@ -49,10 +41,16 @@ use tokio::{
     time::{self, Instant},
 };
 
-lazy_static! {
-    static ref WRITE_BATCHES: Pool<Vec<ToWrite>> = Pool::new(100, 10_000);
-    static ref READ_BATCHES: Pool<Vec<ToRead>> = Pool::new(100, 10_000);
-}
+pub(crate) mod auth;
+pub mod config;
+pub(crate) mod secctx;
+mod shard_store;
+mod store;
+#[cfg(test)]
+mod test;
+
+static WRITE_BATCHES: LazyLock<Pool<Vec<ToWrite>>> = LazyLock::new(|| Pool::new(100, 10_000));
+static READ_BATCHES: LazyLock<Pool<Vec<ToRead>>> = LazyLock::new(|| Pool::new(100, 10_000));
 
 atomic_id!(CId);
 
@@ -372,7 +370,7 @@ pub(crate) async fn krb5_authentication(
 ) -> Result<ServerCtx> {
     // the GSS token shouldn't ever be bigger than 1 MB
     const L: usize = 1 * 1024 * 1024;
-    let spn = spn.map(String::from);
+    let spn = spn.map(ArcStr::from);
     let mut ctx = task::spawn_blocking(move || {
         ServerCtx::new(AcceptFlags::empty(), spn.as_ref().map(|s| s.as_str()))
     })
@@ -537,7 +535,7 @@ async fn write_client_reuse_local(
 async fn write_client_krb5_auth(
     ctx: &Arc<Ctx>,
     mut con: TcpStream,
-    a: &Arc<(Chars, RwLock<secctx::SecCtxData<secctx::K5SecData>>)>,
+    a: &Arc<(ArcStr, RwLock<secctx::SecCtxData<secctx::K5SecData>>)>,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
     info!("hello_write initiating new krb5 context for {:?}", hello.write_addr);
@@ -549,7 +547,7 @@ async fn write_client_krb5_auth(
         ttl: ctx.cfg.writer_ttl.as_secs(),
         ttl_expired: true, // re auth always clears
         resolver_id: ctx.id,
-        auth: AuthWrite::Krb5 { spn: Chars::from("") },
+        auth: AuthWrite::Krb5 { spn: literal!("") },
     };
     debug!("hello_write sending {:?}", h);
     time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await??;
@@ -567,7 +565,7 @@ async fn write_client_krb5_auth(
 async fn write_client_reuse_krb5(
     ctx: &Arc<Ctx>,
     con: TcpStream,
-    a: &Arc<(Chars, RwLock<secctx::SecCtxData<secctx::K5SecData>>)>,
+    a: &Arc<(ArcStr, RwLock<secctx::SecCtxData<secctx::K5SecData>>)>,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
     let wa = &hello.write_addr;
@@ -637,7 +635,7 @@ async fn write_client_tls_auth(
         ttl: ctx.cfg.writer_ttl.as_secs(),
         ttl_expired: true,
         resolver_id: ctx.id,
-        auth: AuthWrite::Tls { name: Chars::from("") },
+        auth: AuthWrite::Tls { name: literal!("") },
     };
     debug!("hello_write sending {:?}", h);
     time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await??;

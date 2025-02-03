@@ -1,3 +1,4 @@
+use crate::{pbuf::PBytes, valarray::ValArray, value_parser};
 use anyhow::{bail, Result as Res};
 use arcstr::{literal, ArcStr};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -32,7 +33,21 @@ use std::{
     time::Duration,
 };
 
-use crate::{pbuf::PBytes, valarray::ValArray, value_parser};
+#[macro_export]
+macro_rules! valarray {
+    ($proto:expr; $size:literal) => {{
+        let proto: Value = $proto.into();
+        Value::Array(std::array::from_fn::<_, $size, _>(|_| proto.clone()))
+    }};
+    ($($e:expr),+) => {
+        Value::Array([$($e.into()),+].into())
+    }
+}
+
+fn _test_valarray() {
+    let v: Value = valarray![1, 2, 5.3, 10];
+    let _: Value = valarray![valarray!["elts", v], valarray!["foo", ["bar"]]];
+}
 
 type Result<T> = result::Result<T, PackError>;
 
@@ -2273,6 +2288,50 @@ impl<T: convert::Into<Value> + Clone + Send + Sync> convert::From<Pooled<Vec<T>>
 {
     fn from(mut v: Pooled<Vec<T>>) -> Value {
         Value::Array(ValArray::from_iter_exact(v.drain(..).map(|e| e.into())))
+    }
+}
+
+impl<const S: usize, T: FromValue> FromValue for [T; S] {
+    fn from_value(v: Value) -> Res<Self> {
+        macro_rules! convert {
+            ($elts:expr) => {{
+                let a = $elts
+                    .iter()
+                    .map(|v| <T as FromValue>::from_value(v.clone()))
+                    .collect::<Res<SmallVec<[T; S]>>>()?;
+                Ok(a.into_inner().map_err(|_| anyhow!("size mismatch"))?)
+            }};
+        }
+        match v {
+            Value::Array(a) if a.len() == S => convert!(a),
+            Value::Array(_) => bail!("size mismatch"),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) if a.len() == S => convert!(a),
+                    Value::Array(_) => bail!("size mismatch"),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Array(a) if a.len() == S => {
+                let a = a
+                    .iter()
+                    .map(|v| <T as FromValue>::get(v.clone()))
+                    .collect::<Option<SmallVec<[T; S]>>>()?;
+                a.into_inner().ok()
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<const S: usize, T: convert::Into<Value>> convert::From<[T; S]> for Value {
+    fn from(v: [T; S]) -> Self {
+        Value::Array(ValArray::from_iter_exact(v.into_iter().map(|e| e.into())))
     }
 }
 
