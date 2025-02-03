@@ -1119,25 +1119,29 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
         event: &Event<E>,
     ) -> Option<Value> {
         let mut val_up: SmallVec<[bool; 16]> = smallvec![];
+        let arg_up = arg.update(ctx, event);
         macro_rules! set_arg {
             ($i:expr) => {
                 if let Some(id) = arms[$i].0.bind() {
                     if let Some(arg) = arg.cached.as_ref() {
-                        val_up[$i] |= arms[$i].1.update(ctx, &Event::Variable(id, arg.clone()));
+                        val_up[$i] |=
+                            arms[$i].1.update(ctx, &Event::Variable(id, arg.clone()));
                     }
                 }
             };
         }
         macro_rules! val {
-            ($i:expr) => {
+            ($i:expr) => {{
+                if arg_up {
+                    set_arg!($i)
+                }
                 if val_up[$i] {
                     arms[$i].1.cached.clone()
                 } else {
                     None
                 }
-            }
+            }};
         }
-        let arg_up = arg.update(ctx, event);
         let mut pat_up = false;
         for (pat, val) in arms.iter_mut() {
             pat_up |= pat.update(ctx, event);
@@ -1151,12 +1155,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             val_up.push(val.update(ctx, event));
         }
         if !pat_up {
-            (*selected).and_then(|i| {
-                if arg_up {
-                    set_arg!(i)
-                }
-                val!(i)
-            })
+            selected.and_then(|i| val!(i))
         } else {
             let sel = arms.iter().enumerate().find_map(|(i, (pat, _))| {
                 match pat.is_match(arg.cached.as_ref()) {
@@ -1165,12 +1164,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 }
             });
             match (sel, *selected) {
-                (Some((i, _)), Some(j)) if i == j => {
-                    if arg_up {
-                        set_arg!(i)
-                    }
-                    val!(i)
-                }
+                (Some((i, _)), Some(j)) if i == j => val!(i),
                 (Some((i, _)), Some(_) | None) => {
                     set_arg!(i);
                     *selected = Some(i);
