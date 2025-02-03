@@ -3,7 +3,7 @@ use crate::{
     stdfn,
 };
 use anyhow::{bail, Result};
-use arcstr::{ArcStr, literal};
+use arcstr::{literal, ArcStr};
 use chrono::prelude::*;
 use compact_str::{format_compact, CompactString};
 use fxhash::FxHashMap;
@@ -489,6 +489,13 @@ impl<C: Ctx + 'static, E: Clone + 'static> PatternNode<C, E> {
         }
     }
 
+    fn bind(&self) -> Option<BindId> {
+        match self {
+            PatternNode::Underscore => None,
+            PatternNode::Typ { tag: _, bind, guard: _ } => Some(*bind),
+        }
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> bool {
         match self {
             PatternNode::Underscore
@@ -497,14 +504,14 @@ impl<C: Ctx + 'static, E: Clone + 'static> PatternNode<C, E> {
         }
     }
 
-    fn is_match(&mut self, arg: &Value) -> (bool, Option<BindId>) {
-        match self {
-            PatternNode::Underscore => (true, None),
-            PatternNode::Typ { tag, bind, guard: None } => {
+    fn is_match(&self, arg: Option<&Value>) -> (bool, Option<BindId>) {
+        match (arg, self) {
+            (_, PatternNode::Underscore) => (true, None),
+            (Some(arg), PatternNode::Typ { tag, bind, guard: None }) => {
                 let typ = Typ::get(arg);
                 (tag.len() == 0 || tag.contains(&typ), Some(*bind))
             }
-            PatternNode::Typ { tag, bind, guard: Some(g) } => {
+            (Some(arg), PatternNode::Typ { tag, bind, guard: Some(g) }) => {
                 let typ = Typ::get(arg);
                 let is_match = (tag.len() == 0 || tag.contains(&typ))
                     && g.cached
@@ -513,6 +520,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> PatternNode<C, E> {
                         .unwrap_or(false);
                 (is_match, Some(*bind))
             }
+            (None, _) => (false, None),
         }
     }
 }
@@ -1103,6 +1111,80 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
         node
     }
 
+    fn update_select(
+        ctx: &mut ExecCtx<C, E>,
+        selected: &mut Option<usize>,
+        arg: &mut Cached<C, E>,
+        arms: &mut Vec<(PatternNode<C, E>, Cached<C, E>)>,
+        event: &Event<E>,
+    ) -> Option<Value> {
+        let mut val_up: SmallVec<[bool; 16]> = smallvec![];
+        macro_rules! set_arg {
+            ($i:expr) => {
+                if let Some(id) = arms[$i].0.bind() {
+                    if let Some(arg) = arg.cached.as_ref() {
+                        val_up[$i] |= arms[$i].1.update(ctx, &Event::Variable(id, arg.clone()));
+                    }
+                }
+            };
+        }
+        macro_rules! val {
+            ($i:expr) => {
+                if val_up[$i] {
+                    arms[$i].1.cached.clone()
+                } else {
+                    None
+                }
+            }
+        }
+        let arg_up = arg.update(ctx, event);
+        let mut pat_up = false;
+        for (pat, val) in arms.iter_mut() {
+            pat_up |= pat.update(ctx, event);
+            if arg_up {
+                if let Some(id) = pat.bind() {
+                    if let Some(arg) = arg.cached.as_ref() {
+                        pat_up |= pat.update(ctx, &Event::Variable(id, arg.clone()));
+                    }
+                }
+            }
+            val_up.push(val.update(ctx, event));
+        }
+        if !pat_up {
+            (*selected).and_then(|i| {
+                if arg_up {
+                    set_arg!(i)
+                }
+                val!(i)
+            })
+        } else {
+            let sel = arms.iter().enumerate().find_map(|(i, (pat, _))| {
+                match pat.is_match(arg.cached.as_ref()) {
+                    (true, id) => Some((i, id)),
+                    _ => None,
+                }
+            });
+            match (sel, *selected) {
+                (Some((i, _)), Some(j)) if i == j => {
+                    if arg_up {
+                        set_arg!(i)
+                    }
+                    val!(i)
+                }
+                (Some((i, _)), Some(_) | None) => {
+                    set_arg!(i);
+                    *selected = Some(i);
+                    arms[i].1.cached.clone()
+                }
+                (None, Some(_)) => {
+                    *selected = None;
+                    None
+                }
+                (None, None) => None,
+            }
+        }
+    }
+
     pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
         macro_rules! binary_op {
             ($op:tt, $lhs:expr, $rhs:expr) => {{
@@ -1209,33 +1291,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             NodeKind::Mul { lhs, rhs } => binary_op_clone!(*, lhs, rhs),
             NodeKind::Div { lhs, rhs } => binary_op_clone!(/, lhs, rhs),
             NodeKind::Select { selected, arg, arms } => {
-                let mut val_up: SmallVec<[bool; 16]> = smallvec![];
-                for (cond, val) in arms.iter_mut() {
-                    cond.update(ctx, event);
-                    val_up.push(val.update(ctx, event));
-                }
-                let sel = arms.iter().enumerate().find_map(|(i, (cond, _))| {
-                    cond.cached.as_ref().and_then(|v| match v {
-                        Value::True => Some(i),
-                        _ => None,
-                    })
-                });
-                match (sel, *selected) {
-                    (Some(i), Some(j)) if i == j && val_up[i] => arms[i].1.cached.clone(),
-                    (Some(i), Some(_)) => {
-                        *selected = Some(i);
-                        arms[i].1.cached.clone()
-                    }
-                    (Some(i), None) => {
-                        *selected = Some(i);
-                        arms[i].1.cached.clone()
-                    }
-                    (None, Some(_)) => {
-                        *selected = None;
-                        None
-                    }
-                    (None, None) => None,
-                }
+                Node::update_select(ctx, selected, arg, arms, event)
             }
             NodeKind::Use | NodeKind::Lambda(_) => None,
         };
