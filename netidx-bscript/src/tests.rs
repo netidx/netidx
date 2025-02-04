@@ -316,3 +316,34 @@ run!(select, SELECT, |v: Result<&Value>| match v {
     },
     _ => false,
 });
+
+const LIB_CORE_ALL: &str = r#"
+{
+  let x = 1;
+  let y = x;
+  let z = y;
+  all(x, y, z)
+}
+"#;
+
+run!(lib_core_all, LIB_CORE_ALL, |v: Result<&Value>| match v {
+    Ok(Value::I64(1)) => true,
+    _ => false
+});
+
+const LIB_CORE_AND: &str = r#"
+{
+  let x = 1;
+  let y = x + 1;
+  let z = y + 1;
+  and(x < y, y < z, x > 0, z < 10)
+}
+"#;
+
+run!(lib_core_and, LIB_CORE_AND, |v: Result<&Value>| match v {
+    Ok(Value::True) => true,
+    _ => false
+});
+
+const LIB_CORE_ANY: &str = r#"
+"#;

@@ -703,8 +703,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Ungroup {
 
 const MOD: &str = r#"
 pub mod core {
-    pub let group = |v, f| 'group
-    pub let ungroup = |a| 'ungroup
     pub let all = |@args| 'all
     pub let and = |@args| 'and
     pub let any = |@args| 'any
@@ -714,6 +712,7 @@ pub mod core {
     pub let divide = |@args| 'divide
     pub let filter_err = |e| 'filter_err
     pub let filter = |predicate, v| 'filter
+    pub let group = |v, f| 'group
     pub let index = |array, i| 'index
     pub let isa = |type, v| 'isa
     pub let is_err = |e| 'is_error
@@ -727,12 +726,12 @@ pub mod core {
     pub let product = |@args| 'product
     pub let sample = |trigger, v| 'sample
     pub let sum = |@args| 'sum
+    pub let ungroup = |a| 'ungroup
     pub let uniq = |v| 'uniq
 }
 "#;
 
 pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<Group<C, E>>();
     ctx.register_builtin::<All>();
     ctx.register_builtin::<And>();
     ctx.register_builtin::<Any>();
@@ -742,6 +741,7 @@ pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Divide>();
     ctx.register_builtin::<Filter>();
     ctx.register_builtin::<FilterErr>();
+    ctx.register_builtin::<Group<C, E>>();
     ctx.register_builtin::<Index>();
     ctx.register_builtin::<Isa>();
     ctx.register_builtin::<IsErr>();
