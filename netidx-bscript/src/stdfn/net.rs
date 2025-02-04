@@ -2,7 +2,7 @@ use crate::{
     arity1, arity2, errf,
     expr::{Expr, ExprId},
     stdfn::CachedVals,
-    vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node, RpcCallId},
+    vm::{Apply, Arity, BindId, Ctx, Event, ExecCtx, Init, InitFn, Node},
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
@@ -172,11 +172,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Load {
             }
         }
         self.cur.as_ref().and_then(|(_, dv)| match event {
-            Event::Variable { .. }
-            | Event::Rpc(_, _)
-            | Event::Timer(_, _)
-            | Event::User(_)
-            | Event::Init => None,
+            Event::Variable { .. } | Event::User(_) | Event::Init => None,
             Event::Netidx(id, value) if dv.id() == *id => Some(value.clone()),
             Event::Netidx(_, _) => None,
         })
@@ -186,7 +182,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Load {
 struct RpcCall {
     args: CachedVals,
     top_id: ExprId,
-    pending: FxHashSet<RpcCallId>,
+    pending: FxHashSet<BindId>,
 }
 
 impl<C: Ctx, E: Clone> Init<C, E> for RpcCall {
@@ -240,7 +236,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
             | ((Some(path), Some(args)), (true, _)) => match parse_args(path, args) {
                 Err(e) => return errf!("{e}"),
                 Ok((path, args)) => {
-                    let id = RpcCallId::new();
+                    let id = BindId::new();
                     self.pending.insert(id);
                     ctx.user.call_rpc(path, args, self.top_id, id);
                 }
@@ -248,12 +244,8 @@ impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
             ((None, _), (_, _)) | ((_, None), (_, _)) | ((_, _), (false, false)) => (),
         }
         match event {
-            Event::Init
-            | Event::Netidx(_, _)
-            | Event::Timer(_, _)
-            | Event::User(_)
-            | Event::Variable { .. } => None,
-            Event::Rpc(id, val) => {
+            Event::Init | Event::Netidx(_, _) | Event::User(_) => None,
+            Event::Variable(id, val) => {
                 if self.pending.remove(id) {
                     Some(val.clone())
                 } else {

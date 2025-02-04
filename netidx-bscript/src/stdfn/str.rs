@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-
 use crate::{
     err,
     expr::Expr,
@@ -8,6 +6,7 @@ use crate::{
 };
 use arcstr::{literal, ArcStr};
 use netidx::{path::Path, subscriber::Value};
+use std::cell::RefCell;
 
 struct StartsWithEv;
 

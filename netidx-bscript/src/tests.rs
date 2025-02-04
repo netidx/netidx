@@ -291,3 +291,27 @@ run!(first_class_lambdas, FIRST_CLASS_LAMBDAS, |v: Result<&Value>| match v {
     Ok(Value::I64(3)) => true,
     _ => false,
 });
+
+const SELECT: &str = r#"
+{
+  let x = 1;
+  let y = x + 1;
+  let z = y + 1;
+  let s = select any(x, y, z) {
+    I64(v) if v == 1 => "first [v]",
+    v if v == 2 => "second [v]",
+    v => "third [v]"
+  };
+  group(s, |n, x| n == 3)
+}
+"#;
+
+run!(select, SELECT, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &**a {
+        [Value::String(a), Value::String(b), Value::String(c)]
+            if &**a == "first 1" && &**b == "second 2" && &**c == "third 3" =>
+            true,
+        _ => false,
+    },
+    _ => false,
+});

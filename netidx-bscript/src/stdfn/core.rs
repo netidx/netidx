@@ -1,14 +1,16 @@
 use crate::{
     err, errf,
-    expr::Expr,
+    expr::{Expr, ExprKind},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node},
+    vm::{Apply, Arity, BindId, Ctx, Event, ExecCtx, Init, InitFn, Node, NodeKind},
 };
-use netidx::subscriber::{Typ, Value};
-use netidx_netproto::valarray::ValArray;
-use std::sync::Arc;
+use anyhow::bail;
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
+use netidx::subscriber::{Typ, Value};
+use netidx_netproto::valarray::ValArray;
+use smallvec::{smallvec, SmallVec};
+use std::sync::Arc;
 
 struct Any;
 
@@ -579,55 +581,182 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Uniq {
     }
 }
 
+struct Never;
+
+impl<C: Ctx, E: Clone> Init<C, E> for Never {
+    const NAME: &str = "never";
+    const ARITY: Arity = Arity::Any;
+
+    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, _, _| Ok(Box::new(Never)))
+    }
+}
+
+impl<C: Ctx, E: Clone> Apply<C, E> for Never {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        for n in from {
+            n.update(ctx, event);
+        }
+        None
+    }
+}
+
+struct Group<C: Ctx + 'static, E: Clone + 'static> {
+    buf: SmallVec<[Value; 16]>,
+    pred: Box<dyn Apply<C, E> + Send + Sync>,
+    n_id: BindId,
+    val_id: BindId,
+    from: [Node<C, E>; 2],
+}
+
+impl<C: Ctx, E: Clone> Init<C, E> for Group<C, E> {
+    const NAME: &str = "group";
+    const ARITY: Arity = Arity::Exactly(2);
+
+    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|ctx, from, top_id| match from {
+            [_, Node { spec: _, kind: NodeKind::Lambda(init) }] => {
+                let n_id = BindId::new();
+                let val_id = BindId::new();
+                let mut from = [
+                    Node {
+                        spec: ExprKind::Ref { name: ["n"].into() }.to_expr(),
+                        kind: NodeKind::Ref(n_id),
+                    },
+                    Node {
+                        spec: ExprKind::Ref { name: ["x"].into() }.to_expr(),
+                        kind: NodeKind::Ref(val_id),
+                    },
+                ];
+                let pred = init(ctx, &mut from, top_id)?;
+                Ok(Box::new(Self { buf: smallvec![], pred, n_id, val_id, from }))
+            }
+            _ => bail!("expected a function"),
+        })
+    }
+}
+
+impl<C: Ctx + 'static, E: Clone + 'static> Apply<C, E> for Group<C, E> {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        from[0].update(ctx, event).and_then(|val| {
+            self.buf.push(val.clone());
+            let n: Value = self.buf.len().into();
+            let n_up =
+                self.pred.update(ctx, &mut self.from, &Event::Variable(self.n_id, n));
+            let v_up =
+                self.pred.update(ctx, &mut self.from, &Event::Variable(self.val_id, val));
+            let stop_batch = n_up.and_then(|n| n.get_as::<bool>()).unwrap_or(false)
+                || v_up.and_then(|n| n.get_as::<bool>()).unwrap_or(false);
+            if stop_batch {
+                Some(Value::Array(ValArray::from_iter_exact(self.buf.drain(..))))
+            } else {
+                None
+            }
+        })
+    }
+}
+
+struct Ungroup(BindId);
+
+impl<C: Ctx, E: Clone> Init<C, E> for Ungroup {
+    const NAME: &str = "ungroup";
+    const ARITY: Arity = Arity::Exactly(1);
+
+    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, _, _| Ok(Box::new(Ungroup(BindId::new()))))
+    }
+}
+
+impl<C: Ctx + 'static, E: Clone + 'static> Apply<C, E> for Ungroup {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        match from[0].update(ctx, event) {
+            Some(Value::Array(a)) => match &*a {
+                [] => None,
+                [hd, tl @ ..] => {
+                    for v in tl {
+                        ctx.user.set_var(self.0, v.clone());
+                    }
+                    Some(hd.clone())
+                }
+            },
+            Some(v) => Some(v),
+            None => match event {
+                Event::Variable(id, v) if id == &self.0 => Some(v.clone()),
+                _ => None,
+            },
+        }
+    }
+}
+
 const MOD: &str = r#"
 pub mod core {
-    pub let any = |@args| 'any
-    pub let once = |v| 'once
+    pub let group = |v, f| 'group
+    pub let ungroup = |a| 'ungroup
     pub let all = |@args| 'all
-    pub let array = |@args| 'array
-    pub let sum = |@args| 'sum
-    pub let product = |@args| 'product
-    pub let divide = |@args| 'divide
-    pub let min = |@args| 'min
-    pub let max = |@args| 'max
     pub let and = |@args| 'and
-    pub let or = |@args| 'or
-    pub let not = |e| 'not
-    pub let is_err = |e| 'is_error
-    pub let index = |array, i| 'index
-    pub let filter = |predicate, v| 'filter
-    pub let filter_err = |e| 'filter_err
+    pub let any = |@args| 'any
+    pub let array = |@args| 'array
     pub let cast = |type, v| 'cast
-    pub let isa = |type, v| 'isa
     pub let count = |@args| 'count
-    pub let sample = |trigger, v| 'sample
+    pub let divide = |@args| 'divide
+    pub let filter_err = |e| 'filter_err
+    pub let filter = |predicate, v| 'filter
+    pub let index = |array, i| 'index
+    pub let isa = |type, v| 'isa
+    pub let is_err = |e| 'is_error
+    pub let max = |@args| 'max
     pub let mean = |@args| 'mean
+    pub let min = |@args| 'min
+    pub let never = |@args| 'never
+    pub let not = |e| 'not
+    pub let once = |v| 'once
+    pub let or = |@args| 'or
+    pub let product = |@args| 'product
+    pub let sample = |trigger, v| 'sample
+    pub let sum = |@args| 'sum
     pub let uniq = |v| 'uniq
 }
 "#;
 
 pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<Any>();
-    ctx.register_builtin::<Once>();
+    ctx.register_builtin::<Group<C, E>>();
     ctx.register_builtin::<All>();
-    ctx.register_builtin::<Array>();
-    ctx.register_builtin::<Sum>();
-    ctx.register_builtin::<Product>();
-    ctx.register_builtin::<Divide>();
-    ctx.register_builtin::<Min>();
-    ctx.register_builtin::<Max>();
     ctx.register_builtin::<And>();
-    ctx.register_builtin::<Or>();
-    ctx.register_builtin::<Not>();
-    ctx.register_builtin::<IsErr>();
-    ctx.register_builtin::<Index>();
+    ctx.register_builtin::<Any>();
+    ctx.register_builtin::<Array>();
+    ctx.register_builtin::<Cast>();
+    ctx.register_builtin::<Count>();
+    ctx.register_builtin::<Divide>();
     ctx.register_builtin::<Filter>();
     ctx.register_builtin::<FilterErr>();
-    ctx.register_builtin::<Cast>();
+    ctx.register_builtin::<Index>();
     ctx.register_builtin::<Isa>();
-    ctx.register_builtin::<Count>();
-    ctx.register_builtin::<Sample>();
+    ctx.register_builtin::<IsErr>();
+    ctx.register_builtin::<Max>();
     ctx.register_builtin::<Mean>();
+    ctx.register_builtin::<Min>();
+    ctx.register_builtin::<Never>();
+    ctx.register_builtin::<Not>();
+    ctx.register_builtin::<Once>();
+    ctx.register_builtin::<Or>();
+    ctx.register_builtin::<Product>();
+    ctx.register_builtin::<Sample>();
+    ctx.register_builtin::<Sum>();
     ctx.register_builtin::<Uniq>();
     MOD.parse().unwrap()
 }

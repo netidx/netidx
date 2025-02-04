@@ -2,7 +2,7 @@ use crate::{
     arity2, err, errf,
     expr::{Expr, ExprId},
     stdfn::CachedVals,
-    vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node, TimerId},
+    vm::{Apply, Arity, BindId, Ctx, Event, ExecCtx, Init, InitFn, Node},
 };
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
@@ -12,7 +12,7 @@ use std::{ops::SubAssign, sync::Arc, time::Duration};
 
 struct AfterIdle {
     args: CachedVals,
-    id: Option<TimerId>,
+    id: Option<BindId>,
     eid: ExprId,
 }
 
@@ -44,7 +44,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for AfterIdle {
                     return errf!("after_idle(timeout, cur): expected duration {e:?}");
                 }
                 Ok(dur) => {
-                    let id = TimerId::new();
+                    let id = BindId::new();
                     self.id = Some(id);
                     ctx.user.set_timer(id, dur, self.eid);
                     return None;
@@ -58,12 +58,8 @@ impl<C: Ctx, E: Clone> Apply<C, E> for AfterIdle {
             | ((Some(_), Some(_)), (false, _)) => (),
         };
         match event {
-            Event::Init
-            | Event::Variable { .. }
-            | Event::Netidx(_, _)
-            | Event::Rpc(_, _)
-            | Event::User(_) => None,
-            Event::Timer(id, _) => {
+            Event::Init | Event::Netidx(_, _) | Event::User(_) => None,
+            Event::Variable(id, _) => {
                 if self.id != Some(*id) {
                     None
                 } else {
@@ -118,7 +114,7 @@ struct Timer {
     args: CachedVals,
     timeout: Option<Duration>,
     repeat: Repeat,
-    id: Option<TimerId>,
+    id: Option<BindId>,
     eid: ExprId,
 }
 
@@ -156,7 +152,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Timer {
         }
         macro_rules! schedule {
             ($dur:expr) => {{
-                let id = TimerId::new();
+                let id = BindId::new();
                 self.id = Some(id);
                 ctx.user.set_timer(id, $dur, self.eid);
             }};
@@ -197,12 +193,8 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Timer {
             | ((_, None), (false, true)) => (),
         }
         match event {
-            Event::Init
-            | Event::Variable { .. }
-            | Event::Netidx(_, _)
-            | Event::Rpc(_, _)
-            | Event::User(_) => None,
-            Event::Timer(id, now) => {
+            Event::Init | Event::Netidx(_, _) | Event::User(_) => None,
+            Event::Variable(id, now) => {
                 if self.id != Some(*id) {
                     None
                 } else {

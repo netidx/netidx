@@ -315,7 +315,7 @@ impl ExprKind {
                         Pattern::Typ { tag, bind, guard } if tag.len() == 0 => {
                             write!(buf, "{bind}")?;
                             if let Some(guard) = guard {
-                                write!(buf, "if ")?;
+                                write!(buf, " if ")?;
                                 guard.kind.pretty_print(indent + 2, limit, false, buf)?;
                                 write!(buf, " ")?;
                             }
@@ -337,7 +337,7 @@ impl ExprKind {
                                 }
                             }
                             if let Some(guard) = guard {
-                                write!(buf, "if ")?;
+                                write!(buf, " if ")?;
                                 guard.kind.pretty_print(indent + 2, limit, false, buf)?;
                                 write!(buf, " ")?;
                             }

@@ -104,8 +104,6 @@ impl<E: Clone> DbgCtx<E> {
     }
 }
 
-atomic_id!(TimerId);
-atomic_id!(RpcCallId);
 atomic_id!(BindId);
 atomic_id!(LambdaId);
 atomic_id!(SelectId);
@@ -115,8 +113,6 @@ pub enum Event<E> {
     Init,
     Variable(BindId, Value),
     Netidx(SubId, Value),
-    Rpc(RpcCallId, Value),
-    Timer(TimerId, Value),
     User(E),
 }
 
@@ -179,11 +175,11 @@ pub trait Ctx {
         name: Path,
         args: Vec<(ArcStr, Value)>,
         ref_by: ExprId,
-        id: RpcCallId,
+        id: BindId,
     );
 
     /// arrange to have a Timer event delivered after timeout
-    fn set_timer(&mut self, id: TimerId, timeout: Duration, ref_by: ExprId);
+    fn set_timer(&mut self, id: BindId, timeout: Duration, ref_by: ExprId);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -601,8 +597,8 @@ pub enum NodeKind<C: Ctx + 'static, E: Clone + 'static> {
 }
 
 pub struct Node<C: Ctx + 'static, E: Clone + 'static> {
-    spec: Expr,
-    kind: NodeKind<C, E>,
+    pub spec: Expr,
+    pub kind: NodeKind<C, E>,
 }
 
 impl<C: Ctx + 'static, E: Clone + 'static> fmt::Display for Node<C, E> {
@@ -1232,8 +1228,6 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             NodeKind::Constant(v) => match event {
                 Event::Init => Some(v.clone()),
                 Event::Netidx(_, _)
-                | Event::Rpc(_, _)
-                | Event::Timer(_, _)
                 | Event::User(_)
                 | Event::Variable(_, _) => None,
             },
@@ -1251,8 +1245,6 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
                 Event::Variable(id, v) if bid == id => Some(v.clone()),
                 Event::Init
                 | Event::Netidx(_, _)
-                | Event::Rpc(_, _)
-                | Event::Timer(_, _)
                 | Event::User(_)
                 | Event::Variable { .. } => None,
             },
