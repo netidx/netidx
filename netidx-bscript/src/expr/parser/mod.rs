@@ -68,9 +68,7 @@ where
 {
     recognize((
         take_while1(|c: char| c.is_alphabetic() && c.is_uppercase()),
-        take_while(|c: char| {
-            (c.is_alphanumeric() && (c.is_numeric() || c.is_lowercase())) || c == '_'
-        }),
+        take_while(|c: char| c.is_alphanumeric() || c == '_'),
     ))
     .then(|s: String| match s.parse::<Typ>() {
         Err(_) => unexpected_any("invalid variant tag").left(),
@@ -421,7 +419,7 @@ where
                 attempt(spstring("-")),
                 attempt(spstring("*")),
                 attempt(spstring("/")),
-                attempt(spstring("=")),
+                attempt(spstring("==")),
                 attempt(spstring("!=")),
                 attempt(spstring(">=")),
                 attempt(spstring("<=")),
@@ -430,7 +428,7 @@ where
                 attempt(spstring("&&")),
                 attempt(spstring("||")),
             ))
-            .map(|op: &str| match op {
+            .map(|op: &str| match dbg!(op) {
                 "+" => |lhs, rhs| {
                     ExprKind::Add { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
                 },
@@ -443,7 +441,7 @@ where
                 "/" => |lhs, rhs| {
                     ExprKind::Div { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
                 },
-                "=" => |lhs, rhs| {
+                "==" => |lhs, rhs| {
                     ExprKind::Eq { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
                 },
                 "!=" => |lhs, rhs| {
@@ -511,14 +509,14 @@ where
     choice((
         attempt(sptoken('_')).map(|_| Pattern::Underscore),
         attempt(
-            (spfname(), optional(space().with(pattern_guard()))).map(|(bind, guard)| {
-                Pattern::Typ { tag: Arc::from_iter([]), bind, guard }
-            }),
+            (spfname(), optional(attempt(space().with(pattern_guard())))).map(
+                |(bind, guard)| Pattern::Typ { tag: Arc::from_iter([]), bind, guard },
+            ),
         ),
         attempt(
             (
                 sep_by1(typ_pattern(), attempt(sptoken('|'))),
-                optional(space().with(pattern_guard())),
+                optional(attempt(space().with(pattern_guard()))),
             )
                 .then(
                     |(binds, guard): (SmallVec<[(Typ, ArcStr); 4]>, Option<Expr>)| {

@@ -1,8 +1,9 @@
 use super::*;
 use bytes::Bytes;
 use chrono::prelude::*;
-use netidx_core::chars::Chars;
+use netidx_netproto::pbuf::PBytes;
 use parser::{parse, RESERVED};
+use prop::option;
 use proptest::{collection, prelude::*};
 use std::time::Duration;
 
@@ -18,12 +19,12 @@ fn duration() -> impl Strategy<Value = Duration> {
     (any::<u64>(), 0..1_000_000_000u32).prop_map(|(s, ns)| Duration::new(s, ns))
 }
 
-fn bytes() -> impl Strategy<Value = Bytes> {
-    any::<Vec<u8>>().prop_map(Bytes::from)
+fn pbytes() -> impl Strategy<Value = PBytes> {
+    any::<Vec<u8>>().prop_map(|b| PBytes::from(Bytes::from(b)))
 }
 
-fn chars() -> impl Strategy<Value = Chars> {
-    any::<String>().prop_map(Chars::from)
+fn arcstr() -> impl Strategy<Value = ArcStr> {
+    any::<String>().prop_map(ArcStr::from)
 }
 
 fn value() -> impl Strategy<Value = Value> {
@@ -40,13 +41,13 @@ fn value() -> impl Strategy<Value = Value> {
         any::<f64>().prop_map(Value::F64),
         datetime().prop_map(Value::DateTime),
         duration().prop_map(Value::Duration),
-        chars().prop_map(Value::String),
-        bytes().prop_map(Value::Bytes),
+        arcstr().prop_map(Value::String),
+        pbytes().prop_map(Value::Bytes),
         Just(Value::True),
         Just(Value::False),
         Just(Value::Null),
         Just(Value::Ok),
-        chars().prop_map(Value::Error),
+        arcstr().prop_map(Value::Error),
     ]
 }
 
@@ -60,8 +61,8 @@ prop_compose! {
     }
 }
 
-fn random_fname() -> impl Strategy<Value = Chars> {
-    random_modpart().prop_map(Chars::from)
+fn random_fname() -> impl Strategy<Value = ArcStr> {
+    random_modpart().prop_map(ArcStr::from)
 }
 
 fn random_modpath() -> impl Strategy<Value = ModPath> {
@@ -113,13 +114,64 @@ fn reference() -> impl Strategy<Value = Expr> {
     modpath().prop_map(|name| ExprKind::Ref { name }.to_expr())
 }
 
+fn typ() -> impl Strategy<Value = Typ> {
+    prop_oneof![
+        Just(Typ::U32),
+        Just(Typ::V32),
+        Just(Typ::I32),
+        Just(Typ::Z32),
+        Just(Typ::U64),
+        Just(Typ::V64),
+        Just(Typ::I64),
+        Just(Typ::Z64),
+        Just(Typ::F32),
+        Just(Typ::F64),
+        Just(Typ::Decimal),
+        Just(Typ::DateTime),
+        Just(Typ::Duration),
+        Just(Typ::Bool),
+        Just(Typ::String),
+        Just(Typ::Bytes),
+        Just(Typ::Result),
+        Just(Typ::Array),
+        Just(Typ::Null),
+    ]
+}
+
+fn pattern() -> impl Strategy<Value = Pattern> {
+    prop_oneof![
+        Just(Pattern::Underscore),
+        (collection::vec(typ(), (0, 10)), random_fname()).prop_map(|(tag, bind)| {
+            Pattern::Typ { tag: Arc::from(tag), bind, guard: None }
+        })
+    ]
+}
+
+fn build_pattern(arg: Expr, arms: Vec<(Option<Expr>, Pattern, Expr)>) -> Expr {
+    let arms = arms.into_iter().map(|(guard, mut pat, expr)| {
+        match &mut pat {
+            Pattern::Typ { guard: g, .. } => {
+                *g = guard;
+            }
+            Pattern::Underscore => (),
+        }
+        (pat, expr)
+    });
+    ExprKind::Select { arg: Arc::new(arg), arms: Arc::from_iter(arms) }.to_expr()
+}
+
 fn arithexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
     leaf.prop_recursive(5, 100, 5, |inner| {
         prop_oneof![
-            (collection::vec((inner.clone(), inner.clone()), (1, 10))).prop_map(|arms| {
-                ExprKind::Select { arms: Arc::from_iter(arms) }.to_expr()
-            }),
+            (
+                inner.clone(),
+                collection::vec(
+                    (option::of(inner.clone()), pattern(), inner.clone()),
+                    (1, 10)
+                )
+            )
+                .prop_map(|(arg, arms)| build_pattern(arg, arms)),
             collection::vec(inner.clone(), (1, 10))
                 .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
             (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
@@ -224,9 +276,14 @@ fn expr() -> impl Strategy<Value = Expr> {
             (inner.clone(), modpath()).prop_map(|(e, n)| {
                 ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
             }),
-            (collection::vec((inner.clone(), inner.clone()), (1, 10))).prop_map(|arms| {
-                ExprKind::Select { arms: Arc::from_iter(arms) }.to_expr()
-            }),
+            (
+                inner.clone(),
+                collection::vec(
+                    (option::of(inner.clone()), pattern(), inner.clone()),
+                    (1, 10)
+                )
+            )
+                .prop_map(|(arg, arms)| build_pattern(arg, arms)),
         ]
     })
 }
@@ -279,7 +336,7 @@ fn acc_strings(args: &[Expr]) -> Arc<[Expr]> {
                         let mut st = String::new();
                         st.push_str(&*c0);
                         st.push_str(&*c1);
-                        *c0 = Chars::from(st);
+                        *c0 = ArcStr::from(st);
                     }
                     _ => v.push(s),
                 },
@@ -288,6 +345,21 @@ fn acc_strings(args: &[Expr]) -> Arc<[Expr]> {
         }
     }
     Arc::from(v)
+}
+
+fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
+    match (pat0, pat1) {
+        (Pattern::Underscore, Pattern::Underscore) => true,
+        (
+            Pattern::Typ { tag: tag0, bind: bind0, guard: Some(guard0) },
+            Pattern::Typ { tag: tag1, bind: bind1, guard: Some(guard1) },
+        ) => tag0 == tag1 && bind0 == bind1 && check(guard0, guard1),
+        (
+            Pattern::Typ { tag: tag0, bind: bind0, guard: None },
+            Pattern::Typ { tag: tag1, bind: bind1, guard: None },
+        ) => tag0 == tag1 && bind0 == bind1,
+        (_, _) => false,
+    }
 }
 
 fn check(s0: &Expr, s1: &Expr) -> bool {
@@ -432,13 +504,18 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::Lambda { args: args0, vargs: vargs0, body: Either::Right(b0) },
             ExprKind::Lambda { args: args1, vargs: vargs1, body: Either::Right(b1) },
         ) => dbg!(dbg!(args0 == args1) && dbg!(vargs0 == vargs1) && dbg!(b0 == b1)),
-        (ExprKind::Select { arms: arms0 }, ExprKind::Select { arms: arms1 }) => {
+        (
+            ExprKind::Select { arg: arg0, arms: arms0 },
+            ExprKind::Select { arg: arg1, arms: arms1 },
+        ) => {
             dbg!(
-                dbg!(arms0.len() == arms1.len())
+                dbg!(check(arg0, arg1))
+                    && dbg!(arms0.len() == arms1.len())
                     && dbg!(arms0
                         .iter()
                         .zip(arms1.iter())
-                        .all(|((c0, b0), (c1, b1))| check(c0, c1) && check(b0, b1)))
+                        .all(|((pat0, b0), (pat1, b1))| check(b0, b1)
+                            && dbg!(check_pattern(pat0, pat1))))
             )
         }
         (_, _) => false,

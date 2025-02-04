@@ -319,7 +319,7 @@ impl FromStr for Typ {
             "F32" | "f32" => Ok(Typ::F32),
             "F64" | "f64" => Ok(Typ::F64),
             "Decimal" | "decimal" => Ok(Typ::Decimal),
-            "Datetime" | "datetime" => Ok(Typ::DateTime),
+            "DateTime" | "datetime" => Ok(Typ::DateTime),
             "Duration" | "duration" => Ok(Typ::Duration),
             "Bool" | "bool" => Ok(Typ::Bool),
             "String" | "string" => Ok(Typ::String),

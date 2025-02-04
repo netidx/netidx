@@ -3,6 +3,7 @@ use crate::{
     vm::{BindId, Ctx, Event, ExecCtx, Node},
 };
 use anyhow::{anyhow, bail, Result};
+use arcstr::ArcStr;
 use fxhash::FxHashMap;
 use netidx::{
     publisher::{Publisher, PublisherBuilder, Value},
@@ -60,7 +61,7 @@ impl Ctx for TestCtx {
     fn call_rpc(
         &mut self,
         name: netidx::path::Path,
-        args: Vec<(netidx::chars::Chars, netidx::publisher::Value)>,
+        args: Vec<(ArcStr, netidx::publisher::Value)>,
         ref_by: ExprId,
         id: crate::vm::RpcCallId,
     ) {

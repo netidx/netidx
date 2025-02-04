@@ -1,4 +1,5 @@
 use super::*;
+use arcstr::literal;
 
 fn parse_expr(s: &str) -> anyhow::Result<Expr> {
     expr()
@@ -9,12 +10,12 @@ fn parse_expr(s: &str) -> anyhow::Result<Expr> {
 
 #[test]
 fn escaped_string() {
-    let p = Chars::from(r#"/foo bar baz/"zam"/)_ xyz+ "#);
+    let p = Value::String(literal!(r#"/foo bar baz/"zam"/)_ xyz+ "#));
     let s = r#"load("/foo bar baz/\"zam\"/)_ xyz+ ")"#;
     assert_eq!(
         ExprKind::Apply {
             function: ["load"].into(),
-            args: Arc::from_iter([ExprKind::Constant(Value::String(p)).to_expr()])
+            args: Arc::from_iter([ExprKind::Constant(p).to_expr()])
         }
         .to_expr(),
         parse(s).unwrap()
@@ -96,8 +97,8 @@ fn apply_path() {
         ExprKind::Apply {
             args: Arc::from_iter([ExprKind::Apply {
                 args: Arc::from_iter([
-                    ExprKind::Constant(Value::String(Chars::from("foo"))).to_expr(),
-                    ExprKind::Constant(Value::String(Chars::from("bar"))).to_expr(),
+                    ExprKind::Constant(Value::String(literal!("foo"))).to_expr(),
+                    ExprKind::Constant(Value::String(literal!("bar"))).to_expr(),
                     ExprKind::Ref { name: ["baz"].into() }.to_expr()
                 ]),
                 function: ["path", "concat"].into(),
@@ -137,7 +138,7 @@ fn nested_apply() {
         args: Arc::from_iter([
             ExprKind::Constant(Value::F32(1.)).to_expr(),
             ExprKind::Apply {
-                args: Arc::from_iter([ExprKind::Constant(Value::String(Chars::from(
+                args: Arc::from_iter([ExprKind::Constant(Value::String(literal!(
                     "/foo/bar",
                 )))
                 .to_expr()]),
@@ -149,7 +150,7 @@ fn nested_apply() {
                     ExprKind::Constant(Value::F32(675.6)).to_expr(),
                     ExprKind::Apply {
                         args: Arc::from_iter([ExprKind::Constant(Value::String(
-                            Chars::from("/foo/baz"),
+                            literal!("/foo/baz"),
                         ))
                         .to_expr()]),
                         function: ["load"].into(),
@@ -176,7 +177,7 @@ fn arith_eq() {
         rhs: Arc::new(ExprKind::Ref { name: ModPath::from(["b"]) }.to_expr()),
     }
     .to_expr();
-    let s = r#"a = b"#;
+    let s = r#"a == b"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -331,7 +332,7 @@ fn arith_nested() {
         ),
     }
     .to_expr();
-    let s = r#"((a + b + c) = (a - b - c)) && !a"#;
+    let s = r#"((a + b + c) == (a - b - c)) && !a"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -339,17 +340,44 @@ fn arith_nested() {
 fn select() {
     let arms = Arc::from_iter([
         (
-            ExprKind::Ref { name: ModPath::from(["a"]) }.to_expr(),
-            ExprKind::Ref { name: ModPath::from(["foo"]) }.to_expr(),
+            Pattern::Typ {
+                tag: Arc::from_iter([Typ::I64]),
+                bind: literal!("a"),
+                guard: Some(
+                    ExprKind::Lt {
+                        lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
+                        rhs: Arc::new(ExprKind::Constant(Value::I64(10)).to_expr()),
+                    }
+                    .to_expr(),
+                ),
+            },
+            ExprKind::Mul {
+                lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
+                rhs: Arc::new(ExprKind::Constant(Value::I64(2)).to_expr()),
+            }
+            .to_expr(),
         ),
         (
-            ExprKind::Ref { name: ModPath::from(["b"]) }.to_expr(),
-            ExprKind::Ref { name: ModPath::from(["bar"]) }.to_expr(),
+            Pattern::Typ { tag: Arc::from_iter([]), bind: literal!("a"), guard: None },
+            ExprKind::Ref { name: ModPath::from(["a"]) }.to_expr(),
         ),
     ]);
-    let exp = ExprKind::Select { arms }.to_expr();
-    let s = r#"select { a => foo, b => bar }"#;
+    let arg = Arc::new(
+        ExprKind::Apply {
+            args: Arc::from_iter([ExprKind::Ref { name: ["b"].into() }.to_expr()]),
+            function: ["foo"].into(),
+        }
+        .to_expr(),
+    );
+    let exp = ExprKind::Select { arg, arms }.to_expr();
+    let s = r#"select foo(b) { I64(a) if a < 10 => a * 2, a => a }"#;
     assert_eq!(exp, parse_expr(s).unwrap());
+}
+
+#[test]
+fn pattern() {
+    let s = r#"I64(a) if a < 10"#;
+    dbg!(super::pattern().easy_parse(position::Stream::new(s)).unwrap());
 }
 
 #[test]
@@ -372,18 +400,18 @@ fn connect() {
 #[test]
 fn inline_module() {
     let exp = ExprKind::Module {
-        name: Chars::from("foo"),
+        name: literal!("foo"),
         export: true,
         value: Some(Arc::from_iter([
             ExprKind::Bind {
                 export: true,
-                name: Chars::from("z"),
+                name: literal!("z"),
                 value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr()),
             }
             .to_expr(),
             ExprKind::Bind {
                 export: false,
-                name: Chars::from("m"),
+                name: literal!("m"),
                 value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr()),
             }
             .to_expr(),
@@ -399,8 +427,8 @@ fn inline_module() {
 
 #[test]
 fn external_module() {
-    let exp = ExprKind::Module { name: Chars::from("foo"), export: true, value: None }
-        .to_expr();
+    let exp =
+        ExprKind::Module { name: literal!("foo"), export: true, value: None }.to_expr();
     let s = r#"pub mod foo;"#;
     assert_eq!(exp, parse(s).unwrap());
 }
@@ -446,7 +474,7 @@ fn doexpr() {
         exprs: Arc::from_iter([
             ExprKind::Bind {
                 export: false,
-                name: Chars::from("baz"),
+                name: literal!("baz"),
                 value: Arc::new(ExprKind::Constant(Value::from(42)).to_expr()),
             }
             .to_expr(),
@@ -534,7 +562,7 @@ fn apply_lambda() {
 #[test]
 fn mod_interpolate() {
     let e = ExprKind::Module {
-        name: Chars::from("a"),
+        name: literal!("a"),
         export: false,
         value: Some(Arc::from_iter([ExprKind::Apply {
             function: ["str", "concat"].into(),
@@ -564,4 +592,11 @@ fn multi_line_do() {
     let s = "{\n  (a *\n  u64:1\n)}\n";
     let pe = parse(s).unwrap();
     assert_eq!(e, pe)
+}
+
+#[test]
+fn prop0() {
+    let s = "select u32:0 {DateTime(a) => {((u32:1 * u32:2) != {f64:3.; store; z64:4; gj})}}";
+    let s = "t(l <- select u32:0 {DateTime(a) => {((u32:1 * u32:2) != {f64:3.; store; z64:4; gj})}})";
+    dbg!(parse_expr(s).unwrap());
 }

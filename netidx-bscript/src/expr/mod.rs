@@ -332,7 +332,7 @@ impl ExprKind {
                 push_indent(indent, buf);
                 writeln!(buf, "}}")
             }
-            ExprKind::Eq { lhs, rhs } => binop!("=", lhs, rhs),
+            ExprKind::Eq { lhs, rhs } => binop!("==", lhs, rhs),
             ExprKind::Ne { lhs, rhs } => binop!("!=", lhs, rhs),
             ExprKind::Lt { lhs, rhs } => binop!("<", lhs, rhs),
             ExprKind::Gt { lhs, rhs } => binop!(">", lhs, rhs),
@@ -477,7 +477,7 @@ impl fmt::Display for ExprKind {
                 }
                 write!(f, "}}")
             }
-            ExprKind::Eq { lhs, rhs } => write_binop(f, "=", lhs, rhs),
+            ExprKind::Eq { lhs, rhs } => write_binop(f, "==", lhs, rhs),
             ExprKind::Ne { lhs, rhs } => write_binop(f, "!=", lhs, rhs),
             ExprKind::Gt { lhs, rhs } => write_binop(f, ">", lhs, rhs),
             ExprKind::Lt { lhs, rhs } => write_binop(f, "<", lhs, rhs),
