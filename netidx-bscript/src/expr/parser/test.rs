@@ -596,7 +596,6 @@ fn multi_line_do() {
 
 #[test]
 fn prop0() {
-    let s = "select u32:0 {DateTime(a) => {((u32:1 * u32:2) != {f64:3.; store; z64:4; gj})}}";
     let s = "t(l <- select u32:0 {DateTime(a) => {((u32:1 * u32:2) != {f64:3.; store; z64:4; gj})}})";
     dbg!(parse_expr(s).unwrap());
 }

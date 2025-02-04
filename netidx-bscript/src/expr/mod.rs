@@ -1,10 +1,10 @@
+use arcstr::ArcStr;
 use netidx::{
     path::Path,
     publisher::Typ,
     subscriber::Value,
     utils::{self, Either},
 };
-use arcstr::ArcStr;
 use regex::Regex;
 use serde::{
     de::{self, Visitor},
@@ -277,6 +277,32 @@ impl ExprKind {
                     },
                 }
             }
+            ExprKind::Eq { lhs, rhs } => binop!("==", lhs, rhs),
+            ExprKind::Ne { lhs, rhs } => binop!("!=", lhs, rhs),
+            ExprKind::Lt { lhs, rhs } => binop!("<", lhs, rhs),
+            ExprKind::Gt { lhs, rhs } => binop!(">", lhs, rhs),
+            ExprKind::Lte { lhs, rhs } => binop!("<=", lhs, rhs),
+            ExprKind::Gte { lhs, rhs } => binop!(">=", lhs, rhs),
+            ExprKind::And { lhs, rhs } => binop!("&&", lhs, rhs),
+            ExprKind::Or { lhs, rhs } => binop!("||", lhs, rhs),
+            ExprKind::Add { lhs, rhs } => binop!("+", lhs, rhs),
+            ExprKind::Sub { lhs, rhs } => binop!("-", lhs, rhs),
+            ExprKind::Mul { lhs, rhs } => binop!("*", lhs, rhs),
+            ExprKind::Div { lhs, rhs } => binop!("/", lhs, rhs),
+            ExprKind::Not { expr } => {
+                try_single_line!(true);
+                match &expr.kind {
+                    ExprKind::Do { exprs } => {
+                        pretty_print_exprs(indent, limit, buf, exprs, "!{", "}", ";")
+                    }
+                    _ => {
+                        writeln!(buf, "!(")?;
+                        expr.kind.pretty_print(indent + 2, limit, true, buf)?;
+                        push_indent(indent, buf);
+                        writeln!(buf, ")")
+                    }
+                }
+            }
             ExprKind::Select { arg, arms } => {
                 try_single_line!(true);
                 write!(buf, "select ")?;
@@ -286,6 +312,14 @@ impl ExprKind {
                 for (i, (pat, expr)) in arms.iter().enumerate() {
                     match pat {
                         Pattern::Underscore => write!(buf, "_ ")?,
+                        Pattern::Typ { tag, bind, guard } if tag.len() == 0 => {
+                            write!(buf, "{bind}")?;
+                            if let Some(guard) = guard {
+                                write!(buf, "if ")?;
+                                guard.kind.pretty_print(indent + 2, limit, false, buf)?;
+                                write!(buf, " ")?;
+                            }
+                        }
                         Pattern::Typ { tag, bind, guard } => {
                             let len = tag.len();
                             for (i, tag) in tag.iter().enumerate() {
@@ -331,32 +365,6 @@ impl ExprKind {
                 }
                 push_indent(indent, buf);
                 writeln!(buf, "}}")
-            }
-            ExprKind::Eq { lhs, rhs } => binop!("==", lhs, rhs),
-            ExprKind::Ne { lhs, rhs } => binop!("!=", lhs, rhs),
-            ExprKind::Lt { lhs, rhs } => binop!("<", lhs, rhs),
-            ExprKind::Gt { lhs, rhs } => binop!(">", lhs, rhs),
-            ExprKind::Lte { lhs, rhs } => binop!("<=", lhs, rhs),
-            ExprKind::Gte { lhs, rhs } => binop!(">=", lhs, rhs),
-            ExprKind::And { lhs, rhs } => binop!("&&", lhs, rhs),
-            ExprKind::Or { lhs, rhs } => binop!("||", lhs, rhs),
-            ExprKind::Add { lhs, rhs } => binop!("+", lhs, rhs),
-            ExprKind::Sub { lhs, rhs } => binop!("-", lhs, rhs),
-            ExprKind::Mul { lhs, rhs } => binop!("*", lhs, rhs),
-            ExprKind::Div { lhs, rhs } => binop!("/", lhs, rhs),
-            ExprKind::Not { expr } => {
-                try_single_line!(true);
-                match &expr.kind {
-                    ExprKind::Do { exprs } => {
-                        pretty_print_exprs(indent, limit, buf, exprs, "!{", "}", ";")
-                    }
-                    _ => {
-                        writeln!(buf, "!(")?;
-                        expr.kind.pretty_print(indent + 2, limit, true, buf)?;
-                        push_indent(indent, buf);
-                        writeln!(buf, ")")
-                    }
-                }
             }
         }
     }
@@ -458,6 +466,13 @@ impl fmt::Display for ExprKind {
                 for (i, (pat, rhs)) in arms.iter().enumerate() {
                     match pat {
                         Pattern::Underscore => write!(f, "_ => {rhs}")?,
+                        Pattern::Typ { tag, bind, guard } if tag.len() == 0 => {
+                            write!(f, "{bind}")?;
+                            if let Some(guard) = guard {
+                                write!(f, " if {guard}")?;
+                            }
+                            write!(f, " => {rhs}")?
+                        }
                         Pattern::Typ { tag, bind, guard } => {
                             for (i, t) in tag.iter().enumerate() {
                                 write!(f, "{t:?}({bind})")?;
