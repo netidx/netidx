@@ -2,7 +2,7 @@ use crate::vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node};
 use netidx::subscriber::Value;
 use netidx_core::utils::Either;
 use smallvec::SmallVec;
-use std::{iter, marker::PhantomData, sync::Arc};
+use std::{fmt::Debug, iter, marker::PhantomData, sync::Arc};
 
 pub mod core;
 pub mod net;
@@ -45,11 +45,11 @@ macro_rules! arity2 {
 pub struct CachedVals(pub SmallVec<[Option<Value>; 4]>);
 
 impl CachedVals {
-    pub fn new<C: Ctx, E: Clone>(from: &[Node<C, E>]) -> CachedVals {
+    pub fn new<C: Ctx, E: Debug + Clone>(from: &[Node<C, E>]) -> CachedVals {
         CachedVals(from.into_iter().map(|_| None).collect())
     }
 
-    pub fn update<C: Ctx, E: Clone>(
+    pub fn update<C: Ctx, E: Debug + Clone>(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
@@ -66,7 +66,7 @@ impl CachedVals {
         })
     }
 
-    pub fn update_diff<C: Ctx, E: Clone>(
+    pub fn update_diff<C: Ctx, E: Debug + Clone>(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
@@ -104,7 +104,7 @@ pub struct CachedArgs<T: EvalCached + Send + Sync> {
     t: PhantomData<T>,
 }
 
-impl<C: Ctx, E: Clone, T: EvalCached + Send + Sync + 'static> Init<C, E>
+impl<C: Ctx, E: Debug + Clone, T: EvalCached + Send + Sync + 'static> Init<C, E>
     for CachedArgs<T>
 {
     const NAME: &str = T::NAME;
@@ -118,7 +118,7 @@ impl<C: Ctx, E: Clone, T: EvalCached + Send + Sync + 'static> Init<C, E>
     }
 }
 
-impl<C: Ctx, E: Clone, T: EvalCached + Send + Sync + 'static> Apply<C, E>
+impl<C: Ctx, E: Debug + Clone, T: EvalCached + Send + Sync + 'static> Apply<C, E>
     for CachedArgs<T>
 {
     fn update(

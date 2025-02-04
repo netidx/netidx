@@ -13,7 +13,7 @@ use netidx::{
     subscriber::{Dval, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, fmt::Debug, sync::Arc};
 
 fn as_path(v: Value) -> Option<Path> {
     match v.cast_to::<String>() {
@@ -34,7 +34,7 @@ struct Store {
     dv: Either<(Path, Dval), Vec<Value>>,
 }
 
-impl<C: Ctx, E: Clone> Init<C, E> for Store {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for Store {
     const NAME: &str = "store";
     const ARITY: Arity = Arity::Exactly(2);
 
@@ -49,7 +49,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Store {
     }
 }
 
-impl<C: Ctx, E: Clone> Apply<C, E> for Store {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Store {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -124,7 +124,7 @@ struct Load {
     top_id: ExprId,
 }
 
-impl<C: Ctx, E: Clone> Init<C, E> for Load {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for Load {
     const NAME: &str = "load";
     const ARITY: Arity = Arity::Exactly(1);
 
@@ -135,7 +135,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Load {
     }
 }
 
-impl<C: Ctx, E: Clone> Apply<C, E> for Load {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Load {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -185,7 +185,7 @@ struct RpcCall {
     pending: FxHashSet<BindId>,
 }
 
-impl<C: Ctx, E: Clone> Init<C, E> for RpcCall {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for RpcCall {
     const NAME: &str = "call";
     const ARITY: Arity = Arity::Exactly(2);
 
@@ -200,7 +200,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for RpcCall {
     }
 }
 
-impl<C: Ctx, E: Clone> Apply<C, E> for RpcCall {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for RpcCall {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -264,7 +264,7 @@ pub mod net {
 }
 "#;
 
-pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
+pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Store>();
     ctx.register_builtin::<Load>();
     ctx.register_builtin::<RpcCall>();

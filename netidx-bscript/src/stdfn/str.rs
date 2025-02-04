@@ -6,7 +6,7 @@ use crate::{
 };
 use arcstr::{literal, ArcStr};
 use netidx::{path::Path, subscriber::Value};
-use std::cell::RefCell;
+use std::{cell::RefCell, fmt::Debug};
 
 struct StartsWithEv;
 
@@ -337,7 +337,7 @@ pub mod str {
 }
 "#;
 
-pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
+pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<StartsWith>();
     ctx.register_builtin::<EndsWith>();
     ctx.register_builtin::<Contains>();

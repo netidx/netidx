@@ -428,7 +428,7 @@ where
                 attempt(spstring("&&")),
                 attempt(spstring("||")),
             ))
-            .map(|op: &str| match dbg!(op) {
+            .map(|op: &str| match op {
                 "+" => |lhs, rhs| {
                     ExprKind::Add { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
                 },

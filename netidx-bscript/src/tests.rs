@@ -63,7 +63,7 @@ impl Ctx for TestCtx {
         name: netidx::path::Path,
         args: Vec<(ArcStr, netidx::publisher::Value)>,
         ref_by: ExprId,
-        id: crate::vm::RpcCallId,
+        id: crate::vm::BindId,
     ) {
         unimplemented!()
     }
@@ -93,7 +93,7 @@ impl Ctx for TestCtx {
 
     fn set_timer(
         &mut self,
-        id: crate::vm::TimerId,
+        id: crate::vm::BindId,
         timeout: std::time::Duration,
         ref_by: ExprId,
     ) {
@@ -168,20 +168,19 @@ macro_rules! run {
         #[tokio::test(flavor = "current_thread")]
         async fn $name() -> Result<()> {
             let mut state = TestState::new().await?;
-            let mut n =
-                Node::compile(&mut state.ctx, &ModPath::root(), dbg!($code.parse()?));
+            let mut n = Node::compile(&mut state.ctx, &ModPath::root(), $code.parse()?);
             if let Some(e) = n.extract_err() {
-                if $pred(Err(anyhow!("compilation failed {}", dbg!(e)))) {
+                if $pred(Err(anyhow!("compilation failed {}", e))) {
                     return Ok(());
                 }
             }
-            assert_eq!(dbg!(n.update(&mut state.ctx, &Event::Init)), None);
+            assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
             let mut fin = false;
-            while dbg!(state.ctx.user.var_updates.len()) > 0 {
+            while state.ctx.user.var_updates.len() > 0 {
                 for (_, id, v) in mem::take(&mut state.ctx.user.var_updates) {
-                    match dbg!(n.update(&mut state.ctx, &Event::Variable(id, v))) {
-                        None if !fin => (),
-                        Some(v) if $pred(Ok(dbg!(&v))) => fin = true,
+                    match n.update(&mut state.ctx, &Event::Variable(id, v)) {
+                        None => (),
+                        Some(v) if !fin && $pred(Ok(&v)) => fin = true,
                         v => panic!("unexpected result {v:?}"),
                     }
                 }
@@ -309,7 +308,9 @@ const SELECT: &str = r#"
 run!(select, SELECT, |v: Result<&Value>| match v {
     Ok(Value::Array(a)) => match &**a {
         [Value::String(a), Value::String(b), Value::String(c)]
-            if &**a == "first 1" && &**b == "second 2" && &**c == "third 3" =>
+            if &**a == "first i64:1"
+                && &**b == "second i64:2"
+                && &**c == "third i64:3" =>
             true,
         _ => false,
     },

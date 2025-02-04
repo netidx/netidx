@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use netidx::{publisher::FromValue, subscriber::Value};
-use std::{ops::SubAssign, sync::Arc, time::Duration};
+use std::{fmt::Debug, ops::SubAssign, sync::Arc, time::Duration};
 
 struct AfterIdle {
     args: CachedVals,
@@ -16,7 +16,7 @@ struct AfterIdle {
     eid: ExprId,
 }
 
-impl<C: Ctx, E: Clone> Init<C, E> for AfterIdle {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for AfterIdle {
     const NAME: &str = "after_idle";
     const ARITY: Arity = Arity::Exactly(2);
 
@@ -27,7 +27,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for AfterIdle {
     }
 }
 
-impl<C: Ctx, E: Clone> Apply<C, E> for AfterIdle {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for AfterIdle {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -118,7 +118,7 @@ struct Timer {
     eid: ExprId,
 }
 
-impl<C: Ctx, E: Clone> Init<C, E> for Timer {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for Timer {
     const NAME: &str = "timer";
     const ARITY: Arity = Arity::Exactly(2);
 
@@ -135,7 +135,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Timer {
     }
 }
 
-impl<C: Ctx, E: Clone> Apply<C, E> for Timer {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Timer {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -219,7 +219,7 @@ pub mod time {
 }
 "#;
 
-pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
+pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<AfterIdle>();
     ctx.register_builtin::<Timer>();
     MOD.parse().unwrap()

@@ -10,11 +10,11 @@ use compact_str::format_compact;
 use netidx::subscriber::{Typ, Value};
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
 struct Any;
 
-impl<C: Ctx, E: Clone> Init<C, E> for Any {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for Any {
     const NAME: &str = "any";
     const ARITY: Arity = Arity::Any;
 
@@ -23,7 +23,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Any {
     }
 }
 
-impl<C: Ctx, E: Clone> Apply<C, E> for Any {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Any {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -40,7 +40,7 @@ struct Once {
     val: bool,
 }
 
-impl<C: Ctx, E: Clone> Init<C, E> for Once {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for Once {
     const NAME: &str = "once";
     const ARITY: Arity = Arity::Exactly(1);
 
@@ -49,7 +49,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Once {
     }
 }
 
-impl<C: Ctx, E: Clone> Apply<C, E> for Once {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Once {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -459,7 +459,7 @@ struct Count {
     count: u64,
 }
 
-impl<C: Ctx, E: Clone> Init<C, E> for Count {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for Count {
     const NAME: &str = "count";
     const ARITY: Arity = Arity::Any;
 
@@ -468,7 +468,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Count {
     }
 }
 
-impl<C: Ctx, E: Clone> Apply<C, E> for Count {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Count {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -488,7 +488,7 @@ struct Sample {
     last: Option<Value>,
 }
 
-impl<C: Ctx, E: Clone> Init<C, E> for Sample {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for Sample {
     const NAME: &str = "sample";
     const ARITY: Arity = Arity::Exactly(2);
 
@@ -497,7 +497,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Sample {
     }
 }
 
-impl<C: Ctx, E: Clone> Apply<C, E> for Sample {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Sample {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -551,7 +551,7 @@ type Mean = CachedArgs<MeanEv>;
 
 struct Uniq(Option<Value>);
 
-impl<C: Ctx, E: Clone> Init<C, E> for Uniq {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for Uniq {
     const NAME: &str = "uniq";
     const ARITY: Arity = Arity::Exactly(1);
 
@@ -560,7 +560,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Uniq {
     }
 }
 
-impl<C: Ctx, E: Clone> Apply<C, E> for Uniq {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Uniq {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -583,7 +583,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Uniq {
 
 struct Never;
 
-impl<C: Ctx, E: Clone> Init<C, E> for Never {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for Never {
     const NAME: &str = "never";
     const ARITY: Arity = Arity::Any;
 
@@ -592,7 +592,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Never {
     }
 }
 
-impl<C: Ctx, E: Clone> Apply<C, E> for Never {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Never {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -606,7 +606,7 @@ impl<C: Ctx, E: Clone> Apply<C, E> for Never {
     }
 }
 
-struct Group<C: Ctx + 'static, E: Clone + 'static> {
+struct Group<C: Ctx + 'static, E: Debug + Clone + 'static> {
     buf: SmallVec<[Value; 16]>,
     pred: Box<dyn Apply<C, E> + Send + Sync>,
     n_id: BindId,
@@ -614,7 +614,7 @@ struct Group<C: Ctx + 'static, E: Clone + 'static> {
     from: [Node<C, E>; 2],
 }
 
-impl<C: Ctx, E: Clone> Init<C, E> for Group<C, E> {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for Group<C, E> {
     const NAME: &str = "group";
     const ARITY: Arity = Arity::Exactly(2);
 
@@ -633,6 +633,8 @@ impl<C: Ctx, E: Clone> Init<C, E> for Group<C, E> {
                         kind: NodeKind::Ref(val_id),
                     },
                 ];
+                ctx.user.ref_var(n_id, top_id);
+                ctx.user.ref_var(val_id, top_id);
                 let pred = init(ctx, &mut from, top_id)?;
                 Ok(Box::new(Self { buf: smallvec![], pred, n_id, val_id, from }))
             }
@@ -641,34 +643,30 @@ impl<C: Ctx, E: Clone> Init<C, E> for Group<C, E> {
     }
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> Apply<C, E> for Group<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Group<C, E> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value> {
-        from[0].update(ctx, event).and_then(|val| {
+        if let Some(val) = from[0].update(ctx, event) {
             self.buf.push(val.clone());
-            let n: Value = self.buf.len().into();
-            let n_up =
-                self.pred.update(ctx, &mut self.from, &Event::Variable(self.n_id, n));
-            let v_up =
-                self.pred.update(ctx, &mut self.from, &Event::Variable(self.val_id, val));
-            let stop_batch = n_up.and_then(|n| n.get_as::<bool>()).unwrap_or(false)
-                || v_up.and_then(|n| n.get_as::<bool>()).unwrap_or(false);
-            if stop_batch {
+            ctx.user.set_var(self.n_id, self.buf.len().into());
+            ctx.user.set_var(self.val_id, val);
+        }
+        match self.pred.update(ctx, &mut self.from, event) {
+            Some(Value::True) => {
                 Some(Value::Array(ValArray::from_iter_exact(self.buf.drain(..))))
-            } else {
-                None
             }
-        })
+            _ => None,
+        }
     }
 }
 
 struct Ungroup(BindId);
 
-impl<C: Ctx, E: Clone> Init<C, E> for Ungroup {
+impl<C: Ctx, E: Debug + Clone> Init<C, E> for Ungroup {
     const NAME: &str = "ungroup";
     const ARITY: Arity = Arity::Exactly(1);
 
@@ -677,7 +675,7 @@ impl<C: Ctx, E: Clone> Init<C, E> for Ungroup {
     }
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> Apply<C, E> for Ungroup {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Ungroup {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -733,7 +731,7 @@ pub mod core {
 }
 "#;
 
-pub fn register<C: Ctx, E: Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
+pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Group<C, E>>();
     ctx.register_builtin::<All>();
     ctx.register_builtin::<And>();

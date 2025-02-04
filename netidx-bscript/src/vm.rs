@@ -17,13 +17,14 @@ use netidx::{
 use smallvec::{smallvec, SmallVec};
 use std::{
     collections::{HashMap, VecDeque},
-    fmt, iter, mem,
+    fmt::{self, Debug},
+    iter, mem,
     sync::{self, Weak},
     time::Duration,
 };
 use triomphe::Arc;
 
-pub struct DbgCtx<E> {
+pub struct DbgCtx<E: Debug> {
     pub trace: bool,
     events: VecDeque<(ExprId, (DateTime<Local>, Option<Event<E>>, Value))>,
     watch: FxHashMap<
@@ -33,7 +34,7 @@ pub struct DbgCtx<E> {
     current: FxHashMap<ExprId, (Option<Event<E>>, Value)>,
 }
 
-impl<E: Clone> DbgCtx<E> {
+impl<E: Debug + Clone> DbgCtx<E> {
     fn new() -> Self {
         DbgCtx {
             trace: false,
@@ -109,7 +110,7 @@ atomic_id!(LambdaId);
 atomic_id!(SelectId);
 
 #[derive(Clone, Debug)]
-pub enum Event<E> {
+pub enum Event<E: Debug> {
     Init,
     Variable(BindId, Value),
     Netidx(SubId, Value),
@@ -126,14 +127,14 @@ pub type InitFn<C, E> = sync::Arc<
         + Sync,
 >;
 
-pub trait Init<C: Ctx, E: Clone> {
+pub trait Init<C: Ctx, E: Debug + Clone> {
     const ARITY: Arity;
     const NAME: &str;
 
     fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E>;
 }
 
-pub trait Apply<C: Ctx, E: Clone> {
+pub trait Apply<C: Ctx, E: Debug + Clone> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -144,13 +145,20 @@ pub trait Apply<C: Ctx, E: Clone> {
 
 pub trait Ctx {
     fn clear(&mut self);
+
+    /// Subscribe to the specified netidx path. When the subscription
+    /// updates you are expected to deliver Netidx events to the
+    /// expression specified by ref_by.
     fn durable_subscribe(
         &mut self,
         flags: UpdatesFlags,
         path: Path,
         ref_by: ExprId,
     ) -> Dval;
+
+    /// Called when a subscription is no longer needed
     fn unsubscribe(&mut self, path: Path, dv: Dval, ref_by: ExprId);
+
     /// This will be called by the compiler whenever a bound variable
     /// is referenced. The ref_by is the toplevel expression that
     /// contains the variable reference. When a variable event
@@ -164,12 +172,16 @@ pub trait Ctx {
     fn unref_var(&mut self, id: BindId, ref_by: ExprId);
 
     /// Called when a variable updates. All expressions that ref the
-    /// id should be updates with a Variable event when this happens.
+    /// id should be updated with a Variable event when this happens.
     fn set_var(&mut self, id: BindId, value: Value);
 
     /// For a given name, this must have at most one outstanding call
     /// at a time, and must preserve the order of the calls. Calls to
     /// different names may execute concurrently.
+    ///
+    /// when the rpc returns you are expected to deliver a Variable
+    /// event with the specified id to the expression specified by
+    /// ref_by.
     fn call_rpc(
         &mut self,
         name: Path,
@@ -178,7 +190,9 @@ pub trait Ctx {
         id: BindId,
     );
 
-    /// arrange to have a Timer event delivered after timeout
+    /// arrange to have a Timer event delivered after timeout. When
+    /// the timer expires you are expected to deliver a Variable event
+    /// for the id, containing the current time.
     fn set_timer(&mut self, id: BindId, timeout: Duration, ref_by: ExprId);
 }
 
@@ -189,13 +203,13 @@ pub enum Arity {
     Exactly(usize),
 }
 
-struct Bind<C: Ctx + 'static, E: Clone + 'static> {
+struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     id: BindId,
     export: bool,
     fun: Option<InitFn<C, E>>,
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> fmt::Debug for Bind<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> fmt::Debug for Bind<C, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -207,13 +221,13 @@ impl<C: Ctx + 'static, E: Clone + 'static> fmt::Debug for Bind<C, E> {
     }
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> Default for Bind<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Default for Bind<C, E> {
     fn default() -> Self {
         Self { id: BindId::new(), export: false, fun: None }
     }
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> Clone for Bind<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
@@ -223,13 +237,13 @@ impl<C: Ctx + 'static, E: Clone + 'static> Clone for Bind<C, E> {
     }
 }
 
-struct Env<C: Ctx + 'static, E: Clone + 'static> {
+struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
     binds: Map<ModPath, Map<CompactString, Bind<C, E>>>,
     used: Map<ModPath, Arc<Vec<ModPath>>>,
     modules: Set<ModPath>,
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> Clone for Env<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Env<C, E> {
     fn clone(&self) -> Self {
         Self {
             binds: self.binds.clone(),
@@ -239,7 +253,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Clone for Env<C, E> {
     }
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> Env<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
     fn new() -> Self {
         Self { binds: Map::new(), used: Map::new(), modules: Set::new() }
     }
@@ -296,14 +310,14 @@ impl<C: Ctx + 'static, E: Clone + 'static> Env<C, E> {
     }
 }
 
-pub struct ExecCtx<C: Ctx + 'static, E: Clone + 'static> {
+pub struct ExecCtx<C: Ctx + 'static, E: Debug + Clone + 'static> {
     env: Env<C, E>,
     builtins: FxHashMap<&'static str, (Arity, InitFn<C, E>)>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> ExecCtx<C, E> {
     pub fn clear(&mut self) {
         self.env.clear();
         self.dbg_ctx.clear();
@@ -363,13 +377,13 @@ impl<C: Ctx + 'static, E: Clone + 'static> ExecCtx<C, E> {
     }
 }
 
-struct Lambda<C: Ctx + 'static, E: Clone + 'static> {
+struct Lambda<C: Ctx + 'static, E: Debug + Clone + 'static> {
     eid: ExprId,
     argids: Vec<BindId>,
     body: Node<C, E>,
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> Apply<C, E> for Lambda<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Lambda<C, E> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -377,18 +391,27 @@ impl<C: Ctx + 'static, E: Clone + 'static> Apply<C, E> for Lambda<C, E> {
         event: &Event<E>,
     ) -> Option<Value> {
         for (arg, id) in from.iter_mut().zip(&self.argids) {
-            if let Some(v) = arg.update(ctx, event) {
-                if ctx.dbg_ctx.trace {
-                    ctx.dbg_ctx.add_event(self.eid, Some(event.clone()), v.clone())
+            match arg {
+                Node { kind: NodeKind::Ref(_), .. } => (), // the bind is forwarded into the body
+                arg => {
+                    if let Some(v) = arg.update(ctx, event) {
+                        if ctx.dbg_ctx.trace {
+                            ctx.dbg_ctx.add_event(
+                                self.eid,
+                                Some(event.clone()),
+                                v.clone(),
+                            )
+                        }
+                        ctx.user.set_var(*id, v)
+                    }
                 }
-                ctx.user.set_var(*id, v)
             }
         }
         self.body.update(ctx, event)
     }
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> Lambda<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
     fn new(
         ctx: &mut ExecCtx<C, E>,
         argspec: Arc<[ArcStr]>,
@@ -407,8 +430,16 @@ impl<C: Ctx + 'static, E: Clone + 'static> Lambda<C, E> {
         let binds = ctx.env.binds.get_or_default_cow(scope.clone());
         for (name, node) in argspec.iter().zip(args.iter()) {
             let bind = binds.get_or_default_cow(CompactString::from(&**name));
-            argids.push(bind.id);
-            bind.fun = node.find_lambda();
+            match &node.kind {
+                NodeKind::Ref(id) => {
+                    argids.push(*id);
+                    bind.id = *id;
+                }
+                _ => {
+                    argids.push(bind.id);
+                    bind.fun = node.find_lambda();
+                }
+            }
         }
         let body = Node::compile_int(ctx, body, &scope, tid);
         match body.extract_err() {
@@ -418,12 +449,12 @@ impl<C: Ctx + 'static, E: Clone + 'static> Lambda<C, E> {
     }
 }
 
-pub struct Cached<C: Ctx + 'static, E: Clone + 'static> {
+pub struct Cached<C: Ctx + 'static, E: Debug + Clone + 'static> {
     pub cached: Option<Value>,
     pub node: Node<C, E>,
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> Cached<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Cached<C, E> {
     pub fn new(node: Node<C, E>) -> Self {
         Self { cached: None, node }
     }
@@ -439,12 +470,12 @@ impl<C: Ctx + 'static, E: Clone + 'static> Cached<C, E> {
     }
 }
 
-pub enum PatternNode<C: Ctx + 'static, E: Clone + 'static> {
+pub enum PatternNode<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Underscore,
     Typ { tag: Arc<[Typ]>, bind: BindId, guard: Option<Cached<C, E>> },
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> PatternNode<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
     fn is_err(&self) -> bool {
         match self {
             PatternNode::Underscore
@@ -521,7 +552,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> PatternNode<C, E> {
     }
 }
 
-pub enum NodeKind<C: Ctx + 'static, E: Clone + 'static> {
+pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Constant(Value),
     Module(Vec<Node<C, E>>),
     Use,
@@ -596,18 +627,18 @@ pub enum NodeKind<C: Ctx + 'static, E: Clone + 'static> {
     },
 }
 
-pub struct Node<C: Ctx + 'static, E: Clone + 'static> {
+pub struct Node<C: Ctx + 'static, E: Debug + Clone + 'static> {
     pub spec: Expr,
     pub kind: NodeKind<C, E>,
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> fmt::Display for Node<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> fmt::Display for Node<C, E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", &self.spec)
     }
 }
 
-impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
     fn find_lambda(&self) -> Option<InitFn<C, E>> {
         match &self.kind {
             NodeKind::Constant(_)
@@ -1035,14 +1066,13 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             Expr { kind: ExprKind::Ref { name }, id: _ } => {
                 match ctx.env.lookup_bind(scope, name) {
                     None => error!("{name} not defined"),
-                    Some((_, bind)) => match &bind.fun {
-                        Some(init) => Node { spec, kind: NodeKind::Lambda(init.clone()) },
-                        None => {
-                            let id = bind.id;
-                            ctx.user.ref_var(id, top_id);
-                            Node { spec, kind: NodeKind::Ref(id) }
+                    Some((_, bind)) => {
+                        ctx.user.ref_var(bind.id, top_id);
+                        match &bind.fun {
+                            None => Node { spec, kind: NodeKind::Ref(bind.id) },
+                            Some(i) => Node { spec, kind: NodeKind::Lambda(i.clone()) },
                         }
-                    },
+                    }
                 }
             }
             Expr { kind: ExprKind::Select { arg, arms }, id: _ } => {
@@ -1227,9 +1257,7 @@ impl<C: Ctx + 'static, E: Clone + 'static> Node<C, E> {
             NodeKind::Error { .. } => None,
             NodeKind::Constant(v) => match event {
                 Event::Init => Some(v.clone()),
-                Event::Netidx(_, _)
-                | Event::User(_)
-                | Event::Variable(_, _) => None,
+                Event::Netidx(_, _) | Event::User(_) | Event::Variable(_, _) => None,
             },
             NodeKind::Apply { args, function } => function.update(ctx, args, event),
             NodeKind::Connect(id, rhs) | NodeKind::Bind(id, rhs) => {
