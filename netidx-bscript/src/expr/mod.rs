@@ -1,4 +1,5 @@
 use arcstr::ArcStr;
+use enumflags2::BitFlags;
 use netidx::{
     path::Path,
     publisher::Typ,
@@ -106,30 +107,121 @@ pub enum Pattern {
 }
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
+pub enum Type {
+    Bottom,
+    Primitive(BitFlags<Typ>),
+    Ref(ModPath),
+    Fn(Arc<FnType>),
+    Set(Arc<[Type]>),
+}
+
+#[derive(Debug, Clone, PartialOrd, PartialEq)]
+pub struct FnType {
+    pub args: Arc<[Type]>,
+    pub vargs: Type,
+    pub rtype: Type,
+}
+
+#[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum ExprKind {
     Constant(Value),
-    Module { name: ArcStr, export: bool, value: Option<Arc<[Expr]>> },
-    Do { exprs: Arc<[Expr]> },
-    Use { name: ModPath },
-    Bind { name: ArcStr, export: bool, value: Arc<Expr> },
-    Ref { name: ModPath },
-    Connect { name: ModPath, value: Arc<Expr> },
-    Lambda { args: Arc<[ArcStr]>, vargs: bool, body: Either<Arc<Expr>, ArcStr> },
-    Apply { args: Arc<[Expr]>, function: ModPath },
-    Select { arg: Arc<Expr>, arms: Arc<[(Pattern, Expr)]> },
-    Eq { lhs: Arc<Expr>, rhs: Arc<Expr> },
-    Ne { lhs: Arc<Expr>, rhs: Arc<Expr> },
-    Lt { lhs: Arc<Expr>, rhs: Arc<Expr> },
-    Gt { lhs: Arc<Expr>, rhs: Arc<Expr> },
-    Lte { lhs: Arc<Expr>, rhs: Arc<Expr> },
-    Gte { lhs: Arc<Expr>, rhs: Arc<Expr> },
-    And { lhs: Arc<Expr>, rhs: Arc<Expr> },
-    Or { lhs: Arc<Expr>, rhs: Arc<Expr> },
-    Not { expr: Arc<Expr> },
-    Add { lhs: Arc<Expr>, rhs: Arc<Expr> },
-    Sub { lhs: Arc<Expr>, rhs: Arc<Expr> },
-    Mul { lhs: Arc<Expr>, rhs: Arc<Expr> },
-    Div { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Module {
+        name: ArcStr,
+        export: bool,
+        value: Option<Arc<[Expr]>>,
+    },
+    Do {
+        exprs: Arc<[Expr]>,
+    },
+    Use {
+        name: ModPath,
+    },
+    Bind {
+        name: ArcStr,
+        typ: Option<Type>,
+        export: bool,
+        value: Arc<Expr>,
+    },
+    Ref {
+        name: ModPath,
+    },
+    Connect {
+        name: ModPath,
+        value: Arc<Expr>,
+    },
+    Lambda {
+        args: Arc<[(ArcStr, Option<Type>)]>,
+        vargs: bool,
+        rtype: Option<Type>,
+        body: Either<Arc<Expr>, ArcStr>,
+    },
+    TypeDef {
+        name: ArcStr,
+        typ: Type,
+    },
+    TypeCast {
+        expr: Arc<Expr>,
+        typ: Typ,
+    },
+    Apply {
+        args: Arc<[Expr]>,
+        function: ModPath,
+    },
+    Select {
+        arg: Arc<Expr>,
+        arms: Arc<[(Pattern, Expr)]>,
+    },
+    Eq {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
+    Ne {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
+    Lt {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
+    Gt {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
+    Lte {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
+    Gte {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
+    And {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
+    Or {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
+    Not {
+        expr: Arc<Expr>,
+    },
+    Add {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
+    Sub {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
+    Mul {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
+    Div {
+        lhs: Arc<Expr>,
+        rhs: Arc<Expr>,
+    },
 }
 
 impl ExprKind {

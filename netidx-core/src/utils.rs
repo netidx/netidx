@@ -581,6 +581,22 @@ pub enum Either<T, U> {
     Right(U),
 }
 
+impl<T, U> Either<T, U> {
+    pub fn is_left(&self) -> bool {
+        match self {
+            Self::Left(_) => true,
+            Self::Right(_) => false
+        }
+    }
+
+    pub fn is_right(&self) -> bool {
+        match self {
+            Self::Left(_) => false,
+            Self::Right(_) => true
+        }
+    }
+}
+
 impl<I, T: Iterator<Item = I>, U: Iterator<Item = I>> Iterator for Either<T, U> {
     type Item = I;
     fn next(&mut self) -> Option<I> {

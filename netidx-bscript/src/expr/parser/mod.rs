@@ -1,3 +1,4 @@
+use super::{FnType, Pattern, Type};
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use arcstr::ArcStr;
 use combine::{
@@ -11,6 +12,7 @@ use combine::{
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
+use enumflags2::BitFlags;
 use netidx::{
     path::Path,
     publisher::{Typ, Value},
@@ -19,8 +21,6 @@ use netidx::{
 use netidx_netproto::value_parser::{escaped_string, value as netidx_value};
 use smallvec::SmallVec;
 use triomphe::Arc;
-
-use super::Pattern;
 
 #[cfg(test)]
 mod test;
@@ -298,6 +298,119 @@ where
     )
 }
 
+fn typeprim<I>() -> impl Parser<I, Output = Typ>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        attempt(spstring("u32").map(|_| Typ::U32)),
+        attempt(spstring("v32").map(|_| Typ::V32)),
+        attempt(spstring("i32").map(|_| Typ::I32)),
+        attempt(spstring("z32").map(|_| Typ::Z32)),
+        attempt(spstring("u64").map(|_| Typ::U64)),
+        attempt(spstring("v64").map(|_| Typ::V64)),
+        attempt(spstring("i64").map(|_| Typ::I64)),
+        attempt(spstring("z64").map(|_| Typ::Z64)),
+        attempt(spstring("f32").map(|_| Typ::F32)),
+        attempt(spstring("f64").map(|_| Typ::F64)),
+        attempt(spstring("decimal").map(|_| Typ::Decimal)),
+        attempt(spstring("dateTime").map(|_| Typ::DateTime)),
+        attempt(spstring("duration").map(|_| Typ::Duration)),
+        attempt(spstring("bool").map(|_| Typ::Bool)),
+        attempt(spstring("string").map(|_| Typ::String)),
+        attempt(spstring("bytes").map(|_| Typ::Bytes)),
+        attempt(spstring("result").map(|_| Typ::Result)),
+        attempt(spstring("array").map(|_| Typ::Array)),
+        attempt(spstring("null").map(|_| Typ::Null)),
+    ))
+}
+
+fn fntype<I>() -> impl Parser<I, Output = Type>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        spstring("fn").with(between(
+            token('('),
+            sptoken(')'),
+            sep_by(
+                choice((
+                    attempt(typexp().map(|e| Either::Left(e))),
+                    attempt(spstring("@args:").with(typexp()).map(|e| Either::Right(e))),
+                )),
+                csep(),
+            ),
+        )),
+        spstring("->").with(typexp()),
+    )
+        .then(|(mut args, rtype): (Vec<Either<Type, Type>>, Type)| {
+            let vargs = match args.pop() {
+                Some(Either::Right(t)) => t,
+                Some(Either::Left(t)) => {
+                    args.push(Either::Left(t));
+                    Type::Bottom
+                }
+                None => Type::Bottom,
+            };
+            if !args.iter().all(|a| a.is_left()) {
+                unexpected_any("vargs must appear once at the end of the args").left()
+            } else {
+                let args = args.into_iter().map(|t| match t {
+                    Either::Left(t) => t,
+                    Either::Right(_) => unreachable!(),
+                });
+                value(Type::Fn(Arc::new(FnType {
+                    args: Arc::from_iter(args),
+                    vargs,
+                    rtype,
+                })))
+                .right()
+            }
+        })
+}
+
+fn typexp_<I>() -> impl Parser<I, Output = Type>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        attempt(sptoken('_').map(|_| Type::Bottom)),
+        typeprim().map(|typ| Type::Primitive(typ.into())),
+        attempt(between(sptoken('['), sptoken(']'), sep_by1(typexp(), csep())).map(
+            |mut ts: Vec<Type>| {
+                let mut prims: BitFlags<Typ> = BitFlags::empty();
+                ts.retain(|t| match t {
+                    Type::Primitive(s) => {
+                        prims.insert(*s);
+                        false
+                    }
+                    _ => true,
+                });
+                if !prims.is_empty() {
+                    ts.push(Type::Primitive(prims));
+                }
+                Type::Set(Arc::from_iter(ts))
+            },
+        )),
+        attempt(fntype()),
+        attempt(modpath().map(|n| Type::Ref(n))),
+    ))
+}
+
+parser! {
+    fn typexp[I]()(I) -> Type
+    where [I: RangeStream<Token = char>, I::Range: Range]
+    {
+        typexp_()
+    }
+}
+
 fn lambda<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -309,14 +422,17 @@ where
             token('|'),
             sptoken('|'),
             sep_by(
-                choice((
-                    attempt(spfname()),
-                    attempt(spstring("@args")).map(ArcStr::from),
-                )),
+                (
+                    choice((
+                        attempt(spfname()),
+                        attempt(spstring("@args")).map(ArcStr::from),
+                    )),
+                    attempt(optional(sptoken(':').with(typexp()))),
+                ),
                 csep(),
             )
-            .then(|mut v: SmallVec<[ArcStr; 4]>| {
-                match v.iter().enumerate().find(|(_, a)| &***a == "@args") {
+            .then(|mut v: SmallVec<[(ArcStr, Option<Type>); 4]>| {
+                match v.iter().enumerate().find(|(_, (a, _))| &**a == "@args") {
                     None => value((v, false)).left(),
                     Some((i, _)) => {
                         if i == v.len() - 1 {
@@ -329,14 +445,15 @@ where
                 }
             }),
         ),
+        attempt(optional(sptoken(':').with(typexp()))),
         choice((
             attempt(sptoken('\'')).with(fname()).map(Either::Right),
             expr().map(|e| Either::Left(Arc::new(e))),
         )),
     )
-        .map(|((args, vargs), body)| {
-            let args = Arc::from_iter(args.into_iter().map(ArcStr::from));
-            ExprKind::Lambda { args, vargs, body }.to_expr()
+        .map(|((args, vargs), rtype, body)| {
+            let args = Arc::from_iter(args.into_iter());
+            ExprKind::Lambda { args, vargs, rtype, body }.to_expr()
         })
 }
 

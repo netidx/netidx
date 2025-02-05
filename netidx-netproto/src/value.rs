@@ -5,6 +5,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::{Buf, BufMut, Bytes};
 use chrono::prelude::*;
 use compact_str::{format_compact, CompactString};
+use enumflags2::bitflags;
 use fxhash::FxHashMap;
 use indexmap::{IndexMap, IndexSet};
 use netidx_core::{
@@ -52,6 +53,8 @@ fn _test_valarray() {
 type Result<T> = result::Result<T, PackError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[repr(u32)]
+#[bitflags]
 pub enum Typ {
     U32,
     V32,
@@ -186,13 +189,12 @@ impl Typ {
         }
     }
 
-    pub fn all() -> &'static [Self] {
-        &TYPES
+    pub fn any() -> BitFlags<Typ> {
+        BitFlags::all()
     }
 
-    pub fn number(&self) -> bool {
-        match self {
-            Typ::U32
+    pub fn number() -> BitFlags<Typ> {
+        Typ::U32
             | Typ::V32
             | Typ::I32
             | Typ::Z32
@@ -202,104 +204,50 @@ impl Typ {
             | Typ::Z64
             | Typ::F32
             | Typ::F64
-            | Typ::Decimal => true,
-            Typ::DateTime
-            | Typ::Duration
-            | Typ::Bool
-            | Typ::String
-            | Typ::Bytes
-            | Typ::Result
-            | Typ::Array
-            | Typ::Null => false,
-        }
+            | Typ::Decimal
     }
 
-    pub fn integer(&self) -> bool {
-        match self {
-            Typ::U32
+    pub fn is_number(&self) -> bool {
+        Self::number().contains(*self)
+    }
+
+    pub fn integer() -> BitFlags<Typ> {
+        Typ::U32
             | Typ::V32
             | Typ::I32
             | Typ::Z32
             | Typ::U64
             | Typ::V64
             | Typ::I64
-            | Typ::Z64 => true,
-            Typ::F32
-            | Typ::F64
-            | Typ::Decimal
-            | Typ::DateTime
-            | Typ::Duration
-            | Typ::Bool
-            | Typ::String
-            | Typ::Bytes
-            | Typ::Result
-            | Typ::Array
-            | Typ::Null => false,
-        }
-    }
-
-    pub fn signed_integer(&self) -> bool {
-        match self {
-            Typ::I32 | Typ::Z32 | Typ::I64 | Typ::Z64 => true,
-            Typ::U32
-            | Typ::V32
-            | Typ::U64
-            | Typ::V64
-            | Typ::F32
-            | Typ::F64
-            | Typ::Decimal
-            | Typ::DateTime
-            | Typ::Duration
-            | Typ::Bool
-            | Typ::String
-            | Typ::Bytes
-            | Typ::Result
-            | Typ::Array
-            | Typ::Null => false,
-        }
-    }
-
-    pub fn unsigned_integer(&self) -> bool {
-        match self {
-            Typ::U32 | Typ::V32 | Typ::U64 | Typ::V64 => true,
-            Typ::I32
-            | Typ::Z32
-            | Typ::I64
             | Typ::Z64
-            | Typ::F32
-            | Typ::F64
-            | Typ::Decimal
-            | Typ::DateTime
-            | Typ::Duration
-            | Typ::Bool
-            | Typ::String
-            | Typ::Bytes
-            | Typ::Result
-            | Typ::Array
-            | Typ::Null => false,
-        }
     }
 
-    pub fn float(&self) -> bool {
-        match self {
-            Typ::F32 | Typ::F64 | Typ::Decimal => true,
-            Typ::U32
-            | Typ::V32
-            | Typ::U64
-            | Typ::V64
-            | Typ::I32
-            | Typ::Z32
-            | Typ::I64
-            | Typ::Z64
-            | Typ::DateTime
-            | Typ::Duration
-            | Typ::Bool
-            | Typ::String
-            | Typ::Bytes
-            | Typ::Result
-            | Typ::Array
-            | Typ::Null => false,
-        }
+    pub fn is_integer(&self) -> bool {
+        Self::integer().contains(*self)
+    }
+
+    pub fn signed_integer() -> BitFlags<Typ> {
+        Typ::I32 | Typ::Z32 | Typ::I64 | Typ::Z64
+    }
+
+    pub fn is_signed_integer(&self) -> bool {
+        Self::signed_integer().contains(*self)
+    }
+
+    pub fn unsigned_integer() -> BitFlags<Typ> {
+        Typ::U32 | Typ::V32 | Typ::U64 | Typ::V64
+    }
+
+    pub fn is_unsigned_integer(&self) -> bool {
+        Self::unsigned_integer().contains(*self)
+    }
+
+    pub fn real() -> BitFlags<Typ> {
+        Typ::F32 | Typ::F64 | Typ::Decimal
+    }
+
+    pub fn is_real(&self) -> bool {
+        Self::real().contains(*self)
     }
 }
 

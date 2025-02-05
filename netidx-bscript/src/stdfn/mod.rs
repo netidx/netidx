@@ -1,8 +1,8 @@
-use crate::vm::{Apply, Arity, Ctx, Event, ExecCtx, Init, InitFn, Node};
+use crate::vm::{Apply, Arity, Ctx, Event, ExecCtx, FnType, Init, InitFn, Node};
 use netidx::subscriber::Value;
 use netidx_core::utils::Either;
 use smallvec::SmallVec;
-use std::{fmt::Debug, iter, marker::PhantomData, sync::Arc};
+use std::{fmt::Debug, iter, marker::PhantomData, sync::{Arc, LazyLock}};
 
 pub mod core;
 pub mod net;
@@ -94,7 +94,7 @@ impl CachedVals {
 
 pub trait EvalCached {
     const NAME: &str;
-    const ARITY: Arity;
+    const TYP: LazyLock<FnType>;
 
     fn eval(from: &CachedVals) -> Option<Value>;
 }
@@ -108,7 +108,7 @@ impl<C: Ctx, E: Debug + Clone, T: EvalCached + Send + Sync + 'static> Init<C, E>
     for CachedArgs<T>
 {
     const NAME: &str = T::NAME;
-    const ARITY: Arity = T::ARITY;
+    const TYP: LazyLock<FnType> = T::TYP;
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, from, _| {

@@ -6,6 +6,7 @@ use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
 use chrono::prelude::*;
 use compact_str::{format_compact, CompactString};
+use enumflags2::BitFlags;
 use fxhash::FxHashMap;
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::{
@@ -19,7 +20,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fmt::{self, Debug},
     iter, mem,
-    sync::{self, Weak},
+    sync::{self, LazyLock, Weak},
     time::Duration,
 };
 use triomphe::Arc;
@@ -128,7 +129,7 @@ pub type InitFn<C, E> = sync::Arc<
 >;
 
 pub trait Init<C: Ctx, E: Debug + Clone> {
-    const ARITY: Arity;
+    const TYP: LazyLock<FnType>;
     const NAME: &str;
 
     fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E>;
@@ -194,13 +195,6 @@ pub trait Ctx {
     /// the timer expires you are expected to deliver a Variable event
     /// for the id, containing the current time.
     fn set_timer(&mut self, id: BindId, timeout: Duration, ref_by: ExprId);
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Arity {
-    Any,
-    AtLeast(usize),
-    Exactly(usize),
 }
 
 struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {

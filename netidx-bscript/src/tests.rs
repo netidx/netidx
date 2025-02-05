@@ -344,6 +344,3 @@ run!(lib_core_and, LIB_CORE_AND, |v: Result<&Value>| match v {
     Ok(Value::True) => true,
     _ => false
 });
-
-const LIB_CORE_ANY: &str = r#"
-"#;
