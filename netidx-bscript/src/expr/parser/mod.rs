@@ -26,8 +26,8 @@ use triomphe::Arc;
 mod test;
 
 pub const BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
-pub const RESERVED: [&str; 8] =
-    ["true", "false", "ok", "null", "mod", "let", "select", "pub"];
+pub const RESERVED: [&str; 11] =
+    ["true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn", "cast"];
 
 fn spstring<'a, I>(s: &'static str) -> impl Parser<I, Output = &'a str>
 where
@@ -217,6 +217,8 @@ where
                     | (Some(Expr { kind: ExprKind::Mul { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Div { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Select { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::TypeCast { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::TypeDef { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
                         unreachable!()
                     }
@@ -427,7 +429,7 @@ where
                         attempt(spfname()),
                         attempt(spstring("@args")).map(ArcStr::from),
                     )),
-                    attempt(optional(sptoken(':').with(typexp()))),
+                    attempt(optional(spstring("->").with(typexp()))),
                 ),
                 csep(),
             )
@@ -465,11 +467,14 @@ where
 {
     (
         optional(string("pub").skip(space())).map(|o| o.is_some()),
-        spstring("let").with(space()).with(spfname()).skip(spstring("=")),
+        spstring("let")
+            .with(space())
+            .with((spfname(), attempt(optional(sptoken(':').with(typexp())))))
+            .skip(spstring("=")),
         expr(),
     )
-        .map(|(export, name, value)| {
-            ExprKind::Bind { export, name, value: Arc::new(value) }.to_expr()
+        .map(|(export, (name, typ), value)| {
+            ExprKind::Bind { export, name, typ, value: Arc::new(value) }.to_expr()
         })
 }
 
@@ -679,6 +684,29 @@ where
         })
 }
 
+fn cast<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        string("cast").with(between(token('<'), sptoken('>'), typeprim())),
+        between(sptoken('('), sptoken(')'), expr()),
+    )
+        .map(|(typ, e)| ExprKind::TypeCast { expr: Arc::new(e), typ }.to_expr())
+}
+
+fn typedef<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (string("type").with(spfname()), sptoken('=').with(typexp()))
+        .map(|(name, typ)| ExprKind::TypeDef { name, typ }.to_expr())
+}
+
 fn expr_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -693,6 +721,7 @@ where
         attempt(spaces().with(letbind())),
         attempt(spaces().with(connect())),
         attempt(spaces().with(select())),
+        attempt(spaces().with(cast())),
         attempt(spaces().with(apply())),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
@@ -717,6 +746,7 @@ where
     choice((
         attempt(spaces().with(module())),
         attempt(spaces().with(use_module())),
+        attempt(spaces().with(typedef())),
         attempt(spaces().with(do_block())),
         attempt(spaces().with(array())),
         attempt(spaces().with(letbind())),
