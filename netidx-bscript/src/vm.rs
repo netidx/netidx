@@ -199,6 +199,8 @@ pub trait Ctx {
 
 struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     id: BindId,
+    scope: ModPath,
+    name: CompactString,
     export: bool,
     typ: Option<Type>,
     fun: Option<InitFn<C, E>>,
@@ -216,16 +218,12 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> fmt::Debug for Bind<C, E> {
     }
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Default for Bind<C, E> {
-    fn default() -> Self {
-        Self { id: BindId::new(), typ: None, export: false, fun: None }
-    }
-}
-
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
+            scope: self.scope.clone(),
+            name: self.name.clone(),
             export: self.export,
             typ: self.typ.clone(),
             fun: self.fun.as_ref().map(|fun| sync::Arc::clone(fun)),
@@ -234,7 +232,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
 }
 
 struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
-    binds: Map<ModPath, Map<CompactString, Bind<C, E>>>,
+    by_id: Map<BindId, Bind<C, E>>,
+    binds: Map<ModPath, Map<CompactString, BindId>>,
     used: Map<ModPath, Arc<Vec<ModPath>>>,
     modules: Set<ModPath>,
     typedefs: Map<ModPath, Map<CompactString, Type>>,
@@ -243,6 +242,7 @@ struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Env<C, E> {
     fn clone(&self) -> Self {
         Self {
+            by_id: self.by_id.clone(),
             binds: self.binds.clone(),
             used: self.used.clone(),
             modules: self.modules.clone(),
@@ -254,6 +254,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Env<C, E> {
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
     fn new() -> Self {
         Self {
+            by_id: Map::new(),
             binds: Map::new(),
             used: Map::new(),
             modules: Set::new(),
@@ -262,7 +263,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
     }
 
     fn clear(&mut self) {
-        let Self { binds, used, modules, typedefs } = self;
+        let Self { by_id, binds, used, modules, typedefs } = self;
+        *by_id = Map::new();
         *binds = Map::new();
         *used = Map::new();
         *modules = Set::new();
@@ -308,9 +310,44 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         name: &ModPath,
     ) -> Option<(&ModPath, &Bind<C, E>)> {
         self.find_visible(scope, name, |scope, name| {
-            self.binds
-                .get_full(scope)
-                .and_then(|(scope, vars)| vars.get(name).map(|bind| (scope, bind)))
+            self.binds.get_full(scope).and_then(|(scope, vars)| {
+                vars.get(name)
+                    .and_then(|bid| self.by_id.get(bid).map(|bind| (scope, bind)))
+            })
+        })
+    }
+
+    // alias orig_id -> new_id. orig_id will be removed, and it's in
+    // scope entry will point to new_id
+    fn alias(&mut self, orig_id: BindId, new_id: BindId) {
+        if let Some(bind) = self.by_id.remove_cow(&orig_id) {
+            if let Some(binds) = self.binds.get_mut_cow(&bind.scope) {
+                if let Some(id) = binds.get_mut_cow(bind.name.as_str()) {
+                    *id = new_id
+                }
+            }
+        }
+    }
+
+    // create a new binding. If an existing bind exists in the same
+    // scope shadow it.
+    fn bind_variable(&mut self, scope: &ModPath, name: &str) -> &mut Bind<C, E> {
+        let binds = self.binds.get_or_default_cow(scope.clone());
+        let mut existing = true;
+        let id = binds.get_or_insert_cow(CompactString::from(name), || {
+            existing = false;
+            BindId::new()
+        });
+        if existing {
+            *id = BindId::new();
+        }
+        self.by_id.get_or_insert_cow(*id, || Bind {
+            export: true,
+            id: *id,
+            scope: scope.clone(),
+            name: CompactString::from(name),
+            typ: None,
+            fun: None,
         })
     }
 
@@ -497,13 +534,13 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
         let id = LambdaId::new();
         let mut argids = vec![];
         let scope = ModPath(scope.0.append(&format_compact!("{id:?}")));
-        let binds = ctx.env.binds.get_or_default_cow(scope.clone());
         for (name, node) in argspec.iter().zip(args.iter()) {
-            let bind = binds.get_or_default_cow(CompactString::from(&**name));
+            let bind = ctx.env.bind_variable(&scope, &**name);
             match &node.kind {
                 NodeKind::Ref(id) => {
                     argids.push(*id);
-                    bind.id = *id;
+                    let old_id = bind.id;
+                    ctx.env.alias(old_id, *id)
                 }
                 _ => {
                     argids.push(bind.id);
@@ -591,9 +628,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
                         format_compact!("{ptyp} will never match {atyp}").as_str().into(),
                     );
                 }
-                let k = CompactString::from(&**bind);
-                let bind =
-                    ctx.env.binds.get_or_default_cow(scope.clone()).get_or_default_cow(k);
+                let bind = ctx.env.bind_variable(scope, &**bind);
                 let id = bind.id;
                 bind.typ = Some(ptyp);
                 let guard = guard.as_ref().map(|g| {
@@ -931,14 +966,27 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         }
         macro_rules! typchk {
             ($n:expr, $t:expr) => {{
-                let typ = typ!($n);
-                if !$t.contains(&typ) {
-                    return error!(
-                        "type mismatch. got {} expected {}",
-                        vec![$n],
-                        typ,
-                        $t
-                    );
+                match &$n.typ {
+                    Some(typ) => {
+                        if !$t.contains(&typ) {
+                            return error!(
+                                "type mismatch. got {} expected {}",
+                                vec![$n],
+                                typ,
+                                $t
+                            );
+                        }
+                    }
+                    None => match &$n.kind {
+                        NodeKind::Ref(id) => match ctx.env.by_id.get_mut_cow(id) {
+                            None => return error!("type must be known", vec![$n]),
+                            Some(bind) => {
+                                bind.typ = Some($t.clone());
+                                $n.typ = Some($t.clone());
+                            }
+                        }
+                        _ => return error!("type must be known", vec![$n])
+                    }
                 }
             }};
         }
@@ -1087,24 +1135,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let node = Node::compile_int(ctx, (**value).clone(), &scope, top_id);
                 if let Some(typ) = typ {
                     match ctx.env.resolve_typrefs(scope, typ) {
-                        Ok(t) => typchk!(node, t),
+                        Ok(t) => typchk!(node, &*t),
                         Err(e) => return error!("{e}", vec![node]),
                     }
                 }
-                let mut existing = true;
-                let f = || {
-                    existing = false;
-                    Bind::default()
-                };
-                let k = CompactString::from(&**name);
-                let bind = ctx
-                    .env
-                    .binds
-                    .get_or_default_cow(scope.clone())
-                    .get_or_insert_cow(k, f);
-                if existing {
-                    bind.id = BindId::new();
-                }
+                let bind = ctx.env.bind_variable(scope, &**name);
                 bind.typ = Some(typ!(node));
                 bind.fun = node.find_lambda();
                 if node.is_err() {
@@ -1192,15 +1227,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     return error!("", vec![node]);
                 }
                 let at = Type::boolean();
-                let typ = typ!(node);
-                if !at.contains(&typ) {
-                    return error!(
-                        "type mismatch, expected {} got {}",
-                        vec![node],
-                        at,
-                        typ
-                    );
-                }
+                typchk!(node, at);
                 let node = Box::new(Cached::new(node));
                 Node { spec, typ: Some(at), kind: NodeKind::Not { node } }
             }
