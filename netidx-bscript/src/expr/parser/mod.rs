@@ -384,7 +384,7 @@ where
     choice((
         attempt(sptoken('_').map(|_| Type::Bottom)),
         typeprim().map(|typ| Type::Primitive(typ.into())),
-        attempt(between(sptoken('['), sptoken(']'), sep_by1(typexp(), csep())).map(
+        attempt(between(sptoken('['), sptoken(']'), sep_by(typexp(), csep())).map(
             |mut ts: Vec<Type>| {
                 let mut prims: BitFlags<Typ> = BitFlags::empty();
                 ts.retain(|t| match t {
@@ -394,10 +394,12 @@ where
                     }
                     _ => true,
                 });
-                if !prims.is_empty() {
+                if ts.len() == 0 {
+                    Type::Primitive(prims)
+                } else {
                     ts.push(Type::Primitive(prims));
+                    Type::Set(Arc::from_iter(ts))
                 }
-                Type::Set(Arc::from_iter(ts))
             },
         )),
         attempt(fntype()),

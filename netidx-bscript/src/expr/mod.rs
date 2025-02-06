@@ -115,11 +115,64 @@ pub enum Type {
     Set(Arc<[Type]>),
 }
 
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bottom => write!(f, "_"),
+            Self::Ref(t) => write!(f, "{t}"),
+            Self::Fn(t) => write!(f, "{t}"),
+            Self::Set(s) => {
+                write!(f, "[")?;
+                for (i, t) in s.iter().enumerate() {
+                    write!(f, "{t}")?;
+                    if i < s.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, "]")
+            }
+            Self::Primitive(s) => {
+                if s.len() == 0 {
+                    write!(f, "[]")
+                } else if s.len() == 1 {
+                    write!(f, "{}", s.iter().next().unwrap())
+                } else {
+                    write!(f, "[")?;
+                    for (i, t) in s.iter().enumerate() {
+                        write!(f, "{t}")?;
+                        if i < s.len() - 1 {
+                            write!(f, ", ")?;
+                        }
+                    }
+                    write!(f, "]")
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub struct FnType {
     pub args: Arc<[Type]>,
     pub vargs: Type,
     pub rtype: Type,
+}
+
+impl fmt::Display for FnType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fn(")?;
+        for (i, t) in self.args.iter().enumerate() {
+            write!(f, "{t}")?;
+            if i < self.args.len() - 1 {
+                write!(f, ", ")?;
+            }
+        }
+        match &self.vargs {
+            Type::Bottom => (),
+            t => write!(f, "@args: {t}")?
+        }
+        write!(f, ") -> {}", self.rtype)
+    }
 }
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
