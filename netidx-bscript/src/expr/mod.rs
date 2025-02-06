@@ -106,7 +106,7 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum Pattern {
     Underscore,
-    Typ { tag: Arc<[Typ]>, bind: ArcStr, guard: Option<Expr> },
+    Typ { tag: BitFlags<Typ>, bind: ArcStr, guard: Option<Expr> },
 }
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]

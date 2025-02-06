@@ -634,7 +634,7 @@ where
         attempt(sptoken('_')).map(|_| Pattern::Underscore),
         attempt(
             (spfname(), optional(attempt(space().with(pattern_guard())))).map(
-                |(bind, guard)| Pattern::Typ { tag: Arc::from_iter([]), bind, guard },
+                |(bind, guard)| Pattern::Typ { tag: BitFlags::empty(), bind, guard },
             ),
         ),
         attempt(
@@ -643,7 +643,7 @@ where
                 optional(attempt(space().with(pattern_guard()))),
             )
                 .then(
-                    |(binds, guard): (SmallVec<[(Typ, ArcStr); 4]>, Option<Expr>)| {
+                    |(binds, guard): (SmallVec<[(Typ, ArcStr); 8]>, Option<Expr>)| {
                         let (tag, mut binds): (
                             SmallVec<[Typ; 8]>,
                             SmallVec<[ArcStr; 8]>,
@@ -653,7 +653,7 @@ where
                             unexpected_any("all binds must be the same").left()
                         } else {
                             value(Pattern::Typ {
-                                tag: Arc::from_iter(tag),
+                                tag: BitFlags::from_iter(tag),
                                 bind: binds.pop().unwrap(),
                                 guard,
                             })
