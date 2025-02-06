@@ -1034,32 +1034,52 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let (args, body, id) = (args.clone(), (*body).clone(), *id);
                 Node::compile_lambda(ctx, spec, args, scope, body, id)
             }
-            Expr { kind: ExprKind::Apply { args, function }, id: _ } => {
+            Expr { kind: ExprKind::Apply { args, function: f }, id: _ } => {
                 let (error, args) = subexprs!(scope, args);
-                match ctx.env.lookup_bind(scope, function) {
-                    None => error!("{function} is undefined"),
+                match ctx.env.lookup_bind(scope, f) {
+                    None => error!("{f} is undefined"),
                     Some((_, Bind { fun: None, .. })) => {
-                        error!("{function} is not a function")
+                        error!("{f} is not a function")
                     }
-                    Some((_, Bind { fun: Some(init), id: varid, .. })) => {
-                        let varid = *varid;
-                        let init = sync::Arc::clone(init);
+                    Some((_, Bind { typ: None, .. })) => {
+                        error!("type unknown")
+                    }
+                    Some((_, Bind { fun: Some(i), typ: Some(Type::Fn(ft)), id, .. })) => {
+                        let varid = *id;
+                        let init = sync::Arc::clone(i);
                         if error {
-                            error!("", args)
-                        } else if let Some(e) = args.iter().find(|e| !e.args_ok()) {
-                            error!("invalid argument \"{e}\"")
-                        } else {
-                            match init(ctx, &args, top_id) {
-                                Err(e) => error!("error in function {function} {e:?}"),
-                                Ok(function) => {
-                                    ctx.user.ref_var(varid, top_id);
-                                    Node {
-                                        spec,
-                                        kind: NodeKind::Apply { args, function },
-                                    }
+                            return error!("", args);
+                        }
+                        if (args.len() > ft.args.len() && ft.vargs.is_bot())
+                            || args.len() < ft.args.len()
+                        {
+                            return error!("{f} expected {} args", args, ft.args.len());
+                        }
+                        for i in 0..args.len() {
+                            let atyp = match &args[i].typ {
+                                Some(typ) => typ,
+                                None => return error!("{f} arg {i} type unknown", args),
+                            };
+                            let ftyp =
+                                if i < ft.args.len() { &ft.args[i] } else { &ft.vargs };
+                            if !ftyp.contains(atyp) {
+                                return error!("type mismatch {f} arg {i} expected {ftyp} got {atyp}");
+                            }
+                        }
+                        match init(ctx, &args, top_id) {
+                            Err(e) => error!("error in function {f} {e:?}"),
+                            Ok(function) => {
+                                ctx.user.ref_var(varid, top_id);
+                                Node {
+                                    spec,
+                                    typ: Some(ft.rtype),
+                                    kind: NodeKind::Apply { args, function },
                                 }
                             }
                         }
+                    }
+                    Some((_, Bind { typ: Some(t), .. })) => {
+                        error!("{f} has type {t} which is not a function")
                     }
                 }
             }
@@ -1127,10 +1147,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                         );
                         let pat = PatternNode::compile(ctx, &atyp, pat, &scope, top_id);
                         let n = Node::compile_int(ctx, spec.clone(), &scope, top_id);
-                        let e = n.typ.is_none();
                         let rtyp = n.typ.as_ref().unwrap_or(&Type::Bottom).union(&rtyp);
                         let ptyp = ptyp.union(&pat.ptype());
-                        let e = e || pat.extract_err().is_some() || n.is_err();
+                        let e = e
+                            || pat.extract_err().is_some()
+                            || n.is_err() | n.typ.is_none();
                         nodes.push((pat, Cached::new(n)));
                         (e, nodes, ptyp, rtyp)
                     },

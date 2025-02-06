@@ -119,6 +119,13 @@ pub enum Type {
 }
 
 impl Type {
+    pub fn is_bot(&self) -> bool {
+        match self {
+            Type::Bottom => true,
+            Type::Primitive(_) | Type::Ref(_) | Type::Fn(_) | Type::Set(_) => false,
+        }
+    }
+
     pub fn contains(&self, t: &Type) -> bool {
         match (self, t) {
             (Self::Ref(_), _) | (_, Self::Ref(_)) => false, // refs must be eliminated before unification
