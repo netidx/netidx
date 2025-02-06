@@ -957,6 +957,22 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             ($fmt:expr) => { error!($fmt, vec![],) };
             ($fmt:expr, $children:expr) => { error!($fmt, $children,) };
         }
+        macro_rules! typ {
+            ($n:expr) => {
+                match &$n.typ {
+                    None => return error!("type must be known", vec![$n]),
+                    Some(t) => t.clone(),
+                }
+            };
+        }
+        macro_rules! typchk {
+            ($n:expr, $t:expr) => {{
+                let typ = typ!($n);
+                if !$t.contains(&typ) {
+                    return error!("type mismatch. got {} expected {}", vec![$n], typ, $t);
+                }
+            }};
+        }
         macro_rules! binary_op {
             ($op:ident, $lhs:expr, $rhs:expr, $at:expr, $rt:expr) => {{
                 let lhs = Node::compile_int(ctx, (**$lhs).clone(), scope, top_id);
@@ -964,25 +980,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 if lhs.is_err() || rhs.is_err() {
                     return error!("", vec![lhs, rhs]);
                 }
-                match (&lhs.typ, &rhs.typ) {
-                    (None, _) | (_, None) => {
-                        return error!(
-                            "type must be known, add annotations",
-                            vec![lhs, rhs]
-                        )
-                    }
-                    (Some(ltyp), Some(rtyp)) => {
-                        if !($at.contains(ltyp) && $at.contains(rtyp)) {
-                            return error!(
-                                "type mismatch got ({}, {}) expected {}",
-                                vec![lhs, rhs],
-                                ltyp,
-                                rtyp,
-                                $at
-                            );
-                        }
-                    }
-                }
+                typchk!(lhs, $at);
+                typchk!(rhs, $at);
                 let lhs = Box::new(Cached::new(lhs));
                 let rhs = Box::new(Cached::new(rhs));
                 Node { spec, typ: Some($rt), kind: NodeKind::$op { lhs, rhs } }
@@ -1002,7 +1001,15 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 } else if let Some(e) = exp.iter().find(|e| !e.do_expr_ok()) {
                     error!("\"{e}\" cannot appear inside do")
                 } else {
-                    Node { kind: NodeKind::Do(exp), spec }
+                    let typ = match exp.pop() {
+                        None => Type::Bottom,
+                        Some(n) => {
+                            let t = typ!(n);
+                            exp.push(n);
+                            t
+                        }
+                    };
+                    Node { kind: NodeKind::Do(exp), spec, typ: Some(typ) }
                 }
             }
             Expr { kind: ExprKind::Module { name, export: _, value }, id: _ } => {
@@ -1015,7 +1022,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                             error!("", children)
                         } else {
                             ctx.env.modules.insert_cow(scope.clone());
-                            Node { spec, kind: NodeKind::Module(children) }
+                            Node {
+                                spec,
+                                typ: Some(Type::Bottom),
+                                kind: NodeKind::Module(children),
+                            }
                         }
                     }
                 }
@@ -1026,7 +1037,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 } else {
                     let used = ctx.env.used.get_or_default_cow(scope.clone());
                     Arc::make_mut(used).push(name.clone());
-                    Node { spec, kind: NodeKind::Use }
+                    Node { spec, typ: Some(Type::Bottom), kind: NodeKind::Use }
                 }
             }
             Expr { kind: ExprKind::Connect { name, value }, id: _ } => {
@@ -1035,7 +1046,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     Some((_, Bind { fun: Some(_), .. })) => {
                         error!("{name} is a function")
                     }
-                    Some((_, Bind { id, fun: None, export: _ })) => {
+                    Some((_, Bind { id: _, fun: None, typ: None, export: _ })) => {
+                        error!("bind type must be known")
+                    }
+                    Some((_, Bind { id, fun: None, typ: Some(typ), export: _ })) => {
                         let id = *id;
                         let node =
                             Node::compile_int(ctx, (**value).clone(), scope, top_id);
@@ -1044,13 +1058,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                         } else if !node.connect_rhs_ok() {
                             error!("{name} cannot be connected to \"{node}\"")
                         } else {
+                            typchk!(node, typ);
                             let kind = NodeKind::Connect(id, Box::new(node));
-                            Node { spec, kind }
+                            Node { spec, typ: Some(Type::Bottom), kind }
                         }
                     }
                 }
             }
-            Expr { kind: ExprKind::Lambda { args, vargs: _, body }, id } => {
+            Expr { kind: ExprKind::Lambda { args, vargs, rtype, body }, id } => {
                 let (args, body, id) = (args.clone(), (*body).clone(), *id);
                 Node::compile_lambda(ctx, spec, args, scope, body, id)
             }
@@ -1111,9 +1126,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     None => error!("{name} not defined"),
                     Some((_, bind)) => {
                         ctx.user.ref_var(bind.id, top_id);
+                        let typ = bind.typ.clone();
                         match &bind.fun {
-                            None => Node { spec, kind: NodeKind::Ref(bind.id) },
-                            Some(i) => Node { spec, kind: NodeKind::Lambda(i.clone()) },
+                            None => Node { spec, typ, kind: NodeKind::Ref(bind.id) },
+                            Some(i) => Node { spec, typ, kind: NodeKind::Lambda(i.clone()) },
                         }
                     }
                 }
@@ -1153,18 +1169,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     return error!("", vec![node]);
                 }
                 let at = Type::boolean();
-                match &node.typ {
-                    None => return error!("type must be known", vec![node]),
-                    Some(typ) => {
-                        if !at.contains(typ) {
-                            return error!(
-                                "type mismatch, expected {} got {}",
-                                vec![node],
-                                at,
-                                typ
-                            );
-                        }
-                    }
+                let typ = typ!(node);
+                if !at.contains(&typ) {
+                    return error!(
+                        "type mismatch, expected {} got {}",
+                        vec![node],
+                        at,
+                        typ
+                    );
                 }
                 let node = Box::new(Cached::new(node));
                 Node { spec, typ: Some(at), kind: NodeKind::Not { node } }
