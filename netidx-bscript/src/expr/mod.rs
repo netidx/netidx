@@ -12,10 +12,12 @@ use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
 };
+use smallvec::{smallvec, SmallVec};
 use std::{
     borrow::Borrow,
     cmp::{Ordering, PartialEq, PartialOrd},
     fmt::{self, Display, Write},
+    iter,
     ops::Deref,
     result,
     str::FromStr,
@@ -107,7 +109,7 @@ pub enum Pattern {
     Typ { tag: Arc<[Typ]>, bind: ArcStr, guard: Option<Expr> },
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub enum Type {
     Bottom,
     Primitive(BitFlags<Typ>),
@@ -129,10 +131,96 @@ impl Type {
         }
     }
 
+    fn merge_sets(s0: &[Type], s1: &[Type]) -> Type {
+        let mut res: SmallVec<[Type; 20]> = smallvec![];
+        for t in s0.iter().chain(s1.iter()) {
+            let mut merged = false;
+            for i in 0..res.len() {
+                if let Some(t) = t.merge(&res[i]) {
+                    res[i] = t;
+                    merged = true;
+                    break;
+                }
+            }
+            if !merged {
+                res.push(t.clone());
+            }
+        }
+        Type::Set(Arc::from_iter(res))
+    }
+
+    fn merge_into_set(s: &[Type], t: &Type) -> Type {
+        let mut res: SmallVec<[Type; 20]> = smallvec![];
+        res.extend(s.iter().map(|t| t.clone()));
+        let mut merged = false;
+        for i in 0..res.len() {
+            if let Some(t) = t.merge(&res[i]) {
+                merged = true;
+                res[i] = t;
+                break;
+            }
+        }
+        if !merged {
+            res.push(t.clone());
+        }
+        Type::Set(Arc::from_iter(res))
+    }
+
+    fn merge(&self, t: &Type) -> Option<Type> {
+        match (self, t) {
+            (Type::Bottom, t) | (t, Type::Bottom) => Some(t.clone()),
+            (Type::Primitive(s0), Type::Primitive(s1)) => {
+                let mut s = *s0;
+                s.insert(*s1);
+                Some(Type::Primitive(s))
+            }
+            (Type::Ref(_), _) | (_, Type::Ref(_)) => None,
+            (Type::Fn(f0), Type::Fn(f1)) => {
+                if f0 == f1 {
+                    Some(Type::Fn(f0.clone()))
+                } else {
+                    None
+                }
+            }
+            (_, Type::Fn(_)) | (Type::Fn(_), _) => None,
+            (Type::Set(s0), Type::Set(s1)) => Some(Self::merge_sets(s0, s1)),
+            (Type::Set(s), t) | (t, Type::Set(s)) => Some(Self::merge_into_set(s, t)),
+        }
+    }
+
+    pub fn union(&self, t: &Type) -> Type {
+        match (self, t) {
+            (Type::Bottom, t) | (t, Type::Bottom) => t.clone(),
+            (Type::Primitive(s0), Type::Primitive(s1)) => {
+                let mut s = *s0;
+                s.insert(*s1);
+                Type::Primitive(s)
+            }
+            (Type::Set(s0), Type::Set(s1)) => Self::merge_sets(s0, s1),
+            (Type::Set(s), t) | (t, Type::Set(s)) => Self::merge_into_set(s, t),
+            (r @ Type::Ref(_), t) | (t, r @ Type::Ref(_)) => {
+                Type::Set(Arc::from_iter([r.clone(), t.clone()]))
+            }
+            (Type::Fn(f0), Type::Fn(f1)) => {
+                if f0 == f1 {
+                    Type::Fn(f0.clone())
+                } else {
+                    Type::Set(Arc::from_iter([
+                        Type::Fn(f0.clone()),
+                        Type::Fn(f1.clone()),
+                    ]))
+                }
+            }
+            (f @ Type::Fn(_), t) | (t, f @ Type::Fn(_)) => {
+                Type::Set(Arc::from_iter([f.clone(), t.clone()]))
+            }
+        }
+    }
+
     pub fn any() -> Self {
         Self::Primitive(Typ::any())
     }
-    
+
     pub fn boolean() -> Self {
         Self::Primitive(Typ::Bool.into())
     }
@@ -184,7 +272,7 @@ impl fmt::Display for Type {
     }
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct FnType {
     pub args: Arc<[Type]>,
     pub vargs: Type,

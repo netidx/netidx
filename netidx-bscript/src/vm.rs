@@ -1,5 +1,5 @@
 use crate::{
-    expr::{Expr, ExprId, ExprKind, ModPath, Pattern, Type},
+    expr::{Expr, ExprId, ExprKind, FnType, ModPath, Pattern, Type},
     stdfn,
 };
 use anyhow::{bail, Result};
@@ -16,6 +16,7 @@ use netidx::{
 };
 use smallvec::{smallvec, SmallVec};
 use std::{
+    borrow::Cow,
     collections::{HashMap, VecDeque},
     fmt::{self, Debug},
     iter, mem,
@@ -310,6 +311,71 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
                 .get_full(scope)
                 .and_then(|(scope, vars)| vars.get(name).map(|bind| (scope, bind)))
         })
+    }
+
+    fn resolve_typrefs<'a>(
+        &self,
+        scope: &ModPath,
+        typ: &'a Type,
+    ) -> Result<Cow<'a, Type>> {
+        match typ {
+            Type::Bottom => Ok(Cow::Borrowed(typ)),
+            Type::Primitive(_) => Ok(Cow::Borrowed(typ)),
+            Type::Ref(name) => {
+                let scope = match Path::dirname(&**name) {
+                    None => scope,
+                    Some(dn) => &*scope.append(dn),
+                };
+                let name = Path::basename(&**name).unwrap_or("");
+                match self.typedefs.get(scope) {
+                    None => bail!("undefined type {name} in scope {scope}"),
+                    Some(defs) => match defs.get(name) {
+                        None => bail!("undefined type {name} in scope {scope}"),
+                        Some(typ) => Ok(Cow::Owned(typ.clone())),
+                    },
+                }
+            }
+            Type::Set(ts) => {
+                let mut res: SmallVec<[Cow<Type>; 20]> = smallvec![];
+                for t in ts.iter() {
+                    res.push(self.resolve_typrefs(scope, t)?)
+                }
+                let borrowed = res.iter().all(|t| match t {
+                    Cow::Borrowed(_) => true,
+                    Cow::Owned(_) => false,
+                });
+                if borrowed {
+                    Ok(Cow::Borrowed(typ))
+                } else {
+                    let iter = res.into_iter().map(|t| t.into_owned());
+                    Ok(Cow::Owned(Type::Set(Arc::from_iter(iter))))
+                }
+            }
+            Type::Fn(f) => {
+                let vargs = self.resolve_typrefs(scope, &f.vargs)?;
+                let rtype = self.resolve_typrefs(scope, &f.rtype)?;
+                let mut res: SmallVec<[Cow<Type>; 20]> = smallvec![];
+                for t in f.args.iter() {
+                    res.push(self.resolve_typrefs(scope, t)?);
+                }
+                let borrowed =
+                    res.iter().chain(iter::once(&vargs)).chain(iter::once(&rtype)).all(
+                        |t| match t {
+                            Cow::Borrowed(_) => true,
+                            Cow::Owned(_) => false,
+                        },
+                    );
+                if borrowed {
+                    Ok(Cow::Borrowed(typ))
+                } else {
+                    Ok(Cow::Owned(Type::Fn(Arc::new(FnType {
+                        args: Arc::from_iter(res.into_iter().map(|t| t.into_owned())),
+                        rtype: rtype.into_owned(),
+                        vargs: vargs.into_owned(),
+                    }))))
+                }
+            }
+        }
     }
 }
 
@@ -750,128 +816,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         }
     }
 
-    pub fn bind_rhs_ok(&self) -> bool {
-        match &self.kind {
-            NodeKind::Use
-            | NodeKind::Connect(_, _)
-            | NodeKind::Bind(_, _)
-            | NodeKind::Module(_)
-            | NodeKind::TypeDef
-            | NodeKind::Error { .. } => false,
-            NodeKind::Do(_)
-            | NodeKind::Eq { .. }
-            | NodeKind::Ne { .. }
-            | NodeKind::Lt { .. }
-            | NodeKind::Gt { .. }
-            | NodeKind::Gte { .. }
-            | NodeKind::Lte { .. }
-            | NodeKind::And { .. }
-            | NodeKind::Or { .. }
-            | NodeKind::Not { .. }
-            | NodeKind::Add { .. }
-            | NodeKind::Sub { .. }
-            | NodeKind::Mul { .. }
-            | NodeKind::Div { .. }
-            | NodeKind::Select { .. }
-            | NodeKind::Constant(_)
-            | NodeKind::Ref(_)
-            | NodeKind::Lambda(_)
-            | NodeKind::TypeCast { .. }
-            | NodeKind::Apply { .. } => true,
-        }
-    }
-
-    pub fn connect_rhs_ok(&self) -> bool {
-        match &self.kind {
-            NodeKind::Use
-            | NodeKind::Connect(_, _)
-            | NodeKind::Bind(_, _)
-            | NodeKind::Module(_)
-            | NodeKind::Lambda(_)
-            | NodeKind::TypeDef
-            | NodeKind::Error { .. } => false,
-            NodeKind::Do(_)
-            | NodeKind::Eq { .. }
-            | NodeKind::Ne { .. }
-            | NodeKind::Lt { .. }
-            | NodeKind::Gt { .. }
-            | NodeKind::Gte { .. }
-            | NodeKind::Lte { .. }
-            | NodeKind::And { .. }
-            | NodeKind::Or { .. }
-            | NodeKind::Not { .. }
-            | NodeKind::Add { .. }
-            | NodeKind::Sub { .. }
-            | NodeKind::Mul { .. }
-            | NodeKind::Div { .. }
-            | NodeKind::Select { .. }
-            | NodeKind::Constant(_)
-            | NodeKind::Ref(_)
-            | NodeKind::TypeCast { .. }
-            | NodeKind::Apply { .. } => true,
-        }
-    }
-
-    pub fn do_expr_ok(&self) -> bool {
-        match &self.kind {
-            NodeKind::Module(_) | NodeKind::Error { .. } | NodeKind::TypeDef => false,
-            NodeKind::Use
-            | NodeKind::Lambda(_)
-            | NodeKind::Connect(_, _)
-            | NodeKind::Bind(_, _)
-            | NodeKind::Do(_)
-            | NodeKind::Constant(_)
-            | NodeKind::Ref(_)
-            | NodeKind::Eq { .. }
-            | NodeKind::Ne { .. }
-            | NodeKind::Lt { .. }
-            | NodeKind::Gt { .. }
-            | NodeKind::Gte { .. }
-            | NodeKind::Lte { .. }
-            | NodeKind::And { .. }
-            | NodeKind::Or { .. }
-            | NodeKind::Not { .. }
-            | NodeKind::Add { .. }
-            | NodeKind::Sub { .. }
-            | NodeKind::Mul { .. }
-            | NodeKind::Div { .. }
-            | NodeKind::Select { .. }
-            | NodeKind::TypeCast { .. }
-            | NodeKind::Apply { .. } => true,
-        }
-    }
-
-    pub fn args_ok(&self) -> bool {
-        match &self.kind {
-            NodeKind::Use
-            | NodeKind::Connect(_, _)
-            | NodeKind::Bind(_, _)
-            | NodeKind::Module(_)
-            | NodeKind::TypeDef
-            | NodeKind::Error { .. } => false,
-            NodeKind::Lambda(_)
-            | NodeKind::Eq { .. }
-            | NodeKind::Ne { .. }
-            | NodeKind::Lt { .. }
-            | NodeKind::Gt { .. }
-            | NodeKind::Gte { .. }
-            | NodeKind::Lte { .. }
-            | NodeKind::And { .. }
-            | NodeKind::Or { .. }
-            | NodeKind::Not { .. }
-            | NodeKind::Add { .. }
-            | NodeKind::Sub { .. }
-            | NodeKind::Mul { .. }
-            | NodeKind::Div { .. }
-            | NodeKind::Select { .. }
-            | NodeKind::Do(_)
-            | NodeKind::Constant(_)
-            | NodeKind::Ref(_)
-            | NodeKind::TypeCast { .. }
-            | NodeKind::Apply { .. } => true,
-        }
-    }
-
     fn compile_lambda(
         ctx: &mut ExecCtx<C, E>,
         spec: Expr,
@@ -969,7 +913,12 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             ($n:expr, $t:expr) => {{
                 let typ = typ!($n);
                 if !$t.contains(&typ) {
-                    return error!("type mismatch. got {} expected {}", vec![$n], typ, $t);
+                    return error!(
+                        "type mismatch. got {} expected {}",
+                        vec![$n],
+                        typ,
+                        $t
+                    );
                 }
             }};
         }
@@ -1055,8 +1004,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                             Node::compile_int(ctx, (**value).clone(), scope, top_id);
                         if node.is_err() {
                             error!("", vec![node])
-                        } else if !node.connect_rhs_ok() {
-                            error!("{name} cannot be connected to \"{node}\"")
                         } else {
                             typchk!(node, typ);
                             let kind = NodeKind::Connect(id, Box::new(node));
@@ -1098,8 +1045,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     }
                 }
             }
-            Expr { kind: ExprKind::Bind { export: _, name, value }, id: _ } => {
+            Expr { kind: ExprKind::Bind { export: _, name, typ, value }, id: _ } => {
                 let node = Node::compile_int(ctx, (**value).clone(), &scope, top_id);
+                if let Some(typ) = typ {
+                    match ctx.env.resolve_typrefs(scope, typ) {
+                        Ok(t) => typchk!(node, t),
+                        Err(e) => return error!("{e}", vec![node]),
+                    }
+                }
                 let mut existing = true;
                 let f = || {
                     existing = false;
@@ -1114,11 +1067,16 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 if existing {
                     bind.id = BindId::new();
                 }
+                bind.typ = Some(typ!(node));
                 bind.fun = node.find_lambda();
                 if node.is_err() {
                     error!("", vec![node])
                 } else {
-                    Node { spec, kind: NodeKind::Bind(bind.id, Box::new(node)) }
+                    Node {
+                        spec,
+                        typ: Some(Type::Bottom),
+                        kind: NodeKind::Bind(bind.id, Box::new(node)),
+                    }
                 }
             }
             Expr { kind: ExprKind::Ref { name }, id: _ } => {
@@ -1129,7 +1087,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                         let typ = bind.typ.clone();
                         match &bind.fun {
                             None => Node { spec, typ, kind: NodeKind::Ref(bind.id) },
-                            Some(i) => Node { spec, typ, kind: NodeKind::Lambda(i.clone()) },
+                            Some(i) => {
+                                Node { spec, typ, kind: NodeKind::Lambda(i.clone()) }
+                            }
                         }
                     }
                 }
