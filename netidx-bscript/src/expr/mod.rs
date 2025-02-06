@@ -1,4 +1,5 @@
 use arcstr::ArcStr;
+use compact_str::CompactString;
 use enumflags2::BitFlags;
 use netidx::{
     path::Path,
@@ -115,6 +116,38 @@ pub enum Type {
     Set(Arc<[Type]>),
 }
 
+impl Type {
+    pub fn contains(&self, t: &Type) -> bool {
+        match (self, t) {
+            (Self::Ref(_), _) | (_, Self::Ref(_)) => false, // refs must be eliminated before unification
+            (Self::Bottom, _) | (_, Self::Bottom) => true,
+            (Self::Primitive(p0), Self::Primitive(p1)) => p0.contains(*p1),
+            (Self::Set(s), t) => s.iter().any(|s| s.contains(t)),
+            (s, Self::Set(t)) => t.iter().all(|t| s.contains(t)),
+            (Self::Fn(f0), Self::Fn(f1)) => f0.contains(f1),
+            (Self::Fn(_), _) | (_, Self::Fn(_)) => false,
+        }
+    }
+
+    pub fn any() -> Self {
+        Self::Primitive(Typ::any())
+    }
+    
+    pub fn boolean() -> Self {
+        Self::Primitive(Typ::Bool.into())
+    }
+
+    pub fn number() -> Self {
+        Self::Primitive(Typ::number())
+    }
+}
+
+impl Default for Type {
+    fn default() -> Self {
+        Self::Primitive(Typ::any())
+    }
+}
+
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -158,6 +191,15 @@ pub struct FnType {
     pub rtype: Type,
 }
 
+impl FnType {
+    pub fn contains(&self, t: &FnType) -> bool {
+        self.args.len() == t.args.len()
+            && t.args.iter().zip(self.args.iter()).all(|(t, s)| t.contains(s))
+            && t.vargs.contains(&self.vargs)
+            && self.rtype.contains(&t.rtype)
+    }
+}
+
 impl fmt::Display for FnType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "fn(")?;
@@ -169,7 +211,7 @@ impl fmt::Display for FnType {
         }
         match &self.vargs {
             Type::Bottom => (),
-            t => write!(f, "@args: {t}")?
+            t => write!(f, "@args: {t}")?,
         }
         write!(f, ") -> {}", self.rtype)
     }
@@ -204,7 +246,7 @@ pub enum ExprKind {
     },
     Lambda {
         args: Arc<[(ArcStr, Option<Type>)]>,
-        vargs: bool,
+        vargs: Option<Option<Type>>,
         rtype: Option<Type>,
         body: Either<Arc<Expr>, ArcStr>,
     },
@@ -331,6 +373,19 @@ impl ExprKind {
                 write!(buf, ")")
             }};
         }
+        let mut tbuf = CompactString::new("");
+        macro_rules! typ {
+            ($typ:expr) => {{
+                match $typ {
+                    None => "",
+                    Some(typ) => {
+                        tbuf.clear();
+                        write!(tbuf, ": {typ}")?;
+                        tbuf.as_str()
+                    }
+                }
+            }};
+        }
         fn push_indent(indent: usize, buf: &mut String) {
             buf.extend((0..indent).into_iter().map(|_| ' '));
         }
@@ -359,15 +414,16 @@ impl ExprKind {
             ExprKind::Constant(_)
             | ExprKind::Use { name: _ }
             | ExprKind::Ref { name: _ }
+            | ExprKind::TypeDef { name: _, typ: _ }
             | ExprKind::Module { name: _, export: _, value: None } => {
                 if newline {
                     push_indent(indent, buf);
                 }
                 writeln!(buf, "{self}")
             }
-            ExprKind::Bind { export, name, value } => {
+            ExprKind::Bind { export, name, typ, value } => {
                 try_single_line!(true);
-                writeln!(buf, "{}let {name} = ", exp(*export))?;
+                writeln!(buf, "{}let {name}{} = ", exp(*export), typ!(typ))?;
                 value.kind.pretty_print(indent + 2, limit, false, buf)
             }
             ExprKind::Module { name, export, value: Some(exprs) } => {
@@ -384,6 +440,12 @@ impl ExprKind {
                 writeln!(buf, "{name} <- ")?;
                 value.kind.pretty_print(indent + 2, limit, false, buf)
             }
+            ExprKind::TypeCast { expr, typ } => {
+                try_single_line!(true);
+                writeln!(buf, "cast<{typ}>(")?;
+                expr.kind.pretty_print(indent + 2, limit, true, buf)?;
+                writeln!(buf, ")")
+            }
             ExprKind::Apply { function, args } => {
                 let len = try_single_line!(false);
                 if function == &["str", "concat"] {
@@ -397,19 +459,22 @@ impl ExprKind {
                     pretty_print_exprs(indent, limit, buf, args, "(", ")", ",")
                 }
             }
-            ExprKind::Lambda { args, vargs, body } => {
+            ExprKind::Lambda { args, vargs, rtype, body } => {
                 try_single_line!(true);
                 write!(buf, "|")?;
-                for i in 0..args.len() {
-                    write!(buf, "{}", &args[i])?;
-                    if *vargs || i < args.len() - 1 {
+                for (i, (a, typ)) in args.iter().enumerate() {
+                    write!(buf, "{a}{}", typ!(typ))?;
+                    if vargs.is_some() || i < args.len() - 1 {
                         write!(buf, ", ")?
                     }
                 }
-                if *vargs {
-                    write!(buf, "@args")?;
+                if let Some(typ) = vargs {
+                    write!(buf, "@args{}", typ!(typ))?;
                 }
                 write!(buf, "| ")?;
+                if let Some(t) = rtype {
+                    write!(buf, "-> {t}")?
+                }
                 match body {
                     Either::Right(builtin) => {
                         writeln!(buf, "'{builtin}")
@@ -543,11 +608,24 @@ impl fmt::Display for ExprKind {
             }
             write!(f, "{close}")
         }
+        let mut tbuf = CompactString::new("");
+        macro_rules! typ {
+            ($typ:expr) => {{
+                match $typ {
+                    None => "",
+                    Some(typ) => {
+                        tbuf.clear();
+                        write!(tbuf, ": {typ}")?;
+                        tbuf.as_str()
+                    }
+                }
+            }};
+        }
         let exp = |export| if export { "pub " } else { "" };
         match self {
             ExprKind::Constant(v) => v.fmt_ext(f, &parser::BSCRIPT_ESC, true),
-            ExprKind::Bind { export, name, value } => {
-                write!(f, "{}let {name} = {value}", exp(*export))
+            ExprKind::Bind { export, name, typ, value } => {
+                write!(f, "{}let {name}{} = {value}", exp(*export), typ!(typ))
             }
             ExprKind::Connect { name, value } => {
                 write!(f, "{name} <- {value}")
@@ -565,19 +643,24 @@ impl fmt::Display for ExprKind {
                     Some(exprs) => print_exprs(f, &**exprs, "{", "}", " "),
                 }
             }
+            ExprKind::TypeCast { expr, typ } => write!(f, "cast<{typ}>({expr})"),
+            ExprKind::TypeDef { name, typ } => write!(f, "type {name} = {typ}"),
             ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", "; "),
-            ExprKind::Lambda { args, vargs, body } => {
+            ExprKind::Lambda { args, vargs, rtype, body } => {
                 write!(f, "|")?;
-                for i in 0..args.len() {
-                    write!(f, "{}", args[i])?;
-                    if *vargs || i < args.len() - 1 {
+                for (i, (a, typ)) in args.iter().enumerate() {
+                    write!(f, "{a}{}", typ!(typ))?;
+                    if vargs.is_some() || i < args.len() - 1 {
                         write!(f, ", ")?
                     }
                 }
-                if *vargs {
-                    write!(f, "@args")?;
+                if let Some(typ) = vargs {
+                    write!(f, "@args{}", typ!(typ))?;
                 }
                 write!(f, "| ")?;
+                if let Some(t) = rtype {
+                    write!(f, "-> {t}")?
+                }
                 match body {
                     Either::Right(builtin) => write!(f, "'{builtin}"),
                     Either::Left(body) => write!(f, "{body}"),

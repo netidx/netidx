@@ -431,17 +431,17 @@ where
                         attempt(spfname()),
                         attempt(spstring("@args")).map(ArcStr::from),
                     )),
-                    attempt(optional(spstring("->").with(typexp()))),
+                    attempt(optional(sptoken(':').with(typexp()))),
                 ),
                 csep(),
             )
             .then(|mut v: SmallVec<[(ArcStr, Option<Type>); 4]>| {
                 match v.iter().enumerate().find(|(_, (a, _))| &**a == "@args") {
-                    None => value((v, false)).left(),
+                    None => value((v, None)).left(),
                     Some((i, _)) => {
                         if i == v.len() - 1 {
-                            v.pop();
-                            value((v, true)).left()
+                            let (_, typ) = v.pop().unwrap();
+                            value((v, Some(typ))).left()
                         } else {
                             unexpected_any("@args must be the last argument").right()
                         }
@@ -449,7 +449,7 @@ where
                 }
             }),
         ),
-        attempt(optional(sptoken(':').with(typexp()))),
+        attempt(optional(spstring("->").with(typexp()))),
         choice((
             attempt(sptoken('\'')).with(fname()).map(Either::Right),
             expr().map(|e| Either::Left(Arc::new(e))),

@@ -1,12 +1,11 @@
 use crate::{
-    expr::{Expr, ExprId, ExprKind, ModPath, Pattern},
+    expr::{Expr, ExprId, ExprKind, ModPath, Pattern, Type},
     stdfn,
 };
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
 use chrono::prelude::*;
 use compact_str::{format_compact, CompactString};
-use enumflags2::BitFlags;
 use fxhash::FxHashMap;
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::{
@@ -129,7 +128,6 @@ pub type InitFn<C, E> = sync::Arc<
 >;
 
 pub trait Init<C: Ctx, E: Debug + Clone> {
-    const TYP: LazyLock<FnType>;
     const NAME: &str;
 
     fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E>;
@@ -200,6 +198,7 @@ pub trait Ctx {
 struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     id: BindId,
     export: bool,
+    typ: Option<Type>,
     fun: Option<InitFn<C, E>>,
 }
 
@@ -217,7 +216,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> fmt::Debug for Bind<C, E> {
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Default for Bind<C, E> {
     fn default() -> Self {
-        Self { id: BindId::new(), export: false, fun: None }
+        Self { id: BindId::new(), typ: None, export: false, fun: None }
     }
 }
 
@@ -226,6 +225,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
         Self {
             id: self.id,
             export: self.export,
+            typ: self.typ.clone(),
             fun: self.fun.as_ref().map(|fun| sync::Arc::clone(fun)),
         }
     }
@@ -235,6 +235,7 @@ struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
     binds: Map<ModPath, Map<CompactString, Bind<C, E>>>,
     used: Map<ModPath, Arc<Vec<ModPath>>>,
     modules: Set<ModPath>,
+    typedefs: Map<ModPath, Map<CompactString, Type>>,
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Env<C, E> {
@@ -243,19 +244,27 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Env<C, E> {
             binds: self.binds.clone(),
             used: self.used.clone(),
             modules: self.modules.clone(),
+            typedefs: self.typedefs.clone(),
         }
     }
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
     fn new() -> Self {
-        Self { binds: Map::new(), used: Map::new(), modules: Set::new() }
+        Self {
+            binds: Map::new(),
+            used: Map::new(),
+            modules: Set::new(),
+            typedefs: Map::new(),
+        }
     }
 
     fn clear(&mut self) {
-        self.binds = Map::new();
-        self.used = Map::new();
-        self.modules = Set::new();
+        let Self { binds, used, modules, typedefs } = self;
+        *binds = Map::new();
+        *used = Map::new();
+        *modules = Set::new();
+        *typedefs = Map::new();
     }
 
     fn find_visible<R, F: FnMut(&str, &str) -> Option<R>>(
@@ -306,7 +315,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
 
 pub struct ExecCtx<C: Ctx + 'static, E: Debug + Clone + 'static> {
     env: Env<C, E>,
-    builtins: FxHashMap<&'static str, (Arity, InitFn<C, E>)>,
+    builtins: FxHashMap<&'static str, InitFn<C, E>>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }
@@ -367,7 +376,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ExecCtx<C, E> {
 
     pub fn register_builtin<T: Init<C, E>>(&mut self) {
         let f = T::init(self);
-        self.builtins.insert(T::NAME, (T::ARITY, f));
+        self.builtins.insert(T::NAME, f);
     }
 }
 
@@ -555,6 +564,11 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Ref(BindId),
     Connect(BindId, Box<Node<C, E>>),
     Lambda(InitFn<C, E>),
+    TypeCast {
+        target: Typ,
+        n: Box<Node<C, E>>,
+    },
+    TypeDef,
     Apply {
         args: Vec<Node<C, E>>,
         function: Box<dyn Apply<C, E> + Send + Sync>,
@@ -623,6 +637,7 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
 
 pub struct Node<C: Ctx + 'static, E: Debug + Clone + 'static> {
     pub spec: Expr,
+    pub typ: Option<Type>,
     pub kind: NodeKind<C, E>,
 }
 
@@ -656,6 +671,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Sub { .. }
             | NodeKind::Mul { .. }
             | NodeKind::Div { .. }
+            | NodeKind::TypeCast { .. }
+            | NodeKind::TypeDef
             | NodeKind::Select { .. } => None,
             NodeKind::Lambda(init) => Some(sync::Arc::clone(init)),
             NodeKind::Do(children) => children.last().and_then(|t| t.find_lambda()),
@@ -687,6 +704,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Sub { .. }
             | NodeKind::Mul { .. }
             | NodeKind::Div { .. }
+            | NodeKind::TypeCast { .. }
+            | NodeKind::TypeDef
             | NodeKind::Select { .. } => false,
         }
     }
@@ -725,6 +744,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Sub { .. }
             | NodeKind::Mul { .. }
             | NodeKind::Div { .. }
+            | NodeKind::TypeCast { .. }
+            | NodeKind::TypeDef
             | NodeKind::Select { .. } => None,
         }
     }
@@ -735,6 +756,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Connect(_, _)
             | NodeKind::Bind(_, _)
             | NodeKind::Module(_)
+            | NodeKind::TypeDef
             | NodeKind::Error { .. } => false,
             NodeKind::Do(_)
             | NodeKind::Eq { .. }
@@ -754,6 +776,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Constant(_)
             | NodeKind::Ref(_)
             | NodeKind::Lambda(_)
+            | NodeKind::TypeCast { .. }
             | NodeKind::Apply { .. } => true,
         }
     }
@@ -765,6 +788,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Bind(_, _)
             | NodeKind::Module(_)
             | NodeKind::Lambda(_)
+            | NodeKind::TypeDef
             | NodeKind::Error { .. } => false,
             NodeKind::Do(_)
             | NodeKind::Eq { .. }
@@ -783,13 +807,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Select { .. }
             | NodeKind::Constant(_)
             | NodeKind::Ref(_)
+            | NodeKind::TypeCast { .. }
             | NodeKind::Apply { .. } => true,
         }
     }
 
     pub fn do_expr_ok(&self) -> bool {
         match &self.kind {
-            NodeKind::Module(_) | NodeKind::Error { .. } => false,
+            NodeKind::Module(_) | NodeKind::Error { .. } | NodeKind::TypeDef => false,
             NodeKind::Use
             | NodeKind::Lambda(_)
             | NodeKind::Connect(_, _)
@@ -811,6 +836,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Mul { .. }
             | NodeKind::Div { .. }
             | NodeKind::Select { .. }
+            | NodeKind::TypeCast { .. }
             | NodeKind::Apply { .. } => true,
         }
     }
@@ -821,6 +847,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Connect(_, _)
             | NodeKind::Bind(_, _)
             | NodeKind::Module(_)
+            | NodeKind::TypeDef
             | NodeKind::Error { .. } => false,
             NodeKind::Lambda(_)
             | NodeKind::Eq { .. }
@@ -840,6 +867,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Do(_)
             | NodeKind::Constant(_)
             | NodeKind::Ref(_)
+            | NodeKind::TypeCast { .. }
             | NodeKind::Apply { .. } => true,
         }
     }
@@ -919,32 +947,53 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         macro_rules! error {
             ("", $children:expr) => {{
                 let kind = NodeKind::Error { error: None, children: $children };
-                Node { spec, kind }
+                Node { spec, kind, typ: Some(Type::Primitive(Typ::Result.into())) }
             }};
             ($fmt:expr, $children:expr, $($arg:expr),*) => {{
                 let e = ArcStr::from(format_compact!($fmt, $($arg),*).as_str());
                 let kind = NodeKind::Error { error: Some(e), children: $children };
-                Node { spec, kind }
+                Node { spec, kind, typ: Some(Type::Primitive(Typ::Result.into())) }
             }};
             ($fmt:expr) => { error!($fmt, vec![],) };
             ($fmt:expr, $children:expr) => { error!($fmt, $children,) };
         }
         macro_rules! binary_op {
-            ($op:ident, $lhs:expr, $rhs:expr) => {{
+            ($op:ident, $lhs:expr, $rhs:expr, $at:expr, $rt:expr) => {{
                 let lhs = Node::compile_int(ctx, (**$lhs).clone(), scope, top_id);
                 let rhs = Node::compile_int(ctx, (**$rhs).clone(), scope, top_id);
                 if lhs.is_err() || rhs.is_err() {
                     return error!("", vec![lhs, rhs]);
                 }
+                match (&lhs.typ, &rhs.typ) {
+                    (None, _) | (_, None) => {
+                        return error!(
+                            "type must be known, add annotations",
+                            vec![lhs, rhs]
+                        )
+                    }
+                    (Some(ltyp), Some(rtyp)) => {
+                        if !($at.contains(ltyp) && $at.contains(rtyp)) {
+                            return error!(
+                                "type mismatch got ({}, {}) expected {}",
+                                vec![lhs, rhs],
+                                ltyp,
+                                rtyp,
+                                $at
+                            );
+                        }
+                    }
+                }
                 let lhs = Box::new(Cached::new(lhs));
                 let rhs = Box::new(Cached::new(rhs));
-                Node { spec, kind: NodeKind::$op { lhs, rhs } }
+                Node { spec, typ: Some($rt), kind: NodeKind::$op { lhs, rhs } }
             }};
         }
         match &spec {
-            Expr { kind: ExprKind::Constant(v), id: _ } => {
-                Node { kind: NodeKind::Constant(v.clone()), spec }
-            }
+            Expr { kind: ExprKind::Constant(v), id: _ } => Node {
+                kind: NodeKind::Constant(v.clone()),
+                spec,
+                typ: Some(Type::Primitive(Typ::get(&v).into())),
+            },
             Expr { kind: ExprKind::Do { exprs }, id } => {
                 let scope = ModPath(scope.append(&format_compact!("do{}", id.inner())));
                 let (error, exp) = subexprs!(scope, exprs);
@@ -1103,21 +1152,59 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 if node.is_err() {
                     return error!("", vec![node]);
                 }
+                let at = Type::boolean();
+                match &node.typ {
+                    None => return error!("type must be known", vec![node]),
+                    Some(typ) => {
+                        if !at.contains(typ) {
+                            return error!(
+                                "type mismatch, expected {} got {}",
+                                vec![node],
+                                at,
+                                typ
+                            );
+                        }
+                    }
+                }
                 let node = Box::new(Cached::new(node));
-                Node { spec, kind: NodeKind::Not { node } }
+                Node { spec, typ: Some(at), kind: NodeKind::Not { node } }
             }
-            Expr { kind: ExprKind::Eq { lhs, rhs }, id: _ } => binary_op!(Eq, lhs, rhs),
-            Expr { kind: ExprKind::Ne { lhs, rhs }, id: _ } => binary_op!(Ne, lhs, rhs),
-            Expr { kind: ExprKind::Lt { lhs, rhs }, id: _ } => binary_op!(Lt, lhs, rhs),
-            Expr { kind: ExprKind::Gt { lhs, rhs }, id: _ } => binary_op!(Gt, lhs, rhs),
-            Expr { kind: ExprKind::Lte { lhs, rhs }, id: _ } => binary_op!(Lte, lhs, rhs),
-            Expr { kind: ExprKind::Gte { lhs, rhs }, id: _ } => binary_op!(Gte, lhs, rhs),
-            Expr { kind: ExprKind::And { lhs, rhs }, id: _ } => binary_op!(And, lhs, rhs),
-            Expr { kind: ExprKind::Or { lhs, rhs }, id: _ } => binary_op!(Or, lhs, rhs),
-            Expr { kind: ExprKind::Add { lhs, rhs }, id: _ } => binary_op!(Add, lhs, rhs),
-            Expr { kind: ExprKind::Sub { lhs, rhs }, id: _ } => binary_op!(Sub, lhs, rhs),
-            Expr { kind: ExprKind::Mul { lhs, rhs }, id: _ } => binary_op!(Mul, lhs, rhs),
-            Expr { kind: ExprKind::Div { lhs, rhs }, id: _ } => binary_op!(Div, lhs, rhs),
+            Expr { kind: ExprKind::Eq { lhs, rhs }, id: _ } => {
+                binary_op!(Eq, lhs, rhs, Type::any(), Type::boolean())
+            }
+            Expr { kind: ExprKind::Ne { lhs, rhs }, id: _ } => {
+                binary_op!(Ne, lhs, rhs, Type::any(), Type::boolean())
+            }
+            Expr { kind: ExprKind::Lt { lhs, rhs }, id: _ } => {
+                binary_op!(Lt, lhs, rhs, Type::any(), Type::boolean())
+            }
+            Expr { kind: ExprKind::Gt { lhs, rhs }, id: _ } => {
+                binary_op!(Gt, lhs, rhs, Type::any(), Type::boolean())
+            }
+            Expr { kind: ExprKind::Lte { lhs, rhs }, id: _ } => {
+                binary_op!(Lte, lhs, rhs, Type::any(), Type::boolean())
+            }
+            Expr { kind: ExprKind::Gte { lhs, rhs }, id: _ } => {
+                binary_op!(Gte, lhs, rhs, Type::any(), Type::boolean())
+            }
+            Expr { kind: ExprKind::And { lhs, rhs }, id: _ } => {
+                binary_op!(And, lhs, rhs, Type::boolean(), Type::boolean())
+            }
+            Expr { kind: ExprKind::Or { lhs, rhs }, id: _ } => {
+                binary_op!(Or, lhs, rhs, Type::boolean(), Type::boolean())
+            }
+            Expr { kind: ExprKind::Add { lhs, rhs }, id: _ } => {
+                binary_op!(Add, lhs, rhs, Type::number(), Type::number())
+            }
+            Expr { kind: ExprKind::Sub { lhs, rhs }, id: _ } => {
+                binary_op!(Sub, lhs, rhs, Type::number(), Type::number())
+            }
+            Expr { kind: ExprKind::Mul { lhs, rhs }, id: _ } => {
+                binary_op!(Mul, lhs, rhs, Type::number(), Type::number())
+            }
+            Expr { kind: ExprKind::Div { lhs, rhs }, id: _ } => {
+                binary_op!(Div, lhs, rhs, Type::number(), Type::number())
+            }
         }
     }
 
