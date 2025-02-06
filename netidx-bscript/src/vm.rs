@@ -984,9 +984,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                                 bind.typ = Some($t.clone());
                                 $n.typ = Some($t.clone());
                             }
-                        }
-                        _ => return error!("type must be known", vec![$n])
-                    }
+                        },
+                        _ => return error!("type must be known", vec![$n]),
+                    },
                 }
             }};
         }
@@ -1061,10 +1061,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     Some((_, Bind { fun: Some(_), .. })) => {
                         error!("{name} is a function")
                     }
-                    Some((_, Bind { id: _, fun: None, typ: None, export: _ })) => {
+                    Some((_, Bind { fun: None, typ: None, .. })) => {
                         error!("bind type must be known")
                     }
-                    Some((_, Bind { id, fun: None, typ: Some(typ), export: _ })) => {
+                    Some((_, Bind { id, fun: None, typ: Some(typ), .. })) => {
                         let id = *id;
                         let node =
                             Node::compile_int(ctx, (**value).clone(), scope, top_id);
@@ -1083,7 +1083,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 Node::compile_lambda(ctx, spec, args, scope, body, id)
             }
             Expr { kind: ExprKind::Apply { args, function: f }, id: _ } => {
-                let (error, args) = subexprs!(scope, args);
+                let (error, mut args) = subexprs!(scope, args);
                 match ctx.env.lookup_bind(scope, f) {
                     None => error!("{f} is undefined"),
                     Some((_, Bind { fun: None, .. })) => {
@@ -1104,12 +1104,24 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                             return error!("{f} expected {} args", args, ft.args.len());
                         }
                         for i in 0..args.len() {
-                            let atyp = match &args[i].typ {
-                                Some(typ) => typ,
-                                None => return error!("{f} arg {i} type unknown", args),
-                            };
                             let ftyp =
                                 if i < ft.args.len() { &ft.args[i] } else { &ft.vargs };
+                            let atyp = match &args[i].typ {
+                                Some(typ) => typ,
+                                None => match &args[i].kind {
+                                    NodeKind::Ref(id) => {
+                                        match ctx.env.by_id.get_mut_cow(id) {
+                                            None => return error!("missing ref", args),
+                                            Some(bind) => {
+                                                bind.typ = Some(ftyp.clone());
+                                                args[i].typ = Some(ftyp.clone());
+                                                &ftyp
+                                            }
+                                        }
+                                    }
+                                    _ => return error!("{f} arg {i} type unknown", args),
+                                },
+                            };
                             if !ftyp.contains(atyp) {
                                 return error!("type mismatch {f} arg {i} expected {ftyp} got {atyp}");
                             }
