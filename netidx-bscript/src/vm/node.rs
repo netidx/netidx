@@ -801,20 +801,23 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Div { lhs, rhs } => {
                 lhs.node.typecheck(ctx)?;
                 rhs.node.typecheck(ctx)?;
-                ctx.env.check_typevar_contains(ctx.env.number(), lhs.node.typ)?;
-                ctx.env.check_typevar_contains(ctx.env.number(), rhs.node.typ)?;
+                let id = ctx.env.number();
+                ctx.env.check_typevar_contains(id, lhs.node.typ)?;
+                ctx.env.check_typevar_contains(id, rhs.node.typ)?;
                 Ok(())
             }
             NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {
                 lhs.node.typecheck(ctx)?;
                 rhs.node.typecheck(ctx)?;
-                ctx.env.check_typevar_contains(ctx.env.boolean(), lhs.node.typ)?;
-                ctx.env.check_typevar_contains(ctx.env.boolean(), rhs.node.typ)?;
+                let id = ctx.env.boolean();
+                ctx.env.check_typevar_contains(id, lhs.node.typ)?;
+                ctx.env.check_typevar_contains(id, rhs.node.typ)?;
                 Ok(())
             }
             NodeKind::Not { node } => {
                 node.typecheck(ctx)?;
-                ctx.env.check_typevar_contains(ctx.env.boolean(), node.typ)?;
+                let id = ctx.env.boolean();
+                ctx.env.check_typevar_contains(id, node.typ)?;
                 Ok(())
             }
             NodeKind::Eq { lhs, rhs }
@@ -827,7 +830,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 rhs.node.typecheck(ctx)?;
                 Ok(())
             }
-            NodeKind::TypeCast { target, n } => Ok(n.typecheck(ctx)?),
+            NodeKind::TypeCast { target: _, n } => Ok(n.typecheck(ctx)?),
             NodeKind::Do(nodes) => {
                 for n in nodes {
                     n.typecheck(ctx)?;
@@ -841,14 +844,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             }
             NodeKind::Connect(_, node) => Ok(node.typecheck(ctx)?),
             NodeKind::Apply { args, spec, function } => {
-                for n in args {
+                for n in args.iter_mut() {
                     n.typecheck(ctx)?
                 }
                 let ftyp = function.typecheck(ctx, spec, args)?;
                 ctx.env.define_typevar(self.typ, Type::Fn(Arc::new(ftyp)))?;
                 Ok(())
             }
-            NodeKind::Select { selected, arg, arms } => {
+            NodeKind::Select { selected: _, arg, arms } => {
                 arg.node.typecheck(ctx)?;
                 let mut rtype = Type::Bottom;
                 let mut mtype = Type::Bottom;
@@ -902,6 +905,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::TypeDef
             | NodeKind::Module(_)
             | NodeKind::Ref(_)
+            | NodeKind::Error { .. }
             | NodeKind::Lambda(_) => Ok(()),
         }
     }
