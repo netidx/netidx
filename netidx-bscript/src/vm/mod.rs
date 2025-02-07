@@ -1,9 +1,10 @@
 use crate::{
-    expr::{ExprId, ExprKind, FnType, ModPath},
+    expr::{ExprId, ExprKind, FnType, ModPath, Type},
     vm::{dbg::DbgCtx, env::Env, node::Node},
 };
 use anyhow::Result;
 use arcstr::ArcStr;
+use env::LambdaBind;
 use fxhash::FxHashMap;
 use netidx::{
     path::Path,
@@ -40,6 +41,16 @@ pub type InitFn<C, E> = sync::Arc<
         + Sync,
 >;
 
+pub type InitFnTyped<C, E> = sync::Arc<
+    dyn for<'a, 'b, 'c> Fn(
+            &'a mut ExecCtx<C, E>,
+            &'b [Node<C, E>],
+            ExprId,
+        ) -> Result<Box<dyn ApplyTyped<C, E> + Send + Sync>>
+        + Send
+        + Sync,
+>;
+
 pub trait BuiltIn<C: Ctx, E: Debug + Clone> {
     const NAME: &str;
     const TYP: LazyLock<FnType>;
@@ -54,6 +65,15 @@ pub trait Apply<C: Ctx, E: Debug + Clone> {
         from: &mut [Node<C, E>],
         event: &Event<E>,
     ) -> Option<Value>;
+}
+
+pub trait ApplyTyped<C: Ctx, E: Debug + Clone>: Apply<C, E> {
+    fn typecheck(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        spec: &LambdaBind<C, E>,
+        args: &mut [Node<C, E>]
+    ) -> Result<FnType>;
 }
 
 pub trait Ctx {
@@ -111,7 +131,7 @@ pub trait Ctx {
 
 pub struct ExecCtx<C: Ctx + 'static, E: Debug + Clone + 'static> {
     env: Env<C, E>,
-    builtins: FxHashMap<&'static str, InitFn<C, E>>,
+    builtins: FxHashMap<&'static str, (FnType, InitFn<C, E>)>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }

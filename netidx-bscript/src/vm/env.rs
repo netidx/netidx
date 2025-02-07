@@ -1,6 +1,6 @@
 use crate::{
     expr::{FnType, ModPath, Type},
-    vm::{BindId, Ctx, InitFn, TypeId},
+    vm::{BindId, Ctx, InitFnTyped, TypeId},
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
@@ -12,15 +12,15 @@ use std::{
     borrow::Cow,
     fmt::{self, Debug},
     iter,
-    sync::{self, LazyLock},
+    sync::LazyLock,
 };
 use triomphe::Arc;
 
-pub(super) struct LambdaBind<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub struct LambdaBind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     pub argspec: Arc<[(ArcStr, TypeId)]>,
     pub vargs: Option<TypeId>,
     pub rtype: TypeId,
-    pub init: InitFn<C, E>,
+    pub init: InitFnTyped<C, E>,
 }
 
 pub(super) struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {
@@ -57,13 +57,19 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
     }
 }
 
+#[derive(Clone)]
+enum TypeOrAlias {
+    Alias(TypeId),
+    Type(Type),
+}
+
 pub(super) struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
     by_id: Map<BindId, Bind<C, E>>,
     binds: Map<ModPath, Map<CompactString, BindId>>,
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
     pub modules: Set<ModPath>,
     typedefs: Map<ModPath, Map<CompactString, Type>>,
-    typevars: Map<TypeId, Type>,
+    typevars: Map<TypeId, TypeOrAlias>,
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Env<C, E> {
@@ -192,6 +198,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         })
     }
 
+    pub(super) fn lookup_bind_by_id(&self, id: &BindId) -> Option<&Bind<C, E>> {
+        self.by_id.get(id)
+    }
+
     // alias orig_id -> new_id. orig_id will be removed, and it's in
     // scope entry will point to new_id
     pub(super) fn alias(&mut self, orig_id: BindId, new_id: BindId) {
@@ -231,7 +241,12 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         })
     }
 
-    pub(super) fn deftype(&mut self, scope: &ModPath, name: &str, typ: Type) -> Result<()> {
+    pub(super) fn deftype(
+        &mut self,
+        scope: &ModPath,
+        name: &str,
+        typ: Type,
+    ) -> Result<()> {
         let defs = self.typedefs.get_or_default_cow(scope.clone());
         if defs.get(name).is_some() {
             bail!("{name} is already defined in scope {scope}")
@@ -244,7 +259,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
     pub(super) fn bottom(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
         if self.typevars.get(&ID).is_none() {
-            self.typevars.insert_cow(*ID, Type::Bottom);
+            self.typevars.insert_cow(*ID, TypeOrAlias::Type(Type::Bottom));
         }
         *ID
     }
@@ -252,7 +267,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
     pub(super) fn boolean(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
         if self.typevars.get(&ID).is_none() {
-            self.typevars.insert_cow(*ID, Type::Primitive(Typ::Bool.into()));
+            let t = Type::Primitive(Typ::Bool.into());
+            self.typevars.insert_cow(*ID, TypeOrAlias::Type(t));
         }
         *ID
     }
@@ -260,7 +276,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
     pub(super) fn number(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
         if self.typevars.get(&ID).is_none() {
-            self.typevars.insert_cow(*ID, Type::Primitive(Typ::number()));
+            let t = Type::Primitive(Typ::number());
+            self.typevars.insert_cow(*ID, TypeOrAlias::Type(t));
         }
         *ID
     }
@@ -268,15 +285,82 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
     pub(super) fn any(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
         if self.typevars.get(&ID).is_none() {
-            self.typevars.insert_cow(*ID, Type::Primitive(Typ::any()));
+            let t = Type::Primitive(Typ::any());
+            self.typevars.insert_cow(*ID, TypeOrAlias::Type(t));
         }
         *ID
     }
 
     pub(super) fn add_typ(&mut self, typ: Type) -> TypeId {
         let id = TypeId::new();
-        self.typevars.insert_cow(id, typ);
+        self.typevars.insert_cow(id, TypeOrAlias::Type(typ));
         id
+    }
+
+    pub(super) fn define_typevar(&mut self, id: TypeId, typ: Type) -> Result<()> {
+        match self.typevars.get(&id) {
+            None => {
+                self.typevars.insert_cow(id, TypeOrAlias::Type(typ));
+                Ok(())
+            }
+            Some(TypeOrAlias::Alias(id)) => self.define_typevar(*id, typ),
+            Some(TypeOrAlias::Type(cur_typ)) if cur_typ.contains(&typ) => Ok(()),
+            Some(TypeOrAlias::Type(cur_typ)) => {
+                bail!("type mismatch {cur_typ} does not contain {typ}")
+            }
+        }
+    }
+
+    pub(super) fn alias_typevar(&mut self, from: TypeId, to: TypeId) -> Result<()> {
+        match self.typevars.get(&from) {
+            None => {
+                self.typevars.insert_cow(from, TypeOrAlias::Alias(to));
+                Ok(())
+            }
+            Some(TypeOrAlias::Alias(tgt)) if &to == tgt => Ok(()),
+            Some(_) => {
+                bail!("can't alias {from:?} to {to:?}, {from:?} is already defined")
+            }
+        }
+    }
+
+    pub(super) fn check_typevar_contains(
+        &mut self,
+        t0: TypeId,
+        t1: TypeId,
+    ) -> Result<()> {
+        match (self.typevars.get(&t0), self.typevars.get(&t1)) {
+            (Some(TypeOrAlias::Alias(t0)), Some(TypeOrAlias::Alias(t1))) => {
+                self.check_typevar_contains(*t0, *t1)
+            }
+            (Some(TypeOrAlias::Alias(t0)), _) => self.check_typevar_contains(*t0, t1),
+            (_, Some(TypeOrAlias::Alias(t1))) => self.check_typevar_contains(t0, *t1),
+            (Some(TypeOrAlias::Type(typ0)), Some(TypeOrAlias::Type(typ1)))
+                if typ0.contains(typ1) =>
+            {
+                Ok(())
+            }
+            (Some(TypeOrAlias::Type(typ0)), Some(TypeOrAlias::Type(typ1))) => {
+                bail!("type mismatch {typ0} does not contain {typ1}")
+            }
+            (Some(TypeOrAlias::Type(t0)), None) => {
+                let typ = t0.clone();
+                self.define_typevar(t1, typ)
+            }
+            (None, Some(TypeOrAlias::Type(t1))) => {
+                let typ = t1.clone();
+                self.define_typevar(t0, typ)
+            }
+            (None, None) => bail!("type must be known"),
+        }
+    }
+
+    pub(super) fn get_typevar(&self, id: &TypeId) -> Option<&Type> {
+        match self.typevars.get(id) {
+            None => None,
+            Some(TypeOrAlias::Alias(id)) => self.get_typevar(id),
+            Some(TypeOrAlias::Type(t)) => Some(t),
+        }
     }
 
     pub(super) fn resolve_typrefs<'a>(
