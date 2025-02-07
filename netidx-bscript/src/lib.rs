@@ -5,7 +5,7 @@
 
 pub mod expr;
 pub mod vm;
-pub mod stdfn;
+//pub mod stdfn;
 
 #[cfg(test)]
 mod tests;

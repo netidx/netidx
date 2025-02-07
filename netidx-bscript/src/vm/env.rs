@@ -3,6 +3,7 @@ use crate::{
     vm::{BindId, Ctx, InitFn, TypeId},
 };
 use anyhow::{bail, Result};
+use arcstr::ArcStr;
 use compact_str::CompactString;
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::{path::Path, publisher::Typ};
@@ -15,11 +16,18 @@ use std::{
 };
 use triomphe::Arc;
 
+pub(super) struct LambdaBind<C: Ctx + 'static, E: Debug + Clone + 'static> {
+    pub argspec: Arc<[(ArcStr, TypeId)]>,
+    pub vargs: Option<TypeId>,
+    pub rtype: TypeId,
+    pub init: InitFn<C, E>,
+}
+
 pub(super) struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     pub id: BindId,
     pub export: bool,
     pub typ: TypeId,
-    pub fun: Option<InitFn<C, E>>,
+    pub fun: Option<Arc<LambdaBind<C, E>>>,
     scope: ModPath,
     name: CompactString,
 }
@@ -44,7 +52,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
             name: self.name.clone(),
             export: self.export,
             typ: self.typ.clone(),
-            fun: self.fun.as_ref().map(|fun| sync::Arc::clone(fun)),
+            fun: self.fun.as_ref().map(|f| Arc::clone(f)),
         }
     }
 }
@@ -52,8 +60,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
 pub(super) struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
     by_id: Map<BindId, Bind<C, E>>,
     binds: Map<ModPath, Map<CompactString, BindId>>,
-    used: Map<ModPath, Arc<Vec<ModPath>>>,
-    modules: Set<ModPath>,
+    pub used: Map<ModPath, Arc<Vec<ModPath>>>,
+    pub modules: Set<ModPath>,
     typedefs: Map<ModPath, Map<CompactString, Type>>,
     typevars: Map<TypeId, Type>,
 }
@@ -221,6 +229,16 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
             typ,
             fun: None,
         })
+    }
+
+    pub(super) fn deftype(&mut self, scope: &ModPath, name: &str, typ: Type) -> Result<()> {
+        let defs = self.typedefs.get_or_default_cow(scope.clone());
+        if defs.get(name).is_some() {
+            bail!("{name} is already defined in scope {scope}")
+        } else {
+            defs.insert_cow(name.into(), typ);
+            Ok(())
+        }
     }
 
     pub(super) fn bottom(&mut self) -> TypeId {
