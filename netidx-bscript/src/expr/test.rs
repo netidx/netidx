@@ -142,7 +142,7 @@ fn pattern() -> impl Strategy<Value = Pattern> {
     prop_oneof![
         Just(Pattern::Underscore),
         (collection::vec(typ(), (0, 10)), random_fname()).prop_map(|(tag, bind)| {
-            Pattern::Typ { tag: Arc::from(tag), bind, guard: None }
+            Pattern::Typ { tag: BitFlags::from_iter(tag), bind, guard: None }
         })
     ]
 }

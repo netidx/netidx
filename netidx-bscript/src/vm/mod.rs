@@ -4,7 +4,6 @@ use crate::{
 };
 use anyhow::Result;
 use arcstr::ArcStr;
-use env::LambdaBind;
 use fxhash::FxHashMap;
 use netidx::{
     path::Path,
@@ -15,6 +14,7 @@ use std::{
     sync::{self, LazyLock},
     time::Duration,
 };
+use triomphe::Arc;
 
 pub mod dbg;
 mod env;
@@ -40,6 +40,13 @@ pub type InitFn<C, E> = sync::Arc<
         + Send
         + Sync,
 >;
+
+#[derive(Debug, Clone)]
+pub struct LambdaTVars {
+    pub argspec: Arc<[(ArcStr, TypeId)]>,
+    pub vargs: Option<TypeId>,
+    pub rtype: TypeId,
+}
 
 pub type InitFnTyped<C, E> = sync::Arc<
     dyn for<'a, 'b, 'c> Fn(
@@ -71,8 +78,7 @@ pub trait ApplyTyped<C: Ctx, E: Debug + Clone>: Apply<C, E> {
     fn typecheck(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
-        spec: &LambdaBind<C, E>,
-        args: &mut [Node<C, E>]
+        from: &mut [Node<C, E>],
     ) -> Result<FnType>;
 }
 

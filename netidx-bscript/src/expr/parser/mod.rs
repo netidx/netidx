@@ -789,3 +789,10 @@ pub fn parse_many(s: &str) -> anyhow::Result<Vec<Expr>> {
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
+
+pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType> {
+    fntype()
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{e}")))
+}

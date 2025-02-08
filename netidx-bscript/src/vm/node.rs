@@ -1,8 +1,8 @@
 use crate::{
     expr::{Expr, ExprId, ExprKind, FnType, ModPath, Pattern, Type},
     vm::{
-        env::{Bind, LambdaBind},
-        Apply, BindId, Ctx, Event, ExecCtx, InitFn, TypeId,
+        env::Bind, Apply, ApplyTyped, BindId, Ctx, Event, ExecCtx, InitFnTyped,
+        LambdaTVars, TypeId,
     },
 };
 use anyhow::{anyhow, bail, Result};
@@ -14,11 +14,10 @@ use netidx::{publisher::Typ, subscriber::Value, utils::Either};
 use smallvec::{smallvec, SmallVec};
 use std::{
     fmt::{self, Debug},
-    mem, sync,
+    mem,
+    sync::Arc as SArc,
 };
 use triomphe::Arc;
-
-use super::{ApplyTyped, InitFnTyped};
 
 atomic_id!(LambdaId);
 atomic_id!(SelectId);
@@ -26,6 +25,7 @@ atomic_id!(SelectId);
 struct Lambda<C: Ctx + 'static, E: Debug + Clone + 'static> {
     eid: ExprId,
     argids: Vec<BindId>,
+    spec: LambdaTVars,
     body: Node<C, E>,
 }
 
@@ -57,23 +57,49 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Lambda<C, E> 
     }
 }
 
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C, E> {
+    fn typecheck(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        args: &mut [Node<C, E>],
+    ) -> Result<FnType> {
+        let spec = &self.spec;
+        for (arg, (_, typ)) in args.iter_mut().zip(spec.argspec.iter()) {
+            arg.typecheck(ctx)?;
+            ctx.env.check_typevar_contains(*typ, arg.typ)?;
+        }
+        self.body.typecheck(ctx)?;
+        ctx.env.check_typevar_contains(spec.rtype, self.body.typ)?;
+        Ok(FnType {
+            args: Arc::from_iter(
+                spec.argspec
+                    .iter()
+                    .map(|(_, typ)| Ok(ctx.env.get_typevar(typ)?.clone()))
+                    .collect::<Result<SmallVec<[_; 16]>>>()?,
+            ),
+            vargs: Type::Bottom,
+            rtype: ctx.env.get_typevar(&self.body.typ)?.clone(),
+        })
+    }
+}
+
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
     fn new(
         ctx: &mut ExecCtx<C, E>,
-        argspec: Arc<[(ArcStr, TypeId)]>,
+        spec: LambdaTVars,
         args: &[Node<C, E>],
         scope: &ModPath,
         eid: ExprId,
         tid: ExprId,
         body: Expr,
     ) -> Result<Self> {
-        if args.len() != argspec.len() {
-            bail!("arity mismatch, expected {} arguments", argspec.len())
+        if args.len() != spec.argspec.len() {
+            bail!("arity mismatch, expected {} arguments", spec.argspec.len())
         }
         let id = LambdaId::new();
         let mut argids = vec![];
         let scope = ModPath(scope.0.append(&format_compact!("{id:?}")));
-        for ((name, typ), node) in argspec.iter().zip(args.iter()) {
+        for ((name, typ), node) in spec.argspec.iter().zip(args.iter()) {
             let bind = ctx.env.bind_variable(&scope, &**name, *typ);
             match &node.kind {
                 NodeKind::Ref(id) => {
@@ -89,7 +115,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
         }
         let body = Node::compile_int(ctx, body, &scope, tid);
         match body.extract_err() {
-            None => Ok(Self { argids, eid, body }),
+            None => Ok(Self { argids, spec, eid, body }),
             Some(e) => bail!("{e}"),
         }
     }
@@ -98,6 +124,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
 struct BuiltIn<C: Ctx + 'static, E: Debug + Clone + 'static> {
     typ: FnType,
     scope: ModPath,
+    spec: LambdaTVars,
     apply: Box<dyn Apply<C, E> + Send + Sync + 'static>,
 }
 
@@ -116,9 +143,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<
     fn typecheck(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
-        spec: &LambdaBind<C, E>,
         args: &mut [Node<C, E>],
     ) -> Result<FnType> {
+        let spec = &self.spec;
         if spec.argspec.len() != self.typ.args.len()
             || spec.vargs.is_none() && self.typ.vargs != Type::Bottom
         {
@@ -138,6 +165,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<
         }
         ctx.env.define_typevar(spec.rtype, self.typ.rtype.clone())?;
         for i in 0..args.len() {
+            args[i].typecheck(ctx)?;
             let atyp = if i < spec.argspec.len() {
                 spec.argspec[i].1
             } else {
@@ -207,9 +235,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         match self {
             PatternNode::Typ { tag, bind: _, guard: None } => Type::Primitive(*tag),
             PatternNode::Underscore => Type::any(),
-            PatternNode::Typ { tag, bind: _, guard: Some(_) } | PatternNode::Error(_) => {
-                Type::Bottom
-            }
+            PatternNode::Typ { tag: _, bind: _, guard: Some(_) }
+            | PatternNode::Error(_) => Type::Bottom,
         }
     }
 
@@ -274,25 +301,24 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Use,
     TypeDef,
     Constant(Value),
-    Module(Vec<Node<C, E>>),
-    Do(Vec<Node<C, E>>),
+    Module(Box<[Node<C, E>]>),
+    Do(Box<[Node<C, E>]>),
     Bind(BindId, Box<Node<C, E>>),
     Ref(BindId),
     Connect(BindId, Box<Node<C, E>>),
-    Lambda(Arc<LambdaBind<C, E>>),
+    Lambda(InitFnTyped<C, E>),
     TypeCast {
         target: Typ,
         n: Box<Node<C, E>>,
     },
     Apply {
-        args: Vec<Node<C, E>>,
-        spec: Arc<LambdaBind<C, E>>,
+        args: Box<[Node<C, E>]>,
         function: Box<dyn ApplyTyped<C, E> + Send + Sync>,
     },
     Select {
         selected: Option<usize>,
         arg: Box<Cached<C, E>>,
-        arms: Vec<(PatternNode<C, E>, Cached<C, E>)>,
+        arms: Box<[(PatternNode<C, E>, Cached<C, E>)]>,
     },
     Eq {
         lhs: Box<Cached<C, E>>,
@@ -347,12 +373,12 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     },
     Error {
         error: Option<ArcStr>,
-        children: Vec<Node<C, E>>,
+        children: Box<[Node<C, E>]>,
     },
 }
 
 pub struct Node<C: Ctx + 'static, E: Debug + Clone + 'static> {
-    pub spec: Expr,
+    pub spec: Box<Expr>,
     pub typ: TypeId,
     pub kind: NodeKind<C, E>,
 }
@@ -364,7 +390,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> fmt::Display for Node<C, E> {
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
-    fn find_lambda(&self) -> Option<Arc<LambdaBind<C, E>>> {
+    fn find_lambda(&self) -> Option<InitFnTyped<C, E>> {
         match &self.kind {
             NodeKind::Constant(_)
             | NodeKind::Use
@@ -390,7 +416,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::TypeCast { .. }
             | NodeKind::TypeDef
             | NodeKind::Select { .. } => None,
-            NodeKind::Lambda(b) => Some(Arc::clone(b)),
+            NodeKind::Lambda(b) => Some(SArc::clone(b)),
             NodeKind::Do(children) => children.last().and_then(|t| t.find_lambda()),
         }
     }
@@ -478,36 +504,56 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
     ) -> Node<C, E> {
         if argspec.len() != argspec.iter().collect::<Set<_>>().len() {
             let e = literal!("arguments must have unique names");
-            let kind = NodeKind::Error { error: Some(e), children: vec![] };
-            return Node { spec, typ: ctx.env.bottom(), kind };
+            let kind = NodeKind::Error { error: Some(e), children: Box::from_iter([]) };
+            return Node { spec: Box::new(spec), typ: ctx.env.bottom(), kind };
         }
         let scope = scope.clone();
-        let argspec = Arc::from_iter(argspec.iter().map(|(name, typ)| match typ {
-            None => (name.clone(), TypeId::new()),
-            Some(typ) => (name.clone(), ctx.env.add_typ(typ.clone())),
-        }));
-        let argspec_ = argspec.clone();
-        let vargs = match vargs {
-            Some(Some(typ)) => Some(ctx.env.add_typ(typ.clone())),
-            Some(None) => Some(TypeId::new()),
-            None => None,
-        };
-        let vargs_ = vargs.clone();
-        let rtype = rtype
-            .as_ref()
-            .map(|t| ctx.env.add_typ(t.clone()))
-            .unwrap_or_else(|| TypeId::new());
-        let rtype_ = rtype.clone();
         let env = ctx.env.clone();
-        let f: InitFnTyped<C, E> =
-            sync::Arc::new(move |ctx, args, tid| match body.clone() {
+        let argspec = argspec
+            .iter()
+            .map(|(name, typ)| match typ {
+                None => Ok((name.clone(), None)),
+                Some(typ) => {
+                    let typ = ctx.env.resolve_typrefs(&scope, typ)?;
+                    Ok((name.clone(), Some(typ.into_owned())))
+                }
+            })
+            .collect::<Result<SmallVec<[_; 16]>>>();
+        let argspec = match argspec {
+            Ok(a) => a,
+            Err(e) => {
+                let error = Some(format_compact!("{e}").as_str().into());
+                let kind = NodeKind::Error { error, children: Box::from_iter([]) };
+                return Node { spec: Box::new(spec), typ: ctx.env.bottom(), kind };
+            }
+        };
+        let f: InitFnTyped<C, E> = SArc::new(move |ctx, args, tid| {
+            let argspec = Arc::from_iter(argspec.iter().map(|(name, typ)| match typ {
+                None => (name.clone(), TypeId::new()),
+                Some(typ) => (name.clone(), ctx.env.add_typ(typ.clone())),
+            }));
+            let vargs = match vargs.as_ref() {
+                Some(Some(typ)) => Some(ctx.env.add_typ(typ.clone())),
+                Some(None) => Some(TypeId::new()),
+                None => None,
+            };
+            let rtype = rtype
+                .as_ref()
+                .map(|t| ctx.env.add_typ(t.clone()))
+                .unwrap_or_else(|| TypeId::new());
+            let spec = LambdaTVars { argspec, vargs, rtype };
+            match body.clone() {
                 Either::Right(builtin) => match ctx.builtins.get(&*builtin) {
                     None => bail!("unknown builtin function {builtin}"),
                     Some((typ, init)) => {
-                        let init = sync::Arc::clone(init);
+                        let init = SArc::clone(init);
+                        let old_env = mem::replace(&mut ctx.env, env.clone());
+                        let typ = ctx.env.resolve_fn_typerefs(&scope, &typ);
+                        ctx.env = old_env;
                         Ok(Box::new(BuiltIn {
-                            typ: typ.clone(),
+                            typ: typ?,
                             scope: scope.clone(),
+                            spec,
                             apply: init(ctx, args, tid)?,
                         }))
                     }
@@ -515,21 +561,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 Either::Left(body) => {
                     // compile with the original env not the call site env
                     let new_env = mem::replace(&mut ctx.env, env.clone());
-                    let res = Lambda::new(
-                        ctx,
-                        argspec.clone(),
-                        args,
-                        &scope,
-                        eid,
-                        tid,
-                        (*body).clone(),
-                    );
+                    let apply =
+                        Lambda::new(ctx, spec, args, &scope, eid, tid, (*body).clone());
                     ctx.env = ctx.env.merge_lambda_env(&new_env);
-                    Ok(Box::new(res?))
+                    Ok(Box::new(apply?))
                 }
-            });
-        let lb = LambdaBind { argspec: argspec_, vargs: vargs_, rtype: rtype_, init: f };
-        Node { spec, typ: TypeId::new(), kind: NodeKind::Lambda(Arc::new(lb)) }
+            }
+        });
+        Node { spec: Box::new(spec), typ: TypeId::new(), kind: NodeKind::Lambda(f) }
     }
 
     pub fn compile_int(
@@ -550,15 +589,15 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         }
         macro_rules! error {
             ("", $children:expr) => {{
-                let kind = NodeKind::Error { error: None, children: $children };
-                Node { spec, kind, typ: ctx.env.bottom() }
+                let kind = NodeKind::Error { error: None, children: Box::from_iter($children) };
+                Node { spec: Box::new(spec), kind, typ: ctx.env.bottom() }
             }};
             ($fmt:expr, $children:expr, $($arg:expr),*) => {{
                 let e = ArcStr::from(format_compact!($fmt, $($arg),*).as_str());
-                let kind = NodeKind::Error { error: Some(e), children: $children };
-                Node { spec, kind, typ: ctx.env.bottom() }
+                let kind = NodeKind::Error { error: Some(e), children: Box::from_iter($children) };
+                Node { spec: Box::new(spec), kind, typ: ctx.env.bottom() }
             }};
-            ($fmt:expr) => { error!($fmt, vec![],) };
+            ($fmt:expr) => { error!($fmt, [],) };
             ($fmt:expr, $children:expr) => { error!($fmt, $children,) };
         }
         macro_rules! binary_op {
@@ -566,17 +605,17 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let lhs = Node::compile_int(ctx, (**$lhs).clone(), scope, top_id);
                 let rhs = Node::compile_int(ctx, (**$rhs).clone(), scope, top_id);
                 if lhs.is_err() || rhs.is_err() {
-                    return error!("", vec![lhs, rhs]);
+                    return error!("", [lhs, rhs]);
                 }
                 let lhs = Box::new(Cached::new(lhs));
                 let rhs = Box::new(Cached::new(rhs));
-                Node { spec, typ: $rt, kind: NodeKind::$op { lhs, rhs } }
+                Node { spec: Box::new(spec), typ: $rt, kind: NodeKind::$op { lhs, rhs } }
             }};
         }
         match &spec {
             Expr { kind: ExprKind::Constant(v), id: _ } => {
                 let typ = ctx.env.add_typ(Type::Primitive(Typ::get(&v).into()));
-                Node { kind: NodeKind::Constant(v.clone()), spec, typ }
+                Node { kind: NodeKind::Constant(v.clone()), spec: Box::new(spec), typ }
             }
             Expr { kind: ExprKind::Do { exprs }, id } => {
                 let scope = ModPath(scope.append(&format_compact!("do{}", id.inner())));
@@ -586,7 +625,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 } else {
                     let typ =
                         exp.last().map(|n| n.typ).unwrap_or_else(|| ctx.env.bottom());
-                    Node { kind: NodeKind::Do(exp), spec, typ }
+                    Node { kind: NodeKind::Do(Box::from(exp)), spec: Box::new(spec), typ }
                 }
             }
             Expr { kind: ExprKind::Module { name, export: _, value }, id: _ } => {
@@ -600,7 +639,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                         } else {
                             ctx.env.modules.insert_cow(scope.clone());
                             let typ = ctx.env.bottom();
-                            Node { spec, typ, kind: NodeKind::Module(children) }
+                            let kind = NodeKind::Module(Box::from(children));
+                            Node { spec: Box::new(spec), typ, kind }
                         }
                     }
                 }
@@ -611,7 +651,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 } else {
                     let used = ctx.env.used.get_or_default_cow(scope.clone());
                     Arc::make_mut(used).push(name.clone());
-                    Node { spec, typ: ctx.env.bottom(), kind: NodeKind::Use }
+                    let kind = NodeKind::Use;
+                    Node { spec: Box::new(spec), typ: ctx.env.bottom(), kind }
                 }
             }
             Expr { kind: ExprKind::Connect { name, value }, id: _ } => {
@@ -628,7 +669,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                             error!("", vec![node])
                         } else {
                             let kind = NodeKind::Connect(id, Box::new(node));
-                            Node { spec, typ: ctx.env.bottom(), kind }
+                            Node { spec: Box::new(spec), typ: ctx.env.bottom(), kind }
                         }
                     }
                 }
@@ -648,16 +689,17 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     Some((_, Bind { fun: Some(i), typ, id, .. })) => {
                         let varid = *id;
                         let typ = *typ;
-                        let i = Arc::clone(i);
+                        let i = SArc::clone(i);
                         if error {
                             return error!("", args);
                         }
-                        match (i.init)(ctx, &args, top_id) {
+                        match i(ctx, &args, top_id) {
                             Err(e) => error!("error in function {f} {e:?}"),
                             Ok(function) => {
                                 ctx.user.ref_var(varid, top_id);
-                                let kind = NodeKind::Apply { args, spec: i, function };
-                                Node { spec, typ, kind }
+                                let kind =
+                                    NodeKind::Apply { args: Box::from(args), function };
+                                Node { spec: Box::new(spec), typ, kind }
                             }
                         }
                     }
@@ -677,7 +719,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 if node.is_err() {
                     error!("", vec![node])
                 } else {
-                    Node { spec, typ, kind: NodeKind::Bind(bind.id, Box::new(node)) }
+                    let kind = NodeKind::Bind(bind.id, Box::new(node));
+                    Node { spec: Box::new(spec), typ, kind }
                 }
             }
             Expr { kind: ExprKind::Ref { name }, id: _ } => {
@@ -686,6 +729,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     Some((_, bind)) => {
                         ctx.user.ref_var(bind.id, top_id);
                         let typ = bind.typ;
+                        let spec = Box::new(spec);
                         match &bind.fun {
                             None => Node { spec, typ, kind: NodeKind::Ref(bind.id) },
                             Some(i) => {
@@ -727,8 +771,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     }
                     return error!("{err}", v);
                 }
+                let arms = Box::from(arms);
                 let kind = NodeKind::Select { selected: None, arg, arms };
-                Node { spec, typ: TypeId::new(), kind }
+                Node { spec: Box::new(spec), typ: TypeId::new(), kind }
             }
             Expr { kind: ExprKind::TypeCast { expr, typ }, id: _ } => {
                 let n = Node::compile_int(ctx, (**expr).clone(), scope, top_id);
@@ -737,21 +782,24 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 }
                 let tid = ctx.env.add_typ(Type::Primitive(*typ | Typ::Result));
                 let kind = NodeKind::TypeCast { target: *typ, n: Box::new(n) };
-                Node { spec, typ: tid, kind }
+                Node { spec: Box::new(spec), typ: tid, kind }
             }
-            Expr { kind: ExprKind::TypeDef { name, typ }, id: _ } => match ctx
-                .env
-                .deftype(scope, name, typ.clone())
-            {
-                Ok(()) => Node { spec, typ: ctx.env.bottom(), kind: NodeKind::TypeDef },
-                Err(e) => error!("{e}"),
-            },
+            Expr { kind: ExprKind::TypeDef { name, typ }, id: _ } => {
+                match ctx.env.deftype(scope, name, typ.clone()) {
+                    Err(e) => error!("{e}"),
+                    Ok(()) => {
+                        let spec = Box::new(spec);
+                        Node { spec, typ: ctx.env.bottom(), kind: NodeKind::TypeDef }
+                    }
+                }
+            }
             Expr { kind: ExprKind::Not { expr }, id: _ } => {
                 let node = Node::compile_int(ctx, (**expr).clone(), scope, top_id);
                 if node.is_err() {
                     return error!("", vec![node]);
                 }
                 let node = Box::new(node);
+                let spec = Box::new(spec);
                 Node { spec, typ: ctx.env.boolean(), kind: NodeKind::Not { node } }
             }
             Expr { kind: ExprKind::Eq { lhs, rhs }, id: _ } => {
@@ -843,11 +891,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 Ok(())
             }
             NodeKind::Connect(_, node) => Ok(node.typecheck(ctx)?),
-            NodeKind::Apply { args, spec, function } => {
+            NodeKind::Apply { args, function } => {
                 for n in args.iter_mut() {
                     n.typecheck(ctx)?
                 }
-                let ftyp = function.typecheck(ctx, spec, args)?;
+                let ftyp = function.typecheck(ctx, args)?;
                 ctx.env.define_typevar(self.typ, Type::Fn(Arc::new(ftyp)))?;
                 Ok(())
             }
@@ -884,10 +932,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                         }
                     }
                     n.node.typecheck(ctx)?;
-                    let t = ctx
-                        .env
-                        .get_typevar(&n.node.typ)
-                        .ok_or_else(|| anyhow!("type must be known"))?;
+                    let t = ctx.env.get_typevar(&n.node.typ)?;
                     rtype = rtype.union(t);
                 }
                 let mtypeid = ctx.env.add_typ(mtype.clone());
@@ -924,7 +969,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         ctx: &mut ExecCtx<C, E>,
         selected: &mut Option<usize>,
         arg: &mut Cached<C, E>,
-        arms: &mut Vec<(PatternNode<C, E>, Cached<C, E>)>,
+        arms: &mut [(PatternNode<C, E>, Cached<C, E>)],
         event: &Event<E>,
     ) -> Option<Value> {
         let mut val_up: SmallVec<[bool; 16]> = smallvec![];
@@ -1042,9 +1087,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 Event::Init => Some(v.clone()),
                 Event::Netidx(_, _) | Event::User(_) | Event::Variable(_, _) => None,
             },
-            NodeKind::Apply { spec: _, args, function } => {
-                function.update(ctx, args, event)
-            }
+            NodeKind::Apply { args, function } => function.update(ctx, args, event),
             NodeKind::Connect(id, rhs) | NodeKind::Bind(id, rhs) => {
                 if let Some(v) = rhs.update(ctx, event) {
                     if ctx.dbg_ctx.trace {

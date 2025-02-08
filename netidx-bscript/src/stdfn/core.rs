@@ -1,8 +1,11 @@
 use crate::{
-    err, errf,
-    expr::{Expr, ExprKind},
+    deftype, err, errf,
+    expr::{Expr, ExprKind, FnType},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    vm::{Apply, BindId, Ctx, Event, ExecCtx, FnType, Init, InitFn, Node, NodeKind},
+    vm::{
+        node::{Node, NodeKind},
+        Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, TypeId,
+    },
 };
 use anyhow::bail;
 use arcstr::{literal, ArcStr};
@@ -19,13 +22,9 @@ use triomphe::Arc as TArc;
 
 struct Any;
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for Any {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Any {
     const NAME: &str = "any";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([]),
-        variable: Some(BitFlags::all()),
-        rtype: Some(BitFlags::all()),
-    });
+    deftype!("fn(@args: any) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _| Ok(Box::new(Any)))
@@ -49,13 +48,9 @@ struct Once {
     val: bool,
 }
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for Once {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Once {
     const NAME: &str = "once";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([BitFlags::all()]),
-        variable: None,
-        rtype: Some(BitFlags::all()),
-    });
+    deftype!("fn(any) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _| Ok(Box::new(Once { val: false })))
@@ -87,11 +82,7 @@ struct AllEv;
 
 impl EvalCached for AllEv {
     const NAME: &str = "all";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([BitFlags::all()]),
-        variable: Some(BitFlags::all()),
-        rtype: Some(BitFlags::all()),
-    });
+    deftype!("fn(@args: any) -> any");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
@@ -116,11 +107,7 @@ struct ArrayEv;
 
 impl EvalCached for ArrayEv {
     const NAME: &str = "array";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([]),
-        variable: Some(BitFlags::all()),
-        rtype: Some(Typ::Array.into()),
-    });
+    deftype!("fn(@args: any) -> array");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         if from.0.iter().all(|v| v.is_some()) {
@@ -146,11 +133,7 @@ struct SumEv;
 
 impl EvalCached for SumEv {
     const NAME: &str = "sum";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([]),
-        variable: Some(Typ::number() | Typ::Array),
-        rtype: Some(Typ::number()),
-    });
+    deftype!("fn(@args: number) -> number");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
@@ -174,11 +157,7 @@ fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 
 impl EvalCached for ProductEv {
     const NAME: &str = "product";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([]),
-        variable: Some(Typ::number() | Typ::Array),
-        rtype: Some(Typ::number()),
-    });
+    deftype!("fn(@args: number) -> number");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
@@ -202,11 +181,7 @@ fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 
 impl EvalCached for DivideEv {
     const NAME: &str = "divide";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([]),
-        variable: Some(Typ::number() | Typ::Array),
-        rtype: Some(Typ::number()),
-    });
+    deftype!("fn(@args: number) -> number");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
@@ -222,11 +197,7 @@ struct MinEv;
 
 impl EvalCached for MinEv {
     const NAME: &str = "min";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([]),
-        variable: Some(Typ::any()),
-        rtype: Some(Typ::any()),
-    });
+    deftype!("fn(@args: any) -> any");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = None;
@@ -251,11 +222,7 @@ struct MaxEv;
 
 impl EvalCached for MaxEv {
     const NAME: &str = "max";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([]),
-        variable: Some(Typ::any()),
-        rtype: Some(Typ::any()),
-    });
+    deftype!("fn(@args: any) -> any");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = None;
@@ -280,11 +247,7 @@ struct AndEv;
 
 impl EvalCached for AndEv {
     const NAME: &str = "and";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([]),
-        variable: Some(Typ::Bool.into()),
-        rtype: Some(Typ::Bool.into()),
-    });
+    deftype!("fn(@args: bool) -> bool");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = Some(Value::True);
@@ -307,11 +270,7 @@ struct OrEv;
 
 impl EvalCached for OrEv {
     const NAME: &str = "or";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([]),
-        variable: Some(Typ::Bool.into()),
-        rtype: Some(Typ::Bool.into()),
-    });
+    deftype!("fn(@args: bool) -> bool");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = Some(Value::False);
@@ -330,32 +289,11 @@ impl EvalCached for OrEv {
 
 type Or = CachedArgs<OrEv>;
 
-struct NotEv;
-
-impl EvalCached for NotEv {
-    const NAME: &str = "not";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([Typ::Bool.into()]),
-        variable: None,
-        rtype: Some(Typ::Bool.into()),
-    });
-
-    fn eval(from: &CachedVals) -> Option<Value> {
-        from.0[0].as_ref().map(|v| !(v.clone()))
-    }
-}
-
-type Not = CachedArgs<NotEv>;
-
 struct IsErrEv;
 
 impl EvalCached for IsErrEv {
     const NAME: &str = "is_error";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([Typ::any()]),
-        variable: None,
-        rtype: Some(Typ::Bool.into()),
-    });
+    deftype!("fn(any) -> bool");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         from.0[0].as_ref().map(|v| match v {
@@ -371,11 +309,7 @@ struct IndexEv;
 
 impl EvalCached for IndexEv {
     const NAME: &str = "index";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([Typ::Array.into(), Typ::unsigned_integer()]),
-        variable: None,
-        rtype: Some(Typ::any()),
-    });
+    deftype!("fn(array, i64) -> any");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -399,11 +333,7 @@ struct FilterEv;
 
 impl EvalCached for FilterEv {
     const NAME: &str = "filter";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([Typ::Bool.into(), Typ::any()]),
-        variable: None,
-        rtype: Some(Typ::any()),
-    });
+    deftype!("fn(bool, any) -> any");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let (pred, s) = (&from.0[0], &from.0[1]);
@@ -422,11 +352,7 @@ struct FilterErrEv;
 
 impl EvalCached for FilterErrEv {
     const NAME: &str = "filter_err";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([Typ::any()]),
-        variable: None,
-        rtype: Some(Typ::Result.into()),
-    });
+    deftype!("fn(any) -> result");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
@@ -438,105 +364,13 @@ impl EvalCached for FilterErrEv {
 
 type FilterErr = CachedArgs<FilterErrEv>;
 
-/*
-struct CastEv;
-
-fn with_typ_prefix(
-    from: &CachedVals,
-    name: &'static str,
-    f: impl Fn(Typ, &Option<Value>) -> Option<Value>,
-) -> Option<Value> {
-    let (typ, src) = (&from.0[0], &from.0[1]);
-    match typ {
-        None => None,
-        Some(Value::String(s)) => match s.parse::<Typ>() {
-            Ok(typ) => f(typ, src),
-            Err(e) => errf!("{name}: invalid type {s}, {e}"),
-        },
-        _ => errf!("{name} expected typ as string"),
-    }
-}
-
-impl EvalCached for CastEv {
-    const NAME: &str = "cast";
-    const ARITY: Arity = Arity::Exactly(2);
-
-    fn eval(from: &CachedVals) -> Option<Value> {
-        with_typ_prefix(from, "cast(typ, src)", |typ, v| {
-            v.as_ref().and_then(|v| v.clone().cast(typ))
-        })
-    }
-}
-
-type Cast = CachedArgs<CastEv>;
-
-struct IsaEv;
-
-impl EvalCached for IsaEv {
-    const NAME: &str = "isa";
-    const ARITY: Arity = Arity::Exactly(2);
-
-    fn eval(from: &CachedVals) -> Option<Value> {
-        with_typ_prefix(from, "isa(typ, src)", |typ, v| match (typ, v) {
-            (_, None) => None,
-            (Typ::U32, Some(Value::U32(_))) => Some(Value::True),
-            (Typ::U32, Some(_)) => Some(Value::False),
-            (Typ::V32, Some(Value::V32(_))) => Some(Value::True),
-            (Typ::V32, Some(_)) => Some(Value::False),
-            (Typ::I32, Some(Value::I32(_))) => Some(Value::True),
-            (Typ::I32, Some(_)) => Some(Value::False),
-            (Typ::Z32, Some(Value::Z32(_))) => Some(Value::True),
-            (Typ::Z32, Some(_)) => Some(Value::False),
-            (Typ::U64, Some(Value::U64(_))) => Some(Value::True),
-            (Typ::U64, Some(_)) => Some(Value::False),
-            (Typ::V64, Some(Value::V64(_))) => Some(Value::True),
-            (Typ::V64, Some(_)) => Some(Value::False),
-            (Typ::I64, Some(Value::I64(_))) => Some(Value::True),
-            (Typ::I64, Some(_)) => Some(Value::False),
-            (Typ::Z64, Some(Value::Z64(_))) => Some(Value::True),
-            (Typ::Z64, Some(_)) => Some(Value::False),
-            (Typ::F32, Some(Value::F32(_))) => Some(Value::True),
-            (Typ::F32, Some(_)) => Some(Value::False),
-            (Typ::F64, Some(Value::F64(_))) => Some(Value::True),
-            (Typ::F64, Some(_)) => Some(Value::False),
-            (Typ::Decimal, Some(Value::Decimal(_))) => Some(Value::True),
-            (Typ::Decimal, Some(_)) => Some(Value::False),
-            (Typ::Bool, Some(Value::True)) => Some(Value::True),
-            (Typ::Bool, Some(Value::False)) => Some(Value::True),
-            (Typ::Bool, Some(_)) => Some(Value::False),
-            (Typ::String, Some(Value::String(_))) => Some(Value::True),
-            (Typ::String, Some(_)) => Some(Value::False),
-            (Typ::Bytes, Some(Value::Bytes(_))) => Some(Value::True),
-            (Typ::Bytes, Some(_)) => Some(Value::False),
-            (Typ::Result, Some(Value::Ok)) => Some(Value::True),
-            (Typ::Result, Some(Value::Error(_))) => Some(Value::True),
-            (Typ::Result, Some(_)) => Some(Value::False),
-            (Typ::Array, Some(Value::Array(_))) => Some(Value::True),
-            (Typ::Array, Some(_)) => Some(Value::False),
-            (Typ::DateTime, Some(Value::DateTime(_))) => Some(Value::True),
-            (Typ::DateTime, Some(_)) => Some(Value::False),
-            (Typ::Duration, Some(Value::Duration(_))) => Some(Value::True),
-            (Typ::Duration, Some(_)) => Some(Value::False),
-            (Typ::Null, Some(Value::Null)) => Some(Value::True),
-            (Typ::Null, Some(_)) => Some(Value::False),
-        })
-    }
-}
-
-type Isa = CachedArgs<IsaEv>;
-*/
-
 struct Count {
     count: u64,
 }
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for Count {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Count {
     const NAME: &str = "count";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([Typ::any()]),
-        variable: None,
-        rtype: Some(Typ::U64.into()),
-    });
+    deftype!("fn(any) -> u64");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _| Ok(Box::new(Count { count: 0 })))
@@ -563,13 +397,9 @@ struct Sample {
     last: Option<Value>,
 }
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for Sample {
-    const NAME: &str = "sample";    
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([Typ::any(), Typ::any()]),
-        variable: None,
-        rtype: Some(Typ::any())
-    });
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Sample {
+    const NAME: &str = "sample";
+    deftype!("fn(any, any) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _| Ok(Box::new(Sample { last: None })))
@@ -598,12 +428,8 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Sample {
 struct MeanEv;
 
 impl EvalCached for MeanEv {
-    const NAME: &str = "mean";    
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([Typ::any()]),
-        variable: Some(Typ::any()),
-        rtype: Some(Typ::F64.into())
-    });        
+    const NAME: &str = "mean";
+    deftype!("fn([number, array], @args: [number, array]) -> f64");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut total = 0.;
@@ -634,13 +460,9 @@ type Mean = CachedArgs<MeanEv>;
 
 struct Uniq(Option<Value>);
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for Uniq {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Uniq {
     const NAME: &str = "uniq";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([Typ::any()]),
-        variable: None,
-        rtype: Some(Typ::any())
-    });        
+    deftype!("fn(any) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _| Ok(Box::new(Uniq(None))))
@@ -670,13 +492,9 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Uniq {
 
 struct Never;
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for Never {
-    const NAME: &str = "never";    
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([]),
-        variable: Some(Typ::any()),
-        rtype: None
-    });        
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Never {
+    const NAME: &str = "never";
+    deftype!("fn(any) -> _");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _| Ok(Box::new(Never)))
@@ -705,27 +523,24 @@ struct Group<C: Ctx + 'static, E: Debug + Clone + 'static> {
     from: [Node<C, E>; 2],
 }
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for Group<C, E> {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Group<C, E> {
     const NAME: &str = "group";
-    const TYP: LazyLock<FnType> = LazyLock::new(|| FnType {
-        fixed: TArc::from_iter([Typ::any()]),
-        variable: Some(Typ::any()),
-        rtype: Some(Typ::F64.into())
-    });        
-    
+    deftype!("fn(any, fn(u64, any) -> bool) -> array");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|ctx, from, top_id| match from {
-            [_, Node { spec: _, kind: NodeKind::Lambda(init) }] => {
+            [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(init) }] => {
                 let n_id = BindId::new();
                 let val_id = BindId::new();
                 let mut from = [
                     Node {
-                        spec: ExprKind::Ref { name: ["n"].into() }.to_expr(),
+                        spec: Box::new(ExprKind::Ref { name: ["n"].into() }.to_expr()),
+                        typ: TypeId::new(),
                         kind: NodeKind::Ref(n_id),
                     },
                     Node {
-                        spec: ExprKind::Ref { name: ["x"].into() }.to_expr(),
+                        spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
+                        typ: TypeId::new(),
                         kind: NodeKind::Ref(val_id),
                     },
                 ];
@@ -762,9 +577,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Group<C, E> {
 
 struct Ungroup(BindId);
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for Ungroup {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Ungroup {
     const NAME: &str = "ungroup";
-    const ARITY: Arity = Arity::Exactly(1);
+    deftype!("fn(array) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _| Ok(Box::new(Ungroup(BindId::new()))))
@@ -799,6 +614,57 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Ungroup {
 
 const MOD: &str = r#"
 pub mod core {
+    type any = [
+        u32,
+        v32,
+        i32,
+        z32,
+        u64,
+        v64,
+        i64,
+        z64,
+        f32,
+        f64,
+        decimal,
+        dateTime,
+        duration,
+        bool,
+        string,
+        bytes,
+        result,
+        array,
+        null,
+    ]
+    
+    type number = [
+        u32,
+        v32,
+        i32,
+        z32,
+        u64,
+        v64,
+        i64,
+        z64,
+        f32,
+        f64,
+        decimal
+    ]
+    
+    type int = [
+        u32,
+        v32,
+        i32,
+        z32,
+        u64,
+        v64,
+        i64,
+        z64
+    ]
+    
+    type sint = [ i32, z32, i64, z64 ]
+    type uint = [ u32, v32, u64, v64 ]
+    type real = [ f32, f64, decimal ]
+        
     pub let all = |@args| 'all
     pub let and = |@args| 'and
     pub let any = |@args| 'any
@@ -832,20 +698,17 @@ pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<And>();
     ctx.register_builtin::<Any>();
     ctx.register_builtin::<Array>();
-    ctx.register_builtin::<Cast>();
     ctx.register_builtin::<Count>();
     ctx.register_builtin::<Divide>();
     ctx.register_builtin::<Filter>();
     ctx.register_builtin::<FilterErr>();
     ctx.register_builtin::<Group<C, E>>();
     ctx.register_builtin::<Index>();
-    ctx.register_builtin::<Isa>();
     ctx.register_builtin::<IsErr>();
     ctx.register_builtin::<Max>();
     ctx.register_builtin::<Mean>();
     ctx.register_builtin::<Min>();
     ctx.register_builtin::<Never>();
-    ctx.register_builtin::<Not>();
     ctx.register_builtin::<Once>();
     ctx.register_builtin::<Or>();
     ctx.register_builtin::<Product>();

@@ -12,22 +12,15 @@ use std::{
     borrow::Cow,
     fmt::{self, Debug},
     iter,
-    sync::LazyLock,
+    sync::{Arc as SArc, LazyLock},
 };
 use triomphe::Arc;
-
-pub struct LambdaBind<C: Ctx + 'static, E: Debug + Clone + 'static> {
-    pub argspec: Arc<[(ArcStr, TypeId)]>,
-    pub vargs: Option<TypeId>,
-    pub rtype: TypeId,
-    pub init: InitFnTyped<C, E>,
-}
 
 pub(super) struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     pub id: BindId,
     pub export: bool,
     pub typ: TypeId,
-    pub fun: Option<Arc<LambdaBind<C, E>>>,
+    pub fun: Option<InitFnTyped<C, E>>,
     scope: ModPath,
     name: CompactString,
 }
@@ -52,7 +45,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
             name: self.name.clone(),
             export: self.export,
             typ: self.typ.clone(),
-            fun: self.fun.as_ref().map(|f| Arc::clone(f)),
+            fun: self.fun.as_ref().map(|f| SArc::clone(f)),
         }
     }
 }
@@ -355,11 +348,24 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         }
     }
 
-    pub(super) fn get_typevar(&self, id: &TypeId) -> Option<&Type> {
+    pub(super) fn get_typevar(&self, id: &TypeId) -> Result<&Type> {
         match self.typevars.get(id) {
-            None => None,
+            None => bail!("type must be know"),
             Some(TypeOrAlias::Alias(id)) => self.get_typevar(id),
-            Some(TypeOrAlias::Type(t)) => Some(t),
+            Some(TypeOrAlias::Type(t)) => Ok(t),
+        }
+    }
+
+    pub(super) fn resolve_fn_typerefs<'a>(
+        &self,
+        scope: &ModPath,
+        typ: &'a FnType,
+    ) -> Result<FnType> {
+        let typ = Type::Fn(Arc::new(typ.clone()));
+        let typ = self.resolve_typrefs(scope, &typ)?;
+        match &*typ {
+            Type::Fn(f) => Ok((**f).clone()),
+            _ => bail!("unexpected fn resolution"),
         }
     }
 

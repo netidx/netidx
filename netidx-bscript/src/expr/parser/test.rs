@@ -124,6 +124,7 @@ fn letbind() {
     assert_eq!(
         ExprKind::Bind {
             export: false,
+            typ: None,
             name: "foo".into(),
             value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
         }
@@ -341,7 +342,7 @@ fn select() {
     let arms = Arc::from_iter([
         (
             Pattern::Typ {
-                tag: Arc::from_iter([Typ::I64]),
+                tag: Typ::I64.into(),
                 bind: literal!("a"),
                 guard: Some(
                     ExprKind::Lt {
@@ -358,7 +359,7 @@ fn select() {
             .to_expr(),
         ),
         (
-            Pattern::Typ { tag: Arc::from_iter([]), bind: literal!("a"), guard: None },
+            Pattern::Typ { tag: BitFlags::empty(), bind: literal!("a"), guard: None },
             ExprKind::Ref { name: ModPath::from(["a"]) }.to_expr(),
         ),
     ]);
@@ -404,12 +405,14 @@ fn inline_module() {
         export: true,
         value: Some(Arc::from_iter([
             ExprKind::Bind {
+                typ: None,
                 export: true,
                 name: literal!("z"),
                 value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr()),
             }
             .to_expr(),
             ExprKind::Bind {
+                typ: None,
                 export: false,
                 name: literal!("m"),
                 value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr()),
@@ -473,6 +476,7 @@ fn doexpr() {
     let exp = ExprKind::Do {
         exprs: Arc::from_iter([
             ExprKind::Bind {
+                typ: None,
                 export: false,
                 name: literal!("baz"),
                 value: Arc::new(ExprKind::Constant(Value::from(42)).to_expr()),
@@ -489,8 +493,9 @@ fn doexpr() {
 #[test]
 fn lambda() {
     let exp = ExprKind::Lambda {
-        args: Arc::from_iter(["foo".into(), "bar".into()]),
-        vargs: false,
+        args: Arc::from_iter([("foo".into(), None), ("bar".into(), None)]),
+        rtype: None,
+        vargs: None,
         body: Either::Left(Arc::new(
             ExprKind::Add {
                 lhs: Arc::new(
@@ -527,11 +532,13 @@ fn nested_lambda() {
     );
     let exp = ExprKind::Lambda {
         args: Arc::from_iter([]),
-        vargs: false,
+        rtype: None,
+        vargs: None,
         body: Either::Left(Arc::new(
             ExprKind::Lambda {
                 args: Arc::from_iter([]),
-                vargs: false,
+                rtype: None,
+                vargs: None,
                 body: Either::Left(e),
             }
             .to_expr(),
@@ -546,8 +553,9 @@ fn nested_lambda() {
 fn apply_lambda() {
     let e = ExprKind::Apply {
         args: Arc::from_iter([ExprKind::Lambda {
-            args: Arc::from_iter(["a".into()]),
-            vargs: true,
+            args: Arc::from_iter([("a".into(), None)]),
+            vargs: None,
+            rtype: None,
             body: Either::Right("a".into()),
         }
         .to_expr()]),

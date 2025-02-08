@@ -1,13 +1,29 @@
-use crate::vm::{Apply, Arity, Ctx, Event, ExecCtx, FnType, Init, InitFn, Node};
+use crate::{
+    expr::FnType,
+    vm::{node::Node, Apply, BuiltIn, Ctx, Event, ExecCtx, InitFn},
+};
 use netidx::subscriber::Value;
 use netidx_core::utils::Either;
 use smallvec::SmallVec;
-use std::{fmt::Debug, iter, marker::PhantomData, sync::{Arc, LazyLock}};
+use std::{
+    fmt::Debug,
+    iter,
+    marker::PhantomData,
+    sync::{Arc, LazyLock},
+};
 
 pub mod core;
 pub mod net;
 pub mod str;
 pub mod time;
+
+#[macro_export]
+macro_rules! deftype {
+    ($s:literal) => {
+        const TYP: LazyLock<FnType> =
+            LazyLock::new(|| parse_fn_type($s).expect("failed to parse fn type {s}"));
+    };
+}
 
 #[macro_export]
 macro_rules! errf {
@@ -104,7 +120,7 @@ pub struct CachedArgs<T: EvalCached + Send + Sync> {
     t: PhantomData<T>,
 }
 
-impl<C: Ctx, E: Debug + Clone, T: EvalCached + Send + Sync + 'static> Init<C, E>
+impl<C: Ctx, E: Debug + Clone, T: EvalCached + Send + Sync + 'static> BuiltIn<C, E>
     for CachedArgs<T>
 {
     const NAME: &str = T::NAME;

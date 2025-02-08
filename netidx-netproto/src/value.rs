@@ -77,28 +77,6 @@ pub enum Typ {
     Null,
 }
 
-static TYPES: [Typ; 19] = [
-    Typ::U32,
-    Typ::V32,
-    Typ::I32,
-    Typ::Z32,
-    Typ::U64,
-    Typ::V64,
-    Typ::I64,
-    Typ::Z64,
-    Typ::F32,
-    Typ::F64,
-    Typ::Decimal,
-    Typ::DateTime,
-    Typ::Duration,
-    Typ::Bool,
-    Typ::String,
-    Typ::Bytes,
-    Typ::Result,
-    Typ::Array,
-    Typ::Null,
-];
-
 impl Typ {
     pub fn parse(&self, s: &str) -> anyhow::Result<Value> {
         match self {
