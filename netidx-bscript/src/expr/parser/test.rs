@@ -8,12 +8,14 @@ fn parse_expr(s: &str) -> anyhow::Result<Expr> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
+/*
 fn parse_typexpr(s: &str) -> anyhow::Result<Type> {
     typexp()
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
+*/
 
 #[test]
 fn escaped_string() {

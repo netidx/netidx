@@ -391,8 +391,10 @@ where
                 });
                 if ts.len() == 0 {
                     Type::Primitive(prims)
-                } else {
+                } else if !prims.is_empty() {
                     ts.push(Type::Primitive(prims));
+                    Type::Set(Arc::from_iter(ts))
+                } else {
                     Type::Set(Arc::from_iter(ts))
                 }
             },
