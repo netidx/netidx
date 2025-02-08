@@ -8,6 +8,13 @@ fn parse_expr(s: &str) -> anyhow::Result<Expr> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
+fn parse_typexpr(s: &str) -> anyhow::Result<Type> {
+    typexp()
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
+}
+
 #[test]
 fn escaped_string() {
     let p = Value::String(literal!(r#"/foo bar baz/"zam"/)_ xyz+ "#));
@@ -130,6 +137,20 @@ fn letbind() {
         }
         .to_expr(),
         parse("let foo = 42").unwrap()
+    );
+}
+
+#[test]
+fn typed_letbind() {
+    assert_eq!(
+        ExprKind::Bind {
+            export: false,
+            typ: Some(Type::Primitive(Typ::I64.into())),
+            name: "foo".into(),
+            value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
+        }
+        .to_expr(),
+        parse("let foo: i64 = 42").unwrap()
     );
 }
 
@@ -563,6 +584,33 @@ fn apply_lambda() {
     }
     .to_expr();
     let s = "a(|a, @args| 'a)";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
+fn apply_typed_lambda() {
+    let e = ExprKind::Apply {
+        args: Arc::from_iter([ExprKind::Lambda {
+            args: Arc::from_iter([
+                ("a".into(), None),
+                (
+                    "b".into(),
+                    Some(Type::Set(Arc::from_iter([
+                        Type::Primitive(Typ::Null.into()),
+                        Type::Ref(["number"].into()),
+                    ]))),
+                ),
+            ]),
+            vargs: Some(Some(Type::Primitive(Typ::String.into()))),
+            rtype: Some(Type::Bottom),
+            body: Either::Right("a".into()),
+        }
+        .to_expr()]),
+        function: ["a"].into(),
+    }
+    .to_expr();
+    let s = "a(|a, b: [null, number], @args: string| -> _ 'a)";
     let pe = parse(s).unwrap();
     assert_eq!(e, pe)
 }

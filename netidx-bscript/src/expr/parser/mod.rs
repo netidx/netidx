@@ -398,7 +398,7 @@ where
             },
         )),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
-        attempt(modpath().map(|n| Type::Ref(n))),
+        attempt(spaces().with(modpath()).map(|n| Type::Ref(n))),
     ))
 }
 

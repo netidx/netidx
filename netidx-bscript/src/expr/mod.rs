@@ -108,7 +108,7 @@ pub enum Pattern {
     Typ { tag: BitFlags<Typ>, bind: ArcStr, guard: Option<Expr> },
 }
 
-#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialOrd, Ord)]
 pub enum Type {
     Bottom,
     Primitive(BitFlags<Typ>),
@@ -116,6 +116,23 @@ pub enum Type {
     Fn(Arc<FnType>),
     Set(Arc<[Type]>),
 }
+
+impl PartialEq for Type {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Type::Bottom, Type::Bottom) => true,
+            (Type::Primitive(p0), Type::Primitive(p1)) => p0 == p1,
+            (Type::Ref(m0), Type::Ref(m1)) => m0 == m1,
+            (Type::Fn(f0), Type::Fn(f1)) => f0 == f1,
+            (Type::Set(s0), Type::Set(s1)) => {
+                s0.len() == s1.len() && s0.iter().all(|t| s1.contains(t))
+            }
+            (_, _) => false
+        }
+    }
+}
+
+impl Eq for Type {}
 
 impl Type {
     pub fn is_bot(&self) -> bool {
