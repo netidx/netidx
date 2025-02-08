@@ -1,6 +1,6 @@
 use crate::{
     expr::{Expr, ExprId, ModPath},
-    vm::{BindId, Ctx, Event, ExecCtx, Node},
+    vm::{node::Node, BindId, Ctx, Event, ExecCtx},
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
@@ -328,7 +328,7 @@ const LIB_CORE_ALL: &str = r#"
 
 run!(lib_core_all, LIB_CORE_ALL, |v: Result<&Value>| match v {
     Ok(Value::I64(1)) => true,
-    _ => false
+    _ => false,
 });
 
 const LIB_CORE_AND: &str = r#"
@@ -342,5 +342,5 @@ const LIB_CORE_AND: &str = r#"
 
 run!(lib_core_and, LIB_CORE_AND, |v: Result<&Value>| match v {
     Ok(Value::True) => true,
-    _ => false
+    _ => false,
 });

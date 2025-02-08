@@ -138,6 +138,29 @@ fn typ() -> impl Strategy<Value = Typ> {
     ]
 }
 
+fn typexp() -> impl Strategy<Value = Type> {
+    let leaf = prop_oneof![
+        Just(Type::Bottom),
+        collection::vec(typ(), (0, 40)).prop_map(|mut prims| {
+            prims.sort();
+            prims.dedup();
+            Type::Primitive(BitFlags::from_iter(prims))
+        }),
+        modpath().prop_map(Type::Ref),
+    ];
+    leaf.prop_recursive(5, 100, 5, |inner| {
+        prop_oneof![
+            collection::vec(inner.clone(), (1, 20)).prop_map(|t| Type::Set(Arc::from(t))),
+            (collection::vec(inner.clone(), (1, 10)), inner.clone(), inner.clone())
+                .prop_map(|(args, vargs, rtype)| Type::Fn(Arc::new(FnType {
+                    args: Arc::from(args),
+                    vargs,
+                    rtype
+                })))
+        ]
+    })
+}
+
 fn pattern() -> impl Strategy<Value = Pattern> {
     prop_oneof![
         Just(Pattern::Underscore),
@@ -250,29 +273,48 @@ fn expr() -> impl Strategy<Value = Expr> {
             (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
                 ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
             }),
+            (inner.clone(), typ()).prop_map(|(expr, typ)| ExprKind::TypeCast {
+                expr: Arc::new(expr),
+                typ
+            }
+            .to_expr()),
             collection::vec(inner.clone(), (1, 10))
                 .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
-            (collection::vec(random_fname(), (0, 10)), any::<bool>(), inner.clone())
-                .prop_map(|(args, vargs, body)| {
+            (
+                collection::vec((random_fname(), option::of(typexp())), (0, 10)),
+                option::of(option::of(typexp())),
+                option::of(typexp()),
+                inner.clone()
+            )
+                .prop_map(|(args, vargs, rtype, body)| {
                     ExprKind::Lambda {
                         args: Arc::from_iter(args),
                         vargs,
+                        rtype,
                         body: Either::Left(Arc::new(body)),
                     }
                     .to_expr()
                 }),
-            (collection::vec(random_fname(), (0, 10)), any::<bool>(), random_fname())
-                .prop_map(|(args, vargs, body)| {
+            (
+                collection::vec((random_fname(), option::of(typexp())), (0, 10)),
+                option::of(option::of(typexp())),
+                option::of(typexp()),
+                random_fname()
+            )
+                .prop_map(|(args, vargs, rtype, body)| {
                     ExprKind::Lambda {
                         args: Arc::from_iter(args),
                         vargs,
+                        rtype,
                         body: Either::Right(body),
                     }
                     .to_expr()
                 }),
-            (inner.clone(), random_fname(), any::<bool>()).prop_map(|(e, n, exp)| {
-                ExprKind::Bind { export: exp, name: n, value: Arc::new(e) }.to_expr()
-            }),
+            (inner.clone(), random_fname(), any::<bool>(), option::of(typexp()))
+                .prop_map(|(e, n, exp, typ)| {
+                    ExprKind::Bind { export: exp, name: n, value: Arc::new(e), typ }
+                        .to_expr()
+                }),
             (inner.clone(), modpath()).prop_map(|(e, n)| {
                 ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
             }),
@@ -296,9 +338,16 @@ fn modexpr() -> impl Strategy<Value = Expr> {
         collection::vec(expr(), (1, 10))
             .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
         modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
-        (expr(), random_fname(), any::<bool>()).prop_map(|(e, n, exp)| {
-            ExprKind::Bind { export: exp, name: n, value: Arc::new(e) }.to_expr()
-        }),
+        (random_fname(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef {
+            name,
+            typ
+        }
+        .to_expr()),
+        (expr(), random_fname(), any::<bool>(), option::of(typexp())).prop_map(
+            |(e, n, exp, typ)| {
+                ExprKind::Bind { export: exp, name: n, value: Arc::new(e), typ }.to_expr()
+            }
+        ),
         (expr(), modpath()).prop_map(|(e, n)| {
             ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
         }),
@@ -480,11 +529,12 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             dbg!(name0 == name1)
         }
         (
-            ExprKind::Bind { name: name0, export: export0, value: value0 },
-            ExprKind::Bind { name: name1, export: export1, value: value1 },
+            ExprKind::Bind { name: name0, export: export0, value: value0, typ: typ0 },
+            ExprKind::Bind { name: name1, export: export1, value: value1, typ: typ1 },
         ) => dbg!(
             dbg!(name0 == name1)
                 && dbg!(export0 == export1)
+                && dbg!(typ0 == typ1)
                 && dbg!(check(value0, value1))
         ),
         (
@@ -495,15 +545,43 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             dbg!(name0 == name1)
         }
         (
-            ExprKind::Lambda { args: args0, vargs: vargs0, body: Either::Left(body0) },
-            ExprKind::Lambda { args: args1, vargs: vargs1, body: Either::Left(body1) },
+            ExprKind::Lambda {
+                args: args0,
+                vargs: vargs0,
+                rtype: rtype0,
+                body: Either::Left(body0),
+            },
+            ExprKind::Lambda {
+                args: args1,
+                vargs: vargs1,
+                rtype: rtype1,
+                body: Either::Left(body1),
+            },
         ) => dbg!(
-            dbg!(args0 == args1) && dbg!(vargs0 == vargs1) && dbg!(check(body0, body1))
+            dbg!(args0 == args1)
+                && dbg!(vargs0 == vargs1)
+                && dbg!(rtype0 == rtype1)
+                && dbg!(check(body0, body1))
         ),
         (
-            ExprKind::Lambda { args: args0, vargs: vargs0, body: Either::Right(b0) },
-            ExprKind::Lambda { args: args1, vargs: vargs1, body: Either::Right(b1) },
-        ) => dbg!(dbg!(args0 == args1) && dbg!(vargs0 == vargs1) && dbg!(b0 == b1)),
+            ExprKind::Lambda {
+                args: args0,
+                vargs: vargs0,
+                rtype: rtype0,
+                body: Either::Right(b0),
+            },
+            ExprKind::Lambda {
+                args: args1,
+                vargs: vargs1,
+                rtype: rtype1,
+                body: Either::Right(b1),
+            },
+        ) => dbg!(
+            dbg!(args0 == args1)
+                && dbg!(vargs0 == vargs1)
+                && dbg!(rtype0 == rtype1)
+                && dbg!(b0 == b1)
+        ),
         (
             ExprKind::Select { arg: arg0, arms: arms0 },
             ExprKind::Select { arg: arg1, arms: arms1 },

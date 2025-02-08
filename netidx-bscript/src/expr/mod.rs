@@ -17,7 +17,6 @@ use std::{
     borrow::Borrow,
     cmp::{Ordering, PartialEq, PartialOrd},
     fmt::{self, Display, Write},
-    iter,
     ops::Deref,
     result,
     str::FromStr,
