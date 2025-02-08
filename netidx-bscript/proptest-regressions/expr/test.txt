@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b3598a7b0d62381e19070f1863e2153442e1491d6a4215462fd596fd09fa1126 # shrinks to s = Expr { id: ExprId(1410), kind: TypeDef { name: "a", typ: Bottom } }

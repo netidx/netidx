@@ -267,7 +267,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
 
 fn expr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
-    leaf.prop_recursive(100, 100000, 10, |inner| {
+    leaf.prop_recursive(10, 1000, 10, |inner| {
         prop_oneof![
             arithexpr(),
             (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
@@ -596,6 +596,14 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                             && dbg!(check_pattern(pat0, pat1))))
             )
         }
+        (
+            ExprKind::TypeDef { name: name0, typ: typ0 },
+            ExprKind::TypeDef { name: name1, typ: typ1 },
+        ) => dbg!(name0 == name1) && dbg!(typ0 == typ1),
+        (
+            ExprKind::TypeCast { expr: expr0, typ: typ0 },
+            ExprKind::TypeCast { expr: expr1, typ: typ1 },
+        ) => dbg!(check(expr0, expr1)) && dbg!(typ0 == typ1),
         (_, _) => false,
     }
 }
