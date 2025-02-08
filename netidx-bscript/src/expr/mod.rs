@@ -125,9 +125,39 @@ impl PartialEq for Type {
             (Type::Ref(m0), Type::Ref(m1)) => m0 == m1,
             (Type::Fn(f0), Type::Fn(f1)) => f0 == f1,
             (Type::Set(s0), Type::Set(s1)) => {
-                s0.len() == s1.len() && s0.iter().all(|t| s1.contains(t))
+                let mut s0p = BitFlags::empty();
+                let mut s1p = BitFlags::empty();
+                for t in s0.iter() {
+                    match t {
+                        Type::Primitive(p) => s0p.insert(*p),
+                        _ => (),
+                    }
+                }
+                for t in s1.iter() {
+                    match t {
+                        Type::Primitive(p) => s1p.insert(*p),
+                        _ => (),
+                    }
+                }
+                s0p == s1p
+                    && s0.iter().all(|t| match t {
+                        Type::Primitive(_) => true,
+                        t => s1.contains(t),
+                    })
+                    && s1.iter().all(|t| match t {
+                        Type::Primitive(_) => true,
+                        t => s0.contains(t),
+                    })
             }
-            (_, _) => false
+            (Type::Primitive(p), Type::Set(s)) | (Type::Set(s), Type::Primitive(p)) => {
+                (p.is_empty() && s.is_empty())
+                    || s.len() == 1
+                        && match &s[0] {
+                            Type::Primitive(sp) => sp == p,
+                            _ => false,
+                        }
+            }
+            (_, _) => false,
         }
     }
 }

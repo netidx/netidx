@@ -381,6 +381,9 @@ where
         typeprim().map(|typ| Type::Primitive(typ.into())),
         attempt(between(sptoken('['), sptoken(']'), sep_by(typexp(), csep())).map(
             |mut ts: Vec<Type>| {
+                if ts.len() == 0 {
+                    return Type::Set(Arc::from(ts))
+                }
                 let mut prims: BitFlags<Typ> = BitFlags::empty();
                 ts.retain(|t| match t {
                     Type::Primitive(s) => {
@@ -393,9 +396,9 @@ where
                     Type::Primitive(prims)
                 } else if !prims.is_empty() {
                     ts.push(Type::Primitive(prims));
-                    Type::Set(Arc::from_iter(ts))
+                    Type::Set(Arc::from(ts))
                 } else {
-                    Type::Set(Arc::from_iter(ts))
+                    Type::Set(Arc::from(ts))
                 }
             },
         )),
