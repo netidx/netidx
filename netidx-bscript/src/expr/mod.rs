@@ -346,7 +346,7 @@ impl fmt::Display for FnType {
         write!(f, "fn(")?;
         for (i, t) in self.args.iter().enumerate() {
             write!(f, "{t}")?;
-            if i < self.args.len() - 1 {
+            if i < self.args.len() - 1 || self.vargs != Type::Bottom {
                 write!(f, ", ")?;
             }
         }
