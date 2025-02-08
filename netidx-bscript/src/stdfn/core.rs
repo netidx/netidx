@@ -1,24 +1,22 @@
 use crate::{
     deftype, err, errf,
-    expr::{Expr, ExprKind, FnType},
+    expr::{parser::parse_fn_type, Expr, ExprKind, FnType},
     stdfn::{CachedArgs, CachedVals, EvalCached},
     vm::{
         node::{Node, NodeKind},
-        Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, TypeId,
+        Apply, ApplyTyped, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, TypeId,
     },
 };
 use anyhow::bail;
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
-use enumflags2::BitFlags;
-use netidx::subscriber::{Typ, Value};
+use netidx::subscriber::Value;
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{
     fmt::Debug,
     sync::{Arc, LazyLock},
 };
-use triomphe::Arc as TArc;
 
 struct Any;
 
@@ -517,7 +515,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Never {
 
 struct Group<C: Ctx + 'static, E: Debug + Clone + 'static> {
     buf: SmallVec<[Value; 16]>,
-    pred: Box<dyn Apply<C, E> + Send + Sync>,
+    pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
     n_id: BindId,
     val_id: BindId,
     from: [Node<C, E>; 2],
@@ -626,7 +624,7 @@ pub mod core {
         f32,
         f64,
         decimal,
-        dateTime,
+        datetime,
         duration,
         bool,
         string,
@@ -635,35 +633,11 @@ pub mod core {
         array,
         null,
     ]
-    
-    type number = [
-        u32,
-        v32,
-        i32,
-        z32,
-        u64,
-        v64,
-        i64,
-        z64,
-        f32,
-        f64,
-        decimal
-    ]
-    
-    type int = [
-        u32,
-        v32,
-        i32,
-        z32,
-        u64,
-        v64,
-        i64,
-        z64
-    ]
-    
-    type sint = [ i32, z32, i64, z64 ]
+        
+    type int = [ i32, z32, i64, z64 ]
     type uint = [ u32, v32, u64, v64 ]
     type real = [ f32, f64, decimal ]
+    type number = [ int, uint, real ]
         
     pub let all = |@args| 'all
     pub let and = |@args| 'and

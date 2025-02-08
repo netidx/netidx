@@ -1,5 +1,6 @@
 use crate::{
-    expr::{ExprId, ExprKind, FnType, ModPath, Type},
+    expr::{ExprId, ExprKind, FnType, ModPath},
+    stdfn,
     vm::{dbg::DbgCtx, env::Env, node::Node},
 };
 use anyhow::Result;
@@ -157,7 +158,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ExecCtx<C, E> {
             dbg_ctx: DbgCtx::new(),
             user,
         };
-        /*
         let core = stdfn::core::register(&mut t);
         let root = ModPath(Path::root());
         let node = Node::compile(&mut t, &root, core);
@@ -172,14 +172,12 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ExecCtx<C, E> {
         if let Some(e) = node.extract_err() {
             panic!("error using core {e}")
         }
-        */
         t
     }
 
     /// build a new context with the full standard library
     pub fn new(user: C) -> Self {
         let mut t = Self::new_no_std(user);
-        /*
         let root = ModPath(Path::root());
         let net = stdfn::net::register(&mut t);
         let node = Node::compile(&mut t, &root, net);
@@ -196,12 +194,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ExecCtx<C, E> {
         if let Some(e) = node.extract_err() {
             panic!("failed to compile the time module {e}")
         }
-        */
         t
     }
 
     pub fn register_builtin<T: BuiltIn<C, E>>(&mut self) {
         let f = T::init(self);
-        self.builtins.insert(T::NAME, f);
+        self.builtins.insert(T::NAME, (T::TYP.clone(), f));
     }
 }

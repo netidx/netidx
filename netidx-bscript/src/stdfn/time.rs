@@ -1,14 +1,19 @@
 use crate::{
-    arity2, err, errf,
-    expr::{Expr, ExprId},
+    arity2, deftype, err, errf,
+    expr::{parser::parse_fn_type, Expr, ExprId, FnType},
     stdfn::CachedVals,
-    vm::{Apply, Arity, BindId, Ctx, Event, ExecCtx, Init, InitFn, Node},
+    vm::{node::Node, Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn},
 };
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use netidx::{publisher::FromValue, subscriber::Value};
-use std::{fmt::Debug, ops::SubAssign, sync::Arc, time::Duration};
+use std::{
+    fmt::Debug,
+    ops::SubAssign,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 struct AfterIdle {
     args: CachedVals,
@@ -16,9 +21,9 @@ struct AfterIdle {
     eid: ExprId,
 }
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for AfterIdle {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for AfterIdle {
     const NAME: &str = "after_idle";
-    const ARITY: Arity = Arity::Exactly(2);
+    deftype!("fn([duration, number], any) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, from, eid| {
@@ -118,9 +123,9 @@ struct Timer {
     eid: ExprId,
 }
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for Timer {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Timer {
     const NAME: &str = "timer";
-    const ARITY: Arity = Arity::Exactly(2);
+    deftype!("fn([duration, number], [bool, number]) -> datetime");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, from, eid| {

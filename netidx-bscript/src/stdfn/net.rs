@@ -1,8 +1,8 @@
 use crate::{
-    arity1, arity2, errf,
-    expr::{Expr, ExprId},
+    arity1, arity2, deftype, errf,
+    expr::{parser::parse_fn_type, Expr, ExprId, FnType},
     stdfn::CachedVals,
-    vm::{Apply, Arity, BindId, Ctx, Event, ExecCtx, Init, InitFn, Node},
+    vm::{node::Node, Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn},
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
@@ -13,7 +13,11 @@ use netidx::{
     subscriber::{Dval, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
-use std::{collections::HashSet, fmt::Debug, sync::Arc};
+use std::{
+    collections::HashSet,
+    fmt::Debug,
+    sync::{Arc, LazyLock},
+};
 
 fn as_path(v: Value) -> Option<Path> {
     match v.cast_to::<String>() {
@@ -34,9 +38,9 @@ struct Store {
     dv: Either<(Path, Dval), Vec<Value>>,
 }
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for Store {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Store {
     const NAME: &str = "store";
-    const ARITY: Arity = Arity::Exactly(2);
+    deftype!("fn(string, any) -> _");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, from, top_id| {
@@ -124,9 +128,9 @@ struct Load {
     top_id: ExprId,
 }
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for Load {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Load {
     const NAME: &str = "load";
-    const ARITY: Arity = Arity::Exactly(1);
+    deftype!("fn(string) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, from, top_id| {
@@ -185,9 +189,9 @@ struct RpcCall {
     pending: FxHashSet<BindId>,
 }
 
-impl<C: Ctx, E: Debug + Clone> Init<C, E> for RpcCall {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for RpcCall {
     const NAME: &str = "call";
-    const ARITY: Arity = Arity::Exactly(2);
+    deftype!("fn(string, array) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, from, top_id| {

@@ -1,18 +1,18 @@
 use crate::{
-    err,
-    expr::Expr,
+    deftype, err,
+    expr::{parser::parse_fn_type, Expr, FnType},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    vm::{Arity, Ctx, ExecCtx},
+    vm::{Ctx, ExecCtx},
 };
 use arcstr::{literal, ArcStr};
 use netidx::{path::Path, subscriber::Value};
-use std::{cell::RefCell, fmt::Debug};
+use std::{cell::RefCell, fmt::Debug, sync::LazyLock};
 
 struct StartsWithEv;
 
 impl EvalCached for StartsWithEv {
     const NAME: &str = "starts_with";
-    const ARITY: Arity = Arity::Exactly(2);
+    deftype!("fn(string, string) -> bool");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -35,7 +35,7 @@ struct EndsWithEv;
 
 impl EvalCached for EndsWithEv {
     const NAME: &str = "ends_with";
-    const ARITY: Arity = Arity::Exactly(2);
+    deftype!("fn(string, string) -> bool");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -58,7 +58,7 @@ struct ContainsEv;
 
 impl EvalCached for ContainsEv {
     const NAME: &str = "contains";
-    const ARITY: Arity = Arity::Exactly(2);
+    deftype!("fn(string, string) -> bool");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -81,7 +81,7 @@ struct StripPrefixEv;
 
 impl EvalCached for StripPrefixEv {
     const NAME: &str = "strip_prefix";
-    const ARITY: Arity = Arity::Exactly(2);
+    deftype!("fn(string, string) -> string");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -100,7 +100,7 @@ struct StripSuffixEv;
 
 impl EvalCached for StripSuffixEv {
     const NAME: &str = "strip_suffix";
-    const ARITY: Arity = Arity::Exactly(2);
+    deftype!("fn(string, string) -> string");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -119,7 +119,7 @@ struct TrimEv;
 
 impl EvalCached for TrimEv {
     const NAME: &str = "trim";
-    const ARITY: Arity = Arity::Exactly(1);
+    deftype!("fn(string) -> string");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
@@ -136,7 +136,7 @@ struct TrimStartEv;
 
 impl EvalCached for TrimStartEv {
     const NAME: &str = "trim_start";
-    const ARITY: Arity = Arity::Exactly(1);
+    deftype!("fn(string) -> string");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
@@ -153,7 +153,7 @@ struct TrimEndEv;
 
 impl EvalCached for TrimEndEv {
     const NAME: &str = "trim_end";
-    const ARITY: Arity = Arity::Exactly(1);
+    deftype!("fn(string) -> string");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
@@ -170,7 +170,7 @@ struct ReplaceEv;
 
 impl EvalCached for ReplaceEv {
     const NAME: &str = "replace";
-    const ARITY: Arity = Arity::Exactly(3);
+    deftype!("fn(string, string, string) -> string");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1], &from.0[2]) {
@@ -191,7 +191,7 @@ struct DirnameEv;
 
 impl EvalCached for DirnameEv {
     const NAME: &str = "dirname";
-    const ARITY: Arity = Arity::Exactly(1);
+    deftype!("fn(string) -> [null, string]");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
@@ -211,7 +211,7 @@ struct BasenameEv;
 
 impl EvalCached for BasenameEv {
     const NAME: &str = "basename";
-    const ARITY: Arity = Arity::Exactly(1);
+    deftype!("fn(string) -> [null, string]");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
@@ -231,7 +231,7 @@ struct StringJoinEv;
 
 impl EvalCached for StringJoinEv {
     const NAME: &str = "string_join";
-    const ARITY: Arity = Arity::AtLeast(2);
+    deftype!("fn(string, string) -> string");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         thread_local! {
@@ -288,7 +288,7 @@ struct StringConcatEv;
 
 impl EvalCached for StringConcatEv {
     const NAME: &str = "string_concat";
-    const ARITY: Arity = Arity::AtLeast(1);
+    deftype!("fn(@args: string) -> string");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         thread_local! {

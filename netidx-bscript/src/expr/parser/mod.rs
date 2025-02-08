@@ -329,7 +329,7 @@ where
     ))
 }
 
-fn fntype<I>() -> impl Parser<I, Output = Type>
+fn fntype<I>() -> impl Parser<I, Output = FnType>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -365,12 +365,7 @@ where
                     Either::Left(t) => t,
                     Either::Right(_) => unreachable!(),
                 });
-                value(Type::Fn(Arc::new(FnType {
-                    args: Arc::from_iter(args),
-                    vargs,
-                    rtype,
-                })))
-                .right()
+                value(FnType { args: Arc::from_iter(args), vargs, rtype }).right()
             }
         })
 }
@@ -402,7 +397,7 @@ where
                 }
             },
         )),
-        attempt(fntype()),
+        attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(modpath().map(|n| Type::Ref(n))),
     ))
 }
