@@ -318,7 +318,7 @@ where
         attempt(spstring("f32").map(|_| Typ::F32)),
         attempt(spstring("f64").map(|_| Typ::F64)),
         attempt(spstring("decimal").map(|_| Typ::Decimal)),
-        attempt(spstring("dateTime").map(|_| Typ::DateTime)),
+        attempt(spstring("datetime").map(|_| Typ::DateTime)),
         attempt(spstring("duration").map(|_| Typ::Duration)),
         attempt(spstring("bool").map(|_| Typ::Bool)),
         attempt(spstring("string").map(|_| Typ::String)),
