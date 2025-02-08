@@ -554,7 +554,7 @@ fn apply_lambda() {
     let e = ExprKind::Apply {
         args: Arc::from_iter([ExprKind::Lambda {
             args: Arc::from_iter([("a".into(), None)]),
-            vargs: None,
+            vargs: Some(None),
             rtype: None,
             body: Either::Right("a".into()),
         }

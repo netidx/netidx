@@ -426,7 +426,7 @@ where
                         attempt(spfname()),
                         attempt(spstring("@args")).map(ArcStr::from),
                     )),
-                    attempt(optional(sptoken(':').with(typexp()))),
+                    optional(attempt(sptoken(':').with(typexp()))),
                 ),
                 csep(),
             )
@@ -444,7 +444,7 @@ where
                 }
             }),
         ),
-        attempt(optional(spstring("->").with(typexp()))),
+        optional(attempt(spstring("->").with(typexp()))),
         choice((
             attempt(sptoken('\'')).with(fname()).map(Either::Right),
             expr().map(|e| Either::Left(Arc::new(e))),
@@ -466,7 +466,7 @@ where
         optional(string("pub").skip(space())).map(|o| o.is_some()),
         spstring("let")
             .with(space())
-            .with((spfname(), attempt(optional(sptoken(':').with(typexp())))))
+            .with((spfname(), optional(attempt(sptoken(':').with(typexp())))))
             .skip(spstring("=")),
         expr(),
     )
