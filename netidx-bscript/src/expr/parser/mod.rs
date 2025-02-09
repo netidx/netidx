@@ -384,27 +384,7 @@ where
         attempt(sptoken('_').map(|_| Type::Bottom)),
         attempt(typeprim()).map(|typ| Type::Primitive(typ.into())),
         attempt(between(sptoken('['), sptoken(']'), sep_by(typexp(), csep())).map(
-            |mut ts: Vec<Type>| {
-                if ts.len() == 0 {
-                    return Type::Set(Arc::from(ts));
-                }
-                let mut prims: BitFlags<Typ> = BitFlags::empty();
-                ts.retain(|t| match t {
-                    Type::Primitive(s) => {
-                        prims.insert(*s);
-                        false
-                    }
-                    _ => true,
-                });
-                if ts.len() == 0 {
-                    Type::Primitive(prims)
-                } else if !prims.is_empty() {
-                    ts.push(Type::Primitive(prims));
-                    Type::Set(Arc::from(ts))
-                } else {
-                    Type::Set(Arc::from(ts))
-                }
-            },
+            |ts: SmallVec<[Type; 16]>| Type::Set(Arc::from_iter(Type::flatten_set(ts))),
         )),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(spaces().with(modpath()).map(|n| Type::Ref(n))),

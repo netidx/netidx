@@ -129,8 +129,8 @@ impl PartialEq for Type {
                 let mut s1p = BitFlags::empty();
                 let mut s0f: SmallVec<[&Type; 16]> = smallvec![];
                 let mut s1f: SmallVec<[&Type; 16]> = smallvec![];
-                Type::flatten_set(&mut s0f, &**s0);
-                Type::flatten_set(&mut s1f, &**s1);
+                Type::flatten_set_ref(&mut s0f, &**s0);
+                Type::flatten_set_ref(&mut s1f, &**s1);
                 s0f.retain(|t| match t {
                     Type::Primitive(p) => {
                         s0p.insert(*p);
@@ -152,7 +152,7 @@ impl PartialEq for Type {
             (Type::Primitive(p), Type::Set(s)) | (Type::Set(s), Type::Primitive(p)) => {
                 let mut sp = BitFlags::empty();
                 let mut sf: SmallVec<[&Type; 16]> = smallvec![];
-                Type::flatten_set(&mut sf, &**s);
+                Type::flatten_set_ref(&mut sf, &**s);
                 sf.retain(|t| match t {
                     Type::Primitive(p) => {
                         sp.insert(*p);
@@ -189,13 +189,39 @@ impl Type {
         }
     }
 
-    fn flatten_set<'a>(acc: &mut SmallVec<[&'a Type; 16]>, set: &'a [Type]) {
+    fn flatten_set_ref<'a>(acc: &mut SmallVec<[&'a Type; 16]>, set: &'a [Type]) {
         for i in 0..set.len() {
             match &set[i] {
-                Type::Set(s) => Self::flatten_set(acc, s),
+                Type::Set(s) => Self::flatten_set_ref(acc, s),
                 t => acc.push(t),
             }
         }
+    }
+
+    fn flatten_set(set: impl IntoIterator<Item = Type>) -> SmallVec<[Type; 16]> {
+        fn flatten_set_(acc: &mut SmallVec<[Type; 16]>, set: impl IntoIterator<Item = Type>) {
+            for t in set {
+                match t {
+                    Type::Set(s) => flatten_set_(acc, s.iter().map(|t| t.clone())),
+                    t => {
+                        let mut merged = false;
+                        for i in 0..acc.len() {
+                            if let Some(t) = t.merge(&acc[i]) {
+                                acc[i] = t;
+                                merged = true;
+                                break;
+                            }
+                        }
+                        if !merged {
+                            acc.push(t);
+                        }
+                    }
+                }
+            }
+        }
+        let mut acc = smallvec![];
+        flatten_set_(&mut acc, set);
+        acc
     }
 
     fn merge_sets(s0: &[Type], s1: &[Type]) -> Type {
