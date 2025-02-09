@@ -198,12 +198,23 @@ impl Type {
         }
     }
 
-    fn flatten_set(set: impl IntoIterator<Item = Type>) -> SmallVec<[Type; 16]> {
-        fn flatten_set_(acc: &mut SmallVec<[Type; 16]>, set: impl IntoIterator<Item = Type>) {
-            for t in set {
-                match t {
-                    Type::Set(s) => flatten_set_(acc, s.iter().map(|t| t.clone())),
-                    t => {
+    fn flatten_set(set: impl IntoIterator<Item = Type>) -> Type {
+        let init: Box<dyn Iterator<Item = Type>> = Box::new(set.into_iter());
+        let mut iters: SmallVec<[Box<dyn Iterator<Item = Type>>; 16]> = smallvec![init];
+        let mut acc: SmallVec<[Type; 16]> = smallvec![];
+        loop {
+            match iters.last_mut() {
+                None => break,
+                Some(iter) => match iter.next() {
+                    None => {
+                        iters.pop();
+                    }
+                    Some(Type::Set(s)) => {
+                        let v: SmallVec<[Type; 16]> =
+                            s.iter().map(|t| t.clone()).collect();
+                        iters.push(Box::new(v.into_iter()))
+                    }
+                    Some(t) => {
                         let mut merged = false;
                         for i in 0..acc.len() {
                             if let Some(t) = t.merge(&acc[i]) {
@@ -216,12 +227,13 @@ impl Type {
                             acc.push(t);
                         }
                     }
-                }
+                },
             }
         }
-        let mut acc = smallvec![];
-        flatten_set_(&mut acc, set);
-        acc
+        match &*acc {
+            [Type::Primitive(p)] => Type::Primitive(*p),
+            _ => Type::Set(Arc::from_iter(acc)),
+        }
     }
 
     fn merge_sets(s0: &[Type], s1: &[Type]) -> Type {

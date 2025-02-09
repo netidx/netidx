@@ -383,9 +383,10 @@ where
     choice((
         attempt(sptoken('_').map(|_| Type::Bottom)),
         attempt(typeprim()).map(|typ| Type::Primitive(typ.into())),
-        attempt(between(sptoken('['), sptoken(']'), sep_by(typexp(), csep())).map(
-            |ts: SmallVec<[Type; 16]>| Type::Set(Arc::from_iter(Type::flatten_set(ts))),
-        )),
+        attempt(
+            between(sptoken('['), sptoken(']'), sep_by(typexp(), csep()))
+                .map(|ts: SmallVec<[Type; 16]>| Type::flatten_set(ts)),
+        ),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(spaces().with(modpath()).map(|n| Type::Ref(n))),
     ))
