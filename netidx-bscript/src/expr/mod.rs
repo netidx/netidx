@@ -149,7 +149,7 @@ impl PartialEq for Type {
                 s1f.sort();
                 s0p == s1p && s0f == s1f
             }
-            (Type::Primitive(p), Type::Set(s)) | (Type::Set(s), Type::Primitive(p)) => {
+            (t, Type::Set(s)) | (Type::Set(s), t) => {
                 let mut sp = BitFlags::empty();
                 let mut sf: SmallVec<[&Type; 16]> = smallvec![];
                 Type::flatten_set_ref(&mut sf, &**s);
@@ -160,7 +160,12 @@ impl PartialEq for Type {
                     }
                     _ => true,
                 });
-                sf.len() == 0 && sp == *p
+                sf.sort();
+                sf.dedup();
+                match t {
+                    Type::Primitive(p) => sf.len() == 0 && sp == *p,
+                    t => sf.len() == 1 && sf[0] == t
+                }
             }
             (_, _) => false,
         }
@@ -231,7 +236,7 @@ impl Type {
             }
         }
         match &*acc {
-            [Type::Primitive(p)] => Type::Primitive(*p),
+            [t] => t.clone(),
             _ => Type::Set(Arc::from_iter(acc)),
         }
     }

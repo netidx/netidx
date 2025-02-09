@@ -3,7 +3,7 @@ use bytes::Bytes;
 use chrono::prelude::*;
 use netidx_netproto::pbuf::PBytes;
 use parser::{parse, RESERVED};
-use prop::option;
+use prop::{char, option};
 use proptest::{collection, prelude::*};
 use std::time::Duration;
 
@@ -53,14 +53,10 @@ fn value() -> impl Strategy<Value = Value> {
     ]
 }
 
-prop_compose! {
-    fn random_modpart()(s in "[a-z][a-z0-9_]*".prop_filter(
-        "Filter reserved words",
-        |s| s.len() <= SLEN && !RESERVED.contains(&s.as_str()))
-    ) -> String
-    {
-        s
-    }
+fn random_modpart() -> impl Strategy<Value = String> {
+    collection::vec(prop_oneof![Just(b'_'), b'a'..=b'z', b'0'..=b'9'], 1..=SLEN - 1)
+        .prop_map(|v| unsafe { String::from_utf8_unchecked(v) })
+        .prop_filter("Filter reserved words", |s| !RESERVED.contains(s.as_str()))
 }
 
 fn random_fname() -> impl Strategy<Value = ArcStr> {
