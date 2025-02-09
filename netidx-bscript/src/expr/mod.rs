@@ -127,35 +127,40 @@ impl PartialEq for Type {
             (Type::Set(s0), Type::Set(s1)) => {
                 let mut s0p = BitFlags::empty();
                 let mut s1p = BitFlags::empty();
-                for t in s0.iter() {
-                    match t {
-                        Type::Primitive(p) => s0p.insert(*p),
-                        _ => (),
+                let mut s0f: SmallVec<[&Type; 16]> = smallvec![];
+                let mut s1f: SmallVec<[&Type; 16]> = smallvec![];
+                Type::flatten_set(&mut s0f, &**s0);
+                Type::flatten_set(&mut s1f, &**s1);
+                s0f.retain(|t| match t {
+                    Type::Primitive(p) => {
+                        s0p.insert(*p);
+                        false
                     }
-                }
-                for t in s1.iter() {
-                    match t {
-                        Type::Primitive(p) => s1p.insert(*p),
-                        _ => (),
+                    _ => true,
+                });
+                s1f.retain(|t| match t {
+                    Type::Primitive(p) => {
+                        s1p.insert(*p);
+                        false
                     }
-                }
-                s0p == s1p
-                    && s0.iter().all(|t| match t {
-                        Type::Primitive(_) => true,
-                        t => s1.contains(t),
-                    })
-                    && s1.iter().all(|t| match t {
-                        Type::Primitive(_) => true,
-                        t => s0.contains(t),
-                    })
+                    _ => true,
+                });
+                s0f.sort();
+                s1f.sort();
+                s0p == s1p && s0f == s1f
             }
             (Type::Primitive(p), Type::Set(s)) | (Type::Set(s), Type::Primitive(p)) => {
-                (p.is_empty() && s.is_empty())
-                    || s.len() == 1
-                        && match &s[0] {
-                            Type::Primitive(sp) => sp == p,
-                            _ => false,
-                        }
+                let mut sp = BitFlags::empty();
+                let mut sf: SmallVec<[&Type; 16]> = smallvec![];
+                Type::flatten_set(&mut sf, &**s);
+                sf.retain(|t| match t {
+                    Type::Primitive(p) => {
+                        sp.insert(*p);
+                        false
+                    }
+                    _ => true,
+                });
+                sf.len() == 0 && sp == *p
             }
             (_, _) => false,
         }
@@ -181,6 +186,15 @@ impl Type {
             (s, Self::Set(t)) => t.iter().all(|t| s.contains(t)),
             (Self::Fn(f0), Self::Fn(f1)) => f0.contains(f1),
             (Self::Fn(_), _) | (_, Self::Fn(_)) => false,
+        }
+    }
+
+    fn flatten_set<'a>(acc: &mut SmallVec<[&'a Type; 16]>, set: &'a [Type]) {
+        for i in 0..set.len() {
+            match &set[i] {
+                Type::Set(s) => Self::flatten_set(acc, s),
+                t => acc.push(t),
+            }
         }
     }
 
@@ -236,7 +250,15 @@ impl Type {
                 }
             }
             (_, Type::Fn(_)) | (Type::Fn(_), _) => None,
-            (Type::Set(s0), Type::Set(s1)) => Some(Self::merge_sets(s0, s1)),
+            (Type::Set(s0), Type::Set(s1)) => {
+                if s0.is_empty() {
+                    Some(Type::Set(s1.clone()))
+                } else if s1.is_empty() {
+                    Some(Type::Set(s0.clone()))
+                } else {
+                    Some(Self::merge_sets(s0, s1))
+                }
+            }
             (Type::Set(s), t) | (t, Type::Set(s)) => Some(Self::merge_into_set(s, t)),
         }
     }
