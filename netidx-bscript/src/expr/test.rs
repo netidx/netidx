@@ -150,7 +150,9 @@ fn typexp() -> impl Strategy<Value = Type> {
             let n = if n.len() > 1 {
                 let s = &n.0[1..];
                 if parser::RESERVED.contains(&s) {
-                    ModPath(n.0.append("1"))
+                    let mut s = CompactString::from(&*n.0);
+                    s.push('1');
+                    ModPath(Path::from(ArcStr::from(s.as_str())))
                 } else {
                     n
                 }

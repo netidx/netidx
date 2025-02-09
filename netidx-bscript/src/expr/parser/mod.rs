@@ -2,9 +2,9 @@ use super::{FnType, Pattern, Type};
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use arcstr::ArcStr;
 use combine::{
-    attempt, between, chainl1, choice, eof, many, many1, optional,
+    attempt, between, chainl1, choice, eof, many, many1, not_followed_by, optional,
     parser::{
-        char::{space, spaces, string},
+        char::{alpha_num, space, spaces, string},
         combinator::recognize,
         range::{take_while, take_while1},
     },
@@ -330,6 +330,7 @@ where
         attempt(spstring("array").map(|_| Typ::Array)),
         attempt(spstring("null").map(|_| Typ::Null)),
     ))
+    .skip(not_followed_by(alpha_num()))
 }
 
 fn fntype<I>() -> impl Parser<I, Output = FnType>
@@ -381,7 +382,7 @@ where
 {
     choice((
         attempt(sptoken('_').map(|_| Type::Bottom)),
-        typeprim().map(|typ| Type::Primitive(typ.into())),
+        attempt(typeprim()).map(|typ| Type::Primitive(typ.into())),
         attempt(between(sptoken('['), sptoken(']'), sep_by(typexp(), csep())).map(
             |mut ts: Vec<Type>| {
                 if ts.len() == 0 {

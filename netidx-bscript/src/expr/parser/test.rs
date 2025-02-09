@@ -8,14 +8,12 @@ fn parse_expr(s: &str) -> anyhow::Result<Expr> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
-/*
 fn parse_typexpr(s: &str) -> anyhow::Result<Type> {
     typexp()
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
-*/
 
 #[test]
 fn escaped_string() {
@@ -654,6 +652,7 @@ fn multi_line_do() {
 
 #[test]
 fn prop0() {
-    let s = "t(l <- select u32:0 {DateTime(a) => {((u32:1 * u32:2) != {f64:3.; store; z64:4; gj})}})";
-    dbg!(parse_expr(s).unwrap());
+    let s = "mod a{type a = [array1]}";
+    let s = "array1";
+    dbg!(parse_typexpr(s).unwrap());
 }
