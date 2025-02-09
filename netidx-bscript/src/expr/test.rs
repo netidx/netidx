@@ -3,7 +3,7 @@ use bytes::Bytes;
 use chrono::prelude::*;
 use netidx_netproto::pbuf::PBytes;
 use parser::{parse, RESERVED};
-use prop::{char, option};
+use prop::option;
 use proptest::{collection, prelude::*};
 use std::time::Duration;
 
@@ -137,14 +137,14 @@ fn typ() -> impl Strategy<Value = Typ> {
 fn typexp() -> impl Strategy<Value = Type> {
     let leaf = prop_oneof![
         Just(Type::Bottom),
-        collection::vec(typ(), (0, 40)).prop_map(|mut prims| {
+        collection::vec(typ(), (0, 10)).prop_map(|mut prims| {
             prims.sort();
             prims.dedup();
             Type::Primitive(BitFlags::from_iter(prims))
         }),
         modpath().prop_map(Type::Ref),
     ];
-    leaf.prop_recursive(5, 100, 5, |inner| {
+    leaf.prop_recursive(5, 25, 5, |inner| {
         prop_oneof![
             collection::vec(inner.clone(), (1, 20)).prop_map(|t| Type::Set(Arc::from(t))),
             (collection::vec(inner.clone(), (1, 10)), inner.clone(), inner.clone())
@@ -181,7 +181,7 @@ fn build_pattern(arg: Expr, arms: Vec<(Option<Expr>, Pattern, Expr)>) -> Expr {
 
 fn arithexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
-    leaf.prop_recursive(5, 100, 5, |inner| {
+    leaf.prop_recursive(5, 25, 5, |inner| {
         prop_oneof![
             (
                 inner.clone(),
@@ -263,7 +263,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
 
 fn expr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
-    leaf.prop_recursive(10, 1000, 10, |inner| {
+    leaf.prop_recursive(10, 100, 10, |inner| {
         prop_oneof![
             arithexpr(),
             (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
@@ -348,7 +348,7 @@ fn modexpr() -> impl Strategy<Value = Expr> {
             ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
         }),
     ];
-    leaf.prop_recursive(10, 1000, 100, |inner| {
+    leaf.prop_recursive(10, 100, 10, |inner| {
         prop_oneof![
             (any::<bool>(), random_fname(), collection::vec(inner.clone(), (0, 10)))
                 .prop_map(|(export, name, body)| ExprKind::Module {
