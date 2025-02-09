@@ -652,7 +652,6 @@ fn multi_line_do() {
 
 #[test]
 fn prop0() {
-    let s = "mod a{type a = [array1]}";
-    let s = "array1";
-    dbg!(parse_typexpr(s).unwrap());
+    let s = "mod a{pub let a: fn(not, [v32, z32, v64, z64, decimal, null], [[u32, v32, i32, z32, v64, i64, z64, f32, f64, decimal, datetime, duration, string, bytes, result, array, null], _, _, [u32, v32, i32, z32, u64, v64, f32, f64, decimal, datetime, duration, bool, string, bytes, result, array], s, [v32, i32, z32, u64, v64, i64, z64, f32, f64, datetime, duration, bool, string, bytes, result, array, null], sample, l, not, _, d, [v32, z32, u64, duration, result]], @args: [v32, u64, z64, datetime, string, bytes, array]) -> _ = (u32:0 == select select u32:0 {a => false} {v if min => cast0, _ => duration:2.s, Z64(q) if a => (!v), V64(j) | String(j) => bytes:Wf+DPXxoKmUkQ6Jr8KbScx8=, Z32(j) | Z64(j) | F32(j) | String(j) | Bytes(j) | Null(j) => x, V64(u) | F64(u) | String(u) => \"y\", _ => mean, I64(d) => false})}";
+    dbg!(parse(s).unwrap());
 }

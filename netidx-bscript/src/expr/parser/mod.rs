@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use super::{FnType, Pattern, Type};
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use arcstr::ArcStr;
@@ -13,6 +15,7 @@ use combine::{
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
 use enumflags2::BitFlags;
+use fxhash::FxHashSet;
 use netidx::{
     path::Path,
     publisher::{Typ, Value},
@@ -26,11 +29,14 @@ use triomphe::Arc;
 mod test;
 
 pub const BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
-pub const RESERVED: [&str; 30] = [
-    "true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn", "cast",
-    "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32", "f64", "decimal",
-    "datetime", "duration", "bool", "string", "bytes", "result", "array", "null",
-];
+pub const RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
+    FxHashSet::from_iter([
+        "true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn",
+        "cast", "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32", "f64",
+        "decimal", "datetime", "duration", "bool", "string", "bytes", "result", "array",
+        "null", "if",
+    ])
+});
 
 fn spstring<'a, I>(s: &'static str) -> impl Parser<I, Output = &'a str>
 where

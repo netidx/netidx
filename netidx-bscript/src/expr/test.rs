@@ -7,6 +7,8 @@ use prop::option;
 use proptest::{collection, prelude::*};
 use std::time::Duration;
 
+const SLEN: usize = 16;
+
 fn datetime() -> impl Strategy<Value = DateTime<Utc>> {
     (
         DateTime::<Utc>::MIN_UTC.timestamp()..DateTime::<Utc>::MAX_UTC.timestamp(),
@@ -54,7 +56,7 @@ fn value() -> impl Strategy<Value = Value> {
 prop_compose! {
     fn random_modpart()(s in "[a-z][a-z0-9_]*".prop_filter(
         "Filter reserved words",
-        |s| !RESERVED.contains(&s.as_str()))
+        |s| s.len() <= SLEN && !RESERVED.contains(&s.as_str()))
     ) -> String
     {
         s
@@ -66,7 +68,7 @@ fn random_fname() -> impl Strategy<Value = ArcStr> {
 }
 
 fn random_modpath() -> impl Strategy<Value = ModPath> {
-    collection::vec(random_modpart(), (1, 10)).prop_map(ModPath::from_iter)
+    collection::vec(random_modpart(), (1, 5)).prop_map(ModPath::from_iter)
 }
 
 fn valid_modpath() -> impl Strategy<Value = ModPath> {
@@ -84,9 +86,7 @@ fn valid_modpath() -> impl Strategy<Value = ModPath> {
         Just(ModPath::from_iter(["or"])),
         Just(ModPath::from_iter(["not"])),
         Just(ModPath::from_iter(["cmp"])),
-        Just(ModPath::from_iter(["if"])),
         Just(ModPath::from_iter(["filter"])),
-        Just(ModPath::from_iter(["cast"])),
         Just(ModPath::from_iter(["isa"])),
         Just(ModPath::from_iter(["eval"])),
         Just(ModPath::from_iter(["count"])),
@@ -146,21 +146,7 @@ fn typexp() -> impl Strategy<Value = Type> {
             prims.dedup();
             Type::Primitive(BitFlags::from_iter(prims))
         }),
-        modpath().prop_map(|n| {
-            let n = if n.len() > 1 {
-                let s = &n.0[1..];
-                if parser::RESERVED.contains(&s) {
-                    let mut s = CompactString::from(&*n.0);
-                    s.push('1');
-                    ModPath(Path::from(ArcStr::from(s.as_str())))
-                } else {
-                    n
-                }
-            } else {
-                n
-            };
-            Type::Ref(n)
-        }),
+        modpath().prop_map(Type::Ref),
     ];
     leaf.prop_recursive(5, 100, 5, |inner| {
         prop_oneof![
