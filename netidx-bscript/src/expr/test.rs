@@ -146,7 +146,19 @@ fn typexp() -> impl Strategy<Value = Type> {
             prims.dedup();
             Type::Primitive(BitFlags::from_iter(prims))
         }),
-        modpath().prop_map(Type::Ref),
+        modpath().prop_map(|n| {
+            let n = if n.len() > 1 {
+                let s = &n.0[1..];
+                if parser::RESERVED.contains(&s) {
+                    ModPath(n.0.append("1"))
+                } else {
+                    n
+                }
+            } else {
+                n
+            };
+            Type::Ref(n)
+        }),
     ];
     leaf.prop_recursive(5, 100, 5, |inner| {
         prop_oneof![

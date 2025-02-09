@@ -26,8 +26,11 @@ use triomphe::Arc;
 mod test;
 
 pub const BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
-pub const RESERVED: [&str; 11] =
-    ["true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn", "cast"];
+pub const RESERVED: [&str; 30] = [
+    "true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn", "cast",
+    "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32", "f64", "decimal",
+    "datetime", "duration", "bool", "string", "bytes", "result", "array", "null",
+];
 
 fn spstring<'a, I>(s: &'static str) -> impl Parser<I, Output = &'a str>
 where
@@ -382,7 +385,7 @@ where
         attempt(between(sptoken('['), sptoken(']'), sep_by(typexp(), csep())).map(
             |mut ts: Vec<Type>| {
                 if ts.len() == 0 {
-                    return Type::Set(Arc::from(ts))
+                    return Type::Set(Arc::from(ts));
                 }
                 let mut prims: BitFlags<Typ> = BitFlags::empty();
                 ts.retain(|t| match t {
