@@ -125,46 +125,22 @@ impl PartialEq for Type {
             (Type::Ref(m0), Type::Ref(m1)) => m0 == m1,
             (Type::Fn(f0), Type::Fn(f1)) => f0 == f1,
             (Type::Set(s0), Type::Set(s1)) => {
-                let mut s0p = BitFlags::empty();
-                let mut s1p = BitFlags::empty();
-                let mut s0f: SmallVec<[&Type; 16]> = smallvec![];
-                let mut s1f: SmallVec<[&Type; 16]> = smallvec![];
-                Type::flatten_set_ref(&mut s0f, &**s0);
-                Type::flatten_set_ref(&mut s1f, &**s1);
-                s0f.retain(|t| match t {
-                    Type::Primitive(p) => {
-                        s0p.insert(*p);
-                        false
+                let s0f = Self::flatten_set(s0.iter().cloned());
+                let s1f = Self::flatten_set(s1.iter().cloned());
+                match (s0f, s1f) {
+                    (Type::Set(s0), Type::Set(s1)) => {
+                        s0.len() == s1.len()
+                            && s0.iter().zip(s1.iter()).all(|(t0, t1)| t0 == t1)
                     }
-                    _ => true,
-                });
-                s1f.retain(|t| match t {
-                    Type::Primitive(p) => {
-                        s1p.insert(*p);
-                        false
-                    }
-                    _ => true,
-                });
-                s0f.sort();
-                s1f.sort();
-                s0p == s1p && s0f == s1f
+                    (_, Type::Set(_)) | (Type::Set(_), _) => false,
+                    (t0, t1) => t0 == t1,
+                }
             }
             (t, Type::Set(s)) | (Type::Set(s), t) => {
-                let mut sp = BitFlags::empty();
-                let mut sf: SmallVec<[&Type; 16]> = smallvec![];
-                Type::flatten_set_ref(&mut sf, &**s);
-                sf.retain(|t| match t {
-                    Type::Primitive(p) => {
-                        sp.insert(*p);
-                        false
-                    }
-                    _ => true,
-                });
-                sf.sort();
-                sf.dedup();
-                match t {
-                    Type::Primitive(p) => sf.len() == 0 && sp == *p,
-                    t => sf.len() == 1 && sf[0] == t
+                let s = Self::flatten_set(s.iter().cloned());
+                match s {
+                    Type::Set(_) => false,
+                    s => t == &s,
                 }
             }
             (_, _) => false,
@@ -191,15 +167,6 @@ impl Type {
             (s, Self::Set(t)) => t.iter().all(|t| s.contains(t)),
             (Self::Fn(f0), Self::Fn(f1)) => f0.contains(f1),
             (Self::Fn(_), _) | (_, Self::Fn(_)) => false,
-        }
-    }
-
-    fn flatten_set_ref<'a>(acc: &mut SmallVec<[&'a Type; 16]>, set: &'a [Type]) {
-        for i in 0..set.len() {
-            match &set[i] {
-                Type::Set(s) => Self::flatten_set_ref(acc, s),
-                t => acc.push(t),
-            }
         }
     }
 
