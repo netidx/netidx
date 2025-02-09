@@ -56,7 +56,9 @@ fn value() -> impl Strategy<Value = Value> {
 fn random_modpart() -> impl Strategy<Value = String> {
     collection::vec(prop_oneof![Just(b'_'), b'a'..=b'z', b'0'..=b'9'], 1..=SLEN - 1)
         .prop_map(|v| unsafe { String::from_utf8_unchecked(v) })
-        .prop_filter("Filter reserved words", |s| !RESERVED.contains(s.as_str()))
+        .prop_filter("Filter reserved words", |s| {
+            s.starts_with(|c: char| c.is_alphabetic()) && !RESERVED.contains(s.as_str())
+        })
 }
 
 fn random_fname() -> impl Strategy<Value = ArcStr> {
