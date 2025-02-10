@@ -631,7 +631,7 @@ pub mod core {
         bytes,
         result,
         array,
-        null,
+        null
     ]
         
     type int = [ i32, z32, i64, z64 ]
@@ -643,20 +643,17 @@ pub mod core {
     pub let and = |@args| 'and
     pub let any = |@args| 'any
     pub let array = |@args| 'array
-    pub let cast = |type, v| 'cast
     pub let count = |@args| 'count
     pub let divide = |@args| 'divide
     pub let filter_err = |e| 'filter_err
     pub let filter = |predicate, v| 'filter
     pub let group = |v, f| 'group
     pub let index = |array, i| 'index
-    pub let isa = |type, v| 'isa
     pub let is_err = |e| 'is_error
     pub let max = |@args| 'max
     pub let mean = |@args| 'mean
     pub let min = |@args| 'min
     pub let never = |@args| 'never
-    pub let not = |e| 'not
     pub let once = |v| 'once
     pub let or = |@args| 'or
     pub let product = |@args| 'product

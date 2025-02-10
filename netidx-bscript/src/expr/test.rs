@@ -2,7 +2,7 @@ use super::*;
 use bytes::Bytes;
 use chrono::prelude::*;
 use netidx_netproto::pbuf::PBytes;
-use parser::{parse, RESERVED};
+use parser::{parse, RESERVED, TYPE_RESERVED};
 use prop::option;
 use proptest::{collection, prelude::*};
 use std::time::Duration;
@@ -67,12 +67,30 @@ fn random_modpart() -> impl Strategy<Value = String> {
         .prop_filter("Filter reserved words", |s| !RESERVED.contains(s.as_str()))
 }
 
+fn typart() -> impl Strategy<Value = String> {
+    collection::vec(prop_oneof![Just(b'_'), b'a'..=b'z', b'0'..=b'9'], 1..=SLEN - 1)
+        .prop_map(|mut v| unsafe {
+            if v[0] == b'_' {
+                v[0] = b'a';
+            }
+            if v[0] >= b'0' && v[0] <= b'9' {
+                v[0] += 49;
+            }
+            String::from_utf8_unchecked(v)
+        })
+        .prop_filter("Filter reserved words", |s| !TYPE_RESERVED.contains(s.as_str()))
+}
+
 fn random_fname() -> impl Strategy<Value = ArcStr> {
     random_modpart().prop_map(ArcStr::from)
 }
 
 fn random_modpath() -> impl Strategy<Value = ModPath> {
     collection::vec(random_modpart(), (1, 5)).prop_map(ModPath::from_iter)
+}
+
+fn typath() -> impl Strategy<Value = ModPath> {
+    collection::vec(typart(), (1, 5)).prop_map(ModPath::from_iter)
 }
 
 fn valid_modpath() -> impl Strategy<Value = ModPath> {
@@ -83,6 +101,7 @@ fn valid_modpath() -> impl Strategy<Value = ModPath> {
         Just(ModPath::from_iter(["product"])),
         Just(ModPath::from_iter(["divide"])),
         Just(ModPath::from_iter(["mean"])),
+        Just(ModPath::from_iter(["array"])),
         Just(ModPath::from_iter(["min"])),
         Just(ModPath::from_iter(["max"])),
         Just(ModPath::from_iter(["and"])),
@@ -149,7 +168,7 @@ fn typexp() -> impl Strategy<Value = Type> {
             prims.dedup();
             Type::Primitive(BitFlags::from_iter(prims))
         }),
-        modpath().prop_map(Type::Ref),
+        typath().prop_map(Type::Ref),
     ];
     leaf.prop_recursive(5, 25, 5, |inner| {
         prop_oneof![
@@ -341,8 +360,8 @@ fn modexpr() -> impl Strategy<Value = Expr> {
         collection::vec(expr(), (1, 10))
             .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
         modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
-        (random_fname(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef {
-            name,
+        (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef {
+            name: ArcStr::from(name),
             typ
         }
         .to_expr()),

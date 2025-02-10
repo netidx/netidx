@@ -32,9 +32,14 @@ pub const BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
 pub const RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
     FxHashSet::from_iter([
         "true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn",
-        "cast", "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32", "f64",
-        "decimal", "datetime", "duration", "bool", "string", "bytes", "result", "array",
-        "null", "if", "_",
+        "cast", "if", "_",
+    ])
+});
+
+pub const TYPE_RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
+    FxHashSet::from_iter([
+        "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32", "f64", "decimal",
+        "datetime", "duration", "bool", "string", "bytes", "result", "array", "null",
     ])
 });
 
@@ -47,7 +52,7 @@ where
     spaces().with(string(s))
 }
 
-fn fname<I>() -> impl Parser<I, Output = ArcStr>
+fn ident<I>() -> impl Parser<I, Output = ArcStr>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -59,14 +64,55 @@ where
             (c.is_alphanumeric() && (c.is_numeric() || c.is_lowercase())) || c == '_'
         }),
     ))
-    .then(|s: String| {
+    .map(|s: String| ArcStr::from(s))
+}
+
+fn fname<I>() -> impl Parser<I, Output = ArcStr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    ident().then(|s| {
         if RESERVED.contains(&s.as_str()) {
             unexpected_any("can't use keyword as a function or variable name").left()
         } else {
             value(s).right()
         }
     })
-    .map(ArcStr::from)
+}
+
+fn spfname<I>() -> impl Parser<I, Output = ArcStr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(fname())
+}
+
+fn typname<I>() -> impl Parser<I, Output = ArcStr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    ident().then(|s| {
+        if TYPE_RESERVED.contains(&s.as_str()) {
+            unexpected_any("can't use keyword as a type name").left()
+        } else {
+            value(s).right()
+        }
+    })
+}
+
+fn sptypname<I>() -> impl Parser<I, Output = ArcStr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(typname())
 }
 
 fn variant_tag<I>() -> impl Parser<I, Output = Typ>
@@ -83,15 +129,6 @@ where
         Err(_) => unexpected_any("invalid variant tag").left(),
         Ok(typ) => value(typ).right(),
     })
-}
-
-fn spfname<I>() -> impl Parser<I, Output = ArcStr>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    spaces().with(fname())
 }
 
 fn modpath<I>() -> impl Parser<I, Output = ModPath>
@@ -111,6 +148,25 @@ where
     I::Range: Range,
 {
     spaces().with(modpath())
+}
+
+fn typath<I>() -> impl Parser<I, Output = ModPath>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    sep_by1(typname(), string("::"))
+        .map(|v: SmallVec<[ArcStr; 4]>| ModPath(Path::from_iter(v)))
+}
+
+fn sptypath<I>() -> impl Parser<I, Output = ModPath>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(typath())
 }
 
 fn csep<I>() -> impl Parser<I, Output = char>
@@ -394,7 +450,7 @@ where
                 .map(|ts: SmallVec<[Type; 16]>| Type::flatten_set(ts)),
         ),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
-        attempt(spaces().with(modpath()).map(|n| Type::Ref(n))),
+        attempt(sptypath()).map(|n| Type::Ref(n)),
     ))
 }
 
@@ -696,7 +752,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (string("type").with(spfname()), sptoken('=').with(typexp()))
+    (string("type").with(sptypname()), sptoken('=').with(typexp()))
         .map(|(name, typ)| ExprKind::TypeDef { name, typ }.to_expr())
 }
 
