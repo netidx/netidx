@@ -121,6 +121,9 @@ impl PartialEq for Type {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Type::Bottom, Type::Bottom) => true,
+            (Type::Bottom, Type::Primitive(p)) | (Type::Primitive(p), Type::Bottom) => {
+                p.is_empty()
+            }
             (Type::Primitive(p0), Type::Primitive(p1)) => p0 == p1,
             (Type::Ref(m0), Type::Ref(m1)) => m0 == m1,
             (Type::Fn(f0), Type::Fn(f1)) => f0 == f1,
@@ -377,8 +380,8 @@ impl FnType {
 impl fmt::Display for FnType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let vargs = match &self.vargs {
-            Type::Bottom => true,
-            _ => false,
+            Type::Bottom => false,
+            _ => true,
         };
         write!(f, "fn(")?;
         for (i, t) in self.args.iter().enumerate() {
