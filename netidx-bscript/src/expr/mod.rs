@@ -646,7 +646,7 @@ impl ExprKind {
                 }
                 write!(buf, "| ")?;
                 if let Some(t) = rtype {
-                    write!(buf, "-> {t}")?
+                    write!(buf, "-> {t} ")?
                 }
                 match body {
                     Either::Right(builtin) => {
@@ -832,7 +832,7 @@ impl fmt::Display for ExprKind {
                 }
                 write!(f, "| ")?;
                 if let Some(t) = rtype {
-                    write!(f, "-> {t}")?
+                    write!(f, "-> {t} ")?
                 }
                 match body {
                     Either::Right(builtin) => write!(f, "'{builtin}"),

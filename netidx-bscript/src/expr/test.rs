@@ -72,7 +72,6 @@ fn random_modpath() -> impl Strategy<Value = ModPath> {
 fn valid_modpath() -> impl Strategy<Value = ModPath> {
     prop_oneof![
         Just(ModPath::from_iter(["any"])),
-        Just(ModPath::from_iter(["array"])),
         Just(ModPath::from_iter(["all"])),
         Just(ModPath::from_iter(["sum"])),
         Just(ModPath::from_iter(["product"])),

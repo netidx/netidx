@@ -440,7 +440,7 @@ where
                 }
             }),
         ),
-        optional(attempt(spstring("->").with(typexp()))),
+        optional(attempt(spstring("->").with(typexp()).skip(space()))),
         choice((
             attempt(sptoken('\'')).with(fname()).map(Either::Right),
             expr().map(|e| Either::Left(Arc::new(e))),

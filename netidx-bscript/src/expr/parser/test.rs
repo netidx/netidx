@@ -652,6 +652,6 @@ fn multi_line_do() {
 
 #[test]
 fn prop0() {
-    let s = "a(cast<u32>(__))";
-    dbg!(parse(s).unwrap());
+    let s = "array";
+    dbg!(parse_expr(s).unwrap());
 }
