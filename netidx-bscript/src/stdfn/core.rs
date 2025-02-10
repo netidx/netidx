@@ -1,6 +1,6 @@
 use crate::{
     deftype, err, errf,
-    expr::{parser::parse_fn_type, Expr, ExprKind, FnType},
+    expr::{parser::parse_fn_type, Expr, ExprKind, FnType, Type},
     stdfn::{CachedArgs, CachedVals, EvalCached},
     vm::{
         node::{Node, NodeKind},
@@ -10,7 +10,7 @@ use crate::{
 use anyhow::bail;
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
-use netidx::subscriber::Value;
+use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{
@@ -25,7 +25,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Any {
     deftype!("fn(@args: any) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _| Ok(Box::new(Any)))
+        Arc::new(|_, _, _, _| Ok(Box::new(Any)))
     }
 }
 
@@ -51,7 +51,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Once {
     deftype!("fn(any) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _| Ok(Box::new(Once { val: false })))
+        Arc::new(|_, _, _, _| Ok(Box::new(Once { val: false })))
     }
 }
 
@@ -371,7 +371,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Count {
     deftype!("fn(any) -> u64");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _| Ok(Box::new(Count { count: 0 })))
+        Arc::new(|_, _, _, _| Ok(Box::new(Count { count: 0 })))
     }
 }
 
@@ -400,7 +400,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Sample {
     deftype!("fn(any, any) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _| Ok(Box::new(Sample { last: None })))
+        Arc::new(|_, _, _, _| Ok(Box::new(Sample { last: None })))
     }
 }
 
@@ -463,7 +463,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Uniq {
     deftype!("fn(any) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _| Ok(Box::new(Uniq(None))))
+        Arc::new(|_, _, _, _| Ok(Box::new(Uniq(None))))
     }
 }
 
@@ -495,7 +495,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Never {
     deftype!("fn(any) -> _");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _| Ok(Box::new(Never)))
+        Arc::new(|_, _, _, _| Ok(Box::new(Never)))
     }
 }
 
@@ -516,8 +516,8 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Never {
 struct Group<C: Ctx + 'static, E: Debug + Clone + 'static> {
     buf: SmallVec<[Value; 16]>,
     pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
-    n_id: BindId,
-    val_id: BindId,
+    n: BindId,
+    x: BindId,
     from: [Node<C, E>; 2],
 }
 
@@ -526,26 +526,27 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Group<C, E> {
     deftype!("fn(any, fn(u64, any) -> bool) -> array");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|ctx, from, top_id| match from {
+        Arc::new(|ctx, scope, from, top_id| match from {
             [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(init) }] => {
-                let n_id = BindId::new();
-                let val_id = BindId::new();
+                let n_typ = ctx.env.add_typ(Type::Primitive(Typ::U64.into()));
+                let n = ctx.env.bind_variable(scope, "n", n_typ).id;
+                let x = ctx.env.bind_variable(scope, "x", from[0].typ).id;
+                ctx.user.ref_var(n, top_id);
+                ctx.user.ref_var(x, top_id);
                 let mut from = [
                     Node {
                         spec: Box::new(ExprKind::Ref { name: ["n"].into() }.to_expr()),
                         typ: TypeId::new(),
-                        kind: NodeKind::Ref(n_id),
+                        kind: NodeKind::Ref(n),
                     },
                     Node {
                         spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
                         typ: TypeId::new(),
-                        kind: NodeKind::Ref(val_id),
+                        kind: NodeKind::Ref(x),
                     },
                 ];
-                ctx.user.ref_var(n_id, top_id);
-                ctx.user.ref_var(val_id, top_id);
                 let pred = init(ctx, &mut from, top_id)?;
-                Ok(Box::new(Self { buf: smallvec![], pred, n_id, val_id, from }))
+                Ok(Box::new(Self { buf: smallvec![], pred, n, x, from }))
             }
             _ => bail!("expected a function"),
         })
@@ -561,8 +562,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Group<C, E> {
     ) -> Option<Value> {
         if let Some(val) = from[0].update(ctx, event) {
             self.buf.push(val.clone());
-            ctx.user.set_var(self.n_id, self.buf.len().into());
-            ctx.user.set_var(self.val_id, val);
+            ctx.user.set_var(self.n, self.buf.len().into());
+            ctx.user.set_var(self.x, val);
         }
         match self.pred.update(ctx, &mut self.from, event) {
             Some(Value::True) => {
@@ -580,7 +581,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Ungroup {
     deftype!("fn(array) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _| Ok(Box::new(Ungroup(BindId::new()))))
+        Arc::new(|_, _, _, _| Ok(Box::new(Ungroup(BindId::new()))))
     }
 }
 

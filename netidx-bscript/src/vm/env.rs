@@ -15,7 +15,7 @@ use std::{
 };
 use triomphe::Arc;
 
-pub(super) struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     pub id: BindId,
     pub export: bool,
     pub typ: TypeId,
@@ -55,7 +55,7 @@ enum TypeOrAlias {
     Type(Type),
 }
 
-pub(super) struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
     by_id: Map<BindId, Bind<C, E>>,
     binds: Map<ModPath, Map<CompactString, BindId>>,
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
@@ -215,7 +215,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         if let Some(bind) = self.by_id.remove_cow(&orig_id) {
             if let Some(binds) = self.binds.get_mut_cow(&bind.scope) {
                 if let Some(id) = binds.get_mut_cow(bind.name.as_str()) {
-                    *id = dbg!(new_id)
+                    *id = new_id
                 }
             }
         }
@@ -223,7 +223,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
 
     // create a new binding. If an existing bind exists in the same
     // scope shadow it.
-    pub(super) fn bind_variable(
+    pub fn bind_variable(
         &mut self,
         scope: &ModPath,
         name: &str,
@@ -263,7 +263,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         }
     }
 
-    pub(super) fn bottom(&mut self) -> TypeId {
+    pub fn bottom(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
         if self.typevars.get(&ID).is_none() {
             self.typevars.insert_cow(*ID, TypeOrAlias::Type(Type::Bottom));
@@ -271,7 +271,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         *ID
     }
 
-    pub(super) fn boolean(&mut self) -> TypeId {
+    pub fn boolean(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
         if self.typevars.get(&ID).is_none() {
             let t = Type::Primitive(Typ::Bool.into());
@@ -280,7 +280,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         *ID
     }
 
-    pub(super) fn number(&mut self) -> TypeId {
+    pub fn number(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
         if self.typevars.get(&ID).is_none() {
             let t = Type::Primitive(Typ::number());
@@ -289,7 +289,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         *ID
     }
 
-    pub(super) fn any(&mut self) -> TypeId {
+    pub fn any(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
         if self.typevars.get(&ID).is_none() {
             let t = Type::Primitive(Typ::any());
@@ -298,13 +298,13 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         *ID
     }
 
-    pub(super) fn add_typ(&mut self, typ: Type) -> TypeId {
+    pub fn add_typ(&mut self, typ: Type) -> TypeId {
         let id = TypeId::new();
         self.typevars.insert_cow(id, TypeOrAlias::Type(typ));
         id
     }
 
-    pub(super) fn define_typevar(&mut self, id: TypeId, typ: Type) -> Result<()> {
+    pub fn define_typevar(&mut self, id: TypeId, typ: Type) -> Result<()> {
         match self.typevars.get(&id) {
             None => {
                 self.typevars.insert_cow(id, TypeOrAlias::Type(typ));
@@ -318,7 +318,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         }
     }
 
-    pub(super) fn alias_typevar(&mut self, from: TypeId, to: TypeId) -> Result<()> {
+    pub fn alias_typevar(&mut self, from: TypeId, to: TypeId) -> Result<()> {
         match self.typevars.get(&from) {
             None => {
                 self.typevars.insert_cow(from, TypeOrAlias::Alias(to));

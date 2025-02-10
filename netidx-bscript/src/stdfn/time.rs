@@ -26,7 +26,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for AfterIdle {
     deftype!("fn([duration, number], any) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, eid| {
+        Arc::new(|_, _, from, eid| {
             Ok(Box::new(AfterIdle { args: CachedVals::new(from), id: None, eid }))
         })
     }
@@ -128,7 +128,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Timer {
     deftype!("fn([duration, number], [bool, number]) -> datetime");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, eid| {
+        Arc::new(|_, _, from, eid| {
             Ok(Box::new(Self {
                 args: CachedVals::new(from),
                 timeout: None,

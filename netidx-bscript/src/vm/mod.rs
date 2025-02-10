@@ -35,7 +35,8 @@ pub enum Event<E: Debug> {
 pub type InitFn<C, E> = sync::Arc<
     dyn for<'a, 'b, 'c> Fn(
             &'a mut ExecCtx<C, E>,
-            &'b [Node<C, E>],
+            &'b ModPath,
+            &'c [Node<C, E>],
             ExprId,
         ) -> Result<Box<dyn Apply<C, E> + Send + Sync>>
         + Send
@@ -50,7 +51,7 @@ pub struct LambdaTVars {
 }
 
 pub type InitFnTyped<C, E> = sync::Arc<
-    dyn for<'a, 'b, 'c> Fn(
+    dyn for<'a, 'b> Fn(
             &'a mut ExecCtx<C, E>,
             &'b [Node<C, E>],
             ExprId,
@@ -137,7 +138,7 @@ pub trait Ctx {
 }
 
 pub struct ExecCtx<C: Ctx + 'static, E: Debug + Clone + 'static> {
-    env: Env<C, E>,
+    pub env: Env<C, E>,
     builtins: FxHashMap<&'static str, (FnType, InitFn<C, E>)>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,

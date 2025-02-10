@@ -127,7 +127,7 @@ impl<C: Ctx, E: Debug + Clone, T: EvalCached + Send + Sync + 'static> BuiltIn<C,
     const TYP: LazyLock<FnType> = T::TYP;
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, _| {
+        Arc::new(|_, _, from, _| {
             let t = CachedArgs::<T> { cached: CachedVals::new(from), t: PhantomData };
             Ok(Box::new(t))
         })

@@ -43,7 +43,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Store {
     deftype!("fn(string, any) -> _");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, top_id| {
+        Arc::new(|_, _, from, top_id| {
             Ok(Box::new(Store {
                 args: CachedVals::new(from),
                 dv: Either::Right(vec![]),
@@ -133,7 +133,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Load {
     deftype!("fn(string) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, top_id| {
+        Arc::new(|_, _, from, top_id| {
             Ok(Box::new(Load { args: CachedVals::new(from), cur: None, top_id }))
         })
     }
@@ -194,7 +194,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for RpcCall {
     deftype!("fn(string, array) -> any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, from, top_id| {
+        Arc::new(|_, _, from, top_id| {
             Ok(Box::new(RpcCall {
                 args: CachedVals::new(from),
                 top_id,

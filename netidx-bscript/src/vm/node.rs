@@ -114,7 +114,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
             }
         }
         let body = Node::compile_int(ctx, body, &scope, tid);
-        match body.extract_err() {
+        match dbg!(body.extract_err()) {
             None => Ok(Self { argids, spec, eid, body }),
             Some(e) => bail!("{e}"),
         }
@@ -531,7 +531,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             // restore the lexical environment to the state it was in
             // when the closure was created
             let snap = ctx.env.restore_lexical_env(&env);
-            let new_env = mem::replace(&mut ctx.env, snap);
+            let orig_env = mem::replace(&mut ctx.env, snap);
             let argspec = Arc::from_iter(argspec.iter().map(|(name, typ)| match typ {
                 None => (name.clone(), TypeId::new()),
                 Some(typ) => (name.clone(), ctx.env.add_typ(typ.clone())),
@@ -553,7 +553,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                         let init = SArc::clone(init);
                         let typ = ctx.env.resolve_fn_typerefs(&scope, &typ);
                         typ.and_then(|typ| {
-                            init(ctx, args, tid).map(|apply| {
+                            init(ctx, &scope, args, tid).map(|apply| {
                                 let f: Box<dyn ApplyTyped<C, E> + Send + Sync + 'static> =
                                     Box::new(BuiltIn {
                                         typ,
@@ -576,7 +576,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     })
                 }
             };
-            ctx.env = ctx.env.merge_lexical(&new_env);
+            ctx.env = ctx.env.merge_lexical(&orig_env);
             res
         });
         Node { spec: Box::new(spec), typ: TypeId::new(), kind: NodeKind::Lambda(f) }
