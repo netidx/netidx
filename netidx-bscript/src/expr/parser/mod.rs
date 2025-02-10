@@ -34,7 +34,7 @@ pub const RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
         "true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn",
         "cast", "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32", "f64",
         "decimal", "datetime", "duration", "bool", "string", "bytes", "result", "array",
-        "null", "if", "_"
+        "null", "if", "_",
     ])
 });
 
@@ -336,7 +336,7 @@ where
         attempt(spstring("array").map(|_| Typ::Array)),
         attempt(spstring("null").map(|_| Typ::Null)),
     ))
-    .skip(not_followed_by(alpha_num()))
+    .skip(not_followed_by(choice((alpha_num(), token('_')))))
 }
 
 fn fntype<I>() -> impl Parser<I, Output = FnType>

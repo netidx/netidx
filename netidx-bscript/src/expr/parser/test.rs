@@ -652,6 +652,6 @@ fn multi_line_do() {
 
 #[test]
 fn prop0() {
-    let s = "a({|| -> a u32:0})";
+    let s = "mod a{mod a{a <- |a: [[u32_]]| 'a}}";
     dbg!(parse(s).unwrap());
 }
