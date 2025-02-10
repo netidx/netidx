@@ -203,6 +203,7 @@ impl Type {
             }
         }
         match &*acc {
+            [] => Type::Primitive(BitFlags::empty()),
             [t] => t.clone(),
             _ => Type::Set(Arc::from_iter(acc)),
         }
@@ -375,16 +376,19 @@ impl FnType {
 
 impl fmt::Display for FnType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let vargs = match &self.vargs {
+            Type::Bottom => true,
+            _ => false,
+        };
         write!(f, "fn(")?;
         for (i, t) in self.args.iter().enumerate() {
             write!(f, "{t}")?;
-            if i < self.args.len() - 1 || self.vargs != Type::Bottom {
+            if i < self.args.len() - 1 || vargs {
                 write!(f, ", ")?;
             }
         }
-        match &self.vargs {
-            Type::Bottom => (),
-            t => write!(f, "@args: {t}")?,
+        if vargs {
+            write!(f, "@args: {}", self.vargs)?;
         }
         write!(f, ") -> {}", self.rtype)
     }

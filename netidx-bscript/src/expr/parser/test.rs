@@ -652,6 +652,6 @@ fn multi_line_do() {
 
 #[test]
 fn prop0() {
-    let s = "array";
-    dbg!(parse_expr(s).unwrap());
+    let s = "a({|| -> a u32:0})";
+    dbg!(parse(s).unwrap());
 }
