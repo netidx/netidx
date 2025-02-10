@@ -370,11 +370,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         }
     }
 
-    pub(super) fn get_typevar(&self, id: &TypeId) -> Result<&Type> {
+    pub(super) fn get_typevar(&self, id: &TypeId) -> Option<&Type> {
         match self.typevars.get(id) {
-            None => bail!("type must be known"),
+            None => None,
             Some(TypeOrAlias::Alias(id)) => self.get_typevar(id),
-            Some(TypeOrAlias::Type(t)) => Ok(t),
+            Some(TypeOrAlias::Type(t)) => Some(t),
         }
     }
 

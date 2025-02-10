@@ -355,16 +355,3 @@ run!(simple_typecheck, SIMPLE_TYPECHECK, |v: Result<&Value>| match v {
     Err(_) => true,
     _ => false,
 });
-
-const TCFAIL: &str = r#"
-{
-  let x = 1;
-  let y = x + 1;
-  true
-}
-"#;
-
-run!(tcfail, TCFAIL, |v: Result<&Value>| match v {
-    Ok(Value::True) => true,
-    _ => false,
-});

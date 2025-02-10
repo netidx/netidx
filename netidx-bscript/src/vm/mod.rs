@@ -81,7 +81,7 @@ pub trait ApplyTyped<C: Ctx, E: Debug + Clone>: Apply<C, E> {
         &self,
         ctx: &mut ExecCtx<C, E>,
         from: &[Node<C, E>],
-    ) -> Result<FnType>;
+    ) -> Result<()>;
 
     fn rtypeid(&self) -> TypeId;
 }

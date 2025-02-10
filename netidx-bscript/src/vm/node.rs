@@ -58,7 +58,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Lambda<C, E> 
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C, E> {
-    fn typecheck(&self, ctx: &mut ExecCtx<C, E>, args: &[Node<C, E>]) -> Result<FnType> {
+    fn typecheck(&self, ctx: &mut ExecCtx<C, E>, args: &[Node<C, E>]) -> Result<()> {
         macro_rules! wrap {
             ($n:expr, $e:expr) => {
                 match $e {
@@ -77,16 +77,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C
             self.body,
             ctx.env.check_typevar_contains(true, spec.rtype, self.body.typ)
         )?;
-        Ok(FnType {
-            args: Arc::from_iter(
-                spec.argspec
-                    .iter()
-                    .map(|(_, typ)| Ok(ctx.env.get_typevar(typ)?.clone()))
-                    .collect::<Result<SmallVec<[_; 16]>>>()?,
-            ),
-            vargs: Type::Bottom,
-            rtype: ctx.env.get_typevar(&self.body.typ)?.clone(),
-        })
+        if ctx.env.get_typevar(&spec.rtype).is_none() {
+            ctx.env.alias_typevar(spec.rtype, self.body.typ)?;
+        }
+        Ok(())
     }
 
     fn rtypeid(&self) -> TypeId {
@@ -151,7 +145,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for BuiltIn<C, E>
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<C, E> {
-    fn typecheck(&self, ctx: &mut ExecCtx<C, E>, args: &[Node<C, E>]) -> Result<FnType> {
+    fn typecheck(&self, ctx: &mut ExecCtx<C, E>, args: &[Node<C, E>]) -> Result<()> {
         macro_rules! wrap {
             ($n:expr, $e:expr) => {
                 match $e {
@@ -194,7 +188,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<
             };
             wrap!(args[i], ctx.env.check_typevar_contains(false, atyp, args[i].typ))?
         }
-        Ok(self.typ.clone())
+        Ok(())
     }
 
     fn rtypeid(&self) -> TypeId {
@@ -947,8 +941,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 for n in args.iter() {
                     wrap!(n, n.typecheck(ctx))?
                 }
-                let ftyp = wrap!(function.typecheck(ctx, args))?;
-                wrap!(ctx.env.define_typevar(self.typ, ftyp.rtype))?;
+                wrap!(function.typecheck(ctx, args))?;
                 Ok(())
             }
             NodeKind::Select { selected: _, arg, arms } => {
@@ -984,7 +977,12 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                         }
                     }
                     wrap!(n.node.typecheck(ctx))?;
-                    let t = wrap!(ctx.env.get_typevar(&n.node.typ))?;
+                    let t = wrap!(
+                        n.node,
+                        ctx.env
+                            .get_typevar(&n.node.typ)
+                            .ok_or_else(|| anyhow!("type must be known"))
+                    )?;
                     rtype = rtype.union(t);
                 }
                 let mtypeid = ctx.env.add_typ(mtype.clone());

@@ -231,7 +231,7 @@ struct StringJoinEv;
 
 impl EvalCached for StringJoinEv {
     const NAME: &str = "string_join";
-    deftype!("fn(string, string) -> string");
+    deftype!("fn(string, @args: string) -> string");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         thread_local! {
