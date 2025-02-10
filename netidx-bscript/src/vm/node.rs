@@ -77,6 +77,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C
             rtype: ctx.env.get_typevar(&self.body.typ)?.clone(),
         })
     }
+
+    fn rtypeid(&self) -> TypeId {
+        self.spec.rtype
+    }
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
@@ -170,6 +174,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<
             ctx.env.check_typevar_contains(atyp, args[i].typ)?
         }
         Ok(self.typ.clone())
+    }
+
+    fn rtypeid(&self) -> TypeId {
+        self.spec.rtype
     }
 }
 
@@ -561,12 +569,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                         typ.and_then(|typ| {
                             init(ctx, &scope, args, tid).map(|apply| {
                                 let f: Box<dyn ApplyTyped<C, E> + Send + Sync + 'static> =
-                                    Box::new(BuiltIn {
-                                        name,
-                                        typ,
-                                        spec,
-                                        apply,
-                                    });
+                                    Box::new(BuiltIn { name, typ, spec, apply });
                                 f
                             })
                         })
@@ -703,9 +706,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     Some((_, Bind { fun: None, .. })) => {
                         error!("{f} is not a function")
                     }
-                    Some((_, Bind { fun: Some(i), typ, id, .. })) => {
+                    Some((_, Bind { fun: Some(i), id, .. })) => {
                         let varid = *id;
-                        let typ = *typ;
                         let i = SArc::clone(i);
                         if error {
                             return error!("", args);
@@ -714,6 +716,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                             Err(e) => error!("error in function {f} {e:?}"),
                             Ok(function) => {
                                 ctx.user.ref_var(varid, top_id);
+                                let typ = function.rtypeid();
                                 let kind =
                                     NodeKind::Apply { args: Box::from(args), function };
                                 Node { spec: Box::new(spec), typ, kind }
@@ -859,30 +862,38 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
     }
 
     fn typecheck(&self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        macro_rules! wrap {
+            ($e:expr) => {
+                match $e {
+                    Ok(x) => Ok(x),
+                    Err(e) => Err(anyhow!("in expr: {}, type error: {e}", self.spec)),
+                }
+            };
+        }
         match &self.kind {
             NodeKind::Add { lhs, rhs }
             | NodeKind::Sub { lhs, rhs }
             | NodeKind::Mul { lhs, rhs }
             | NodeKind::Div { lhs, rhs } => {
-                lhs.node.typecheck(ctx)?;
-                rhs.node.typecheck(ctx)?;
+                wrap!(lhs.node.typecheck(ctx))?;
+                wrap!(rhs.node.typecheck(ctx))?;
                 let id = ctx.env.number();
-                ctx.env.check_typevar_contains(id, lhs.node.typ)?;
-                ctx.env.check_typevar_contains(id, rhs.node.typ)?;
+                wrap!(ctx.env.check_typevar_contains(id, lhs.node.typ))?;
+                wrap!(ctx.env.check_typevar_contains(id, rhs.node.typ))?;
                 Ok(())
             }
             NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {
-                lhs.node.typecheck(ctx)?;
-                rhs.node.typecheck(ctx)?;
+                wrap!(lhs.node.typecheck(ctx))?;
+                wrap!(rhs.node.typecheck(ctx))?;
                 let id = ctx.env.boolean();
-                ctx.env.check_typevar_contains(id, lhs.node.typ)?;
-                ctx.env.check_typevar_contains(id, rhs.node.typ)?;
+                wrap!(ctx.env.check_typevar_contains(id, lhs.node.typ))?;
+                wrap!(ctx.env.check_typevar_contains(id, rhs.node.typ))?;
                 Ok(())
             }
             NodeKind::Not { node } => {
-                node.typecheck(ctx)?;
+                wrap!(node.typecheck(ctx))?;
                 let id = ctx.env.boolean();
-                ctx.env.check_typevar_contains(id, node.typ)?;
+                wrap!(ctx.env.check_typevar_contains(id, node.typ))?;
                 Ok(())
             }
             NodeKind::Eq { lhs, rhs }
@@ -891,33 +902,33 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Gt { lhs, rhs }
             | NodeKind::Lte { lhs, rhs }
             | NodeKind::Gte { lhs, rhs } => {
-                lhs.node.typecheck(ctx)?;
-                rhs.node.typecheck(ctx)?;
+                wrap!(lhs.node.typecheck(ctx))?;
+                wrap!(rhs.node.typecheck(ctx))?;
                 Ok(())
             }
-            NodeKind::TypeCast { target: _, n } => Ok(n.typecheck(ctx)?),
+            NodeKind::TypeCast { target: _, n } => Ok(wrap!(n.typecheck(ctx))?),
             NodeKind::Do(nodes) => {
                 for n in nodes {
-                    n.typecheck(ctx)?;
+                    wrap!(n.typecheck(ctx))?;
                 }
                 Ok(())
             }
             NodeKind::Bind(_, node) => {
-                node.typecheck(ctx)?;
-                ctx.env.check_typevar_contains(self.typ, node.typ)?;
+                wrap!(node.typecheck(ctx))?;
+                wrap!(ctx.env.check_typevar_contains(self.typ, node.typ))?;
                 Ok(())
             }
-            NodeKind::Connect(_, node) => Ok(node.typecheck(ctx)?),
+            NodeKind::Connect(_, node) => Ok(wrap!(node.typecheck(ctx))?),
             NodeKind::Apply { args, function } => {
                 for n in args.iter() {
-                    n.typecheck(ctx)?
+                    wrap!(n.typecheck(ctx))?
                 }
-                let ftyp = function.typecheck(ctx, args)?;
-                ctx.env.define_typevar(self.typ, Type::Fn(Arc::new(ftyp)))?;
+                let ftyp = wrap!(function.typecheck(ctx, args))?;
+                wrap!(ctx.env.define_typevar(self.typ, ftyp.rtype))?;
                 Ok(())
             }
             NodeKind::Select { selected: _, arg, arms } => {
-                arg.node.typecheck(ctx)?;
+                wrap!(arg.node.typecheck(ctx))?;
                 let mut rtype = Type::Bottom;
                 let mut mtype = Type::Bottom;
                 let mut mcases = Type::Bottom;
@@ -926,21 +937,21 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                         PatternNode::Error(_) => bail!("pattern is error"),
                         PatternNode::Underscore => mtype = mtype.union(&Type::any()),
                         PatternNode::Typ { tag, bind, guard, .. } => {
-                            let bind = ctx
+                            let bind = wrap!(ctx
                                 .env
                                 .lookup_bind_by_id(bind)
-                                .ok_or_else(|| anyhow!("missing bind"))?;
+                                .ok_or_else(|| anyhow!("missing bind")))?;
                             let ptyp = Type::Primitive(*tag);
                             if tag.len() > 0 {
-                                ctx.env.define_typevar(bind.typ, ptyp.clone())?;
+                                wrap!(ctx.env.define_typevar(bind.typ, ptyp.clone()))?;
                             } else {
-                                ctx.env.alias_typevar(bind.typ, arg.node.typ)?;
+                                wrap!(ctx.env.alias_typevar(bind.typ, arg.node.typ))?;
                             }
                             if tag.len() > 0 {
                                 mcases = mcases.union(&ptyp);
                             }
                             match guard {
-                                Some(guard) => guard.node.typecheck(ctx)?,
+                                Some(guard) => wrap!(guard.node.typecheck(ctx))?,
                                 None if tag.len() == 0 => {
                                     mtype = mtype.union(&Type::any())
                                 }
@@ -948,18 +959,20 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                             }
                         }
                     }
-                    n.node.typecheck(ctx)?;
-                    let t = ctx.env.get_typevar(&n.node.typ)?;
+                    wrap!(n.node.typecheck(ctx))?;
+                    let t = wrap!(ctx.env.get_typevar(&n.node.typ))?;
                     rtype = rtype.union(t);
                 }
                 let mtypeid = ctx.env.add_typ(mtype.clone());
                 let mcasesid = ctx.env.add_typ(mcases.clone());
-                ctx.env
+                wrap!(ctx
+                    .env
                     .check_typevar_contains(arg.node.typ, mcasesid)
-                    .map_err(|e| anyhow!("pattern will never match {e}"))?;
-                ctx.env
+                    .map_err(|e| anyhow!("pattern will never match {e}")))?;
+                wrap!(ctx
+                    .env
                     .check_typevar_contains(mtypeid, arg.node.typ)
-                    .map_err(|e| anyhow!("missing match cases {e}"))?;
+                    .map_err(|e| anyhow!("missing match cases {e}")))?;
                 ctx.env.define_typevar(self.typ, rtype)
             }
             NodeKind::Constant(_)
