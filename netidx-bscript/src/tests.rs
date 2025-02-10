@@ -170,7 +170,7 @@ macro_rules! run {
             let mut state = TestState::new().await?;
             let mut n = Node::compile(&mut state.ctx, &ModPath::root(), $code.parse()?);
             if let Some(e) = n.extract_err() {
-                if $pred(Err(anyhow!("compilation failed {}", e))) {
+                if $pred(Err(anyhow!("compilation failed {}", dbg!(e)))) {
                     return Ok(());
                 }
             }

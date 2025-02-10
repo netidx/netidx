@@ -1,5 +1,3 @@
-use std::sync::LazyLock;
-
 use super::{FnType, Pattern, Type};
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use arcstr::ArcStr;
@@ -23,6 +21,7 @@ use netidx::{
 };
 use netidx_netproto::value_parser::{escaped_string, value as netidx_value};
 use smallvec::SmallVec;
+use std::sync::LazyLock;
 use triomphe::Arc;
 
 #[cfg(test)]
@@ -823,9 +822,10 @@ pub(super) fn parse(s: &str) -> anyhow::Result<Expr> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
-/// Parse one or more toplevel module expressions followed by
-/// (optional) whitespace and then eof. At least one expression is
-/// required otherwise this function will fail.
+/// Parse one or more toplevel module expressions
+///
+/// followed by (optional) whitespace and then eof. At least one
+/// expression is required otherwise this function will fail.
 ///
 /// if you wish to parse a str containing one and only one module
 /// expression just call [str.parse::<Expr>()].

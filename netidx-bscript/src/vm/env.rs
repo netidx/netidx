@@ -3,7 +3,6 @@ use crate::{
     vm::{BindId, Ctx, InitFnTyped, TypeId},
 };
 use anyhow::{bail, Result};
-use arcstr::ArcStr;
 use compact_str::CompactString;
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::{path::Path, publisher::Typ};
@@ -100,15 +99,27 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         *typevars = Map::new();
     }
 
-    // this is NOT a general merge operation for environments
-    pub(super) fn merge_lambda_env(&self, other: &Self) -> Self {
-        let Self { by_id, binds, used, modules, typedefs, typevars } = self;
-        let by_id = by_id
-            .update_many(other.by_id.into_iter().map(|(id, b)| (*id, b)), |k, v, _| {
-                Some((k, v.clone()))
-            });
+    // restore the lexical environment to the state it was in at the
+    // snapshot `other`, but leave the bind and type environment
+    // alone.
+    pub(super) fn restore_lexical_env(&self, other: &Self) -> Self {
+        Self {
+            binds: other.binds.clone(),
+            used: other.used.clone(),
+            modules: other.modules.clone(),
+            typedefs: other.typedefs.clone(),
+            by_id: self.by_id.clone(),
+            typevars: self.typevars.clone(),
+        }
+    }
+
+    // merge two lexical environments, with the `orig` environment
+    // taking prescidence in case of conflicts. The type and binding
+    // environment is not altered
+    pub(super) fn merge_lexical(&self, orig: &Self) -> Self {
+        let Self { by_id: _, binds, used, modules, typedefs, typevars: _ } = self;
         let binds = binds.update_many(
-            other.binds.into_iter().map(|(s, m)| (s.clone(), m)),
+            orig.binds.into_iter().map(|(s, m)| (s.clone(), m)),
             |k, v, kv| match kv {
                 None => Some((k, v.clone())),
                 Some((_, m)) => {
@@ -121,12 +132,12 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
             },
         );
         let used = used.update_many(
-            other.used.into_iter().map(|(k, v)| (k.clone(), v.clone())),
+            orig.used.into_iter().map(|(k, v)| (k.clone(), v.clone())),
             |k, v, _| Some((k, v)),
         );
-        let modules = modules.union(&other.modules);
+        let modules = modules.union(&orig.modules);
         let typedefs = typedefs.update_many(
-            other.typedefs.into_iter().map(|(k, v)| (k.clone(), v)),
+            orig.typedefs.into_iter().map(|(k, v)| (k.clone(), v)),
             |k, v, kv| match kv {
                 None => Some((k, v.clone())),
                 Some((_, m)) => {
@@ -138,11 +149,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
                 }
             },
         );
-        let typevars = typevars.update_many(
-            other.typevars.into_iter().map(|(k, v)| (*k, v.clone())),
-            |k, v, _| Some((k, v)),
-        );
-        Self { by_id, binds, used, modules, typedefs, typevars }
+        Self {
+            binds,
+            used,
+            modules,
+            typedefs,
+            by_id: self.by_id.clone(),
+            typevars: self.typevars.clone(),
+        }
     }
 
     fn find_visible<R, F: FnMut(&str, &str) -> Option<R>>(
@@ -201,7 +215,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         if let Some(bind) = self.by_id.remove_cow(&orig_id) {
             if let Some(binds) = self.binds.get_mut_cow(&bind.scope) {
                 if let Some(id) = binds.get_mut_cow(bind.name.as_str()) {
-                    *id = new_id
+                    *id = dbg!(new_id)
                 }
             }
         }

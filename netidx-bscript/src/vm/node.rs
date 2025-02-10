@@ -98,7 +98,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
         }
         let id = LambdaId::new();
         let mut argids = vec![];
-        let scope = ModPath(scope.0.append(&format_compact!("{id:?}")));
+        let scope = ModPath(scope.0.append(&format_compact!("fn{}", id.0)));
         for ((name, typ), node) in spec.argspec.iter().zip(args.iter()) {
             let bind = ctx.env.bind_variable(&scope, &**name, *typ);
             match &node.kind {
@@ -528,6 +528,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             }
         };
         let f: InitFnTyped<C, E> = SArc::new(move |ctx, args, tid| {
+            // restore the lexical environment to the state it was in
+            // when the closure was created
+            let snap = ctx.env.restore_lexical_env(&env);
+            let new_env = mem::replace(&mut ctx.env, snap);
             let argspec = Arc::from_iter(argspec.iter().map(|(name, typ)| match typ {
                 None => (name.clone(), TypeId::new()),
                 Some(typ) => (name.clone(), ctx.env.add_typ(typ.clone())),
@@ -542,31 +546,38 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 .map(|t| ctx.env.add_typ(t.clone()))
                 .unwrap_or_else(|| TypeId::new());
             let spec = LambdaTVars { argspec, vargs, rtype };
-            match body.clone() {
+            let res = match body.clone() {
                 Either::Right(builtin) => match ctx.builtins.get(&*builtin) {
                     None => bail!("unknown builtin function {builtin}"),
                     Some((typ, init)) => {
                         let init = SArc::clone(init);
-                        let old_env = mem::replace(&mut ctx.env, env.clone());
                         let typ = ctx.env.resolve_fn_typerefs(&scope, &typ);
-                        ctx.env = old_env;
-                        Ok(Box::new(BuiltIn {
-                            typ: typ?,
-                            scope: scope.clone(),
-                            spec,
-                            apply: init(ctx, args, tid)?,
-                        }))
+                        typ.and_then(|typ| {
+                            init(ctx, args, tid).map(|apply| {
+                                let f: Box<dyn ApplyTyped<C, E> + Send + Sync + 'static> =
+                                    Box::new(BuiltIn {
+                                        typ,
+                                        scope: scope.clone(),
+                                        spec,
+                                        apply,
+                                    });
+                                f
+                            })
+                        })
                     }
                 },
                 Either::Left(body) => {
-                    // compile with the original env not the call site env
-                    let new_env = mem::replace(&mut ctx.env, env.clone());
                     let apply =
                         Lambda::new(ctx, spec, args, &scope, eid, tid, (*body).clone());
-                    ctx.env = ctx.env.merge_lambda_env(&new_env);
-                    Ok(Box::new(apply?))
+                    apply.map(|a| {
+                        let f: Box<dyn ApplyTyped<C, E> + Send + Sync + 'static> =
+                            Box::new(a);
+                        f
+                    })
                 }
-            }
+            };
+            ctx.env = ctx.env.merge_lexical(&new_env);
+            res
         });
         Node { spec: Box::new(spec), typ: TypeId::new(), kind: NodeKind::Lambda(f) }
     }
