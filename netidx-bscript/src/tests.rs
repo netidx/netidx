@@ -355,3 +355,27 @@ run!(simple_typecheck, SIMPLE_TYPECHECK, |v: Result<&Value>| match v {
     Err(_) => true,
     _ => false,
 });
+
+const FUNCTION_TYPES: &str = r#"
+{
+  let f = |x: number, y: number| -> string "x is [x] and y is [y]";
+  f("foo", 3)
+}
+"#;
+
+run!(function_types, FUNCTION_TYPES, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const PARTIAL_FUNCTION_TYPES: &str = r#"
+{
+  let f = |x: number, y| "x is [x] and y is [y]";
+  f("foo", 3)
+}
+"#;
+
+run!(partial_function_types, PARTIAL_FUNCTION_TYPES, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
