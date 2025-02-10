@@ -2,7 +2,7 @@ use crate::{
     expr::{FnType, ModPath, Type},
     vm::{BindId, Ctx, InitFnTyped, TypeId},
 };
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use compact_str::CompactString;
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::{path::Path, publisher::Typ};
@@ -49,8 +49,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
     }
 }
 
-#[derive(Clone)]
-enum TypeOrAlias {
+#[derive(Debug, Clone)]
+pub enum TypeOrAlias {
     Alias(TypeId),
     Type(Type),
 }
@@ -61,7 +61,7 @@ pub struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
     pub modules: Set<ModPath>,
     typedefs: Map<ModPath, Map<CompactString, Type>>,
-    typevars: Map<TypeId, TypeOrAlias>,
+    pub typevars: Map<TypeId, TypeOrAlias>,
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Env<C, E> {
@@ -265,37 +265,41 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
 
     pub fn bottom(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
-        if self.typevars.get(&ID).is_none() {
-            self.typevars.insert_cow(*ID, TypeOrAlias::Type(Type::Bottom));
+        let id = *ID;
+        if self.typevars.get(&id).is_none() {
+            self.typevars.insert_cow(id, TypeOrAlias::Type(Type::Bottom));
         }
-        *ID
+        id
     }
 
     pub fn boolean(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
-        if self.typevars.get(&ID).is_none() {
+        let id = *ID;
+        if self.typevars.get(&id).is_none() {
             let t = Type::Primitive(Typ::Bool.into());
-            self.typevars.insert_cow(*ID, TypeOrAlias::Type(t));
+            self.typevars.insert_cow(id, TypeOrAlias::Type(t));
         }
-        *ID
+        id
     }
 
     pub fn number(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
-        if self.typevars.get(&ID).is_none() {
+        let id = *ID;
+        if self.typevars.get(&id).is_none() {
             let t = Type::Primitive(Typ::number());
-            self.typevars.insert_cow(*ID, TypeOrAlias::Type(t));
+            self.typevars.insert_cow(id, TypeOrAlias::Type(t));
         }
-        *ID
+        id
     }
 
     pub fn any(&mut self) -> TypeId {
         const ID: LazyLock<TypeId> = LazyLock::new(|| TypeId::new());
-        if self.typevars.get(&ID).is_none() {
+        let id = *ID;
+        if self.typevars.get(&id).is_none() {
             let t = Type::Primitive(Typ::any());
-            self.typevars.insert_cow(*ID, TypeOrAlias::Type(t));
+            self.typevars.insert_cow(id, TypeOrAlias::Type(t));
         }
-        *ID
+        id
     }
 
     pub fn add_typ(&mut self, typ: Type) -> TypeId {
@@ -358,13 +362,15 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
                 let typ = t1.clone();
                 self.define_typevar(t0, typ)
             }
-            (None, None) => bail!("type must be known"),
+            (None, None) => {
+                bail!("type must be known")
+            }
         }
     }
 
     pub(super) fn get_typevar(&self, id: &TypeId) -> Result<&Type> {
         match self.typevars.get(id) {
-            None => bail!("type must be know"),
+            None => bail!("type must be known"),
             Some(TypeOrAlias::Alias(id)) => self.get_typevar(id),
             Some(TypeOrAlias::Type(t)) => Ok(t),
         }
@@ -391,20 +397,13 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         match typ {
             Type::Bottom => Ok(Cow::Borrowed(typ)),
             Type::Primitive(_) => Ok(Cow::Borrowed(typ)),
-            Type::Ref(name) => {
-                let scope = match Path::dirname(&**name) {
-                    None => scope,
-                    Some(dn) => &*scope.append(dn),
-                };
-                let name = Path::basename(&**name).unwrap_or("");
-                match self.typedefs.get(scope) {
-                    None => bail!("undefined type {name} in scope {scope}"),
-                    Some(defs) => match defs.get(name) {
-                        None => bail!("undefined type {name} in scope {scope}"),
-                        Some(typ) => Ok(Cow::Owned(typ.clone())),
-                    },
-                }
-            }
+            Type::Ref(name) => self
+                .find_visible(scope, name, |scope, name| {
+                    self.typedefs.get(scope).and_then(|defs| {
+                        defs.get(name).map(|typ| Cow::Owned(typ.clone()))
+                    })
+                })
+                .ok_or_else(|| anyhow!("undefined type {name} in scope {scope}")),
             Type::Set(ts) => {
                 let mut res: SmallVec<[Cow<Type>; 20]> = smallvec![];
                 for t in ts.iter() {

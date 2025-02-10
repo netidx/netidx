@@ -58,13 +58,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Lambda<C, E> 
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C, E> {
-    fn typecheck(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        args: &mut [Node<C, E>],
-    ) -> Result<FnType> {
+    fn typecheck(&self, ctx: &mut ExecCtx<C, E>, args: &[Node<C, E>]) -> Result<FnType> {
         let spec = &self.spec;
-        for (arg, (_, typ)) in args.iter_mut().zip(spec.argspec.iter()) {
+        for (arg, (_, typ)) in args.iter().zip(spec.argspec.iter()) {
             arg.typecheck(ctx)?;
             ctx.env.check_typevar_contains(*typ, arg.typ)?;
         }
@@ -114,7 +110,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
             }
         }
         let body = Node::compile_int(ctx, body, &scope, tid);
-        match dbg!(body.extract_err()) {
+        match body.extract_err() {
             None => Ok(Self { argids, spec, eid, body }),
             Some(e) => bail!("{e}"),
         }
@@ -122,8 +118,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
 }
 
 struct BuiltIn<C: Ctx + 'static, E: Debug + Clone + 'static> {
+    name: &'static str,
     typ: FnType,
-    scope: ModPath,
     spec: LambdaTVars,
     apply: Box<dyn Apply<C, E> + Send + Sync + 'static>,
 }
@@ -140,16 +136,16 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for BuiltIn<C, E>
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<C, E> {
-    fn typecheck(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        args: &mut [Node<C, E>],
-    ) -> Result<FnType> {
+    fn typecheck(&self, ctx: &mut ExecCtx<C, E>, args: &[Node<C, E>]) -> Result<FnType> {
         let spec = &self.spec;
         if spec.argspec.len() != self.typ.args.len()
-            || spec.vargs.is_none() && self.typ.vargs != Type::Bottom
+            || spec.vargs.is_none()
+                && match self.typ.vargs {
+                    Type::Bottom => false,
+                    _ => true,
+                }
         {
-            bail!("arity mismatch in builtin specification")
+            bail!("in builtin {} arity mismatch in builtin specification", self.name)
         }
         if args.len() < self.typ.args.len()
             || (args.len() > self.typ.args.len() && self.typ.vargs == Type::Bottom)
@@ -205,12 +201,12 @@ pub enum PatternNode<C: Ctx + 'static, E: Debug + Clone + 'static> {
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
-    fn extract_err(&self) -> Option<&ArcStr> {
+    fn extract_err(&self) -> Option<ArcStr> {
         match self {
             PatternNode::Underscore
             | PatternNode::Typ { tag: _, bind: _, guard: None } => None,
             PatternNode::Typ { tag: _, bind: _, guard: Some(c) } => c.node.extract_err(),
-            PatternNode::Error(e) => Some(e),
+            PatternNode::Error(e) => Some(e.clone()),
         }
     }
 
@@ -453,16 +449,25 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
     }
 
     /// extracts the first error
-    pub fn extract_err(&self) -> Option<&ArcStr> {
+    pub fn extract_err(&self) -> Option<ArcStr> {
         match &self.kind {
-            NodeKind::Error { error: Some(e), .. } => Some(e),
-            NodeKind::Error { children, .. } => {
+            NodeKind::Error { error, children, .. } => {
+                let mut s = CompactString::new("");
+                if let Some(e) = error {
+                    s.push_str(e);
+                    s.push_str(", ");
+                }
                 for node in children {
                     if let Some(e) = node.extract_err() {
-                        return Some(e);
+                        s.push_str(e.as_str());
+                        s.push_str(", ");
                     }
                 }
-                None
+                if s.len() > 0 {
+                    Some(ArcStr::from(s.as_str()))
+                } else {
+                    None
+                }
             }
             NodeKind::Constant(_)
             | NodeKind::Lambda { .. }
@@ -547,17 +552,18 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 .unwrap_or_else(|| TypeId::new());
             let spec = LambdaTVars { argspec, vargs, rtype };
             let res = match body.clone() {
-                Either::Right(builtin) => match ctx.builtins.get(&*builtin) {
+                Either::Right(builtin) => match ctx.builtins.get_key_value(&*builtin) {
                     None => bail!("unknown builtin function {builtin}"),
-                    Some((typ, init)) => {
+                    Some((name, (typ, init))) => {
+                        let name = *name;
                         let init = SArc::clone(init);
                         let typ = ctx.env.resolve_fn_typerefs(&scope, &typ);
                         typ.and_then(|typ| {
                             init(ctx, &scope, args, tid).map(|apply| {
                                 let f: Box<dyn ApplyTyped<C, E> + Send + Sync + 'static> =
                                     Box::new(BuiltIn {
+                                        name,
                                         typ,
-                                        scope: scope.clone(),
                                         spec,
                                         apply,
                                     });
@@ -852,8 +858,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         }
     }
 
-    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
-        match &mut self.kind {
+    fn typecheck(&self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        match &self.kind {
             NodeKind::Add { lhs, rhs }
             | NodeKind::Sub { lhs, rhs }
             | NodeKind::Mul { lhs, rhs }
@@ -903,7 +909,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             }
             NodeKind::Connect(_, node) => Ok(node.typecheck(ctx)?),
             NodeKind::Apply { args, function } => {
-                for n in args.iter_mut() {
+                for n in args.iter() {
                     n.typecheck(ctx)?
                 }
                 let ftyp = function.typecheck(ctx, args)?;
@@ -970,6 +976,17 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         let top_id = spec.id;
         let env = ctx.env.clone();
         let node = Self::compile_int(ctx, spec, scope, top_id);
+        let node = match node.typecheck(ctx) {
+            Ok(()) => node,
+            Err(e) => Node {
+                spec: node.spec.clone(),
+                typ: TypeId::new(),
+                kind: NodeKind::Error {
+                    error: Some(format_compact!("{e}").as_str().into()),
+                    children: Box::from_iter([node]),
+                },
+            },
+        };
         if node.is_err() {
             ctx.env = env;
         }

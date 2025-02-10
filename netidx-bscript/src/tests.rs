@@ -170,7 +170,7 @@ macro_rules! run {
             let mut state = TestState::new().await?;
             let mut n = Node::compile(&mut state.ctx, &ModPath::root(), $code.parse()?);
             if let Some(e) = n.extract_err() {
-                if $pred(Err(anyhow!("compilation failed {}", dbg!(e)))) {
+                if $pred(Err(dbg!(anyhow!("compilation failed {e}")))) {
                     return Ok(());
                 }
             }
@@ -341,6 +341,30 @@ const LIB_CORE_AND: &str = r#"
 "#;
 
 run!(lib_core_and, LIB_CORE_AND, |v: Result<&Value>| match v {
+    Ok(Value::True) => true,
+    _ => false,
+});
+
+const SIMPLE_TYPECHECK: &str = r#"
+{
+  "foo" + 1
+}
+"#;
+
+run!(simple_typecheck, SIMPLE_TYPECHECK, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const TCFAIL: &str = r#"
+{
+  let x = 1;
+  let y = x + 1;
+  true
+}
+"#;
+
+run!(tcfail, TCFAIL, |v: Result<&Value>| match v {
     Ok(Value::True) => true,
     _ => false,
 });

@@ -78,9 +78,9 @@ pub trait Apply<C: Ctx, E: Debug + Clone> {
 
 pub trait ApplyTyped<C: Ctx, E: Debug + Clone>: Apply<C, E> {
     fn typecheck(
-        &mut self,
+        &self,
         ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
+        from: &[Node<C, E>],
     ) -> Result<FnType>;
 }
 

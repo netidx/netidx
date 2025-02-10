@@ -288,7 +288,7 @@ struct StringConcatEv;
 
 impl EvalCached for StringConcatEv {
     const NAME: &str = "string_concat";
-    deftype!("fn(@args: string) -> string");
+    deftype!("fn(@args: any) -> string");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         thread_local! {
@@ -333,7 +333,7 @@ pub mod str {
     pub let dirname = |path| 'dirname
     pub let basename = |path| 'basename
     pub let join = |sep, @args| 'string_join
-    pub let concat = |s, @args| 'string_concat
+    pub let concat = |@args| 'string_concat
 }
 "#;
 
