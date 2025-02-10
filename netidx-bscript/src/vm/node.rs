@@ -59,13 +59,24 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Lambda<C, E> 
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C, E> {
     fn typecheck(&self, ctx: &mut ExecCtx<C, E>, args: &[Node<C, E>]) -> Result<FnType> {
+        macro_rules! wrap {
+            ($n:expr, $e:expr) => {
+                match $e {
+                    Ok(x) => Ok(x),
+                    Err(e) => Err(anyhow!("in expr: {}, type error: {e}", $n.spec)),
+                }
+            };
+        }
         let spec = &self.spec;
         for (arg, (_, typ)) in args.iter().zip(spec.argspec.iter()) {
-            arg.typecheck(ctx)?;
-            ctx.env.check_typevar_contains(*typ, arg.typ)?;
+            wrap!(arg, arg.typecheck(ctx))?;
+            wrap!(arg, ctx.env.check_typevar_contains(true, *typ, arg.typ))?;
         }
-        self.body.typecheck(ctx)?;
-        ctx.env.check_typevar_contains(spec.rtype, self.body.typ)?;
+        wrap!(self.body, self.body.typecheck(ctx))?;
+        wrap!(
+            self.body,
+            ctx.env.check_typevar_contains(true, spec.rtype, self.body.typ)
+        )?;
         Ok(FnType {
             args: Arc::from_iter(
                 spec.argspec
@@ -141,6 +152,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for BuiltIn<C, E>
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<C, E> {
     fn typecheck(&self, ctx: &mut ExecCtx<C, E>, args: &[Node<C, E>]) -> Result<FnType> {
+        macro_rules! wrap {
+            ($n:expr, $e:expr) => {
+                match $e {
+                    Ok(x) => Ok(x),
+                    Err(e) => Err(anyhow!("in expr: {}, type error: {e}", $n.spec)),
+                }
+            };
+        }
         let spec = &self.spec;
         if spec.argspec.len() != self.typ.args.len()
             || spec.vargs.is_none()
@@ -157,21 +176,23 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<
             let vargs = if self.typ.vargs != Type::Bottom { "at least " } else { "" };
             bail!("expected {}{} arguments got {}", spec.argspec.len(), vargs, args.len())
         }
-        for ((_, id), typ) in spec.argspec.iter().zip(self.typ.args.iter()) {
-            ctx.env.define_typevar(*id, typ.clone())?
+        for (i, ((_, id), typ)) in
+            spec.argspec.iter().zip(self.typ.args.iter()).enumerate()
+        {
+            wrap!(args[i], ctx.env.define_typevar(*id, typ.clone()))?
         }
         if let Some(id) = spec.vargs {
             ctx.env.define_typevar(id, self.typ.vargs.clone())?;
         }
         ctx.env.define_typevar(spec.rtype, self.typ.rtype.clone())?;
         for i in 0..args.len() {
-            args[i].typecheck(ctx)?;
+            wrap!(args[i], args[i].typecheck(ctx))?;
             let atyp = if i < spec.argspec.len() {
                 spec.argspec[i].1
             } else {
                 spec.vargs.unwrap()
             };
-            ctx.env.check_typevar_contains(atyp, args[i].typ)?
+            wrap!(args[i], ctx.env.check_typevar_contains(false, atyp, args[i].typ))?
         }
         Ok(self.typ.clone())
     }
@@ -864,9 +885,12 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
     fn typecheck(&self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         macro_rules! wrap {
             ($e:expr) => {
+                wrap!(self.spec, $e)
+            };
+            ($n:expr, $e:expr) => {
                 match $e {
                     Ok(x) => Ok(x),
-                    Err(e) => Err(anyhow!("in expr: {}, type error: {e}", self.spec)),
+                    Err(e) => Err(anyhow!("in expr: {}, type error: {e}", $n)),
                 }
             };
         }
@@ -878,22 +902,22 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 wrap!(lhs.node.typecheck(ctx))?;
                 wrap!(rhs.node.typecheck(ctx))?;
                 let id = ctx.env.number();
-                wrap!(ctx.env.check_typevar_contains(id, lhs.node.typ))?;
-                wrap!(ctx.env.check_typevar_contains(id, rhs.node.typ))?;
+                wrap!(ctx.env.check_typevar_contains(false, id, lhs.node.typ))?;
+                wrap!(ctx.env.check_typevar_contains(false, id, rhs.node.typ))?;
                 Ok(())
             }
             NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {
                 wrap!(lhs.node.typecheck(ctx))?;
                 wrap!(rhs.node.typecheck(ctx))?;
                 let id = ctx.env.boolean();
-                wrap!(ctx.env.check_typevar_contains(id, lhs.node.typ))?;
-                wrap!(ctx.env.check_typevar_contains(id, rhs.node.typ))?;
+                wrap!(ctx.env.check_typevar_contains(false, id, lhs.node.typ))?;
+                wrap!(ctx.env.check_typevar_contains(false, id, rhs.node.typ))?;
                 Ok(())
             }
             NodeKind::Not { node } => {
                 wrap!(node.typecheck(ctx))?;
                 let id = ctx.env.boolean();
-                wrap!(ctx.env.check_typevar_contains(id, node.typ))?;
+                wrap!(ctx.env.check_typevar_contains(false, id, node.typ))?;
                 Ok(())
             }
             NodeKind::Eq { lhs, rhs }
@@ -915,13 +939,13 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             }
             NodeKind::Bind(_, node) => {
                 wrap!(node.typecheck(ctx))?;
-                wrap!(ctx.env.check_typevar_contains(self.typ, node.typ))?;
+                wrap!(ctx.env.check_typevar_contains(true, self.typ, node.typ))?;
                 Ok(())
             }
             NodeKind::Connect(_, node) => Ok(wrap!(node.typecheck(ctx))?),
             NodeKind::Apply { args, function } => {
                 for n in args.iter() {
-                    wrap!(n.typecheck(ctx))?
+                    wrap!(n, n.typecheck(ctx))?
                 }
                 let ftyp = wrap!(function.typecheck(ctx, args))?;
                 wrap!(ctx.env.define_typevar(self.typ, ftyp.rtype))?;
@@ -967,11 +991,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let mcasesid = ctx.env.add_typ(mcases.clone());
                 wrap!(ctx
                     .env
-                    .check_typevar_contains(arg.node.typ, mcasesid)
+                    .check_typevar_contains(false, arg.node.typ, mcasesid)
                     .map_err(|e| anyhow!("pattern will never match {e}")))?;
                 wrap!(ctx
                     .env
-                    .check_typevar_contains(mtypeid, arg.node.typ)
+                    .check_typevar_contains(false, mtypeid, arg.node.typ)
                     .map_err(|e| anyhow!("missing match cases {e}")))?;
                 ctx.env.define_typevar(self.typ, rtype)
             }

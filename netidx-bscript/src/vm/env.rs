@@ -337,15 +337,16 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
 
     pub(super) fn check_typevar_contains(
         &mut self,
+        undef_ok: bool,
         t0: TypeId,
         t1: TypeId,
     ) -> Result<()> {
         match (self.typevars.get(&t0), self.typevars.get(&t1)) {
             (Some(TypeOrAlias::Alias(t0)), Some(TypeOrAlias::Alias(t1))) => {
-                self.check_typevar_contains(*t0, *t1)
+                self.check_typevar_contains(undef_ok, *t0, *t1)
             }
-            (Some(TypeOrAlias::Alias(t0)), _) => self.check_typevar_contains(*t0, t1),
-            (_, Some(TypeOrAlias::Alias(t1))) => self.check_typevar_contains(t0, *t1),
+            (Some(TypeOrAlias::Alias(t0)), _) => self.check_typevar_contains(undef_ok, *t0, t1),
+            (_, Some(TypeOrAlias::Alias(t1))) => self.check_typevar_contains(undef_ok, t0, *t1),
             (Some(TypeOrAlias::Type(typ0)), Some(TypeOrAlias::Type(typ1)))
                 if typ0.contains(typ1) =>
             {
@@ -362,6 +363,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
                 let typ = t1.clone();
                 self.define_typevar(t0, typ)
             }
+            (None, None) if undef_ok => Ok(()),
             (None, None) => {
                 bail!("type must be known")
             }
