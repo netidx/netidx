@@ -9,7 +9,6 @@ use futures::{
 use fxhash::{FxHashMap, FxHashSet};
 use log::{error, info};
 use netidx::{
-    chars::Chars,
     path::Path,
     pool::{Pool, Pooled},
     publisher::{
@@ -184,7 +183,7 @@ pub mod server {
 			    match req.value {
 				Value::Null => (),
 				Value::Array(a) => for v in &*a {
-				    match v.clone().cast_to::<(Chars, Value)>() {
+				    match v.clone().cast_to::<(ArcStr, Value)>() {
 					Ok((name, val)) => {
 					    if let Some(name) = self.arg_names.get(&*name) {
 						args.insert(name.clone(), val);
@@ -429,7 +428,7 @@ pub mod client {
     #[derive(Debug)]
     struct ProcInner {
         call: Dval,
-        args: OnceCell<FxHashSet<Chars>>,
+        args: OnceCell<FxHashSet<ArcStr>>,
         subscribe_timeout: Duration,
     }
 
@@ -510,19 +509,19 @@ pub mod client {
                             debug!("args are {:?}", v);
                             let args = v
                                 .clone()
-                                .cast_to::<FxHashSet<Chars>>()
+                                .cast_to::<FxHashSet<ArcStr>>()
                                 .ok()
                                 .unwrap_or(HashSet::default());
                             // Another thread may have set these args already,
                             // so ignore if `set` returns Err.
-                            let _: Result<(), FxHashSet<Chars>> = self.0.args.set(args);
+                            let _: Result<(), FxHashSet<ArcStr>> = self.0.args.set(args);
                             break;
                         }
                     }
                 }
             }
             let args = {
-                let mut set: FxHashMap<Chars, Value> = HashMap::default();
+                let mut set: FxHashMap<ArcStr, Value> = HashMap::default();
                 let names = match self.0.args.get() {
                     Some(names) => names,
                     None => bail!("no args set"),

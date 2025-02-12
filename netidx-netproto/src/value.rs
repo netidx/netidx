@@ -9,7 +9,6 @@ use enumflags2::bitflags;
 use fxhash::FxHashMap;
 use indexmap::{IndexMap, IndexSet};
 use netidx_core::{
-    chars::Chars,
     pack::{self, Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
@@ -1937,33 +1936,6 @@ impl FromValue for Bytes {
 impl convert::From<Bytes> for Value {
     fn from(v: Bytes) -> Value {
         Value::Bytes(v.into())
-    }
-}
-
-impl FromValue for Chars {
-    fn from_value(v: Value) -> Res<Self> {
-        match v {
-            Value::String(v) => Ok(Chars::from(v)),
-            v => v.cast(Typ::String).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
-                match v {
-                    Value::String(v) => Ok(Chars::from(v)),
-                    _ => bail!("can't cast"),
-                }
-            }),
-        }
-    }
-
-    fn get(v: Value) -> Option<Self> {
-        match v {
-            Value::String(c) => Some(Chars::from(c)),
-            _ => None,
-        }
-    }
-}
-
-impl convert::From<Chars> for Value {
-    fn from(v: Chars) -> Value {
-        Value::String(ArcStr::from(&*v))
     }
 }
 

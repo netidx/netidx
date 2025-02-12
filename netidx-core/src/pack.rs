@@ -1592,11 +1592,12 @@ impl Pack for anyhow::Error {
         if len > buf.remaining() {
             Err(PackError::BufferShort)
         } else {
-            let s = match crate::chars::Chars::from_bytes(buf.copy_to_bytes(len)) {
+            let b = buf.copy_to_bytes(len);
+            let s = match str::from_utf8(&b[..]) {
                 Ok(s) => s,
                 Err(_) => return Err(PackError::InvalidFormat),
             };
-            Ok(anyhow::anyhow!(s))
+            Ok(anyhow::anyhow!(ArcStr::from(s)))
         }
     }
 }

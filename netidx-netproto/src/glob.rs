@@ -3,7 +3,6 @@ use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use globset;
 use netidx_core::{
-    chars::Chars,
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
@@ -208,16 +207,6 @@ impl FromValue for GlobSet {
     }
 }
 
-impl<'a> TryFrom<&'a [Chars]> for GlobSet {
-    type Error = anyhow::Error;
-
-    fn try_from(value: &[Chars]) -> result::Result<Self, Self::Error> {
-        let v: SmallVec<[Glob; 8]> =
-            value.iter().map(|c| Glob::new(ArcStr::from(&**c))).collect::<Result<_>>()?;
-        GlobSet::new(false, v)
-    }
-}
-
 impl<'a> TryFrom<&'a [String]> for GlobSet {
     type Error = anyhow::Error;
 
@@ -235,18 +224,6 @@ impl<'a> TryFrom<&'a [ArcStr]> for GlobSet {
         let v: SmallVec<[Glob; 8]> = value
             .iter()
             .map(|c| Glob::new(ArcStr::from(c.clone())))
-            .collect::<Result<_>>()?;
-        GlobSet::new(false, v)
-    }
-}
-
-impl TryFrom<Vec<Chars>> for GlobSet {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Vec<Chars>) -> result::Result<Self, Self::Error> {
-        let v: SmallVec<[Glob; 8]> = value
-            .into_iter()
-            .map(|c| Glob::new(ArcStr::from(&*c)))
             .collect::<Result<_>>()?;
         GlobSet::new(false, v)
     }

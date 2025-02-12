@@ -1,5 +1,4 @@
 use crate::{
-    chars::Chars,
     pack::{Pack, PackError},
     utils,
 };
@@ -93,16 +92,6 @@ impl Deref for Path {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl From<Chars> for Path {
-    fn from(c: Chars) -> Path {
-        if is_canonical(&c) {
-            Path(ArcStr::from(c.as_ref()))
-        } else {
-            Path(ArcStr::from(canonize(&c)))
-        }
     }
 }
 
