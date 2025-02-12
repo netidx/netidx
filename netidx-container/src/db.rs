@@ -11,7 +11,6 @@ use futures::{
     select_biased,
 };
 use netidx::{
-    chars::Chars,
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
@@ -230,25 +229,25 @@ enum TxnOp {
     },
     CreateTable {
         base: Path,
-        rows: Vec<Chars>,
-        cols: Vec<Chars>,
+        rows: Vec<ArcStr>,
+        cols: Vec<ArcStr>,
         lock: bool,
     },
     AddTableColumns {
         base: Path,
-        cols: Vec<Chars>,
+        cols: Vec<ArcStr>,
     },
     AddTableRows {
         base: Path,
-        rows: Vec<Chars>,
+        rows: Vec<ArcStr>,
     },
     DelTableColumns {
         base: Path,
-        cols: Vec<Chars>,
+        cols: Vec<ArcStr>,
     },
     DelTableRows {
         base: Path,
-        rows: Vec<Chars>,
+        rows: Vec<ArcStr>,
     },
     SetLocked(Path),
     SetUnlocked(Path),
@@ -348,27 +347,27 @@ impl Txn {
     pub fn create_table(
         &mut self,
         base: Path,
-        rows: Vec<Chars>,
-        cols: Vec<Chars>,
+        rows: Vec<ArcStr>,
+        cols: Vec<ArcStr>,
         lock: bool,
         reply: Reply,
     ) {
         self.0.push((TxnOp::CreateTable { base, rows, cols, lock }, reply))
     }
 
-    pub fn add_table_columns(&mut self, base: Path, cols: Vec<Chars>, reply: Reply) {
+    pub fn add_table_columns(&mut self, base: Path, cols: Vec<ArcStr>, reply: Reply) {
         self.0.push((TxnOp::AddTableColumns { base, cols }, reply))
     }
 
-    pub fn add_table_rows(&mut self, base: Path, rows: Vec<Chars>, reply: Reply) {
+    pub fn add_table_rows(&mut self, base: Path, rows: Vec<ArcStr>, reply: Reply) {
         self.0.push((TxnOp::AddTableRows { base, rows }, reply))
     }
 
-    pub fn del_table_columns(&mut self, base: Path, cols: Vec<Chars>, reply: Reply) {
+    pub fn del_table_columns(&mut self, base: Path, cols: Vec<ArcStr>, reply: Reply) {
         self.0.push((TxnOp::DelTableColumns { base, cols }, reply))
     }
 
-    pub fn del_table_rows(&mut self, base: Path, rows: Vec<Chars>, reply: Reply) {
+    pub fn del_table_rows(&mut self, base: Path, rows: Vec<ArcStr>, reply: Reply) {
         self.0.push((TxnOp::DelTableRows { base, rows }, reply))
     }
 
@@ -803,8 +802,8 @@ fn create_table(
     locked: &sled::Tree,
     pending: &mut Update,
     base: Path,
-    rows: Vec<Chars>,
-    cols: Vec<Chars>,
+    rows: Vec<ArcStr>,
+    cols: Vec<ArcStr>,
     lock: bool,
 ) -> Result<()> {
     use rayon::prelude::*;
@@ -876,7 +875,7 @@ fn add_table_columns(
     data: &sled::Tree,
     pending: &mut Update,
     base: Path,
-    cols: Vec<Chars>,
+    cols: Vec<ArcStr>,
 ) -> Result<()> {
     use rayon::prelude::*;
     let cols: Vec<String> =
@@ -912,7 +911,7 @@ fn del_table_columns(
     data: &sled::Tree,
     pending: &mut Update,
     base: Path,
-    cols: Vec<Chars>,
+    cols: Vec<ArcStr>,
 ) -> Result<()> {
     use rayon::prelude::*;
     let cols: Vec<String> =
@@ -941,7 +940,7 @@ fn add_table_rows(
     data: &sled::Tree,
     pending: &mut Update,
     base: Path,
-    rows: Vec<Chars>,
+    rows: Vec<ArcStr>,
 ) -> Result<()> {
     use rayon::prelude::*;
     let rows: Vec<String> =
@@ -996,7 +995,7 @@ fn del_table_rows(
     data: &sled::Tree,
     pending: &mut Update,
     base: Path,
-    rows: Vec<Chars>,
+    rows: Vec<ArcStr>,
 ) -> Result<()> {
     use rayon::prelude::*;
     let rows: Vec<String> =
@@ -1153,7 +1152,7 @@ fn send_reply(reply: Reply, r: Result<()>) {
             reply.send(Value::Ok);
         }
         (Err(e), Some(reply)) => {
-            let e = Value::Error(Chars::from(format!("{}", e)));
+            let e = Value::Error(format!("{}", e).into());
             reply.send(e);
         }
         (_, None) => (),

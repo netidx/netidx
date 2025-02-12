@@ -8,8 +8,9 @@ mod rpcs;
 mod stats;
 
 use anyhow::{anyhow, bail, Result};
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 pub use db::{Datum, DatumKind, Db, Reply, Sendable, Txn};
+use chrono::prelude::*;
 use futures::{
     self,
     channel::{mpsc, oneshot},
@@ -21,7 +22,6 @@ use futures::{
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use log::{error, info};
 use netidx::{
-    chars::Chars,
     config::Config,
     pack::Pack,
     path::Path,
@@ -35,8 +35,9 @@ use netidx::{
     utils::BatchItem,
 };
 use netidx_bscript::{
-    expr::{Expr, ExprId},
-    vm::{self, Apply, Ctx, ExecCtx, InitFn, Node, Register, RpcCallId, TimerId},
+    deftype,
+    expr::{self, parser::parse_fn_type, Expr, ExprId, FnType, ModPath},
+    vm::{self, node::Node, Apply, BindId, BuiltIn, Ctx, ExecCtx, InitFn},
 };
 use netidx_protocols::rpc;
 use parking_lot::Mutex;
@@ -54,7 +55,7 @@ use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 use structopt::StructOpt;
@@ -100,7 +101,7 @@ impl Params {
 }
 
 lazy_static! {
-    static ref VARS: Pool<Vec<(Path, Chars, Value)>> = Pool::new(8, 2048);
+    static ref VARS: Pool<Vec<(BindId, Value)>> = Pool::new(8, 2048);
     static ref REFS: Pool<Vec<(Path, Value)>> = Pool::new(8, 16384);
     static ref REFIDS: Pool<Vec<ExprId>> = Pool::new(8, 2048);
     static ref PKBUF: Pool<Vec<u8>> = Pool::new(8, 16384);
@@ -113,7 +114,7 @@ macro_rules! or_reply {
             Ok(r) => r,
             Err(e) => {
                 if let Some(reply) = $reply {
-                    let e = Value::Error(Chars::from(format!("{}", e)));
+                    let e = Value::Error(format!("{}", e).into());
                     reply.send(e);
                 }
                 return;
@@ -126,8 +127,8 @@ struct Refs {
     refs: FxHashSet<Path>,
     rpcs: FxHashSet<Path>,
     subs: FxHashSet<SubId>,
-    vars: FxHashSet<Chars>,
-    timers: FxHashSet<TimerId>,
+    vars: FxHashSet<BindId>,
+    timers: FxHashSet<BindId>,
 }
 
 impl Refs {
@@ -189,25 +190,25 @@ enum UserEv {
 
 enum LcEvent {
     Refs,
-    RpcCall { name: Path, args: Vec<(Chars, Value)>, id: RpcCallId },
-    RpcReply { name: Path, id: RpcCallId, result: Value },
-    Timer(TimerId, Duration),
+    RpcCall { name: Path, args: Vec<(ArcStr, Value)>, id: BindId },
+    RpcReply { name: Path, id: BindId, result: Value },
+    Timer(BindId, Duration),
 }
 
 struct Lc {
     current_path: Path,
     db: Db,
-    var: FxHashMap<Chars, FxHashMap<ExprId, usize>>,
+    var: FxHashMap<BindId, FxHashMap<ExprId, usize>>,
     sub: FxHashMap<SubId, FxHashMap<ExprId, usize>>,
     rpc: FxHashMap<Path, FxHashSet<ExprId>>,
-    timer: FxHashMap<TimerId, FxHashMap<ExprId, usize>>,
+    timer: FxHashMap<BindId, FxHashMap<ExprId, usize>>,
     refs: FxHashMap<Path, FxHashMap<ExprId, usize>>,
     rels: FxHashMap<Path, FxHashSet<ExprId>>,
     forward_refs: FxHashMap<ExprId, Refs>,
     subscriber: Subscriber,
     publisher: Publisher,
     sub_updates: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
-    var_updates: Pooled<Vec<(Path, Chars, Value)>>,
+    var_updates: Pooled<Vec<(BindId, Value)>>,
     ref_updates: Pooled<Vec<(Path, Value)>>,
     by_id: FxHashMap<Id, Published>,
     by_path: HashMap<Path, Published>,
@@ -328,8 +329,6 @@ impl Ctx for Lc {
         dv
     }
 
-    fn register_fn(&mut self, _: netidx::chars::Chars, _: netidx::path::Path) {}
-
     fn unsubscribe(&mut self, _path: Path, dv: Dval, ref_id: ExprId) {
         if let Entry::Occupied(mut etbl) = self.sub.entry(dv.id()) {
             let tbl = etbl.get_mut();
@@ -350,18 +349,18 @@ impl Ctx for Lc {
     }
 
     // CR estokes: future optimization, use scope to avoid sending unecessary events
-    fn ref_var(&mut self, name: Chars, _scope: Path, ref_id: ExprId) {
+    fn ref_var(&mut self, id: BindId, ref_id: ExprId) {
         *self
             .var
-            .entry(name.clone())
+            .entry(id)
             .or_insert_with(|| HashMap::default())
             .entry(ref_id)
             .or_insert(0) += 1;
-        self.forward_refs.entry(ref_id).or_insert_with(Refs::new).vars.insert(name);
+        self.forward_refs.entry(ref_id).or_insert_with(Refs::new).vars.insert(*id);
     }
 
-    fn unref_var(&mut self, name: Chars, _scope: Path, ref_id: ExprId) {
-        if let Entry::Occupied(mut etbl) = self.var.entry(name.clone()) {
+    fn unref_var(&mut self, id: BindId, ref_id: ExprId) {
+        if let Entry::Occupied(mut etbl) = self.var.entry(id) {
             let tbl = etbl.get_mut();
             if let Entry::Occupied(mut ecnt) = tbl.entry(ref_id) {
                 let cnt = ecnt.get_mut();
@@ -372,31 +371,23 @@ impl Ctx for Lc {
                         etbl.remove();
                     }
                     if let Some(refs) = self.forward_refs.get_mut(&ref_id) {
-                        refs.vars.remove(&name);
+                        refs.vars.remove(&id);
                     }
                 }
             }
         }
     }
 
-    fn set_var(
-        &mut self,
-        variables: &mut FxHashMap<Path, FxHashMap<Chars, Value>>,
-        local: bool,
-        scope: Path,
-        name: Chars,
-        value: Value,
-    ) {
-        vm::store_var(variables, local, &scope, &name, value.clone());
-        self.var_updates.push((scope, name, value));
+    fn set_var(&mut self, id: BindId, value: Value) {
+        self.var_updates.push((id, value));
     }
 
     fn call_rpc(
         &mut self,
         name: Path,
-        args: Vec<(Chars, Value)>,
+        args: Vec<(ArcStr, Value)>,
         ref_id: ExprId,
-        id: RpcCallId,
+        id: BindId,
     ) {
         self.rpc.entry(name.clone()).or_insert_with(|| HashSet::default()).insert(ref_id);
         self.forward_refs
@@ -408,7 +399,7 @@ impl Ctx for Lc {
             self.events.unbounded_send(LcEvent::RpcCall { name, args, id });
     }
 
-    fn set_timer(&mut self, id: TimerId, timeout: Duration, ref_by: ExprId) {
+    fn set_timer(&mut self, id: BindId, timeout: Duration, ref_by: ExprId) {
         *self
             .timer
             .entry(id)
@@ -422,7 +413,7 @@ impl Ctx for Lc {
 
 struct Ref {
     id: ExprId,
-    path: Option<Chars>,
+    path: Option<ArcStr>,
     current: Value,
 }
 
@@ -430,19 +421,19 @@ impl Ref {
     fn get_path(
         from: &[Node<Lc, UserEv>],
         ctx: &mut ExecCtx<Lc, UserEv>,
-    ) -> Option<Chars> {
+    ) -> Option<ArcStr> {
         match from {
-            [path] => path.current(ctx).and_then(|v| v.get_as::<Chars>()),
+            [path] => path.current(ctx).and_then(|v| v.get_as::<ArcStr>()),
             _ => None,
         }
     }
 
-    fn get_current(ctx: &ExecCtx<Lc, UserEv>, path: &Option<Chars>) -> Value {
+    fn get_current(ctx: &ExecCtx<Lc, UserEv>, path: &Option<ArcStr>) -> Value {
         macro_rules! or_ref {
             ($e:expr) => {
                 match $e {
                     Some(e) => e,
-                    None => return Value::Error(Chars::from("#REF")),
+                    None => return Value::Error(literal!("#REF")),
                 }
             };
         }
@@ -455,7 +446,7 @@ impl Ref {
             path.as_ref()
         };
         match or_ref!(ctx.user.db.lookup(dbpath).ok().flatten()) {
-            Datum::Deleted => Value::Error(Chars::from("#REF")),
+            Datum::Deleted => Value::Error(literal!("#REF")),
             Datum::Data(v) => v,
             Datum::Formula(fv, wv) => {
                 if is_fpath {
@@ -464,7 +455,7 @@ impl Ref {
                     wv
                 } else {
                     match or_ref!(ctx.user.by_path.get(dbpath)) {
-                        Published::Data(_) => return Value::Error(Chars::from("#REF")),
+                        Published::Data(_) => return Value::Error(literal!("#REF")),
                         Published::Formula(fifo) => {
                             or_ref!(ctx.user.publisher.current(&fifo.data.id()))
                         }
@@ -484,16 +475,15 @@ impl Ref {
                     None
                 }
             }
-            vm::Event::User(UserEv::OnWriteEvent(_))
+            vm::Event::Init
+            | vm::Event::User(UserEv::OnWriteEvent(_))
             | vm::Event::User(UserEv::Rel)
             | vm::Event::Netidx(_, _)
-            | vm::Event::Rpc(_, _)
-            | vm::Event::Timer(_)
-            | vm::Event::Variable(_, _, _) => None,
+            | vm::Event::Variable(_, _) => None,
         }
     }
 
-    fn set_ref(&mut self, ctx: &mut ExecCtx<Lc, UserEv>, path: Option<Chars>) {
+    fn set_ref(&mut self, ctx: &mut ExecCtx<Lc, UserEv>, path: Option<ArcStr>) {
         if let Some(path) = self.path.take() {
             let path = Path::from(path);
             if let Entry::Occupied(mut etbl) = ctx.user.refs.entry(path.clone()) {
@@ -532,24 +522,22 @@ impl Ref {
     }
 }
 
-impl Register<Lc, UserEv> for Ref {
-    fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
-        let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, _, id| {
+impl BuiltIn<Lc, UserEv> for Ref {
+    const NAME: &str = "ref";
+    deftype!("fn(string) -> any");
+
+    fn init(ctx: &mut ExecCtx<Lc, UserEv>) -> InitFn<Lc, UserEv> {
+        Arc::new(|ctx, from, _, id| {
             let path = Ref::get_path(from, ctx);
             let current = Ref::get_current(ctx, &path);
             let mut t = Box::new(Ref { id, path: None, current });
             t.set_ref(ctx, path);
             t
-        });
-        ctx.functions.insert("ref".into(), f);
+        })
     }
 }
 
 impl Apply<Lc, UserEv> for Ref {
-    fn current(&self, _ctx: &mut ExecCtx<Lc, UserEv>) -> Option<Value> {
-        Some(self.current.clone())
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<Lc, UserEv>,
@@ -557,7 +545,7 @@ impl Apply<Lc, UserEv> for Ref {
         event: &vm::Event<UserEv>,
     ) -> Option<Value> {
         match from {
-            [path] => match path.update(ctx, event).map(|p| p.get_as::<Chars>()) {
+            [path] => match path.update(ctx, event).map(|p| p.get_as::<ArcStr>()) {
                 None => self.apply_ev(event),
                 Some(new_path) => {
                     if new_path != self.path {
@@ -608,8 +596,9 @@ impl Rel {
             (None, Some(c)) => invalid || c.abs() > 255,
         };
         if invalid {
-            let e = "rel(), rel([col]), rel([row], [col]): expected at most 2 args";
-            Value::Error(Chars::from(e))
+            let e =
+                literal!("rel(), rel([col]), rel([row], [col]): expected at most 2 args");
+            Value::Error(e)
         } else {
             let loc = &self.loc;
             let loc = match row {
@@ -621,16 +610,19 @@ impl Rel {
                 Some(offset) => ctx.user.db.relative_column(&loc, offset).ok().flatten(),
             });
             match loc {
-                None => Value::Error(Chars::from("#LOC")),
-                Some(p) => Value::String(Chars::from(String::from(p.as_ref()))),
+                None => Value::Error(literal!("#LOC")),
+                Some(p) => Value::String(p.as_ref().into()),
             }
         }
     }
 }
 
-impl Register<Lc, UserEv> for Rel {
-    fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
-        let f: InitFn<Lc, UserEv> = Arc::new(|ctx, from, _, id| {
+impl BuiltIn<Lc, UserEv> for Rel {
+    const NAME: &str = "rel";
+    deftype!("fn(@args:int) -> any");
+
+    fn init(ctx: &mut ExecCtx<Lc, UserEv>) -> InitFn<Lc, UserEv> {
+        Arc::new(|ctx, from, _, id| {
             let loc = ctx.user.current_path.clone();
             if let Some(table) = Path::dirname(&loc).and_then(Path::dirname) {
                 ctx.user
@@ -639,19 +631,14 @@ impl Register<Lc, UserEv> for Rel {
                     .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
                     .insert(id);
             }
-            let mut t = Rel { loc, current: Value::Error(Chars::from("#LOC")) };
+            let mut t = Rel { loc, current: Value::Error(literal!("#LOC")) };
             t.current = t.eval(ctx, from);
             Box::new(t)
-        });
-        ctx.functions.insert("rel".into(), f);
+        })
     }
 }
 
 impl Apply<Lc, UserEv> for Rel {
-    fn current(&self, _ctx: &mut ExecCtx<Lc, UserEv>) -> Option<Value> {
-        Some(self.current.clone())
-    }
-
     fn update(
         &mut self,
         ctx: &mut ExecCtx<Lc, UserEv>,
@@ -676,41 +663,34 @@ pub(crate) struct OnWriteEvent {
     invalid: bool,
 }
 
-impl Register<Lc, UserEv> for OnWriteEvent {
-    fn register(ctx: &mut ExecCtx<Lc, UserEv>) {
-        let f: InitFn<Lc, UserEv> = Arc::new(|_, from, _, _| {
-            Box::new(OnWriteEvent { cur: None, invalid: from.len() > 0 })
-        });
-        ctx.functions.insert("event".into(), f);
+impl BuiltIn<Lc, UserEv> for OnWriteEvent {
+    const NAME: &str = "event";
+    deftype!("fn() -> any");
+
+    fn init(_ctx: &mut ExecCtx<Lc, UserEv>) -> InitFn<Lc, UserEv> {
+        Arc::new(|_, from, _, _| {
+            Ok(Box::new(OnWriteEvent { cur: None, invalid: from.len() > 0 }))
+        })
     }
 }
 
 impl Apply<Lc, UserEv> for OnWriteEvent {
-    fn current(&self, _ctx: &mut ExecCtx<Lc, UserEv>) -> Option<Value> {
-        if self.invalid {
-            OnWriteEvent::err()
-        } else {
-            self.cur.as_ref().cloned()
-        }
-    }
-
     fn update(
         &mut self,
-        ctx: &mut ExecCtx<Lc, UserEv>,
+        _ctx: &mut ExecCtx<Lc, UserEv>,
         from: &mut [Node<Lc, UserEv>],
         event: &vm::Event<UserEv>,
     ) -> Option<Value> {
         self.invalid = from.len() > 0;
         match event {
-            vm::Event::Variable(_, _, _)
+            vm::Event::Variable(_, _)
+            | vm::Event::Init
             | vm::Event::Netidx(_, _)
-            | vm::Event::Rpc(_, _)
-            | vm::Event::Timer(_)
             | vm::Event::User(UserEv::Ref(_, _))
             | vm::Event::User(UserEv::Rel) => None,
             vm::Event::User(UserEv::OnWriteEvent(value)) => {
                 self.cur = Some(value.clone());
-                self.current(ctx)
+                self.cur.clone()
             }
         }
     }
@@ -718,12 +698,12 @@ impl Apply<Lc, UserEv> for OnWriteEvent {
 
 impl OnWriteEvent {
     fn err() -> Option<Value> {
-        Some(Value::Error(Chars::from("event(): expected 0 arguments")))
+        Some(Value::Error(literal!("event(): expected 0 arguments")))
     }
 }
 
-fn to_chars(value: Value) -> Chars {
-    value.cast_to::<Chars>().ok().unwrap_or_else(|| Chars::from("null"))
+fn to_chars(value: Value) -> ArcStr {
+    value.cast_to::<ArcStr>().ok().unwrap_or_else(|| literal!("null"))
 }
 
 #[must_use = "streams do nothing unless polled"]
@@ -814,12 +794,10 @@ struct ContainerInner {
     db_updates: mpsc::UnboundedReceiver<db::Update>,
     api: Option<rpcs::RpcApi>,
     bscript_event: mpsc::UnboundedReceiver<LcEvent>,
-    rpcs: FxHashMap<
-        Path,
-        (Instant, mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)>),
-    >,
+    rpcs:
+        FxHashMap<Path, (Instant, mpsc::UnboundedSender<(Vec<(ArcStr, Value)>, BindId)>)>,
     timer: OptTimer,
-    timers: BTreeMap<time::Instant, TimerId>,
+    timers: BTreeMap<time::Instant, BindId>,
 }
 
 impl ContainerInner {
@@ -851,9 +829,9 @@ impl ContainerInner {
         };
         let mut ctx =
             ExecCtx::new(Lc::new(db, subscriber, publisher, sub_updates_tx, bs_tx));
-        Ref::register(&mut ctx);
-        Rel::register(&mut ctx);
-        OnWriteEvent::register(&mut ctx);
+        ctx.register_builtin::<Ref>();
+        ctx.register_builtin::<Rel>();
+        ctx.register_builtin::<OnWriteEvent>();
         Ok(Self {
             params,
             api_path,
@@ -912,28 +890,33 @@ impl ContainerInner {
     ) -> Result<()> {
         let expr = formula_txt
             .clone()
-            .cast_to::<Chars>()
+            .cast_to::<ArcStr>()
             .map_err(|e| anyhow!(e))
-            .and_then(|c| c.parse::<Expr>());
+            .and_then(|c| expr::parser::parse_expr(&c));
         let on_write_expr = on_write_txt
             .clone()
-            .cast_to::<Chars>()
+            .cast_to::<ArcStr>()
             .map_err(|e| anyhow!(e))
-            .and_then(|c| c.parse::<Expr>());
+            .and_then(|c| expr::parser::parse_expr(&c));
         let expr_id = expr.as_ref().map(|e| e.id).unwrap_or_else(|_| ExprId::new());
         let on_write_expr_id =
             on_write_expr.as_ref().map(|e| e.id).unwrap_or_else(|_| ExprId::new());
         self.ctx.user.current_path = path.clone();
-        let scope = Path::dirname(&path)
-            .map(|s| Path::from(String::from(s)))
-            .unwrap_or_else(Path::root);
-        let formula_node = expr.map(|e| Node::compile(&mut self.ctx, scope.clone(), e));
-        let on_write_node =
-            on_write_expr.map(|e| Node::compile(&mut self.ctx, scope.clone(), e));
+        let scope = ModPath(
+            Path::dirname(&path)
+                .map(|s| Path::from(String::from(s)))
+                .unwrap_or_else(Path::root),
+        );
+        let mut formula_node = expr.map(|e| Node::compile(&mut self.ctx, &scope, e));
+        let mut on_write_node =
+            on_write_expr.map(|e| Node::compile(&mut self.ctx, &scope, e));
+        if let Some(n) = on_write_node.as_mut().ok() {
+            n.update(&mut self.ctx, &vm::Event::Init);
+        }
         let value = formula_node
-            .as_ref()
+            .as_mut()
             .ok()
-            .and_then(|n| n.current(&mut self.ctx))
+            .and_then(|n| n.update(&mut self.ctx, &vm::Event::Init))
             .unwrap_or(Value::Null);
         let src_path = path.append(".formula");
         let on_write_path = path.append(".on-write");
@@ -1082,17 +1065,11 @@ impl ContainerInner {
             }
             // update variable references
             let v = VARS.take();
-            for (scope, name, value) in
-                replace(&mut self.ctx.user.var_updates, v).drain(..)
-            {
-                if let Some(expr_ids) = self.ctx.user.var.get(&name) {
+            for (id, value) in replace(&mut self.ctx.user.var_updates, v).drain(..) {
+                if let Some(expr_ids) = self.ctx.user.var.get(&id) {
                     refs.extend(expr_ids.keys().copied());
                 }
-                self.update_expr_ids(
-                    batch,
-                    &mut refs,
-                    &vm::Event::Variable(scope, name, value),
-                );
+                self.update_expr_ids(batch, &mut refs, &vm::Event::Variable(id, value));
             }
             n += 1;
         }
@@ -1137,29 +1114,29 @@ impl ContainerInner {
         &mut self,
         batch: &mut UpdateBatch,
         fifo: &Arc<Fifo>,
-        value: Chars,
+        value: ArcStr,
     ) -> Result<()> {
         fifo.src.update(batch, Value::String(value.clone()));
         let mut expr_id = fifo.expr_id.lock();
         self.ctx.user.unref(*expr_id);
         self.ctx.user.remove_rel(&fifo.data_path, *expr_id);
         self.compiled.remove(&expr_id);
-        let dv = match value.parse::<Expr>() {
+        let dv = match expr::parser::parse_expr(&value) {
+            Err(e) => Value::Error(format!("{}", e).into()),
             Ok(expr) => {
                 *expr_id = expr.id;
                 self.ctx.user.current_path = fifo.data_path.clone();
-                let scope = Path::dirname(&fifo.data_path)
-                    .map(|s| Path::from(String::from(s)))
-                    .unwrap_or_else(Path::root);
-                let node = Node::compile(&mut self.ctx, scope, expr);
-                let dv = node.current(&mut self.ctx).unwrap_or(Value::Null);
+                let scope = ModPath(
+                    Path::dirname(&fifo.data_path)
+                        .map(|s| Path::from(String::from(s)))
+                        .unwrap_or_else(Path::root),
+                );
+                let mut node = Node::compile(&mut self.ctx, &scope, expr);
+                let dv =
+                    node.update(&mut self.ctx, &vm::Event::Init).unwrap_or(Value::Null);
                 let c = Compiled::Formula { node, data_id: fifo.data.id() };
                 self.compiled.insert(*expr_id, c);
                 dv
-            }
-            Err(e) => {
-                let e = Chars::from(format!("{}", e));
-                Value::Error(e)
             }
         };
         fifo.data.update(batch, dv.clone());
@@ -1173,24 +1150,27 @@ impl ContainerInner {
         &mut self,
         batch: &mut UpdateBatch,
         fifo: &Arc<Fifo>,
-        value: Chars,
+        value: ArcStr,
     ) -> Result<()> {
         fifo.on_write.update(batch, Value::String(value.clone()));
         let mut expr_id = fifo.on_write_expr_id.lock();
         self.ctx.user.unref(*expr_id);
         self.ctx.user.remove_rel(&fifo.data_path, *expr_id);
         self.compiled.remove(&expr_id);
-        match value.parse::<Expr>() {
+        match expr::parser::parse_expr(&value) {
+            Err(_) => (), // CR estokes: log and report to user
             Ok(expr) => {
                 *expr_id = expr.id;
                 self.ctx.user.current_path = fifo.data_path.clone();
-                let scope = Path::dirname(&fifo.data_path)
-                    .map(|s| Path::from(String::from(s)))
-                    .unwrap_or_else(Path::root);
-                let node = Node::compile(&mut self.ctx, scope, expr);
+                let scope = ModPath(
+                    Path::dirname(&fifo.data_path)
+                        .map(|s| Path::from(String::from(s)))
+                        .unwrap_or_else(Path::root),
+                );
+                let mut node = Node::compile(&mut self.ctx, &scope, expr);
+                node.update(&mut self.ctx, &vm::Event::Init);
                 self.compiled.insert(*expr_id, Compiled::OnWrite(node));
             }
-            Err(_) => (), // CR estokes: log and report to user
         }
         let v = Value::String(value.clone());
         self.ctx.user.ref_updates.push((fifo.on_write_path.clone(), v));
@@ -1311,12 +1291,12 @@ impl ContainerInner {
     fn get_rpc_proc(
         &mut self,
         name: &Path,
-    ) -> mpsc::UnboundedSender<(Vec<(Chars, Value)>, RpcCallId)> {
+    ) -> mpsc::UnboundedSender<(Vec<(ArcStr, Value)>, BindId)> {
         async fn rpc_task(
             reply: mpsc::UnboundedSender<LcEvent>,
             subscriber: Subscriber,
             name: Path,
-            mut rx: mpsc::UnboundedReceiver<(Vec<(Chars, Value)>, RpcCallId)>,
+            mut rx: mpsc::UnboundedReceiver<(Vec<(ArcStr, Value)>, BindId)>,
         ) -> Result<()> {
             let proc = rpc::client::Proc::new(&subscriber, name.clone())?;
             while let Some((args, id)) = rx.next().await {
@@ -1370,7 +1350,7 @@ impl ContainerInner {
         }
     }
 
-    fn set_timer(&mut self, id: TimerId, duration: Duration) {
+    fn set_timer(&mut self, id: BindId, duration: Duration) {
         let deadline = time::Instant::now() + duration;
         self.timers.insert(deadline, id);
         self.reschedule_timer()
@@ -1384,7 +1364,8 @@ impl ContainerInner {
             if let Some(expr_ids) = self.ctx.user.timer.get(&id) {
                 refs.extend(expr_ids.keys().copied());
             }
-            self.update_expr_ids(batch, &mut refs, &vm::Event::Timer(id));
+            let e = vm::Event::Variable(id, Utc::now().into());
+            self.update_expr_ids(batch, &mut refs, &e);
             self.update_refs(batch);
         }
         self.reschedule_timer()
@@ -1398,7 +1379,7 @@ impl ContainerInner {
                 if let Some(expr_ids) = self.ctx.user.rpc.get(&name) {
                     refs.extend(expr_ids);
                 }
-                self.update_expr_ids(batch, &mut refs, &vm::Event::Rpc(id, result));
+                self.update_expr_ids(batch, &mut refs, &vm::Event::Variable(id, result));
                 self.update_refs(batch);
             }
             LcEvent::RpcCall { name, mut args, id } => {
@@ -1412,7 +1393,7 @@ impl ContainerInner {
                         }
                     }
                 }
-                let result = Value::Error(Chars::from("failed to call rpc"));
+                let result = Value::Error(literal!("failed to call rpc"));
                 let _: Result<_, _> = self
                     .ctx
                     .user
@@ -1461,8 +1442,8 @@ impl ContainerInner {
         &mut self,
         txn: &mut Txn,
         path: Path,
-        formula: Option<Chars>,
-        on_write: Option<Chars>,
+        formula: Option<ArcStr>,
+        on_write: Option<ArcStr>,
         reply: Reply,
     ) {
         let path = or_reply!(reply, self.check_path(path));
@@ -1487,10 +1468,9 @@ impl ContainerInner {
     ) {
         let path = or_reply!(reply, self.check_path(path));
         if rows > max_rows || columns > max_columns {
-            let m = "rows <= max_rows && columns <= max_columns";
-            let e = Value::Error(Chars::from(m));
+            let m = literal!("rows <= max_rows && columns <= max_columns");
             if let Some(reply) = reply {
-                reply.send(e);
+                reply.send(Value::Error(m));
             }
         } else {
             txn.create_sheet(path, rows, columns, max_rows, max_columns, lock, reply);
@@ -1501,8 +1481,8 @@ impl ContainerInner {
         &self,
         txn: &mut Txn,
         path: Path,
-        rows: Vec<Chars>,
-        columns: Vec<Chars>,
+        rows: Vec<ArcStr>,
+        columns: Vec<ArcStr>,
         lock: bool,
         reply: Reply,
     ) {
@@ -1599,7 +1579,7 @@ impl ContainerInner {
     }
 
     fn remove_deleted_published(&mut self, batch: &mut UpdateBatch, path: &Path) {
-        let ref_err = Value::Error(Chars::from("#REF"));
+        let ref_err = Value::Error(literal!("#REF"));
         self.remove_advertisement(&path);
         match self.ctx.user.by_path.remove(path) {
             None => (),

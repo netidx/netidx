@@ -829,7 +829,7 @@ pub(super) fn parse(s: &str) -> anyhow::Result<Expr> {
 ///
 /// if you wish to parse a str containing one and only one module
 /// expression just call [str.parse::<Expr>()].
-pub fn parse_many(s: &str) -> anyhow::Result<Vec<Expr>> {
+pub fn parse_many_modexpr(s: &str) -> anyhow::Result<Vec<Expr>> {
     many1(modexpr())
         .skip(spaces())
         .skip(eof())
@@ -840,6 +840,14 @@ pub fn parse_many(s: &str) -> anyhow::Result<Vec<Expr>> {
 
 pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType> {
     fntype()
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{e}")))
+}
+
+/// Parse an expression instead of a module expression
+pub fn parse_expr(s: &str) -> anyhow::Result<Expr> {
+    expr()
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{e}")))
