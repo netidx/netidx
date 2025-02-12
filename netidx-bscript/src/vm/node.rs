@@ -798,7 +798,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 if n.is_err() {
                     return error!("", vec![n]);
                 }
-                let tid = ctx.env.add_typ(Type::Primitive(*typ | Typ::Result));
+                let tid = ctx.env.add_typ(Type::Primitive(*typ | Typ::Error));
                 let kind = NodeKind::TypeCast { target: *typ, n: Box::new(n) };
                 Node { spec: Box::new(spec), typ: tid, kind }
             }

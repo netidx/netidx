@@ -39,7 +39,7 @@ pub const TYPE_RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
     FxHashSet::from_iter([
         "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32", "f64", "decimal",
         "datetime", "duration", "bool", "string", "bytes", "result", "array", "null",
-        "_"
+        "_",
     ])
 });
 
@@ -388,7 +388,7 @@ where
         attempt(spstring("bool").map(|_| Typ::Bool)),
         attempt(spstring("string").map(|_| Typ::String)),
         attempt(spstring("bytes").map(|_| Typ::Bytes)),
-        attempt(spstring("result").map(|_| Typ::Result)),
+        attempt(spstring("error").map(|_| Typ::Error)),
         attempt(spstring("array").map(|_| Typ::Array)),
         attempt(spstring("null").map(|_| Typ::Null)),
     ))

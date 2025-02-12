@@ -588,7 +588,7 @@ impl ClientCtx {
                     Box::pin(async move {
                         BlockedWrite::Reply(match rx.await {
                             Ok(v) => From::WriteResult(id, v, wid),
-                            Err(_) => From::WriteResult(id, Value::Ok, wid),
+                            Err(_) => From::WriteResult(id, Value::Null, wid),
                         })
                     }) as BlockedWriteFut
                 },
