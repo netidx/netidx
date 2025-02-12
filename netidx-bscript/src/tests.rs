@@ -379,3 +379,41 @@ run!(partial_function_types, PARTIAL_FUNCTION_TYPES, |v: Result<&Value>| match v
     Err(_) => true,
     _ => false,
 });
+
+const FUNCTION_RTYPE: &str = r#"
+{
+  let f = |x, y| -> number "x is [x] and y is [y]";
+  f("foo", 3)
+}
+"#;
+
+run!(function_rtype, FUNCTION_RTYPE, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const INFERRED_RTYPE: &str = r#"
+{
+  let f = |x, y| "x is [x] and y is [y]";
+  let v = f("foo", 3);
+  let g = |x| x + 1;
+  g(v)
+}
+"#;
+
+run!(inferred_rtype, INFERRED_RTYPE, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const LAMBDA_CONSTRAINT: &str = r#"
+{
+  let f = |f: fn(string, string) -> string, a| f("foo", a);
+  f(|x, y: number| "[x] and [y]", "foo")
+}
+"#;
+
+run!(lambda_constraint, LAMBDA_CONSTRAINT, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});

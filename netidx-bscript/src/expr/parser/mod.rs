@@ -31,7 +31,7 @@ pub const BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
 pub const RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
     FxHashSet::from_iter([
         "true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn",
-        "cast", "if", "_",
+        "cast", "if",
     ])
 });
 
@@ -39,7 +39,7 @@ pub const TYPE_RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
     FxHashSet::from_iter([
         "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32", "f64", "decimal",
         "datetime", "duration", "bool", "string", "bytes", "result", "array", "null",
-        "_",
+        "_"
     ])
 });
 

@@ -242,23 +242,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         }
     }
 
-    fn match_type(&self) -> Type {
-        match self {
-            PatternNode::Typ { tag, bind: _, guard: _ } => Type::Primitive(*tag),
-            PatternNode::Underscore => Type::any(),
-            PatternNode::Error(_) => Type::Bottom,
-        }
-    }
-
-    fn bind_type(&self) -> Type {
-        match self {
-            PatternNode::Typ { tag, bind: _, guard: None } => Type::Primitive(*tag),
-            PatternNode::Underscore => Type::any(),
-            PatternNode::Typ { tag: _, bind: _, guard: Some(_) }
-            | PatternNode::Error(_) => Type::Bottom,
-        }
-    }
-
     fn compile(
         ctx: &mut ExecCtx<C, E>,
         spec: &Pattern,
@@ -934,6 +917,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             NodeKind::Bind(_, node) => {
                 wrap!(node.typecheck(ctx))?;
                 wrap!(ctx.env.check_typevar_contains(true, self.typ, node.typ))?;
+                if ctx.env.get_typevar(&self.typ).is_none() {
+                    ctx.env.alias_typevar(self.typ, node.typ)?
+                }
                 Ok(())
             }
             NodeKind::Connect(_, node) => Ok(wrap!(node.typecheck(ctx))?),

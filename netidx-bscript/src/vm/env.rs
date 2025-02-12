@@ -323,6 +323,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
     }
 
     pub fn alias_typevar(&mut self, from: TypeId, to: TypeId) -> Result<()> {
+        if from == to {
+            return Ok(())
+        }
         match self.typevars.get(&from) {
             None => {
                 self.typevars.insert_cow(from, TypeOrAlias::Alias(to));
