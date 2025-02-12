@@ -1,5 +1,4 @@
 use anyhow::Result;
-use bytes::Bytes;
 use futures::{channel::mpsc, prelude::*};
 use log::{info, warn};
 use netidx::{

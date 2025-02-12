@@ -72,7 +72,7 @@ pub enum Typ {
     Bool,
     String,
     Bytes,
-    Result,
+    Error,
     Array,
     Null,
 }
@@ -107,7 +107,7 @@ impl Typ {
                 tmp.push_str(s);
                 Ok(tmp.parse::<Value>()?)
             }
-            Typ::Result => Ok(s.parse::<Value>()?),
+            Typ::Error => Ok(s.parse::<Value>()?),
             Typ::Array => Ok(s.parse::<Value>()?),
             Typ::Null => {
                 if s.trim() == "null" {
@@ -137,7 +137,7 @@ impl Typ {
             Typ::Bool => "bool",
             Typ::String => "string",
             Typ::Bytes => "bytes",
-            Typ::Result => "result",
+            Typ::Error => "error",
             Typ::Array => "array",
             Typ::Null => "null",
         }
@@ -162,7 +162,7 @@ impl Typ {
             Value::Bytes(_) => Typ::Bytes,
             Value::True | Value::False => Typ::Bool,
             Value::Null => Typ::Null,
-            Value::Ok | Value::Error(_) => Typ::Result,
+            Value::Error(_) => Typ::Error,
             Value::Array(_) => Typ::Array,
         }
     }
@@ -250,11 +250,11 @@ impl FromStr for Typ {
             "Bool" | "bool" => Ok(Typ::Bool),
             "String" | "string" => Ok(Typ::String),
             "Bytes" | "bytes" => Ok(Typ::Bytes),
-            "Result" | "result" => Ok(Typ::Result),
+            "Error" | "error" => Ok(Typ::Error),
             "Array" | "array" => Ok(Typ::Array),
             "Null" | "null" => Ok(Typ::Null),
             s => Err(anyhow!(
-                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, result, array, null", s))
+                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, error, array, null", s))
         }
     }
 }
@@ -309,8 +309,6 @@ pub enum Value {
     False = 0x0f,
     /// Empty value
     Null = 0x10,
-    /// An explicit ok
-    Ok = 0x11,
     /// unicode string
     String(ArcStr) = 0x80,
     /// byte array
@@ -339,7 +337,6 @@ fn _assert_variants_are_copy(v: &Value) -> Value {
         Value::True => Value::True,
         Value::False => Value::False,
         Value::Null => Value::Null,
-        Value::Ok => Value::Ok,
 
         // not copy types
         Value::String(i) => Value::String(i.clone()),
@@ -377,8 +374,7 @@ impl Clone for Value {
                 | Value::Duration(_)
                 | Value::True
                 | Value::False
-                | Value::Null
-                | Value::Ok => unsafe { unreachable_unchecked() },
+                | Value::Null => unsafe { unreachable_unchecked() },
             }
         }
     }
@@ -415,8 +411,7 @@ impl Clone for Value {
                 | Value::Duration(_)
                 | Value::True
                 | Value::False
-                | Value::Null
-                | Value::Ok => unsafe { unreachable_unchecked() },
+                | Value::Null => unsafe { unreachable_unchecked() },
             }
         }
     }
@@ -493,7 +488,6 @@ impl Hash for Value {
             Value::True => 14u8.hash(state),
             Value::False => 15u8.hash(state),
             Value::Null => 16u8.hash(state),
-            Value::Ok => 17u8.hash(state),
             Value::Error(c) => {
                 18u8.hash(state);
                 c.hash(state)
@@ -539,9 +533,7 @@ impl PartialEq for Value {
             (Value::False, Value::False) => true,
             (Value::True | Value::False, Value::True | Value::False) => false,
             (Value::Null, Value::Null) => true,
-            (Value::Ok, Value::Ok) => true,
             (Value::Error(l), Value::Error(r)) => l == r,
-            (Value::Ok | Value::Error(_), Value::Ok | Value::Error(_)) => false,
             (Value::Array(l), Value::Array(r)) => l == r,
             (Value::Array(_), _) | (_, Value::Array(_)) => false,
             (l, r) if l.number() || r.number() => {
@@ -601,7 +593,6 @@ impl PartialOrd for Value {
             (Value::Null, Value::Null) => Some(Ordering::Equal),
             (Value::Null, _) => Some(Ordering::Less),
             (_, Value::Null) => Some(Ordering::Greater),
-            (Value::Ok, Value::Ok) => Some(Ordering::Equal),
             (Value::Error(l), Value::Error(r)) => l.partial_cmp(r),
             (Value::Error(_), _) => Some(Ordering::Less),
             (_, Value::Error(_)) => Some(Ordering::Greater),
@@ -797,10 +788,8 @@ macro_rules! apply_op {
             (Value::Null, _) | (_, Value::Null) => {
                 Value::Error(literal!("can't add null"))
             }
-            (Value::Ok, _)
-            | (_, Value::Ok)
             | (Value::Error(_), _)
-            | (_, Value::Error(_)) => Value::Error(literal!("can't add result types")),
+            | (_, Value::Error(_)) => Value::Error(literal!("can't add error types")),
             (Value::True, n) => Value::U32(1) $op n,
             (n, Value::True) => n $op Value::U32(1),
             (Value::False, n) => Value::U32(0) $op n,
@@ -923,7 +912,6 @@ impl Not for Value {
             Value::Duration(_) => Value::Error(literal!("can't apply not to Duration")),
             Value::String(_) => Value::Error(literal!("can't apply not to String")),
             Value::Bytes(_) => Value::Error(literal!("can't apply not to Bytes")),
-            Value::Ok => Value::Error(literal!("can't apply not to Ok")),
             Value::Error(_) => Value::Error(literal!("can't apply not to Error")),
             Value::Array(elts) => {
                 Value::Array(ValArray::from_iter_exact(elts.iter().cloned().map(|v| !v)))
@@ -950,7 +938,6 @@ impl Pack for Value {
             Value::String(c) => Pack::encoded_len(c),
             Value::Bytes(b) => Pack::encoded_len(b),
             Value::True | Value::False | Value::Null => 0,
-            Value::Ok => 0,
             Value::Error(c) => Pack::encoded_len(c),
             Value::Array(elts) => Pack::encoded_len(elts),
             Value::Decimal(d) => Pack::encoded_len(d),
@@ -1020,7 +1007,8 @@ impl Pack for Value {
             Value::True => Ok(buf.put_u8(14)),
             Value::False => Ok(buf.put_u8(15)),
             Value::Null => Ok(buf.put_u8(16)),
-            Value::Ok => Ok(buf.put_u8(17)),
+            //          OK is deprecated, but we reserve 17 for backwards compatibility
+            //          Value::Ok => Ok(buf.put_u8(17))
             Value::Error(e) => {
                 buf.put_u8(18);
                 Pack::encode(e, buf)
@@ -1055,7 +1043,7 @@ impl Pack for Value {
             14 => Ok(Value::True),
             15 => Ok(Value::False),
             16 => Ok(Value::Null),
-            17 => Ok(Value::Ok),
+            17 => Ok(Value::Null), // 17 used to be Ok
             18 => Ok(Value::Error(Pack::decode(buf)?)),
             19 => Ok(Value::Array(Pack::decode(buf)?)),
             20 => Ok(Value::Decimal(Pack::decode(buf)?)),
@@ -1122,7 +1110,6 @@ impl Value {
             Value::True => write!(f, "true"),
             Value::False => write!(f, "false"),
             Value::Null => write!(f, "null"),
-            Value::Ok => write!(f, "ok"),
             v @ Value::Error(_) => write!(f, "{}", v),
             v @ Value::Array(_) => write!(f, "{}", v),
         }
@@ -1244,7 +1231,6 @@ impl Value {
             Value::True => write!(f, "true"),
             Value::False => write!(f, "false"),
             Value::Null => write!(f, "null"),
-            Value::Ok => write!(f, "ok"),
             Value::Error(v) => {
                 write!(f, r#"error:"{}""#, utils::escape(&*v, '\\', esc))
             }
@@ -1295,17 +1281,18 @@ impl Value {
                         Some(Value::String(format_compact!("{}", self).as_str().into()))
                     }
                     Typ::Bytes => None,
-                    Typ::Result => Some(Value::Ok),
+                    Typ::Error => None,
                     Typ::Array => Some(Value::Array([self.clone()].into())),
                     Typ::Null => Some(Value::Null),
                 }
             };
         }
         match self {
-            Value::String(s) if typ != Typ::String => {
-                s.parse::<Value>().ok().and_then(|v| v.cast(typ))
-            }
-            v @ Value::String(_) => Some(v),
+            Value::String(s) => match typ {
+                Typ::String => Some(Value::String(s)),
+                Typ::Error => Some(Value::Error(s)),
+                _ => s.parse::<Value>().ok().and_then(|v| v.cast(typ)),
+            },
             v if typ == Typ::String => {
                 Some(Value::String(format_compact!("{}", v).as_str().into()))
             }
@@ -1340,7 +1327,7 @@ impl Value {
                 | Typ::DateTime
                 | Typ::Duration
                 | Typ::Null
-                | Typ::Result => None,
+                | Typ::Error => None,
             },
             Value::DateTime(v) => match typ {
                 Typ::U32 | Typ::V32 => {
@@ -1398,7 +1385,7 @@ impl Value {
                 Typ::Duration => None,
                 Typ::Bool => None,
                 Typ::Bytes => None,
-                Typ::Result => Some(Value::Ok),
+                Typ::Error => None,
                 Typ::Array => Some(Value::Array([self].into())),
                 Typ::Null => Some(Value::Null),
                 Typ::String => unreachable!(),
@@ -1419,7 +1406,7 @@ impl Value {
                 Typ::Duration => Some(Value::Duration(d)),
                 Typ::Bool => None,
                 Typ::Bytes => None,
-                Typ::Result => Some(Value::Ok),
+                Typ::Error => None,
                 Typ::Array => Some(Value::Array([self].into())),
                 Typ::Null => Some(Value::Null),
                 Typ::String => unreachable!(),
@@ -1442,7 +1429,7 @@ impl Value {
                     Typ::Duration => None,
                     Typ::Bool => Some(self),
                     Typ::Bytes => None,
-                    Typ::Result => Some(Value::Ok),
+                    Typ::Error => None,
                     Typ::Array => Some(Value::Array([self].into())),
                     Typ::Null => Some(Value::Null),
                     Typ::String => unreachable!(),
@@ -1450,7 +1437,6 @@ impl Value {
             }
             Value::Bytes(_) if typ == Typ::Bytes => Some(self),
             Value::Bytes(_) => None,
-            Value::Ok => Value::True.cast(typ),
             Value::Error(_) => Value::False.cast(typ),
             Value::Null if typ == Typ::Null => Some(self),
             Value::Null => None,
@@ -1495,7 +1481,6 @@ impl Value {
             | Value::True
             | Value::False
             | Value::Null
-            | Value::Ok
             | Value::Error(_)
             | Value::Array(_) => false,
         }

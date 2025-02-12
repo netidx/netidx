@@ -175,7 +175,6 @@ where
                 .with(from_str(base64str()))
                 .map(|Base64Encoded(v)| Value::Bytes(PBytes::new(Bytes::from(v)))),
         ),
-        attempt(string("ok").skip(close_expr()).map(|_| Value::Ok)),
         attempt(
             constant("error").with(quoted(esc)).map(|s| Value::Error(ArcStr::from(s))),
         ),
@@ -264,7 +263,6 @@ mod tests {
         assert_eq!(Value::True, parse_value("true ").unwrap());
         assert_eq!(Value::False, parse_value("false").unwrap());
         assert_eq!(Value::Null, parse_value("null").unwrap());
-        assert_eq!(Value::Ok, parse_value("ok").unwrap());
         assert_eq!(
             Value::Error(ArcStr::from("error")),
             parse_value(r#"error:"error""#).unwrap()
