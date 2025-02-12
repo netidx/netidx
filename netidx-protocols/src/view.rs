@@ -1,4 +1,5 @@
-use netidx::{chars::Chars, protocol::value::Value};
+use arcstr::literal;
+use netidx::protocol::value::Value;
 use netidx_bscript::expr::{Expr, ExprKind};
 use std::{
     boxed,
@@ -380,7 +381,7 @@ pub struct Table {
 impl Default for Table {
     fn default() -> Self {
         Self {
-            path: ExprKind::Constant(Value::String(Chars::from("/"))).to_expr(),
+            path: ExprKind::Constant(Value::String(literal!("/"))).to_expr(),
             sort_mode: Expr::default(),
             column_filter: Expr::default(),
             row_filter: Expr::default(),
@@ -388,7 +389,8 @@ impl Default for Table {
             column_widths: Expr::default(),
             columns_resizable: Expr::default(),
             column_types: Expr::default(),
-            selection_mode: ExprKind::Constant(Value::from("single")).to_expr(),
+            selection_mode: ExprKind::Constant(Value::String(literal!("single")))
+                .to_expr(),
             selection: Expr::default(),
             show_row_name: ExprKind::Constant(Value::True).to_expr(),
             refresh: Expr::default(),
