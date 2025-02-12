@@ -3,7 +3,6 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use derive_builder::Builder;
 use netidx::{
-    chars::Chars,
     config::Config as NetIdxCfg,
     path::Path,
     protocol::glob::Glob,
@@ -14,6 +13,8 @@ use serde_derive::{Deserialize, Serialize};
 use std::{collections::HashMap, path::{PathBuf, Path as FilePath}, time::Duration};
 
 pub mod file {
+    use arcstr::literal;
+
     use super::*;
 
     pub fn default_max_sessions() -> usize {
@@ -104,7 +105,7 @@ pub mod file {
         /// If spec is empty, then no recorder task will be started
         /// for the shard, however the shard's `ArchiveCollectionWriter`
         /// will be available so you can log to the shard directly.
-        pub spec: Vec<Chars>,
+        pub spec: Vec<ArcStr>,
         /// override the poll_interval for this shard
         pub poll_interval: Option<Duration>,
         /// override the image_frequency for this shard
@@ -126,7 +127,7 @@ pub mod file {
     impl Default for RecordShardConfig {
         fn default() -> Self {
             Self {
-                spec: vec![Chars::from("/tmp/**")],
+                spec: vec![literal!("/tmp/**")],
                 poll_interval: None,
                 image_frequency: None,
                 flush_frequency: None,

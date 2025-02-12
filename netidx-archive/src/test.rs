@@ -5,6 +5,7 @@ use crate::{
     recorder_client::{Client, Speed},
 };
 use anyhow::{Context, Result};
+use arcstr::literal;
 use chrono::prelude::*;
 use futures::{
     channel::{mpsc, oneshot},
@@ -12,7 +13,6 @@ use futures::{
     prelude::*,
 };
 use netidx::{
-    chars::Chars,
     config::{
         file::{self as client, Auth as CAuth},
         Config as CConfig, DefaultAuthMech,
@@ -65,8 +65,7 @@ impl Ctx {
             .build()
             .await
             .context("building publisher")?;
-        let subscriber = SubscriberBuilder::new()
-            .config(client_cfg.clone())
+        let subscriber = SubscriberBuilder::new(client_cfg.clone())
             .build()
             .context("building subscriber")?;
         Ok(Self { _server: server, publisher, subscriber })
@@ -90,7 +89,7 @@ async fn recorder() -> Result<()> {
     let ctx = Ctx::new().await.context("build creating context")?;
     eprintln!("context created");
     let record = RecordConfigBuilder::default()
-        .try_spec(vec![Chars::from("/test/**")])
+        .try_spec(vec![literal!("/test/**")])
         .context("compiling spec")?
         .build()
         .context("build record config")?;

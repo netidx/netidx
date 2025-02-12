@@ -4,11 +4,11 @@ use crate::{
     recorder::{publish::ClusterCmd, State},
 };
 use anyhow::Result;
+use arcstr::{literal, ArcStr};
 use chrono::prelude::*;
 use futures::channel::mpsc;
 use log::{info, warn};
 use netidx::{
-    chars::Chars,
     path::Path,
     pool::Pooled,
     publisher::{ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest},
@@ -34,7 +34,7 @@ pub(crate) static FILTER_DOC: &'static str = "Only publish paths matching the sp
 fn parse_speed(v: Value) -> Result<Option<f64>> {
     match v.clone().cast_to::<f64>() {
         Ok(speed) => Ok(Some(speed)),
-        Err(_) => match v.cast_to::<Chars>() {
+        Err(_) => match v.cast_to::<ArcStr>() {
             Err(_) => bail!("expected a float, or unlimited"),
             Ok(s) => {
                 if s.trim().to_lowercase().as_str() == "unlimited" {
@@ -68,14 +68,14 @@ fn get_bound(r: WriteRequest) -> Option<Bound<DateTime<Utc>>> {
         Ok(b) => Some(b),
         Err(e) => {
             if let Some(reply) = r.send_result {
-                reply.send(Value::Error(Chars::from(format!("{}", e))))
+                reply.send(Value::Error(format!("{}", e).into()))
             }
             None
         }
     }
 }
 
-pub(crate) fn parse_filter(globs: Vec<Chars>) -> Result<GlobSet> {
+pub(crate) fn parse_filter(globs: Vec<ArcStr>) -> Result<GlobSet> {
     let globs: Vec<Glob> =
         globs.into_iter().map(|s| Glob::new(s)).collect::<Result<_>>()?;
     Ok(GlobSet::new(true, globs)?)
@@ -90,7 +90,7 @@ pub(super) struct NewSessionConfig {
     pub(super) pos: Option<Seek>,
     pub(super) state: Option<State>,
     pub(super) play_after: Option<Duration>,
-    pub(super) filter: Vec<Chars>,
+    pub(super) filter: Vec<ArcStr>,
 }
 
 impl NewSessionConfig {
@@ -102,7 +102,7 @@ impl NewSessionConfig {
         pos: Option<Seek>,
         state: Option<State>,
         play_after: Option<Duration>,
-        filter: Vec<Chars>,
+        filter: Vec<ArcStr>,
     ) -> Option<(NewSessionConfig, RpcReply)> {
         let start = match parse_bound(start) {
             Ok(s) => s,
@@ -154,34 +154,34 @@ impl Controls {
     ) -> Result<Self> {
         let _start_doc = publisher.publish(
             session_base.append("control/start/doc"),
-            Value::String(Chars::from(START_DOC)),
+            Value::String(literal!(START_DOC)),
         )?;
         let _end_doc = publisher.publish(
             session_base.append("control/end/doc"),
-            Value::String(Chars::from(END_DOC)),
+            Value::String(literal!(END_DOC)),
         )?;
         let _speed_doc = publisher.publish(
             session_base.append("control/speed/doc"),
-            Value::String(Chars::from(SPEED_DOC)),
+            Value::String(literal!(SPEED_DOC)),
         )?;
         let _state_doc = publisher.publish(
             session_base.append("control/state/doc"),
-            Value::String(Chars::from(STATE_DOC)),
+            Value::String(literal!(STATE_DOC)),
         )?;
         let _pos_doc = publisher.publish(
             session_base.append("control/pos/doc"),
-            Value::String(Chars::from(POS_DOC)),
+            Value::String(literal!(POS_DOC)),
         )?;
         let start_ctl = publisher.publish_with_flags(
             PublishFlags::USE_EXISTING,
             session_base.append("control/start/current"),
-            Value::String(Chars::from("Unbounded")),
+            Value::String(literal!("Unbounded")),
         )?;
         publisher.writes(start_ctl.id(), control_tx.clone());
         let end_ctl = publisher.publish_with_flags(
             PublishFlags::USE_EXISTING,
             session_base.append("control/end/current"),
-            Value::String(Chars::from("Unbounded")),
+            Value::String(literal!("Unbounded")),
         )?;
         publisher.writes(end_ctl.id(), control_tx.clone());
         let speed_ctl = publisher.publish_with_flags(
@@ -193,7 +193,7 @@ impl Controls {
         let state_ctl = publisher.publish_with_flags(
             PublishFlags::USE_EXISTING,
             session_base.append("control/state/current"),
-            Value::String(Chars::from("pause")),
+            Value::String(literal!("pause")),
         )?;
         publisher.writes(state_ctl.id(), control_tx.clone());
         let pos_ctl = publisher.publish_with_flags(
@@ -220,7 +220,7 @@ impl Controls {
     pub(super) fn process_update(&self, batch: &mut UpdateBatch, m: SessionUpdate) {
         fn bound_to_val(b: Bound<DateTime<Utc>>) -> Value {
             match b {
-                Bound::Unbounded => Value::String(Chars::from("Unbounded")),
+                Bound::Unbounded => Value::String(literal!("Unbounded")),
                 Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
             }
         }
@@ -277,7 +277,7 @@ impl Controls {
                     Err(e) => {
                         warn!("tried to set invalid speed {}", e);
                         if let Some(reply) = req.send_result {
-                            reply.send(Value::Error(Chars::from(format!("{}", e))));
+                            reply.send(Value::Error(format!("{}", e).into()));
                         }
                     }
                 }
@@ -291,7 +291,7 @@ impl Controls {
                     Err(e) => {
                         warn!("tried to set invalid state {}", e);
                         if let Some(reply) = req.send_result {
-                            reply.send(Value::Error(Chars::from(format!("{}", e))))
+                            reply.send(Value::Error(format!("{}", e).into()))
                         }
                     }
                 }
@@ -305,7 +305,7 @@ impl Controls {
                     Err(e) => {
                         warn!("invalid set pos {}", e);
                         if let Some(reply) = req.send_result {
-                            reply.send(Value::Error(Chars::from(format!("{}", e))))
+                            reply.send(Value::Error(format!("{}", e).into()))
                         }
                     }
                 }
