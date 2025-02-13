@@ -11,7 +11,7 @@ use compact_str::{format_compact, CompactString};
 use enumflags2::BitFlags;
 use fxhash::FxHashMap;
 use immutable_chunkmap::set::SetS as Set;
-use netidx::{path::Path, publisher::Typ, subscriber::Value, utils::Either};
+use netidx::{publisher::Typ, subscriber::Value, utils::Either};
 use smallvec::{smallvec, SmallVec};
 use std::{
     fmt::{self, Debug},
@@ -105,8 +105,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
         let id = LambdaId::new();
         let mut argids = vec![];
         let scope = ModPath(scope.0.append(&format_compact!("fn{}", id.0)));
-        for ((name, typ), node) in spec.argspec.iter().zip(args.iter()) {
-            let bind = ctx.env.bind_variable(&scope, &**name, *typ);
+        for ((a, typ), node) in spec.argspec.iter().zip(args.iter()) {
+            let bind = ctx.env.bind_variable(&scope, &*a.name, *typ);
             match &node.kind {
                 NodeKind::Ref(id) => {
                     argids.push(*id);
@@ -643,7 +643,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 None => match &a.default {
                     None => bail!("missing required argument {}", a.name),
                     Some(e) => {
-                        let orig_env = mem::replace(&mut ctx.env, lb.env.clone());
+                        let orig_env = ctx.env.restore_lexical_env(&lb.env);
                         let n = Node::compile_int(ctx, e.clone(), &lb.scope, top_id);
                         ctx.env = ctx.env.merge_lexical(&orig_env);
                         if let Some(e) = n.extract_err() {
@@ -678,7 +678,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 match &lb.argspec[i].default {
                     None => bail!("missing required argument {}", lb.argspec[i].name),
                     Some(e) => {
-                        let orig_env = mem::replace(&mut ctx.env, lb.env.clone());
+                        let orig_env = ctx.env.restore_lexical_env(&lb.env);
                         let n = Node::compile_int(ctx, e.clone(), &lb.scope, top_id);
                         ctx.env = ctx.env.merge_lexical(&orig_env);
                         if let Some(e) = n.extract_err() {
@@ -720,16 +720,17 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             }
             Some((_, Bind { fun: Some(lb), id, .. })) => {
                 let varid = *id;
-                let init = SArc::clone(init);
-                if error {
-                    return error!("", args);
-                }
-                match i(ctx, &args, top_id) {
+                let lb = lb.clone();
+                let args = match Node::compile_apply_args(ctx, scope, top_id, args, &lb) {
+                    Err(e) => return error!("{e}"),
+                    Ok(a) => a,
+                };
+                match (lb.init)(ctx, &args, top_id) {
                     Err(e) => error!("error in function {f} {e:?}"),
                     Ok(function) => {
                         ctx.user.ref_var(varid, top_id);
                         let typ = function.rtypeid();
-                        let kind = NodeKind::Apply { args: Box::from(args), function };
+                        let kind = NodeKind::Apply { args, function };
                         Node { spec: Box::new(spec), typ, kind }
                     }
                 }
