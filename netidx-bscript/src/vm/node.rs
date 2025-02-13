@@ -206,6 +206,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Cached<C, E> {
         Self { cached: None, node }
     }
 
+    /// update the node, return whether the node updated. If it did,
+    /// the updated value will be stored in the cached field, if not,
+    /// the previous value will remain there.
     pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> bool {
         match self.node.update(ctx, event) {
             None => false,
@@ -213,6 +216,19 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Cached<C, E> {
                 self.cached = Some(v);
                 true
             }
+        }
+    }
+
+    /// update the node, return true if the node updated AND the new
+    /// value is different from the old value. The cached field will
+    /// only be updated if the value changed.
+    pub fn update_changed(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> bool {
+        match self.node.update(ctx, event) {
+            v @ Some(_) if v == self.cached => {
+                self.cached = v;
+                true
+            }
+            Some(_) | None => false,
         }
     }
 }

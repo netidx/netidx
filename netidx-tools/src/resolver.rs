@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use netidx::{
-    chars::Chars,
     config::Config,
     path::Path,
     protocol::glob::{Glob, GlobSet},
@@ -90,7 +89,7 @@ pub(super) async fn run(
                     path
                 }
             };
-            let glob = Glob::new(Chars::from(String::from(&*pat))).unwrap();
+            let glob = Glob::new(pat.into()).unwrap();
             let mut ct = ChangeTracker::new(Path::from(ArcStr::from(glob.base())));
             let globs = GlobSet::new(no_structure, iter::once(glob)).unwrap();
             let mut paths = HashSet::new();

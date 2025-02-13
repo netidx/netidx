@@ -36,8 +36,8 @@ use netidx::{
 };
 use netidx_bscript::{
     deftype,
-    expr::{self, parser::parse_fn_type, Expr, ExprId, FnType, ModPath},
-    vm::{self, node::Node, Apply, BindId, BuiltIn, Ctx, ExecCtx, InitFn},
+    expr::{self, parser::parse_fn_type, ExprId, FnType, ModPath},
+    vm::{self, node::{Cached, Node}, Apply, BindId, BuiltIn, Ctx, ExecCtx, InitFn},
 };
 use netidx_protocols::rpc;
 use parking_lot::Mutex;
@@ -356,7 +356,7 @@ impl Ctx for Lc {
             .or_insert_with(|| HashMap::default())
             .entry(ref_id)
             .or_insert(0) += 1;
-        self.forward_refs.entry(ref_id).or_insert_with(Refs::new).vars.insert(*id);
+        self.forward_refs.entry(ref_id).or_insert_with(Refs::new).vars.insert(id);
     }
 
     fn unref_var(&mut self, id: BindId, ref_id: ExprId) {
@@ -413,21 +413,11 @@ impl Ctx for Lc {
 
 struct Ref {
     id: ExprId,
-    path: Option<ArcStr>,
+    path: Cached<Lc, UserEv>,
     current: Value,
 }
 
 impl Ref {
-    fn get_path(
-        from: &[Node<Lc, UserEv>],
-        ctx: &mut ExecCtx<Lc, UserEv>,
-    ) -> Option<ArcStr> {
-        match from {
-            [path] => path.current(ctx).and_then(|v| v.get_as::<ArcStr>()),
-            _ => None,
-        }
-    }
-
     fn get_current(ctx: &ExecCtx<Lc, UserEv>, path: &Option<ArcStr>) -> Value {
         macro_rules! or_ref {
             ($e:expr) => {

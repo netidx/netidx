@@ -36,7 +36,7 @@ netidx-archive = { path = "../netidx-archive", version = "0.27.0", default-featu
 netidx = { path = "../netidx", version = "0.27.0", default-features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.27.0", default-features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "0.27.0", default-features = false }
-netidx-container = { path = "../netidx-container", version = "0.27.0", default-features = false }
+#netidx-container = { path = "../netidx-container", version = "0.27.0", default-features = false }
 netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.27.0", default-features = false }
 tokio = { workspace = true }
 anyhow = { workspace = true }

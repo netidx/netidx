@@ -11,7 +11,7 @@ mod wsproxy;
 
 #[cfg(unix)]
 mod activation;
-mod container;
+//mod container;
 #[cfg(unix)]
 mod recorder;
 mod resolver_server;
@@ -83,6 +83,7 @@ enum Opt {
         #[structopt(flatten)]
         params: subscriber::Params,
     },
+/*
     #[structopt(name = "container", about = "a hierarchical database in netidx")]
     Container {
         #[structopt(flatten)]
@@ -90,6 +91,7 @@ enum Opt {
         #[structopt(flatten)]
         params: container::Params,
     },
+*/
     #[cfg(unix)]
     #[structopt(name = "record", about = "record and republish archives")]
     Record {
@@ -153,10 +155,12 @@ async fn tokio_main() -> Result<()> {
             let (cfg, auth) = common.load();
             subscriber::run(cfg, auth, params).await
         }
+/*
         Opt::Container { common, params } => {
             let (cfg, auth) = common.load();
             container::run(cfg, auth, params).await
         }
+*/
         Opt::RecordClient { cmd } => record_client::run(cmd).await,
         #[cfg(unix)]
         Opt::Record { config, example } => recorder::run(config, example).await,
