@@ -9,8 +9,8 @@ mod stats;
 
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
-pub use db::{Datum, DatumKind, Db, Reply, Sendable, Txn};
 use chrono::prelude::*;
+pub use db::{Datum, DatumKind, Db, Reply, Sendable, Txn};
 use futures::{
     self,
     channel::{mpsc, oneshot},
@@ -37,7 +37,8 @@ use netidx::{
 use netidx_bscript::{
     deftype,
     expr::{self, parser::parse_fn_type, ExprId, FnType, ModPath},
-    vm::{self, node::{Cached, Node}, Apply, BindId, BuiltIn, Ctx, ExecCtx, InitFn},
+    stdfn::CachedVals,
+    vm::{self, node::Node, Apply, BindId, BuiltIn, Ctx, ExecCtx, InitFn},
 };
 use netidx_protocols::rpc;
 use parking_lot::Mutex;
@@ -413,12 +414,12 @@ impl Ctx for Lc {
 
 struct Ref {
     id: ExprId,
-    path: Cached<Lc, UserEv>,
-    current: Value,
+    args: CachedVals,
+    path: Option<Path>,
 }
 
 impl Ref {
-    fn get_current(ctx: &ExecCtx<Lc, UserEv>, path: &Option<ArcStr>) -> Value {
+    fn get_current(&self, ctx: &ExecCtx<Lc, UserEv>) -> Value {
         macro_rules! or_ref {
             ($e:expr) => {
                 match $e {
@@ -427,7 +428,7 @@ impl Ref {
                 }
             };
         }
-        let path = or_ref!(path);
+        let path = or_ref!(&self.path);
         let is_fpath = path.ends_with(".formula");
         let is_wpath = path.ends_with(".on-write");
         let dbpath = if is_fpath || is_wpath {
@@ -455,27 +456,8 @@ impl Ref {
         }
     }
 
-    fn apply_ev(&mut self, ev: &vm::Event<UserEv>) -> Option<Value> {
-        match ev {
-            vm::Event::User(UserEv::Ref(path, value)) => {
-                if Some(path.as_ref()) == self.path.as_ref().map(|c| c.as_ref()) {
-                    self.current = value.clone();
-                    Some(self.current.clone())
-                } else {
-                    None
-                }
-            }
-            vm::Event::Init
-            | vm::Event::User(UserEv::OnWriteEvent(_))
-            | vm::Event::User(UserEv::Rel)
-            | vm::Event::Netidx(_, _)
-            | vm::Event::Variable(_, _) => None,
-        }
-    }
-
-    fn set_ref(&mut self, ctx: &mut ExecCtx<Lc, UserEv>, path: Option<ArcStr>) {
+    fn set_ref(&mut self, ctx: &mut ExecCtx<Lc, UserEv>, path: Option<Path>) {
         if let Some(path) = self.path.take() {
-            let path = Path::from(path);
             if let Entry::Occupied(mut etbl) = ctx.user.refs.entry(path.clone()) {
                 let tbl = etbl.get_mut();
                 if let Entry::Occupied(mut ecnt) = tbl.entry(self.id) {
@@ -494,7 +476,6 @@ impl Ref {
             }
         }
         if let Some(path) = path.clone() {
-            let path = Path::from(path);
             *ctx.user
                 .refs
                 .entry(path.clone())
@@ -516,13 +497,9 @@ impl BuiltIn<Lc, UserEv> for Ref {
     const NAME: &str = "ref";
     deftype!("fn(string) -> any");
 
-    fn init(ctx: &mut ExecCtx<Lc, UserEv>) -> InitFn<Lc, UserEv> {
-        Arc::new(|ctx, from, _, id| {
-            let path = Ref::get_path(from, ctx);
-            let current = Ref::get_current(ctx, &path);
-            let mut t = Box::new(Ref { id, path: None, current });
-            t.set_ref(ctx, path);
-            t
+    fn init(_: &mut ExecCtx<Lc, UserEv>) -> InitFn<Lc, UserEv> {
+        Arc::new(|_, _, from, id| {
+            Ok(Box::new(Ref { id, args: CachedVals::new(from), path: None }))
         })
     }
 }
@@ -534,47 +511,43 @@ impl Apply<Lc, UserEv> for Ref {
         from: &mut [Node<Lc, UserEv>],
         event: &vm::Event<UserEv>,
     ) -> Option<Value> {
-        match from {
-            [path] => match path.update(ctx, event).map(|p| p.get_as::<ArcStr>()) {
-                None => self.apply_ev(event),
-                Some(new_path) => {
-                    if new_path != self.path {
-                        self.set_ref(ctx, new_path);
-                        match self.apply_ev(event) {
-                            v @ Some(_) => v,
-                            None => {
-                                self.current = Ref::get_current(ctx, &self.path);
-                                Some(self.current.clone())
-                            }
-                        }
-                    } else {
-                        self.apply_ev(event)
-                    }
+        if self.args.update_changed(ctx, from, event)[0] {
+            self.set_ref(
+                ctx,
+                self.args.0[0].clone().and_then(|v| v.cast_to::<Path>().ok()),
+            );
+            return Some(self.get_current(ctx));
+        }
+        match event {
+            vm::Event::User(UserEv::Ref(path, value)) => {
+                if Some(path.as_ref()) == self.path.as_ref().map(|c| c.as_ref()) {
+                    Some(value.clone())
+                } else {
+                    None
                 }
-            },
-            from => {
-                for n in from {
-                    n.update(ctx, event);
-                }
-                None
             }
+            vm::Event::Init
+            | vm::Event::User(UserEv::OnWriteEvent(_))
+            | vm::Event::User(UserEv::Rel)
+            | vm::Event::Netidx(_, _)
+            | vm::Event::Variable(_, _) => None,
         }
     }
 }
 
 struct Rel {
+    args: CachedVals,
     loc: Path,
-    current: Value,
 }
 
 impl Rel {
-    fn eval(&self, ctx: &mut ExecCtx<Lc, UserEv>, from: &[Node<Lc, UserEv>]) -> Value {
-        let (row, col, invalid) = match from {
+    fn eval(&self, ctx: &mut ExecCtx<Lc, UserEv>) -> Value {
+        let (row, col, invalid) = match &self.args.0[..] {
             [] => (None, None, false),
-            [v] => (None, v.current(ctx).and_then(|v| v.cast_to::<i32>().ok()), false),
+            [v] => (None, v.clone().and_then(|v| v.cast_to::<i32>().ok()), false),
             [v0, v1] => {
-                let row = v0.current(ctx).and_then(|v| v.cast_to::<i32>().ok());
-                let col = v1.current(ctx).and_then(|v| v.cast_to::<i32>().ok());
+                let row = v0.clone().and_then(|v| v.cast_to::<i32>().ok());
+                let col = v1.clone().and_then(|v| v.cast_to::<i32>().ok());
                 (row, col, false)
             }
             _ => (None, None, true),
@@ -611,8 +584,8 @@ impl BuiltIn<Lc, UserEv> for Rel {
     const NAME: &str = "rel";
     deftype!("fn(@args:int) -> any");
 
-    fn init(ctx: &mut ExecCtx<Lc, UserEv>) -> InitFn<Lc, UserEv> {
-        Arc::new(|ctx, from, _, id| {
+    fn init(_: &mut ExecCtx<Lc, UserEv>) -> InitFn<Lc, UserEv> {
+        Arc::new(|ctx, _, from, id| {
             let loc = ctx.user.current_path.clone();
             if let Some(table) = Path::dirname(&loc).and_then(Path::dirname) {
                 ctx.user
@@ -621,9 +594,8 @@ impl BuiltIn<Lc, UserEv> for Rel {
                     .or_insert_with(|| HashSet::with_hasher(FxBuildHasher::default()))
                     .insert(id);
             }
-            let mut t = Rel { loc, current: Value::Error(literal!("#LOC")) };
-            t.current = t.eval(ctx, from);
-            Box::new(t)
+            let t = Rel { args: CachedVals::new(from), loc };
+            Ok(Box::new(t))
         })
     }
 }
@@ -635,13 +607,9 @@ impl Apply<Lc, UserEv> for Rel {
         from: &mut [Node<Lc, UserEv>],
         event: &vm::Event<UserEv>,
     ) -> Option<Value> {
-        for s in from.iter_mut() {
-            s.update(ctx, event);
-        }
-        let v = self.eval(ctx, from);
-        if v != self.current {
-            self.current = v.clone();
-            Some(v)
+        let changed = self.args.update_changed(ctx, from, event);
+        if changed.iter().any(|b| *b) {
+            Some(self.eval(ctx))
         } else {
             None
         }
@@ -683,12 +651,6 @@ impl Apply<Lc, UserEv> for OnWriteEvent {
                 self.cur.clone()
             }
         }
-    }
-}
-
-impl OnWriteEvent {
-    fn err() -> Option<Value> {
-        Some(Value::Error(literal!("event(): expected 0 arguments")))
     }
 }
 

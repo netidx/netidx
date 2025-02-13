@@ -323,8 +323,8 @@ pub(super) fn start_set_formula_rpc(
         map,
         Some(tx),
         path: Vec<Path> = Vec::<Path>::new(); "the paths to set",
-        formula: Option<ArcStr> = None; "the formula",
-        on_write: Option<ArcStr> = None; "the on write formula"
+        formula: Option<ArcStr> = None::<ArcStr>; "the formula",
+        on_write: Option<ArcStr> = None::<ArcStr>; "the on write formula"
     )
 }
 

@@ -1149,7 +1149,7 @@ fn del_root(
 fn send_reply(reply: Reply, r: Result<()>) {
     match (r, reply) {
         (Ok(()), Some(reply)) => {
-            reply.send(Value::Ok);
+            reply.send(Value::Null);
         }
         (Err(e), Some(reply)) => {
             let e = Value::Error(format!("{}", e).into());

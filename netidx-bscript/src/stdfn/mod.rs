@@ -82,6 +82,8 @@ impl CachedVals {
         })
     }
 
+    /// Like update, but return the indexes of the nodes that updated
+    /// instead of a consolidated bool
     pub fn update_diff<C: Ctx, E: Debug + Clone>(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -96,6 +98,25 @@ impl CachedVals {
                     self.0[i] = v;
                     true
                 }
+            })
+            .collect()
+    }
+
+    /// Only update if the value changes, return the indexes of nodes that updated
+    pub fn update_changed<C: Ctx, E: Debug + Clone>(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> SmallVec<[bool; 4]> {
+        from.into_iter()
+            .enumerate()
+            .map(|(i, src)| match src.update(ctx, event) {
+                v @ Some(_) if self.0[i] != v => {
+                    self.0[i] = v;
+                    true
+                }
+                Some(_) | None => false,
             })
             .collect()
     }
