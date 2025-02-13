@@ -398,6 +398,14 @@ impl fmt::Display for FnType {
 }
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
+pub struct Arg {
+    pub labeled: bool,
+    pub name: ArcStr,
+    pub constraint: Option<Type>,
+    pub default: Option<Expr>
+}
+
+#[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum ExprKind {
     Constant(Value),
     Module {
@@ -425,7 +433,7 @@ pub enum ExprKind {
         value: Arc<Expr>,
     },
     Lambda {
-        args: Arc<[(ArcStr, Option<Type>)]>,
+        args: Arc<[Arg]>,
         vargs: Option<Option<Type>>,
         rtype: Option<Type>,
         body: Either<Arc<Expr>, ArcStr>,
@@ -439,7 +447,7 @@ pub enum ExprKind {
         typ: Typ,
     },
     Apply {
-        args: Arc<[Expr]>,
+        args: Arc<[(Option<ArcStr>, Expr)]>,
         function: ModPath,
     },
     Select {

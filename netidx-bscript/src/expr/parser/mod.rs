@@ -1,4 +1,4 @@
-use super::{FnType, Pattern, Type};
+use super::{Arg, FnType, Pattern, Type};
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use arcstr::ArcStr;
 use combine::{
@@ -234,7 +234,9 @@ where
                         argvec.push(s);
                         Some(
                             ExprKind::Apply {
-                                args: Arc::from(argvec.clone()),
+                                args: Arc::from_iter(
+                                    argvec.clone().into_iter().map(|a| (None, a)),
+                                ),
                                 function: ["str", "concat"].into(),
                             }
                             .to_expr(),
@@ -244,7 +246,9 @@ where
                         argvec.extend([src, s.to_expr()]);
                         Some(
                             ExprKind::Apply {
-                                args: Arc::from(argvec.clone()),
+                                args: Arc::from_iter(
+                                    argvec.clone().into_iter().map(|a| (None, a)),
+                                ),
                                 function: ["str", "concat"].into(),
                             }
                             .to_expr(),
@@ -258,8 +262,13 @@ where
                     ) => {
                         argvec.push(s.to_expr());
                         Some(
-                            ExprKind::Apply { args: Arc::from(argvec.clone()), function }
-                                .to_expr(),
+                            ExprKind::Apply {
+                                args: Arc::from_iter(
+                                    argvec.clone().into_iter().map(|a| (None, a)),
+                                ),
+                                function,
+                            }
+                            .to_expr(),
                         )
                     }
                     (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
@@ -348,7 +357,11 @@ where
     I::Range: Range,
 {
     between(token('['), sptoken(']'), sep_by(expr(), csep())).map(|args: Vec<Expr>| {
-        ExprKind::Apply { function: ["array"].into(), args: Arc::from(args) }.to_expr()
+        ExprKind::Apply {
+            function: ["array"].into(),
+            args: Arc::from_iter(args.into_iter().map(|a| (None, a))),
+        }
+        .to_expr()
     })
 }
 
@@ -358,11 +371,42 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (modpath(), between(sptoken('('), sptoken(')'), sep_by(expr(), csep()))).map(
-        |(function, args): (ModPath, Vec<Expr>)| {
-            ExprKind::Apply { function, args: Arc::from(args) }.to_expr()
-        },
+    (
+        modpath(),
+        between(
+            sptoken('('),
+            sptoken(')'),
+            sep_by(
+                choice((
+                    attempt(sptoken('#').with(fname()).skip(not_followed_by(token(':'))))
+                        .map(|n| {
+                            let e = ExprKind::Ref { name: [n.clone()].into() }.to_expr();
+                            (Some(n), e)
+                        }),
+                    attempt((sptoken('#').with(fname()).skip(token(':')), expr()))
+                        .map(|(n, e)| (Some(n), e)),
+                    expr().map(|e| (None, e)),
+                )),
+                csep(),
+            ),
+        ),
     )
+        .then(|(function, args): (ModPath, Vec<(Option<ArcStr>, Expr)>)| {
+            let mut anon = false;
+            for (a, _) in &args {
+                if a.is_some() && anon {
+                    return unexpected_any(
+                        "labeled arguments must come before anonymous arguments",
+                    )
+                    .right();
+                }
+                anon |= a.is_none();
+            }
+            value((function, args)).left()
+        })
+        .map(|(function, args): (ModPath, Vec<(Option<ArcStr>, Expr)>)| {
+            ExprKind::Apply { function, args: Arc::from(args) }.to_expr()
+        })
 }
 
 fn typeprim<I>() -> impl Parser<I, Output = Typ>
@@ -462,6 +506,65 @@ parser! {
     }
 }
 
+fn lambda_args<I>() -> impl Parser<I, Output = (Vec<Arg>, Option<Option<Type>>)>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    sep_by(
+        (
+            choice((
+                attempt(
+                    spaces().with((optional(token('#')).map(|o| o.is_some()), fname())),
+                ),
+                attempt(spstring("@args")).map(|s| (false, ArcStr::from(s))),
+            )),
+            optional(attempt(sptoken(':').with(typexp()))),
+            optional(attempt(sptoken('=').with(expr()))),
+        ),
+        csep(),
+    )
+    .map(|v: Vec<((bool, ArcStr), Option<Type>, Option<Expr>)>| {
+        v.into_iter()
+            .map(|((labeled, name), constraint, default)| Arg {
+                labeled,
+                name,
+                constraint,
+                default,
+            })
+            .collect::<Vec<_>>()
+    })
+    // @args must be last
+    .then(|mut v: Vec<Arg>| {
+        match v.iter().enumerate().find(|(_, a)| &*a.name == "@args") {
+            None => value((v, None)).left(),
+            Some((_, a)) if a.default.is_some() => {
+                unexpected_any("@args may not have a default value").right()
+            }
+            Some((i, _)) => {
+                if i == v.len() - 1 {
+                    let a = v.pop().unwrap();
+                    value((v, Some(a.constraint))).left()
+                } else {
+                    unexpected_any("@args must be the last argument").right()
+                }
+            }
+        }
+    })
+    // labeled before anonymous args
+    .then(|(v, vargs): (Vec<Arg>, Option<Option<Type>>)| {
+        let mut anon = false;
+        for a in &v {
+            if a.labeled && anon {
+                return unexpected_any("labeled args must come before anon args").right();
+            }
+            anon |= !a.labeled;
+        }
+        value((v, vargs)).left()
+    })
+}
+
 fn lambda<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -469,33 +572,7 @@ where
     I::Range: Range,
 {
     (
-        between(
-            token('|'),
-            sptoken('|'),
-            sep_by(
-                (
-                    choice((
-                        attempt(spfname()),
-                        attempt(spstring("@args")).map(ArcStr::from),
-                    )),
-                    optional(attempt(sptoken(':').with(typexp()))),
-                ),
-                csep(),
-            )
-            .then(|mut v: SmallVec<[(ArcStr, Option<Type>); 4]>| {
-                match v.iter().enumerate().find(|(_, (a, _))| &**a == "@args") {
-                    None => value((v, None)).left(),
-                    Some((i, _)) => {
-                        if i == v.len() - 1 {
-                            let (_, typ) = v.pop().unwrap();
-                            value((v, Some(typ))).left()
-                        } else {
-                            unexpected_any("@args must be the last argument").right()
-                        }
-                    }
-                }
-            }),
-        ),
+        between(token('|'), sptoken('|'), lambda_args()),
         optional(attempt(spstring("->").with(typexp()).skip(space()))),
         choice((
             attempt(sptoken('\'')).with(fname()).map(Either::Right),
@@ -503,7 +580,7 @@ where
         )),
     )
         .map(|((args, vargs), rtype, body)| {
-            let args = Arc::from_iter(args.into_iter());
+            let args = Arc::from_iter(args);
             ExprKind::Lambda { args, vargs, rtype, body }.to_expr()
         })
 }

@@ -1,5 +1,5 @@
 use crate::{
-    expr::{ExprId, ExprKind, FnType, ModPath},
+    expr::{Arg, ExprId, ExprKind, FnType, ModPath},
     stdfn,
     vm::{dbg::DbgCtx, env::Env, node::Node},
 };
@@ -45,7 +45,7 @@ pub type InitFn<C, E> = sync::Arc<
 
 #[derive(Debug, Clone)]
 pub struct LambdaTVars {
-    pub argspec: Arc<[(ArcStr, TypeId)]>,
+    pub argspec: Arc<[(Arg, TypeId)]>,
     pub vargs: Option<TypeId>,
     pub rtype: TypeId,
 }

@@ -1,5 +1,5 @@
 use crate::{
-    expr::{FnType, ModPath, Type},
+    expr::{Arg, FnType, ModPath, Type},
     vm::{BindId, Ctx, InitFnTyped, TypeId},
 };
 use anyhow::{anyhow, bail, Result};
@@ -11,15 +11,22 @@ use std::{
     borrow::Cow,
     fmt::{self, Debug},
     iter,
-    sync::{Arc as SArc, LazyLock},
+    sync::LazyLock,
 };
 use triomphe::Arc;
+
+pub struct LambdaBind<C: Ctx + 'static, E: Debug + Clone + 'static> {
+    pub env: Env<C, E>,
+    pub scope: ModPath,
+    pub argspec: Arc<[Arg]>,
+    pub init: InitFnTyped<C, E>,
+}
 
 pub struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     pub id: BindId,
     pub export: bool,
     pub typ: TypeId,
-    pub fun: Option<InitFnTyped<C, E>>,
+    pub fun: Option<Arc<LambdaBind<C, E>>>,
     scope: ModPath,
     name: CompactString,
 }
@@ -44,7 +51,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
             name: self.name.clone(),
             export: self.export,
             typ: self.typ.clone(),
-            fun: self.fun.as_ref().map(|f| SArc::clone(f)),
+            fun: self.fun.as_ref().map(Arc::clone),
         }
     }
 }
@@ -324,7 +331,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
 
     pub fn alias_typevar(&mut self, from: TypeId, to: TypeId) -> Result<()> {
         if from == to {
-            return Ok(())
+            return Ok(());
         }
         match self.typevars.get(&from) {
             None => {
@@ -348,8 +355,12 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
             (Some(TypeOrAlias::Alias(t0)), Some(TypeOrAlias::Alias(t1))) => {
                 self.check_typevar_contains(undef_ok, *t0, *t1)
             }
-            (Some(TypeOrAlias::Alias(t0)), _) => self.check_typevar_contains(undef_ok, *t0, t1),
-            (_, Some(TypeOrAlias::Alias(t1))) => self.check_typevar_contains(undef_ok, t0, *t1),
+            (Some(TypeOrAlias::Alias(t0)), _) => {
+                self.check_typevar_contains(undef_ok, *t0, t1)
+            }
+            (_, Some(TypeOrAlias::Alias(t1))) => {
+                self.check_typevar_contains(undef_ok, t0, *t1)
+            }
             (Some(TypeOrAlias::Type(typ0)), Some(TypeOrAlias::Type(typ1)))
                 if typ0.contains(typ1) =>
             {
