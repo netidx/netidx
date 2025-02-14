@@ -402,7 +402,7 @@ pub struct Arg {
     pub labeled: bool,
     pub name: ArcStr,
     pub constraint: Option<Type>,
-    pub default: Option<Expr>
+    pub default: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
@@ -577,6 +577,27 @@ impl ExprKind {
         fn push_indent(indent: usize, buf: &mut String) {
             buf.extend((0..indent).into_iter().map(|_| ' '));
         }
+        fn pretty_print_exprs_int<'a, A, F: Fn(&'a A) -> &'a Expr>(
+            indent: usize,
+            limit: usize,
+            buf: &mut String,
+            exprs: &'a [A],
+            open: &str,
+            close: &str,
+            sep: &str,
+            f: F,
+        ) -> fmt::Result {
+            writeln!(buf, "{}", open)?;
+            for i in 0..exprs.len() {
+                f(&exprs[i]).kind.pretty_print(indent + 2, limit, true, buf)?;
+                if i < exprs.len() - 1 {
+                    kill_newline!(buf);
+                    writeln!(buf, "{}", sep)?
+                }
+            }
+            push_indent(indent, buf);
+            writeln!(buf, "{}", close)
+        }
         fn pretty_print_exprs(
             indent: usize,
             limit: usize,
@@ -586,16 +607,7 @@ impl ExprKind {
             close: &str,
             sep: &str,
         ) -> fmt::Result {
-            writeln!(buf, "{}", open)?;
-            for i in 0..exprs.len() {
-                exprs[i].kind.pretty_print(indent + 2, limit, true, buf)?;
-                if i < exprs.len() - 1 {
-                    kill_newline!(buf);
-                    writeln!(buf, "{}", sep)?
-                }
-            }
-            push_indent(indent, buf);
-            writeln!(buf, "{}", close)
+            pretty_print_exprs_int(indent, limit, buf, exprs, open, close, sep, |a| a)
         }
         let exp = |export| if export { "pub " } else { "" };
         match self {
@@ -640,18 +652,61 @@ impl ExprKind {
                     Ok(())
                 } else if function == &["array"] {
                     buf.truncate(len);
-                    pretty_print_exprs(indent, limit, buf, args, "[", "]", ",")
+                    pretty_print_exprs_int(indent, limit, buf, args, "[", "]", ",", |a| {
+                        &a.1
+                    })
                 } else {
                     buf.truncate(len);
                     write!(buf, "{function}")?;
-                    pretty_print_exprs(indent, limit, buf, args, "(", ")", ",")
+                    writeln!(buf, "(")?;
+                    for i in 0..args.len() {
+                        match &args[i].0 {
+                            None => args[i].1.kind.pretty_print(
+                                indent + 2,
+                                limit,
+                                true,
+                                buf,
+                            )?,
+                            Some(name) => match &args[i].1.kind {
+                                ExprKind::Ref { name: n }
+                                    if Path::dirname(&n.0).is_none()
+                                        && Path::basename(&n.0)
+                                            == Some(name.as_str()) =>
+                                {
+                                    writeln!(buf, "#{name}")?
+                                }
+                                _ => {
+                                    write!(buf, "#{name}: ")?;
+                                    args[i].1.kind.pretty_print(
+                                        indent + 2,
+                                        limit,
+                                        false,
+                                        buf,
+                                    )?
+                                }
+                            },
+                        }
+                        if i < args.len() - 1 {
+                            kill_newline!(buf);
+                            writeln!(buf, ",")?
+                        }
+                    }
+                    writeln!(buf, ")")
                 }
             }
             ExprKind::Lambda { args, vargs, rtype, body } => {
                 try_single_line!(true);
                 write!(buf, "|")?;
-                for (i, (a, typ)) in args.iter().enumerate() {
-                    write!(buf, "{a}{}", typ!(typ))?;
+                for (i, a) in args.iter().enumerate() {
+                    if a.labeled {
+                        write!(buf, "#{}", a.name)?
+                    } else {
+                        write!(buf, "{}", a.name)?
+                    }
+                    buf.push_str(typ!(&a.constraint));
+                    if let Some(def) = &a.default {
+                        write!(buf, " = {def}")?;
+                    }
                     if vargs.is_some() || i < args.len() - 1 {
                         write!(buf, ", ")?
                     }
@@ -836,8 +891,14 @@ impl fmt::Display for ExprKind {
             ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", "; "),
             ExprKind::Lambda { args, vargs, rtype, body } => {
                 write!(f, "|")?;
-                for (i, (a, typ)) in args.iter().enumerate() {
-                    write!(f, "{a}{}", typ!(typ))?;
+                for (i, a) in args.iter().enumerate() {
+                    if a.labeled {
+                        write!(f, "#{}", a.name)?
+                    }
+                    write!(f, "{}", typ!(&a.constraint))?;
+                    if let Some(def) = &a.default {
+                        write!(f, " = {def}")?;
+                    }
                     if vargs.is_some() || i < args.len() - 1 {
                         write!(f, ", ")?
                     }
@@ -859,7 +920,7 @@ impl fmt::Display for ExprKind {
                     // interpolation
                     write!(f, "\"")?;
                     for s in args.iter() {
-                        match &s.kind {
+                        match &s.1.kind {
                             ExprKind::Constant(Value::String(s)) if s.len() > 0 => {
                                 let es = utils::escape(&*s, '\\', &parser::BSCRIPT_ESC);
                                 write!(f, "{es}",)?;
@@ -871,10 +932,36 @@ impl fmt::Display for ExprKind {
                     }
                     write!(f, "\"")
                 } else if function == &["array"] {
-                    print_exprs(f, &**args, "[", "]", ", ")
+                    write!(f, "[")?;
+                    for i in 0..args.len() {
+                        write!(f, "{}", &args[i].1)?;
+                        if i < args.len() - 1 {
+                            write!(f, ", ")?
+                        }
+                    }
+                    write!(f, "]")
                 } else {
                     write!(f, "{function}")?;
-                    print_exprs(f, &**args, "(", ")", ", ")
+                    write!(f, "(")?;
+                    for i in 0..args.len() {
+                        match &args[i].0 {
+                            None => write!(f, "{}", &args[i].1)?,
+                            Some(name) => match &args[i].1.kind {
+                                ExprKind::Ref { name: n }
+                                    if Path::dirname(&n.0).is_none()
+                                        && Path::basename(&n.0)
+                                            == Some(name.as_str()) =>
+                                {
+                                    write!(f, "#{name}")?
+                                }
+                                _ => write!(f, "#{name}: {}", &args[i].1)?,
+                            },
+                        }
+                        if i < args.len() - 1 {
+                            write!(f, ", ")?
+                        }
+                    }
+                    write!(f, ")")
                 }
             }
             ExprKind::Select { arg, arms } => {

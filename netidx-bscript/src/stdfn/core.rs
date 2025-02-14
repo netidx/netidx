@@ -527,7 +527,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Group<C, E> {
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|ctx, scope, from, top_id| match from {
-            [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(init) }] => {
+            [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
                 let n_typ = ctx.env.add_typ(Type::Primitive(Typ::U64.into()));
                 let n = ctx.env.bind_variable(scope, "n", n_typ).id;
                 let x = ctx.env.bind_variable(scope, "x", from[0].typ).id;
@@ -545,7 +545,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Group<C, E> {
                         kind: NodeKind::Ref(x),
                     },
                 ];
-                let pred = init(ctx, &mut from, top_id)?;
+                let pred = (lb.init)(ctx, &mut from, top_id)?;
                 Ok(Box::new(Self { buf: smallvec![], pred, n, x, from }))
             }
             _ => bail!("expected a function"),
