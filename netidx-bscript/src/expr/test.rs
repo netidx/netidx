@@ -203,12 +203,26 @@ fn typexp() -> impl Strategy<Value = Type> {
     leaf.prop_recursive(5, 25, 5, |inner| {
         prop_oneof![
             collection::vec(inner.clone(), (1, 20)).prop_map(|t| Type::Set(Arc::from(t))),
-            (collection::vec(inner.clone(), (1, 10)), inner.clone(), inner.clone())
-                .prop_map(|(args, vargs, rtype)| Type::Fn(Arc::new(FnType {
-                    args: Arc::from(args),
-                    vargs,
-                    rtype
-                })))
+            (
+                collection::vec(
+                    (option::of(random_fname()), any::<bool>(), inner.clone()),
+                    (1, 10)
+                ),
+                option::of(inner.clone()),
+                inner.clone()
+            )
+                .prop_map(|(mut args, vargs, rtype)| {
+                    args.sort_by(|(k0, _, _), (k1, _, _)| k1.cmp(k0));
+                    let args = args.into_iter().map(|(name, optional, typ)| FnArgType {
+                        label: name.map(|n| (n, optional)),
+                        typ,
+                    });
+                    Type::Fn(Arc::new(FnType {
+                        args: Arc::from_iter(args),
+                        vargs,
+                        rtype,
+                    }))
+                })
         ]
     })
 }

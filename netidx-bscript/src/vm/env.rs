@@ -1,5 +1,5 @@
 use crate::{
-    expr::{Arg, FnType, ModPath, Type},
+    expr::{Arg, FnArgType, FnType, ModPath, Type},
     vm::{BindId, Ctx, InitFnTyped, TypeId},
 };
 use anyhow::{anyhow, bail, Result};
@@ -8,7 +8,6 @@ use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::{path::Path, publisher::Typ};
 use smallvec::{smallvec, SmallVec};
 use std::{
-    borrow::Cow,
     fmt::{self, Debug},
     iter,
     sync::LazyLock,
@@ -398,9 +397,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         typ: &'a FnType,
     ) -> Result<FnType> {
         let typ = Type::Fn(Arc::new(typ.clone()));
-        let typ = self.resolve_typrefs(scope, &typ)?;
-        match &*typ {
-            Type::Fn(f) => Ok((**f).clone()),
+        match self.resolve_typrefs(scope, &typ)? {
+            Type::Fn(f) => Ok((*f).clone()),
             _ => bail!("unexpected fn resolution"),
         }
     }
@@ -409,56 +407,38 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         &self,
         scope: &ModPath,
         typ: &'a Type,
-    ) -> Result<Cow<'a, Type>> {
+    ) -> Result<Type> {
         match typ {
-            Type::Bottom => Ok(Cow::Borrowed(typ)),
-            Type::Primitive(_) => Ok(Cow::Borrowed(typ)),
+            Type::Bottom => Ok(Type::Bottom),
+            Type::Primitive(s) => Ok(Type::Primitive(*s)),
             Type::Ref(name) => self
                 .find_visible(scope, name, |scope, name| {
-                    self.typedefs.get(scope).and_then(|defs| {
-                        defs.get(name).map(|typ| Cow::Owned(typ.clone()))
-                    })
+                    self.typedefs
+                        .get(scope)
+                        .and_then(|defs| defs.get(name).map(|typ| typ.clone()))
                 })
                 .ok_or_else(|| anyhow!("undefined type {name} in scope {scope}")),
             Type::Set(ts) => {
-                let mut res: SmallVec<[Cow<Type>; 20]> = smallvec![];
+                let mut res: SmallVec<[Type; 20]> = smallvec![];
                 for t in ts.iter() {
                     res.push(self.resolve_typrefs(scope, t)?)
                 }
-                let borrowed = res.iter().all(|t| match t {
-                    Cow::Borrowed(_) => true,
-                    Cow::Owned(_) => false,
-                });
-                if borrowed {
-                    Ok(Cow::Borrowed(typ))
-                } else {
-                    let iter = res.into_iter().map(|t| t.into_owned());
-                    Ok(Cow::Owned(Type::Set(Arc::from_iter(iter))))
-                }
+                Ok(Type::Set(Arc::from_iter(res)))
             }
             Type::Fn(f) => {
-                let vargs = self.resolve_typrefs(scope, &f.vargs)?;
+                let vargs = f
+                    .vargs
+                    .as_ref()
+                    .map(|t| self.resolve_typrefs(scope, t))
+                    .transpose()?;
                 let rtype = self.resolve_typrefs(scope, &f.rtype)?;
-                let mut res: SmallVec<[Cow<Type>; 20]> = smallvec![];
-                for t in f.args.iter() {
-                    res.push(self.resolve_typrefs(scope, t)?);
+                let mut res: SmallVec<[FnArgType; 20]> = smallvec![];
+                for a in f.args.iter() {
+                    let typ = self.resolve_typrefs(scope, &a.typ)?;
+                    let a = FnArgType { label: a.label.clone(), typ };
+                    res.push(a);
                 }
-                let borrowed =
-                    res.iter().chain(iter::once(&vargs)).chain(iter::once(&rtype)).all(
-                        |t| match t {
-                            Cow::Borrowed(_) => true,
-                            Cow::Owned(_) => false,
-                        },
-                    );
-                if borrowed {
-                    Ok(Cow::Borrowed(typ))
-                } else {
-                    Ok(Cow::Owned(Type::Fn(Arc::new(FnType {
-                        args: Arc::from_iter(res.into_iter().map(|t| t.into_owned())),
-                        rtype: rtype.into_owned(),
-                        vargs: vargs.into_owned(),
-                    }))))
-                }
+                Ok(Type::Fn(Arc::new(FnType { args: Arc::from_iter(res), rtype, vargs })))
             }
         }
     }

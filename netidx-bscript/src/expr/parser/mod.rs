@@ -1,4 +1,4 @@
-use super::{Arg, FnType, Pattern, Type};
+use super::{Arg, FnArgType, FnType, Pattern, Type};
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
 use arcstr::ArcStr;
 use combine::{
@@ -39,7 +39,7 @@ pub const TYPE_RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
     FxHashSet::from_iter([
         "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32", "f64", "decimal",
         "datetime", "duration", "bool", "string", "bytes", "result", "array", "null",
-        "_",
+        "_", "?",
     ])
 });
 
@@ -451,7 +451,24 @@ where
             sptoken(')'),
             sep_by(
                 choice((
-                    attempt(typexp().map(|e| Either::Left(e))),
+                    attempt(
+                        (
+                            optional(attempt(sptoken('?')))
+                                .map(|o| o.is_some())
+                                .skip(token('#')),
+                            fname().skip(token(':')),
+                            typexp(),
+                        )
+                            .map(|(optional, name, typ)| {
+                                Either::Left(FnArgType {
+                                    label: Some((name.into(), optional)),
+                                    typ,
+                                })
+                            }),
+                    ),
+                    attempt(
+                        typexp().map(|typ| Either::Left(FnArgType { label: None, typ })),
+                    ),
                     attempt(spstring("@args:").with(typexp()).map(|e| Either::Right(e))),
                 )),
                 csep(),
@@ -459,24 +476,34 @@ where
         )),
         spstring("->").with(typexp()),
     )
-        .then(|(mut args, rtype): (Vec<Either<Type, Type>>, Type)| {
+        .then(|(mut args, rtype): (Vec<Either<FnArgType, Type>>, Type)| {
             let vargs = match args.pop() {
-                Some(Either::Right(t)) => t,
+                None => None,
+                Some(Either::Right(t)) => Some(t),
                 Some(Either::Left(t)) => {
                     args.push(Either::Left(t));
-                    Type::Bottom
+                    None
                 }
-                None => Type::Bottom,
             };
             if !args.iter().all(|a| a.is_left()) {
-                unexpected_any("vargs must appear once at the end of the args").left()
-            } else {
-                let args = args.into_iter().map(|t| match t {
-                    Either::Left(t) => t,
-                    Either::Right(_) => unreachable!(),
-                });
-                value(FnType { args: Arc::from_iter(args), vargs, rtype }).right()
+                return unexpected_any("vargs must appear once at the end of the args")
+                    .left();
             }
+            let args = Arc::from_iter(args.into_iter().map(|t| match t {
+                Either::Left(t) => t,
+                Either::Right(_) => unreachable!(),
+            }));
+            let mut anon = false;
+            for a in args.iter() {
+                if anon && a.label.is_some() {
+                    return unexpected_any(
+                        "anonymous args must appear after labeled args",
+                    )
+                    .left();
+                }
+                anon |= a.label.is_none();
+            }
+            value(FnType { args, vargs, rtype }).right()
         })
 }
 

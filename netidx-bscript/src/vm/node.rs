@@ -157,27 +157,24 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<
         }
         let spec = &self.spec;
         if spec.argspec.len() != self.typ.args.len()
-            || spec.vargs.is_none()
-                && match self.typ.vargs {
-                    Type::Bottom => false,
-                    _ => true,
-                }
+            || spec.vargs.is_none() && self.typ.vargs.is_some()
         {
             bail!("in builtin {} arity mismatch in builtin specification", self.name)
         }
         if args.len() < self.typ.args.len()
-            || (args.len() > self.typ.args.len() && self.typ.vargs == Type::Bottom)
+            || (args.len() > self.typ.args.len() && self.typ.vargs.is_none())
         {
-            let vargs = if self.typ.vargs != Type::Bottom { "at least " } else { "" };
+            let vargs = if self.typ.vargs.is_some() { "at least " } else { "" };
             bail!("expected {}{} arguments got {}", spec.argspec.len(), vargs, args.len())
         }
-        for (i, ((_, id), typ)) in
-            spec.argspec.iter().zip(self.typ.args.iter()).enumerate()
+        for (i, ((_, id), a)) in spec.argspec.iter().zip(self.typ.args.iter()).enumerate()
         {
-            wrap!(args[i], ctx.env.define_typevar(*id, typ.clone()))?
+            wrap!(args[i], ctx.env.define_typevar(*id, a.typ.clone()))?
         }
         if let Some(id) = spec.vargs {
-            ctx.env.define_typevar(id, self.typ.vargs.clone())?;
+            if let Some(typ) = &self.typ.vargs {
+                ctx.env.define_typevar(id, typ.clone())?;
+            }
         }
         ctx.env.define_typevar(spec.rtype, self.typ.rtype.clone())?;
         for i in 0..args.len() {
@@ -547,7 +544,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 None => Ok((a.clone(), None)),
                 Some(typ) => {
                     let typ = ctx.env.resolve_typrefs(&scope, typ)?;
-                    Ok((a.clone(), Some(typ.into_owned())))
+                    Ok((a.clone(), Some(typ)))
                 }
             })
             .collect::<Result<SmallVec<[_; 16]>>>();
@@ -855,7 +852,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let typ = match typ {
                     None => node.typ,
                     Some(typ) => match ctx.env.resolve_typrefs(scope, typ) {
-                        Ok(t) => ctx.env.add_typ(t.into_owned()),
+                        Ok(t) => ctx.env.add_typ(t),
                         Err(e) => return error!("{e}", vec![node]),
                     },
                 };

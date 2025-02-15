@@ -363,15 +363,14 @@ impl fmt::Display for Type {
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct FnArgType {
-    label: Option<ArcStr>,
-    optional: bool,
-    typ: Type,
+    pub label: Option<(ArcStr, bool)>,
+    pub typ: Type,
 }
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct FnType {
     pub args: Arc<[FnArgType]>,
-    pub vargs: Type,
+    pub vargs: Option<Type>,
     pub rtype: Type,
 }
 
@@ -385,14 +384,20 @@ impl FnType {
                     sul = i;
                     break;
                 }
-                Some(l) => match t.args.iter().find(|a| a.label.as_ref() == Some(l)) {
-                    None => return false,
-                    Some(o) => {
-                        if !o.typ.contains(&a.typ) {
-                            return false;
+                Some((l, _)) => {
+                    match t
+                        .args
+                        .iter()
+                        .find(|a| a.label.as_ref().map(|a| &a.0) == Some(l))
+                    {
+                        None => return false,
+                        Some(o) => {
+                            if !o.typ.contains(&a.typ) {
+                                return false;
+                            }
                         }
                     }
-                },
+                }
             }
         }
         for (i, a) in t.args.iter().enumerate() {
@@ -401,10 +406,14 @@ impl FnType {
                     tul = i;
                     break;
                 }
-                Some(l) => match self.args.iter().find(|a| a.label.as_ref() == Some(l)) {
+                Some((l, opt)) => match self
+                    .args
+                    .iter()
+                    .find(|a| a.label.as_ref().map(|a| &a.0) == Some(l))
+                {
                     Some(_) => (),
                     None => {
-                        if !a.optional {
+                        if !opt {
                             return false;
                         }
                     }
@@ -413,45 +422,36 @@ impl FnType {
         }
         let slen = self.args.len() - sul;
         let tlen = t.args.len() - tul;
-        if slen < tlen {
-            for i in 0..(tlen - slen) {
-                if !t.args[tul + i].optional {
-                    return false;
-                }
-            }
-            tul += slen - tlen;
-        }
-        let tlen = t.args.len() - tul;
         slen == tlen
             && t.args[tul..]
                 .iter()
                 .zip(self.args[sul..].iter())
                 .all(|(t, s)| t.typ.contains(&s.typ))
-            && t.vargs.contains(&self.vargs)
+            && match (&t.vargs, &self.vargs) {
+                (Some(tv), Some(sv)) => tv.contains(sv),
+                (None, None) => true,
+                (_, _) => false,
+            }
             && self.rtype.contains(&t.rtype)
     }
 }
 
 impl fmt::Display for FnType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let vargs = match &self.vargs {
-            Type::Bottom => false,
-            _ => true,
-        };
         write!(f, "fn(")?;
         for (i, a) in self.args.iter().enumerate() {
-            let optional = if a.optional { "?" } else { "" };
             match &a.label {
-                Some(l) => write!(f, "{optional}#{l}: ")?,
-                None => write!(f, "{optional}")?,
+                Some((l, true)) => write!(f, "?#{l}: ")?,
+                Some((l, false)) => write!(f, "#{l}: ")?,
+                None => (),
             }
             write!(f, "{}", a.typ)?;
-            if i < self.args.len() - 1 || vargs {
+            if i < self.args.len() - 1 || self.vargs.is_some() {
                 write!(f, ", ")?;
             }
         }
-        if vargs {
-            write!(f, "@args: {}", self.vargs)?;
+        if let Some(vargs) = &self.vargs {
+            write!(f, "@args: {}", vargs)?;
         }
         write!(f, ") -> {}", self.rtype)
     }
