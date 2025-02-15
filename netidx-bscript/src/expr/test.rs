@@ -352,7 +352,13 @@ fn expr() -> impl Strategy<Value = Expr> {
                 modpath()
             )
                 .prop_map(|(mut s, f)| {
-                    s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
+                    if &*f.0 == "/array" {
+                        for a in &mut s {
+                            a.0 = None;
+                        }
+                    } else {
+                        s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
+                    }
                     ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
                 }),
             (inner.clone(), typ()).prop_map(|(expr, typ)| ExprKind::TypeCast {

@@ -793,6 +793,7 @@ let a: fn(?#foo: number, ?#bar: string, #a: any, any) -> string =
 
 #[test]
 fn prop0() {
-    let s = r#"{ |#bar = "hello"| 'foo }"#;
-    dbg!(parse(s).unwrap());
+    let s = r#"mod a{{|#a = true| u32:0}}"#;
+    let s = r#"|#a = true| u32:0"#;
+    dbg!(parse_expr(s).unwrap());
 }
