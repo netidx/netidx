@@ -268,7 +268,13 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
                 modpath()
             )
                 .prop_map(|(mut s, f)| {
-                    s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
+                    if &*f.0 == "/array" {
+                        for a in &mut s {
+                            a.0 = None;
+                        }
+                    } else {
+                        s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
+                    }
                     ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
                 }),
             inner.clone().prop_map(|e0| ExprKind::Not { expr: Arc::new(e0) }.to_expr()),
@@ -371,7 +377,7 @@ fn expr() -> impl Strategy<Value = Expr> {
                 inner.clone()
             )
                 .prop_map(|(mut args, vargs, rtype, body)| {
-                    args.sort_unstable_by_key(|(k, _, _, _)| *k);
+                    args.sort_unstable_by(|(k0, _, _, _), (k1, _, _, _)| k1.cmp(k0));
                     let args =
                         args.into_iter().map(|(labeled, name, constraint, default)| {
                             Arg { labeled: labeled.then_some(default), name, constraint }
@@ -436,7 +442,13 @@ fn modexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![
         (collection::vec((option::of(random_fname()), expr()), (0, 10)), modpath())
             .prop_map(|(mut s, f)| {
-                s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
+                if &*f.0 == "/array" {
+                    for a in &mut s {
+                        a.0 = None;
+                    }
+                } else {
+                    s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
+                }
                 ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
             }),
         collection::vec(expr(), (1, 10))
