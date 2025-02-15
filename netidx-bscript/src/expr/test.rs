@@ -48,7 +48,6 @@ fn value() -> impl Strategy<Value = Value> {
         Just(Value::True),
         Just(Value::False),
         Just(Value::Null),
-        Just(Value::Ok),
         arcstr().prop_map(Value::Error),
     ]
 }
@@ -81,8 +80,39 @@ fn typart() -> impl Strategy<Value = String> {
         .prop_filter("Filter reserved words", |s| !TYPE_RESERVED.contains(s.as_str()))
 }
 
+fn valid_fname() -> impl Strategy<Value = ArcStr> {
+    prop_oneof![
+        Just(ArcStr::from("any")),
+        Just(ArcStr::from("all")),
+        Just(ArcStr::from("sum")),
+        Just(ArcStr::from("product")),
+        Just(ArcStr::from("divide")),
+        Just(ArcStr::from("mean")),
+        Just(ArcStr::from("array")),
+        Just(ArcStr::from("min")),
+        Just(ArcStr::from("max")),
+        Just(ArcStr::from("and")),
+        Just(ArcStr::from("or")),
+        Just(ArcStr::from("not")),
+        Just(ArcStr::from("cmp")),
+        Just(ArcStr::from("filter")),
+        Just(ArcStr::from("isa")),
+        Just(ArcStr::from("eval")),
+        Just(ArcStr::from("count")),
+        Just(ArcStr::from("sample")),
+        Just(ArcStr::from("join")),
+        Just(ArcStr::from("concat")),
+        Just(ArcStr::from("navigate")),
+        Just(ArcStr::from("confirm")),
+        Just(ArcStr::from("load")),
+        Just(ArcStr::from("get")),
+        Just(ArcStr::from("store")),
+        Just(ArcStr::from("set")),
+    ]
+}
+
 fn random_fname() -> impl Strategy<Value = ArcStr> {
-    random_modpart().prop_map(ArcStr::from)
+    prop_oneof![random_modpart().prop_map(ArcStr::from), valid_fname()]
 }
 
 fn random_modpath() -> impl Strategy<Value = ModPath> {
@@ -154,7 +184,7 @@ fn typ() -> impl Strategy<Value = Typ> {
         Just(Typ::Bool),
         Just(Typ::String),
         Just(Typ::Bytes),
-        Just(Typ::Result),
+        Just(Typ::Error),
         Just(Typ::Array),
         Just(Typ::Null),
     ]
@@ -219,9 +249,14 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
                 .prop_map(|(arg, arms)| build_pattern(arg, arms)),
             collection::vec(inner.clone(), (1, 10))
                 .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
-            (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
-                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
-            }),
+            (
+                collection::vec((option::of(random_fname()), inner.clone()), (0, 10)),
+                modpath()
+            )
+                .prop_map(|(mut s, f)| {
+                    s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
+                    ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
+                }),
             inner.clone().prop_map(|e0| ExprKind::Not { expr: Arc::new(e0) }.to_expr()),
             (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Eq {
                 lhs: Arc::new(e0),
@@ -292,9 +327,14 @@ fn expr() -> impl Strategy<Value = Expr> {
     leaf.prop_recursive(10, 100, 10, |inner| {
         prop_oneof![
             arithexpr(),
-            (collection::vec(inner.clone(), (0, 10)), modpath()).prop_map(|(s, f)| {
-                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
-            }),
+            (
+                collection::vec((option::of(random_fname()), inner.clone()), (0, 10)),
+                modpath()
+            )
+                .prop_map(|(mut s, f)| {
+                    s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
+                    ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
+                }),
             (inner.clone(), typ()).prop_map(|(expr, typ)| ExprKind::TypeCast {
                 expr: Arc::new(expr),
                 typ
@@ -303,12 +343,25 @@ fn expr() -> impl Strategy<Value = Expr> {
             collection::vec(inner.clone(), (1, 10))
                 .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
             (
-                collection::vec((random_fname(), option::of(typexp())), (0, 10)),
+                collection::vec(
+                    (
+                        any::<bool>(),
+                        random_fname(),
+                        option::of(typexp()),
+                        option::of(inner.clone())
+                    ),
+                    (0, 10)
+                ),
                 option::of(option::of(typexp())),
                 option::of(typexp()),
                 inner.clone()
             )
-                .prop_map(|(args, vargs, rtype, body)| {
+                .prop_map(|(mut args, vargs, rtype, body)| {
+                    args.sort_unstable_by_key(|(k, _, _, _)| *k);
+                    let args =
+                        args.into_iter().map(|(labeled, name, constraint, default)| {
+                            Arg { labeled, name, constraint, default }
+                        });
                     ExprKind::Lambda {
                         args: Arc::from_iter(args),
                         vargs,
@@ -318,12 +371,25 @@ fn expr() -> impl Strategy<Value = Expr> {
                     .to_expr()
                 }),
             (
-                collection::vec((random_fname(), option::of(typexp())), (0, 10)),
+                collection::vec(
+                    (
+                        any::<bool>(),
+                        random_fname(),
+                        option::of(typexp()),
+                        option::of(inner.clone())
+                    ),
+                    (0, 10)
+                ),
                 option::of(option::of(typexp())),
                 option::of(typexp()),
                 random_fname()
             )
-                .prop_map(|(args, vargs, rtype, body)| {
+                .prop_map(|(mut args, vargs, rtype, body)| {
+                    args.sort_unstable_by_key(|(k, _, _, _)| !*k);
+                    let args =
+                        args.into_iter().map(|(labeled, name, constraint, default)| {
+                            Arg { labeled, name, constraint, default }
+                        });
                     ExprKind::Lambda {
                         args: Arc::from_iter(args),
                         vargs,
@@ -354,9 +420,11 @@ fn expr() -> impl Strategy<Value = Expr> {
 
 fn modexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![
-        (collection::vec(expr(), (0, 10)), modpath()).prop_map(|(s, f)| {
-            ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
-        }),
+        (collection::vec((option::of(random_fname()), expr()), (0, 10)), modpath())
+            .prop_map(|(mut s, f)| {
+                s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
+                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
+            }),
         collection::vec(expr(), (1, 10))
             .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
         modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
@@ -393,7 +461,7 @@ fn modexpr() -> impl Strategy<Value = Expr> {
     })
 }
 
-fn acc_strings(args: &[Expr]) -> Arc<[Expr]> {
+fn acc_strings<'a>(args: impl IntoIterator<Item = &'a Expr> + 'a) -> Arc<[Expr]> {
     let mut v: Vec<Expr> = Vec::new();
     for s in args {
         let s = s.clone();
@@ -433,6 +501,19 @@ fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
     }
 }
 
+fn check_args(args0: &[Arg], args1: &[Arg]) -> bool {
+    args0.iter().zip(args1.iter()).fold(true, |r, (a0, a1)| {
+        r && a0.labeled == a1.labeled
+            && a0.name == a1.name
+            && a0.constraint == a1.constraint
+            && match (&a0.default, &a1.default) {
+                (Some(e0), Some(e1)) => check(e0, e1),
+                (None, None) => true,
+                (_, _) => false,
+            }
+    })
+}
+
 fn check(s0: &Expr, s1: &Expr) -> bool {
     match (&s0.kind, &s1.kind) {
         (ExprKind::Constant(v0), ExprKind::Constant(v1)) => match (v0, v1) {
@@ -451,7 +532,9 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (
             ExprKind::Apply { args: srs0, function: fn0 },
             ExprKind::Constant(Value::String(c1)),
-        ) if fn0 == &["str", "concat"] => match &acc_strings(srs0)[..] {
+        ) if fn0 == &["str", "concat"] => match &acc_strings(srs0.iter().map(|(_, e)| e))
+            [..]
+        {
             [Expr { kind: ExprKind::Constant(Value::String(c0)), .. }] => dbg!(c0 == c1),
             _ => false,
         },
@@ -459,7 +542,8 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::Apply { args: srs0, function: fn0 },
             ExprKind::Apply { args: srs1, function: fn1 },
         ) if fn0 == fn1 && fn0 == &["str", "concat"] => {
-            let srs0 = acc_strings(srs0);
+            let srs0 = acc_strings(srs0.iter().map(|a| &a.1));
+            let srs1 = acc_strings(srs1.iter().map(|a| &a.1));
             dbg!(srs0
                 .iter()
                 .zip(srs1.iter())
@@ -472,7 +556,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             dbg!(srs0
                 .iter()
                 .zip(srs1.iter())
-                .fold(true, |r, (s0, s1)| r && check(s0, s1)))
+                .fold(true, |r, ((n0, s0), (n1, s1))| r && n0 == n1 && check(s0, s1)))
         }
         (
             ExprKind::Add { lhs: lhs0, rhs: rhs0 },
@@ -580,7 +664,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                 body: Either::Left(body1),
             },
         ) => dbg!(
-            dbg!(args0 == args1)
+            dbg!(check_args(args0, args1))
                 && dbg!(vargs0 == vargs1)
                 && dbg!(rtype0 == rtype1)
                 && dbg!(check(body0, body1))
@@ -599,7 +683,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                 body: Either::Right(b1),
             },
         ) => dbg!(
-            dbg!(args0 == args1)
+            dbg!(check_args(args0, args1))
                 && dbg!(vargs0 == vargs1)
                 && dbg!(rtype0 == rtype1)
                 && dbg!(b0 == b1)

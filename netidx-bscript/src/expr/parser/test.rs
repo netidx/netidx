@@ -22,7 +22,7 @@ fn escaped_string() {
     assert_eq!(
         ExprKind::Apply {
             function: ["load"].into(),
-            args: Arc::from_iter([ExprKind::Constant(p).to_expr()])
+            args: Arc::from_iter([(None, ExprKind::Constant(p).to_expr())])
         }
         .to_expr(),
         parse(s).unwrap()
@@ -33,26 +33,43 @@ fn escaped_string() {
 fn interpolated0() {
     let p = ExprKind::Apply {
         function: ["load"].into(),
-        args: Arc::from_iter([ExprKind::Apply {
-            args: Arc::from_iter([
-                ExprKind::Constant(Value::from("/foo/")).to_expr(),
-                ExprKind::Apply {
-                    function: ["get"].into(),
-                    args: Arc::from_iter([ExprKind::Apply {
-                        args: Arc::from_iter([
-                            ExprKind::Ref { name: ["sid"].into() }.to_expr(),
-                            ExprKind::Constant(Value::from("_var")).to_expr(),
-                        ]),
-                        function: ["str", "concat"].into(),
-                    }
-                    .to_expr()]),
-                }
-                .to_expr(),
-                ExprKind::Constant(Value::from("/baz")).to_expr(),
-            ]),
-            function: ["str", "concat"].into(),
-        }
-        .to_expr()]),
+        args: Arc::from_iter([(
+            None,
+            ExprKind::Apply {
+                args: Arc::from_iter([
+                    (None, ExprKind::Constant(Value::from("/foo/")).to_expr()),
+                    (
+                        None,
+                        ExprKind::Apply {
+                            function: ["get"].into(),
+                            args: Arc::from_iter([(
+                                None,
+                                ExprKind::Apply {
+                                    args: Arc::from_iter([
+                                        (
+                                            None,
+                                            ExprKind::Ref { name: ["sid"].into() }
+                                                .to_expr(),
+                                        ),
+                                        (
+                                            None,
+                                            ExprKind::Constant(Value::from("_var"))
+                                                .to_expr(),
+                                        ),
+                                    ]),
+                                    function: ["str", "concat"].into(),
+                                }
+                                .to_expr(),
+                            )]),
+                        }
+                        .to_expr(),
+                    ),
+                    (None, ExprKind::Constant(Value::from("/baz")).to_expr()),
+                ]),
+                function: ["str", "concat"].into(),
+            }
+            .to_expr(),
+        )]),
     }
     .to_expr();
     let s = r#"load("/foo/[get("[sid]_var")]/baz")"#;
@@ -63,7 +80,7 @@ fn interpolated0() {
 fn interpolated1() {
     let s = r#""[true]""#;
     let p = ExprKind::Apply {
-        args: Arc::from_iter([ExprKind::Constant(Value::True).to_expr()]),
+        args: Arc::from_iter([(None, ExprKind::Constant(Value::True).to_expr())]),
         function: ["str", "concat"].into(),
     }
     .to_expr();
@@ -74,23 +91,38 @@ fn interpolated1() {
 fn interpolated2() {
     let s = r#"a(a(a(get("[true]"))))"#;
     let p = ExprKind::Apply {
-        args: Arc::from_iter([ExprKind::Apply {
-            args: Arc::from_iter([ExprKind::Apply {
-                args: Arc::from_iter([ExprKind::Apply {
-                    args: Arc::from_iter([ExprKind::Apply {
-                        args: Arc::from_iter([ExprKind::Constant(Value::True).to_expr()]),
-                        function: ["str", "concat"].into(),
+        args: Arc::from_iter([(
+            None,
+            ExprKind::Apply {
+                args: Arc::from_iter([(
+                    None,
+                    ExprKind::Apply {
+                        args: Arc::from_iter([(
+                            None,
+                            ExprKind::Apply {
+                                args: Arc::from_iter([(
+                                    None,
+                                    ExprKind::Apply {
+                                        args: Arc::from_iter([(
+                                            None,
+                                            ExprKind::Constant(Value::True).to_expr(),
+                                        )]),
+                                        function: ["str", "concat"].into(),
+                                    }
+                                    .to_expr(),
+                                )]),
+                                function: ["get"].into(),
+                            }
+                            .to_expr(),
+                        )]),
+                        function: ["a"].into(),
                     }
-                    .to_expr()]),
-                    function: ["get"].into(),
-                }
-                .to_expr()]),
+                    .to_expr(),
+                )]),
                 function: ["a"].into(),
             }
-            .to_expr()]),
-            function: ["a"].into(),
-        }
-        .to_expr()]),
+            .to_expr(),
+        )]),
         function: ["a"].into(),
     }
     .to_expr();
@@ -102,15 +134,24 @@ fn apply_path() {
     let s = r#"load(path::concat("foo", "bar", baz))"#;
     assert_eq!(
         ExprKind::Apply {
-            args: Arc::from_iter([ExprKind::Apply {
-                args: Arc::from_iter([
-                    ExprKind::Constant(Value::String(literal!("foo"))).to_expr(),
-                    ExprKind::Constant(Value::String(literal!("bar"))).to_expr(),
-                    ExprKind::Ref { name: ["baz"].into() }.to_expr()
-                ]),
-                function: ["path", "concat"].into(),
-            }
-            .to_expr()]),
+            args: Arc::from_iter([(
+                None,
+                ExprKind::Apply {
+                    args: Arc::from_iter([
+                        (
+                            None,
+                            ExprKind::Constant(Value::String(literal!("foo"))).to_expr()
+                        ),
+                        (
+                            None,
+                            ExprKind::Constant(Value::String(literal!("bar"))).to_expr()
+                        ),
+                        (None, ExprKind::Ref { name: ["baz"].into() }.to_expr())
+                    ]),
+                    function: ["path", "concat"].into(),
+                }
+                .to_expr()
+            )]),
             function: ["load"].into(),
         }
         .to_expr(),
@@ -158,32 +199,48 @@ fn typed_letbind() {
 fn nested_apply() {
     let src = ExprKind::Apply {
         args: Arc::from_iter([
-            ExprKind::Constant(Value::F32(1.)).to_expr(),
-            ExprKind::Apply {
-                args: Arc::from_iter([ExprKind::Constant(Value::String(literal!(
-                    "/foo/bar",
-                )))
-                .to_expr()]),
-                function: ["load"].into(),
-            }
-            .to_expr(),
-            ExprKind::Apply {
-                args: Arc::from_iter([
-                    ExprKind::Constant(Value::F32(675.6)).to_expr(),
-                    ExprKind::Apply {
-                        args: Arc::from_iter([ExprKind::Constant(Value::String(
-                            literal!("/foo/baz"),
-                        ))
-                        .to_expr()]),
-                        function: ["load"].into(),
-                    }
-                    .to_expr(),
-                ]),
-                function: ["max"].into(),
-            }
-            .to_expr(),
-            ExprKind::Apply { args: Arc::from_iter([]), function: ["rand"].into() }
+            (None, ExprKind::Constant(Value::F32(1.)).to_expr()),
+            (
+                None,
+                ExprKind::Apply {
+                    args: Arc::from_iter([(
+                        None,
+                        ExprKind::Constant(Value::String(literal!("/foo/bar",)))
+                            .to_expr(),
+                    )]),
+                    function: ["load"].into(),
+                }
                 .to_expr(),
+            ),
+            (
+                None,
+                ExprKind::Apply {
+                    args: Arc::from_iter([
+                        (None, ExprKind::Constant(Value::F32(675.6)).to_expr()),
+                        (
+                            None,
+                            ExprKind::Apply {
+                                args: Arc::from_iter([(
+                                    None,
+                                    ExprKind::Constant(Value::String(literal!(
+                                        "/foo/baz"
+                                    )))
+                                    .to_expr(),
+                                )]),
+                                function: ["load"].into(),
+                            }
+                            .to_expr(),
+                        ),
+                    ]),
+                    function: ["max"].into(),
+                }
+                .to_expr(),
+            ),
+            (
+                None,
+                ExprKind::Apply { args: Arc::from_iter([]), function: ["rand"].into() }
+                    .to_expr(),
+            ),
         ]),
         function: ["sum"].into(),
     }
@@ -386,7 +443,10 @@ fn select() {
     ]);
     let arg = Arc::new(
         ExprKind::Apply {
-            args: Arc::from_iter([ExprKind::Ref { name: ["b"].into() }.to_expr()]),
+            args: Arc::from_iter([(
+                None,
+                ExprKind::Ref { name: ["b"].into() }.to_expr(),
+            )]),
             function: ["foo"].into(),
         }
         .to_expr(),
@@ -469,22 +529,28 @@ fn array() {
     let exp = ExprKind::Apply {
         function: ModPath::from(["array"]),
         args: Arc::from_iter([
-            ExprKind::Apply {
-                function: ModPath::from(["array"]),
-                args: Arc::from_iter([
-                    ExprKind::Constant(Value::from("foo")).to_expr(),
-                    ExprKind::Constant(Value::from(42)).to_expr(),
-                ]),
-            }
-            .to_expr(),
-            ExprKind::Apply {
-                function: ModPath::from(["array"]),
-                args: Arc::from_iter([
-                    ExprKind::Constant(Value::from("bar")).to_expr(),
-                    ExprKind::Constant(Value::from(42)).to_expr(),
-                ]),
-            }
-            .to_expr(),
+            (
+                None,
+                ExprKind::Apply {
+                    function: ModPath::from(["array"]),
+                    args: Arc::from_iter([
+                        (None, ExprKind::Constant(Value::from("foo")).to_expr()),
+                        (None, ExprKind::Constant(Value::from(42)).to_expr()),
+                    ]),
+                }
+                .to_expr(),
+            ),
+            (
+                None,
+                ExprKind::Apply {
+                    function: ModPath::from(["array"]),
+                    args: Arc::from_iter([
+                        (None, ExprKind::Constant(Value::from("bar")).to_expr()),
+                        (None, ExprKind::Constant(Value::from(42)).to_expr()),
+                    ]),
+                }
+                .to_expr(),
+            ),
         ]),
     }
     .to_expr();
@@ -514,7 +580,10 @@ fn doexpr() {
 #[test]
 fn lambda() {
     let exp = ExprKind::Lambda {
-        args: Arc::from_iter([("foo".into(), None), ("bar".into(), None)]),
+        args: Arc::from_iter([
+            Arg { labeled: false, name: "foo".into(), constraint: None, default: None },
+            Arg { labeled: false, name: "bar".into(), constraint: None, default: None },
+        ]),
         rtype: None,
         vargs: None,
         body: Either::Left(Arc::new(
@@ -573,13 +642,21 @@ fn nested_lambda() {
 #[test]
 fn apply_lambda() {
     let e = ExprKind::Apply {
-        args: Arc::from_iter([ExprKind::Lambda {
-            args: Arc::from_iter([("a".into(), None)]),
-            vargs: Some(None),
-            rtype: None,
-            body: Either::Right("a".into()),
-        }
-        .to_expr()]),
+        args: Arc::from_iter([(
+            None,
+            ExprKind::Lambda {
+                args: Arc::from_iter([Arg {
+                    labeled: false,
+                    name: "a".into(),
+                    constraint: None,
+                    default: None,
+                }]),
+                vargs: Some(None),
+                rtype: None,
+                body: Either::Right("a".into()),
+            }
+            .to_expr(),
+        )]),
         function: ["a"].into(),
     }
     .to_expr();
@@ -591,22 +668,32 @@ fn apply_lambda() {
 #[test]
 fn apply_typed_lambda() {
     let e = ExprKind::Apply {
-        args: Arc::from_iter([ExprKind::Lambda {
-            args: Arc::from_iter([
-                ("a".into(), None),
-                (
-                    "b".into(),
-                    Some(Type::Set(Arc::from_iter([
-                        Type::Primitive(Typ::Null.into()),
-                        Type::Ref(["number"].into()),
-                    ]))),
-                ),
-            ]),
-            vargs: Some(Some(Type::Primitive(Typ::String.into()))),
-            rtype: Some(Type::Bottom),
-            body: Either::Right("a".into()),
-        }
-        .to_expr()]),
+        args: Arc::from_iter([(
+            None,
+            ExprKind::Lambda {
+                args: Arc::from_iter([
+                    Arg {
+                        labeled: false,
+                        name: "a".into(),
+                        constraint: None,
+                        default: None,
+                    },
+                    Arg {
+                        labeled: false,
+                        name: "b".into(),
+                        constraint: Some(Type::Set(Arc::from_iter([
+                            Type::Primitive(Typ::Null.into()),
+                            Type::Ref(["number"].into()),
+                        ]))),
+                        default: None,
+                    },
+                ]),
+                vargs: Some(Some(Type::Primitive(Typ::String.into()))),
+                rtype: Some(Type::Bottom),
+                body: Either::Right("a".into()),
+            }
+            .to_expr(),
+        )]),
         function: ["a"].into(),
     }
     .to_expr();
@@ -623,8 +710,8 @@ fn mod_interpolate() {
         value: Some(Arc::from_iter([ExprKind::Apply {
             function: ["str", "concat"].into(),
             args: Arc::from_iter([
-                ExprKind::Constant(Value::from("foo_")).to_expr(),
-                ExprKind::Constant(Value::I64(42)).to_expr(),
+                (None, ExprKind::Constant(Value::from("foo_")).to_expr()),
+                (None, ExprKind::Constant(Value::I64(42)).to_expr()),
             ]),
         }
         .to_expr()])),
@@ -651,7 +738,7 @@ fn multi_line_do() {
 }
 
 #[test]
-fn prop0() {    
+fn prop0() {
     let s = r#"
 {
   "foo" + 1

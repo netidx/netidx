@@ -362,16 +362,71 @@ impl fmt::Display for Type {
 }
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+pub struct FnArgType {
+    label: Option<ArcStr>,
+    optional: bool,
+    typ: Type,
+}
+
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct FnType {
-    pub args: Arc<[Type]>,
+    pub args: Arc<[FnArgType]>,
     pub vargs: Type,
     pub rtype: Type,
 }
 
 impl FnType {
     pub fn contains(&self, t: &FnType) -> bool {
-        self.args.len() == t.args.len()
-            && t.args.iter().zip(self.args.iter()).all(|(t, s)| t.contains(s))
+        let mut sul = 0;
+        let mut tul = 0;
+        for (i, a) in self.args.iter().enumerate() {
+            match &a.label {
+                None => {
+                    sul = i;
+                    break;
+                }
+                Some(l) => match t.args.iter().find(|a| a.label.as_ref() == Some(l)) {
+                    None => return false,
+                    Some(o) => {
+                        if !o.typ.contains(&a.typ) {
+                            return false;
+                        }
+                    }
+                },
+            }
+        }
+        for (i, a) in t.args.iter().enumerate() {
+            match &a.label {
+                None => {
+                    tul = i;
+                    break;
+                }
+                Some(l) => match self.args.iter().find(|a| a.label.as_ref() == Some(l)) {
+                    Some(_) => (),
+                    None => {
+                        if !a.optional {
+                            return false;
+                        }
+                    }
+                },
+            }
+        }
+        let slen = self.args.len() - sul;
+        let tlen = t.args.len() - tul;
+        if slen < tlen {
+            for i in 0..(tlen - slen) {
+                if !t.args[tul + i].optional {
+                    return false;
+                }
+            }
+            tul += slen - tlen;
+        }
+        let tlen = t.args.len() - tul;
+        slen == tlen
+            && t.args[tul..]
+                .iter()
+                .zip(self.args[sul..].iter())
+                .all(|(t, s)| t.typ.contains(&s.typ))
             && t.vargs.contains(&self.vargs)
             && self.rtype.contains(&t.rtype)
     }
@@ -384,8 +439,13 @@ impl fmt::Display for FnType {
             _ => true,
         };
         write!(f, "fn(")?;
-        for (i, t) in self.args.iter().enumerate() {
-            write!(f, "{t}")?;
+        for (i, a) in self.args.iter().enumerate() {
+            let optional = if a.optional { "?" } else { "" };
+            match &a.label {
+                Some(l) => write!(f, "{optional}#{l}: ")?,
+                None => write!(f, "{optional}")?,
+            }
+            write!(f, "{}", a.typ)?;
             if i < self.args.len() - 1 || vargs {
                 write!(f, ", ")?;
             }
