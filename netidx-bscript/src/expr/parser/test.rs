@@ -581,8 +581,8 @@ fn doexpr() {
 fn lambda() {
     let exp = ExprKind::Lambda {
         args: Arc::from_iter([
-            Arg { labeled: false, name: "foo".into(), constraint: None, default: None },
-            Arg { labeled: false, name: "bar".into(), constraint: None, default: None },
+            Arg { labeled: None, name: "foo".into(), constraint: None },
+            Arg { labeled: None, name: "bar".into(), constraint: None },
         ]),
         rtype: None,
         vargs: None,
@@ -646,10 +646,9 @@ fn apply_lambda() {
             None,
             ExprKind::Lambda {
                 args: Arc::from_iter([Arg {
-                    labeled: false,
+                    labeled: None,
                     name: "a".into(),
                     constraint: None,
-                    default: None,
                 }]),
                 vargs: Some(None),
                 rtype: None,
@@ -672,20 +671,14 @@ fn apply_typed_lambda() {
             None,
             ExprKind::Lambda {
                 args: Arc::from_iter([
+                    Arg { labeled: None, name: "a".into(), constraint: None },
                     Arg {
-                        labeled: false,
-                        name: "a".into(),
-                        constraint: None,
-                        default: None,
-                    },
-                    Arg {
-                        labeled: false,
+                        labeled: None,
                         name: "b".into(),
                         constraint: Some(Type::Set(Arc::from_iter([
                             Type::Primitive(Typ::Null.into()),
                             Type::Ref(["number"].into()),
                         ]))),
-                        default: None,
                     },
                 ]),
                 vargs: Some(Some(Type::Primitive(Typ::String.into()))),
@@ -738,11 +731,65 @@ fn multi_line_do() {
 }
 
 #[test]
-fn prop0() {
-    let s = r#"
-{
-  "foo" + 1
+fn labeled_argument_lambda() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::Bind {
+            export: false,
+            name: "a".into(),
+            typ: Some(Type::Fn(Arc::new(FnType {
+                args: Arc::from_iter([
+                    FnArgType {
+                        label: Some(("foo".into(), true)),
+                        typ: Type::Ref(["number"].into()),
+                    },
+                    FnArgType {
+                        label: Some(("bar".into(), true)),
+                        typ: Type::Primitive(Typ::String.into()),
+                    },
+                    FnArgType { label: Some(("a".into(), false)), typ: Type::any() },
+                    FnArgType { label: None, typ: Type::any() },
+                ]),
+                vargs: None,
+                rtype: Type::any(),
+            }))),
+            value: Arc::new(
+                ExprKind::Lambda {
+                    args: Arc::from_iter([
+                        Arg {
+                            name: "foo".into(),
+                            labeled: Some(Some(ExprKind::Constant(3.into()).to_expr())),
+                            constraint: Some(Type::Ref(["number"].into())),
+                        },
+                        Arg {
+                            name: "bar".into(),
+                            labeled: Some(Some(
+                                ExprKind::Constant("hello".into()).to_expr(),
+                            )),
+                            constraint: None,
+                        },
+                        Arg { name: "a".into(), labeled: Some(None), constraint: None },
+                        Arg { name: "baz".into(), labeled: None, constraint: None },
+                    ]),
+                    vargs: None,
+                    rtype: None,
+                    body: Either::Right("foo".into()),
+                }
+                .to_expr(),
+            ),
+        }
+        .to_expr()]),
+    }
+    .to_expr();
+    let s = r#"{
+let a: fn(?#foo: number, ?#bar: string, #a: any, any) -> string =
+  |#foo: number = 3, #bar = \"hello\", #a, baz| 'foo
+}"#;
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
 }
-"#;
-    dbg!(parse(s).unwrap());
+
+#[test]
+fn prop0() {
+    let s = "fn(?#foo: number, ?#bar: string, #a: any, any) -> string";
+    dbg!(parse_typexpr(s).unwrap());
 }

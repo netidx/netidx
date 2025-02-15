@@ -374,7 +374,7 @@ fn expr() -> impl Strategy<Value = Expr> {
                     args.sort_unstable_by_key(|(k, _, _, _)| *k);
                     let args =
                         args.into_iter().map(|(labeled, name, constraint, default)| {
-                            Arg { labeled, name, constraint, default }
+                            Arg { labeled: labeled.then_some(default), name, constraint }
                         });
                     ExprKind::Lambda {
                         args: Arc::from_iter(args),
@@ -402,7 +402,7 @@ fn expr() -> impl Strategy<Value = Expr> {
                     args.sort_unstable_by_key(|(k, _, _, _)| !*k);
                     let args =
                         args.into_iter().map(|(labeled, name, constraint, default)| {
-                            Arg { labeled, name, constraint, default }
+                            Arg { labeled: labeled.then_some(default), name, constraint }
                         });
                     ExprKind::Lambda {
                         args: Arc::from_iter(args),
@@ -517,12 +517,11 @@ fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
 
 fn check_args(args0: &[Arg], args1: &[Arg]) -> bool {
     args0.iter().zip(args1.iter()).fold(true, |r, (a0, a1)| {
-        r && a0.labeled == a1.labeled
-            && a0.name == a1.name
+        r && a0.name == a1.name
             && a0.constraint == a1.constraint
-            && match (&a0.default, &a1.default) {
-                (Some(e0), Some(e1)) => check(e0, e1),
-                (None, None) => true,
+            && match (&a0.labeled, &a1.labeled) {
+                (None, None) | (Some(None), Some(None)) => true,
+                (Some(Some(d0)), Some(Some(d1))) => check(d0, d1),
                 (_, _) => false,
             }
     })
