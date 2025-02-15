@@ -746,11 +746,14 @@ fn labeled_argument_lambda() {
                         label: Some(("bar".into(), true)),
                         typ: Type::Primitive(Typ::String.into()),
                     },
-                    FnArgType { label: Some(("a".into(), false)), typ: Type::any() },
-                    FnArgType { label: None, typ: Type::any() },
+                    FnArgType {
+                        label: Some(("a".into(), false)),
+                        typ: Type::Ref(["any"].into()),
+                    },
+                    FnArgType { label: None, typ: Type::Ref(["any"].into()) },
                 ]),
                 vargs: None,
-                rtype: Type::any(),
+                rtype: Type::Primitive(Typ::String.into()),
             }))),
             value: Arc::new(
                 ExprKind::Lambda {
@@ -782,7 +785,7 @@ fn labeled_argument_lambda() {
     .to_expr();
     let s = r#"{
 let a: fn(?#foo: number, ?#bar: string, #a: any, any) -> string =
-  |#foo: number = 3, #bar = \"hello\", #a, baz| 'foo
+  |#foo: number = 3, #bar = "hello", #a, baz| 'foo
 }"#;
     let pe = parse(s).unwrap();
     assert_eq!(e, pe)
@@ -790,6 +793,6 @@ let a: fn(?#foo: number, ?#bar: string, #a: any, any) -> string =
 
 #[test]
 fn prop0() {
-    let s = "fn(?#foo: number, ?#bar: string, #a: any, any) -> string";
-    dbg!(parse_typexpr(s).unwrap());
+    let s = r#"{ |#bar = "hello"| 'foo }"#;
+    dbg!(parse(s).unwrap());
 }
