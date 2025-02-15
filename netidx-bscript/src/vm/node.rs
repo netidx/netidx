@@ -626,28 +626,28 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             }
         }
         for a in lb.argspec.iter() {
-            if !a.labeled {
-                break;
-            }
-            match named.remove(&a.name) {
-                Some(e) => {
-                    let n = Node::compile_int(ctx, e, scope, top_id);
-                    if let Some(e) = n.extract_err() {
-                        bail!(e);
-                    }
-                    nodes.push(n)
-                }
-                None => match &a.default {
-                    None => bail!("missing required argument {}", a.name),
+            match &a.labeled {
+                None => break,
+                Some(def) => match named.remove(&a.name) {
                     Some(e) => {
-                        let orig_env = ctx.env.restore_lexical_env(&lb.env);
-                        let n = Node::compile_int(ctx, e.clone(), &lb.scope, top_id);
-                        ctx.env = ctx.env.merge_lexical(&orig_env);
+                        let n = Node::compile_int(ctx, e, scope, top_id);
                         if let Some(e) = n.extract_err() {
-                            bail!(e)
+                            bail!(e);
                         }
-                        nodes.push(n);
+                        nodes.push(n)
                     }
+                    None => match def {
+                        None => bail!("missing required argument {}", a.name),
+                        Some(e) => {
+                            let orig_env = ctx.env.restore_lexical_env(&lb.env);
+                            let n = Node::compile_int(ctx, e.clone(), &lb.scope, top_id);
+                            ctx.env = ctx.env.merge_lexical(&orig_env);
+                            if let Some(e) = n.extract_err() {
+                                bail!(e)
+                            }
+                            nodes.push(n);
+                        }
+                    },
                 },
             }
         }
@@ -671,20 +671,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             }
         }
         if nodes.len() < lb.argspec.len() {
-            for i in nodes.len()..lb.argspec.len() {
-                match &lb.argspec[i].default {
-                    None => bail!("missing required argument {}", lb.argspec[i].name),
-                    Some(e) => {
-                        let orig_env = ctx.env.restore_lexical_env(&lb.env);
-                        let n = Node::compile_int(ctx, e.clone(), &lb.scope, top_id);
-                        ctx.env = ctx.env.merge_lexical(&orig_env);
-                        if let Some(e) = n.extract_err() {
-                            bail!(e)
-                        }
-                        nodes.push(n);
-                    }
-                }
-            }
+            bail!("missing required argument {}", lb.argspec[nodes.len()].name)
         }
         Ok(Box::from_iter(nodes))
     }

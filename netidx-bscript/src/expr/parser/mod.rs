@@ -1,5 +1,6 @@
 use super::{Arg, FnArgType, FnType, Pattern, Type};
 use crate::expr::{Expr, ExprId, ExprKind, ModPath};
+use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use combine::{
     attempt, between, chainl1, choice, eof, many, many1, not_followed_by, optional,
@@ -552,23 +553,28 @@ where
         ),
         csep(),
     )
-    .map(|v: Vec<((bool, ArcStr), Option<Type>, Option<Expr>)>| {
-        v.into_iter()
-            .map(|((labeled, name), constraint, default)| Arg {
-                labeled,
-                name,
-                constraint,
-                default,
+    .then(|v: Vec<((bool, ArcStr), Option<Type>, Option<Expr>)>| {
+        let args = v
+            .into_iter()
+            .map(|((labeled, name), constraint, default)| {
+                if !labeled && default.is_some() {
+                    bail!("labeled")
+                } else {
+                    Ok(Arg { labeled: labeled.then_some(default), name, constraint })
+                }
             })
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>>>();
+        match args {
+            Ok(a) => value(a).right(),
+            Err(_) => {
+                unexpected_any("only labeled arguments may have a default value").left()
+            }
+        }
     })
     // @args must be last
     .then(|mut v: Vec<Arg>| {
         match v.iter().enumerate().find(|(_, a)| &*a.name == "@args") {
             None => value((v, None)).left(),
-            Some((_, a)) if a.default.is_some() => {
-                unexpected_any("@args may not have a default value").right()
-            }
             Some((i, _)) => {
                 if i == v.len() - 1 {
                     let a = v.pop().unwrap();
@@ -583,10 +589,10 @@ where
     .then(|(v, vargs): (Vec<Arg>, Option<Option<Type>>)| {
         let mut anon = false;
         for a in &v {
-            if a.labeled && anon {
+            if a.labeled.is_some() && anon {
                 return unexpected_any("labeled args must come before anon args").right();
             }
-            anon |= !a.labeled;
+            anon |= a.labeled.is_none();
         }
         value((v, vargs)).left()
     })

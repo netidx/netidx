@@ -459,10 +459,9 @@ impl fmt::Display for FnType {
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub struct Arg {
-    pub labeled: bool,
+    pub labeled: Option<Option<Expr>>,
     pub name: ArcStr,
     pub constraint: Option<Type>,
-    pub default: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
@@ -758,14 +757,18 @@ impl ExprKind {
                 try_single_line!(true);
                 write!(buf, "|")?;
                 for (i, a) in args.iter().enumerate() {
-                    if a.labeled {
-                        write!(buf, "#{}", a.name)?
-                    } else {
-                        write!(buf, "{}", a.name)?
-                    }
-                    buf.push_str(typ!(&a.constraint));
-                    if let Some(def) = &a.default {
-                        write!(buf, " = {def}")?;
+                    match &a.labeled {
+                        None => {
+                            write!(buf, "{}", a.name)?;
+                            buf.push_str(typ!(&a.constraint));
+                        }
+                        Some(def) => {
+                            write!(buf, "#{}", a.name)?;
+                            buf.push_str(typ!(&a.constraint));
+                            if let Some(def) = def {
+                                write!(buf, " = {def}")?;
+                            }
+                        }
                     }
                     if vargs.is_some() || i < args.len() - 1 {
                         write!(buf, ", ")?
@@ -952,12 +955,18 @@ impl fmt::Display for ExprKind {
             ExprKind::Lambda { args, vargs, rtype, body } => {
                 write!(f, "|")?;
                 for (i, a) in args.iter().enumerate() {
-                    if a.labeled {
-                        write!(f, "#{}", a.name)?
-                    }
-                    write!(f, "{}", typ!(&a.constraint))?;
-                    if let Some(def) = &a.default {
-                        write!(f, " = {def}")?;
+                    match &a.labeled {
+                        None => {
+                            write!(f, "{}", a.name)?;
+                            write!(f, "{}", typ!(&a.constraint))?;
+                        }
+                        Some(def) => {
+                            write!(f, "#{}", a.name)?;
+                            write!(f, "{}", typ!(&a.constraint))?;
+                            if let Some(def) = def {
+                                write!(f, " = {def}")?;
+                            }
+                        }
                     }
                     if vargs.is_some() || i < args.len() - 1 {
                         write!(f, ", ")?
