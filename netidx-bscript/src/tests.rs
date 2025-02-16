@@ -297,9 +297,9 @@ const SELECT: &str = r#"
   let y = x + 1;
   let z = y + 1;
   let s = select any(x, y, z) {
-    I64(v) if v == 1 => "first [v]",
-    v if v == 2 => "second [v]",
-    v => "third [v]"
+    i64 as v if v == 1 => "first [v]",
+    _ as v if v == 2 => "second [v]",
+    _ as v => "third [v]"
   };
   group(s, |n, x| n == 3)
 }

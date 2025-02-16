@@ -892,12 +892,15 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 Node { spec: Box::new(spec), typ: tid, kind }
             }
             Expr { kind: ExprKind::TypeDef { name, typ }, id: _ } => {
-                match ctx.env.deftype(scope, name, typ.clone()) {
+                match ctx.env.resolve_typrefs(scope, typ) {
                     Err(e) => error!("{e}"),
-                    Ok(()) => {
-                        let spec = Box::new(spec);
-                        Node { spec, typ: ctx.env.bottom(), kind: NodeKind::TypeDef }
-                    }
+                    Ok(typ) => match ctx.env.deftype(scope, name, typ.clone()) {
+                        Err(e) => error!("{e}"),
+                        Ok(()) => {
+                            let spec = Box::new(spec);
+                            Node { spec, typ: ctx.env.bottom(), kind: NodeKind::TypeDef }
+                        }
+                    },
                 }
             }
             Expr { kind: ExprKind::Not { expr }, id: _ } => {
