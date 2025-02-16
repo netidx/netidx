@@ -138,11 +138,21 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    choice((
-        attempt((spmodpath().skip(string("::")), typname()))
-            .map(|(m, s)| ModPath(m.0.append(s.as_str()))),
-        attempt(sptypname()).map(|s| ModPath::from([s])),
-    ))
+    sep_by1(choice((attempt(spfname()), sptypname())), string("::")).then(
+        |parts: SmallVec<[ArcStr; 8]>| {
+            if parts.len() == 0 {
+                unexpected_any("empty type path").left()
+            } else {
+                match parts.last().unwrap().chars().next() {
+                    None => unexpected_any("empty name").left(),
+                    Some(c) if c.is_lowercase() => {
+                        unexpected_any("type names must be capitalized").left()
+                    }
+                    Some(_) => value(ModPath::from(parts)).right(),
+                }
+            }
+        },
+    )
 }
 
 fn sptypath<I>() -> impl Parser<I, Output = ModPath>

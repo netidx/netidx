@@ -458,7 +458,7 @@ fn select() {
 
 #[test]
 fn pattern() {
-    let s = r#"I64(a) if a < 10"#;
+    let s = r#"i64 as a if a < 10"#;
     dbg!(super::pattern().easy_parse(position::Stream::new(s)).unwrap());
 }
 
@@ -677,7 +677,7 @@ fn apply_typed_lambda() {
                         name: "b".into(),
                         constraint: Some(Type::Set(Arc::from_iter([
                             Type::Primitive(Typ::Null.into()),
-                            Type::Ref(["number"].into()),
+                            Type::Ref(["Number"].into()),
                         ]))),
                     },
                 ]),
@@ -690,7 +690,7 @@ fn apply_typed_lambda() {
         function: ["a"].into(),
     }
     .to_expr();
-    let s = "a(|a, b: [null, number], @args: string| -> _ 'a)";
+    let s = "a(|a, b: [null, Number], @args: string| -> _ 'a)";
     let pe = parse(s).unwrap();
     assert_eq!(e, pe)
 }
@@ -740,7 +740,7 @@ fn labeled_argument_lambda() {
                 args: Arc::from_iter([
                     FnArgType {
                         label: Some(("foo".into(), true)),
-                        typ: Type::Ref(["number"].into()),
+                        typ: Type::Ref(["Number"].into()),
                     },
                     FnArgType {
                         label: Some(("bar".into(), true)),
@@ -748,9 +748,9 @@ fn labeled_argument_lambda() {
                     },
                     FnArgType {
                         label: Some(("a".into(), false)),
-                        typ: Type::Ref(["any"].into()),
+                        typ: Type::Ref(["Any"].into()),
                     },
-                    FnArgType { label: None, typ: Type::Ref(["any"].into()) },
+                    FnArgType { label: None, typ: Type::Ref(["Any"].into()) },
                 ]),
                 vargs: None,
                 rtype: Type::Primitive(Typ::String.into()),
@@ -761,7 +761,7 @@ fn labeled_argument_lambda() {
                         Arg {
                             name: "foo".into(),
                             labeled: Some(Some(ExprKind::Constant(3.into()).to_expr())),
-                            constraint: Some(Type::Ref(["number"].into())),
+                            constraint: Some(Type::Ref(["Number"].into())),
                         },
                         Arg {
                             name: "bar".into(),
@@ -784,8 +784,8 @@ fn labeled_argument_lambda() {
     }
     .to_expr();
     let s = r#"{
-let a: fn(?#foo: number, ?#bar: string, #a: any, any) -> string =
-  |#foo: number = 3, #bar = "hello", #a, baz| 'foo
+let a: fn(?#foo: Number, ?#bar: string, #a: Any, Any) -> string =
+  |#foo: Number = 3, #bar = "hello", #a, baz| 'foo
 }"#;
     let pe = parse(s).unwrap();
     assert_eq!(e, pe)
@@ -793,7 +793,6 @@ let a: fn(?#foo: number, ?#bar: string, #a: any, any) -> string =
 
 #[test]
 fn prop0() {
-    let s = r#"mod a{{|#a = true| u32:0}}"#;
-    let s = r#"|#a = true| u32:0"#;
-    dbg!(parse_expr(s).unwrap());
+    let s = r#"mod a{type A = [a::A]}"#;
+    dbg!(parse(s).unwrap());
 }

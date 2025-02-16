@@ -70,10 +70,13 @@ fn typart() -> impl Strategy<Value = String> {
     collection::vec(prop_oneof![Just(b'_'), b'a'..=b'z', b'0'..=b'9'], 1..=SLEN - 1)
         .prop_map(|mut v| unsafe {
             if v[0] == b'_' {
-                v[0] = b'a';
+                v[0] = b'A';
             }
             if v[0] >= b'0' && v[0] <= b'9' {
-                v[0] += 49;
+                v[0] += 17;
+            }
+            if v[0] >= 97 {
+                v[0] -= 32;
             }
             String::from_utf8_unchecked(v)
         })
@@ -120,7 +123,8 @@ fn random_modpath() -> impl Strategy<Value = ModPath> {
 }
 
 fn typath() -> impl Strategy<Value = ModPath> {
-    collection::vec(typart(), (1, 5)).prop_map(ModPath::from_iter)
+    (collection::vec(random_modpart(), (0, 4)), typart())
+        .prop_map(|(path, typ)| ModPath(ModPath::from_iter(path).0.append(typ.as_str())))
 }
 
 fn valid_modpath() -> impl Strategy<Value = ModPath> {
