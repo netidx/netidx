@@ -135,7 +135,7 @@ fn valid_modpath() -> impl Strategy<Value = ModPath> {
         Just(ModPath::from_iter(["product"])),
         Just(ModPath::from_iter(["divide"])),
         Just(ModPath::from_iter(["mean"])),
-        Just(ModPath::from_iter(["array"])),
+        Just(ModPath::from_iter(["mkarray"])),
         Just(ModPath::from_iter(["min"])),
         Just(ModPath::from_iter(["max"])),
         Just(ModPath::from_iter(["and"])),
@@ -266,7 +266,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
                 modpath()
             )
                 .prop_map(|(mut s, f)| {
-                    if &*f.0 == "/array" {
+                    if &*f.0 == "/mkarray" {
                         for a in &mut s {
                             a.0 = None;
                         }
@@ -350,7 +350,7 @@ fn expr() -> impl Strategy<Value = Expr> {
                 modpath()
             )
                 .prop_map(|(mut s, f)| {
-                    if &*f.0 == "/array" {
+                    if &*f.0 == "/mkarray" {
                         for a in &mut s {
                             a.0 = None;
                         }
@@ -446,7 +446,7 @@ fn modexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![
         (collection::vec((option::of(random_fname()), expr()), (0, 10)), modpath())
             .prop_map(|(mut s, f)| {
-                if &*f.0 == "/array" {
+                if &*f.0 == "/mkarray" {
                     for a in &mut s {
                         a.0 = None;
                     }
