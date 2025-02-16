@@ -228,22 +228,16 @@ fn typexp() -> impl Strategy<Value = Type> {
 }
 
 fn pattern() -> impl Strategy<Value = Pattern> {
-    prop_oneof![
-        Just(Pattern::Underscore),
-        (collection::vec(typ(), (0, 10)), random_fname()).prop_map(|(tag, bind)| {
-            Pattern::Typ { tag: BitFlags::from_iter(tag), bind, guard: None }
-        })
-    ]
+    (typexp(), random_fname()).prop_map(|(predicate, bind)| Pattern {
+        predicate,
+        bind,
+        guard: None,
+    })
 }
 
 fn build_pattern(arg: Expr, arms: Vec<(Option<Expr>, Pattern, Expr)>) -> Expr {
     let arms = arms.into_iter().map(|(guard, mut pat, expr)| {
-        match &mut pat {
-            Pattern::Typ { guard: g, .. } => {
-                *g = guard;
-            }
-            Pattern::Underscore => (),
-        }
+        pat.guard = guard;
         (pat, expr)
     });
     ExprKind::Select { arg: Arc::new(arg), arms: Arc::from_iter(arms) }.to_expr()
@@ -519,18 +513,13 @@ fn acc_strings<'a>(args: impl IntoIterator<Item = &'a Expr> + 'a) -> Arc<[Expr]>
 }
 
 fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
-    match (pat0, pat1) {
-        (Pattern::Underscore, Pattern::Underscore) => true,
-        (
-            Pattern::Typ { tag: tag0, bind: bind0, guard: Some(guard0) },
-            Pattern::Typ { tag: tag1, bind: bind1, guard: Some(guard1) },
-        ) => tag0 == tag1 && bind0 == bind1 && check(guard0, guard1),
-        (
-            Pattern::Typ { tag: tag0, bind: bind0, guard: None },
-            Pattern::Typ { tag: tag1, bind: bind1, guard: None },
-        ) => tag0 == tag1 && bind0 == bind1,
-        (_, _) => false,
-    }
+    pat0.predicate == pat1.predicate
+        && pat0.bind == pat1.bind
+        && match (&pat0.guard, &pat1.guard) {
+            (Some(g0), Some(g1)) => check(g0, g1),
+            (None, None) => true,
+            (_, _) => false,
+        }
 }
 
 fn check_args(args0: &[Arg], args1: &[Arg]) -> bool {

@@ -244,6 +244,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         top_id: ExprId,
     ) -> Result<Self> {
         let predicate = ctx.env.resolve_typrefs(scope, &spec.predicate)?;
+        match &predicate {
+            Type::Fn(_) => bail!("can't match on Fn type"),
+            Type::Ref(_) => bail!("bug in resolve_typrefs"),
+            Type::Bottom | Type::Primitive(_) | Type::Set(_) => (),
+        }
         let tid = ctx.env.add_typ(predicate.clone());
         let bind = ctx.env.bind_variable(scope, &*spec.bind, tid);
         let bind = bind.id;

@@ -419,8 +419,8 @@ fn arith_nested() {
 fn select() {
     let arms = Arc::from_iter([
         (
-            Pattern::Typ {
-                tag: Typ::I64.into(),
+            Pattern {
+                predicate: Type::Primitive(Typ::I64.into()),
                 bind: literal!("a"),
                 guard: Some(
                     ExprKind::Lt {
@@ -437,7 +437,7 @@ fn select() {
             .to_expr(),
         ),
         (
-            Pattern::Typ { tag: BitFlags::empty(), bind: literal!("a"), guard: None },
+            Pattern { predicate: Type::Bottom, bind: literal!("a"), guard: None },
             ExprKind::Ref { name: ModPath::from(["a"]) }.to_expr(),
         ),
     ]);
@@ -452,7 +452,7 @@ fn select() {
         .to_expr(),
     );
     let exp = ExprKind::Select { arg, arms }.to_expr();
-    let s = r#"select foo(b) { I64(a) if a < 10 => a * 2, a => a }"#;
+    let s = r#"select foo(b) { i64 as a if a < 10 => a * 2, _ as a => a }"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
