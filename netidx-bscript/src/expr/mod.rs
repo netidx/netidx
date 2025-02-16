@@ -103,9 +103,10 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
 }
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
-pub enum Pattern {
-    Underscore,
-    Typ { tag: BitFlags<Typ>, bind: ArcStr, guard: Option<Expr> },
+pub struct Pattern {
+    pub predicate: Type,
+    pub bind: ArcStr,
+    pub guard: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialOrd, Ord)]
@@ -826,38 +827,12 @@ impl ExprKind {
                 kill_newline!(buf);
                 writeln!(buf, " {{")?;
                 for (i, (pat, expr)) in arms.iter().enumerate() {
-                    match pat {
-                        Pattern::Underscore => write!(buf, "_ ")?,
-                        Pattern::Typ { tag, bind, guard } if tag.len() == 0 => {
-                            write!(buf, "{bind}")?;
-                            if let Some(guard) = guard {
-                                write!(buf, " if ")?;
-                                guard.kind.pretty_print(indent + 2, limit, false, buf)?;
-                                write!(buf, " ")?;
-                            }
-                        }
-                        Pattern::Typ { tag, bind, guard } => {
-                            let len = tag.len();
-                            for (i, tag) in tag.iter().enumerate() {
-                                if i == 0 {
-                                    write!(buf, "{tag:?}({bind})")?;
-                                    if len > 1 {
-                                        writeln!(buf, "")?;
-                                    }
-                                } else {
-                                    if i < len - 1 {
-                                        writeln!(buf, "| {tag:?}({bind})")?;
-                                    } else {
-                                        write!(buf, "| {tag:?}({bind})")?;
-                                    }
-                                }
-                            }
-                            if let Some(guard) = guard {
-                                write!(buf, " if ")?;
-                                guard.kind.pretty_print(indent + 2, limit, false, buf)?;
-                                write!(buf, " ")?;
-                            }
-                        }
+                    write!(buf, "{} as {} ", pat.predicate, pat.bind)?;
+                    if let Some(guard) = &pat.guard {
+                        write!(buf, "if ")?;
+                        guard.kind.pretty_print(indent + 2, limit, false, buf)?;
+                        kill_newline!(buf);
+                        write!(buf, " ")?;
                     }
                     write!(buf, "=> ")?;
                     if let ExprKind::Do { exprs } = &expr.kind {
@@ -1036,28 +1011,11 @@ impl fmt::Display for ExprKind {
             ExprKind::Select { arg, arms } => {
                 write!(f, "select {arg} {{")?;
                 for (i, (pat, rhs)) in arms.iter().enumerate() {
-                    match pat {
-                        Pattern::Underscore => write!(f, "_ => {rhs}")?,
-                        Pattern::Typ { tag, bind, guard } if tag.len() == 0 => {
-                            write!(f, "{bind}")?;
-                            if let Some(guard) = guard {
-                                write!(f, " if {guard}")?;
-                            }
-                            write!(f, " => {rhs}")?
-                        }
-                        Pattern::Typ { tag, bind, guard } => {
-                            for (i, t) in tag.iter().enumerate() {
-                                write!(f, "{t:?}({bind})")?;
-                                if i < tag.len() - 1 {
-                                    write!(f, " | ")?
-                                }
-                            }
-                            if let Some(guard) = guard {
-                                write!(f, " if {guard}")?
-                            }
-                            write!(f, " => {rhs}")?
-                        }
+                    write!(f, "{} as {} ", pat.predicate, pat.bind)?;
+                    if let Some(guard) = &pat.guard {
+                        write!(f, "if {guard} ")?;
                     }
+                    write!(f, "=> {rhs}")?;
                     if i < arms.len() - 1 {
                         write!(f, ", ")?
                     }

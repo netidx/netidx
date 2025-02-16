@@ -13,7 +13,6 @@ use combine::{
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
-use enumflags2::BitFlags;
 use fxhash::FxHashSet;
 use netidx::{
     path::Path,
@@ -53,17 +52,15 @@ where
     spaces().with(string(s))
 }
 
-fn ident<I>() -> impl Parser<I, Output = ArcStr>
+fn ident<I>(cap: bool) -> impl Parser<I, Output = ArcStr>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     recognize((
-        take_while1(|c: char| c.is_alphabetic() && c.is_lowercase()),
-        take_while(|c: char| {
-            (c.is_alphanumeric() && (c.is_numeric() || c.is_lowercase())) || c == '_'
-        }),
+        take_while1(move |c: char| c.is_alphabetic() && cap == c.is_uppercase()),
+        take_while(|c: char| c.is_alphanumeric() || c == '_'),
     ))
     .map(|s: String| ArcStr::from(s))
 }
@@ -74,7 +71,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    ident().then(|s| {
+    ident(false).then(|s| {
         if RESERVED.contains(&s.as_str()) {
             unexpected_any("can't use keyword as a function or variable name").left()
         } else {
@@ -98,7 +95,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    ident().then(|s| {
+    ident(true).then(|s| {
         if TYPE_RESERVED.contains(&s.as_str()) {
             unexpected_any("can't use keyword as a type name").left()
         } else {
@@ -114,22 +111,6 @@ where
     I::Range: Range,
 {
     spaces().with(typname())
-}
-
-fn variant_tag<I>() -> impl Parser<I, Output = Typ>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    recognize((
-        take_while1(|c: char| c.is_alphabetic() && c.is_uppercase()),
-        take_while(|c: char| c.is_alphanumeric() || c == '_'),
-    ))
-    .then(|s: String| match s.parse::<Typ>() {
-        Err(_) => unexpected_any("invalid variant tag").left(),
-        Ok(typ) => value(typ).right(),
-    })
 }
 
 fn modpath<I>() -> impl Parser<I, Output = ModPath>
@@ -157,8 +138,11 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    sep_by1(typname(), string("::"))
-        .map(|v: SmallVec<[ArcStr; 4]>| ModPath(Path::from_iter(v)))
+    choice((
+        attempt((spmodpath().skip(string("::")), typname()))
+            .map(|(m, s)| ModPath(m.0.append(s.as_str()))),
+        attempt(sptypname()).map(|s| ModPath::from([s])),
+    ))
 }
 
 fn sptypath<I>() -> impl Parser<I, Output = ModPath>
@@ -763,63 +747,22 @@ parser! {
     }
 }
 
-fn typ_pattern<I>() -> impl Parser<I, Output = (Typ, ArcStr)>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    spaces().with((variant_tag().skip(sptoken('(')), spfname().skip(sptoken(')'))))
-}
-
-fn pattern_guard<I>() -> impl Parser<I, Output = Expr>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    spstring("if").with(space()).with(expr())
-}
-
 fn pattern<I>() -> impl Parser<I, Output = Pattern>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    choice((
-        attempt(sptoken('_')).map(|_| Pattern::Underscore),
-        attempt(
-            (spfname(), optional(attempt(space().with(pattern_guard())))).map(
-                |(bind, guard)| Pattern::Typ { tag: BitFlags::empty(), bind, guard },
-            ),
-        ),
-        attempt(
-            (
-                sep_by1(typ_pattern(), attempt(sptoken('|'))),
-                optional(attempt(space().with(pattern_guard()))),
-            )
-                .then(
-                    |(binds, guard): (SmallVec<[(Typ, ArcStr); 8]>, Option<Expr>)| {
-                        let (tag, mut binds): (
-                            SmallVec<[Typ; 8]>,
-                            SmallVec<[ArcStr; 8]>,
-                        ) = binds.into_iter().unzip();
-                        binds.dedup();
-                        if binds.len() != 1 {
-                            unexpected_any("all binds must be the same").left()
-                        } else {
-                            value(Pattern::Typ {
-                                tag: BitFlags::from_iter(tag),
-                                bind: binds.pop().unwrap(),
-                                guard,
-                            })
-                            .right()
-                        }
-                    },
-                ),
-        ),
-    ))
+    (
+        typexp().skip(space().with(spstring("as "))),
+        spfname(),
+        optional(attempt(space().with(spstring("if").with(space()).with(expr())))),
+    )
+        .map(|(predicate, bind, guard): (Type, ArcStr, Option<Expr>)| Pattern {
+            predicate,
+            bind,
+            guard,
+        })
 }
 
 fn select<I>() -> impl Parser<I, Output = Expr>

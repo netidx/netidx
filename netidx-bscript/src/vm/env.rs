@@ -211,10 +211,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         })
     }
 
-    pub(super) fn lookup_bind_by_id(&self, id: &BindId) -> Option<&Bind<C, E>> {
-        self.by_id.get(id)
-    }
-
     // alias orig_id -> new_id. orig_id will be removed, and it's in
     // scope entry will point to new_id
     pub(super) fn alias(&mut self, orig_id: BindId, new_id: BindId) {

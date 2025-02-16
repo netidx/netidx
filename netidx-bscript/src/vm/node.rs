@@ -8,7 +8,6 @@ use crate::{
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::{format_compact, CompactString};
-use enumflags2::BitFlags;
 use fxhash::FxHashMap;
 use immutable_chunkmap::set::SetS as Set;
 use netidx::{publisher::Typ, subscriber::Value, utils::Either};
@@ -231,85 +230,51 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Cached<C, E> {
     }
 }
 
-pub enum PatternNode<C: Ctx + 'static, E: Debug + Clone + 'static> {
-    Underscore,
-    Typ { tag: BitFlags<Typ>, bind: BindId, guard: Option<Cached<C, E>> },
-    Error(ArcStr),
+pub struct PatternNode<C: Ctx + 'static, E: Debug + Clone + 'static> {
+    predicate: Type,
+    bind: BindId,
+    guard: Option<Cached<C, E>>,
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
-    fn extract_err(&self) -> Option<ArcStr> {
-        match self {
-            PatternNode::Underscore
-            | PatternNode::Typ { tag: _, bind: _, guard: None } => None,
-            PatternNode::Typ { tag: _, bind: _, guard: Some(c) } => c.node.extract_err(),
-            PatternNode::Error(e) => Some(e.clone()),
-        }
-    }
-
-    fn extract_guard(self) -> Option<Node<C, E>> {
-        match self {
-            PatternNode::Typ { tag: _, bind: _, guard: Some(g) } => Some(g.node),
-            PatternNode::Underscore
-            | PatternNode::Error(_)
-            | PatternNode::Typ { tag: _, bind: _, guard: None } => None,
-        }
-    }
-
     fn compile(
         ctx: &mut ExecCtx<C, E>,
         spec: &Pattern,
         scope: &ModPath,
         top_id: ExprId,
-    ) -> Self {
-        match spec {
-            Pattern::Underscore => PatternNode::Underscore,
-            Pattern::Typ { tag, bind, guard } => {
-                let tag = *tag;
-                let bind = ctx.env.bind_variable(scope, &**bind, TypeId::new());
-                let id = bind.id;
-                let guard = guard.as_ref().map(|g| {
-                    Cached::new(Node::compile_int(ctx, g.clone(), &scope, top_id))
-                });
-                PatternNode::Typ { tag, bind: id, guard }
-            }
-        }
+    ) -> Result<Self> {
+        let predicate = ctx.env.resolve_typrefs(scope, &spec.predicate)?;
+        let tid = ctx.env.add_typ(predicate.clone());
+        let bind = ctx.env.bind_variable(scope, &*spec.bind, tid);
+        let bind = bind.id;
+        let guard = spec
+            .guard
+            .as_ref()
+            .map(|g| Cached::new(Node::compile_int(ctx, g.clone(), &scope, top_id)));
+        Ok(PatternNode { predicate, bind, guard })
     }
 
-    fn bind(&self) -> Option<BindId> {
-        match self {
-            PatternNode::Underscore | PatternNode::Error(_) => None,
-            PatternNode::Typ { tag: _, bind, guard: _ } => Some(*bind),
-        }
+    fn extract_err(&self) -> Option<ArcStr> {
+        self.guard.as_ref().and_then(|n| n.node.extract_err())
     }
 
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> bool {
-        match self {
-            PatternNode::Underscore
-            | PatternNode::Typ { tag: _, bind: _, guard: None }
-            | PatternNode::Error(_) => false,
-            PatternNode::Typ { tag: _, bind: _, guard: Some(g) } => g.update(ctx, event),
+        match &mut self.guard {
+            None => false,
+            Some(g) => g.update(ctx, event),
         }
     }
 
-    fn is_match(&self, arg: Option<&Value>) -> (bool, Option<BindId>) {
-        match (arg, self) {
-            (_, PatternNode::Underscore) => (true, None),
-            (Some(arg), PatternNode::Typ { tag, bind, guard: None }) => {
-                let typ = BitFlags::from_iter([Typ::get(arg)]);
-                (tag.len() == 0 || tag.contains(typ), Some(*bind))
+    fn is_match(&self, typ: &Type) -> bool {
+        self.predicate.contains(&typ)
+            && match &self.guard {
+                None => true,
+                Some(g) => g
+                    .cached
+                    .as_ref()
+                    .and_then(|v| v.clone().get_as::<bool>())
+                    .unwrap_or(false),
             }
-            (Some(arg), PatternNode::Typ { tag, bind, guard: Some(g) }) => {
-                let typ = BitFlags::from_iter([Typ::get(arg)]);
-                let is_match = (tag.len() == 0 || tag.contains(typ))
-                    && g.cached
-                        .as_ref()
-                        .and_then(|v| v.clone().get_as::<bool>())
-                        .unwrap_or(false);
-                (is_match, Some(*bind))
-            }
-            (Some(_), PatternNode::Error(_)) | (None, _) => (false, None),
-        }
     }
 }
 
@@ -881,26 +846,34 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                         );
                         let pat = PatternNode::compile(ctx, pat, &scope, top_id);
                         let n = Node::compile_int(ctx, spec.clone(), &scope, top_id);
-                        let e = e || pat.extract_err().is_some() || n.is_err();
+                        let e = e
+                            || pat.is_err()
+                            || pat.as_ref().unwrap().extract_err().is_some()
+                            || n.is_err();
                         nodes.push((pat, Cached::new(n)));
                         (e, nodes)
                     });
+                use std::fmt::Write;
                 let mut err = CompactString::new("");
                 if error {
                     let mut v = vec![];
                     for (pat, n) in arms {
-                        if let Some(e) = pat.extract_err() {
-                            err.push_str(e.as_str());
-                            err.push_str(", ");
-                        }
-                        if let Some(g) = pat.extract_guard() {
-                            v.push(g);
+                        match pat {
+                            Err(e) => write!(err, "{e}, ").unwrap(),
+                            Ok(p) => {
+                                if let Some(e) = p.extract_err() {
+                                    write!(err, "{e}, ").unwrap();
+                                }
+                                if let Some(g) = p.guard {
+                                    v.push(g.node);
+                                }
+                            }
                         }
                         v.push(n.node)
                     }
                     return error!("{err}", v);
                 }
-                let arms = Box::from(arms);
+                let arms = Box::from_iter(arms.into_iter().map(|(p, n)| (p.unwrap(), n)));
                 let kind = NodeKind::Select { selected: None, arg, arms };
                 Node { spec: Box::new(spec), typ: TypeId::new(), kind }
             }
@@ -1047,31 +1020,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let mut mtype = Type::Bottom;
                 let mut mcases = Type::Bottom;
                 for (pat, n) in arms {
-                    match pat {
-                        PatternNode::Error(_) => bail!("pattern is error"),
-                        PatternNode::Underscore => mtype = mtype.union(&Type::any()),
-                        PatternNode::Typ { tag, bind, guard, .. } => {
-                            let bind = wrap!(ctx
-                                .env
-                                .lookup_bind_by_id(bind)
-                                .ok_or_else(|| anyhow!("missing bind")))?;
-                            let ptyp = Type::Primitive(*tag);
-                            if tag.len() > 0 {
-                                wrap!(ctx.env.define_typevar(bind.typ, ptyp.clone()))?;
-                            } else {
-                                wrap!(ctx.env.alias_typevar(bind.typ, arg.node.typ))?;
-                            }
-                            if tag.len() > 0 {
-                                mcases = mcases.union(&ptyp);
-                            }
-                            match guard {
-                                Some(guard) => wrap!(guard.node.typecheck(ctx))?,
-                                None if tag.len() == 0 => {
-                                    mtype = mtype.union(&Type::any())
-                                }
-                                None => mtype = mtype.union(&ptyp),
-                            }
-                        }
+                    mcases = mcases.union(&pat.predicate);
+                    match &pat.guard {
+                        Some(guard) => wrap!(guard.node.typecheck(ctx))?,
+                        None => mtype = mtype.union(&pat.predicate),
                     }
                     wrap!(n.node.typecheck(ctx))?;
                     let t = wrap!(
@@ -1132,17 +1084,16 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         arms: &mut [(PatternNode<C, E>, Cached<C, E>)],
         event: &Event<E>,
     ) -> Option<Value> {
-        let mut val_up: SmallVec<[bool; 16]> = smallvec![];
+        let mut val_up: SmallVec<[bool; 64]> = smallvec![];
         let arg_up = arg.update(ctx, event);
         macro_rules! set_arg {
-            ($i:expr) => {
-                if let Some(id) = arms[$i].0.bind() {
-                    if let Some(arg) = arg.cached.as_ref() {
-                        val_up[$i] |=
-                            arms[$i].1.update(ctx, &Event::Variable(id, arg.clone()));
-                    }
+            ($i:expr) => {{
+                let id = arms[$i].0.bind;
+                if let Some(arg) = arg.cached.as_ref() {
+                    val_up[$i] |=
+                        arms[$i].1.update(ctx, &Event::Variable(id, arg.clone()));
                 }
-            };
+            }};
         }
         macro_rules! val {
             ($i:expr) => {{
@@ -1159,27 +1110,31 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         let mut pat_up = false;
         for (pat, val) in arms.iter_mut() {
             pat_up |= pat.update(ctx, event);
-            if arg_up {
-                if let Some(id) = pat.bind() {
-                    if let Some(arg) = arg.cached.as_ref() {
-                        pat_up |= pat.update(ctx, &Event::Variable(id, arg.clone()));
-                    }
+            if arg_up && pat.guard.is_some() {
+                if let Some(arg) = arg.cached.as_ref() {
+                    pat_up |= pat.update(ctx, &Event::Variable(pat.bind, arg.clone()));
                 }
             }
             val_up.push(val.update(ctx, event));
         }
-        if !pat_up {
+        if !arg_up && !pat_up {
             selected.and_then(|i| val!(i))
         } else {
+            let typ = arg
+                .cached
+                .as_ref()
+                .map(|v| Type::Primitive(Typ::get(v).into()))
+                .unwrap_or(Type::Bottom);
             let sel = arms.iter().enumerate().find_map(|(i, (pat, _))| {
-                match pat.is_match(arg.cached.as_ref()) {
-                    (true, id) => Some((i, id)),
-                    _ => None,
+                if pat.is_match(&typ) {
+                    Some(i)
+                } else {
+                    None
                 }
             });
             match (sel, *selected) {
-                (Some((i, _)), Some(j)) if i == j => val!(i),
-                (Some((i, _)), Some(_) | None) => {
+                (Some(i), Some(j)) if i == j => val!(i),
+                (Some(i), Some(_) | None) => {
                     set_arg!(i);
                     *selected = Some(i);
                     arms[i].1.cached.clone()
