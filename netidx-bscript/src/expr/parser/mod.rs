@@ -31,15 +31,9 @@ pub const BSCRIPT_ESC: [char; 4] = ['"', '\\', '[', ']'];
 pub const RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
     FxHashSet::from_iter([
         "true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn",
-        "cast", "if",
-    ])
-});
-
-pub const TYPE_RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
-    FxHashSet::from_iter([
-        "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32", "f64", "decimal",
-        "datetime", "duration", "bool", "string", "bytes", "result", "array", "null",
-        "_", "?", "fn",
+        "cast", "if", "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32",
+        "f64", "decimal", "datetime", "duration", "bool", "string", "bytes", "result",
+        "array", "null", "_", "?", "fn",
     ])
 });
 
@@ -96,7 +90,7 @@ where
     I::Range: Range,
 {
     ident(true).then(|s| {
-        if TYPE_RESERVED.contains(&s.as_str()) {
+        if RESERVED.contains(&s.as_str()) {
             unexpected_any("can't use keyword as a type name").left()
         } else {
             value(s).right()
@@ -353,7 +347,7 @@ where
 {
     between(token('['), sptoken(']'), sep_by(expr(), csep())).map(|args: Vec<Expr>| {
         ExprKind::Apply {
-            function: ["array"].into(),
+            function: ["mkarray"].into(),
             args: Arc::from_iter(args.into_iter().map(|a| (None, a))),
         }
         .to_expr()

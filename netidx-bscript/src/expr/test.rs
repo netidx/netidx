@@ -2,7 +2,7 @@ use super::*;
 use bytes::Bytes;
 use chrono::prelude::*;
 use netidx_netproto::pbuf::PBytes;
-use parser::{parse, RESERVED, TYPE_RESERVED};
+use parser::{parse, RESERVED};
 use prop::option;
 use proptest::{collection, prelude::*};
 use std::time::Duration;
@@ -80,7 +80,7 @@ fn typart() -> impl Strategy<Value = String> {
             }
             String::from_utf8_unchecked(v)
         })
-        .prop_filter("Filter reserved words", |s| !TYPE_RESERVED.contains(s.as_str()))
+        .prop_filter("Filter reserved words", |s| !RESERVED.contains(s.as_str()))
 }
 
 fn valid_fname() -> impl Strategy<Value = ArcStr> {
@@ -91,7 +91,7 @@ fn valid_fname() -> impl Strategy<Value = ArcStr> {
         Just(ArcStr::from("product")),
         Just(ArcStr::from("divide")),
         Just(ArcStr::from("mean")),
-        Just(ArcStr::from("array")),
+        Just(ArcStr::from("mkarray")),
         Just(ArcStr::from("min")),
         Just(ArcStr::from("max")),
         Just(ArcStr::from("and")),

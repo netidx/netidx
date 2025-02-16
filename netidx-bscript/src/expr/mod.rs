@@ -710,7 +710,7 @@ impl ExprKind {
                 let len = try_single_line!(false);
                 if function == &["str", "concat"] {
                     Ok(())
-                } else if function == &["array"] {
+                } else if function == &["mkarray"] {
                     buf.truncate(len);
                     pretty_print_exprs_int(indent, limit, buf, args, "[", "]", ",", |a| {
                         &a.1
@@ -975,7 +975,7 @@ impl fmt::Display for ExprKind {
                         }
                     }
                     write!(f, "\"")
-                } else if function == &["array"] {
+                } else if function == &["mkarray"] {
                     write!(f, "[")?;
                     for i in 0..args.len() {
                         write!(f, "{}", &args[i].1)?;

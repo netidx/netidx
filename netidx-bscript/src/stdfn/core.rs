@@ -613,7 +613,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Ungroup {
 
 const MOD: &str = r#"
 pub mod core {
-    type any = [
+    type Any = [
         u32,
         v32,
         i32,
@@ -635,15 +635,15 @@ pub mod core {
         null
     ]
         
-    type int = [ i32, z32, i64, z64 ]
-    type uint = [ u32, v32, u64, v64 ]
-    type real = [ f32, f64, decimal ]
-    type number = [ int, uint, real ]
+    type Int = [ i32, z32, i64, z64 ]
+    type Uint = [ u32, v32, u64, v64 ]
+    type Real = [ f32, f64, decimal ]
+    type Number = [ int, uint, real ]
         
     pub let all = |@args| 'all
     pub let and = |@args| 'and
     pub let any = |@args| 'any
-    pub let array = |@args| 'array
+    pub let mkarray = |@args| 'array
     pub let count = |@args| 'count
     pub let divide = |@args| 'divide
     pub let filter_err = |e| 'filter_err
