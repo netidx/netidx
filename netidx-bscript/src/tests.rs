@@ -358,7 +358,7 @@ run!(simple_typecheck, SIMPLE_TYPECHECK, |v: Result<&Value>| match v {
 
 const FUNCTION_TYPES: &str = r#"
 {
-  let f = |x: number, y: number| -> string "x is [x] and y is [y]";
+  let f = |x: Number, y: Number| -> string "x is [x] and y is [y]";
   f("foo", 3)
 }
 "#;
@@ -370,7 +370,7 @@ run!(function_types, FUNCTION_TYPES, |v: Result<&Value>| match v {
 
 const PARTIAL_FUNCTION_TYPES: &str = r#"
 {
-  let f = |x: number, y| "x is [x] and y is [y]";
+  let f = |x: Number, y| "x is [x] and y is [y]";
   f("foo", 3)
 }
 "#;
@@ -382,7 +382,7 @@ run!(partial_function_types, PARTIAL_FUNCTION_TYPES, |v: Result<&Value>| match v
 
 const FUNCTION_RTYPE: &str = r#"
 {
-  let f = |x, y| -> number "x is [x] and y is [y]";
+  let f = |x, y| -> Number "x is [x] and y is [y]";
   f("foo", 3)
 }
 "#;
@@ -409,7 +409,7 @@ run!(inferred_rtype, INFERRED_RTYPE, |v: Result<&Value>| match v {
 const LAMBDA_CONSTRAINT: &str = r#"
 {
   let f = |f: fn(string, string) -> string, a| f("foo", a);
-  f(|x, y: number| "[x] and [y]", "foo")
+  f(|x, y: Number| "[x] and [y]", "foo")
 }
 "#;
 

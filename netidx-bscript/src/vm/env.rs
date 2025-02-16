@@ -419,7 +419,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
                 for t in ts.iter() {
                     res.push(self.resolve_typrefs(scope, t)?)
                 }
-                Ok(Type::Set(Arc::from_iter(res)))
+                Ok(Type::flatten_set(res))
             }
             Type::Fn(f) => {
                 let vargs = f

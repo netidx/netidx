@@ -163,10 +163,11 @@ impl Type {
     }
 
     pub fn contains(&self, t: &Type) -> bool {
-        match (self, t) {
+        match dbg!((self, t)) {
             (Self::Ref(_), _) | (_, Self::Ref(_)) => false, // refs must be eliminated before unification
             (Self::Bottom, _) | (_, Self::Bottom) => true,
             (Self::Primitive(p0), Self::Primitive(p1)) => p0.contains(*p1),
+            (Self::Set(_), Self::Set(s1)) => s1.iter().all(|t| self.contains(t)),
             (Self::Set(s), t) => s.iter().any(|s| s.contains(t)),
             (s, Self::Set(t)) => t.iter().all(|t| s.contains(t)),
             (Self::Fn(f0), Self::Fn(f1)) => f0.contains(f1),
@@ -174,7 +175,7 @@ impl Type {
         }
     }
 
-    fn flatten_set(set: impl IntoIterator<Item = Type>) -> Type {
+    pub(crate) fn flatten_set(set: impl IntoIterator<Item = Type>) -> Type {
         let init: Box<dyn Iterator<Item = Type>> = Box::new(set.into_iter());
         let mut iters: SmallVec<[Box<dyn Iterator<Item = Type>>; 16]> = smallvec![init];
         let mut acc: SmallVec<[Type; 16]> = smallvec![];
