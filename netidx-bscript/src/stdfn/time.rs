@@ -23,7 +23,7 @@ struct AfterIdle {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for AfterIdle {
     const NAME: &str = "after_idle";
-    deftype!("fn([duration, number], any) -> any");
+    deftype!("fn([duration, Number], Any) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, from, eid| {
@@ -125,7 +125,7 @@ struct Timer {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Timer {
     const NAME: &str = "timer";
-    deftype!("fn([duration, number], [bool, number]) -> datetime");
+    deftype!("fn([duration, Number], [bool, Number]) -> datetime");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, from, eid| {

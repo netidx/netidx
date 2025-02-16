@@ -22,7 +22,7 @@ struct Any;
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Any {
     const NAME: &str = "any";
-    deftype!("fn(@args: any) -> any");
+    deftype!("fn(@args: Any) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Any)))
@@ -48,7 +48,7 @@ struct Once {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Once {
     const NAME: &str = "once";
-    deftype!("fn(any) -> any");
+    deftype!("fn(Any) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Once { val: false })))
@@ -80,7 +80,7 @@ struct AllEv;
 
 impl EvalCached for AllEv {
     const NAME: &str = "all";
-    deftype!("fn(@args: any) -> any");
+    deftype!("fn(@args: Any) -> Any");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &*from.0 {
@@ -104,8 +104,8 @@ type All = CachedArgs<AllEv>;
 struct ArrayEv;
 
 impl EvalCached for ArrayEv {
-    const NAME: &str = "array";
-    deftype!("fn(@args: any) -> array");
+    const NAME: &str = "mkarray";
+    deftype!("fn(@args: Any) -> array");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         if from.0.iter().all(|v| v.is_some()) {
@@ -131,7 +131,7 @@ struct SumEv;
 
 impl EvalCached for SumEv {
     const NAME: &str = "sum";
-    deftype!("fn(@args: number) -> number");
+    deftype!("fn(@args: Number) -> Number");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
@@ -155,7 +155,7 @@ fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 
 impl EvalCached for ProductEv {
     const NAME: &str = "product";
-    deftype!("fn(@args: number) -> number");
+    deftype!("fn(@args: Number) -> Number");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
@@ -179,7 +179,7 @@ fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 
 impl EvalCached for DivideEv {
     const NAME: &str = "divide";
-    deftype!("fn(@args: number) -> number");
+    deftype!("fn(@args: Number) -> Number");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
@@ -195,7 +195,7 @@ struct MinEv;
 
 impl EvalCached for MinEv {
     const NAME: &str = "min";
-    deftype!("fn(@args: any) -> any");
+    deftype!("fn(@args: Any) -> Any");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = None;
@@ -220,7 +220,7 @@ struct MaxEv;
 
 impl EvalCached for MaxEv {
     const NAME: &str = "max";
-    deftype!("fn(@args: any) -> any");
+    deftype!("fn(@args: Any) -> Any");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut res = None;
@@ -291,7 +291,7 @@ struct IsErrEv;
 
 impl EvalCached for IsErrEv {
     const NAME: &str = "is_error";
-    deftype!("fn(any) -> bool");
+    deftype!("fn(Any) -> bool");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         from.0[0].as_ref().map(|v| match v {
@@ -307,7 +307,7 @@ struct IndexEv;
 
 impl EvalCached for IndexEv {
     const NAME: &str = "index";
-    deftype!("fn(array, i64) -> any");
+    deftype!("fn(array, i64) -> Any");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -331,7 +331,7 @@ struct FilterEv;
 
 impl EvalCached for FilterEv {
     const NAME: &str = "filter";
-    deftype!("fn(bool, any) -> any");
+    deftype!("fn(bool, Any) -> Any");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let (pred, s) = (&from.0[0], &from.0[1]);
@@ -350,7 +350,7 @@ struct FilterErrEv;
 
 impl EvalCached for FilterErrEv {
     const NAME: &str = "filter_err";
-    deftype!("fn(any) -> result");
+    deftype!("fn(Any) -> error");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
@@ -368,7 +368,7 @@ struct Count {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Count {
     const NAME: &str = "count";
-    deftype!("fn(any) -> u64");
+    deftype!("fn(Any) -> u64");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Count { count: 0 })))
@@ -397,7 +397,7 @@ struct Sample {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Sample {
     const NAME: &str = "sample";
-    deftype!("fn(any, any) -> any");
+    deftype!("fn(Any, Any) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Sample { last: None })))
@@ -427,7 +427,7 @@ struct MeanEv;
 
 impl EvalCached for MeanEv {
     const NAME: &str = "mean";
-    deftype!("fn([number, array], @args: [number, array]) -> f64");
+    deftype!("fn([Number, array], @args: [Number, array]) -> f64");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut total = 0.;
@@ -460,7 +460,7 @@ struct Uniq(Option<Value>);
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Uniq {
     const NAME: &str = "uniq";
-    deftype!("fn(any) -> any");
+    deftype!("fn(Any) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Uniq(None))))
@@ -492,7 +492,7 @@ struct Never;
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Never {
     const NAME: &str = "never";
-    deftype!("fn(any) -> _");
+    deftype!("fn(Any) -> _");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Never)))
@@ -523,7 +523,7 @@ struct Group<C: Ctx + 'static, E: Debug + Clone + 'static> {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Group<C, E> {
     const NAME: &str = "group";
-    deftype!("fn(any, fn(u64, any) -> bool) -> array");
+    deftype!("fn(Any, fn(u64, Any) -> bool) -> array");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|ctx, scope, from, top_id| match from {
@@ -578,7 +578,7 @@ struct Ungroup(BindId);
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Ungroup {
     const NAME: &str = "ungroup";
-    deftype!("fn(array) -> any");
+    deftype!("fn(array) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Ungroup(BindId::new()))))
@@ -613,43 +613,34 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Ungroup {
 
 const MOD: &str = r#"
 pub mod core {
+    type Sint = [ i32, z32, i64, z64 ]
+    type Uint = [ u32, v32, u64, v64 ]
+    type Int = [ Sint, Uint ]
+    type Real = [ f32, f64, decimal ]
+    type Number = [ Int, Real ]
+
     type Any = [
-        u32,
-        v32,
-        i32,
-        z32,
-        u64,
-        v64,
-        i64,
-        z64,
-        f32,
-        f64,
-        decimal,
+        Number,
         datetime,
         duration,
         bool,
         string,
         bytes,
-        result,
+        error,
         array,
         null
     ]
-        
-    type Int = [ i32, z32, i64, z64 ]
-    type Uint = [ u32, v32, u64, v64 ]
-    type Real = [ f32, f64, decimal ]
-    type Number = [ int, uint, real ]
-        
+                
     pub let all = |@args| 'all
     pub let and = |@args| 'and
     pub let any = |@args| 'any
-    pub let mkarray = |@args| 'array
+    pub let mkarray = |@args| 'mkarray
     pub let count = |@args| 'count
     pub let divide = |@args| 'divide
     pub let filter_err = |e| 'filter_err
     pub let filter = |predicate, v| 'filter
     pub let group = |v, f| 'group
-    pub let index = |array, i| 'index
+    pub let index = |a, i| 'index
     pub let is_err = |e| 'is_error
     pub let max = |@args| 'max
     pub let mean = |@args| 'mean

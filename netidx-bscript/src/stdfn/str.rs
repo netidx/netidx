@@ -288,7 +288,7 @@ struct StringConcatEv;
 
 impl EvalCached for StringConcatEv {
     const NAME: &str = "string_concat";
-    deftype!("fn(@args: any) -> string");
+    deftype!("fn(@args: Any) -> string");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         thread_local! {

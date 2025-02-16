@@ -40,7 +40,7 @@ struct Store {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Store {
     const NAME: &str = "store";
-    deftype!("fn(string, any) -> _");
+    deftype!("fn(string, Any) -> _");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, from, top_id| {
@@ -130,7 +130,7 @@ struct Load {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Load {
     const NAME: &str = "load";
-    deftype!("fn(string) -> any");
+    deftype!("fn(string) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, from, top_id| {
@@ -191,7 +191,7 @@ struct RpcCall {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for RpcCall {
     const NAME: &str = "call";
-    deftype!("fn(string, array) -> any");
+    deftype!("fn(string, array) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, from, top_id| {
