@@ -417,3 +417,20 @@ run!(lambda_constraint, LAMBDA_CONSTRAINT, |v: Result<&Value>| match v {
     Err(_) => true,
     _ => false,
 });
+
+const LOOPING_SELECT: &str = r#"
+{
+  let v: [Number, string, error] = "1";
+  let v = select v {
+    Number as i => i,
+    string as s => v <- cast<i64>(s),
+    error as e => never(e)
+  };
+  v + 1
+}
+"#;
+
+run!(looping_select, LOOPING_SELECT, |v: Result<&Value>| match v {
+    Ok(Value::I64(2)) => true,
+    _ => false,
+});

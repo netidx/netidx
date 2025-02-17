@@ -492,7 +492,7 @@ struct Never;
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Never {
     const NAME: &str = "never";
-    deftype!("fn(Any) -> _");
+    deftype!("fn(@args: Any) -> _");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Never)))
