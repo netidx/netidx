@@ -483,3 +483,16 @@ run!(arg_subtyping, ARG_SUBTYPING, |v: Result<&Value>| match v {
     Ok(Value::I64(45)) => true,
     _ => false,
 });
+
+const ARG_NAME_SHORT: &str = r#"
+{
+  let f = |#foo: Number, #bar: Number = 42| foo + bar;
+  let foo = 3;
+  f(#foo)
+}
+"#;
+
+run!(arg_name_short, ARG_NAME_SHORT, |v: Result<&Value>| match v {
+    Ok(Value::I64(45)) => true,
+    _ => false,
+});
