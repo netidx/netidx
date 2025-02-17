@@ -434,3 +434,52 @@ run!(looping_select, LOOPING_SELECT, |v: Result<&Value>| match v {
     Ok(Value::I64(2)) => true,
     _ => false,
 });
+
+const LABELED_ARGS: &str = r#"
+{
+  let f = |#foo: Number, #bar: Number = 42| foo + bar;
+  f(#foo: 0)
+}
+"#;
+
+run!(labeled_args, LABELED_ARGS, |v: Result<&Value>| match v {
+    Ok(Value::I64(42)) => true,
+    _ => false,
+});
+
+const REQUIRED_ARGS: &str = r#"
+{
+  let f = |#foo: Number, #bar: Number = 42| foo + bar;
+  f(#bar: 0)
+}
+"#;
+
+run!(required_args, REQUIRED_ARGS, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const MIXED_ARGS: &str = r#"
+{
+  let f = |#foo: Number, #bar: Number = 42, baz| foo + bar + baz;
+  f(#foo: 0, 0)
+}
+"#;
+
+run!(mixed_args, MIXED_ARGS, |v: Result<&Value>| match v {
+    Ok(Value::I64(42)) => true,
+    _ => false,
+});
+
+const ARG_SUBTYPING: &str = r#"
+{
+  let f = |#foo: Number, #bar: Number = 42| foo + bar;
+  let g = |f: fn(#foo: Number) -> Number| f(#foo: 3);
+  g(f)
+}
+"#;
+
+run!(arg_subtyping, ARG_SUBTYPING, |v: Result<&Value>| match v {
+    Ok(Value::I64(45)) => true,
+    _ => false,
+});

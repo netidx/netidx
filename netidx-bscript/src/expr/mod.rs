@@ -163,7 +163,7 @@ impl Type {
     }
 
     pub fn contains(&self, t: &Type) -> bool {
-        match dbg!((self, t)) {
+        match (self, t) {
             (Self::Ref(_), _) | (_, Self::Ref(_)) => false, // refs must be eliminated before unification
             (Self::Bottom, _) | (_, Self::Bottom) => true,
             (Self::Primitive(p0), Self::Primitive(p1)) => p0.contains(*p1),
