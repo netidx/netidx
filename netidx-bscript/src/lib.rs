@@ -9,6 +9,7 @@ extern crate serde_derive;
 
 pub mod expr;
 pub mod stdfn;
+pub mod typ;
 pub mod vm;
 
 #[cfg(test)]

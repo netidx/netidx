@@ -516,8 +516,48 @@ fn acc_strings<'a>(args: impl IntoIterator<Item = &'a Expr> + 'a) -> Arc<[Expr]>
     Arc::from(v)
 }
 
+fn check_type(t0: &Type, t1: &Type) -> bool {
+    match (t0, t1) {
+        (Type::Bottom, Type::Bottom) => true,
+        (Type::Bottom, Type::Primitive(p)) | (Type::Primitive(p), Type::Bottom) => {
+            p.is_empty()
+        }
+        (Type::Primitive(p0), Type::Primitive(p1)) => p0 == p1,
+        (Type::Ref(m0), Type::Ref(m1)) => m0 == m1,
+        (Type::Fn(f0), Type::Fn(f1)) => f0 == f1,
+        (Type::Set(s0), Type::Set(s1)) => {
+            let s0f = Type::flatten_set(s0.iter().cloned());
+            let s1f = Type::flatten_set(s1.iter().cloned());
+            match (s0f, s1f) {
+                (Type::Set(s0), Type::Set(s1)) => {
+                    s0.len() == s1.len()
+                        && s0.iter().zip(s1.iter()).all(|(t0, t1)| check_type(t0, t1))
+                }
+                (_, Type::Set(_)) | (Type::Set(_), _) => false,
+                (t0, t1) => check_type(&t0, &t1),
+            }
+        }
+        (t, Type::Set(s)) | (Type::Set(s), t) => {
+            let s = Type::flatten_set(s.iter().cloned());
+            match s {
+                Type::Set(_) => false,
+                s => check_type(t, &s),
+            }
+        }
+        (_, _) => false,
+    }
+}
+
+fn check_type_opt(t0: &Option<Type>, t1: &Option<Type>) -> bool {
+    match (t0, t1) {
+        (Some(t0), Some(t1)) => check_type(t0, t1),
+        (None, None) => true,
+        (_, _) => false,
+    }
+}
+
 fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
-    pat0.predicate == pat1.predicate
+    check_type(&pat0.predicate, &pat1.predicate)
         && pat0.bind == pat1.bind
         && match (&pat0.guard, &pat1.guard) {
             (Some(g0), Some(g1)) => check(g0, g1),
@@ -529,7 +569,7 @@ fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
 fn check_args(args0: &[Arg], args1: &[Arg]) -> bool {
     args0.iter().zip(args1.iter()).fold(true, |r, (a0, a1)| {
         r && a0.name == a1.name
-            && a0.constraint == a1.constraint
+            && check_type_opt(&a0.constraint, &a1.constraint)
             && match (&a0.labeled, &a1.labeled) {
                 (None, None) | (Some(None), Some(None)) => true,
                 (Some(Some(d0)), Some(Some(d1))) => check(d0, d1),
@@ -664,7 +704,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         ) => dbg!(
             dbg!(name0 == name1)
                 && dbg!(export0 == export1)
-                && dbg!(typ0 == typ1)
+                && dbg!(check_type_opt(typ0, typ1))
                 && dbg!(check(value0, value1))
         ),
         (
@@ -689,8 +729,12 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             },
         ) => dbg!(
             dbg!(check_args(args0, args1))
-                && dbg!(vargs0 == vargs1)
-                && dbg!(rtype0 == rtype1)
+                && dbg!(match (vargs0, vargs1) {
+                    (Some(t0), Some(t1)) => check_type_opt(t0, t1),
+                    (None, None) => true,
+                    _ => false,
+                })
+                && dbg!(check_type_opt(rtype0, rtype1))
                 && dbg!(check(body0, body1))
         ),
         (
@@ -708,8 +752,12 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             },
         ) => dbg!(
             dbg!(check_args(args0, args1))
-                && dbg!(vargs0 == vargs1)
-                && dbg!(rtype0 == rtype1)
+                && dbg!(match (vargs0, vargs1) {
+                    (Some(t0), Some(t1)) => check_type_opt(t0, t1),
+                    (None, None) => true,
+                    _ => false,
+                })
+                && dbg!(check_type_opt(rtype0, rtype1))
                 && dbg!(b0 == b1)
         ),
         (
@@ -729,7 +777,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (
             ExprKind::TypeDef { name: name0, typ: typ0 },
             ExprKind::TypeDef { name: name1, typ: typ1 },
-        ) => dbg!(name0 == name1) && dbg!(typ0 == typ1),
+        ) => dbg!(name0 == name1) && dbg!(check_type(typ0, typ1)),
         (
             ExprKind::TypeCast { expr: expr0, typ: typ0 },
             ExprKind::TypeCast { expr: expr1, typ: typ1 },
