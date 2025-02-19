@@ -58,7 +58,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Lambda<C, E> 
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C, E> {
-    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>, args: &[Node<C, E>]) -> Result<()> {
+    fn typecheck(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        args: &mut [Node<C, E>],
+    ) -> Result<()> {
         macro_rules! wrap {
             ($n:expr, $e:expr) => {
                 match $e {
@@ -68,7 +72,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C
             };
         }
         let spec = &mut self.spec;
-        for (arg, (_, typ)) in args.iter().zip(spec.argspec.iter()) {
+        for (arg, (_, typ)) in args.iter_mut().zip(spec.argspec.iter()) {
             wrap!(arg, arg.typecheck(ctx))?;
             wrap!(arg, typ.check_contains(&arg.typ))?;
         }
@@ -142,7 +146,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for BuiltIn<C, E>
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<C, E> {
-    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>, args: &[Node<C, E>]) -> Result<()> {
+    fn typecheck(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        args: &mut [Node<C, E>],
+    ) -> Result<()> {
         macro_rules! wrap {
             ($n:expr, $e:expr) => {
                 match $e {
@@ -833,7 +841,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                         Err(e) => return error!("{e}", vec![node]),
                     },
                 };
-                let bind = ctx.env.bind_variable(scope, &**name, typ);
+                let bind = ctx.env.bind_variable(scope, &**name, typ.clone());
                 bind.fun = node.find_lambda();
                 if node.is_err() {
                     error!("", vec![node])
@@ -847,7 +855,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     None => error!("{name} not defined"),
                     Some((_, bind)) => {
                         ctx.user.ref_var(bind.id, top_id);
-                        let typ = bind.typ;
+                        let typ = bind.typ.clone();
                         let spec = Box::new(spec);
                         match &bind.fun {
                             None => Node { spec, typ, kind: NodeKind::Ref(bind.id) },

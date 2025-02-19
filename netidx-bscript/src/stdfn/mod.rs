@@ -1,4 +1,8 @@
-use crate::{node::Node, typ::FnType, Apply, BuiltIn, Ctx, Event, ExecCtx, InitFn};
+use crate::{
+    node::Node,
+    typ::{FnType, Refs},
+    Apply, BuiltIn, Ctx, Event, ExecCtx, InitFn,
+};
 use netidx::subscriber::Value;
 use netidx_core::utils::Either;
 use smallvec::SmallVec;
@@ -17,7 +21,7 @@ pub mod time;
 #[macro_export]
 macro_rules! deftype {
     ($s:literal) => {
-        const TYP: LazyLock<FnType> =
+        const TYP: LazyLock<FnType<Refs>> =
             LazyLock::new(|| parse_fn_type($s).expect("failed to parse fn type {s}"));
     };
 }
@@ -128,7 +132,7 @@ impl CachedVals {
 
 pub trait EvalCached {
     const NAME: &str;
-    const TYP: LazyLock<FnType>;
+    const TYP: LazyLock<FnType<Refs>>;
 
     fn eval(from: &CachedVals) -> Option<Value>;
 }
@@ -142,7 +146,7 @@ impl<C: Ctx, E: Debug + Clone, T: EvalCached + Send + Sync + 'static> BuiltIn<C,
     for CachedArgs<T>
 {
     const NAME: &str = T::NAME;
-    const TYP: LazyLock<FnType> = T::TYP;
+    const TYP: LazyLock<FnType<Refs>> = T::TYP;
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, from, _| {

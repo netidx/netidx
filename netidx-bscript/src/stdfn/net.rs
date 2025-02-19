@@ -3,7 +3,7 @@ use crate::{
     expr::{parser::parse_fn_type, Expr, ExprId},
     node::Node,
     stdfn::CachedVals,
-    typ::FnType,
+    typ::{FnType, Refs},
     Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn,
 };
 use anyhow::{anyhow, bail, Result};

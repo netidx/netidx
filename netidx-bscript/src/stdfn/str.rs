@@ -2,7 +2,7 @@ use crate::{
     deftype, err,
     expr::{parser::parse_fn_type, Expr},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    typ::FnType,
+    typ::{FnType, Refs},
     Ctx, ExecCtx,
 };
 use arcstr::{literal, ArcStr};

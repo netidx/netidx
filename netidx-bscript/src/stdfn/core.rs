@@ -3,8 +3,8 @@ use crate::{
     expr::{parser::parse_fn_type, Expr, ExprKind},
     node::{Node, NodeKind},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    typ::{FnType, Type},
-    Apply, ApplyTyped, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, TypeId,
+    typ::{FnType, Refs, Type},
+    Apply, ApplyTyped, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn,
 };
 use anyhow::bail;
 use arcstr::{literal, ArcStr};
@@ -527,20 +527,20 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Group<C, E> {
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|ctx, scope, from, top_id| match from {
             [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
-                let n_typ = ctx.env.add_typ(Type::Primitive(Typ::U64.into()));
-                let n = ctx.env.bind_variable(scope, "n", n_typ).id;
-                let x = ctx.env.bind_variable(scope, "x", from[0].typ).id;
+                let n_typ = Type::Primitive(Typ::U64.into());
+                let n = ctx.env.bind_variable(scope, "n", n_typ.clone()).id;
+                let x = ctx.env.bind_variable(scope, "x", from[0].typ.clone()).id;
                 ctx.user.ref_var(n, top_id);
                 ctx.user.ref_var(x, top_id);
                 let mut from = [
                     Node {
                         spec: Box::new(ExprKind::Ref { name: ["n"].into() }.to_expr()),
-                        typ: TypeId::new(),
+                        typ: n_typ,
                         kind: NodeKind::Ref(n),
                     },
                     Node {
                         spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
-                        typ: TypeId::new(),
+                        typ: from[0].typ.clone(),
                         kind: NodeKind::Ref(x),
                     },
                 ];
