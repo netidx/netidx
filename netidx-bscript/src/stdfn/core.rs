@@ -1,11 +1,10 @@
 use crate::{
     deftype, err, errf,
-    expr::{parser::parse_fn_type, Expr, ExprKind, FnType, Type},
+    expr::{parser::parse_fn_type, Expr, ExprKind},
+    node::{Node, NodeKind},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    vm::{
-        node::{Node, NodeKind},
-        Apply, ApplyTyped, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, TypeId,
-    },
+    typ::{FnType, Type},
+    Apply, ApplyTyped, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, TypeId,
 };
 use anyhow::bail;
 use arcstr::{literal, ArcStr};

@@ -1,9 +1,8 @@
 use crate::{
-    expr::{Arg, Expr, ExprId, ExprKind, FnType, ModPath, Pattern, Type},
-    vm::{
-        env::{Bind, LambdaBind},
-        Apply, ApplyTyped, BindId, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars, TypeId,
-    },
+    env::{Bind, LambdaBind},
+    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern},
+    typ::{FnType, Type},
+    Apply, ApplyTyped, BindId, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars, TypeId,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
@@ -247,7 +246,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         match &predicate {
             Type::Fn(_) => bail!("can't match on Fn type"),
             Type::Ref(_) => bail!("bug in resolve_typrefs"),
-            Type::Bottom | Type::Primitive(_) | Type::Set(_) => (),
+            Type::Bottom(_) | Type::Primitive(_) | Type::Set(_) => (),
         }
         let tid = ctx.env.add_typ(predicate.clone());
         let bind = ctx.env.bind_variable(scope, &*spec.bind, tid);

@@ -1,5 +1,5 @@
-use crate::expr::ModPath;
-use anyhow::{bail, Result};
+use crate::{env::Env, expr::ModPath, Ctx};
+use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use enumflags2::BitFlags;
 use netidx::{publisher::Typ, utils::Either};
@@ -7,7 +7,8 @@ use parking_lot::Mutex;
 use smallvec::{smallvec, SmallVec};
 use std::{
     cmp::{Eq, PartialEq},
-    fmt, iter,
+    fmt::{self, Debug},
+    iter,
     marker::PhantomData,
 };
 use triomphe::Arc;
@@ -101,10 +102,10 @@ impl Type<NoRefs> {
                     Ok(true)
                 }
             },
-            (Self::Set(_), Self::Set(s1)) => {
+            (t0, Self::Set(s)) => {
                 let mut ok = true;
-                for t in s1.iter() {
-                    ok &= self.contains(t)?
+                for t1 in s.iter() {
+                    ok &= t0.contains(t1)?;
                 }
                 Ok(ok)
             }
@@ -119,12 +120,6 @@ impl Type<NoRefs> {
                 }
                 Ok(ok)
             }
-            (s, Self::Set(t)) => Ok(t
-                .iter()
-                .map(|t| s.contains(t))
-                .collect::<Result<SmallVec<[bool; 64]>>>()?
-                .into_iter()
-                .all(|b| b)),
             (Self::Fn(f0), Self::Fn(f1)) => f0.contains(f1),
             (Self::Fn(_), _) | (_, Self::Fn(_)) => Ok(false),
             (Self::Ref(_), _) | (_, Self::Ref(_)) => unreachable!(),
@@ -166,6 +161,18 @@ impl Type<NoRefs> {
             }
             (Type::Ref(_), _) | (_, Type::Ref(_)) => unreachable!(),
         }
+    }
+
+    pub fn any() -> Self {
+        Self::Primitive(Typ::any())
+    }
+
+    pub fn boolean() -> Self {
+        Self::Primitive(Typ::Bool.into())
+    }
+
+    pub fn number() -> Self {
+        Self::Primitive(Typ::number())
     }
 }
 
@@ -282,16 +289,51 @@ impl<T: TypeMark + Clone> Type<T> {
         }
     }
 
-    pub fn any() -> Self {
-        Self::Primitive(Typ::any())
-    }
-
-    pub fn boolean() -> Self {
-        Self::Primitive(Typ::Bool.into())
-    }
-
-    pub fn number() -> Self {
-        Self::Primitive(Typ::number())
+    pub fn resolve_typrefs<'a, C: Ctx + 'static, E: Debug + Clone + 'static>(
+        &self,
+        scope: &ModPath,
+        env: &Env<C, E>,
+    ) -> Result<Type<NoRefs>> {
+        match self {
+            Type::Bottom(_) => Ok(Type::Bottom(PhantomData)),
+            Type::Primitive(s) => Ok(Type::Primitive(*s)),
+            Type::TVar(name, tv) => match &mut *tv.lock() {
+                None => Ok(Type::TVar(name.clone(), Arc::new(Mutex::new(None)))),
+                Some(typ) => {
+                    let typ = typ.resolve_typrefs(scope, env)?;
+                    Ok(Type::TVar(name.clone(), Arc::new(Mutex::new(Some(typ)))))
+                }
+            },
+            Type::Ref(name) => env
+                .find_visible(scope, name, |scope, name| {
+                    env.typedefs
+                        .get(scope)
+                        .and_then(|defs| defs.get(name).map(|typ| typ.clone()))
+                })
+                .ok_or_else(|| anyhow!("undefined type {name} in scope {scope}")),
+            Type::Set(ts) => {
+                let mut res: SmallVec<[Type<NoRefs>; 20]> = smallvec![];
+                for t in ts.iter() {
+                    res.push(t.resolve_typrefs(scope, env)?)
+                }
+                Ok(Type::flatten_set(res))
+            }
+            Type::Fn(f) => {
+                let vargs = f
+                    .vargs
+                    .as_ref()
+                    .map(|t| t.resolve_typrefs(scope, env))
+                    .transpose()?;
+                let rtype = f.rtype.resolve_typrefs(scope, env)?;
+                let mut res: SmallVec<[FnArgType<NoRefs>; 20]> = smallvec![];
+                for a in f.args.iter() {
+                    let typ = a.typ.resolve_typrefs(scope, env)?;
+                    let a = FnArgType { label: a.label.clone(), typ };
+                    res.push(a);
+                }
+                Ok(Type::Fn(Arc::new(FnType { args: Arc::from_iter(res), rtype, vargs })))
+            }
+        }
     }
 }
 
@@ -363,6 +405,20 @@ impl<T: TypeMark> PartialEq for FnType<T> {
 }
 
 impl<T: TypeMark> Eq for FnType<T> {}
+
+impl<T: TypeMark + Clone> FnType<T> {
+    pub fn resolve_typerefs<'a, C: Ctx + 'static, E: Debug + Clone + 'static>(
+        &self,
+        scope: &ModPath,
+        env: &Env<C, E>,
+    ) -> Result<FnType<NoRefs>> {
+        let typ = Type::Fn(Arc::new(self.clone()));
+        match typ.resolve_typrefs(scope, env)? {
+            Type::Fn(f) => Ok((*f).clone()),
+            _ => bail!("unexpected fn resolution"),
+        }
+    }
+}
 
 impl FnType<NoRefs> {
     pub fn contains(&self, t: &Self) -> Result<bool> {

@@ -1,8 +1,10 @@
 use crate::{
     arity1, arity2, deftype, errf,
-    expr::{parser::parse_fn_type, Expr, ExprId, FnType},
+    expr::{parser::parse_fn_type, Expr, ExprId},
+    node::Node,
     stdfn::CachedVals,
-    vm::{node::Node, Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn},
+    typ::FnType,
+    Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;

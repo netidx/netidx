@@ -1,8 +1,9 @@
 use crate::{
     deftype, err,
-    expr::{parser::parse_fn_type, Expr, FnType},
+    expr::{parser::parse_fn_type, Expr},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    vm::{Ctx, ExecCtx},
+    typ::FnType,
+    Ctx, ExecCtx,
 };
 use arcstr::{literal, ArcStr};
 use netidx::{path::Path, subscriber::Value};

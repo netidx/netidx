@@ -1,6 +1,6 @@
+use crate::typ::{Refs, Type};
 use arcstr::ArcStr;
 use compact_str::CompactString;
-use enumflags2::BitFlags;
 use netidx::{
     path::Path,
     publisher::Typ,
@@ -12,7 +12,6 @@ use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
 };
-use smallvec::{smallvec, SmallVec};
 use std::{
     borrow::Borrow,
     cmp::{Ordering, PartialEq, PartialOrd},
@@ -104,7 +103,7 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub struct Pattern {
-    pub predicate: Type,
+    pub predicate: Type<Refs>,
     pub bind: ArcStr,
     pub guard: Option<Expr>,
 }

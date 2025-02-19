@@ -1,6 +1,7 @@
 use crate::{
-    expr::{Arg, FnArgType, FnType, ModPath, Type},
-    vm::{BindId, Ctx, InitFnTyped, TypeId},
+    expr::{Arg, ModPath},
+    typ::{FnArgType, FnType, Type},
+    BindId, Ctx, InitFnTyped, TypeId,
 };
 use anyhow::{anyhow, bail, Result};
 use compact_str::CompactString;
@@ -62,11 +63,11 @@ pub enum TypeOrAlias {
 }
 
 pub struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
-    by_id: Map<BindId, Bind<C, E>>,
-    binds: Map<ModPath, Map<CompactString, BindId>>,
+    pub by_id: Map<BindId, Bind<C, E>>,
+    pub binds: Map<ModPath, Map<CompactString, BindId>>,
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
     pub modules: Set<ModPath>,
-    typedefs: Map<ModPath, Map<CompactString, Type>>,
+    pub typedefs: Map<ModPath, Map<CompactString, Type>>,
     pub typevars: Map<TypeId, TypeOrAlias>,
 }
 
@@ -165,7 +166,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
         }
     }
 
-    fn find_visible<R, F: FnMut(&str, &str) -> Option<R>>(
+    pub fn find_visible<R, F: FnMut(&str, &str) -> Option<R>>(
         &self,
         scope: &ModPath,
         name: &ModPath,

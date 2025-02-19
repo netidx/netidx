@@ -1,7 +1,4 @@
-use crate::{
-    expr::FnType,
-    vm::{node::Node, Apply, BuiltIn, Ctx, Event, ExecCtx, InitFn},
-};
+use crate::{node::Node, typ::FnType, Apply, BuiltIn, Ctx, Event, ExecCtx, InitFn};
 use netidx::subscriber::Value;
 use netidx_core::utils::Either;
 use smallvec::SmallVec;
