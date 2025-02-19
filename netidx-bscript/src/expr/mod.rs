@@ -19,6 +19,7 @@ use std::{
     ops::Deref,
     result,
     str::FromStr,
+    sync::LazyLock,
 };
 use triomphe::Arc;
 
@@ -26,9 +27,8 @@ pub mod parser;
 #[cfg(test)]
 mod test;
 
-lazy_static! {
-    pub static ref VNAME: Regex = Regex::new("^[a-z][a-z0-9_]*$").unwrap();
-}
+pub static VNAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("^[a-z][a-z0-9_]*$").unwrap());
 
 atomic_id!(ExprId);
 
@@ -101,21 +101,21 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
     }
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Pattern {
     pub predicate: Type<Refs>,
     pub bind: ArcStr,
     pub guard: Option<Expr>,
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Arg {
     pub labeled: Option<Option<Expr>>,
     pub name: ArcStr,
-    pub constraint: Option<Type>,
+    pub constraint: Option<Type<Refs>>,
 }
 
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum ExprKind {
     Constant(Value),
     Module {
@@ -131,7 +131,7 @@ pub enum ExprKind {
     },
     Bind {
         name: ArcStr,
-        typ: Option<Type>,
+        typ: Option<Type<Refs>>,
         export: bool,
         value: Arc<Expr>,
     },
@@ -144,13 +144,13 @@ pub enum ExprKind {
     },
     Lambda {
         args: Arc<[Arg]>,
-        vargs: Option<Option<Type>>,
-        rtype: Option<Type>,
+        vargs: Option<Option<Type<Refs>>>,
+        rtype: Option<Type<Refs>>,
         body: Either<Arc<Expr>, ArcStr>,
     },
     TypeDef {
         name: ArcStr,
-        typ: Type,
+        typ: Type<Refs>,
     },
     TypeCast {
         expr: Arc<Expr>,

@@ -1,5 +1,7 @@
-use super::{Arg, FnArgType, FnType, Pattern, Type};
-use crate::expr::{Expr, ExprId, ExprKind, ModPath};
+use crate::{
+    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern},
+    typ::{FnArgType, FnType, Refs, Type},
+};
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use combine::{
@@ -21,7 +23,7 @@ use netidx::{
 };
 use netidx_netproto::value_parser::{escaped_string, value as netidx_value};
 use smallvec::SmallVec;
-use std::sync::LazyLock;
+use std::{marker::PhantomData, sync::LazyLock};
 use triomphe::Arc;
 
 #[cfg(test)]
@@ -428,7 +430,7 @@ where
     .skip(not_followed_by(choice((alpha_num(), token('_')))))
 }
 
-fn fntype<I>() -> impl Parser<I, Output = FnType>
+fn fntype<I>() -> impl Parser<I, Output = FnType<Refs>>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -465,49 +467,56 @@ where
         )),
         spstring("->").with(typexp()),
     )
-        .then(|(mut args, rtype): (Vec<Either<FnArgType, Type>>, Type)| {
-            let vargs = match args.pop() {
-                None => None,
-                Some(Either::Right(t)) => Some(t),
-                Some(Either::Left(t)) => {
-                    args.push(Either::Left(t));
-                    None
-                }
-            };
-            if !args.iter().all(|a| a.is_left()) {
-                return unexpected_any("vargs must appear once at the end of the args")
-                    .left();
-            }
-            let args = Arc::from_iter(args.into_iter().map(|t| match t {
-                Either::Left(t) => t,
-                Either::Right(_) => unreachable!(),
-            }));
-            let mut anon = false;
-            for a in args.iter() {
-                if anon && a.label.is_some() {
+        .then(
+            |(mut args, rtype): (
+                Vec<Either<FnArgType<Refs>, Type<Refs>>>,
+                Type<Refs>,
+            )| {
+                let vargs = match args.pop() {
+                    None => None,
+                    Some(Either::Right(t)) => Some(t),
+                    Some(Either::Left(t)) => {
+                        args.push(Either::Left(t));
+                        None
+                    }
+                };
+                if !args.iter().all(|a| a.is_left()) {
                     return unexpected_any(
-                        "anonymous args must appear after labeled args",
+                        "vargs must appear once at the end of the args",
                     )
                     .left();
                 }
-                anon |= a.label.is_none();
-            }
-            value(FnType { args, vargs, rtype }).right()
-        })
+                let args = Arc::from_iter(args.into_iter().map(|t| match t {
+                    Either::Left(t) => t,
+                    Either::Right(_) => unreachable!(),
+                }));
+                let mut anon = false;
+                for a in args.iter() {
+                    if anon && a.label.is_some() {
+                        return unexpected_any(
+                            "anonymous args must appear after labeled args",
+                        )
+                        .left();
+                    }
+                    anon |= a.label.is_none();
+                }
+                value(FnType { args, vargs, rtype }).right()
+            },
+        )
 }
 
-fn typexp_<I>() -> impl Parser<I, Output = Type>
+fn typexp_<I>() -> impl Parser<I, Output = Type<Refs>>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     choice((
-        attempt(sptoken('_').map(|_| Type::Bottom)),
+        attempt(sptoken('_').map(|_| Type::Bottom(PhantomData))),
         attempt(typeprim()).map(|typ| Type::Primitive(typ.into())),
         attempt(
             between(sptoken('['), sptoken(']'), sep_by(typexp(), csep()))
-                .map(|ts: SmallVec<[Type; 16]>| Type::flatten_set(ts)),
+                .map(|ts: SmallVec<[Type<Refs>; 16]>| Type::flatten_set(ts)),
         ),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(sptypath()).map(|n| Type::Ref(n)),
@@ -515,14 +524,14 @@ where
 }
 
 parser! {
-    fn typexp[I]()(I) -> Type
+    fn typexp[I]()(I) -> Type<Refs>
     where [I: RangeStream<Token = char>, I::Range: Range]
     {
         typexp_()
     }
 }
 
-fn lambda_args<I>() -> impl Parser<I, Output = (Vec<Arg>, Option<Option<Type>>)>
+fn lambda_args<I>() -> impl Parser<I, Output = (Vec<Arg>, Option<Option<Type<Refs>>>)>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -541,7 +550,7 @@ where
         ),
         csep(),
     )
-    .then(|v: Vec<((bool, ArcStr), Option<Type>, Option<Expr>)>| {
+    .then(|v: Vec<((bool, ArcStr), Option<Type<Refs>>, Option<Expr>)>| {
         let args = v
             .into_iter()
             .map(|((labeled, name), constraint, default)| {
@@ -574,7 +583,7 @@ where
         }
     })
     // labeled before anonymous args
-    .then(|(v, vargs): (Vec<Arg>, Option<Option<Type>>)| {
+    .then(|(v, vargs): (Vec<Arg>, Option<Option<Type<Refs>>>)| {
         let mut anon = false;
         for a in &v {
             if a.labeled.is_some() && anon {
@@ -762,10 +771,8 @@ where
         spfname(),
         optional(attempt(space().with(spstring("if").with(space()).with(expr())))),
     )
-        .map(|(predicate, bind, guard): (Type, ArcStr, Option<Expr>)| Pattern {
-            predicate,
-            bind,
-            guard,
+        .map(|(predicate, bind, guard): (Type<Refs>, ArcStr, Option<Expr>)| {
+            Pattern { predicate, bind, guard }
         })
 }
 
@@ -895,7 +902,7 @@ pub fn parse_many_modexpr(s: &str) -> anyhow::Result<Vec<Expr>> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
-pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType> {
+pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType<Refs>> {
     fntype()
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)

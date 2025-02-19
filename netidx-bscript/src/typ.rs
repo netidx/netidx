@@ -1,70 +1,133 @@
 use crate::{env::Env, expr::ModPath, Ctx};
 use anyhow::{anyhow, bail, Result};
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 use enumflags2::BitFlags;
 use netidx::{publisher::Typ, utils::Either};
-use parking_lot::Mutex;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use smallvec::{smallvec, SmallVec};
 use std::{
     cmp::{Eq, PartialEq},
     fmt::{self, Debug},
+    hash::Hash,
     iter,
     marker::PhantomData,
+    ops::Deref,
 };
 use triomphe::Arc;
 
-pub trait TypeMark {}
+pub trait TypeMark: Clone + Copy + PartialOrd + Ord + PartialEq + Eq + Hash {}
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Refs;
 
 impl TypeMark for Refs {}
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NoRefs;
 
 impl TypeMark for NoRefs {}
 
+#[derive(Debug)]
+pub struct TVarInner<T: TypeMark> {
+    name: ArcStr,
+    typ: RwLock<Arc<RwLock<Option<Type<T>>>>>,
+}
+
 #[derive(Debug, Clone)]
+pub struct TVar<T: TypeMark>(Arc<TVarInner<T>>);
+
+impl<T: TypeMark> Default for TVar<T> {
+    fn default() -> Self {
+        Self::empty_named(literal!("default"))
+    }
+}
+
+impl<T: TypeMark> TVar<T> {
+    pub fn empty_named(name: ArcStr) -> Self {
+        Self(Arc::new(TVarInner { name, typ: RwLock::new(Arc::new(RwLock::new(None))) }))
+    }
+
+    pub fn named(name: ArcStr, typ: Type<T>) -> Self {
+        Self(Arc::new(TVarInner {
+            name,
+            typ: RwLock::new(Arc::new(RwLock::new(Some(typ)))),
+        }))
+    }
+
+    pub fn read(&self) -> RwLockReadGuard<Arc<RwLock<Option<Type<T>>>>> {
+        self.typ.read()
+    }
+
+    pub fn write(&self) -> RwLockWriteGuard<Arc<RwLock<Option<Type<T>>>>> {
+        self.typ.write()
+    }
+}
+
+impl<T: TypeMark> Deref for TVar<T> {
+    type Target = TVarInner<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl<T: TypeMark> PartialEq for TVar<T> {
+    fn eq(&self, other: &Self) -> bool {
+        let t0 = self.read();
+        let t1 = other.read();
+        t0.as_ptr().addr() == t1.as_ptr().addr() || {
+            let t0 = t0.read();
+            let t1 = t1.read();
+            *t0 == *t1
+        }
+    }
+}
+
+impl<T: TypeMark> Eq for TVar<T> {}
+
+impl<T: TypeMark> PartialOrd for TVar<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let t0 = self.read();
+        let t1 = other.read();
+        if t0.as_ptr().addr() == t1.as_ptr().addr() {
+            Some(std::cmp::Ordering::Equal)
+        } else {
+            let t0 = t0.read();
+            let t1 = t1.read();
+            t0.partial_cmp(&*t1)
+        }
+    }
+}
+
+impl<T: TypeMark> Ord for TVar<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let t0 = self.read();
+        let t1 = other.read();
+        if t0.as_ptr().addr() == t1.as_ptr().addr() {
+            std::cmp::Ordering::Equal
+        } else {
+            let t0 = t0.read();
+            let t1 = t1.read();
+            t0.cmp(&*t1)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Type<T: TypeMark> {
     Bottom(PhantomData<T>),
     Primitive(BitFlags<Typ>),
     Ref(ModPath),
     Fn(Arc<FnType<T>>),
     Set(Arc<[Type<T>]>),
-    TVar(ArcStr, Arc<Mutex<Option<Type<T>>>>),
+    TVar(TVar<T>),
 }
-
-impl<T: TypeMark> PartialEq for Type<T> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Bottom(_), Self::Bottom(_)) => true,
-            (Self::Primitive(p0), Self::Primitive(p1)) => p0 == p1,
-            (Self::Ref(r0), Self::Ref(r1)) => r0 == r1,
-            (Self::Fn(f0), Self::Fn(f1)) => f0 == f1,
-            (Self::Set(s0), Self::Set(s1)) => {
-                s0.len() == s1.len() && s0.iter().zip(s1.iter()).all(|(t0, t1)| t0 == t1)
-            }
-            (Self::TVar(_, t0), Self::TVar(_, t1)) => {
-                t0.as_ptr().addr() == t1.as_ptr().addr()
-            }
-            (Type::Bottom(_), _)
-            | (_, Type::Bottom(_))
-            | (Type::Primitive(_), _)
-            | (_, Type::Primitive(_))
-            | (Type::Ref(_), _)
-            | (_, Type::Ref(_))
-            | (Type::Fn(_), _)
-            | (_, Type::Fn(_))
-            | (Type::Set(_), _)
-            | (_, Type::Set(_)) => false,
-        }
-    }
-}
-
-impl<T: TypeMark> Eq for Type<T> {}
 
 impl Type<NoRefs> {
+    pub fn empty_tvar() -> Self {
+        Type::TVar(TVar::default())
+    }
+
     fn iter_prims(&self) -> impl Iterator<Item = Self> {
         match self {
             Self::Primitive(p) => {
@@ -74,54 +137,95 @@ impl Type<NoRefs> {
         }
     }
 
-    pub fn contains(&self, t: &Self) -> Result<bool> {
+    pub fn is_defined(&self) -> bool {
+        match self {
+            Self::Bottom(_) | Self::Primitive(_) | Self::Fn(_) | Self::Set(_) => true,
+            Self::TVar(tv) => tv.read().read().is_some(),
+            Self::Ref(_) => unreachable!(),
+        }
+    }
+
+    pub fn with_deref<R, F: FnOnce(Option<&Self>) -> R>(&self, f: F) -> R {
+        match self {
+            Self::Bottom(_) | Self::Primitive(_) | Self::Fn(_) | Self::Set(_) => {
+                f(Some(self))
+            }
+            Self::TVar(tv) => f(tv.read().read().as_ref()),
+            Self::Ref(_) => unreachable!(),
+        }
+    }
+
+    pub fn check_contains(&self, t: &Self) -> Result<()> {
+        if self.contains(t) {
+            Ok(())
+        } else {
+            bail!("type mismatch {self} does not contain {t}")
+        }
+    }
+
+    pub fn contains(&self, t: &Self) -> bool {
         match (self, t) {
-            (Self::Bottom(_), _) | (_, Self::Bottom(_)) => Ok(true),
-            (Self::Primitive(p0), Self::Primitive(p1)) => Ok(p0.contains(*p1)),
-            (Self::TVar(_, t0), Self::TVar(_, t1)) => {
-                match (&mut *t0.lock(), &mut *t1.lock()) {
-                    (None, None) => bail!("type must be known"),
-                    (Some(t0), Some(t1)) => t0.contains(t1),
-                    (t0 @ None, Some(t1)) | (Some(t1), t0 @ None) => {
-                        *t0 = Some(t1.clone());
-                        Ok(true)
+            (Self::Bottom(_), _) | (_, Self::Bottom(_)) => true,
+            (Self::Primitive(p0), Self::Primitive(p1)) => p0.contains(*p1),
+            (Self::TVar(t0), Self::TVar(t1)) => {
+                let alias = {
+                    let t0 = t0.read();
+                    let t1 = t1.read();
+                    if t0.as_ptr().addr() == t1.as_ptr().addr() {
+                        return true;
+                    }
+                    let t0i = t0.read();
+                    let t1i = t1.read();
+                    match (&*t0i, &*t1i) {
+                        (Some(t0), Some(t1)) => return t0.contains(&*t1),
+                        (None, None) | (Some(_), None) => Either::Right(()),
+                        (None, Some(_)) => Either::Left(()),
+                    }
+                };
+                match alias {
+                    Either::Right(()) => {
+                        *t1.write() = Arc::clone(&*t0.read());
+                    }
+                    Either::Left(()) => {
+                        *t0.write() = Arc::clone(&*t1.read());
                     }
                 }
+                true
             }
-            (Self::TVar(_, t0), t1) => match &mut *t0.lock() {
-                Some(t0) => t0.contains(t1),
-                t0 @ None => {
-                    *t0 = Some(t1.clone());
-                    Ok(true)
+            (Self::TVar(t0), t1) => {
+                if let Some(t0) = t0.read().read().as_ref() {
+                    return t0.contains(t1);
                 }
-            },
-            (t0, Self::TVar(_, t1)) => match &mut *t1.lock() {
-                Some(t1) => t0.contains(t1),
-                t1 @ None => {
-                    *t1 = Some(t0.clone());
-                    Ok(true)
+                *t0.read().write() = Some(t1.clone());
+                true
+            }
+            (t0, Self::TVar(t1)) => {
+                if let Some(t1) = t1.read().read().as_ref() {
+                    return t0.contains(t1);
                 }
-            },
+                *t1.read().write() = Some(t0.clone());
+                true
+            }
             (t0, Self::Set(s)) => {
                 let mut ok = true;
                 for t1 in s.iter() {
-                    ok &= t0.contains(t1)?;
+                    ok &= t0.contains(t1);
                 }
-                Ok(ok)
+                ok
             }
             (Self::Set(s), t) => {
                 let mut ok = true;
                 for t1 in t.iter_prims() {
                     let mut c = false;
                     for t0 in s.iter() {
-                        c |= t0.contains(&t1)?;
+                        c |= t0.contains(&t1);
                     }
                     ok &= c
                 }
-                Ok(ok)
+                ok
             }
             (Self::Fn(f0), Self::Fn(f1)) => f0.contains(f1),
-            (Self::Fn(_), _) | (_, Self::Fn(_)) => Ok(false),
+            (Self::Fn(_), _) | (_, Self::Fn(_)) => false,
             (Self::Ref(_), _) | (_, Self::Ref(_)) => unreachable!(),
         }
     }
@@ -149,14 +253,14 @@ impl Type<NoRefs> {
             (f @ Type::Fn(_), t) | (t, f @ Type::Fn(_)) => {
                 Type::Set(Arc::from_iter([f.clone(), t.clone()]))
             }
-            (t0 @ Type::TVar(_, _), t1 @ Type::TVar(_, _)) => {
+            (t0 @ Type::TVar(_), t1 @ Type::TVar(_)) => {
                 if t0 == t1 {
                     t0.clone()
                 } else {
                     Type::Set(Arc::from_iter([t0.clone(), t1.clone()]))
                 }
             }
-            (t0 @ Type::TVar(_, _), t1) | (t1, t0 @ Type::TVar(_, _)) => {
+            (t0 @ Type::TVar(_), t1) | (t1, t0 @ Type::TVar(_)) => {
                 Type::Set(Arc::from_iter([t0.clone(), t1.clone()]))
             }
             (Type::Ref(_), _) | (_, Type::Ref(_)) => unreachable!(),
@@ -180,7 +284,7 @@ impl<T: TypeMark + Clone> Type<T> {
     pub fn is_bot(&self) -> bool {
         match self {
             Type::Bottom(_) => true,
-            Type::TVar(_, _)
+            Type::TVar(_)
             | Type::Primitive(_)
             | Type::Ref(_)
             | Type::Fn(_)
@@ -282,8 +386,8 @@ impl<T: TypeMark + Clone> Type<T> {
             }
             (Type::Set(s), t) | (t, Type::Set(s)) => Some(Self::merge_into_set(s, t)),
             (Type::Ref(_), _) | (_, Type::Ref(_)) => None,
-            (_, Type::TVar(_, _))
-            | (Type::TVar(_, _), _)
+            (_, Type::TVar(_))
+            | (Type::TVar(_), _)
             | (_, Type::Fn(_))
             | (Type::Fn(_), _) => None,
         }
@@ -297,11 +401,11 @@ impl<T: TypeMark + Clone> Type<T> {
         match self {
             Type::Bottom(_) => Ok(Type::Bottom(PhantomData)),
             Type::Primitive(s) => Ok(Type::Primitive(*s)),
-            Type::TVar(name, tv) => match &mut *tv.lock() {
-                None => Ok(Type::TVar(name.clone(), Arc::new(Mutex::new(None)))),
+            Type::TVar(tv) => match &*tv.read().read() {
+                None => Ok(Type::TVar(TVar::empty_named(tv.name.clone()))),
                 Some(typ) => {
                     let typ = typ.resolve_typrefs(scope, env)?;
-                    Ok(Type::TVar(name.clone(), Arc::new(Mutex::new(Some(typ)))))
+                    Ok(Type::TVar(TVar::named(tv.name.clone(), typ)))
                 }
             },
             Type::Ref(name) => env
@@ -342,7 +446,7 @@ impl<T: TypeMark> fmt::Display for Type<T> {
         match self {
             Self::Bottom(_) => write!(f, "_"),
             Self::Ref(t) => write!(f, "{t}"),
-            Self::TVar(name, _) => write!(f, "'{name}"),
+            Self::TVar(tv) => write!(f, "'{}", tv.name),
             Self::Fn(t) => write!(f, "{t}"),
             Self::Set(s) => {
                 write!(f, "[")?;
@@ -374,37 +478,18 @@ impl<T: TypeMark> fmt::Display for Type<T> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FnArgType<T: TypeMark> {
     pub label: Option<(ArcStr, bool)>,
     pub typ: Type<T>,
 }
 
-impl<T: TypeMark> PartialEq for FnArgType<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.label == other.label && self.typ == other.typ
-    }
-}
-
-impl<T: TypeMark> Eq for FnArgType<T> {}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FnType<T: TypeMark> {
     pub args: Arc<[FnArgType<T>]>,
     pub vargs: Option<Type<T>>,
     pub rtype: Type<T>,
 }
-
-impl<T: TypeMark> PartialEq for FnType<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.args.len() == other.args.len()
-            && self.args.iter().zip(other.args.iter()).all(|(a0, a1)| a0 == a1)
-            && self.vargs == other.vargs
-            && self.rtype == other.rtype
-    }
-}
-
-impl<T: TypeMark> Eq for FnType<T> {}
 
 impl<T: TypeMark + Clone> FnType<T> {
     pub fn resolve_typerefs<'a, C: Ctx + 'static, E: Debug + Clone + 'static>(
@@ -421,7 +506,7 @@ impl<T: TypeMark + Clone> FnType<T> {
 }
 
 impl FnType<NoRefs> {
-    pub fn contains(&self, t: &Self) -> Result<bool> {
+    pub fn contains(&self, t: &Self) -> bool {
         let mut sul = 0;
         let mut tul = 0;
         for (i, a) in self.args.iter().enumerate() {
@@ -436,10 +521,10 @@ impl FnType<NoRefs> {
                         .iter()
                         .find(|a| a.label.as_ref().map(|a| &a.0) == Some(l))
                     {
-                        None => return Ok(false),
+                        None => return false,
                         Some(o) => {
-                            if !o.typ.contains(&a.typ)? {
-                                return Ok(false);
+                            if !o.typ.contains(&a.typ) {
+                                return false;
                             }
                         }
                     }
@@ -460,7 +545,7 @@ impl FnType<NoRefs> {
                     Some(_) => (),
                     None => {
                         if !opt {
-                            return Ok(false);
+                            return false;
                         }
                     }
                 },
@@ -468,20 +553,17 @@ impl FnType<NoRefs> {
         }
         let slen = self.args.len() - sul;
         let tlen = t.args.len() - tul;
-        Ok(slen == tlen
+        slen == tlen
             && t.args[tul..]
                 .iter()
                 .zip(self.args[sul..].iter())
-                .map(|(t, s)| t.typ.contains(&s.typ))
-                .collect::<Result<SmallVec<[bool; 64]>>>()?
-                .into_iter()
-                .all(|b| b)
+                .all(|(t, s)| t.typ.contains(&s.typ))
             && match (&t.vargs, &self.vargs) {
-                (Some(tv), Some(sv)) => tv.contains(sv)?,
+                (Some(tv), Some(sv)) => tv.contains(sv),
                 (None, None) => true,
                 (_, _) => false,
             }
-            && self.rtype.contains(&t.rtype)?)
+            && self.rtype.contains(&t.rtype)
     }
 }
 

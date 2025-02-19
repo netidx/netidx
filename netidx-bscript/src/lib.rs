@@ -25,6 +25,7 @@ use std::{
     time::Duration,
 };
 use triomphe::Arc;
+use typ::{NoRefs, Refs, Type};
 
 pub mod dbg;
 pub mod env;
@@ -37,7 +38,6 @@ pub mod typ;
 mod tests;
 
 atomic_id!(BindId);
-atomic_id!(TypeId);
 
 #[derive(Clone, Debug)]
 pub enum Event<E: Debug> {
@@ -60,9 +60,9 @@ pub type InitFn<C, E> = sync::Arc<
 
 #[derive(Debug, Clone)]
 pub struct LambdaTVars {
-    pub argspec: Arc<[(Arg, TypeId)]>,
-    pub vargs: Option<TypeId>,
-    pub rtype: TypeId,
+    pub argspec: Arc<[(Arg, Type<NoRefs>)]>,
+    pub vargs: Option<Type<NoRefs>>,
+    pub rtype: Type<NoRefs>,
 }
 
 pub type InitFnTyped<C, E> = sync::Arc<
@@ -77,7 +77,7 @@ pub type InitFnTyped<C, E> = sync::Arc<
 
 pub trait BuiltIn<C: Ctx, E: Debug + Clone> {
     const NAME: &str;
-    const TYP: LazyLock<FnType>;
+    const TYP: LazyLock<FnType<Refs>>;
 
     fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E>;
 }
@@ -92,9 +92,9 @@ pub trait Apply<C: Ctx, E: Debug + Clone> {
 }
 
 pub trait ApplyTyped<C: Ctx, E: Debug + Clone>: Apply<C, E> {
-    fn typecheck(&self, ctx: &mut ExecCtx<C, E>, from: &[Node<C, E>]) -> Result<()>;
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>, from: &[Node<C, E>]) -> Result<()>;
 
-    fn rtypeid(&self) -> TypeId;
+    fn rtype(&self) -> &Type<NoRefs>;
 }
 
 pub trait Ctx {
@@ -152,7 +152,7 @@ pub trait Ctx {
 
 pub struct ExecCtx<C: Ctx + 'static, E: Debug + Clone + 'static> {
     pub env: Env<C, E>,
-    builtins: FxHashMap<&'static str, (FnType, InitFn<C, E>)>,
+    builtins: FxHashMap<&'static str, (FnType<Refs>, InitFn<C, E>)>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }
