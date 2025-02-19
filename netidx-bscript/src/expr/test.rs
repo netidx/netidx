@@ -1,11 +1,13 @@
 use super::*;
+use crate::typ::{FnArgType, FnType, Refs, Type};
 use bytes::Bytes;
 use chrono::prelude::*;
+use enumflags2::BitFlags;
 use netidx_netproto::pbuf::PBytes;
 use parser::{parse, RESERVED};
 use prop::option;
 use proptest::{collection, prelude::*};
-use std::time::Duration;
+use std::{marker::PhantomData, time::Duration};
 
 const SLEN: usize = 16;
 
@@ -194,9 +196,9 @@ fn typ() -> impl Strategy<Value = Typ> {
     ]
 }
 
-fn typexp() -> impl Strategy<Value = Type> {
+fn typexp() -> impl Strategy<Value = Type<Refs>> {
     let leaf = prop_oneof![
-        Just(Type::Bottom),
+        Just(Type::Bottom(PhantomData)),
         collection::vec(typ(), (0, 10)).prop_map(|mut prims| {
             prims.sort();
             prims.dedup();
@@ -516,15 +518,24 @@ fn acc_strings<'a>(args: impl IntoIterator<Item = &'a Expr> + 'a) -> Arc<[Expr]>
     Arc::from(v)
 }
 
-fn check_type(t0: &Type, t1: &Type) -> bool {
+fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
     match (t0, t1) {
-        (Type::Bottom, Type::Bottom) => true,
-        (Type::Bottom, Type::Primitive(p)) | (Type::Primitive(p), Type::Bottom) => {
+        (Type::Bottom(_), Type::Bottom(_)) => true,
+        (Type::Bottom(_), Type::Primitive(p)) | (Type::Primitive(p), Type::Bottom(_)) => {
             p.is_empty()
         }
         (Type::Primitive(p0), Type::Primitive(p1)) => p0 == p1,
         (Type::Ref(m0), Type::Ref(m1)) => m0 == m1,
-        (Type::Fn(f0), Type::Fn(f1)) => f0 == f1,
+        (Type::Fn(f0), Type::Fn(f1)) => {
+            let FnType { args: args0, vargs: vargs0, rtype: rtype0 } = &**f0;
+            let FnType { args: args1, vargs: vargs1, rtype: rtype1 } = &**f1;
+            args0
+                .iter()
+                .zip(args1.iter())
+                .all(|(a0, a1)| a0.label == a1.label && check_type(&a0.typ, &a1.typ))
+                && vargs0.iter().zip(vargs1.iter()).all(|(t0, t1)| check_type(t0, t1))
+                && check_type(rtype0, rtype1)
+        }
         (Type::Set(s0), Type::Set(s1)) => {
             let s0f = Type::flatten_set(s0.iter().cloned());
             let s1f = Type::flatten_set(s1.iter().cloned());
@@ -538,8 +549,7 @@ fn check_type(t0: &Type, t1: &Type) -> bool {
             }
         }
         (t, Type::Set(s)) | (Type::Set(s), t) => {
-            let s = Type::flatten_set(s.iter().cloned());
-            match s {
+            match Type::flatten_set(s.iter().cloned()) {
                 Type::Set(_) => false,
                 s => check_type(t, &s),
             }
@@ -548,7 +558,7 @@ fn check_type(t0: &Type, t1: &Type) -> bool {
     }
 }
 
-fn check_type_opt(t0: &Option<Type>, t1: &Option<Type>) -> bool {
+fn check_type_opt(t0: &Option<Type<Refs>>, t1: &Option<Type<Refs>>) -> bool {
     match (t0, t1) {
         (Some(t0), Some(t1)) => check_type(t0, t1),
         (None, None) => true,

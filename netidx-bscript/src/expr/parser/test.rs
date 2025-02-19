@@ -1,4 +1,5 @@
 use super::*;
+use crate::typ::{Refs, Type};
 use arcstr::literal;
 
 fn parse_expr(s: &str) -> anyhow::Result<Expr> {
@@ -8,7 +9,8 @@ fn parse_expr(s: &str) -> anyhow::Result<Expr> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
-fn parse_typexpr(s: &str) -> anyhow::Result<Type> {
+#[allow(unused)]
+fn parse_typexpr(s: &str) -> anyhow::Result<Type<Refs>> {
     typexp()
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
@@ -437,7 +439,11 @@ fn select() {
             .to_expr(),
         ),
         (
-            Pattern { predicate: Type::Bottom, bind: literal!("a"), guard: None },
+            Pattern {
+                predicate: Type::Bottom(PhantomData),
+                bind: literal!("a"),
+                guard: None,
+            },
             ExprKind::Ref { name: ModPath::from(["a"]) }.to_expr(),
         ),
     ]);
@@ -682,7 +688,7 @@ fn apply_typed_lambda() {
                     },
                 ]),
                 vargs: Some(Some(Type::Primitive(Typ::String.into()))),
-                rtype: Some(Type::Bottom),
+                rtype: Some(Type::Bottom(PhantomData)),
                 body: Either::Right("a".into()),
             }
             .to_expr(),

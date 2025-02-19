@@ -1,6 +1,7 @@
 use crate::{
     expr::{Expr, ExprId, ModPath},
-    vm::{node::Node, BindId, Ctx, Event, ExecCtx},
+    node::Node,
+    BindId, Ctx, Event, ExecCtx,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
@@ -16,9 +17,9 @@ use std::{collections::HashMap, mem};
 struct TestCtx {
     by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
     var_updates: Vec<(ExprId, BindId, Value)>,
-    resolver: resolver_server::Server,
-    publisher: Publisher,
-    subscriber: Subscriber,
+    _resolver: resolver_server::Server,
+    _publisher: Publisher,
+    _subscriber: Subscriber,
 }
 
 impl TestCtx {
@@ -50,9 +51,9 @@ impl TestCtx {
         Ok(Self {
             by_ref: HashMap::default(),
             var_updates: vec![],
-            resolver,
-            publisher,
-            subscriber,
+            _resolver: resolver,
+            _publisher: publisher,
+            _subscriber: subscriber,
         })
     }
 }
@@ -60,10 +61,10 @@ impl TestCtx {
 impl Ctx for TestCtx {
     fn call_rpc(
         &mut self,
-        name: netidx::path::Path,
-        args: Vec<(ArcStr, netidx::publisher::Value)>,
-        ref_by: ExprId,
-        id: crate::vm::BindId,
+        _name: netidx::path::Path,
+        _args: Vec<(ArcStr, netidx::publisher::Value)>,
+        _ref_by: ExprId,
+        _id: BindId,
     ) {
         unimplemented!()
     }
@@ -75,28 +76,23 @@ impl Ctx for TestCtx {
 
     fn durable_subscribe(
         &mut self,
-        flags: netidx::subscriber::UpdatesFlags,
-        path: netidx::path::Path,
-        ref_by: ExprId,
+        _flags: netidx::subscriber::UpdatesFlags,
+        _path: netidx::path::Path,
+        _ref_by: ExprId,
     ) -> netidx::subscriber::Dval {
         unimplemented!()
     }
 
     fn unsubscribe(
         &mut self,
-        path: netidx::path::Path,
-        dv: netidx::subscriber::Dval,
-        ref_by: ExprId,
+        _path: netidx::path::Path,
+        _dv: netidx::subscriber::Dval,
+        _ref_by: ExprId,
     ) {
         unimplemented!()
     }
 
-    fn set_timer(
-        &mut self,
-        id: crate::vm::BindId,
-        timeout: std::time::Duration,
-        ref_by: ExprId,
-    ) {
+    fn set_timer(&mut self, _id: BindId, _timeout: std::time::Duration, _ref_by: ExprId) {
         unimplemented!()
     }
 
@@ -107,7 +103,7 @@ impl Ctx for TestCtx {
         }
     }
 
-    fn unref_var(&mut self, id: BindId, ref_by: ExprId) {
+    fn unref_var(&mut self, _id: BindId, _ref_by: ExprId) {
         unimplemented!()
     }
 
@@ -127,13 +123,12 @@ impl Ctx for TestCtx {
 }
 
 struct TestState {
-    exprs: FxHashMap<ExprId, Node<TestCtx, ()>>,
     ctx: ExecCtx<TestCtx, ()>,
 }
 
 impl TestState {
     async fn new() -> Result<Self> {
-        Ok(Self { exprs: HashMap::default(), ctx: ExecCtx::new(TestCtx::new().await?) })
+        Ok(Self { ctx: ExecCtx::new(TestCtx::new().await?) })
     }
 }
 
