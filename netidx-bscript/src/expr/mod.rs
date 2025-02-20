@@ -1,4 +1,4 @@
-use crate::typ::{Refs, TVar, Type, TypeMark};
+use crate::typ::{Refs, TVar, Type};
 use arcstr::ArcStr;
 use compact_str::CompactString;
 use netidx::{

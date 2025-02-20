@@ -82,7 +82,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C
             spec.rtype = self.body.typ.clone();
         }
         for (tv, tc) in spec.constraints.iter() {
-            Type::TVar(tv.clone()).check_contains(tc)?
+            tc.check_contains(&Type::TVar(tv.clone()))?
         }
         Ok(())
     }
@@ -193,6 +193,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<
                 spec.vargs.as_ref().unwrap()
             };
             wrap!(args[i], atyp.check_contains(&args[i].typ))?
+        }
+        for (tv, tc) in spec.constraints.iter() {
+            tc.check_contains(&Type::TVar(tv.clone()))?
         }
         Ok(())
     }
