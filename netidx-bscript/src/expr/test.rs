@@ -209,15 +209,17 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
     leaf.prop_recursive(5, 25, 5, |inner| {
         prop_oneof![
             collection::vec(inner.clone(), (1, 20)).prop_map(|t| Type::Set(Arc::from(t))),
+            random_fname().prop_map(|a| Type::TVar(TVar::empty_named(a))),
             (
                 collection::vec(
                     (option::of(random_fname()), any::<bool>(), inner.clone()),
                     (1, 10)
                 ),
                 option::of(inner.clone()),
-                inner.clone()
+                inner.clone(),
+                collection::vec((random_fname(), inner.clone()), (0, 4))
             )
-                .prop_map(|(mut args, vargs, rtype)| {
+                .prop_map(|(mut args, vargs, rtype, constraints)| {
                     args.sort_by(|(k0, _, _), (k1, _, _)| k1.cmp(k0));
                     let args = args.into_iter().map(|(name, optional, typ)| FnArgType {
                         label: name.map(|n| (n, optional)),
@@ -227,6 +229,11 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
                         args: Arc::from_iter(args),
                         vargs,
                         rtype,
+                        constraints: Arc::from_iter(
+                            constraints
+                                .into_iter()
+                                .map(|(a, t)| (TVar::empty_named(a), t)),
+                        ),
                     }))
                 })
         ]
@@ -380,18 +387,23 @@ fn expr() -> impl Strategy<Value = Expr> {
                 ),
                 option::of(option::of(typexp())),
                 option::of(typexp()),
+                collection::vec((random_fname(), typexp()), (0, 4)),
                 inner.clone()
             )
-                .prop_map(|(mut args, vargs, rtype, body)| {
+                .prop_map(|(mut args, vargs, rtype, constraints, body)| {
                     args.sort_unstable_by(|(k0, _, _, _), (k1, _, _, _)| k1.cmp(k0));
                     let args =
                         args.into_iter().map(|(labeled, name, constraint, default)| {
                             Arg { labeled: labeled.then_some(default), name, constraint }
                         });
+                    let constraints = Arc::from_iter(
+                        constraints.into_iter().map(|(a, t)| (TVar::empty_named(a), t)),
+                    );
                     ExprKind::Lambda {
                         args: Arc::from_iter(args),
                         vargs,
                         rtype,
+                        constraints,
                         body: Either::Left(Arc::new(body)),
                     }
                     .to_expr()
@@ -408,18 +420,23 @@ fn expr() -> impl Strategy<Value = Expr> {
                 ),
                 option::of(option::of(typexp())),
                 option::of(typexp()),
+                collection::vec((random_fname(), typexp()), (0, 4)),
                 random_fname()
             )
-                .prop_map(|(mut args, vargs, rtype, body)| {
+                .prop_map(|(mut args, vargs, rtype, constraints, body)| {
                     args.sort_unstable_by_key(|(k, _, _, _)| !*k);
                     let args =
                         args.into_iter().map(|(labeled, name, constraint, default)| {
                             Arg { labeled: labeled.then_some(default), name, constraint }
                         });
+                    let constraints = Arc::from_iter(
+                        constraints.into_iter().map(|(a, t)| (TVar::empty_named(a), t)),
+                    );
                     ExprKind::Lambda {
                         args: Arc::from_iter(args),
                         vargs,
                         rtype,
+                        constraints,
                         body: Either::Right(body),
                     }
                     .to_expr()
@@ -527,14 +544,19 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
         (Type::Primitive(p0), Type::Primitive(p1)) => p0 == p1,
         (Type::Ref(m0), Type::Ref(m1)) => m0 == m1,
         (Type::Fn(f0), Type::Fn(f1)) => {
-            let FnType { args: args0, vargs: vargs0, rtype: rtype0 } = &**f0;
-            let FnType { args: args1, vargs: vargs1, rtype: rtype1 } = &**f1;
+            let FnType { args: args0, vargs: vargs0, rtype: rtype0, constraints: c0 } =
+                &**f0;
+            let FnType { args: args1, vargs: vargs1, rtype: rtype1, constraints: c1 } =
+                &**f1;
             args0
                 .iter()
                 .zip(args1.iter())
                 .all(|(a0, a1)| a0.label == a1.label && check_type(&a0.typ, &a1.typ))
                 && vargs0.iter().zip(vargs1.iter()).all(|(t0, t1)| check_type(t0, t1))
                 && check_type(rtype0, rtype1)
+                && c0.iter().zip(c1.iter()).all(|((tv0, tc0), (tv1, tc1))| {
+                    tv0.name == tv1.name && check_type(tc0, tc1)
+                })
         }
         (Type::Set(s0), Type::Set(s1)) => {
             let s0f = Type::flatten_set(s0.iter().cloned());
@@ -729,12 +751,14 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                 args: args0,
                 vargs: vargs0,
                 rtype: rtype0,
+                constraints: constraints0,
                 body: Either::Left(body0),
             },
             ExprKind::Lambda {
                 args: args1,
                 vargs: vargs1,
                 rtype: rtype1,
+                constraints: constraints1,
                 body: Either::Left(body1),
             },
         ) => dbg!(
@@ -745,6 +769,11 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                     _ => false,
                 })
                 && dbg!(check_type_opt(rtype0, rtype1))
+                && dbg!(constraints0
+                    .iter()
+                    .zip(constraints1.iter())
+                    .all(|((tv0, tc0), (tv1, tc1))| tv0.name == tv1.name
+                        && check_type(tc0, tc1)))
                 && dbg!(check(body0, body1))
         ),
         (
@@ -752,12 +781,14 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                 args: args0,
                 vargs: vargs0,
                 rtype: rtype0,
+                constraints: constraints0,
                 body: Either::Right(b0),
             },
             ExprKind::Lambda {
                 args: args1,
                 vargs: vargs1,
                 rtype: rtype1,
+                constraints: constraints1,
                 body: Either::Right(b1),
             },
         ) => dbg!(
@@ -768,6 +799,11 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                     _ => false,
                 })
                 && dbg!(check_type_opt(rtype0, rtype1))
+                && dbg!(constraints0
+                    .iter()
+                    .zip(constraints1.iter())
+                    .all(|((tv0, tc0), (tv1, tc1))| tv0.name == tv1.name
+                        && check_type(tc0, tc1)))
                 && dbg!(b0 == b1)
         ),
         (

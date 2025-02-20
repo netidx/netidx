@@ -592,6 +592,7 @@ fn lambda() {
         ]),
         rtype: None,
         vargs: None,
+        constraints: Arc::from_iter([]),
         body: Either::Left(Arc::new(
             ExprKind::Add {
                 lhs: Arc::new(
@@ -630,11 +631,13 @@ fn nested_lambda() {
         args: Arc::from_iter([]),
         rtype: None,
         vargs: None,
+        constraints: Arc::from_iter([]),
         body: Either::Left(Arc::new(
             ExprKind::Lambda {
                 args: Arc::from_iter([]),
                 rtype: None,
                 vargs: None,
+                constraints: Arc::from_iter([]),
                 body: Either::Left(e),
             }
             .to_expr(),
@@ -658,6 +661,7 @@ fn apply_lambda() {
                 }]),
                 vargs: Some(None),
                 rtype: None,
+                constraints: Arc::from_iter([]),
                 body: Either::Right("a".into()),
             }
             .to_expr(),
@@ -689,6 +693,7 @@ fn apply_typed_lambda() {
                 ]),
                 vargs: Some(Some(Type::Primitive(Typ::String.into()))),
                 rtype: Some(Type::Bottom(PhantomData)),
+                constraints: Arc::from_iter([]),
                 body: Either::Right("a".into()),
             }
             .to_expr(),
@@ -760,6 +765,7 @@ fn labeled_argument_lambda() {
                 ]),
                 vargs: None,
                 rtype: Type::Primitive(Typ::String.into()),
+                constraints: Arc::from_iter([]),
             }))),
             value: Arc::new(
                 ExprKind::Lambda {
@@ -781,6 +787,7 @@ fn labeled_argument_lambda() {
                     ]),
                     vargs: None,
                     rtype: None,
+                    constraints: Arc::from_iter([]),
                     body: Either::Right("foo".into()),
                 }
                 .to_expr(),
