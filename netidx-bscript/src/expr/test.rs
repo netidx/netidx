@@ -576,6 +576,7 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
                 s => check_type(t, &s),
             }
         }
+        (Type::TVar(tv0), Type::TVar(tv1)) => tv0.name == tv1.name,
         (_, _) => false,
     }
 }

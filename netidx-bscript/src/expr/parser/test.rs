@@ -806,6 +806,6 @@ let a: fn(?#foo: Number, ?#bar: string, #a: Any, Any) -> string =
 
 #[test]
 fn prop0() {
-    let s = r#"mod a{type A = [a::A]}"#;
+    let s = "mod a{mod a{{|| 'a: _|| u32:0}}}";
     dbg!(parse(s).unwrap());
 }

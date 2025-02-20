@@ -635,7 +635,8 @@ where
         between(sptoken('|'), sptoken('|'), lambda_args()),
         optional(attempt(spstring("->").with(typexp()).skip(space()))),
         choice((
-            attempt(sptoken('\'')).with(fname()).map(Either::Right),
+            attempt(sptoken('\'').with(fname()).skip(not_followed_by(sptoken(':'))))
+                .map(Either::Right),
             expr().map(|e| Either::Left(Arc::new(e))),
         )),
     )
