@@ -1,7 +1,7 @@
 use crate::{
     env::{Bind, LambdaBind},
     expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern},
-    typ::{FnType, NoRefs, Refs, Type},
+    typ::{FnType, NoRefs, Refs, TVar, Type},
     Apply, ApplyTyped, BindId, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars,
 };
 use anyhow::{anyhow, bail, Result};
@@ -80,6 +80,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C
         wrap!(self.body, spec.rtype.check_contains(&self.body.typ))?;
         if !spec.rtype.is_defined() {
             spec.rtype = self.body.typ.clone();
+        }
+        for (tv, tc) in spec.constraints.iter() {
+            Type::TVar(tv.clone()).check_contains(tc)?
         }
         Ok(())
     }
@@ -498,6 +501,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         argspec: Arc<[Arg]>,
         vargs: Option<Option<Type<Refs>>>,
         rtype: Option<Type<Refs>>,
+        constraints: Arc<[(TVar<Refs>, Type<Refs>)]>,
         scope: &ModPath,
         body: Either<Arc<Expr>, ArcStr>,
         eid: ExprId,
@@ -552,6 +556,18 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             Ok(a) => a,
             Err(e) => error!("{e}",),
         };
+        let constraints = constraints
+            .iter()
+            .map(|(tv, tc)| {
+                let tv = tv.resolve_typrefs(&scope, &env)?;
+                let tc = tc.resolve_typrefs(&scope, &env)?;
+                Ok((tv, tc))
+            })
+            .collect::<Result<SmallVec<[_; 4]>>>();
+        let constraints = match constraints {
+            Ok(c) => c,
+            Err(e) => error!("{e}",),
+        };
         let init: InitFnTyped<C, E> = SArc::new(move |ctx, args, tid| {
             // restore the lexical environment to the state it was in
             // when the closure was created
@@ -559,18 +575,22 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             let orig_env = mem::replace(&mut ctx.env, snap);
             let argspec = Arc::from_iter(targspec.iter().map(|(name, typ)| match typ {
                 None => (name.clone(), Type::empty_tvar()),
-                Some(typ) => (name.clone(), typ.clone()),
+                Some(typ) => (name.clone(), typ.reset_tvars()),
             }));
             let vargs = match vargs.as_ref() {
-                Some(Some(typ)) => Some(typ.clone()),
+                Some(Some(typ)) => Some(typ.reset_tvars()),
                 Some(None) => Some(Type::empty_tvar()),
                 None => None,
             };
             let rtype = match rtype.as_ref() {
                 None => Type::empty_tvar(),
-                Some(typ) => typ.clone(),
+                Some(typ) => typ.reset_tvars(),
             };
-            let spec = LambdaTVars { argspec, vargs, rtype };
+            let constraints = Arc::from_iter(constraints.iter().map(|(tv, typ)| {
+                (TVar::<NoRefs>::empty_named(tv.name.clone()), typ.reset_tvars())
+            }));
+            let spec = LambdaTVars { argspec, vargs, rtype, constraints };
+            spec.setup_aliases();
             let res = match body.clone() {
                 Either::Right(builtin) => match ctx.builtins.get_key_value(&*builtin) {
                     None => bail!("unknown builtin function {builtin}"),
@@ -823,10 +843,29 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     }
                 }
             }
-            Expr { kind: ExprKind::Lambda { args, vargs, rtype, body }, id } => {
-                let (args, vargs, rtype, body, id) =
-                    (args.clone(), vargs.clone(), rtype.clone(), (*body).clone(), *id);
-                Node::compile_lambda(ctx, spec, args, vargs, rtype, scope, body, id)
+            Expr {
+                kind: ExprKind::Lambda { args, vargs, rtype, constraints, body },
+                id,
+            } => {
+                let (args, vargs, rtype, constraints, body, id) = (
+                    args.clone(),
+                    vargs.clone(),
+                    rtype.clone(),
+                    constraints.clone(),
+                    (*body).clone(),
+                    *id,
+                );
+                Node::compile_lambda(
+                    ctx,
+                    spec,
+                    args,
+                    vargs,
+                    rtype,
+                    constraints,
+                    scope,
+                    body,
+                    id,
+                )
             }
             Expr { kind: ExprKind::Apply { args, function: f }, id: _ } => {
                 let (args, f) = (args.clone(), f.clone());

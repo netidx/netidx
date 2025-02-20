@@ -1,12 +1,15 @@
 use crate::{env::Env, expr::ModPath, Ctx};
 use anyhow::{anyhow, bail, Result};
-use arcstr::{literal, ArcStr};
+use arcstr::ArcStr;
+use compact_str::format_compact;
 use enumflags2::BitFlags;
+use fxhash::FxHashMap;
 use netidx::{publisher::Typ, utils::Either};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use smallvec::{smallvec, SmallVec};
 use std::{
     cmp::{Eq, PartialEq},
+    collections::hash_map::Entry,
     fmt::{self, Debug},
     hash::Hash,
     iter,
@@ -14,6 +17,8 @@ use std::{
     ops::Deref,
 };
 use triomphe::Arc;
+
+atomic_id!(TVarId);
 
 pub trait TypeMark: Clone + Copy + PartialOrd + Ord + PartialEq + Eq + Hash {}
 
@@ -29,16 +34,24 @@ impl TypeMark for NoRefs {}
 
 #[derive(Debug)]
 pub struct TVarInner<T: TypeMark> {
-    name: ArcStr,
+    pub name: ArcStr,
     typ: RwLock<Arc<RwLock<Option<Type<T>>>>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TVar<T: TypeMark>(Arc<TVarInner<T>>);
 
+impl<T: TypeMark> fmt::Display for TVar<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
 impl<T: TypeMark> Default for TVar<T> {
     fn default() -> Self {
-        Self::empty_named(literal!("default"))
+        Self::empty_named(ArcStr::from(
+            format_compact!("default{}", TVarId::new().0).as_str(),
+        ))
     }
 }
 
@@ -60,6 +73,17 @@ impl<T: TypeMark> TVar<T> {
 
     pub fn write(&self) -> RwLockWriteGuard<Arc<RwLock<Option<Type<T>>>>> {
         self.typ.write()
+    }
+
+    pub fn resolve_typrefs<'a, C: Ctx + 'static, E: Debug + Clone + 'static>(
+        &self,
+        scope: &ModPath,
+        env: &Env<C, E>,
+    ) -> Result<TVar<NoRefs>> {
+        match Type::TVar(self.clone()).resolve_typrefs(scope, env)? {
+            Type::TVar(tv) => Ok(tv),
+            _ => bail!("unexpected result from resolve_typerefs"),
+        }
     }
 }
 
@@ -278,6 +302,71 @@ impl Type<NoRefs> {
     pub fn number() -> Self {
         Self::Primitive(Typ::number())
     }
+
+    /// alias unbound type variables with the same name to each other
+    pub fn alias_unbound(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
+        match self {
+            Type::Bottom(_) | Type::Primitive(_) => (),
+            Type::Ref(_) => unreachable!(),
+            Type::TVar(tv) => match known.entry(tv.name.clone()) {
+                Entry::Vacant(e) => {
+                    e.insert(tv.clone());
+                    ()
+                }
+                Entry::Occupied(e) => {
+                    match (&*e.get().read().read(), &*tv.read().read()) {
+                        (None, None) | (Some(_), None) => (),
+                        (None, Some(_)) | (Some(_), Some(_)) => return (),
+                    }
+                    *tv.write() = Arc::clone(&*e.get().read())
+                }
+            },
+            Type::Fn(fntyp) => {
+                let FnType { args, vargs, rtype, constraints } = &**fntyp;
+                for arg in args.iter() {
+                    arg.typ.alias_unbound(known)
+                }
+                if let Some(vargs) = vargs {
+                    vargs.alias_unbound(known)
+                }
+                rtype.alias_unbound(known);
+                for (tv, tc) in constraints.iter() {
+                    Type::TVar(tv.clone()).alias_unbound(known);
+                    tc.alias_unbound(known);
+                }
+            }
+            Type::Set(s) => {
+                for typ in s.iter() {
+                    typ.alias_unbound(known)
+                }
+            }
+        }
+    }
+
+    /// return a copy of self with all type variables unbound and
+    /// unaliased. self will not be modified
+    pub fn reset_tvars(&self) -> Type<NoRefs> {
+        match self {
+            Type::Bottom(_) => Type::Bottom(PhantomData),
+            Type::Primitive(p) => Type::Primitive(*p),
+            Type::Ref(_) => unreachable!(),
+            Type::TVar(tv) => Type::TVar(TVar::empty_named(tv.name.clone())),
+            Type::Set(s) => Type::Set(Arc::from_iter(s.iter().map(|t| t.reset_tvars()))),
+            Type::Fn(fntyp) => {
+                let FnType { args, vargs, rtype, constraints } = &**fntyp;
+                let args = Arc::from_iter(args.iter().map(|a| FnArgType {
+                    label: a.label.clone(),
+                    typ: a.typ.reset_tvars(),
+                }));
+                let vargs = vargs.as_ref().map(|t| t.reset_tvars());
+                let rtype = rtype.reset_tvars();
+                let constraints = Arc::from_iter(constraints.iter().map(|(tv, tc)| {
+                    (TVar::empty_named(tv.name.clone()), tc.reset_tvars())
+                }));
+                Type::Fn(Arc::new(FnType { args, vargs, rtype, constraints }))
+            }
+        }
+    }
 }
 
 impl<T: TypeMark + Clone> Type<T> {
@@ -435,7 +524,18 @@ impl<T: TypeMark + Clone> Type<T> {
                     let a = FnArgType { label: a.label.clone(), typ };
                     res.push(a);
                 }
-                Ok(Type::Fn(Arc::new(FnType { args: Arc::from_iter(res), rtype, vargs })))
+                let mut cres: SmallVec<[(TVar<NoRefs>, Type<NoRefs>); 4]> = smallvec![];
+                for (tv, tc) in f.constraints.iter() {
+                    let tv = tv.resolve_typrefs(scope, env)?;
+                    let tc = tc.resolve_typrefs(scope, env)?;
+                    cres.push((tv, tc));
+                }
+                Ok(Type::Fn(Arc::new(FnType {
+                    args: Arc::from_iter(res),
+                    rtype,
+                    constraints: Arc::from_iter(cres),
+                    vargs,
+                })))
             }
         }
     }
@@ -489,6 +589,7 @@ pub struct FnType<T: TypeMark> {
     pub args: Arc<[FnArgType<T>]>,
     pub vargs: Option<Type<T>>,
     pub rtype: Type<T>,
+    pub constraints: Arc<[(TVar<T>, Type<T>)]>,
 }
 
 impl<T: TypeMark + Clone> FnType<T> {
@@ -564,6 +665,12 @@ impl FnType<NoRefs> {
                 (_, _) => false,
             }
             && self.rtype.contains(&t.rtype)
+            && self.constraints.len() == t.constraints.len()
+            && self
+                .constraints
+                .iter()
+                .zip(t.constraints.iter())
+                .all(|((_, tc0), (_, tc1))| tc0.contains(tc1))
     }
 }
 

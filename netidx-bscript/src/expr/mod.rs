@@ -1,4 +1,4 @@
-use crate::typ::{Refs, Type};
+use crate::typ::{Refs, TVar, Type, TypeMark};
 use arcstr::ArcStr;
 use compact_str::CompactString;
 use netidx::{
@@ -146,6 +146,7 @@ pub enum ExprKind {
         args: Arc<[Arg]>,
         vargs: Option<Option<Type<Refs>>>,
         rtype: Option<Type<Refs>>,
+        constraints: Arc<[(TVar<Refs>, Type<Refs>)]>,
         body: Either<Arc<Expr>, ArcStr>,
     },
     TypeDef {
@@ -404,8 +405,14 @@ impl ExprKind {
                     writeln!(buf, ")")
                 }
             }
-            ExprKind::Lambda { args, vargs, rtype, body } => {
+            ExprKind::Lambda { args, vargs, rtype, constraints, body } => {
                 try_single_line!(true);
+                for (i, (tvar, typ)) in constraints.iter().enumerate() {
+                    write!(buf, "{tvar}: {typ}")?;
+                    if i < constraints.len() - 1 {
+                        write!(buf, ", ")?;
+                    }
+                }
                 write!(buf, "|")?;
                 for (i, a) in args.iter().enumerate() {
                     match &a.labeled {
@@ -577,7 +584,13 @@ impl fmt::Display for ExprKind {
             ExprKind::TypeCast { expr, typ } => write!(f, "cast<{typ}>({expr})"),
             ExprKind::TypeDef { name, typ } => write!(f, "type {name} = {typ}"),
             ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", "; "),
-            ExprKind::Lambda { args, vargs, rtype, body } => {
+            ExprKind::Lambda { args, vargs, rtype, constraints, body } => {
+                for (i, (tvar, typ)) in constraints.iter().enumerate() {
+                    write!(f, "{tvar}: {typ}")?;
+                    if i < constraints.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
                 write!(f, "|")?;
                 for (i, a) in args.iter().enumerate() {
                     match &a.labeled {

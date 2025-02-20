@@ -1,6 +1,6 @@
 use crate::{
     expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern},
-    typ::{FnArgType, FnType, Refs, Type},
+    typ::{FnArgType, FnType, Refs, TVar, Type},
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
@@ -436,39 +436,57 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (
-        spstring("fn").with(between(
-            token('('),
-            sptoken(')'),
-            sep_by(
-                choice((
-                    attempt(
-                        (
-                            spaces()
-                                .with(optional(token('?')).map(|o| o.is_some()))
-                                .skip(token('#')),
-                            fname().skip(token(':')),
-                            typexp(),
-                        )
-                            .map(|(optional, name, typ)| {
-                                Either::Left(FnArgType {
-                                    label: Some((name.into(), optional)),
-                                    typ,
-                                })
-                            }),
-                    ),
-                    attempt(
-                        typexp().map(|typ| Either::Left(FnArgType { label: None, typ })),
-                    ),
-                    attempt(spstring("@args:").with(typexp()).map(|e| Either::Right(e))),
-                )),
-                csep(),
+    spstring("fn")
+        .with((
+            optional(attempt(between(
+                token('<'),
+                sptoken('>'),
+                sep_by1((tvar().skip(sptoken(':')), typexp()), csep()),
+            )))
+            .map(|cs: Option<SmallVec<[(TVar<Refs>, Type<Refs>); 4]>>| {
+                match cs {
+                    None => Arc::from_iter([]),
+                    Some(cs) => Arc::from_iter(cs),
+                }
+            }),
+            between(
+                token('('),
+                sptoken(')'),
+                sep_by(
+                    choice((
+                        attempt(
+                            (
+                                spaces()
+                                    .with(optional(token('?')).map(|o| o.is_some()))
+                                    .skip(token('#')),
+                                fname().skip(token(':')),
+                                typexp(),
+                            )
+                                .map(
+                                    |(optional, name, typ)| {
+                                        Either::Left(FnArgType {
+                                            label: Some((name.into(), optional)),
+                                            typ,
+                                        })
+                                    },
+                                ),
+                        ),
+                        attempt(
+                            typexp()
+                                .map(|typ| Either::Left(FnArgType { label: None, typ })),
+                        ),
+                        attempt(
+                            spstring("@args:").with(typexp()).map(|e| Either::Right(e)),
+                        ),
+                    )),
+                    csep(),
+                ),
             ),
-        )),
-        spstring("->").with(typexp()),
-    )
+            spstring("->").with(typexp()),
+        ))
         .then(
-            |(mut args, rtype): (
+            |(constraints, mut args, rtype): (
+                Arc<[(TVar<Refs>, Type<Refs>)]>,
                 Vec<Either<FnArgType<Refs>, Type<Refs>>>,
                 Type<Refs>,
             )| {
@@ -500,9 +518,18 @@ where
                     }
                     anon |= a.label.is_none();
                 }
-                value(FnType { args, vargs, rtype }).right()
+                value(FnType { args, vargs, rtype, constraints }).right()
             },
         )
+}
+
+fn tvar<I>() -> impl Parser<I, Output = TVar<Refs>>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    sptoken('\'').with(fname()).map(TVar::empty_named)
 }
 
 fn typexp_<I>() -> impl Parser<I, Output = Type<Refs>>
@@ -520,6 +547,7 @@ where
         ),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(sptypath()).map(|n| Type::Ref(n)),
+        attempt(tvar()).map(|tv| Type::TVar(tv)),
     ))
 }
 
@@ -602,16 +630,18 @@ where
     I::Range: Range,
 {
     (
-        between(token('|'), sptoken('|'), lambda_args()),
+        attempt(sep_by((tvar().skip(sptoken(':')), typexp()), csep()))
+            .map(|tvs: SmallVec<[(TVar<Refs>, Type<Refs>); 4]>| Arc::from_iter(tvs)),
+        between(sptoken('|'), sptoken('|'), lambda_args()),
         optional(attempt(spstring("->").with(typexp()).skip(space()))),
         choice((
             attempt(sptoken('\'')).with(fname()).map(Either::Right),
             expr().map(|e| Either::Left(Arc::new(e))),
         )),
     )
-        .map(|((args, vargs), rtype, body)| {
+        .map(|(constraints, (args, vargs), rtype, body)| {
             let args = Arc::from_iter(args);
-            ExprKind::Lambda { args, vargs, rtype, body }.to_expr()
+            ExprKind::Lambda { args, vargs, rtype, constraints, body }.to_expr()
         })
 }
 

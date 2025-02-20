@@ -25,7 +25,7 @@ use std::{
     time::Duration,
 };
 use triomphe::Arc;
-use typ::{NoRefs, Refs, Type};
+use typ::{NoRefs, Refs, TVar, Type};
 
 pub mod dbg;
 pub mod env;
@@ -63,6 +63,25 @@ pub struct LambdaTVars {
     pub argspec: Arc<[(Arg, Type<NoRefs>)]>,
     pub vargs: Option<Type<NoRefs>>,
     pub rtype: Type<NoRefs>,
+    pub constraints: Arc<[(TVar<NoRefs>, Type<NoRefs>)]>,
+}
+
+impl LambdaTVars {
+    fn setup_aliases(&self) {
+        let Self { argspec, vargs, rtype, constraints } = self;
+        let mut known = FxHashMap::default();
+        for (_, typ) in argspec.iter() {
+            typ.alias_unbound(&mut known)
+        }
+        if let Some(typ) = vargs {
+            typ.alias_unbound(&mut known)
+        }
+        rtype.alias_unbound(&mut known);
+        for (tv, tc) in constraints.iter() {
+            Type::TVar(tv.clone()).alias_unbound(&mut known);
+            tc.alias_unbound(&mut known);
+        }
+    }
 }
 
 pub type InitFnTyped<C, E> = sync::Arc<
