@@ -544,6 +544,7 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
             p.is_empty()
         }
         (Type::Primitive(p0), Type::Primitive(p1)) => p0 == p1,
+        (Type::Array(t0), Type::Array(t1)) => check_type(t0, t1),
         (Type::Ref(m0), Type::Ref(m1)) => m0 == m1,
         (Type::Fn(f0), Type::Fn(f1)) => {
             let FnType { args: args0, vargs: vargs0, rtype: rtype0, constraints: c0 } =

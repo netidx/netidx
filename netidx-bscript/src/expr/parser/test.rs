@@ -743,6 +743,40 @@ fn multi_line_do() {
 }
 
 #[test]
+fn typed_array() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::Bind {
+            export: false,
+            name: "f".into(),
+            typ: None,
+            value: Arc::new(
+                ExprKind::Lambda {
+                    args: Arc::from_iter([Arg {
+                        labeled: None,
+                        name: "a".into(),
+                        constraint: Some(Type::Array(Arc::new(Type::TVar(
+                            TVar::empty_named("a".into()),
+                        )))),
+                    }]),
+                    vargs: None,
+                    constraints: Arc::from_iter([]),
+                    rtype: Some(Type::TVar(TVar::empty_named("a".into()))),
+                    body: Either::Left(Arc::new(
+                        ExprKind::Ref { name: ["a"].into() }.to_expr(),
+                    )),
+                }
+                .to_expr(),
+            ),
+        }
+        .to_expr()]),
+    }
+    .to_expr();
+    let s = "{let f = |a: Array<'a>| -> 'a a}";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
 fn labeled_argument_lambda() {
     let e = ExprKind::Do {
         exprs: Arc::from_iter([ExprKind::Bind {
@@ -807,6 +841,6 @@ let a: fn(?#foo: Number, ?#bar: string, #a: Any, Any) -> string =
 
 #[test]
 fn prop0() {
-    let s = "mod a{mod a{{|| 'a: _|| u32:0}}}";
+    let s = "mod a{let a = select 'a: _|| u32:0 {_ as a => u32:0}}";
     dbg!(parse(s).unwrap());
 }

@@ -585,7 +585,7 @@ impl fmt::Display for ExprKind {
             ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", "; "),
             ExprKind::Lambda { args, vargs, rtype, constraints, body } => {
                 for (i, (tvar, typ)) in constraints.iter().enumerate() {
-                    write!(f, "{}: {typ}", tvar.name)?;
+                    write!(f, "{tvar}: {typ}")?;
                     if i < constraints.len() - 1 {
                         write!(f, ", ")?;
                     }
