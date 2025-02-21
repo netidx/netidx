@@ -831,7 +831,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (
             ExprKind::TypeCast { expr: expr0, typ: typ0 },
             ExprKind::TypeCast { expr: expr1, typ: typ1 },
-        ) => dbg!(check(expr0, expr1)) && dbg!(typ0 == typ1),
+        ) => dbg!(check(expr0, expr1)) && dbg!(check_type(typ0, typ1)),
         (_, _) => false,
     }
 }
