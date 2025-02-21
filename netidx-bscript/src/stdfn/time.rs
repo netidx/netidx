@@ -25,7 +25,7 @@ struct AfterIdle {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for AfterIdle {
     const NAME: &str = "after_idle";
-    deftype!("fn([duration, Number], Any) -> Any");
+    deftype!("fn([duration, Number], 'a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, from, eid| {

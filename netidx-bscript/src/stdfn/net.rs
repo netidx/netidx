@@ -193,7 +193,7 @@ struct RpcCall {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for RpcCall {
     const NAME: &str = "call";
-    deftype!("fn(string, array) -> Any");
+    deftype!("fn(string, Array<Array<Any>>) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, from, top_id| {

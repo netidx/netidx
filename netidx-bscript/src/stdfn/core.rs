@@ -122,7 +122,7 @@ struct Once {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Once {
     const NAME: &str = "once";
-    deftype!("fn(Any) -> Any");
+    deftype!("fn('a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Once { val: false })))
@@ -179,7 +179,7 @@ struct ArrayEv;
 
 impl EvalCached for ArrayEv {
     const NAME: &str = "mkarray";
-    deftype!("fn(@args: Any) -> array");
+    deftype!("fn(@args: Any) -> Array<Any>");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         if from.0.iter().all(|v| v.is_some()) {
@@ -365,7 +365,7 @@ struct IndexEv;
 
 impl EvalCached for IndexEv {
     const NAME: &str = "index";
-    deftype!("fn(array, i64) -> Any");
+    deftype!("fn(Array<'a>, i64) -> ['a, error]");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -377,8 +377,18 @@ impl EvalCached for IndexEv {
                     err!("array index out of bounds")
                 }
             }
+            (Some(Value::Array(elts)), Some(Value::I64(i))) if *i < 0 => {
+                let len = elts.len();
+                let i = *i;
+                let i = len as i64 + i;
+                if i > 0 {
+                    Some(elts[i as usize].clone())
+                } else {
+                    err!("array index out of bounds")
+                }
+            }
             (None, _) | (_, None) => None,
-            _ => err!("index(array, index): expected an array and a positive index"),
+            _ => err!("index(array, index): expected an array"),
         }
     }
 }
@@ -389,7 +399,7 @@ struct FilterEv;
 
 impl EvalCached for FilterEv {
     const NAME: &str = "filter";
-    deftype!("fn(bool, Any) -> Any");
+    deftype!("fn(bool, 'a) -> 'a");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let (pred, s) = (&from.0[0], &from.0[1]);
@@ -439,7 +449,7 @@ struct Sample {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Sample {
     const NAME: &str = "sample";
-    deftype!("fn(Any, Any) -> Any");
+    deftype!("fn(Any, 'a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Sample { last: None })))
@@ -469,7 +479,7 @@ struct MeanEv;
 
 impl EvalCached for MeanEv {
     const NAME: &str = "mean";
-    deftype!("fn([Number, array], @args: [Number, array]) -> f64");
+    deftype!("fn([Number, Array<Number>], @args: [Number, Array<Number>]) -> f64");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         let mut total = 0.;
@@ -502,7 +512,7 @@ struct Uniq(Option<Value>);
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Uniq {
     const NAME: &str = "uniq";
-    deftype!("fn(Any) -> Any");
+    deftype!("fn('a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Uniq(None))))
@@ -565,7 +575,7 @@ struct Group<C: Ctx + 'static, E: Debug + Clone + 'static> {
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Group<C, E> {
     const NAME: &str = "group";
-    deftype!("fn(Any, fn(u64, Any) -> bool) -> array");
+    deftype!("fn('a, fn(u64, 'a) -> bool) -> Array<'a>");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|ctx, scope, from, top_id| match from {
@@ -620,7 +630,7 @@ struct Ungroup(BindId);
 
 impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Ungroup {
     const NAME: &str = "ungroup";
-    deftype!("fn(array) -> Any");
+    deftype!("fn(Array<'a>) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, _, _| Ok(Box::new(Ungroup(BindId::new()))))
