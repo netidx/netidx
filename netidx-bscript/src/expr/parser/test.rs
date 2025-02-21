@@ -82,7 +82,7 @@ fn interpolated0() {
 fn interpolated1() {
     let s = r#""[true]""#;
     let p = ExprKind::Apply {
-        args: Arc::from_iter([(None, ExprKind::Constant(Value::True).to_expr())]),
+        args: Arc::from_iter([(None, ExprKind::Constant(Value::Bool(true)).to_expr())]),
         function: ["str", "concat"].into(),
     }
     .to_expr();
@@ -107,7 +107,8 @@ fn interpolated2() {
                                     ExprKind::Apply {
                                         args: Arc::from_iter([(
                                             None,
-                                            ExprKind::Constant(Value::True).to_expr(),
+                                            ExprKind::Constant(Value::Bool(true))
+                                                .to_expr(),
                                         )]),
                                         function: ["str", "concat"].into(),
                                     }

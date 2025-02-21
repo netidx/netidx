@@ -3,6 +3,7 @@ use crate::typ::{FnArgType, FnType, Refs, Type};
 use bytes::Bytes;
 use chrono::prelude::*;
 use enumflags2::BitFlags;
+use netidx::protocol::value::Typ;
 use netidx_netproto::pbuf::PBytes;
 use parser::{parse, RESERVED};
 use prop::option;
@@ -47,8 +48,8 @@ fn value() -> impl Strategy<Value = Value> {
         duration().prop_map(Value::Duration),
         arcstr().prop_map(Value::String),
         pbytes().prop_map(Value::Bytes),
-        Just(Value::True),
-        Just(Value::False),
+        Just(Value::Bool(true)),
+        Just(Value::Bool(false)),
         Just(Value::Null),
         arcstr().prop_map(Value::Error),
     ]
@@ -209,6 +210,7 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
     leaf.prop_recursive(5, 25, 5, |inner| {
         prop_oneof![
             collection::vec(inner.clone(), (1, 20)).prop_map(|t| Type::Set(Arc::from(t))),
+            inner.clone().prop_map(|t| Type::Array(Arc::new(t))),
             random_fname().prop_map(|a| Type::TVar(TVar::empty_named(a))),
             (
                 collection::vec(
@@ -368,7 +370,7 @@ fn expr() -> impl Strategy<Value = Expr> {
                     }
                     ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
                 }),
-            (inner.clone(), typ()).prop_map(|(expr, typ)| ExprKind::TypeCast {
+            (inner.clone(), typexp()).prop_map(|(expr, typ)| ExprKind::TypeCast {
                 expr: Arc::new(expr),
                 typ
             }

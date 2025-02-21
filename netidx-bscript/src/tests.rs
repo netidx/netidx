@@ -336,7 +336,7 @@ const LIB_CORE_AND: &str = r#"
 "#;
 
 run!(lib_core_and, LIB_CORE_AND, |v: Result<&Value>| match v {
-    Ok(Value::True) => true,
+    Ok(Value::Bool(true)) => true,
     _ => false,
 });
 
