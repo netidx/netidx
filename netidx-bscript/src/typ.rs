@@ -168,6 +168,7 @@ pub enum Type<T: TypeMark> {
     Fn(Arc<FnType<T>>),
     Set(Arc<[Type<T>]>),
     TVar(TVar<T>),
+    Array(Arc<Type<T>>),
 }
 
 impl Type<NoRefs> {
@@ -186,7 +187,11 @@ impl Type<NoRefs> {
 
     pub fn is_defined(&self) -> bool {
         match self {
-            Self::Bottom(_) | Self::Primitive(_) | Self::Fn(_) | Self::Set(_) => true,
+            Self::Bottom(_)
+            | Self::Primitive(_)
+            | Self::Fn(_)
+            | Self::Set(_)
+            | Self::Array(_) => true,
             Self::TVar(tv) => tv.read().read().is_some(),
             Self::Ref(_) => unreachable!(),
         }
@@ -194,9 +199,11 @@ impl Type<NoRefs> {
 
     pub fn with_deref<R, F: FnOnce(Option<&Self>) -> R>(&self, f: F) -> R {
         match self {
-            Self::Bottom(_) | Self::Primitive(_) | Self::Fn(_) | Self::Set(_) => {
-                f(Some(self))
-            }
+            Self::Bottom(_)
+            | Self::Primitive(_)
+            | Self::Fn(_)
+            | Self::Set(_)
+            | Self::Array(_) => f(Some(self)),
             Self::TVar(tv) => f(tv.read().read().as_ref()),
             Self::Ref(_) => unreachable!(),
         }
@@ -214,6 +221,11 @@ impl Type<NoRefs> {
         match (self, t) {
             (Self::Bottom(_), _) | (_, Self::Bottom(_)) => true,
             (Self::Primitive(p0), Self::Primitive(p1)) => p0.contains(*p1),
+            (Self::Array(t0), Self::Array(t1)) => t0.contains(t1),
+            (Self::Array(_), Self::Primitive(_)) => false,
+            (Self::Primitive(_), Self::Array(_)) => {
+                self.contains(&Type::Primitive(Typ::Array.into()))
+            }
             (Self::TVar(t0), Self::TVar(t1)) => {
                 let alias = {
                     let t0 = t0.read();
@@ -284,6 +296,24 @@ impl Type<NoRefs> {
                 let mut s = *s0;
                 s.insert(*s1);
                 Type::Primitive(s)
+            }
+            (Type::Primitive(p), Type::Array(t))
+            | (Type::Array(t), Type::Primitive(p)) => {
+                if p.contains(Typ::Array) {
+                    Type::Primitive(*p)
+                } else {
+                    Type::Set(Arc::from_iter([
+                        Type::Primitive(*p),
+                        Type::Array(t.clone()),
+                    ]))
+                }
+            }
+            (Type::Array(t0), Type::Array(t1)) => {
+                if t0 == t1 {
+                    Type::Array(t0.clone())
+                } else {
+                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+                }
             }
             (Type::Set(s0), Type::Set(s1)) => Self::merge_sets(s0, s1),
             (Type::Set(s), t) | (t, Type::Set(s)) => Self::merge_into_set(s, t),

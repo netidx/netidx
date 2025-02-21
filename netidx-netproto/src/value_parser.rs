@@ -156,8 +156,14 @@ where
         attempt(quoted(esc)).map(|s| Value::String(ArcStr::from(s))),
         attempt(from_str(flt()).map(|v| Value::F64(v))),
         attempt(from_str(int()).map(|v| Value::I64(v))),
-        attempt(string("true").skip(not_followed_by(alpha_num())).map(|_| Value::True)),
-        attempt(string("false").skip(not_followed_by(alpha_num())).map(|_| Value::False)),
+        attempt(
+            string("true").skip(not_followed_by(alpha_num())).map(|_| Value::Bool(true)),
+        ),
+        attempt(
+            string("false")
+                .skip(not_followed_by(alpha_num()))
+                .map(|_| Value::Bool(false)),
+        ),
         attempt(string("null").skip(not_followed_by(alpha_num())).map(|_| Value::Null)),
         attempt(constant("decimal").with(from_str(dcml())).map(|v| Value::Decimal(v))),
         attempt(constant("u32").with(from_str(uint())).map(|v| Value::U32(v))),
@@ -259,9 +265,9 @@ mod tests {
         let c = ArcStr::from(r#"""#);
         let s = r#""\"""#;
         assert_eq!(Value::String(c), parse_value(s).unwrap());
-        assert_eq!(Value::True, parse_value("true").unwrap());
-        assert_eq!(Value::True, parse_value("true ").unwrap());
-        assert_eq!(Value::False, parse_value("false").unwrap());
+        assert_eq!(Value::Bool(true), parse_value("true").unwrap());
+        assert_eq!(Value::Bool(true), parse_value("true ").unwrap());
+        assert_eq!(Value::Bool(false), parse_value("false").unwrap());
         assert_eq!(Value::Null, parse_value("null").unwrap());
         assert_eq!(
             Value::Error(ArcStr::from("error")),

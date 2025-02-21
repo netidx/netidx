@@ -19,7 +19,7 @@ fn init_pool(len: usize) -> Pool<ValArrayInner> {
 }
 
 fn orphan(len: usize) -> Pooled<ValArrayInner> {
-    let iter = (0..len).map(|_| Value::False);
+    let iter = (0..len).map(|_| Value::Bool(false));
     Pooled::orphan(ValArrayInner(ThinArc::from_header_and_iter((), iter)))
 }
 
@@ -71,7 +71,7 @@ impl Poolable for ValArrayInner {
             // reset can only be called if the arc is unique
             for v in Arc::get_mut(t).unwrap().slice.iter_mut() {
                 // ensure we drop any allocated values
-                *v = Value::False;
+                *v = Value::Bool(false);
             }
         })
     }
@@ -149,7 +149,9 @@ impl<const S: usize> Into<SmallVec<[Value; S]>> for ValArray {
 }
 
 impl ValArray {
-    pub fn from_iter_exact<I: Iterator<Item = Value> + ExactSizeIterator>(iter: I) -> Self {
+    pub fn from_iter_exact<I: Iterator<Item = Value> + ExactSizeIterator>(
+        iter: I,
+    ) -> Self {
         let mut res = get_by_size(iter.len());
         res.0.with_arc_mut(|res| {
             let res = Arc::get_mut(res).unwrap();

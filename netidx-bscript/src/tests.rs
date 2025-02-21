@@ -530,3 +530,18 @@ run!(explicit_type_vars2, EXPLICIT_TYPE_VARS2, |v: Result<&Value>| match v {
     Ok(Value::I64(2)) => true,
     _ => false,
 });
+
+const EXPLICIT_TYPE_VARS3: &str = r#"
+{
+  let f = 'a: Number, 'b: Number |x: 'a, y: 'b| -> ['a, 'b] x + y;
+  select f(u32:1, u64:1) {
+    [u32, u64] as t => t,
+    _ as t => error("unexpected [t]")
+  }
+}
+"#;
+
+run!(explicit_type_vars3, EXPLICIT_TYPE_VARS3, |v: Result<&Value>| match v {
+    Ok(Value::U32(2) | Value::U64(2)) => true,
+    _ => false,
+});

@@ -1,6 +1,12 @@
-use crate::{resolver::UserInfo, valarray::ValArray};
-use arcstr::ArcStr;
+use crate::{
+    resolver::UserInfo,
+    valarray::ValArray,
+    value::{Typ, Value},
+};
+use arcstr::{literal, ArcStr};
 use bytes::{Bytes, BytesMut};
+use chrono::{DateTime, Utc};
+use enumflags2::BitFlags;
 use netidx_core::{
     pack::{Pack, Z64},
     path::Path,
@@ -9,7 +15,7 @@ use netidx_core::{
 };
 use proptest::{collection, prelude::*, string::string_regex};
 use rust_decimal::Decimal;
-use std::{fmt::Debug, net::SocketAddr};
+use std::{fmt::Debug, net::SocketAddr, time::Duration};
 
 fn check<T: Pack + Debug + PartialEq>(t: T) {
     let mut bytes = pack(&t).expect("encode failed");
@@ -454,10 +460,9 @@ mod publisher {
             duration().prop_map(Value::Duration),
             arcstr().prop_map(Value::String),
             bytes().prop_map(|b| Value::Bytes(b.into())),
-            Just(Value::True),
-            Just(Value::False),
+            Just(Value::Bool(true)),
+            Just(Value::Bool(false)),
             Just(Value::Null),
-            Just(Value::Ok),
             arcstr().prop_map(Value::Error),
         ];
         leaf.prop_recursive(10, 1000, 100, |inner| {
@@ -531,5 +536,71 @@ mod publisher {
         fn test_value_roundtrip(v in value()) {
             round_trip(v)
         }
+    }
+}
+
+#[test]
+fn value_typ_discriminants() {
+    for t in BitFlags::<Typ>::all().iter() {
+        match t {
+            Typ::U32 => assert_eq!(t as u32, Value::U32(42).discriminant()),
+            Typ::V32 => assert_eq!(t as u32, Value::V32(42).discriminant()),
+            Typ::I32 => assert_eq!(t as u32, Value::I32(42).discriminant()),
+            Typ::Z32 => assert_eq!(t as u32, Value::Z32(42).discriminant()),
+            Typ::U64 => assert_eq!(t as u32, Value::U64(42).discriminant()),
+            Typ::V64 => assert_eq!(t as u32, Value::V64(42).discriminant()),
+            Typ::I64 => assert_eq!(t as u32, Value::I64(42).discriminant()),
+            Typ::Z64 => assert_eq!(t as u32, Value::Z64(42).discriminant()),
+            Typ::F32 => assert_eq!(t as u32, Value::F32(42.).discriminant()),
+            Typ::F64 => assert_eq!(t as u32, Value::F64(42.).discriminant()),
+            Typ::Decimal => {
+                assert_eq!(t as u32, Value::Decimal(Decimal::MIN).discriminant())
+            }
+            Typ::DateTime => {
+                assert_eq!(
+                    t as u32,
+                    Value::DateTime(DateTime::<Utc>::MIN_UTC).discriminant()
+                )
+            }
+            Typ::Duration => assert_eq!(
+                t as u32,
+                Value::Duration(Duration::from_secs(42)).discriminant()
+            ),
+            Typ::Bool => assert_eq!(t as u32, Value::Bool(true).discriminant()),
+            Typ::Null => assert_eq!(t as u32, Value::Null.discriminant()),
+            Typ::String => {
+                assert_eq!(t as u32, Value::String(literal!("42")).discriminant())
+            }
+            Typ::Bytes => {
+                assert_eq!(t as u32, Value::Bytes(Bytes::new().into()).discriminant())
+            }
+            Typ::Error => {
+                assert_eq!(t as u32, Value::Error(literal!("42")).discriminant())
+            }
+            Typ::Array => assert_eq!(t as u32, Value::Array([].into()).discriminant()),
+        }
+    }
+    // did you add a new value type, make sure you add a corresponding
+    // Typ, this is here to trip when you do
+    match Value::Bool(true) {
+        Value::U32(_) => (),
+        Value::V32(_) => (),
+        Value::I32(_) => (),
+        Value::Z32(_) => (),
+        Value::U64(_) => (),
+        Value::V64(_) => (),
+        Value::I64(_) => (),
+        Value::Z64(_) => (),
+        Value::F32(_) => (),
+        Value::F64(_) => (),
+        Value::Decimal(_) => (),
+        Value::DateTime(_) => (),
+        Value::Duration(_) => (),
+        Value::Bool(_) => (),
+        Value::Null => (),
+        Value::String(_) => (),
+        Value::Bytes(_) => (),
+        Value::Error(_) => (),
+        Value::Array(_) => (),
     }
 }

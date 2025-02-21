@@ -24,7 +24,7 @@ use std::{
     convert, fmt,
     hash::{BuildHasher, Hash},
     hint::unreachable_unchecked,
-    iter,
+    iter, mem,
     num::Wrapping,
     ops::{Add, Div, Mul, Not, Sub},
     panic::{catch_unwind, AssertUnwindSafe},
@@ -55,25 +55,25 @@ type Result<T> = result::Result<T, PackError>;
 #[repr(u32)]
 #[bitflags]
 pub enum Typ {
-    U32,
-    V32,
-    I32,
-    Z32,
-    U64,
-    V64,
-    I64,
-    Z64,
-    F32,
-    F64,
-    Decimal,
-    DateTime,
-    Duration,
-    Bool,
-    String,
-    Bytes,
-    Error,
-    Array,
-    Null,
+    U32 = 0x0000_0001,
+    V32 = 0x0000_0002,
+    I32 = 0x0000_0004,
+    Z32 = 0x0000_0008,
+    U64 = 0x0000_0010,
+    V64 = 0x0000_0020,
+    I64 = 0x0000_0040,
+    Z64 = 0x0000_0080,
+    F32 = 0x0000_0100,
+    F64 = 0x0000_0200,
+    Decimal = 0x0000_0400,
+    DateTime = 0x0000_0800,
+    Duration = 0x0000_1000,
+    Bool = 0x0000_2000,
+    Null = 0x0000_4000,
+    String = 0x8000_0000,
+    Bytes = 0x4000_0000,
+    Error = 0x2000_0000,
+    Array = 0x1000_0000,
 }
 
 impl Typ {
@@ -96,10 +96,7 @@ impl Typ {
                 tmp.push_str(s);
                 Ok(tmp.parse::<Value>()?)
             }
-            Typ::Bool => match s.parse::<bool>()? {
-                true => Ok(Value::True),
-                false => Ok(Value::False),
-            },
+            Typ::Bool => Ok(Value::Bool(s.parse::<bool>()?)),
             Typ::String => Ok(Value::String(ArcStr::from(s))),
             Typ::Bytes => {
                 let mut tmp = String::from("bytes:");
@@ -143,27 +140,9 @@ impl Typ {
     }
 
     pub fn get(v: &Value) -> Self {
-        match v {
-            Value::U32(_) => Typ::U32,
-            Value::V32(_) => Typ::V32,
-            Value::I32(_) => Typ::I32,
-            Value::Z32(_) => Typ::Z32,
-            Value::U64(_) => Typ::U64,
-            Value::V64(_) => Typ::V64,
-            Value::I64(_) => Typ::I64,
-            Value::Z64(_) => Typ::Z64,
-            Value::F32(_) => Typ::F32,
-            Value::F64(_) => Typ::F64,
-            Value::Decimal(_) => Typ::Decimal,
-            Value::DateTime(_) => Typ::DateTime,
-            Value::Duration(_) => Typ::Duration,
-            Value::String(_) => Typ::String,
-            Value::Bytes(_) => Typ::Bytes,
-            Value::True | Value::False => Typ::Bool,
-            Value::Null => Typ::Null,
-            Value::Error(_) => Typ::Error,
-            Value::Array(_) => Typ::Array,
-        }
+        // safe because we are repr(u32) and because the tags are the
+        // same between Typ and Value
+        unsafe { mem::transmute::<u32, Typ>(v.discriminant()) }
     }
 
     pub fn any() -> BitFlags<Typ> {
@@ -264,58 +243,60 @@ impl fmt::Display for Typ {
     }
 }
 
-// this type is divided into two subtypes.
-// if the high bit of the discrimant is not set, then it is Copy
-// if the high bit of the discrimant is set, then it is not Copy
+const COPY_MAX: u32 = 0x0000_4000;
+
+// this type is divided into two subtypes, the copy part and the clone
+// part. If the tag word is <= COPY_MAX then the type is copy,
+// otherwise it must be cloned. Additionally, the tag word values are
+// THE SAME as the values of the cases of Typ. Getting the Typ of a
+// value is therefore a simply copy of the discriminant of Value.
 //
-// clone will check this bit when deciding what to do, so it is
-// essential that when adding variants you set this bit correctly. If
-// adding a non copy type, you will also need to update the
-// implementation of clone to match and delegate the clone operation
+// It is essential that when adding variants you update COPY_MAX and
+// Typ correctly. If adding a non copy type, you will also need to
+// update the implementation of clone to match and delegate the clone
+// operation
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
-#[repr(u8)]
+#[repr(u32)]
 pub enum Value {
     /// full 4 byte u32
-    U32(u32) = 0x01,
+    U32(u32) = 0x0000_0001,
     /// LEB128 varint, 1 - 5 bytes depending on value
-    V32(u32) = 0x02,
+    V32(u32) = 0x0000_0002,
     /// full 4 byte i32
-    I32(i32) = 0x03,
+    I32(i32) = 0x0000_0004,
     /// LEB128 varint zigzag encoded, 1 - 5 bytes depending on abs(value)
-    Z32(i32) = 0x04,
+    Z32(i32) = 0x0000_0008,
     /// full 8 byte u64
-    U64(u64) = 0x05,
+    U64(u64) = 0x0000_0010,
     /// LEB128 varint, 1 - 10 bytes depending on value
-    V64(u64) = 0x06,
+    V64(u64) = 0x0000_0020,
     /// full 8 byte i64
-    I64(i64) = 0x07,
+    I64(i64) = 0x0000_0040,
     /// LEB128 varint zigzag encoded, 1 - 10 bytes depending on abs(value)
-    Z64(i64) = 0x08,
+    Z64(i64) = 0x0000_0080,
     /// 4 byte ieee754 single precision float
-    F32(f32) = 0x09,
+    F32(f32) = 0x0000_0100,
     /// 8 byte ieee754 double precision float
-    F64(f64) = 0x0a,
+    F64(f64) = 0x0000_0200,
     /// fixed point decimal type
-    Decimal(Decimal) = 0x0b,
+    Decimal(Decimal) = 0x0000_0400,
     /// UTC timestamp
-    DateTime(DateTime<Utc>) = 0x0c,
+    DateTime(DateTime<Utc>) = 0x0000_0800,
     /// Duration
-    Duration(Duration) = 0x0d,
+    Duration(Duration) = 0x0000_1000,
     /// boolean true
-    True = 0x0e,
-    /// boolean false
-    False = 0x0f,
+    Bool(bool) = 0x0000_2000,
     /// Empty value
-    Null = 0x10,
+    Null = 0x0000_4000,
     /// unicode string
-    String(ArcStr) = 0x80,
+    String(ArcStr) = 0x8000_0000,
     /// byte array
-    Bytes(PBytes) = 0x81,
+    Bytes(PBytes) = 0x4000_0000,
     /// An explicit error
-    Error(ArcStr) = 0x82,
+    Error(ArcStr) = 0x2000_0000,
     /// An array of values
-    Array(ValArray) = 0x83,
+    Array(ValArray) = 0x1000_0000,
 }
 
 // This will fail to compile if any variant that is supposed to be
@@ -333,8 +314,7 @@ fn _assert_variants_are_copy(v: &Value) -> Value {
         Value::Decimal(i) => Value::Decimal(*i),
         Value::DateTime(i) => Value::DateTime(*i),
         Value::Duration(i) => Value::Duration(*i),
-        Value::True => Value::True,
-        Value::False => Value::False,
+        Value::Bool(b) => Value::Bool(*b),
         Value::Null => Value::Null,
 
         // not copy types
@@ -371,8 +351,7 @@ impl Clone for Value {
                 | Value::Decimal(_)
                 | Value::DateTime(_)
                 | Value::Duration(_)
-                | Value::True
-                | Value::False
+                | Value::Bool(_)
                 | Value::Null => unsafe { unreachable_unchecked() },
             }
         }
@@ -408,8 +387,7 @@ impl Clone for Value {
                 | Value::Decimal(_)
                 | Value::DateTime(_)
                 | Value::Duration(_)
-                | Value::True
-                | Value::False
+                | Value::Bool(_)
                 | Value::Null => unsafe { unreachable_unchecked() },
             }
         }
@@ -484,8 +462,8 @@ impl Hash for Value {
                 13u8.hash(state);
                 b.hash(state)
             }
-            Value::True => 14u8.hash(state),
-            Value::False => 15u8.hash(state),
+            Value::Bool(true) => 14u8.hash(state),
+            Value::Bool(false) => 15u8.hash(state),
             Value::Null => 16u8.hash(state),
             Value::Error(c) => {
                 18u8.hash(state);
@@ -528,9 +506,7 @@ impl PartialEq for Value {
             (Value::Duration(l), Value::Duration(r)) => l == r,
             (Value::String(l), Value::String(r)) => l == r,
             (Value::Bytes(l), Value::Bytes(r)) => l == r,
-            (Value::True, Value::True) => true,
-            (Value::False, Value::False) => true,
-            (Value::True | Value::False, Value::True | Value::False) => false,
+            (Value::Bool(l), Value::Bool(r)) => l == r,
             (Value::Null, Value::Null) => true,
             (Value::Error(l), Value::Error(r)) => l == r,
             (Value::Array(l), Value::Array(r)) => l == r,
@@ -585,10 +561,7 @@ impl PartialOrd for Value {
             (Value::Duration(l), Value::Duration(r)) => l.partial_cmp(r),
             (Value::String(l), Value::String(r)) => l.partial_cmp(r),
             (Value::Bytes(l), Value::Bytes(r)) => l.partial_cmp(r),
-            (Value::True, Value::True) => Some(Ordering::Equal),
-            (Value::False, Value::False) => Some(Ordering::Equal),
-            (Value::False, Value::True) => Some(Ordering::Less),
-            (Value::True, Value::False) => Some(Ordering::Greater),
+            (Value::Bool(l), Value::Bool(r)) => l.partial_cmp(r),
             (Value::Null, Value::Null) => Some(Ordering::Equal),
             (Value::Null, _) => Some(Ordering::Less),
             (_, Value::Null) => Some(Ordering::Greater),
@@ -789,10 +762,10 @@ macro_rules! apply_op {
             }
             | (Value::Error(_), _)
             | (_, Value::Error(_)) => Value::Error(literal!("can't add error types")),
-            (Value::True, n) => Value::U32(1) $op n,
-            (n, Value::True) => n $op Value::U32(1),
-            (Value::False, n) => Value::U32(0) $op n,
-            (n, Value::False) => n $op Value::U32(0),
+            (Value::Bool(true), n) => Value::U32(1) $op n,
+            (n, Value::Bool(true)) => n $op Value::U32(1),
+            (Value::Bool(false), n) => Value::U32(0) $op n,
+            (n, Value::Bool(false)) => n $op Value::U32(0),
             $($pat => $blk),+
         }
     }
@@ -893,8 +866,7 @@ impl Not for Value {
 
     fn not(self) -> Self {
         match self {
-            Value::True => Value::False,
-            Value::False => Value::True,
+            Value::Bool(v) => Value::Bool(!v),
             Value::Null => Value::Null,
             Value::U32(v) => Value::U32(!v),
             Value::V32(v) => Value::V32(!v),
@@ -936,7 +908,7 @@ impl Pack for Value {
             Value::Duration(d) => Pack::encoded_len(d),
             Value::String(c) => Pack::encoded_len(c),
             Value::Bytes(b) => Pack::encoded_len(b),
-            Value::True | Value::False | Value::Null => 0,
+            Value::Bool(_) | Value::Null => 0,
             Value::Error(c) => Pack::encoded_len(c),
             Value::Array(elts) => Pack::encoded_len(elts),
             Value::Decimal(d) => Pack::encoded_len(d),
@@ -1003,8 +975,8 @@ impl Pack for Value {
                 buf.put_u8(13);
                 Pack::encode(b, buf)
             }
-            Value::True => Ok(buf.put_u8(14)),
-            Value::False => Ok(buf.put_u8(15)),
+            Value::Bool(true) => Ok(buf.put_u8(14)),
+            Value::Bool(false) => Ok(buf.put_u8(15)),
             Value::Null => Ok(buf.put_u8(16)),
             //          OK is deprecated, but we reserve 17 for backwards compatibility
             //          Value::Ok => Ok(buf.put_u8(17))
@@ -1039,8 +1011,8 @@ impl Pack for Value {
             11 => Ok(Value::Duration(Pack::decode(buf)?)),
             12 => Ok(Value::String(Pack::decode(buf)?)),
             13 => Ok(Value::Bytes(Pack::decode(buf)?)),
-            14 => Ok(Value::True),
-            15 => Ok(Value::False),
+            14 => Ok(Value::Bool(true)),
+            15 => Ok(Value::Bool(false)),
             16 => Ok(Value::Null),
             17 => Ok(Value::Null), // 17 used to be Ok
             18 => Ok(Value::Error(Pack::decode(buf)?)),
@@ -1068,12 +1040,12 @@ pub trait FromValue {
 }
 
 impl Value {
-    pub fn discriminant(&self) -> u8 {
-        unsafe { *<*const _>::from(self).cast::<u8>() }
+    pub fn discriminant(&self) -> u32 {
+        unsafe { *<*const _>::from(self).cast::<u32>() }
     }
 
     pub fn is_copy(&self) -> bool {
-        self.discriminant() & 0x80 == 0
+        self.discriminant() <= COPY_MAX
     }
 
     pub fn to_string_naked(&self) -> String {
@@ -1106,8 +1078,8 @@ impl Value {
             }
             Value::String(s) => write!(f, "{}", s),
             Value::Bytes(b) => write!(f, "{}", BASE64.encode(b)),
-            Value::True => write!(f, "true"),
-            Value::False => write!(f, "false"),
+            Value::Bool(true) => write!(f, "true"),
+            Value::Bool(false) => write!(f, "false"),
             Value::Null => write!(f, "null"),
             v @ Value::Error(_) => write!(f, "{}", v),
             v @ Value::Array(_) => write!(f, "{}", v),
@@ -1227,8 +1199,8 @@ impl Value {
                 let pfx = if types { "bytes:" } else { "" };
                 write!(f, "{}{}", pfx, BASE64.encode(&*b))
             }
-            Value::True => write!(f, "true"),
-            Value::False => write!(f, "false"),
+            Value::Bool(true) => write!(f, "true"),
+            Value::Bool(false) => write!(f, "false"),
             Value::Null => write!(f, "null"),
             Value::Error(v) => {
                 write!(f, r#"error:"{}""#, utils::escape(&*v, '\\', esc))
@@ -1273,9 +1245,11 @@ impl Value {
                     Typ::Duration => {
                         Some(Value::Duration(Duration::from_secs($v as u64)))
                     }
-                    Typ::Bool => {
-                        Some(if $v as i64 > 0 { Value::True } else { Value::False })
-                    }
+                    Typ::Bool => Some(if $v as i64 > 0 {
+                        Value::Bool(true)
+                    } else {
+                        Value::Bool(false)
+                    }),
                     Typ::String => {
                         Some(Value::String(format_compact!("{}", self).as_str().into()))
                     }
@@ -1410,33 +1384,30 @@ impl Value {
                 Typ::Null => Some(Value::Null),
                 Typ::String => unreachable!(),
             },
-            Value::True | Value::False => {
-                let b = self == Value::True;
-                match typ {
-                    Typ::U32 => Some(Value::U32(b as u32)),
-                    Typ::V32 => Some(Value::V32(b as u32)),
-                    Typ::I32 => Some(Value::I32(b as i32)),
-                    Typ::Z32 => Some(Value::Z32(b as i32)),
-                    Typ::U64 => Some(Value::U64(b as u64)),
-                    Typ::V64 => Some(Value::V64(b as u64)),
-                    Typ::I64 => Some(Value::I64(b as i64)),
-                    Typ::Z64 => Some(Value::Z64(b as i64)),
-                    Typ::F32 => Some(Value::F32(b as u32 as f32)),
-                    Typ::F64 => Some(Value::F64(b as u64 as f64)),
-                    Typ::Decimal => None,
-                    Typ::DateTime => None,
-                    Typ::Duration => None,
-                    Typ::Bool => Some(self),
-                    Typ::Bytes => None,
-                    Typ::Error => None,
-                    Typ::Array => Some(Value::Array([self].into())),
-                    Typ::Null => Some(Value::Null),
-                    Typ::String => unreachable!(),
-                }
-            }
+            Value::Bool(b) => match typ {
+                Typ::U32 => Some(Value::U32(b as u32)),
+                Typ::V32 => Some(Value::V32(b as u32)),
+                Typ::I32 => Some(Value::I32(b as i32)),
+                Typ::Z32 => Some(Value::Z32(b as i32)),
+                Typ::U64 => Some(Value::U64(b as u64)),
+                Typ::V64 => Some(Value::V64(b as u64)),
+                Typ::I64 => Some(Value::I64(b as i64)),
+                Typ::Z64 => Some(Value::Z64(b as i64)),
+                Typ::F32 => Some(Value::F32(b as u32 as f32)),
+                Typ::F64 => Some(Value::F64(b as u64 as f64)),
+                Typ::Decimal => None,
+                Typ::DateTime => None,
+                Typ::Duration => None,
+                Typ::Bool => Some(self),
+                Typ::Bytes => None,
+                Typ::Error => None,
+                Typ::Array => Some(Value::Array([self].into())),
+                Typ::Null => Some(Value::Null),
+                Typ::String => unreachable!(),
+            },
             Value::Bytes(_) if typ == Typ::Bytes => Some(self),
             Value::Bytes(_) => None,
-            Value::Error(_) => Value::False.cast(typ),
+            Value::Error(_) => Value::Bool(false).cast(typ),
             Value::Null if typ == Typ::Null => Some(self),
             Value::Null => None,
         }
@@ -1477,8 +1448,7 @@ impl Value {
             | Value::Duration(_)
             | Value::String(_)
             | Value::Bytes(_)
-            | Value::True
-            | Value::False
+            | Value::Bool(_)
             | Value::Null
             | Value::Error(_)
             | Value::Array(_) => false,
@@ -2071,12 +2041,10 @@ impl convert::From<Duration> for Value {
 impl FromValue for bool {
     fn from_value(v: Value) -> Res<Self> {
         match v {
-            Value::True => Ok(true),
-            Value::False => Ok(false),
+            Value::Bool(b) => Ok(b),
             v => v.cast(Typ::Bool).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
                 match v {
-                    Value::True => Ok(true),
-                    Value::False => Ok(false),
+                    Value::Bool(b) => Ok(b),
                     _ => bail!("can't cast"),
                 }
             }),
@@ -2085,8 +2053,7 @@ impl FromValue for bool {
 
     fn get(v: Value) -> Option<Self> {
         match v {
-            Value::True => Some(true),
-            Value::False => Some(false),
+            Value::Bool(b) => Some(b),
             _ => None,
         }
     }
@@ -2094,11 +2061,7 @@ impl FromValue for bool {
 
 impl convert::From<bool> for Value {
     fn from(v: bool) -> Value {
-        if v {
-            Value::True
-        } else {
-            Value::False
-        }
+        Value::Bool(v)
     }
 }
 
