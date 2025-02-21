@@ -544,7 +544,6 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
             p.is_empty()
         }
         (Type::Primitive(p0), Type::Primitive(p1)) => p0 == p1,
-        (Type::Array(t0), Type::Array(t1)) => check_type(t0, t1),
         (Type::Ref(m0), Type::Ref(m1)) => m0 == m1,
         (Type::Fn(f0), Type::Fn(f1)) => {
             let FnType { args: args0, vargs: vargs0, rtype: rtype0, constraints: c0 } =
@@ -562,23 +561,28 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
                 })
         }
         (Type::Set(s0), Type::Set(s1)) => {
+            dbg!((s0, s1));
             let s0f = Type::flatten_set(s0.iter().cloned());
             let s1f = Type::flatten_set(s1.iter().cloned());
-            match (s0f, s1f) {
+            match dbg!((s0f, s1f)) {
                 (Type::Set(s0), Type::Set(s1)) => {
-                    s0.len() == s1.len()
-                        && s0.iter().zip(s1.iter()).all(|(t0, t1)| check_type(t0, t1))
+                    dbg!(s0.len() == s1.len())
+                        && s0
+                            .iter()
+                            .zip(s1.iter())
+                            .all(|(t0, t1)| dbg!(check_type(t0, t1)))
                 }
-                (_, Type::Set(_)) | (Type::Set(_), _) => false,
+                (_, Type::Set(_)) | (Type::Set(_), _) => dbg!(false),
                 (t0, t1) => check_type(&t0, &t1),
             }
         }
         (t, Type::Set(s)) | (Type::Set(s), t) => {
-            match Type::flatten_set(s.iter().cloned()) {
+            match dbg!(Type::flatten_set(s.iter().cloned())) {
                 Type::Set(_) => false,
                 s => check_type(t, &s),
             }
         }
+        (Type::Array(t0), Type::Array(t1)) => dbg!(check_type(t0, t1)),
         (Type::TVar(tv0), Type::TVar(tv1)) => tv0.name == tv1.name,
         (_, _) => false,
     }
@@ -593,24 +597,24 @@ fn check_type_opt(t0: &Option<Type<Refs>>, t1: &Option<Type<Refs>>) -> bool {
 }
 
 fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
-    check_type(&pat0.predicate, &pat1.predicate)
-        && pat0.bind == pat1.bind
-        && match (&pat0.guard, &pat1.guard) {
+    dbg!(check_type(&pat0.predicate, &pat1.predicate))
+        && dbg!(pat0.bind == pat1.bind)
+        && dbg!(match (&pat0.guard, &pat1.guard) {
             (Some(g0), Some(g1)) => check(g0, g1),
             (None, None) => true,
             (_, _) => false,
-        }
+        })
 }
 
 fn check_args(args0: &[Arg], args1: &[Arg]) -> bool {
     args0.iter().zip(args1.iter()).fold(true, |r, (a0, a1)| {
-        r && a0.name == a1.name
-            && check_type_opt(&a0.constraint, &a1.constraint)
-            && match (&a0.labeled, &a1.labeled) {
+        r && dbg!(a0.name == a1.name)
+            && dbg!(check_type_opt(&a0.constraint, &a1.constraint))
+            && dbg!(match (&a0.labeled, &a1.labeled) {
                 (None, None) | (Some(None), Some(None)) => true,
                 (Some(Some(d0)), Some(Some(d1))) => check(d0, d1),
                 (_, _) => false,
-            }
+            })
     })
 }
 

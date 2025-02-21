@@ -322,8 +322,12 @@ impl Type<NoRefs> {
                     Type::Set(Arc::from_iter([self.clone(), t.clone()]))
                 }
             }
-            (Type::Set(s0), Type::Set(s1)) => Self::merge_sets(s0, s1),
-            (Type::Set(s), t) | (t, Type::Set(s)) => Self::merge_into_set(s, t),
+            (Type::Set(s0), Type::Set(s1)) => {
+                Self::flatten_set(s0.iter().cloned().chain(s1.iter().cloned()))
+            }
+            (Type::Set(s), t) | (t, Type::Set(s)) => {
+                Self::flatten_set(s.iter().cloned().chain(iter::once(t.clone())))
+            }
             (Type::Fn(f0), Type::Fn(f1)) => {
                 if f0 == f1 {
                     Type::Fn(f0.clone())
@@ -561,41 +565,6 @@ impl<T: TypeMark + Clone> Type<T> {
         }
     }
 
-    fn merge_sets(s0: &[Self], s1: &[Self]) -> Self {
-        let mut res: SmallVec<[Self; 20]> = smallvec![];
-        for t in s0.iter().chain(s1.iter()) {
-            let mut merged = false;
-            for i in 0..res.len() {
-                if let Some(t) = t.merge(&res[i]) {
-                    res[i] = t;
-                    merged = true;
-                    break;
-                }
-            }
-            if !merged {
-                res.push(t.clone());
-            }
-        }
-        Type::Set(Arc::from_iter(res))
-    }
-
-    fn merge_into_set(s: &[Self], t: &Self) -> Self {
-        let mut res: SmallVec<[Self; 20]> = smallvec![];
-        res.extend(s.iter().map(|t| t.clone()));
-        let mut merged = false;
-        for i in 0..res.len() {
-            if let Some(t) = t.merge(&res[i]) {
-                merged = true;
-                res[i] = t;
-                break;
-            }
-        }
-        if !merged {
-            res.push(t.clone());
-        }
-        Type::Set(Arc::from_iter(res))
-    }
-
     fn merge(&self, t: &Self) -> Option<Self> {
         match (self, t) {
             (Type::Bottom(_), t) | (t, Type::Bottom(_)) => Some(t.clone()),
@@ -612,7 +581,15 @@ impl<T: TypeMark + Clone> Type<T> {
                 }
             }
             (Type::Array(t0), Type::Array(t1)) => {
-                if t0 == t1 {
+                let t0f = match &**t0 {
+                    Type::Set(et) => Self::flatten_set(et.iter().cloned()),
+                    t => t.clone(),
+                };
+                let t1f = match &**t1 {
+                    Type::Set(et) => Self::flatten_set(et.iter().cloned()),
+                    t => t.clone(),
+                };
+                if t0f == t1f {
                     Some(Type::Array(t0.clone()))
                 } else {
                     None
@@ -620,15 +597,11 @@ impl<T: TypeMark + Clone> Type<T> {
             }
             (Type::Array(_), _) | (_, Type::Array(_)) => None,
             (Type::Set(s0), Type::Set(s1)) => {
-                if s0.is_empty() {
-                    Some(Type::Set(s1.clone()))
-                } else if s1.is_empty() {
-                    Some(Type::Set(s0.clone()))
-                } else {
-                    Some(Self::merge_sets(s0, s1))
-                }
+                Some(Self::flatten_set(s0.iter().cloned().chain(s1.iter().cloned())))
             }
-            (Type::Set(s), t) | (t, Type::Set(s)) => Some(Self::merge_into_set(s, t)),
+            (Type::Set(s), t) | (t, Type::Set(s)) => {
+                Some(Self::flatten_set(s.iter().cloned().chain(iter::once(t.clone()))))
+            }
             (Type::Ref(r0), Type::Ref(r1)) => {
                 if r0 == r1 {
                     Some(Type::Ref(r0.clone()))
