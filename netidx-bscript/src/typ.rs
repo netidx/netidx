@@ -813,7 +813,18 @@ impl FnType<NoRefs> {
 
 impl<T: TypeMark> fmt::Display for FnType<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "fn(")?;
+        if self.constraints.len() == 0 {
+            write!(f, "fn(")?;
+        } else {
+            write!(f, "fn<")?;
+            for (i, (tv, t)) in self.constraints.iter().enumerate() {
+                write!(f, "{tv}: {t}")?;
+                if i < self.constraints.len() - 1 {
+                    write!(f, ", ")?;
+                }
+            }
+            write!(f, ">(")?;
+        }
         for (i, a) in self.args.iter().enumerate() {
             match &a.label {
                 Some((l, true)) => write!(f, "?#{l}: ")?,

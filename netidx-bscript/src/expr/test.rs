@@ -561,10 +561,9 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
                 })
         }
         (Type::Set(s0), Type::Set(s1)) => {
-            dbg!((s0, s1));
             let s0f = Type::flatten_set(s0.iter().cloned());
             let s1f = Type::flatten_set(s1.iter().cloned());
-            match dbg!((s0f, s1f)) {
+            match (s0f, s1f) {
                 (Type::Set(s0), Type::Set(s1)) => {
                     dbg!(s0.len() == s1.len())
                         && s0
@@ -577,7 +576,7 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
             }
         }
         (t, Type::Set(s)) | (Type::Set(s), t) => {
-            match dbg!(Type::flatten_set(s.iter().cloned())) {
+            match Type::flatten_set(s.iter().cloned()) {
                 Type::Set(_) => false,
                 s => check_type(t, &s),
             }
