@@ -41,6 +41,81 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Any {
     }
 }
 
+struct IsErr;
+
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for IsErr {
+    const NAME: &str = "is_error";
+    deftype!("fn(Any) -> bool");
+
+    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, _, _, _| Ok(Box::new(IsErr)))
+    }
+}
+
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for IsErr {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        from[0].update(ctx, event).map(|v| match v {
+            Value::Error(_) => Value::True,
+            _ => Value::False,
+        })
+    }
+}
+
+struct FilterErr;
+
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for FilterErr {
+    const NAME: &str = "filter_err";
+    deftype!("fn(Any) -> error");
+
+    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, _, _, _| Ok(Box::new(FilterErr)))
+    }
+}
+
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for FilterErr {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        from[0].update(ctx, event).and_then(|v| match v {
+            v @ Value::Error(_) => Some(v),
+            _ => None,
+        })
+    }
+}
+
+struct ToError;
+
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for ToError {
+    const NAME: &str = "error";
+    deftype!("fn(Any) -> error");
+
+    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|_, _, _, _| Ok(Box::new(ToError)))
+    }
+}
+
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for ToError {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        from[0].update(ctx, event).map(|v| match v.cast_to::<ArcStr>() {
+            Ok(s) => Value::Error(s),
+            Err(e) => Value::Error(format_compact!("{e}").as_str().into()),
+        })
+    }
+}
+
 struct Once {
     val: bool,
 }
@@ -286,22 +361,6 @@ impl EvalCached for OrEv {
 
 type Or = CachedArgs<OrEv>;
 
-struct IsErrEv;
-
-impl EvalCached for IsErrEv {
-    const NAME: &str = "is_error";
-    deftype!("fn(Any) -> bool");
-
-    fn eval(from: &CachedVals) -> Option<Value> {
-        from.0[0].as_ref().map(|v| match v {
-            Value::Error(_) => Value::True,
-            _ => Value::False,
-        })
-    }
-}
-
-type IsErr = CachedArgs<IsErrEv>;
-
 struct IndexEv;
 
 impl EvalCached for IndexEv {
@@ -344,22 +403,6 @@ impl EvalCached for FilterEv {
 }
 
 type Filter = CachedArgs<FilterEv>;
-
-struct FilterErrEv;
-
-impl EvalCached for FilterErrEv {
-    const NAME: &str = "filter_err";
-    deftype!("fn(Any) -> error");
-
-    fn eval(from: &CachedVals) -> Option<Value> {
-        match &from.0[0] {
-            None | Some(Value::Error(_)) => None,
-            Some(v) => Some(v.clone()),
-        }
-    }
-}
-
-type FilterErr = CachedArgs<FilterErrEv>;
 
 struct Count {
     count: u64,
@@ -641,6 +684,7 @@ pub mod core {
     pub let group = |v, f| 'group
     pub let index = |a, i| 'index
     pub let is_err = |e| 'is_error
+    pub let error = |e| 'error
     pub let max = |@args| 'max
     pub let mean = |@args| 'mean
     pub let min = |@args| 'min
@@ -677,5 +721,6 @@ pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Sample>();
     ctx.register_builtin::<Sum>();
     ctx.register_builtin::<Uniq>();
+    ctx.register_builtin::<ToError>();
     MOD.parse().unwrap()
 }

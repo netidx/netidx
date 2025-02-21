@@ -491,3 +491,42 @@ run!(arg_name_short, ARG_NAME_SHORT, |v: Result<&Value>| match v {
     Ok(Value::I64(45)) => true,
     _ => false,
 });
+
+const EXPLICIT_TYPE_VARS0: &str = r#"
+{
+  let f = 'a: Number |x: 'a, y: 'a| -> 'a x + y;
+  f("foo", "bar")
+}
+"#;
+
+run!(explicit_type_vars0, EXPLICIT_TYPE_VARS0, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const EXPLICIT_TYPE_VARS1: &str = r#"
+{
+  let f = 'a: Number |x: 'a, y: 'a| -> 'a x + y;
+  f(u32:1, i64:2)
+}
+"#;
+
+run!(explicit_type_vars1, EXPLICIT_TYPE_VARS1, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const EXPLICIT_TYPE_VARS2: &str = r#"
+{
+  let f = 'a: Number |x: 'a, y: 'a| -> 'a x + y;
+  select f(1, 1) {
+    i64 as t => t,
+    _ as t => error("unexpected [t]")
+  }
+}
+"#;
+
+run!(explicit_type_vars2, EXPLICIT_TYPE_VARS2, |v: Result<&Value>| match v {
+    Ok(Value::I64(2)) => true,
+    _ => false,
+});

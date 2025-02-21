@@ -770,7 +770,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             ($fmt:expr, $children:expr) => { error!($fmt, $children,) };
         }
         macro_rules! binary_op {
-            ($op:ident, $lhs:expr, $rhs:expr, $rt:expr) => {{
+            ($op:ident, $lhs:expr, $rhs:expr) => {{
                 let lhs = Node::compile_int(ctx, (**$lhs).clone(), scope, top_id);
                 let rhs = Node::compile_int(ctx, (**$rhs).clone(), scope, top_id);
                 if lhs.is_err() || rhs.is_err() {
@@ -778,7 +778,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 }
                 let lhs = Box::new(Cached::new(lhs));
                 let rhs = Box::new(Cached::new(rhs));
-                Node { spec: Box::new(spec), typ: $rt, kind: NodeKind::$op { lhs, rhs } }
+                Node {
+                    spec: Box::new(spec),
+                    typ: Type::empty_tvar(),
+                    kind: NodeKind::$op { lhs, rhs },
+                }
             }};
         }
         match &spec {
@@ -984,42 +988,18 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let typ = Type::Primitive(Typ::Bool.into());
                 Node { spec, typ, kind: NodeKind::Not { node } }
             }
-            Expr { kind: ExprKind::Eq { lhs, rhs }, id: _ } => {
-                binary_op!(Eq, lhs, rhs, Type::Primitive(Typ::Bool.into()))
-            }
-            Expr { kind: ExprKind::Ne { lhs, rhs }, id: _ } => {
-                binary_op!(Ne, lhs, rhs, Type::Primitive(Typ::Bool.into()))
-            }
-            Expr { kind: ExprKind::Lt { lhs, rhs }, id: _ } => {
-                binary_op!(Lt, lhs, rhs, Type::Primitive(Typ::Bool.into()))
-            }
-            Expr { kind: ExprKind::Gt { lhs, rhs }, id: _ } => {
-                binary_op!(Gt, lhs, rhs, Type::Primitive(Typ::Bool.into()))
-            }
-            Expr { kind: ExprKind::Lte { lhs, rhs }, id: _ } => {
-                binary_op!(Lte, lhs, rhs, Type::Primitive(Typ::Bool.into()))
-            }
-            Expr { kind: ExprKind::Gte { lhs, rhs }, id: _ } => {
-                binary_op!(Gte, lhs, rhs, Type::Primitive(Typ::Bool.into()))
-            }
-            Expr { kind: ExprKind::And { lhs, rhs }, id: _ } => {
-                binary_op!(And, lhs, rhs, Type::Primitive(Typ::Bool.into()))
-            }
-            Expr { kind: ExprKind::Or { lhs, rhs }, id: _ } => {
-                binary_op!(Or, lhs, rhs, Type::Primitive(Typ::Bool.into()))
-            }
-            Expr { kind: ExprKind::Add { lhs, rhs }, id: _ } => {
-                binary_op!(Add, lhs, rhs, Type::Primitive(Typ::number()))
-            }
-            Expr { kind: ExprKind::Sub { lhs, rhs }, id: _ } => {
-                binary_op!(Sub, lhs, rhs, Type::Primitive(Typ::number()))
-            }
-            Expr { kind: ExprKind::Mul { lhs, rhs }, id: _ } => {
-                binary_op!(Mul, lhs, rhs, Type::Primitive(Typ::number()))
-            }
-            Expr { kind: ExprKind::Div { lhs, rhs }, id: _ } => {
-                binary_op!(Div, lhs, rhs, Type::Primitive(Typ::number()))
-            }
+            Expr { kind: ExprKind::Eq { lhs, rhs }, id: _ } => binary_op!(Eq, lhs, rhs),
+            Expr { kind: ExprKind::Ne { lhs, rhs }, id: _ } => binary_op!(Ne, lhs, rhs),
+            Expr { kind: ExprKind::Lt { lhs, rhs }, id: _ } => binary_op!(Lt, lhs, rhs),
+            Expr { kind: ExprKind::Gt { lhs, rhs }, id: _ } => binary_op!(Gt, lhs, rhs),
+            Expr { kind: ExprKind::Lte { lhs, rhs }, id: _ } => binary_op!(Lte, lhs, rhs),
+            Expr { kind: ExprKind::Gte { lhs, rhs }, id: _ } => binary_op!(Gte, lhs, rhs),
+            Expr { kind: ExprKind::And { lhs, rhs }, id: _ } => binary_op!(And, lhs, rhs),
+            Expr { kind: ExprKind::Or { lhs, rhs }, id: _ } => binary_op!(Or, lhs, rhs),
+            Expr { kind: ExprKind::Add { lhs, rhs }, id: _ } => binary_op!(Add, lhs, rhs),
+            Expr { kind: ExprKind::Sub { lhs, rhs }, id: _ } => binary_op!(Sub, lhs, rhs),
+            Expr { kind: ExprKind::Mul { lhs, rhs }, id: _ } => binary_op!(Mul, lhs, rhs),
+            Expr { kind: ExprKind::Div { lhs, rhs }, id: _ } => binary_op!(Div, lhs, rhs),
         }
     }
 
@@ -1045,6 +1025,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let typ = Type::Primitive(Typ::number());
                 wrap!(typ.check_contains(&lhs.node.typ))?;
                 wrap!(typ.check_contains(&rhs.node.typ))?;
+                wrap!(self.typ.check_contains(&lhs.node.typ.union(&rhs.node.typ)))?;
                 Ok(())
             }
             NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {
@@ -1053,12 +1034,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let typ = Type::Primitive(Typ::Bool.into());
                 wrap!(typ.check_contains(&lhs.node.typ))?;
                 wrap!(typ.check_contains(&rhs.node.typ))?;
+                wrap!(self.typ.check_contains(&Type::boolean()))?;
                 Ok(())
             }
             NodeKind::Not { node } => {
                 wrap!(node.typecheck(ctx))?;
                 let typ = Type::Primitive(Typ::Bool.into());
                 wrap!(typ.check_contains(&node.typ))?;
+                wrap!(self.typ.check_contains(&Type::boolean()))?;
                 Ok(())
             }
             NodeKind::Eq { lhs, rhs }
@@ -1069,6 +1052,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Gte { lhs, rhs } => {
                 wrap!(lhs.node.typecheck(ctx))?;
                 wrap!(rhs.node.typecheck(ctx))?;
+                wrap!(self.typ.check_contains(&Type::boolean()))?;
                 Ok(())
             }
             NodeKind::TypeCast { target: _, n } => Ok(wrap!(n.typecheck(ctx))?),

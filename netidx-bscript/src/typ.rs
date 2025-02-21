@@ -8,6 +8,7 @@ use netidx::{publisher::Typ, utils::Either};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use smallvec::{smallvec, SmallVec};
 use std::{
+    cell::Cell,
     cmp::{Eq, PartialEq},
     collections::hash_map::Entry,
     fmt::{self, Debug},
@@ -41,9 +42,31 @@ pub struct TVarInner<T: TypeMark> {
 #[derive(Debug, Clone)]
 pub struct TVar<T: TypeMark>(Arc<TVarInner<T>>);
 
+thread_local! {
+    static TVAR_DEREF: Cell<bool> = Cell::new(false);
+}
+
+/// For the duration of the closure F change the way type
+/// variables are formatted (on this thread only) such that the
+/// inferred type is also shown.
+pub fn format_with_deref<R, F: FnOnce() -> R>(f: F) -> R {
+    let prev = TVAR_DEREF.replace(true);
+    let res = f();
+    TVAR_DEREF.set(prev);
+    res
+}
+
 impl<T: TypeMark> fmt::Display for TVar<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "'{}", self.name)
+        if !TVAR_DEREF.get() {
+            write!(f, "'{}", self.name)
+        } else {
+            write!(f, "'{}: ", self.name)?;
+            match &*self.read().read() {
+                Some(t) => write!(f, "{t}"),
+                None => write!(f, "undefined"),
+            }
+        }
     }
 }
 
@@ -183,7 +206,7 @@ impl Type<NoRefs> {
         if self.contains(t) {
             Ok(())
         } else {
-            bail!("type mismatch {self} does not contain {t}")
+            format_with_deref(|| bail!("type mismatch {self} does not contain {t}"))
         }
     }
 
@@ -546,7 +569,7 @@ impl<T: TypeMark> fmt::Display for Type<T> {
         match self {
             Self::Bottom(_) => write!(f, "_"),
             Self::Ref(t) => write!(f, "{t}"),
-            Self::TVar(tv) => write!(f, "'{}", tv.name),
+            Self::TVar(tv) => write!(f, "{tv}"),
             Self::Fn(t) => write!(f, "{t}"),
             Self::Set(s) => {
                 write!(f, "[")?;
