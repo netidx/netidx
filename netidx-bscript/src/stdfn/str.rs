@@ -19,9 +19,9 @@ impl EvalCached for StartsWithEv {
         match (&from.0[0], &from.0[1]) {
             (Some(Value::String(pfx)), Some(Value::String(val))) => {
                 if val.starts_with(&**pfx) {
-                    Some(Value::True)
+                    Some(Value::Bool(true))
                 } else {
-                    Some(Value::False)
+                    Some(Value::Bool(false))
                 }
             }
             (None, _) | (_, None) => None,
@@ -42,9 +42,9 @@ impl EvalCached for EndsWithEv {
         match (&from.0[0], &from.0[1]) {
             (Some(Value::String(sfx)), Some(Value::String(val))) => {
                 if val.ends_with(&**sfx) {
-                    Some(Value::True)
+                    Some(Value::Bool(true))
                 } else {
-                    Some(Value::False)
+                    Some(Value::Bool(false))
                 }
             }
             (None, _) | (_, None) => None,
@@ -65,9 +65,9 @@ impl EvalCached for ContainsEv {
         match (&from.0[0], &from.0[1]) {
             (Some(Value::String(chs)), Some(Value::String(val))) => {
                 if val.contains(&**chs) {
-                    Some(Value::True)
+                    Some(Value::Bool(true))
                 } else {
-                    Some(Value::False)
+                    Some(Value::Bool(false))
                 }
             }
             (None, _) | (_, None) => None,

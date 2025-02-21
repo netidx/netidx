@@ -3,7 +3,6 @@ use arcstr::ArcStr;
 use compact_str::CompactString;
 use netidx::{
     path::Path,
-    publisher::Typ,
     subscriber::Value,
     utils::{self, Either},
 };
@@ -155,7 +154,7 @@ pub enum ExprKind {
     },
     TypeCast {
         expr: Arc<Expr>,
-        typ: Typ,
+        typ: Type<Refs>,
     },
     Apply {
         args: Arc<[(Option<ArcStr>, Expr)]>,

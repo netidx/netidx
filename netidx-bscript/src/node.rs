@@ -258,7 +258,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         let predicate = spec.predicate.resolve_typrefs(scope, &ctx.env)?;
         match &predicate {
             Type::Fn(_) => bail!("can't match on Fn type"),
-            Type::Bottom(_) | Type::Primitive(_) | Type::Set(_) | Type::TVar(_) => (),
+            Type::Bottom(_)
+            | Type::Primitive(_)
+            | Type::Set(_)
+            | Type::TVar(_)
+            | Type::Array(_) => (),
             Type::Ref(_) => unreachable!(),
         }
         let bind = ctx.env.bind_variable(scope, &*spec.bind, predicate.clone());
@@ -281,8 +285,12 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         }
     }
 
-    fn is_match(&self, typ: &Type<NoRefs>) -> bool {
-        self.predicate.contains(&typ)
+    fn is_match(&self, typ: Typ) -> bool {
+        let tmatch = match (&self.predicate, typ) {
+            (Type::Array(_), Typ::Array) => true,
+            _ => self.predicate.contains(&Type::Primitive(typ.into())),
+        };
+        tmatch
             && match &self.guard {
                 None => true,
                 Some(g) => g
@@ -305,7 +313,7 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Connect(BindId, Box<Node<C, E>>),
     Lambda(Arc<LambdaBind<C, E>>),
     TypeCast {
-        target: Typ,
+        target: Type<NoRefs>,
         n: Box<Node<C, E>>,
     },
     Apply {
@@ -961,8 +969,15 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 if n.is_err() {
                     return error!("", vec![n]);
                 }
-                let rtyp = Type::Primitive(*typ | Typ::Error);
-                let kind = NodeKind::TypeCast { target: *typ, n: Box::new(n) };
+                let typ = match typ.resolve_typrefs(scope, &ctx.env) {
+                    Err(e) => return error!("{e}", vec![n]),
+                    Ok(typ) => typ,
+                };
+                if let Err(e) = typ.check_cast() {
+                    return error!("{e}", vec![n]);
+                }
+                let rtyp = typ.union(&Type::Primitive(Typ::Error.into()));
+                let kind = NodeKind::TypeCast { target: typ, n: Box::new(n) };
                 Node { spec: Box::new(spec), typ: rtyp, kind }
             }
             Expr { kind: ExprKind::TypeDef { name, typ }, id: _ } => {
@@ -1173,10 +1188,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         if !arg_up && !pat_up {
             selected.and_then(|i| val!(i))
         } else {
-            let typ = arg.cached.as_ref().map(|v| Type::Primitive(Typ::get(v).into()));
+            let typ = arg.cached.as_ref().map(Typ::get);
             let sel = arms.iter().enumerate().find_map(|(i, (pat, _))| {
-                typ.as_ref()
-                    .and_then(|typ| if pat.is_match(typ) { Some(i) } else { None })
+                typ.and_then(|typ| if pat.is_match(typ) { Some(i) } else { None })
             });
             match (sel, *selected) {
                 (Some(i), Some(j)) if i == j => val!(i),
@@ -1274,13 +1288,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             NodeKind::Do(children) => {
                 children.into_iter().fold(None, |_, n| n.update(ctx, event))
             }
-            NodeKind::TypeCast { target, n } => n.update(ctx, event).map(|v| {
-                v.clone().cast(*target).unwrap_or_else(|| {
-                    Value::Error(
-                        format_compact!("can't cast {v} to {target}").as_str().into(),
-                    )
-                })
-            }),
+            NodeKind::TypeCast { target, n } => {
+                n.update(ctx, event).map(|v| target.cast_value(v))
+            }
             NodeKind::Not { node } => node.update(ctx, event).map(|v| !v),
             NodeKind::Eq { lhs, rhs } => binary_op!(==, lhs, rhs),
             NodeKind::Ne { lhs, rhs } => binary_op!(!=, lhs, rhs),

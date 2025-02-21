@@ -60,8 +60,8 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for IsErr {
         event: &Event<E>,
     ) -> Option<Value> {
         from[0].update(ctx, event).map(|v| match v {
-            Value::Error(_) => Value::True,
-            _ => Value::False,
+            Value::Error(_) => Value::Bool(true),
+            _ => Value::Bool(false),
         })
     }
 }
@@ -322,13 +322,13 @@ impl EvalCached for AndEv {
     deftype!("fn(@args: bool) -> bool");
 
     fn eval(from: &CachedVals) -> Option<Value> {
-        let mut res = Some(Value::True);
+        let mut res = Some(Value::Bool(true));
         for v in from.flat_iter() {
             match v {
                 None => return None,
-                Some(Value::True) => (),
+                Some(Value::Bool(true)) => (),
                 Some(_) => {
-                    res = Some(Value::False);
+                    res = Some(Value::Bool(false));
                 }
             }
         }
@@ -345,12 +345,12 @@ impl EvalCached for OrEv {
     deftype!("fn(@args: bool) -> bool");
 
     fn eval(from: &CachedVals) -> Option<Value> {
-        let mut res = Some(Value::False);
+        let mut res = Some(Value::Bool(false));
         for v in from.flat_iter() {
             match v {
                 None => return None,
-                Some(Value::True) => {
-                    res = Some(Value::True);
+                Some(Value::Bool(true)) => {
+                    res = Some(Value::Bool(true));
                 }
                 Some(_) => (),
             }
@@ -395,8 +395,8 @@ impl EvalCached for FilterEv {
         let (pred, s) = (&from.0[0], &from.0[1]);
         match pred {
             None => None,
-            Some(Value::True) => s.clone(),
-            Some(Value::False) => None,
+            Some(Value::Bool(true)) => s.clone(),
+            Some(Value::Bool(false)) => None,
             _ => err!("filter(predicate, source) expected boolean predicate"),
         }
     }
@@ -608,7 +608,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Group<C, E> {
             ctx.user.set_var(self.x, val);
         }
         match self.pred.update(ctx, &mut self.from, event) {
-            Some(Value::True) => {
+            Some(Value::Bool(true)) => {
                 Some(Value::Array(ValArray::from_iter_exact(self.buf.drain(..))))
             }
             _ => None,

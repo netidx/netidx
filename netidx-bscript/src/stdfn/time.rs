@@ -88,8 +88,8 @@ enum Repeat {
 impl FromValue for Repeat {
     fn from_value(v: Value) -> Result<Self> {
         match v {
-            Value::True => Ok(Repeat::Yes),
-            Value::False => Ok(Repeat::No),
+            Value::Bool(true) => Ok(Repeat::Yes),
+            Value::Bool(false) => Ok(Repeat::No),
             v => match v.cast_to::<u64>() {
                 Ok(n) => Ok(Repeat::N(n)),
                 Err(_) => bail!("could not cast to repeat"),

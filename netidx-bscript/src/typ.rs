@@ -1,10 +1,14 @@
 use crate::{env::Env, expr::ModPath, Ctx};
 use anyhow::{anyhow, bail, Result};
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use enumflags2::BitFlags;
 use fxhash::FxHashMap;
-use netidx::{publisher::Typ, utils::Either};
+use netidx::{
+    publisher::{Typ, Value},
+    utils::Either,
+};
+use netidx_netproto::valarray::ValArray;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use smallvec::{smallvec, SmallVec};
 use std::{
@@ -222,6 +226,9 @@ impl Type<NoRefs> {
             (Self::Bottom(_), _) | (_, Self::Bottom(_)) => true,
             (Self::Primitive(p0), Self::Primitive(p1)) => p0.contains(*p1),
             (Self::Array(t0), Self::Array(t1)) => t0.contains(t1),
+            (Self::Array(t0), Self::Primitive(p)) if *p == BitFlags::from(Typ::Array) => {
+                t0.contains(&Type::Primitive(BitFlags::all()))
+            }
             (Self::Array(_), Self::Primitive(_)) => false,
             (Self::Primitive(_), Self::Array(_)) => {
                 self.contains(&Type::Primitive(Typ::Array.into()))
@@ -361,6 +368,7 @@ impl Type<NoRefs> {
         match self {
             Type::Bottom(_) | Type::Primitive(_) => (),
             Type::Ref(_) => unreachable!(),
+            Type::Array(t) => t.alias_unbound(known),
             Type::TVar(tv) => match known.entry(tv.name.clone()) {
                 Entry::Vacant(e) => {
                     e.insert(tv.clone());
@@ -403,6 +411,7 @@ impl Type<NoRefs> {
             Type::Bottom(_) => Type::Bottom(PhantomData),
             Type::Primitive(p) => Type::Primitive(*p),
             Type::Ref(_) => unreachable!(),
+            Type::Array(t0) => Type::Array(Arc::new(t0.reset_tvars())),
             Type::TVar(tv) => Type::TVar(TVar::empty_named(tv.name.clone())),
             Type::Set(s) => Type::Set(Arc::from_iter(s.iter().map(|t| t.reset_tvars()))),
             Type::Fn(fntyp) => {
@@ -420,6 +429,84 @@ impl Type<NoRefs> {
             }
         }
     }
+
+    fn first_prim(&self) -> Option<Typ> {
+        match self {
+            Type::Primitive(p) => p.iter().next(),
+            Type::Bottom(_) => None,
+            Type::Ref(_) => unreachable!(),
+            Type::Fn(_) => None,
+            Type::Set(s) => s.iter().find_map(|t| t.first_prim()),
+            Type::TVar(tv) => tv.read().read().as_ref().and_then(|t| t.first_prim()),
+            Type::Array(_) => None,
+        }
+    }
+
+    pub fn check_cast(&self) -> Result<()> {
+        match self {
+            Type::Primitive(_) => Ok(()),
+            Type::Fn(_) => bail!("can't cast a value to a function"),
+            Type::Ref(_) => unreachable!(),
+            Type::Bottom(_) => bail!("can't cast a value to bottom"),
+            Type::Set(s) => Ok(for t in s.iter() {
+                t.check_cast()?
+            }),
+            Type::TVar(tv) => match tv.read().read().as_ref() {
+                Some(t) => t.check_cast(),
+                None => bail!("can't cast a value to a free type variable"),
+            },
+            Type::Array(et) => et.check_cast(),
+        }
+    }
+
+    fn check_array(&self, a: &ValArray) -> bool {
+        a.iter().all(|elt| match elt {
+            Value::Array(elts) => match self {
+                Type::Array(et) => et.check_array(elts),
+                _ => false,
+            },
+            v => self.contains(&Type::Primitive(Typ::get(v).into())),
+        })
+    }
+
+    pub fn cast_value(&self, v: Value) -> Value {
+        if self.contains(&Type::Primitive(Typ::get(&v).into())) {
+            return v;
+        }
+        match self {
+            Type::Array(et) => match v {
+                Value::Array(elts) => {
+                    if et.check_array(&elts) {
+                        return Value::Array(elts);
+                    }
+                    let mut error = None;
+                    let va = ValArray::from_iter_exact(elts.iter().map(|el| {
+                        match et.cast_value(el.clone()) {
+                            Value::Error(e) => {
+                                error = Some(e.clone());
+                                Value::Error(e)
+                            }
+                            v => v,
+                        }
+                    }));
+                    match error {
+                        None => Value::Array(va),
+                        Some(e) => Value::Error(e),
+                    }
+                }
+                v => match et.cast_value(v) {
+                    Value::Error(e) => Value::Error(e),
+                    v => Value::Array([v].into()),
+                },
+            },
+            t => match t.first_prim() {
+                None => Value::Error(literal!("empty or non primitive cast")),
+                Some(t) => v.clone().cast(t).unwrap_or_else(|| {
+                    Value::Error(format_compact!("can't cast {v} to {t}").as_str().into())
+                }),
+            },
+        }
+    }
 }
 
 impl<T: TypeMark + Clone> Type<T> {
@@ -430,6 +517,7 @@ impl<T: TypeMark + Clone> Type<T> {
             | Type::Primitive(_)
             | Type::Ref(_)
             | Type::Fn(_)
+            | Type::Array(_)
             | Type::Set(_) => false,
         }
     }
@@ -516,7 +604,21 @@ impl<T: TypeMark + Clone> Type<T> {
                 s.insert(*s1);
                 Some(Type::Primitive(s))
             }
-            (Type::Fn(_), Type::Fn(_)) => None,
+            (Type::Fn(f0), Type::Fn(f1)) => {
+                if f0 == f1 {
+                    Some(Type::Fn(f0.clone()))
+                } else {
+                    None
+                }
+            }
+            (Type::Array(t0), Type::Array(t1)) => {
+                if t0 == t1 {
+                    Some(Type::Array(t0.clone()))
+                } else {
+                    None
+                }
+            }
+            (Type::Array(_), _) | (_, Type::Array(_)) => None,
             (Type::Set(s0), Type::Set(s1)) => {
                 if s0.is_empty() {
                     Some(Type::Set(s1.clone()))
@@ -527,6 +629,13 @@ impl<T: TypeMark + Clone> Type<T> {
                 }
             }
             (Type::Set(s), t) | (t, Type::Set(s)) => Some(Self::merge_into_set(s, t)),
+            (Type::Ref(r0), Type::Ref(r1)) => {
+                if r0 == r1 {
+                    Some(Type::Ref(r0.clone()))
+                } else {
+                    None
+                }
+            }
             (Type::Ref(_), _) | (_, Type::Ref(_)) => None,
             (_, Type::TVar(_))
             | (Type::TVar(_), _)
@@ -543,6 +652,7 @@ impl<T: TypeMark + Clone> Type<T> {
         match self {
             Type::Bottom(_) => Ok(Type::Bottom(PhantomData)),
             Type::Primitive(s) => Ok(Type::Primitive(*s)),
+            Type::Array(t0) => Ok(Type::Array(Arc::new(t0.resolve_typrefs(scope, env)?))),
             Type::TVar(tv) => match &*tv.read().read() {
                 None => Ok(Type::TVar(TVar::empty_named(tv.name.clone()))),
                 Some(typ) => {
@@ -601,6 +711,7 @@ impl<T: TypeMark> fmt::Display for Type<T> {
             Self::Ref(t) => write!(f, "{t}"),
             Self::TVar(tv) => write!(f, "{tv}"),
             Self::Fn(t) => write!(f, "{t}"),
+            Self::Array(t) => write!(f, "Array<{t}>"),
             Self::Set(s) => {
                 write!(f, "[")?;
                 for (i, t) in s.iter().enumerate() {

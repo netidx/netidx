@@ -35,7 +35,7 @@ pub const RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
         "true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn",
         "cast", "if", "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32",
         "f64", "decimal", "datetime", "duration", "bool", "string", "bytes", "result",
-        "array", "null", "_", "?", "fn",
+        "null", "_", "?", "fn", "array", "Array",
     ])
 });
 
@@ -546,6 +546,8 @@ where
                 .map(|ts: SmallVec<[Type<Refs>; 16]>| Type::flatten_set(ts)),
         ),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
+        attempt(spstring("Array").with(between(sptoken('<'), sptoken('>'), typexp())))
+            .map(|t| Type::Array(Arc::new(t))),
         attempt(sptypath()).map(|n| Type::Ref(n)),
         attempt(tvar()).map(|tv| Type::TVar(tv)),
     ))
@@ -835,7 +837,7 @@ where
     I::Range: Range,
 {
     (
-        string("cast").with(between(token('<'), sptoken('>'), typeprim())),
+        string("cast").with(between(token('<'), sptoken('>'), typexp())),
         between(sptoken('('), sptoken(')'), expr()),
     )
         .map(|(typ, e)| ExprKind::TypeCast { expr: Arc::new(e), typ }.to_expr())
