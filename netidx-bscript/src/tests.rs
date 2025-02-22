@@ -545,3 +545,24 @@ run!(explicit_type_vars3, EXPLICIT_TYPE_VARS3, |v: Result<&Value>| match v {
     Ok(Value::U32(2) | Value::U64(2)) => true,
     _ => false,
 });
+
+const TYPED_ARRAYS: &str = r#"
+{
+  let f = |x: Array<'a>, y: Array<'a>| -> Array<Array<'a>> [x, y];
+  f([1, 2, 3], [1, 2, 3])
+}
+"#;
+
+run!(typed_arrays, TYPED_ARRAYS, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &**a {
+        [Value::Array(a0), Value::Array(a1)] => match (&**a0, &**a1) {
+            (
+                [Value::I64(1), Value::I64(2), Value::I64(3)],
+                [Value::I64(1), Value::I64(2), Value::I64(3)],
+            ) => true,
+            _ => false,
+        },
+        _ => false,
+    },
+    _ => false,
+});

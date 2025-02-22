@@ -175,24 +175,6 @@ impl EvalCached for AllEv {
 
 type All = CachedArgs<AllEv>;
 
-struct ArrayEv;
-
-impl EvalCached for ArrayEv {
-    const NAME: &str = "mkarray";
-    deftype!("fn(@args: Any) -> Array<Any>");
-
-    fn eval(from: &CachedVals) -> Option<Value> {
-        if from.0.iter().all(|v| v.is_some()) {
-            let iter = from.0.iter().map(|v| v.as_ref().unwrap().clone());
-            Some(Value::Array(ValArray::from_iter_exact(iter)))
-        } else {
-            None
-        }
-    }
-}
-
-type Array = CachedArgs<ArrayEv>;
-
 fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     match (lhs, rhs) {
         (None, None) | (Some(_), None) => None,
@@ -686,7 +668,6 @@ pub mod core {
     pub let all = |@args| 'all
     pub let and = |@args| 'and
     pub let any = |@args| 'any
-    pub let mkarray = |@args| 'mkarray
     pub let count = |@args| 'count
     pub let divide = |@args| 'divide
     pub let filter_err = |e| 'filter_err
@@ -713,7 +694,6 @@ pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<All>();
     ctx.register_builtin::<And>();
     ctx.register_builtin::<Any>();
-    ctx.register_builtin::<Array>();
     ctx.register_builtin::<Count>();
     ctx.register_builtin::<Divide>();
     ctx.register_builtin::<Filter>();

@@ -160,6 +160,9 @@ pub enum ExprKind {
         args: Arc<[(Option<ArcStr>, Expr)]>,
         function: ModPath,
     },
+    Array {
+        args: Arc<[Expr]>,
+    },
     Select {
         arg: Arc<Expr>,
         arms: Arc<[(Pattern, Expr)]>,
@@ -356,15 +359,14 @@ impl ExprKind {
                 expr.kind.pretty_print(indent + 2, limit, true, buf)?;
                 writeln!(buf, ")")
             }
+            ExprKind::Array { args } => {
+                try_single_line!(true);
+                pretty_print_exprs_int(indent, limit, buf, args, "[", "]", ",", |a| a)
+            }
             ExprKind::Apply { function, args } => {
                 let len = try_single_line!(false);
                 if function == &["str", "concat"] {
                     Ok(())
-                } else if function == &["mkarray"] {
-                    buf.truncate(len);
-                    pretty_print_exprs_int(indent, limit, buf, args, "[", "]", ",", |a| {
-                        &a.1
-                    })
                 } else {
                     buf.truncate(len);
                     write!(buf, "{function}")?;
@@ -621,6 +623,16 @@ impl fmt::Display for ExprKind {
                     Either::Left(body) => write!(f, "{body}"),
                 }
             }
+            ExprKind::Array { args } => {
+                write!(f, "[")?;
+                for i in 0..args.len() {
+                    write!(f, "{}", &args[i])?;
+                    if i < args.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                write!(f, "]")
+            }
             ExprKind::Apply { args, function } => {
                 if function == &["str", "concat"] && args.len() > 0 {
                     // interpolation
@@ -637,15 +649,6 @@ impl fmt::Display for ExprKind {
                         }
                     }
                     write!(f, "\"")
-                } else if function == &["mkarray"] {
-                    write!(f, "[")?;
-                    for i in 0..args.len() {
-                        write!(f, "{}", &args[i].1)?;
-                        if i < args.len() - 1 {
-                            write!(f, ", ")?
-                        }
-                    }
-                    write!(f, "]")
                 } else {
                     write!(f, "{function}")?;
                     write!(f, "(")?;

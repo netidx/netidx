@@ -10,6 +10,7 @@ use compact_str::{format_compact, CompactString};
 use fxhash::FxHashMap;
 use immutable_chunkmap::set::SetS as Set;
 use netidx::{publisher::Typ, subscriber::Value, utils::Either};
+use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{
     fmt::{self, Debug},
@@ -316,6 +317,9 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
         target: Type<NoRefs>,
         n: Box<Node<C, E>>,
     },
+    Array {
+        args: Box<[Cached<C, E>]>,
+    },
     Apply {
         args: Box<[Node<C, E>]>,
         function: Box<dyn ApplyTyped<C, E> + Send + Sync>,
@@ -402,6 +406,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Bind(_, _)
             | NodeKind::Ref(_)
             | NodeKind::Connect(_, _)
+            | NodeKind::Array { .. }
             | NodeKind::Apply { .. }
             | NodeKind::Error { .. }
             | NodeKind::Module(_)
@@ -436,6 +441,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Bind(_, _)
             | NodeKind::Ref(_)
             | NodeKind::Connect(_, _)
+            | NodeKind::Array { .. }
             | NodeKind::Apply { .. }
             | NodeKind::Module(_)
             | NodeKind::Eq { .. }
@@ -485,6 +491,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Bind(_, _)
             | NodeKind::Ref(_)
             | NodeKind::Connect(_, _)
+            | NodeKind::Array { .. }
             | NodeKind::Apply { .. }
             | NodeKind::Module(_)
             | NodeKind::Eq { .. }
@@ -811,6 +818,16 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     Node { kind: NodeKind::Do(Box::from(exp)), spec: Box::new(spec), typ }
                 }
             }
+            Expr { kind: ExprKind::Array { args }, id: _ } => {
+                let (error, args) = subexprs!(scope, args);
+                if error {
+                    error!("", args)
+                } else {
+                    let typ = Type::empty_tvar();
+                    let args = Box::from_iter(args.into_iter().map(|n| Cached::new(n)));
+                    Node { kind: NodeKind::Array { args }, spec: Box::new(spec), typ }
+                }
+            }
             Expr { kind: ExprKind::Module { name, export: _, value }, id: _ } => {
                 let scope = ModPath(scope.append(&name));
                 match value {
@@ -1083,6 +1100,15 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 Ok(())
             }
             NodeKind::Connect(_, node) => Ok(wrap!(node.typecheck(ctx))?),
+            NodeKind::Array { args } => {
+                for n in args.iter_mut() {
+                    wrap!(n.node, n.node.typecheck(ctx))?
+                }
+                let rtype = args
+                    .iter()
+                    .fold(Type::Bottom(PhantomData), |rtype, n| n.node.typ.union(&rtype));
+                Ok(self.typ.check_contains(&rtype)?)
+            }
             NodeKind::Apply { args, function } => {
                 for n in args.iter_mut() {
                     wrap!(n, n.typecheck(ctx))?
@@ -1262,6 +1288,21 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 Event::Init => Some(v.clone()),
                 Event::Netidx(_, _) | Event::User(_) | Event::Variable(_, _) => None,
             },
+            NodeKind::Array { args } => {
+                let mut updated = false;
+                let mut determined = true;
+                for n in args.iter_mut() {
+                    updated |= n.update(ctx, event);
+                    determined &= n.cached.is_some();
+                }
+                if updated && determined {
+                    let iter = args.iter().map(|n| n.cached.clone().unwrap());
+                    let a = ValArray::from_iter_exact(iter);
+                    Some(Value::Array(a))
+                } else {
+                    None
+                }
+            }
             NodeKind::Apply { args, function } => function.update(ctx, args, event),
             NodeKind::Connect(id, rhs) | NodeKind::Bind(id, rhs) => {
                 if let Some(v) = rhs.update(ctx, event) {

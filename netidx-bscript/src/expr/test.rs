@@ -467,15 +467,11 @@ fn modexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![
         (collection::vec((option::of(random_fname()), expr()), (0, 10)), modpath())
             .prop_map(|(mut s, f)| {
-                if &*f.0 == "/mkarray" {
-                    for a in &mut s {
-                        a.0 = None;
-                    }
-                } else {
-                    s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
-                }
+                s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
                 ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
             }),
+        collection::vec(expr(), (0, 10))
+            .prop_map(|a| { ExprKind::Array { args: Arc::from_iter(a) } }.to_expr()),
         collection::vec(expr(), (1, 10))
             .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
         modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),

@@ -263,6 +263,7 @@ where
                         )
                     }
                     (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Array { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Do { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Module { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Use { .. }, .. }), _)
@@ -347,13 +348,11 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    between(token('['), sptoken(']'), sep_by(expr(), csep())).map(|args: Vec<Expr>| {
-        ExprKind::Apply {
-            function: ["mkarray"].into(),
-            args: Arc::from_iter(args.into_iter().map(|a| (None, a))),
-        }
-        .to_expr()
-    })
+    between(token('['), sptoken(']'), sep_by(expr(), csep())).map(
+        |args: SmallVec<[Expr; 4]>| {
+            ExprKind::Array { args: Arc::from_iter(args.into_iter()) }.to_expr()
+        },
+    )
 }
 
 fn apply<I>() -> impl Parser<I, Output = Expr>
