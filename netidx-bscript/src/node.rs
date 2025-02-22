@@ -1107,6 +1107,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let rtype = args
                     .iter()
                     .fold(Type::Bottom(PhantomData), |rtype, n| n.node.typ.union(&rtype));
+                let rtype = Type::Array(Arc::new(rtype));
                 Ok(self.typ.check_contains(&rtype)?)
             }
             NodeKind::Apply { args, function } => {

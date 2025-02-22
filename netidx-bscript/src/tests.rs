@@ -546,14 +546,14 @@ run!(explicit_type_vars3, EXPLICIT_TYPE_VARS3, |v: Result<&Value>| match v {
     _ => false,
 });
 
-const TYPED_ARRAYS: &str = r#"
+const TYPED_ARRAYS0: &str = r#"
 {
   let f = |x: Array<'a>, y: Array<'a>| -> Array<Array<'a>> [x, y];
   f([1, 2, 3], [1, 2, 3])
 }
 "#;
 
-run!(typed_arrays, TYPED_ARRAYS, |v: Result<&Value>| match v {
+run!(typed_arrays0, TYPED_ARRAYS0, |v: Result<&Value>| match v {
     Ok(Value::Array(a)) => match &**a {
         [Value::Array(a0), Value::Array(a1)] => match (&**a0, &**a1) {
             (
@@ -564,5 +564,17 @@ run!(typed_arrays, TYPED_ARRAYS, |v: Result<&Value>| match v {
         },
         _ => false,
     },
+    _ => false,
+});
+
+const TYPED_ARRAYS1: &str = r#"
+{
+  let f = |x: Array<'a>, y: Array<'a>| -> Array<Array<'a>> [x, y];
+  f([1, 2, 3], [u32:1, 2, 3])
+}
+"#;
+
+run!(typed_arrays1, TYPED_ARRAYS1, |v: Result<&Value>| match v {
+    Err(_) => true,
     _ => false,
 });
