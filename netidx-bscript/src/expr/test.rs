@@ -628,6 +628,9 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             (Value::F64(v0), Value::F64(v1)) => dbg!(v0 == v1 || (v0 - v1).abs() < 1e-8),
             (v0, v1) => dbg!(v0 == v1),
         },
+        (ExprKind::Array { args: a0 }, ExprKind::Array { args: a1 }) => {
+            a0.len() == a1.len() && a0.iter().zip(a1.iter()).all(|(e0, e1)| check(e0, e1))
+        }
         (
             ExprKind::Apply { args: srs0, function: fn0 },
             ExprKind::Constant(Value::String(c1)),
