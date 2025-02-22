@@ -533,31 +533,22 @@ fn usemodule() {
 
 #[test]
 fn array() {
-    let exp = ExprKind::Apply {
-        function: ModPath::from(["mkarray"]),
+    let exp = ExprKind::Array {
         args: Arc::from_iter([
-            (
-                None,
-                ExprKind::Apply {
-                    function: ModPath::from(["mkarray"]),
-                    args: Arc::from_iter([
-                        (None, ExprKind::Constant(Value::from("foo")).to_expr()),
-                        (None, ExprKind::Constant(Value::from(42)).to_expr()),
-                    ]),
-                }
-                .to_expr(),
-            ),
-            (
-                None,
-                ExprKind::Apply {
-                    function: ModPath::from(["mkarray"]),
-                    args: Arc::from_iter([
-                        (None, ExprKind::Constant(Value::from("bar")).to_expr()),
-                        (None, ExprKind::Constant(Value::from(42)).to_expr()),
-                    ]),
-                }
-                .to_expr(),
-            ),
+            ExprKind::Array {
+                args: Arc::from_iter([
+                    ExprKind::Constant(Value::from("foo")).to_expr(),
+                    ExprKind::Constant(Value::from(42)).to_expr(),
+                ]),
+            }
+            .to_expr(),
+            ExprKind::Array {
+                args: Arc::from_iter([
+                    ExprKind::Constant(Value::from("bar")).to_expr(),
+                    ExprKind::Constant(Value::from(42)).to_expr(),
+                ]),
+            }
+            .to_expr(),
         ]),
     }
     .to_expr();
