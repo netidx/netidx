@@ -1,5 +1,5 @@
 use crate::{
-    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern},
+    expr::{Arg, ArrayRef, ArraySlice, Expr, ExprId, ExprKind, ModPath, Pattern},
     typ::{FnArgType, FnType, Refs, TVar, Type},
 };
 use anyhow::{bail, Result};
@@ -268,6 +268,7 @@ where
                     | (Some(Expr { kind: ExprKind::Module { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Use { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Connect { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::ArrayRef { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Ref { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Eq { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Ne { .. }, .. }), _)
@@ -353,6 +354,39 @@ where
             ExprKind::Array { args: Arc::from_iter(args.into_iter()) }.to_expr()
         },
     )
+}
+
+fn arrayref<I>() -> impl Parser<I, Output = Arc<ArrayRef>>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        modpath(),
+        between(
+            token('['),
+            sptoken(']'),
+            choice((
+                attempt((
+                    optional(attempt(expr())).skip(spstring("..")),
+                    optional(attempt(expr())),
+                ))
+                .map(|(start, end)| ArraySlice::Slice { start, end }),
+                attempt(expr()).map(|e| ArraySlice::Index(e)),
+            )),
+        ),
+    )
+        .map(|(name, i)| Arc::new(ArrayRef { name, i }))
+}
+
+fn arrayrefexpr<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    arrayref().map(|r| ExprKind::ArrayRef(r).to_expr())
 }
 
 fn apply<I>() -> impl Parser<I, Output = Expr>
@@ -870,6 +904,7 @@ where
         attempt(spaces().with(apply())),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
+        attempt(spaces().with(arrayrefexpr())),
         attempt(spaces().with(reference())),
     ))
 }

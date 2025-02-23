@@ -367,6 +367,14 @@ impl Type<NoRefs> {
         Self::Primitive(Typ::number())
     }
 
+    pub fn int() -> Self {
+        Self::Primitive(Typ::integer())
+    }
+
+    pub fn uint() -> Self {
+        Self::Primitive(Typ::unsigned_integer())
+    }
+
     /// alias unbound type variables with the same name to each other
     pub fn alias_unbound(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
         match self {

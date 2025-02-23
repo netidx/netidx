@@ -108,6 +108,38 @@ pub struct Pattern {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub enum ArraySlice {
+    Index(Expr),
+    Slice { start: Option<Expr>, end: Option<Expr> },
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub struct ArrayRef {
+    pub name: ModPath,
+    pub i: ArraySlice,
+}
+
+impl fmt::Display for ArrayRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name)?;
+        match &self.i {
+            ArraySlice::Index(e) => write!(f, "[{e}]"),
+            ArraySlice::Slice { start, end } => {
+                write!(f, "[")?;
+                if let Some(e) = start {
+                    write!(f, "{e}")?
+                }
+                write!(f, "..")?;
+                if let Some(e) = end {
+                    write!(f, "{e}")?
+                }
+                write!(f, "]")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Arg {
     pub labeled: Option<Option<Expr>>,
     pub name: ArcStr,
@@ -137,6 +169,7 @@ pub enum ExprKind {
     Ref {
         name: ModPath,
     },
+    ArrayRef(Arc<ArrayRef>),
     Connect {
         name: ModPath,
         value: Arc<Expr>,
@@ -327,6 +360,7 @@ impl ExprKind {
             ExprKind::Constant(_)
             | ExprKind::Use { name: _ }
             | ExprKind::Ref { name: _ }
+            | ExprKind::ArrayRef(_)
             | ExprKind::TypeDef { name: _, typ: _ }
             | ExprKind::Module { name: _, export: _, value: None } => {
                 if newline {
@@ -566,12 +600,11 @@ impl fmt::Display for ExprKind {
             ExprKind::Bind { export, name, typ, value } => {
                 write!(f, "{}let {name}{} = {value}", exp(*export), typ!(typ))
             }
-            ExprKind::Connect { name, value } => {
-                write!(f, "{name} <- {value}")
-            }
+            ExprKind::Connect { name, value } => write!(f, "{name} <- {value}"),
             ExprKind::Use { name } => {
                 write!(f, "use {name}")
             }
+            ExprKind::ArrayRef(r) => write!(f, "{r}"),
             ExprKind::Ref { name } => {
                 write!(f, "{name}")
             }
