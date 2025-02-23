@@ -7,7 +7,7 @@ use arcstr::ArcStr;
 use combine::{
     attempt, between, chainl1, choice, eof, many, many1, not_followed_by, optional,
     parser::{
-        char::{alpha_num, space, spaces, string},
+        char::{alpha_num, digit, space, spaces, string},
         combinator::recognize,
         range::{take_while, take_while1},
     },
@@ -15,6 +15,7 @@ use combine::{
     stream::{position, Range},
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
+use compact_str::CompactString;
 use fxhash::FxHashSet;
 use netidx::{
     path::Path,
@@ -58,7 +59,7 @@ where
         take_while1(move |c: char| c.is_alphabetic() && cap == c.is_uppercase()),
         take_while(|c: char| c.is_alphanumeric() || c == '_'),
     ))
-    .map(|s: String| ArcStr::from(s))
+    .map(|s: CompactString| ArcStr::from(s.as_str()))
 }
 
 fn fname<I>() -> impl Parser<I, Output = ArcStr>
@@ -356,7 +357,7 @@ where
     )
 }
 
-fn arrayref<I>() -> impl Parser<I, Output = Arc<ArrayRef>>
+fn arrayref<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -369,6 +370,19 @@ where
             sptoken(']'),
             choice((
                 attempt((
+                    spaces().with(many(digit())).skip(spstring("..")),
+                    optional(attempt(expr())),
+                ))
+                .map(|(start, end): (CompactString, Option<Expr>)| {
+                    let start = if start == "" {
+                        None
+                    } else {
+                        let v = Value::U64(start.parse().unwrap());
+                        Some(ExprKind::Constant(v).to_expr())
+                    };
+                    ArraySlice::Slice { start, end }
+                }),
+                attempt((
                     optional(attempt(expr())).skip(spstring("..")),
                     optional(attempt(expr())),
                 ))
@@ -377,16 +391,7 @@ where
             )),
         ),
     )
-        .map(|(name, i)| Arc::new(ArrayRef { name, i }))
-}
-
-fn arrayrefexpr<I>() -> impl Parser<I, Output = Expr>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    arrayref().map(|r| ExprKind::ArrayRef(r).to_expr())
+        .map(|(name, i)| ExprKind::ArrayRef(Arc::new(ArrayRef { name, i })).to_expr())
 }
 
 fn apply<I>() -> impl Parser<I, Output = Expr>
@@ -725,7 +730,9 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    modpath().map(|name| ExprKind::Ref { name }.to_expr())
+    modpath()
+        .skip(not_followed_by(token('[')))
+        .map(|name| ExprKind::Ref { name }.to_expr())
 }
 
 fn arith_term<I>() -> impl Parser<I, Output = Expr>
@@ -741,6 +748,7 @@ where
         attempt(spaces().with(apply())),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
+        attempt(spaces().with(arrayref())),
         attempt(spaces().with(reference())),
         attempt(sptoken('!').with(arith()))
             .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
@@ -904,7 +912,7 @@ where
         attempt(spaces().with(apply())),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
-        attempt(spaces().with(arrayrefexpr())),
+        attempt(spaces().with(arrayref())),
         attempt(spaces().with(reference())),
     ))
 }

@@ -355,6 +355,17 @@ fn expr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
     leaf.prop_recursive(10, 100, 10, |inner| {
         prop_oneof![
+            (modpath(), inner.clone()).prop_map(|(name, e)| ExprKind::ArrayRef(
+                Arc::new(ArrayRef { name, i: ArraySlice::Index(e) })
+            )
+            .to_expr()),
+            (modpath(), option::of(inner.clone()), option::of(inner.clone())).prop_map(
+                |(name, start, end)| ExprKind::ArrayRef(Arc::new(ArrayRef {
+                    name,
+                    i: ArraySlice::Slice { start, end }
+                }))
+                .to_expr()
+            ),
             arithexpr(),
             (
                 collection::vec((option::of(random_fname()), inner.clone()), (0, 10)),

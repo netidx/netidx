@@ -831,6 +831,90 @@ let a: fn(?#foo: Number, ?#bar: string, #a: Any, Any) -> string =
 }
 
 #[test]
+fn arrayref0() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::ArrayRef(Arc::new(ArrayRef {
+            name: ["foo"].into(),
+            i: ArraySlice::Index(ExprKind::Constant(Value::I64(3)).to_expr()),
+        }))
+        .to_expr()]),
+    }
+    .to_expr();
+    let s = "{foo[3]}";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
+fn arrayref1() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::ArrayRef(Arc::new(ArrayRef {
+            name: ["foo"].into(),
+            i: ArraySlice::Slice { start: None, end: None },
+        }))
+        .to_expr()]),
+    }
+    .to_expr();
+    let s = "{foo[..]}";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
+fn arrayref2() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::ArrayRef(Arc::new(ArrayRef {
+            name: ["foo"].into(),
+            i: ArraySlice::Slice {
+                start: Some(ExprKind::Constant(Value::I64(1)).to_expr()),
+                end: None,
+            },
+        }))
+        .to_expr()]),
+    }
+    .to_expr();
+    let s = "{foo[1..]}";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
+fn arrayref3() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::ArrayRef(Arc::new(ArrayRef {
+            name: ["foo"].into(),
+            i: ArraySlice::Slice {
+                start: None,
+                end: Some(ExprKind::Constant(Value::I64(1)).to_expr()),
+            },
+        }))
+        .to_expr()]),
+    }
+    .to_expr();
+    let s = "{foo[..1]}";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
+fn arrayref4() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::ArrayRef(Arc::new(ArrayRef {
+            name: ["foo"].into(),
+            i: ArraySlice::Slice {
+                start: Some(ExprKind::Constant(Value::I64(1)).to_expr()),
+                end: Some(ExprKind::Constant(Value::I64(10)).to_expr()),
+            },
+        }))
+        .to_expr()]),
+    }
+    .to_expr();
+    let s = "{foo[1..10]}";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
 fn prop0() {
     let s = "mod a{let a = select 'a: _|| u32:0 {_ as a => u32:0}}";
     dbg!(parse(s).unwrap());

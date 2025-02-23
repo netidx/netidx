@@ -13,9 +13,11 @@ use combine::{
     },
     sep_by,
     stream::{position, Range},
-    token, EasyParser, ParseError, Parser, RangeStream,
+    token, unexpected_any, EasyParser, ParseError, Parser, RangeStream,
 };
+use compact_str::CompactString;
 use netidx_core::utils;
+use rust_decimal::Decimal;
 use std::{borrow::Cow, result::Result, str::FromStr, time::Duration};
 
 pub static VAL_ESC: [char; 2] = ['\\', '"'];
@@ -46,25 +48,33 @@ where
     spaces().with(between(token('"'), token('"'), escaped_string(esc)))
 }
 
-fn uint<I>() -> impl Parser<I, Output = String>
+fn uint<I, T: FromStr + Clone + Copy>() -> impl Parser<I, Output = T>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    many1(digit())
+    many1(digit()).then(|s: CompactString| match s.parse::<T>() {
+        Ok(i) => combine::value(i).right(),
+        Err(_) => unexpected_any("invalid unsigned integer").left(),
+    })
 }
 
-fn int<I>() -> impl Parser<I, Output = String>
+fn int<I, T: FromStr + Clone + Copy>() -> impl Parser<I, Output = T>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    recognize((optional(token('-')), take_while1(|c: char| c.is_digit(10))))
+    recognize((optional(token('-')), take_while1(|c: char| c.is_digit(10)))).then(
+        |s: CompactString| match s.parse::<T>() {
+            Ok(i) => combine::value(i).right(),
+            Err(_) => unexpected_any("invalid signed integer").left(),
+        },
+    )
 }
 
-fn flt<I>() -> impl Parser<I, Output = String>
+fn flt<I, T: FromStr + Clone + Copy>() -> impl Parser<I, Output = T>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -77,7 +87,8 @@ where
             optional(token('.')),
             take_while(|c: char| c.is_digit(10)),
             token('e'),
-            int(),
+            optional(token('-')),
+            take_while1(|c: char| c.is_digit(10)),
         ))),
         attempt(recognize((
             optional(token('-')),
@@ -86,9 +97,13 @@ where
             take_while(|c: char| c.is_digit(10)),
         ))),
     ))
+    .then(|s: CompactString| match s.parse::<T>() {
+        Ok(i) => combine::value(i).right(),
+        Err(_) => unexpected_any("invalid float").left(),
+    })
 }
 
-fn dcml<I>() -> impl Parser<I, Output = String>
+fn dcml<I>() -> impl Parser<I, Output = Decimal>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -100,6 +115,10 @@ where
         optional(token('.')),
         take_while(|c: char| c.is_digit(10)),
     ))
+    .then(|s: CompactString| match s.parse::<Decimal>() {
+        Ok(i) => combine::value(i).right(),
+        Err(_) => unexpected_any("invalid decimal").left(),
+    })
 }
 
 struct Base64Encoded(Vec<u8>);
@@ -154,8 +173,8 @@ where
                 .map(|vals: Vec<Value>| Value::Array(vals.into())),
         ),
         attempt(quoted(esc)).map(|s| Value::String(ArcStr::from(s))),
-        attempt(from_str(flt()).map(|v| Value::F64(v))),
-        attempt(from_str(int()).map(|v| Value::I64(v))),
+        attempt(flt::<_, f64>()).map(Value::F64),
+        attempt(int::<_, i64>()).map(Value::I64),
         attempt(
             string("true").skip(not_followed_by(alpha_num())).map(|_| Value::Bool(true)),
         ),
@@ -165,17 +184,17 @@ where
                 .map(|_| Value::Bool(false)),
         ),
         attempt(string("null").skip(not_followed_by(alpha_num())).map(|_| Value::Null)),
-        attempt(constant("decimal").with(from_str(dcml())).map(|v| Value::Decimal(v))),
-        attempt(constant("u32").with(from_str(uint())).map(|v| Value::U32(v))),
-        attempt(constant("v32").with(from_str(uint())).map(|v| Value::V32(v))),
-        attempt(constant("i32").with(from_str(int())).map(|v| Value::I32(v))),
-        attempt(constant("z32").with(from_str(int())).map(|v| Value::Z32(v))),
-        attempt(constant("u64").with(from_str(uint())).map(|v| Value::U64(v))),
-        attempt(constant("v64").with(from_str(uint())).map(|v| Value::V64(v))),
-        attempt(constant("i64").with(from_str(int())).map(|v| Value::I64(v))),
-        attempt(constant("z64").with(from_str(int())).map(|v| Value::Z64(v))),
-        attempt(constant("f32").with(from_str(flt())).map(|v| Value::F32(v))),
-        attempt(constant("f64").with(from_str(flt())).map(|v| Value::F64(v))),
+        attempt(constant("decimal").with(dcml()).map(Value::Decimal)),
+        attempt(constant("u32").with(uint::<_, u32>()).map(Value::U32)),
+        attempt(constant("v32").with(uint::<_, u32>()).map(Value::V32)),
+        attempt(constant("i32").with(int::<_, i32>()).map(Value::I32)),
+        attempt(constant("z32").with(int::<_, i32>()).map(Value::Z32)),
+        attempt(constant("u64").with(uint::<_, u64>()).map(Value::U64)),
+        attempt(constant("v64").with(uint::<_, u64>()).map(Value::V64)),
+        attempt(constant("i64").with(int::<_, i64>()).map(Value::I64)),
+        attempt(constant("z64").with(int::<_, i64>()).map(Value::Z64)),
+        attempt(constant("f32").with(flt::<_, f32>()).map(Value::F32)),
+        attempt(constant("f64").with(flt::<_, f64>()).map(Value::F64)),
         attempt(
             constant("bytes")
                 .with(from_str(base64str()))
@@ -189,7 +208,7 @@ where
         ),
         attempt(
             constant("duration")
-                .with(from_str(flt()).and(choice((
+                .with(flt::<_, f64>().and(choice((
                     string("ns"),
                     string("us"),
                     string("ms"),

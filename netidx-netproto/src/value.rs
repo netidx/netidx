@@ -1980,6 +1980,33 @@ impl convert::From<ArcStr> for Value {
     }
 }
 
+impl FromValue for CompactString {
+    fn from_value(v: Value) -> Res<Self> {
+        match v {
+            Value::String(s) => Ok(CompactString::from(s.as_str())),
+            v => v.cast(Typ::String).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::String(s) => Ok(CompactString::from(s.as_str())),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::String(c) => Some(CompactString::from(c.as_str())),
+            _ => None,
+        }
+    }
+}
+
+impl convert::From<CompactString> for Value {
+    fn from(v: CompactString) -> Value {
+        Value::String(ArcStr::from(v.as_str()))
+    }
+}
+
 impl FromValue for DateTime<Utc> {
     fn from_value(v: Value) -> Res<Self> {
         match v {
