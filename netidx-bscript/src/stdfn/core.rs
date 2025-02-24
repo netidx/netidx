@@ -788,6 +788,7 @@ pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Sample>();
     ctx.register_builtin::<Sum>();
     ctx.register_builtin::<Uniq>();
+    ctx.register_builtin::<Ungroup>();
     ctx.register_builtin::<ToError>();
     MOD.parse().unwrap()
 }

@@ -114,6 +114,33 @@ impl<T: TypeMark> TVar<T> {
     }
 }
 
+impl TVar<NoRefs> {
+    fn would_cycle(&self, t: &Type<NoRefs>) -> bool {
+        fn would_cycle(addr: usize, t: &Type<NoRefs>) -> bool {
+            match t {
+                Type::Primitive(_) | Type::Bottom(_) | Type::Ref(_) => false,
+                Type::TVar(t) => Arc::as_ptr(&*t.read()).addr() == addr,
+                Type::Array(a) => would_cycle(addr, &**a),
+                Type::Set(s) => s.iter().any(|t| would_cycle(addr, t)),
+                Type::Fn(f) => {
+                    let FnType { args, vargs, rtype, constraints } = &**f;
+                    args.iter().any(|t| would_cycle(addr, &t.typ))
+                        || match vargs {
+                            None => false,
+                            Some(t) => would_cycle(addr, t),
+                        } && would_cycle(addr, &rtype)
+                            && constraints.iter().any(|a| {
+                                Arc::as_ptr(&*a.0.read()).addr() == addr
+                                    || would_cycle(addr, &a.1)
+                            })
+                }
+            }
+        }
+        let addr = Arc::as_ptr(&*self.read()).addr();
+        would_cycle(addr, t)
+    }
+}
+
 impl<T: TypeMark> Deref for TVar<T> {
     type Target = TVarInner<T>;
 
@@ -262,15 +289,19 @@ impl Type<NoRefs> {
                 if let Some(t0) = t0.read().read().as_ref() {
                     return t0.contains(t1);
                 }
-                *t0.read().write() = Some(t1.clone());
-                true
+                !t0.would_cycle(t1) && {
+                    *t0.read().write() = Some(t1.clone());
+                    true
+                }
             }
             (t0, Self::TVar(t1)) => {
                 if let Some(t1) = t1.read().read().as_ref() {
                     return t0.contains(t1);
                 }
-                *t1.read().write() = Some(t0.clone());
-                true
+                !t1.would_cycle(t0) && {
+                    *t1.read().write() = Some(t0.clone());
+                    true
+                }
             }
             (t0, Self::Set(s)) => {
                 let mut ok = true;

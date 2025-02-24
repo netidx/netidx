@@ -169,6 +169,7 @@ macro_rules! run {
                     return Ok(());
                 }
             }
+            dbg!("compilation succeeded");
             assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
             let mut fin = false;
             while state.ctx.user.var_updates.len() > 0 {
@@ -588,5 +589,106 @@ const ARRAY_INDEXING0: &str = r#"
 
 run!(array_indexing0, ARRAY_INDEXING0, |v: Result<&Value>| match v {
     Ok(Value::I64(0)) => true,
+    _ => false,
+});
+
+const ARRAY_INDEXING1: &str = r#"
+{
+  let a = [0, 1, 2, 3, 4, 5, 6];
+  a[0..3]
+}
+"#;
+
+run!(array_indexing1, ARRAY_INDEXING1, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) if &a[..] == [Value::I64(0), Value::I64(1), Value::I64(2)] =>
+        true,
+    _ => false,
+});
+
+const ARRAY_INDEXING2: &str = r#"
+{
+  let a = [0, 1, 2, 3, 4, 5, 6];
+  a[..2]
+}
+"#;
+
+run!(array_indexing2, ARRAY_INDEXING2, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) if &a[..] == [Value::I64(0), Value::I64(1)] => true,
+    _ => false,
+});
+
+const ARRAY_INDEXING3: &str = r#"
+{
+  let a = [0, 1, 2, 3, 4, 5, 6];
+  a[5..]
+}
+"#;
+
+run!(array_indexing3, ARRAY_INDEXING3, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) if &a[..] == [Value::I64(5), Value::I64(6)] => true,
+    _ => false,
+});
+
+const ARRAY_INDEXING4: &str = r#"
+{
+  let a = [0, 1, 2, 3, 4, 5, 6];
+  a[..]
+}
+"#;
+
+run!(array_indexing4, ARRAY_INDEXING4, |v: Result<&Value>| match v {
+    Ok(Value::Array(a))
+        if &a[..]
+            == [
+                Value::I64(0),
+                Value::I64(1),
+                Value::I64(2),
+                Value::I64(3),
+                Value::I64(4),
+                Value::I64(5),
+                Value::I64(6)
+            ] =>
+        true,
+    _ => false,
+});
+
+const ARRAY_INDEXING5: &str = r#"
+{
+  let a = [0, 1, 2, 3, 4, 5, 6];
+  let out = select ungroup(a) {
+    i64 as i => a[i] + 1
+  };
+  group(out, |i, x| i == 6)
+}
+"#;
+
+run!(array_indexing5, ARRAY_INDEXING5, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const ARRAY_INDEXING6: &str = r#"
+{
+  let a = [0, 1, 2, 3, 4, 5, 6];
+  let out = select ungroup(a) {
+    i64 as i => filter_err(a[i]) + 1
+  };
+  group(out, |i, x| i == 6)
+}
+"#;
+
+run!(array_indexing6, ARRAY_INDEXING6, |v: Result<&Value>| match v {
+    Ok(Value::Array(a))
+        if &a[..]
+            == [
+                Value::I64(1),
+                Value::I64(2),
+                Value::I64(3),
+                Value::I64(4),
+                Value::I64(5),
+                Value::I64(6),
+                Value::I64(7)
+            ] =>
+        true,
     _ => false,
 });
