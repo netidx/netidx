@@ -1,6 +1,6 @@
 use crate::typ::{Refs, TVar, Type};
 use arcstr::ArcStr;
-use compact_str::CompactString;
+use compact_str::{format_compact, CompactString};
 use netidx::{
     path::Path,
     subscriber::Value,
@@ -108,38 +108,6 @@ pub struct Pattern {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
-pub enum ArraySlice {
-    Index(Expr),
-    Slice { start: Option<Expr>, end: Option<Expr> },
-}
-
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
-pub struct ArrayRef {
-    pub name: ModPath,
-    pub i: ArraySlice,
-}
-
-impl fmt::Display for ArrayRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name)?;
-        match &self.i {
-            ArraySlice::Index(e) => write!(f, "[{e}]"),
-            ArraySlice::Slice { start, end } => {
-                write!(f, "[")?;
-                if let Some(e) = start {
-                    write!(f, "{e}")?
-                }
-                write!(f, "..")?;
-                if let Some(e) = end {
-                    write!(f, "{e}")?
-                }
-                write!(f, "]")
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Arg {
     pub labeled: Option<Option<Expr>>,
     pub name: ArcStr,
@@ -169,7 +137,6 @@ pub enum ExprKind {
     Ref {
         name: ModPath,
     },
-    ArrayRef(Arc<ArrayRef>),
     Connect {
         name: ModPath,
         value: Arc<Expr>,
@@ -360,7 +327,6 @@ impl ExprKind {
             ExprKind::Constant(_)
             | ExprKind::Use { name: _ }
             | ExprKind::Ref { name: _ }
-            | ExprKind::ArrayRef(_)
             | ExprKind::TypeDef { name: _, typ: _ }
             | ExprKind::Module { name: _, export: _, value: None } => {
                 if newline {
@@ -399,7 +365,10 @@ impl ExprKind {
             }
             ExprKind::Apply { function, args } => {
                 let len = try_single_line!(false);
-                if function == &["str", "concat"] {
+                if function == &["str", "concat"]
+                    || function == &["op", "index"]
+                    || function == &["op", "slice"]
+                {
                     Ok(())
                 } else {
                     buf.truncate(len);
@@ -604,7 +573,6 @@ impl fmt::Display for ExprKind {
             ExprKind::Use { name } => {
                 write!(f, "use {name}")
             }
-            ExprKind::ArrayRef(r) => write!(f, "{r}"),
             ExprKind::Ref { name } => {
                 write!(f, "{name}")
             }
@@ -668,7 +636,6 @@ impl fmt::Display for ExprKind {
             }
             ExprKind::Apply { args, function } => {
                 if function == &["str", "concat"] && args.len() > 0 {
-                    // interpolation
                     write!(f, "\"")?;
                     for s in args.iter() {
                         match &s.1.kind {
@@ -682,6 +649,18 @@ impl fmt::Display for ExprKind {
                         }
                     }
                     write!(f, "\"")
+                } else if function == &["op", "index"] && args.len() == 2 {
+                    write!(f, "{}[{}]", &args[0].1, &args[1].1)
+                } else if function == &["op", "slice"] && args.len() == 3 {
+                    let s = match &args[1].1.kind {
+                        ExprKind::Constant(Value::Null) => "",
+                        e => &format_compact!("{e}"),
+                    };
+                    let e = match &args[2].1.kind {
+                        ExprKind::Constant(Value::Null) => "",
+                        e => &format_compact!("{e}"),
+                    };
+                    write!(f, "{}[{}..{}]", &args[0].1, s, e)
                 } else {
                     write!(f, "{function}")?;
                     write!(f, "(")?;

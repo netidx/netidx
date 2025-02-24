@@ -347,21 +347,28 @@ struct IndexEv;
 
 impl EvalCached for IndexEv {
     const NAME: &str = "index";
-    deftype!("fn(Array<'a>, i64) -> ['a, error]");
+    deftype!("fn(Array<'a>, Int) -> ['a, error]");
 
     fn eval(from: &CachedVals) -> Option<Value> {
-        match (&from.0[0], &from.0[1]) {
-            (Some(Value::Array(elts)), Some(Value::I64(i))) if *i >= 0 => {
-                let i = *i as usize;
+        let i = match &from.0[1] {
+            Some(Value::I64(i)) => *i,
+            Some(v) => match v.clone().cast_to::<i64>() {
+                Ok(i) => i,
+                Err(_) => return err!("op::index(array, index): expected an integer"),
+            },
+            None => return None,
+        };
+        match &from.0[0] {
+            Some(Value::Array(elts)) if i >= 0 => {
+                let i = i as usize;
                 if i < elts.len() {
                     Some(elts[i].clone())
                 } else {
                     err!("array index out of bounds")
                 }
             }
-            (Some(Value::Array(elts)), Some(Value::I64(i))) if *i < 0 => {
+            Some(Value::Array(elts)) if i < 0 => {
                 let len = elts.len();
-                let i = *i;
                 let i = len as i64 + i;
                 if i > 0 {
                     Some(elts[i as usize].clone())
@@ -369,13 +376,78 @@ impl EvalCached for IndexEv {
                     err!("array index out of bounds")
                 }
             }
-            (None, _) | (_, None) => None,
-            _ => err!("index(array, index): expected an array"),
+            None => None,
+            _ => err!("op::index(array, index): expected an array"),
         }
     }
 }
 
 type Index = CachedArgs<IndexEv>;
+
+struct SliceEv;
+
+impl EvalCached for SliceEv {
+    const NAME: &str = "slice";
+    deftype!("fn(Array<'a>, [Int, null], [Int, null]) -> [Array<'a>, error]");
+
+    fn eval(from: &CachedVals) -> Option<Value> {
+        macro_rules! number {
+            ($e:expr) => {
+                match $e.clone().cast_to::<usize>() {
+                    Ok(i) => i,
+                    Err(_) => return err!("expected a positive number"),
+                }
+            };
+        }
+        let (start, end) = match (&from.0[1], &from.0[2]) {
+            (None, _) | (_, None) => return None,
+            (Some(v0), Some(v1)) => match (v0, v1) {
+                (Value::Null, Value::Null) => (None, None),
+                (Value::Null, Value::U64(i)) => (None, Some(*i as usize)),
+                (Value::Null, v) => (None, Some(number!(v))),
+                (Value::U64(i), Value::Null) => (Some(*i as usize), None),
+                (v, Value::Null) => (Some(number!(v)), None),
+                (Value::U64(v0), Value::U64(v1)) => {
+                    (Some(*v0 as usize), Some(*v1 as usize))
+                }
+                (v0, v1) => (Some(number!(v0)), Some(number!(v1))),
+            },
+        };
+        match &from.0[0] {
+            Some(Value::Array(elts)) => match (start, end) {
+                (None, None) => Some(Value::Array(elts.clone())),
+                (Some(i), Some(j)) => {
+                    if i < elts.len() && j <= elts.len() && i < j {
+                        let a = ValArray::from_iter_exact(elts[i..j].iter().cloned());
+                        Some(Value::Array(a))
+                    } else {
+                        err!("array index out of bounds or empty/crossed slice")
+                    }
+                }
+                (Some(i), None) => {
+                    if i < elts.len() {
+                        let a = ValArray::from_iter_exact(elts[i..].iter().cloned());
+                        Some(Value::Array(a))
+                    } else {
+                        err!("array index out of bounds")
+                    }
+                }
+                (None, Some(i)) => {
+                    if i <= elts.len() {
+                        let a = ValArray::from_iter_exact(elts[..i].iter().cloned());
+                        Some(Value::Array(a))
+                    } else {
+                        err!("array index out of bounds")
+                    }
+                }
+            },
+            Some(_) => err!("expected array"),
+            None => None,
+        }
+    }
+}
+
+type Slice = CachedArgs<SliceEv>;
 
 struct FilterEv;
 
@@ -664,6 +736,11 @@ pub mod core {
         array,
         null
     ]
+
+    pub mod op {
+        let index = |a, i| 'index
+        let slice = |a, i, j| 'slice
+    }
                 
     pub let all = |@args| 'all
     pub let and = |@args| 'and
@@ -673,7 +750,6 @@ pub mod core {
     pub let filter_err = |e| 'filter_err
     pub let filter = |predicate, v| 'filter
     pub let group = |v, f| 'group
-    pub let index = |a, i| 'index
     pub let is_err = |e| 'is_error
     pub let error = |e| 'error
     pub let max = |@args| 'max
@@ -700,6 +776,7 @@ pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<FilterErr>();
     ctx.register_builtin::<Group<C, E>>();
     ctx.register_builtin::<Index>();
+    ctx.register_builtin::<Slice>();
     ctx.register_builtin::<IsErr>();
     ctx.register_builtin::<Max>();
     ctx.register_builtin::<Mean>();

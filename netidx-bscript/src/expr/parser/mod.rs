@@ -1,5 +1,5 @@
 use crate::{
-    expr::{Arg, ArrayRef, ArraySlice, Expr, ExprId, ExprKind, ModPath, Pattern},
+    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern},
     typ::{FnArgType, FnType, Refs, TVar, Type},
 };
 use anyhow::{bail, Result};
@@ -269,7 +269,6 @@ where
                     | (Some(Expr { kind: ExprKind::Module { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Use { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Connect { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::ArrayRef { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Ref { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Eq { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Ne { .. }, .. }), _)
@@ -371,27 +370,52 @@ where
             choice((
                 attempt((
                     spaces().with(many(digit())).skip(spstring("..")),
-                    optional(attempt(expr())),
+                    spaces().with(many(digit())),
                 ))
-                .map(|(start, end): (CompactString, Option<Expr>)| {
+                .map(|(start, end): (CompactString, CompactString)| {
                     let start = if start == "" {
-                        None
+                        Value::Null
                     } else {
-                        let v = Value::U64(start.parse().unwrap());
-                        Some(ExprKind::Constant(v).to_expr())
+                        Value::U64(start.parse().unwrap())
                     };
-                    ArraySlice::Slice { start, end }
+                    let start = ExprKind::Constant(start).to_expr();
+                    let end = if end == "" {
+                        Value::Null
+                    } else {
+                        Value::U64(end.parse().unwrap())
+                    };
+                    let end = ExprKind::Constant(end).to_expr();
+                    Either::Left((start, end))
                 }),
                 attempt((
                     optional(attempt(expr())).skip(spstring("..")),
                     optional(attempt(expr())),
                 ))
-                .map(|(start, end)| ArraySlice::Slice { start, end }),
-                attempt(expr()).map(|e| ArraySlice::Index(e)),
+                .map(|(start, end)| {
+                    let start =
+                        start.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
+                    let end = end.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
+                    Either::Left((start, end))
+                }),
+                attempt(expr()).map(|e| Either::Right(e)),
             )),
         ),
     )
-        .map(|(name, i)| ExprKind::ArrayRef(Arc::new(ArrayRef { name, i })).to_expr())
+        .map(|(name, args)| {
+            let a = ExprKind::Ref { name }.to_expr();
+            match args {
+                Either::Left((start, end)) => ExprKind::Apply {
+                    function: ["op", "slice"].into(),
+                    args: Arc::from_iter([(None, a), (None, start), (None, end)]),
+                }
+                .to_expr(),
+                Either::Right(e) => ExprKind::Apply {
+                    function: ["op", "index"].into(),
+                    args: Arc::from_iter([(None, a), (None, e)]),
+                }
+                .to_expr(),
+            }
+        })
 }
 
 fn apply<I>() -> impl Parser<I, Output = Expr>

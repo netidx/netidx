@@ -1,6 +1,6 @@
 use crate::{
     env::{Bind, LambdaBind},
-    expr::{Arg, ArrayRef, ArraySlice, Expr, ExprId, ExprKind, ModPath, Pattern},
+    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern},
     typ::{FnType, NoRefs, Refs, TVar, Type},
     Apply, ApplyTyped, BindId, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars,
 };
@@ -303,199 +303,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
     }
 }
 
-pub enum ArraySliceNode<C: Ctx + 'static, E: Debug + Clone + 'static> {
-    Index(Cached<C, E>),
-    Slice { start: Option<Cached<C, E>>, end: Option<Cached<C, E>> },
-}
-
-pub struct ArrayRefNode<C: Ctx + 'static, E: Debug + Clone + 'static> {
-    id: BindId,
-    i: ArraySliceNode<C, E>,
-    src: Option<ValArray>,
-    typ: Type<NoRefs>,
-}
-
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> ArrayRefNode<C, E> {
-    fn compile(
-        ctx: &mut ExecCtx<C, E>,
-        spec: &ArrayRef,
-        scope: &ModPath,
-        top_id: ExprId,
-    ) -> Result<Self> {
-        macro_rules! comp_bail {
-            ($e:expr) => {{
-                let n = Node::compile_int(ctx, $e.clone(), scope, top_id);
-                if let Some(e) = n.extract_err() {
-                    Err(anyhow!("index error {e}"))
-                } else {
-                    Ok(n)
-                }
-            }};
-        }
-        match ctx.env.lookup_bind(scope, &spec.name) {
-            None => bail!("{} is undefined", spec.name),
-            Some((_, Bind { fun: Some(_), .. })) => bail!("{} is a function", spec.name),
-            Some((_, Bind { id, typ, fun: None, .. })) => {
-                let typ = typ.clone();
-                let id = *id;
-                let i = match &spec.i {
-                    ArraySlice::Index(e) => {
-                        ArraySliceNode::Index(Cached::new(comp_bail!(e)?))
-                    }
-                    ArraySlice::Slice { start, end } => {
-                        let start = start.as_ref().map(|e| comp_bail!(e)).transpose()?;
-                        let start = start.map(Cached::new);
-                        let end = end.as_ref().map(|e| comp_bail!(e)).transpose()?;
-                        let end = end.map(Cached::new);
-                        ArraySliceNode::Slice { start, end }
-                    }
-                };
-                Ok(Self { id, i, src: None, typ })
-            }
-        }
-    }
-
-    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
-        match &mut self.i {
-            ArraySliceNode::Index(n) => {
-                n.node.typecheck(ctx)?;
-                Type::int().check_contains(&n.node.typ)
-            }
-            ArraySliceNode::Slice { start, end } => {
-                if let Some(n) = start {
-                    n.node.typecheck(ctx)?;
-                    Type::uint().check_contains(&n.node.typ)?
-                }
-                if let Some(n) = end {
-                    n.node.typecheck(ctx)?;
-                    Type::uint().check_contains(&n.node.typ)?
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> bool {
-        let idx = match &mut self.i {
-            ArraySliceNode::Index(n) => n.update_changed(ctx, event),
-            ArraySliceNode::Slice { start, end } => {
-                start.as_mut().map(|n| n.update_changed(ctx, event)).unwrap_or(false)
-                    || end.as_mut().map(|n| n.update_changed(ctx, event)).unwrap_or(false)
-            }
-        };
-        let src = match event {
-            Event::Variable(id, Value::Array(a)) if *id == self.id => {
-                self.src = Some(a.clone());
-                true
-            }
-            Event::Variable(_, _)
-            | Event::Init
-            | Event::Netidx(_, _)
-            | Event::User(_) => false,
-        };
-        idx || src
-    }
-
-    fn eval(&self) -> Option<Value> {
-        macro_rules! err {
-            ($e:expr, $($arg:expr),*) => {
-                Some(Value::Error(format_compact!($e, $($arg),*).as_str().into()))
-            };
-        }
-        self.src.as_ref().and_then(|a| match &self.i {
-            ArraySliceNode::Index(Cached { cached: Some(i), .. }) => {
-                i.clone().cast_to::<i64>().ok().and_then(|i| {
-                    let l = a.len();
-                    let i = if i >= 0 {
-                        let i = i as usize;
-                        if i < l {
-                            i
-                        } else {
-                            return err!("index {i} is out of bounds {l}",);
-                        }
-                    } else {
-                        let ix = l as i64 + i;
-                        if ix >= 0 {
-                            ix as usize
-                        } else {
-                            return err!("index {i} -> {ix} is out of bounds {l}",);
-                        }
-                    };
-                    Some(a[i].clone())
-                })
-            }
-            ArraySliceNode::Slice { start: None, end: None } => {
-                Some(Value::Array(a.clone()))
-            }
-            ArraySliceNode::Slice {
-                start: Some(Cached { cached: Some(i), .. }),
-                end: None,
-            } => i.clone().cast_to::<usize>().ok().and_then(|i| {
-                if i < a.len() {
-                    let iter = a[i..].iter().cloned();
-                    Some(Value::Array(ValArray::from_iter_exact(iter)))
-                } else {
-                    err!("slice {i}.. starts after the end of the array {}", a.len())
-                }
-            }),
-            ArraySliceNode::Slice {
-                start: None,
-                end: Some(Cached { cached: Some(i), .. }),
-            } => i.clone().cast_to::<usize>().ok().and_then(|i| {
-                if i <= a.len() {
-                    let iter = a[..i].iter().cloned();
-                    Some(Value::Array(ValArray::from_iter_exact(iter)))
-                } else {
-                    err!("slice ..{i} extends after the end of the array {}", a.len())
-                }
-            }),
-            ArraySliceNode::Slice {
-                start: Some(Cached { cached: Some(i), .. }),
-                end: Some(Cached { cached: Some(j), .. }),
-            } => i
-                .clone()
-                .cast_to::<usize>()
-                .ok()
-                .and_then(|i| j.clone().cast_to::<usize>().ok().map(|j| (i, j)))
-                .and_then(|(i, j)| {
-                    if i > j {
-                        err!("slice {i}..{j} negative sized slice",)
-                    } else if i >= a.len() {
-                        err!(
-                            "slice {i}..{j} starts after the end of the array {}",
-                            a.len()
-                        )
-                    } else if j > a.len() {
-                        err!(
-                            "slice {i}..{j} extends after the end of the array {}",
-                            a.len()
-                        )
-                    } else {
-                        let iter = a[i..j].iter().cloned();
-                        Some(Value::Array(ValArray::from_iter_exact(iter)))
-                    }
-                }),
-            ArraySliceNode::Index(Cached { cached: None, .. })
-            | ArraySliceNode::Slice {
-                start: Some(Cached { cached: None, .. }),
-                end: None,
-            }
-            | ArraySliceNode::Slice {
-                start: None,
-                end: Some(Cached { cached: None, .. }),
-            }
-            | ArraySliceNode::Slice {
-                start: Some(Cached { cached: None, .. }),
-                end: Some(_),
-            }
-            | ArraySliceNode::Slice {
-                start: Some(_),
-                end: Some(Cached { cached: None, .. }),
-            } => None,
-        })
-    }
-}
-
 pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Use,
     TypeDef,
@@ -503,7 +310,6 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Module(Box<[Node<C, E>]>),
     Do(Box<[Node<C, E>]>),
     Bind(BindId, Box<Node<C, E>>),
-    ArrayRef(Box<ArrayRefNode<C, E>>),
     Ref(BindId),
     Connect(BindId, Box<Node<C, E>>),
     Lambda(Arc<LambdaBind<C, E>>),
@@ -598,7 +404,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             NodeKind::Constant(_)
             | NodeKind::Use
             | NodeKind::Bind(_, _)
-            | NodeKind::ArrayRef(_)
             | NodeKind::Ref(_)
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
@@ -634,7 +439,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Do(_)
             | NodeKind::Use
             | NodeKind::Bind(_, _)
-            | NodeKind::ArrayRef(_)
             | NodeKind::Ref(_)
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
@@ -685,7 +489,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Do(_)
             | NodeKind::Use
             | NodeKind::Bind(_, _)
-            | NodeKind::ArrayRef(_)
             | NodeKind::Ref(_)
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
@@ -1114,19 +917,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     Node { spec: Box::new(spec), typ, kind }
                 }
             }
-            Expr { kind: ExprKind::ArrayRef(r), id: _ } => {
-                match ArrayRefNode::compile(ctx, &**r, scope, top_id) {
-                    Err(e) => error!("{e}"),
-                    Ok(n) => Node {
-                        spec: Box::new(spec),
-                        kind: NodeKind::ArrayRef(Box::new(n)),
-                        typ: Type::Set(Arc::from_iter([
-                            Type::Primitive(Typ::Error.into()),
-                            Type::empty_tvar(),
-                        ])),
-                    },
-                }
-            }
             Expr { kind: ExprKind::Ref { name }, id: _ } => {
                 match ctx.env.lookup_bind(scope, name) {
                     None => error!("{name} not defined"),
@@ -1304,22 +1094,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 wrap!(node.typecheck(ctx))?;
                 wrap!(self.typ.check_contains(&node.typ))?;
                 Ok(())
-            }
-            NodeKind::ArrayRef(r) => {
-                wrap!(r.typecheck(ctx))?;
-                match &r.i {
-                    ArraySliceNode::Index(_) => {
-                        match &self.typ {
-                            Type::Set(s) => wrap!(Type::Array(Arc::new(s[1].clone()))
-                                .check_contains(&r.typ))?,
-                            _ => bail!("BUG, unexpected ArrayRef type"),
-                        }
-                    }
-                    ArraySliceNode::Slice { .. } => {
-                        wrap!(self.typ.check_contains(&r.typ))?
-                    }
-                }
-                wrap!(Type::Primitive(Typ::Array.into()).check_contains(&r.typ))
             }
             NodeKind::Connect(id, node) => {
                 wrap!(node.typecheck(ctx))?;
@@ -1542,13 +1316,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     ctx.user.set_var(*id, v)
                 }
                 None
-            }
-            NodeKind::ArrayRef(r) => {
-                if r.update(ctx, event) {
-                    r.eval()
-                } else {
-                    None
-                }
             }
             NodeKind::Ref(bid) => match event {
                 Event::Variable(id, v) if bid == id => Some(v.clone()),

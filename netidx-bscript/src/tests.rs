@@ -181,7 +181,7 @@ macro_rules! run {
                 }
             }
             if !fin {
-                bail!("did not receive expected result")
+                bail!("did not receive any result")
             } else {
                 Ok(())
             }
@@ -576,5 +576,17 @@ const TYPED_ARRAYS1: &str = r#"
 
 run!(typed_arrays1, TYPED_ARRAYS1, |v: Result<&Value>| match v {
     Err(_) => true,
+    _ => false,
+});
+
+const ARRAY_INDEXING0: &str = r#"
+{
+  let a = [0, 1, 2, 3, 4, 5, 6];
+  a[0]
+}
+"#;
+
+run!(array_indexing0, ARRAY_INDEXING0, |v: Result<&Value>| match v {
+    Ok(Value::I64(0)) => true,
     _ => false,
 });
