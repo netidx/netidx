@@ -760,6 +760,25 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::Connect { name: name0, value: value0 },
             ExprKind::Connect { name: name1, value: value1 },
         ) => dbg!(dbg!(name0 == name1) && dbg!(check(value0, value1))),
+        (ExprKind::ArrayRef(r0), ExprKind::ArrayRef(r1)) => {
+            r0.name == r1.name
+                && match (&r0.i, &r1.i) {
+                    (ArraySlice::Index(i0), ArraySlice::Index(i1)) => check(i0, i1),
+                    (
+                        ArraySlice::Slice { start: s0, end: e0 },
+                        ArraySlice::Slice { start: s1, end: e1 },
+                    ) => match (s0, s1, e0, e1) {
+                        (Some(s0), Some(s1), Some(e0), Some(e1)) => {
+                            check(s0, s1) && check(e0, e1)
+                        }
+                        (Some(s0), Some(s1), None, None) => check(s0, s1),
+                        (None, None, Some(e0), Some(e1)) => check(e0, e1),
+                        (None, None, None, None) => true,
+                        _ => false,
+                    },
+                    _ => false,
+                }
+        }
         (ExprKind::Ref { name: name0 }, ExprKind::Ref { name: name1 }) => {
             dbg!(name0 == name1)
         }
