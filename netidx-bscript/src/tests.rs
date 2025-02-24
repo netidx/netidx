@@ -12,11 +12,11 @@ use netidx::{
     subscriber::{Subscriber, SubscriberBuilder},
 };
 use smallvec::SmallVec;
-use std::{collections::HashMap, mem};
+use std::collections::{HashMap, VecDeque};
 
 struct TestCtx {
     by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
-    var_updates: Vec<(ExprId, BindId, Value)>,
+    var_updates: VecDeque<(BindId, Value)>,
     _resolver: resolver_server::Server,
     _publisher: Publisher,
     _subscriber: Subscriber,
@@ -50,7 +50,7 @@ impl TestCtx {
         let subscriber = SubscriberBuilder::new(cfg).build()?;
         Ok(Self {
             by_ref: HashMap::default(),
-            var_updates: vec![],
+            var_updates: VecDeque::new(),
             _resolver: resolver,
             _publisher: publisher,
             _subscriber: subscriber,
@@ -108,17 +108,7 @@ impl Ctx for TestCtx {
     }
 
     fn set_var(&mut self, id: BindId, value: Value) {
-        if let Some(refs) = self.by_ref.get(&id) {
-            match &**refs {
-                [] => (),
-                [eids @ .., eid] => {
-                    for eid in eids {
-                        self.var_updates.push((*eid, id, value.clone()));
-                    }
-                    self.var_updates.push((*eid, id, value))
-                }
-            }
-        }
+        self.var_updates.push_back((id, value));
     }
 }
 
@@ -142,17 +132,15 @@ async fn bind_ref_arith() -> Result<()> {
 }
 "#
     .parse::<Expr>()?;
-    let eid = e.id;
     let mut n = Node::compile(&mut state.ctx, &ModPath::root(), e);
     if let Some(e) = n.extract_err() {
         bail!("compilation failed {e}")
     }
     assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
     assert_eq!(state.ctx.user.var_updates.len(), 1);
-    let (up_eid, _, v) = &state.ctx.user.var_updates[0];
-    assert_eq!(up_eid, &eid);
+    let (_, v) = &state.ctx.user.var_updates[0];
     assert_eq!(v, &Value::I64(1));
-    let (_, id, v) = state.ctx.user.var_updates.pop().unwrap();
+    let (id, v) = state.ctx.user.var_updates.pop_front().unwrap();
     assert_eq!(n.update(&mut state.ctx, &Event::Variable(id, v)), Some(Value::I64(1)));
     assert_eq!(state.ctx.user.var_updates.len(), 0);
     Ok(())
@@ -163,6 +151,7 @@ macro_rules! run {
         #[tokio::test(flavor = "current_thread")]
         async fn $name() -> Result<()> {
             let mut state = TestState::new().await?;
+            state.ctx.dbg_ctx.trace = false;
             let mut n = Node::compile(&mut state.ctx, &ModPath::root(), $code.parse()?);
             if let Some(e) = n.extract_err() {
                 if $pred(Err(dbg!(anyhow!("compilation failed {e}")))) {
@@ -172,16 +161,22 @@ macro_rules! run {
             dbg!("compilation succeeded");
             assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
             let mut fin = false;
-            while state.ctx.user.var_updates.len() > 0 {
-                for (_, id, v) in mem::take(&mut state.ctx.user.var_updates) {
-                    match n.update(&mut state.ctx, &Event::Variable(id, v)) {
-                        None => (),
-                        Some(v) if !fin && $pred(Ok(&v)) => fin = true,
-                        v => panic!("unexpected result {v:?}"),
+            while let Some((id, v)) = state.ctx.user.var_updates.pop_front() {
+                match n.update(&mut state.ctx, &Event::Variable(id, v)) {
+                    None => (),
+                    Some(v) if !fin && $pred(Ok(&v)) => fin = true,
+                    v => {
+                        for (_, (ts, e, v)) in state.ctx.dbg_ctx.iter_events() {
+                            dbg!((ts, e, v));
+                        }
+                        bail!("unexpected result {v:?}")
                     }
                 }
             }
             if !fin {
+                for (_, (ts, e, v)) in state.ctx.dbg_ctx.iter_events() {
+                    dbg!((ts, e, v));
+                }
                 bail!("did not receive any result")
             } else {
                 Ok(())
@@ -671,9 +666,12 @@ const ARRAY_INDEXING6: &str = r#"
 {
   let a = [0, 1, 2, 3, 4, 5, 6];
   let out = select ungroup(a) {
-    i64 as i => filter_err(a[i]) + 1
+    i64 as i => {
+        let r = a[i];
+        filter(!is_err(r), r) + 1
+    }
   };
-  group(out, |i, x| i == 6)
+  group(out, |i, x| i == 7)
 }
 "#;
 
