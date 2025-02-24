@@ -5,7 +5,8 @@ use crate::{
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use combine::{
-    attempt, between, chainl1, choice, eof, many, many1, not_followed_by, optional,
+    attempt, between, chainl1, choice, eof, look_ahead, many, many1, not_followed_by,
+    optional,
     parser::{
         char::{alpha_num, digit, space, spaces, string},
         combinator::recognize,
@@ -368,25 +369,26 @@ where
             token('['),
             sptoken(']'),
             choice((
-                attempt((
-                    spaces().with(many(digit())).skip(spstring("..")),
-                    spaces().with(many(digit())),
-                ))
-                .map(|(start, end): (CompactString, CompactString)| {
-                    let start = if start == "" {
-                        Value::Null
-                    } else {
-                        Value::U64(start.parse().unwrap())
-                    };
-                    let start = ExprKind::Constant(start).to_expr();
-                    let end = if end == "" {
-                        Value::Null
-                    } else {
-                        Value::U64(end.parse().unwrap())
-                    };
-                    let end = ExprKind::Constant(end).to_expr();
-                    Either::Left((start, end))
-                }),
+                attempt(
+                    (
+                        spaces().with(optional(many1(digit()))).skip(spstring("..")),
+                        spaces().with(optional(many1(digit()))),
+                    )
+                        .skip(look_ahead(sptoken(']'))),
+                )
+                .map(
+                    |(start, end): (Option<CompactString>, Option<CompactString>)| {
+                        let start = start
+                            .map(|i| Value::U64(i.parse().unwrap()))
+                            .unwrap_or(Value::Null);
+                        let start = ExprKind::Constant(start).to_expr();
+                        let end = end
+                            .map(|i| Value::U64(i.parse().unwrap()))
+                            .unwrap_or(Value::Null);
+                        let end = ExprKind::Constant(end).to_expr();
+                        Either::Left((start, end))
+                    },
+                ),
                 attempt((
                     optional(attempt(expr())).skip(spstring("..")),
                     optional(attempt(expr())),
