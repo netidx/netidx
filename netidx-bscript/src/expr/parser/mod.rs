@@ -761,6 +761,22 @@ where
         .map(|name| ExprKind::Ref { name }.to_expr())
 }
 
+fn qop<I, P: Parser<I, Output = Expr>>(p: P) -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (p, optional(attempt(sptoken('?')))).map(|(e, qop)| match qop {
+        None => e,
+        Some(_) => ExprKind::Apply {
+            function: ["op::question"].into(),
+            args: Arc::from_iter([(None, e)]),
+        }
+        .to_expr(),
+    })
+}
+
 fn arith_term<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -768,16 +784,19 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(spaces().with(do_block())),
+        attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(array())),
-        attempt(spaces().with(select())),
-        attempt(spaces().with(apply())),
+        attempt(spaces().with(qop(select()))),
+        attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
-        attempt(spaces().with(arrayref())),
-        attempt(spaces().with(reference())),
-        attempt(sptoken('!').with(arith()))
-            .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
+        attempt(spaces().with(qop(arrayref()))),
+        attempt(spaces().with(qop(reference()))),
+        attempt(
+            sptoken('!')
+                .with(arith())
+                .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
+        ),
         attempt(between(sptoken('('), sptoken(')'), arith())),
     ))
     .skip(spaces())
@@ -928,18 +947,18 @@ where
 {
     choice((
         attempt(spaces().with(arith())),
-        attempt(spaces().with(do_block())),
+        attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(array())),
         attempt(spaces().with(lambda())),
         attempt(spaces().with(letbind())),
         attempt(spaces().with(connect())),
-        attempt(spaces().with(select())),
-        attempt(spaces().with(cast())),
-        attempt(spaces().with(apply())),
+        attempt(spaces().with(qop(select()))),
+        attempt(spaces().with(qop(cast()))),
+        attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
-        attempt(spaces().with(arrayref())),
-        attempt(spaces().with(reference())),
+        attempt(spaces().with(qop(arrayref()))),
+        attempt(spaces().with(qop(reference()))),
     ))
 }
 
@@ -961,12 +980,12 @@ where
         attempt(spaces().with(module())),
         attempt(spaces().with(use_module())),
         attempt(spaces().with(typedef())),
-        attempt(spaces().with(do_block())),
+        attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(array())),
         attempt(spaces().with(letbind())),
         attempt(spaces().with(connect())),
         attempt(spaces().with(interpolated())),
-        attempt(spaces().with(apply())),
+        attempt(spaces().with(qop(apply()))),
     ))
 }
 

@@ -1,12 +1,12 @@
 use crate::{
     deftype, err, errf,
-    expr::{parser::parse_fn_type, Expr, ExprKind},
+    expr::{parser::parse_fn_type, Expr, ExprKind, ModPath},
     node::{Node, NodeKind},
     stdfn::{CachedArgs, CachedVals, EvalCached},
     typ::{FnType, Refs, Type},
     Apply, ApplyTyped, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn,
 };
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use netidx::{publisher::Typ, subscriber::Value};
@@ -717,6 +717,52 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Ungroup {
     }
 }
 
+struct QuestionOp(BindId);
+
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for QuestionOp {
+    const NAME: &str = "question";
+    deftype!("fn(['a, error]) -> 'a");
+
+    fn init(_ctx: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|ctx, scope, _from, _top_id| {
+            let (_, bind) = ctx
+                .env
+                .lookup_bind(scope, &ModPath::from(["errors"]))
+                .ok_or_else(|| anyhow!("cannot find errors"))?;
+            Ok(Box::new(QuestionOp(bind.id)))
+        })
+    }
+
+    fn typecheck(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        _from: &mut [Node<C, E>],
+    ) -> anyhow::Result<()> {
+        match ctx.env.by_id.get(&self.0) {
+            None => bail!("missing bind"),
+            Some(bind) => bind.typ.check_contains(&Type::Primitive(Typ::Error.into())),
+        }
+    }
+}
+
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for QuestionOp {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        match from[0].update(ctx, event) {
+            None => None,
+            Some(e @ Value::Error(_)) => {
+                ctx.user.set_var(self.0, e);
+                None
+            }
+            Some(v) => Some(v),
+        }
+    }
+}
+
 const MOD: &str = r#"
 pub mod core {
     type Sint = [ i32, z32, i64, z64 ]
@@ -740,8 +786,10 @@ pub mod core {
     pub mod op {
         let index = |a, i| 'index
         let slice = |a, i, j| 'slice
+        let question = |a| 'question
     }
-                
+
+    pub let errors = never()
     pub let all = |@args| 'all
     pub let and = |@args| 'and
     pub let any = |@args| 'any
@@ -790,5 +838,6 @@ pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Uniq>();
     ctx.register_builtin::<Ungroup>();
     ctx.register_builtin::<ToError>();
+    ctx.register_builtin::<QuestionOp>();
     MOD.parse().unwrap()
 }

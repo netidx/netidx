@@ -363,51 +363,55 @@ impl ExprKind {
                 try_single_line!(true);
                 pretty_print_exprs_int(indent, limit, buf, args, "[", "]", ",", |a| a)
             }
-            ExprKind::Apply { function, args } => {
-                let len = try_single_line!(false);
+            ExprKind::Apply { function, args }
+                if function == &["op", "question"] && args.len() == 1 =>
+            {
+                try_single_line!(true);
+                args[0].1.kind.pretty_print(indent, limit, true, buf)?;
+                kill_newline!(buf);
+                writeln!(buf, "?")
+            }
+            ExprKind::Apply { function, args: _ }
                 if function == &["str", "concat"]
                     || function == &["op", "index"]
-                    || function == &["op", "slice"]
-                {
-                    Ok(())
-                } else {
-                    buf.truncate(len);
-                    write!(buf, "{function}")?;
-                    writeln!(buf, "(")?;
-                    for i in 0..args.len() {
-                        match &args[i].0 {
-                            None => args[i].1.kind.pretty_print(
-                                indent + 2,
-                                limit,
-                                true,
-                                buf,
-                            )?,
-                            Some(name) => match &args[i].1.kind {
-                                ExprKind::Ref { name: n }
-                                    if Path::dirname(&n.0).is_none()
-                                        && Path::basename(&n.0)
-                                            == Some(name.as_str()) =>
-                                {
-                                    writeln!(buf, "#{name}")?
-                                }
-                                _ => {
-                                    write!(buf, "#{name}: ")?;
-                                    args[i].1.kind.pretty_print(
-                                        indent + 2,
-                                        limit,
-                                        false,
-                                        buf,
-                                    )?
-                                }
-                            },
+                    || function == &["op", "slice"] =>
+            {
+                try_single_line!(false);
+                Ok(())
+            }
+            ExprKind::Apply { function, args } => {
+                try_single_line!(true);
+                write!(buf, "{function}")?;
+                writeln!(buf, "(")?;
+                for i in 0..args.len() {
+                    match &args[i].0 {
+                        None => {
+                            args[i].1.kind.pretty_print(indent + 2, limit, true, buf)?
                         }
-                        if i < args.len() - 1 {
-                            kill_newline!(buf);
-                            writeln!(buf, ",")?
-                        }
+                        Some(name) => match &args[i].1.kind {
+                            ExprKind::Ref { name: n }
+                                if Path::dirname(&n.0).is_none()
+                                    && Path::basename(&n.0) == Some(name.as_str()) =>
+                            {
+                                writeln!(buf, "#{name}")?
+                            }
+                            _ => {
+                                write!(buf, "#{name}: ")?;
+                                args[i].1.kind.pretty_print(
+                                    indent + 2,
+                                    limit,
+                                    false,
+                                    buf,
+                                )?
+                            }
+                        },
                     }
-                    writeln!(buf, ")")
+                    if i < args.len() - 1 {
+                        kill_newline!(buf);
+                        writeln!(buf, ",")?
+                    }
                 }
+                writeln!(buf, ")")
             }
             ExprKind::Lambda { args, vargs, rtype, constraints, body } => {
                 try_single_line!(true);
@@ -634,56 +638,67 @@ impl fmt::Display for ExprKind {
                 }
                 write!(f, "]")
             }
-            ExprKind::Apply { args, function } => {
-                if function == &["str", "concat"] && args.len() > 0 {
-                    write!(f, "\"")?;
-                    for s in args.iter() {
-                        match &s.1.kind {
-                            ExprKind::Constant(Value::String(s)) if s.len() > 0 => {
-                                let es = utils::escape(&*s, '\\', &parser::BSCRIPT_ESC);
-                                write!(f, "{es}",)?;
-                            }
-                            s => {
-                                write!(f, "[{s}]")?;
-                            }
+            ExprKind::Apply { args, function }
+                if function == &["str", "concat"] && args.len() > 0 =>
+            {
+                write!(f, "\"")?;
+                for s in args.iter() {
+                    match &s.1.kind {
+                        ExprKind::Constant(Value::String(s)) if s.len() > 0 => {
+                            let es = utils::escape(&*s, '\\', &parser::BSCRIPT_ESC);
+                            write!(f, "{es}",)?;
+                        }
+                        s => {
+                            write!(f, "[{s}]")?;
                         }
                     }
-                    write!(f, "\"")
-                } else if function == &["op", "index"] && args.len() == 2 {
-                    write!(f, "{}[{}]", &args[0].1, &args[1].1)
-                } else if function == &["op", "slice"] && args.len() == 3 {
-                    let s = match &args[1].1.kind {
-                        ExprKind::Constant(Value::Null) => "",
-                        e => &format_compact!("{e}"),
-                    };
-                    let e = match &args[2].1.kind {
-                        ExprKind::Constant(Value::Null) => "",
-                        e => &format_compact!("{e}"),
-                    };
-                    write!(f, "{}[{}..{}]", &args[0].1, s, e)
-                } else {
-                    write!(f, "{function}")?;
-                    write!(f, "(")?;
-                    for i in 0..args.len() {
-                        match &args[i].0 {
-                            None => write!(f, "{}", &args[i].1)?,
-                            Some(name) => match &args[i].1.kind {
-                                ExprKind::Ref { name: n }
-                                    if Path::dirname(&n.0).is_none()
-                                        && Path::basename(&n.0)
-                                            == Some(name.as_str()) =>
-                                {
-                                    write!(f, "#{name}")?
-                                }
-                                _ => write!(f, "#{name}: {}", &args[i].1)?,
-                            },
-                        }
-                        if i < args.len() - 1 {
-                            write!(f, ", ")?
-                        }
-                    }
-                    write!(f, ")")
                 }
+                write!(f, "\"")
+            }
+            ExprKind::Apply { args, function }
+                if function == &["op", "index"] && args.len() == 2 =>
+            {
+                write!(f, "{}[{}]", &args[0].1, &args[1].1)
+            }
+            ExprKind::Apply { args, function }
+                if function == &["op", "slice"] && args.len() == 3 =>
+            {
+                let s = match &args[1].1.kind {
+                    ExprKind::Constant(Value::Null) => "",
+                    e => &format_compact!("{e}"),
+                };
+                let e = match &args[2].1.kind {
+                    ExprKind::Constant(Value::Null) => "",
+                    e => &format_compact!("{e}"),
+                };
+                write!(f, "{}[{}..{}]", &args[0].1, s, e)
+            }
+            ExprKind::Apply { args, function }
+                if function == &["op", "question"] && args.len() == 1 =>
+            {
+                write!(f, "{}?", &args[0].1)
+            }
+            ExprKind::Apply { args, function } => {
+                write!(f, "{function}")?;
+                write!(f, "(")?;
+                for i in 0..args.len() {
+                    match &args[i].0 {
+                        None => write!(f, "{}", &args[i].1)?,
+                        Some(name) => match &args[i].1.kind {
+                            ExprKind::Ref { name: n }
+                                if Path::dirname(&n.0).is_none()
+                                    && Path::basename(&n.0) == Some(name.as_str()) =>
+                            {
+                                write!(f, "#{name}")?
+                            }
+                            _ => write!(f, "#{name}: {}", &args[i].1)?,
+                        },
+                    }
+                    if i < args.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                write!(f, ")")
             }
             ExprKind::Select { arg, arms } => {
                 write!(f, "select {arg} {{")?;

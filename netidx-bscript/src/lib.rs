@@ -99,6 +99,14 @@ pub trait BuiltIn<C: Ctx, E: Debug + Clone> {
     const TYP: LazyLock<FnType<Refs>>;
 
     fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E>;
+
+    fn typecheck(
+        &mut self,
+        _ctx: &mut ExecCtx<C, E>,
+        _from: &mut [Node<C, E>],
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub trait Apply<C: Ctx, E: Debug + Clone> {
