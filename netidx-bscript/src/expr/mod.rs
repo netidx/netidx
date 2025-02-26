@@ -101,9 +101,71 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub enum StructurePattern {
+    BindAll { name: Option<ArcStr> },
+    Slice { binds: Arc<[Option<ArcStr>]> },
+    SlicePrefix { prefix: Arc<[Option<ArcStr>]>, tail: Option<ArcStr> },
+    SliceSuffix { head: Option<ArcStr>, suffix: Arc<[Option<ArcStr>]> },
+}
+
+impl fmt::Display for StructurePattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StructurePattern::BindAll { name } => match name {
+                None => write!(f, "_"),
+                Some(name) => write!(f, "{name}"),
+            },
+            StructurePattern::Slice { binds } => {
+                write!(f, "[")?;
+                for (i, b) in binds.iter().enumerate() {
+                    match b {
+                        None => write!(f, "_"),
+                        Some(name) => write!(f, "{name}"),
+                    }?;
+                    if i < binds.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                write!(f, "]")
+            }
+            StructurePattern::SlicePrefix { prefix, tail } => {
+                write!(f, "[")?;
+                for b in prefix.iter() {
+                    match b {
+                        None => write!(f, "_, ")?,
+                        Some(name) => write!(f, "{name}, ")?,
+                    }
+                }
+                match tail {
+                    None => write!(f, "..]"),
+                    Some(name) => write!(f, "{name}..]"),
+                }
+            }
+            StructurePattern::SliceSuffix { head, suffix } => {
+                write!(f, "[")?;
+                match head {
+                    None => write!(f, ".., ")?,
+                    Some(name) => write!(f, "{name}.., ")?,
+                }
+                for (i, b) in suffix.iter().enumerate() {
+                    match b {
+                        None => write!(f, "_")?,
+                        Some(name) => write!(f, "{name}")?,
+                    }
+                    if i < suffix.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                write!(f, "]")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Pattern {
-    pub predicate: Type<Refs>,
-    pub bind: ArcStr,
+    pub type_predicate: Type<Refs>,
+    pub structure_predicate: StructurePattern,
     pub guard: Option<Expr>,
 }
 
@@ -491,7 +553,11 @@ impl ExprKind {
                 kill_newline!(buf);
                 writeln!(buf, " {{")?;
                 for (i, (pat, expr)) in arms.iter().enumerate() {
-                    write!(buf, "{} as {} ", pat.predicate, pat.bind)?;
+                    write!(
+                        buf,
+                        "{} as {} ",
+                        pat.type_predicate, pat.structure_predicate
+                    )?;
                     if let Some(guard) = &pat.guard {
                         write!(buf, "if ")?;
                         guard.kind.pretty_print(indent + 2, limit, false, buf)?;
@@ -698,7 +764,7 @@ impl fmt::Display for ExprKind {
             ExprKind::Select { arg, arms } => {
                 write!(f, "select {arg} {{")?;
                 for (i, (pat, rhs)) in arms.iter().enumerate() {
-                    write!(f, "{} as {} ", pat.predicate, pat.bind)?;
+                    write!(f, "{} as {} ", pat.type_predicate, pat.structure_predicate)?;
                     if let Some(guard) = &pat.guard {
                         write!(f, "if {guard} ")?;
                     }

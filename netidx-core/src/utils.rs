@@ -585,14 +585,28 @@ impl<T, U> Either<T, U> {
     pub fn is_left(&self) -> bool {
         match self {
             Self::Left(_) => true,
-            Self::Right(_) => false
+            Self::Right(_) => false,
         }
     }
 
     pub fn is_right(&self) -> bool {
         match self {
             Self::Left(_) => false,
-            Self::Right(_) => true
+            Self::Right(_) => true,
+        }
+    }
+
+    pub fn left(self) -> Option<T> {
+        match self {
+            Either::Left(t) => Some(t),
+            Either::Right(_) => None,
+        }
+    }
+
+    pub fn right(self) -> Option<U> {
+        match self {
+            Either::Right(t) => Some(t),
+            Either::Left(_) => None,
         }
     }
 }
