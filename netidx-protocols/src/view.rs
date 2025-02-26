@@ -392,7 +392,7 @@ impl Default for Table {
             selection_mode: ExprKind::Constant(Value::String(literal!("single")))
                 .to_expr(),
             selection: Expr::default(),
-            show_row_name: ExprKind::Constant(Value::True).to_expr(),
+            show_row_name: ExprKind::Constant(Value::Bool(true)).to_expr(),
             refresh: Expr::default(),
             on_select: Expr::default(),
             on_edit: Expr::default(),

@@ -21,8 +21,11 @@ pub mod time;
 #[macro_export]
 macro_rules! deftype {
     ($s:literal) => {
-        const TYP: LazyLock<FnType<Refs>> =
-            LazyLock::new(|| parse_fn_type($s).expect("failed to parse fn type {s}"));
+        const TYP: ::std::sync::LazyLock<$crate::typ::FnType<$crate::typ::Refs>> =
+            ::std::sync::LazyLock::new(|| {
+                $crate::expr::parser::parse_fn_type($s)
+                    .expect("failed to parse fn type {s}")
+            });
     };
 }
 

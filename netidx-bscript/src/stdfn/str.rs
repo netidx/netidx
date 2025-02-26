@@ -1,13 +1,12 @@
 use crate::{
     deftype, err,
-    expr::{parser::parse_fn_type, Expr},
+    expr::Expr,
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    typ::{FnType, Refs},
     Ctx, ExecCtx,
 };
 use arcstr::{literal, ArcStr};
 use netidx::{path::Path, subscriber::Value};
-use std::{cell::RefCell, fmt::Debug, sync::LazyLock};
+use std::{cell::RefCell, fmt::Debug};
 
 struct StartsWithEv;
 

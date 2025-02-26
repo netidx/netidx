@@ -1,9 +1,9 @@
 use crate::{
     deftype, err, errf,
-    expr::{parser::parse_fn_type, Expr, ExprKind},
+    expr::{Expr, ExprKind},
     node::{Node, NodeKind},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    typ::{FnType, Refs, Type},
+    typ::Type,
     Apply, ApplyTyped, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn,
 };
 use anyhow::bail;
@@ -12,10 +12,7 @@ use compact_str::format_compact;
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
-use std::{
-    fmt::Debug,
-    sync::{Arc, LazyLock},
-};
+use std::{fmt::Debug, sync::Arc};
 
 struct Any;
 

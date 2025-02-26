@@ -1,21 +1,15 @@
 use crate::{
     arity2, deftype, err, errf,
-    expr::{parser::parse_fn_type, Expr, ExprId},
+    expr::{Expr, ExprId},
     node::Node,
     stdfn::CachedVals,
-    typ::{FnType, Refs},
     Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn,
 };
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use netidx::{publisher::FromValue, subscriber::Value};
-use std::{
-    fmt::Debug,
-    ops::SubAssign,
-    sync::{Arc, LazyLock},
-    time::Duration,
-};
+use std::{fmt::Debug, ops::SubAssign, sync::Arc, time::Duration};
 
 struct AfterIdle {
     args: CachedVals,

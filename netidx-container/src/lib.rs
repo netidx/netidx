@@ -36,9 +36,10 @@ use netidx::{
 };
 use netidx_bscript::{
     deftype,
-    expr::{self, parser::parse_fn_type, ExprId, FnType, ModPath},
+    expr::{self, ExprId, ModPath},
+    node::Node,
     stdfn::CachedVals,
-    vm::{self, node::Node, Apply, BindId, BuiltIn, Ctx, ExecCtx, InitFn},
+    Apply, BindId, BuiltIn, Ctx, Event as BEvent, ExecCtx, InitFn,
 };
 use netidx_protocols::rpc;
 use parking_lot::Mutex;
@@ -56,7 +57,7 @@ use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
     pin::Pin,
-    sync::{Arc, LazyLock},
+    sync::Arc,
     time::Duration,
 };
 use structopt::StructOpt;
@@ -509,7 +510,7 @@ impl Apply<Lc, UserEv> for Ref {
         &mut self,
         ctx: &mut ExecCtx<Lc, UserEv>,
         from: &mut [Node<Lc, UserEv>],
-        event: &vm::Event<UserEv>,
+        event: &BEvent<UserEv>,
     ) -> Option<Value> {
         if self.args.update_changed(ctx, from, event)[0] {
             self.set_ref(
@@ -519,18 +520,18 @@ impl Apply<Lc, UserEv> for Ref {
             return Some(self.get_current(ctx));
         }
         match event {
-            vm::Event::User(UserEv::Ref(path, value)) => {
+            BEvent::User(UserEv::Ref(path, value)) => {
                 if Some(path.as_ref()) == self.path.as_ref().map(|c| c.as_ref()) {
                     Some(value.clone())
                 } else {
                     None
                 }
             }
-            vm::Event::Init
-            | vm::Event::User(UserEv::OnWriteEvent(_))
-            | vm::Event::User(UserEv::Rel)
-            | vm::Event::Netidx(_, _)
-            | vm::Event::Variable(_, _) => None,
+            BEvent::Init
+            | BEvent::User(UserEv::OnWriteEvent(_))
+            | BEvent::User(UserEv::Rel)
+            | BEvent::Netidx(_, _)
+            | BEvent::Variable(_, _) => None,
         }
     }
 }
@@ -605,7 +606,7 @@ impl Apply<Lc, UserEv> for Rel {
         &mut self,
         ctx: &mut ExecCtx<Lc, UserEv>,
         from: &mut [Node<Lc, UserEv>],
-        event: &vm::Event<UserEv>,
+        event: &BEvent<UserEv>,
     ) -> Option<Value> {
         let changed = self.args.update_changed(ctx, from, event);
         if changed.iter().any(|b| *b) {
@@ -637,16 +638,16 @@ impl Apply<Lc, UserEv> for OnWriteEvent {
         &mut self,
         _ctx: &mut ExecCtx<Lc, UserEv>,
         from: &mut [Node<Lc, UserEv>],
-        event: &vm::Event<UserEv>,
+        event: &BEvent<UserEv>,
     ) -> Option<Value> {
         self.invalid = from.len() > 0;
         match event {
-            vm::Event::Variable(_, _)
-            | vm::Event::Init
-            | vm::Event::Netidx(_, _)
-            | vm::Event::User(UserEv::Ref(_, _))
-            | vm::Event::User(UserEv::Rel) => None,
-            vm::Event::User(UserEv::OnWriteEvent(value)) => {
+            BEvent::Variable(_, _)
+            | BEvent::Init
+            | BEvent::Netidx(_, _)
+            | BEvent::User(UserEv::Ref(_, _))
+            | BEvent::User(UserEv::Rel) => None,
+            BEvent::User(UserEv::OnWriteEvent(value)) => {
                 self.cur = Some(value.clone());
                 self.cur.clone()
             }
@@ -863,12 +864,12 @@ impl ContainerInner {
         let mut on_write_node =
             on_write_expr.map(|e| Node::compile(&mut self.ctx, &scope, e));
         if let Some(n) = on_write_node.as_mut().ok() {
-            n.update(&mut self.ctx, &vm::Event::Init);
+            n.update(&mut self.ctx, &BEvent::Init);
         }
         let value = formula_node
             .as_mut()
             .ok()
-            .and_then(|n| n.update(&mut self.ctx, &vm::Event::Init))
+            .and_then(|n| n.update(&mut self.ctx, &BEvent::Init))
             .unwrap_or(Value::Null);
         let src_path = path.append(".formula");
         let on_write_path = path.append(".on-write");
@@ -975,7 +976,7 @@ impl ContainerInner {
         &mut self,
         batch: &mut UpdateBatch,
         refs: &mut Pooled<Vec<ExprId>>,
-        event: &vm::Event<UserEv>,
+        event: &BEvent<UserEv>,
     ) {
         for expr_id in refs.drain(..) {
             match self.compiled.get_mut(&expr_id) {
@@ -1012,7 +1013,7 @@ impl ContainerInner {
                 self.update_expr_ids(
                     batch,
                     &mut refs,
-                    &vm::Event::User(UserEv::Ref(path, value)),
+                    &BEvent::User(UserEv::Ref(path, value)),
                 );
             }
             // update variable references
@@ -1021,7 +1022,7 @@ impl ContainerInner {
                 if let Some(expr_ids) = self.ctx.user.var.get(&id) {
                     refs.extend(expr_ids.keys().copied());
                 }
-                self.update_expr_ids(batch, &mut refs, &vm::Event::Variable(id, value));
+                self.update_expr_ids(batch, &mut refs, &BEvent::Variable(id, value));
             }
             n += 1;
         }
@@ -1042,7 +1043,7 @@ impl ContainerInner {
                 refs.extend(rels.iter().copied());
             }
         }
-        self.update_expr_ids(batch, &mut refs, &vm::Event::User(UserEv::Rel));
+        self.update_expr_ids(batch, &mut refs, &BEvent::User(UserEv::Rel));
     }
 
     fn process_subscriptions(
@@ -1056,7 +1057,7 @@ impl ContainerInner {
                 if let Some(expr_ids) = self.ctx.user.sub.get(&id) {
                     refs.extend(expr_ids.keys().copied());
                 }
-                self.update_expr_ids(batch, &mut refs, &vm::Event::Netidx(id, value));
+                self.update_expr_ids(batch, &mut refs, &BEvent::Netidx(id, value));
             }
         }
         self.update_refs(batch)
@@ -1084,8 +1085,7 @@ impl ContainerInner {
                         .unwrap_or_else(Path::root),
                 );
                 let mut node = Node::compile(&mut self.ctx, &scope, expr);
-                let dv =
-                    node.update(&mut self.ctx, &vm::Event::Init).unwrap_or(Value::Null);
+                let dv = node.update(&mut self.ctx, &BEvent::Init).unwrap_or(Value::Null);
                 let c = Compiled::Formula { node, data_id: fifo.data.id() };
                 self.compiled.insert(*expr_id, c);
                 dv
@@ -1120,7 +1120,7 @@ impl ContainerInner {
                         .unwrap_or_else(Path::root),
                 );
                 let mut node = Node::compile(&mut self.ctx, &scope, expr);
-                node.update(&mut self.ctx, &vm::Event::Init);
+                node.update(&mut self.ctx, &BEvent::Init);
                 self.compiled.insert(*expr_id, Compiled::OnWrite(node));
             }
         }
@@ -1155,7 +1155,7 @@ impl ContainerInner {
                         if let Some(Compiled::OnWrite(node)) =
                             self.compiled.get_mut(&fifo.on_write_expr_id.lock())
                         {
-                            let ev = vm::Event::User(UserEv::OnWriteEvent(req.value));
+                            let ev = BEvent::User(UserEv::OnWriteEvent(req.value));
                             node.update(&mut self.ctx, &ev);
                             self.update_refs(batch);
                         }
@@ -1316,7 +1316,7 @@ impl ContainerInner {
             if let Some(expr_ids) = self.ctx.user.timer.get(&id) {
                 refs.extend(expr_ids.keys().copied());
             }
-            let e = vm::Event::Variable(id, Utc::now().into());
+            let e = BEvent::Variable(id, Utc::now().into());
             self.update_expr_ids(batch, &mut refs, &e);
             self.update_refs(batch);
         }
@@ -1331,7 +1331,7 @@ impl ContainerInner {
                 if let Some(expr_ids) = self.ctx.user.rpc.get(&name) {
                     refs.extend(expr_ids);
                 }
-                self.update_expr_ids(batch, &mut refs, &vm::Event::Variable(id, result));
+                self.update_expr_ids(batch, &mut refs, &BEvent::Variable(id, result));
                 self.update_refs(batch);
             }
             LcEvent::RpcCall { name, mut args, id } => {

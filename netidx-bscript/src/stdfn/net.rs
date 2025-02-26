@@ -1,9 +1,8 @@
 use crate::{
     arity1, arity2, deftype, errf,
-    expr::{parser::parse_fn_type, Expr, ExprId},
+    expr::{Expr, ExprId},
     node::Node,
     stdfn::CachedVals,
-    typ::{FnType, Refs},
     Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn,
 };
 use anyhow::{anyhow, bail, Result};
@@ -15,11 +14,7 @@ use netidx::{
     subscriber::{Dval, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
-use std::{
-    collections::HashSet,
-    fmt::Debug,
-    sync::{Arc, LazyLock},
-};
+use std::{collections::HashSet, fmt::Debug, sync::Arc};
 
 fn as_path(v: Value) -> Option<Path> {
     match v.cast_to::<String>() {

@@ -5,12 +5,19 @@ extern crate combine;
 #[macro_use]
 extern crate serde_derive;
 
+pub mod dbg;
+pub mod env;
+pub mod expr;
+pub mod node;
+pub mod stdfn;
+pub mod typ;
+
 use crate::{
     dbg::DbgCtx,
     env::Env,
     expr::{Arg, ExprId, ExprKind, ModPath},
     node::Node,
-    typ::FnType,
+    typ::{FnType, NoRefs, Refs, TVar, Type},
 };
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -25,14 +32,6 @@ use std::{
     time::Duration,
 };
 use triomphe::Arc;
-use typ::{NoRefs, Refs, TVar, Type};
-
-pub mod dbg;
-pub mod env;
-pub mod expr;
-pub mod node;
-pub mod stdfn;
-pub mod typ;
 
 #[cfg(test)]
 mod tests;
