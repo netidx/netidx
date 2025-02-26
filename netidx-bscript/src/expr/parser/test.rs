@@ -925,7 +925,29 @@ fn arrayref4() {
 }
 
 #[test]
+fn qop() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::Qop(Arc::new(
+            ExprKind::Apply {
+                function: ["op", "slice"].into(),
+                args: (Arc::from_iter([
+                    (None, ExprKind::Ref { name: ["foo"].into() }.to_expr()),
+                    (None, ExprKind::Constant(Value::U64(1)).to_expr()),
+                    (None, ExprKind::Constant(Value::U64(10)).to_expr()),
+                ])),
+            }
+            .to_expr(),
+        ))
+        .to_expr()]),
+    }
+    .to_expr();
+    let s = "{foo[1..10]?}";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
 fn prop0() {
-    let s = "mod a{a(a[..a])}";
+    let s = "mod a{mod a{[a?]}}";
     dbg!(parse(s).unwrap());
 }

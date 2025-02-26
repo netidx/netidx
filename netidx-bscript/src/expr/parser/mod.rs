@@ -266,6 +266,7 @@ where
                     }
                     (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Array { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Qop(_), .. }), _)
                     | (Some(Expr { kind: ExprKind::Do { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Module { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Use { .. }, .. }), _)
@@ -769,11 +770,7 @@ where
 {
     (p, optional(attempt(sptoken('?')))).map(|(e, qop)| match qop {
         None => e,
-        Some(_) => ExprKind::Apply {
-            function: ["op::question"].into(),
-            args: Arc::from_iter([(None, e)]),
-        }
-        .to_expr(),
+        Some(_) => ExprKind::Qop(Arc::new(e)).to_expr(),
     })
 }
 

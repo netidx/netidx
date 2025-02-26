@@ -363,6 +363,25 @@ fn expr() -> impl Strategy<Value = Expr> {
                 }
                 .to_expr()
             }),
+            (inner.clone()).prop_map(|e| match &e.kind {
+                ExprKind::Do { .. }
+                | ExprKind::Select { .. }
+                | ExprKind::TypeCast { .. }
+                | ExprKind::Ref { .. } => ExprKind::Apply {
+                    function: ["op", "question"].into(),
+                    args: Arc::from_iter([(None, e)]),
+                }
+                .to_expr(),
+                ExprKind::Apply { function, .. }
+                    if function != &["op", "question"]
+                        && function != &["str", "concat"] =>
+                    ExprKind::Apply {
+                        function: ["op", "question"].into(),
+                        args: Arc::from_iter([(None, e)]),
+                    }
+                    .to_expr(),
+                _ => e,
+            }),
             (modpath(), option::of(inner.clone()), option::of(inner.clone())).prop_map(
                 |(name, start, end)| {
                     let a = ExprKind::Ref { name }.to_expr();

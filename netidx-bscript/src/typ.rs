@@ -386,6 +386,77 @@ impl Type<NoRefs> {
         }
     }
 
+    pub fn diff(&self, t: &Self) -> Result<Self> {
+        match (self, t) {
+            (Type::Bottom(_), t) | (t, Type::Bottom(_)) => Ok(t.clone()),
+            (Type::Primitive(s0), Type::Primitive(s1)) => {
+                let mut s = *s0;
+                s.remove(*s1);
+                Ok(Type::Primitive(s))
+            }
+            (Type::Primitive(p), Type::Array(_)) => {
+                let mut s = *p;
+                s.remove(Typ::Array);
+                Ok(Type::Primitive(s))
+            }
+            (Type::Array(t), Type::Primitive(p)) => {
+                if p.contains(Typ::Array) {
+                    Ok(Type::Primitive(BitFlags::empty()))
+                } else {
+                    Ok(Type::Array(t.clone()))
+                }
+            }
+            (Type::Array(t0), Type::Array(t1)) => Ok(Type::Array(Arc::new(t0.diff(t1)?))),
+            (Type::Set(s0), Type::Set(s1)) => {
+                let mut s: SmallVec<[Type<NoRefs>; 4]> = smallvec![];
+                for i in 0..s0.len() {
+                    s.push(s0[i].clone());
+                    for j in 0..s1.len() {
+                        s[i] = s[i].diff(&s1[j])?
+                    }
+                }
+                Ok(Self::flatten_set(s.into_iter()))
+            }
+            (Type::Set(s), t) => Ok(Self::flatten_set(
+                s.iter()
+                    .map(|s| s.diff(t))
+                    .collect::<Result<SmallVec<[Type<NoRefs>; 4]>>>()?
+                    .into_iter(),
+            )),
+            (t, Type::Set(s)) => {
+                let mut t = t.clone();
+                for st in s.iter() {
+                    t = t.diff(st)?;
+                }
+                Ok(t)
+            }
+            (Type::Fn(f0), Type::Fn(f1)) => {
+                if f0 == f1 {
+                    Ok(Type::Primitive(BitFlags::empty()))
+                } else {
+                    Ok(Type::Fn(f0.clone()))
+                }
+            }
+            (f @ Type::Fn(_), _) => Ok(f.clone()),
+            (t, Type::Fn(_)) => Ok(t.clone()),
+            (Type::TVar(tv0), Type::TVar(tv1)) => {
+                match (&*tv0.read().read(), &*tv1.read().read()) {
+                    (None, _) | (_, None) => bail!("type must be known at this point"),
+                    (Some(t0), Some(t1)) => t0.diff(t1),
+                }
+            }
+            (Type::TVar(tv), t1) => match &*tv.read().read() {
+                None => bail!("type must be known at this point"),
+                Some(t0) => t0.diff(t1),
+            },
+            (t0, Type::TVar(tv)) => match &*tv.read().read() {
+                None => bail!("type must be known at this point"),
+                Some(t1) => t0.diff(t1),
+            },
+            (Type::Ref(_), _) | (_, Type::Ref(_)) => unreachable!(),
+        }
+    }
+
     pub fn any() -> Self {
         Self::Primitive(Typ::any())
     }

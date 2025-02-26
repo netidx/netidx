@@ -666,10 +666,7 @@ const ARRAY_INDEXING6: &str = r#"
 {
   let a = [0, 1, 2, 3, 4, 5, 6];
   let out = select ungroup(a) {
-    i64 as i => {
-        let r = a[i];
-        filter(!is_err(r), r) + 1
-    }
+    i64 as i => a[i]? + 1
   };
   group(out, |i, x| i == 7)
 }

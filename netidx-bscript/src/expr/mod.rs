@@ -167,6 +167,7 @@ pub enum ExprKind {
         arg: Arc<Expr>,
         arms: Arc<[(Pattern, Expr)]>,
     },
+    Qop(Arc<Expr>),
     Eq {
         lhs: Arc<Expr>,
         rhs: Arc<Expr>,
@@ -363,11 +364,9 @@ impl ExprKind {
                 try_single_line!(true);
                 pretty_print_exprs_int(indent, limit, buf, args, "[", "]", ",", |a| a)
             }
-            ExprKind::Apply { function, args }
-                if function == &["op", "question"] && args.len() == 1 =>
-            {
+            ExprKind::Qop(e) => {
                 try_single_line!(true);
-                args[0].1.kind.pretty_print(indent, limit, true, buf)?;
+                e.kind.pretty_print(indent, limit, true, buf)?;
                 kill_newline!(buf);
                 writeln!(buf, "?")
             }
@@ -673,11 +672,7 @@ impl fmt::Display for ExprKind {
                 };
                 write!(f, "{}[{}..{}]", &args[0].1, s, e)
             }
-            ExprKind::Apply { args, function }
-                if function == &["op", "question"] && args.len() == 1 =>
-            {
-                write!(f, "{}?", &args[0].1)
-            }
+            ExprKind::Qop(e) => write!(f, "{}?", e),
             ExprKind::Apply { args, function } => {
                 write!(f, "{function}")?;
                 write!(f, "(")?;

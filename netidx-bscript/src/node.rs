@@ -313,6 +313,7 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Ref(BindId),
     Connect(BindId, Box<Node<C, E>>),
     Lambda(Arc<LambdaBind<C, E>>),
+    Qop(BindId, Box<Node<C, E>>),
     TypeCast {
         target: Type<NoRefs>,
         n: Box<Node<C, E>>,
@@ -409,6 +410,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Array { .. }
             | NodeKind::Apply { .. }
             | NodeKind::Error { .. }
+            | NodeKind::Qop(_, _)
             | NodeKind::Module(_)
             | NodeKind::Eq { .. }
             | NodeKind::Ne { .. }
@@ -440,6 +442,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Use
             | NodeKind::Bind(_, _)
             | NodeKind::Ref(_)
+            | NodeKind::Qop(_, _)
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
             | NodeKind::Apply { .. }
@@ -490,6 +493,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Use
             | NodeKind::Bind(_, _)
             | NodeKind::Ref(_)
+            | NodeKind::Qop(_, _)
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
             | NodeKind::Apply { .. }
@@ -917,6 +921,20 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     Node { spec: Box::new(spec), typ, kind }
                 }
             }
+            Expr { kind: ExprKind::Qop(e), id: _ } => {
+                let n = Node::compile_int(ctx, (**e).clone(), scope, top_id);
+                if n.is_err() {
+                    return error!("", vec![n]);
+                }
+                match ctx.env.lookup_bind(scope, &ModPath::from(["errors"])) {
+                    None => error!("BUG: errors is undefined"),
+                    Some((_, bind)) => {
+                        let typ = Type::empty_tvar();
+                        let spec = Box::new(spec);
+                        Node { spec, typ, kind: NodeKind::Qop(bind.id, Box::new(n)) }
+                    }
+                }
+            }
             Expr { kind: ExprKind::Ref { name }, id: _ } => {
                 match ctx.env.lookup_bind(scope, name) {
                     None => error!("{name} not defined"),
@@ -1093,6 +1111,20 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             NodeKind::Bind(_, node) => {
                 wrap!(node.typecheck(ctx))?;
                 wrap!(self.typ.check_contains(&node.typ))?;
+                Ok(())
+            }
+            NodeKind::Qop(id, n) => {
+                wrap!(n.typecheck(ctx))?;
+                let bind =
+                    ctx.env.by_id.get(id).ok_or_else(|| anyhow!("BUG: missing bind"))?;
+                let err = Type::Primitive(Typ::Error.into());
+                wrap!(bind.typ.check_contains(&err))?;
+                wrap!(err.check_contains(&bind.typ))?;
+                if !n.typ.contains(&err) {
+                    bail!("cannot use the ? operator on a non error type")
+                }
+                let rtyp = wrap!(n.typ.diff(&err))?;
+                wrap!(self.typ.check_contains(&rtyp))?;
                 Ok(())
             }
             NodeKind::Connect(id, node) => {
@@ -1323,6 +1355,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 | Event::Netidx(_, _)
                 | Event::User(_)
                 | Event::Variable { .. } => None,
+            },
+            NodeKind::Qop(id, n) => match n.update(ctx, event) {
+                None => None,
+                Some(e @ Value::Error(_)) => {
+                    ctx.user.set_var(*id, e);
+                    None
+                }
+                Some(v) => Some(v),
             },
             NodeKind::Module(children) => {
                 for n in children {
