@@ -1,19 +1,21 @@
 use crate::{
     env::{Bind, LambdaBind},
-    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern},
+    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern, StructurePattern},
     typ::{FnType, NoRefs, Refs, TVar, Type},
     Apply, ApplyTyped, BindId, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::{format_compact, CompactString};
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use immutable_chunkmap::set::SetS as Set;
 use netidx::{publisher::Typ, subscriber::Value, utils::Either};
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{
     fmt::{self, Debug},
+    hash::Hash,
+    iter,
     marker::PhantomData,
     mem,
     sync::Arc as SArc,
@@ -243,10 +245,29 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Cached<C, E> {
     }
 }
 
+pub enum StructPatternNode {
+    BindAll { name: Option<BindId> },
+    Slice { binds: Box<[Option<BindId>]> },
+    SlicePrefix { prefix: Box<[Option<BindId>]>, tail: Option<BindId> },
+    SliceSuffix { head: Option<BindId>, suffix: Box<[Option<BindId>]> },
+}
+
 pub struct PatternNode<C: Ctx + 'static, E: Debug + Clone + 'static> {
-    predicate: Type<NoRefs>,
-    bind: BindId,
+    type_predicate: Type<NoRefs>,
+    structure_predicate: StructPatternNode,
     guard: Option<Cached<C, E>>,
+}
+
+fn uniq<'a, T: Hash + Eq + 'a, I: IntoIterator<Item = &'a T> + 'a>(iter: I) -> bool {
+    let mut set = FxHashSet::default();
+    let mut uniq = true;
+    for e in iter {
+        uniq &= set.insert(e);
+        if !uniq {
+            break;
+        }
+    }
+    uniq
 }
 
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
@@ -256,8 +277,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         scope: &ModPath,
         top_id: ExprId,
     ) -> Result<Self> {
-        let predicate = spec.predicate.resolve_typrefs(scope, &ctx.env)?;
-        match &predicate {
+        let type_predicate = spec.type_predicate.resolve_typrefs(scope, &ctx.env)?;
+        match &type_predicate {
             Type::Fn(_) => bail!("can't match on Fn type"),
             Type::Bottom(_)
             | Type::Primitive(_)
@@ -266,13 +287,67 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
             | Type::Array(_) => (),
             Type::Ref(_) => unreachable!(),
         }
-        let bind = ctx.env.bind_variable(scope, &*spec.bind, predicate.clone());
-        let bind = bind.id;
+        macro_rules! with_pref_suf {
+            ($single:expr, $multi:expr) => {
+                match &type_predicate {
+                    Type::Array(et) => {
+                        let names = $multi
+                            .iter()
+                            .chain(iter::once($single))
+                            .filter_map(|x| x.as_ref());
+                        if !uniq(names) {
+                            bail!("bound variables must have unique names")
+                        }
+                        let single = $single
+                            .as_ref()
+                            .map(|n| ctx.env.bind_variable(scope, n, (**et).clone()).id);
+                        let multi = $multi.iter().map(|n| {
+                            n.as_ref().map(|n| {
+                                ctx.env.bind_variable(scope, n, (**et).clone()).id
+                            })
+                        });
+                        let multi = Box::from_iter(multi);
+                        (single, multi)
+                    }
+                    t => bail!("slice patterns can't match {t}"),
+                }
+            };
+        }
+        let structure_predicate = match &spec.structure_predicate {
+            StructurePattern::BindAll { name: Some(name) } => {
+                let id = ctx.env.bind_variable(scope, name, type_predicate.clone()).id;
+                StructPatternNode::BindAll { name: Some(id) }
+            }
+            StructurePattern::BindAll { name: None } => {
+                StructPatternNode::BindAll { name: None }
+            }
+            StructurePattern::Slice { binds } => match &type_predicate {
+                Type::Array(et) => {
+                    if !uniq(binds.iter().filter_map(|x| x.as_ref())) {
+                        bail!("bound variables must have unique names")
+                    }
+                    let ids = binds.iter().map(|name| {
+                        name.as_ref()
+                            .map(|n| ctx.env.bind_variable(scope, n, (**et).clone()).id)
+                    });
+                    StructPatternNode::Slice { binds: Box::from_iter(ids) }
+                }
+                t => bail!("slice patterns can't match {t}"),
+            },
+            StructurePattern::SlicePrefix { prefix, tail } => {
+                let (tail, prefix) = with_pref_suf!(tail, prefix);
+                StructPatternNode::SlicePrefix { prefix, tail }
+            }
+            StructurePattern::SliceSuffix { head, suffix } => {
+                let (head, suffix) = with_pref_suf!(head, suffix);
+                StructPatternNode::SliceSuffix { head, suffix }
+            }
+        };
         let guard = spec
             .guard
             .as_ref()
             .map(|g| Cached::new(Node::compile_int(ctx, g.clone(), &scope, top_id)));
-        Ok(PatternNode { predicate, bind, guard })
+        Ok(PatternNode { type_predicate, structure_predicate, guard })
     }
 
     fn extract_err(&self) -> Option<ArcStr> {
