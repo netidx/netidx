@@ -1250,10 +1250,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let mut mtype = Type::Bottom(PhantomData);
                 let mut mcases = Type::Bottom(PhantomData);
                 for (pat, n) in arms {
-                    mcases = mcases.union(&pat.predicate);
+                    mcases = mcases.union(&pat.type_predicate);
                     match &mut pat.guard {
                         Some(guard) => wrap!(guard.node.typecheck(ctx))?,
-                        None => mtype = mtype.union(&pat.predicate),
+                        None => mtype = mtype.union(&pat.type_predicate),
                     }
                     wrap!(n.node.typecheck(ctx))?;
                     rtype = rtype.union(&n.node.typ);
@@ -1308,7 +1308,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
     ) -> Option<Value> {
         let mut val_up: SmallVec<[bool; 64]> = smallvec![];
         let arg_up = arg.update(ctx, event);
-        macro_rules! set_arg {
+        macro_rules! set_args {
             ($i:expr) => {{
                 let id = arms[$i].0.bind;
                 if let Some(arg) = arg.cached.as_ref() {
@@ -1320,7 +1320,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         macro_rules! val {
             ($i:expr) => {{
                 if arg_up {
-                    set_arg!($i)
+                    set_args!($i)
                 }
                 if val_up[$i] {
                     arms[$i].1.cached.clone()
@@ -1342,14 +1342,23 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         if !arg_up && !pat_up {
             selected.and_then(|i| val!(i))
         } else {
-            let typ = arg.cached.as_ref().map(Typ::get);
-            let sel = arms.iter().enumerate().find_map(|(i, (pat, _))| {
-                typ.and_then(|typ| if pat.is_match(typ) { Some(i) } else { None })
-            });
+            let sel = match arg.cached.as_ref() {
+                None => None,
+                Some(v) => {
+                    let typ = Typ::get(v);
+                    arms.iter().enumerate().find_map(|(i, (pat, _))| {
+                        if pat.is_match(typ, v) {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                }
+            };
             match (sel, *selected) {
                 (Some(i), Some(j)) if i == j => val!(i),
                 (Some(i), Some(_) | None) => {
-                    set_arg!(i);
+                    set_args!(i);
                     *selected = Some(i);
                     arms[i].1.cached.clone()
                 }
