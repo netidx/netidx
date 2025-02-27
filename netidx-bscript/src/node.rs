@@ -361,20 +361,37 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         }
     }
 
-    fn is_match(&self, typ: Typ) -> bool {
-        let tmatch = match (&self.predicate, typ) {
+    fn is_match(&self, typ: Typ, v: &Value) -> bool {
+        let tmatch = match (&self.type_predicate, typ) {
             (Type::Array(_), Typ::Array) => true,
-            _ => self.predicate.contains(&Type::Primitive(typ.into())),
+            _ => self.type_predicate.contains(&Type::Primitive(typ.into())),
         };
-        tmatch
-            && match &self.guard {
-                None => true,
-                Some(g) => g
-                    .cached
-                    .as_ref()
-                    .and_then(|v| v.clone().get_as::<bool>())
-                    .unwrap_or(false),
-            }
+        tmatch && {
+            let smatch = match &self.structure_predicate {
+                StructPatternNode::BindAll { name: _ } => true,
+                StructPatternNode::Slice { binds } => match v {
+                    Value::Array(a) => a.len() == binds.len(),
+                    _ => false,
+                },
+                StructPatternNode::SlicePrefix { prefix, tail: _ } => match v {
+                    Value::Array(a) => a.len() >= prefix.len(),
+                    _ => false,
+                },
+                StructPatternNode::SliceSuffix { head: _, suffix } => match v {
+                    Value::Array(a) => a.len() >= suffix.len(),
+                    _ => false,
+                },
+            };
+            smatch
+                && match &self.guard {
+                    None => true,
+                    Some(g) => g
+                        .cached
+                        .as_ref()
+                        .and_then(|v| v.clone().get_as::<bool>())
+                        .unwrap_or(false),
+                }
+        }
     }
 }
 
