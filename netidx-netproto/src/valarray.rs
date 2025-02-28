@@ -3,49 +3,64 @@ use bytes::{Buf, BufMut};
 use fxhash::FxHashMap;
 use netidx_core::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError, MAX_VEC},
-    pool::{Pool, Poolable, Pooled},
+    pool::{pooled::PArc, RawPool, RawPoolable, WeakPool},
 };
 use serde::{de::Visitor, ser::SerializeSeq, Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
-use std::{borrow::Borrow, cell::RefCell, collections::HashMap, ops::Deref};
+use std::{
+    borrow::Borrow,
+    cell::RefCell,
+    collections::HashMap,
+    fmt::Debug,
+    hash::{Hash, Hasher},
+    mem::ManuallyDrop,
+    ops::{Bound, Deref, RangeBounds},
+    ptr,
+};
 use triomphe::{Arc, ThinArc};
 
+const MAX_LEN: usize = 128;
+
 thread_local! {
-    static POOLS: RefCell<FxHashMap<usize, Pool<ValArrayInner>>> = RefCell::new(HashMap::default());
+    static POOLS: RefCell<FxHashMap<usize, RawPool<ValArrayBase>>> = RefCell::new(HashMap::default());
+    static SPOOL: RawPool<PArc<Option<ValArraySlice>>> = RawPool::new(1024, 64);
 }
 
-fn init_pool(len: usize) -> Pool<ValArrayInner> {
-    Pool::new(64 * (65 - len), 64)
+fn init_pool(len: usize) -> RawPool<ValArrayBase> {
+    RawPool::new(64 * (MAX_LEN + 1 - len), 64)
 }
 
-fn orphan(len: usize) -> Pooled<ValArrayInner> {
-    let iter = (0..len).map(|_| Value::Bool(false));
-    Pooled::orphan(ValArrayInner(ThinArc::from_header_and_iter((), iter)))
-}
-
-fn get_by_size(len: usize) -> Pooled<ValArrayInner> {
+fn get_by_size(len: usize) -> ValArrayBase {
     POOLS.with_borrow_mut(|pools| {
-        if len > 0 && len <= 64 {
+        if len > 0 && len <= MAX_LEN {
             let pool = pools.entry(len).or_insert_with(|| init_pool(len));
-            let v = pool.take();
-            if v.len() == len {
-                v
-            } else {
-                v.detach();
-                let mut v = orphan(len);
-                v.assign(pool);
-                v
+            match pool.try_take() {
+                Some(t) => t,
+                None => ValArrayBase::new_with_len(pool.downgrade(), len),
             }
         } else {
-            orphan(len)
+            ValArrayBase::new_with_len(WeakPool::new(), len)
         }
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct ValArrayInner(ThinArc<(), Value>);
+#[derive(Debug, Clone)]
+pub struct ValArrayBase(ManuallyDrop<ThinArc<WeakPool<Self>, Value>>);
 
-impl Deref for ValArrayInner {
+impl Drop for ValArrayBase {
+    fn drop(&mut self) {
+        if ThinArc::strong_count(&self.0) > 1 {
+            unsafe { ManuallyDrop::drop(&mut self.0) }
+        } else {
+            match self.0.header.header.upgrade() {
+                Some(pool) => pool.insert(unsafe { ptr::read(self) }),
+                None => unsafe { ManuallyDrop::drop(&mut self.0) },
+            }
+        }
+    }
+}
+
+impl Deref for ValArrayBase {
     type Target = [Value];
 
     fn deref(&self) -> &Self::Target {
@@ -53,17 +68,14 @@ impl Deref for ValArrayInner {
     }
 }
 
-impl Poolable for ValArrayInner {
+unsafe impl RawPoolable for ValArrayBase {
     fn capacity(&self) -> usize {
         1
     }
 
-    fn empty() -> Self {
-        ValArrayInner(ThinArc::from_header_and_iter((), [].into_iter()))
-    }
-
-    fn really_dropped(&self) -> bool {
-        ThinArc::strong_count(&self.0) == 1
+    fn empty(pool: WeakPool<Self>) -> Self {
+        let t = ThinArc::from_header_and_iter(pool, [].into_iter());
+        ValArrayBase(ManuallyDrop::new(t))
     }
 
     fn reset(&mut self) {
@@ -75,22 +87,111 @@ impl Poolable for ValArrayInner {
             }
         })
     }
+
+    fn really_drop(self) {
+        let mut t = ManuallyDrop::new(self);
+        unsafe { ManuallyDrop::drop(&mut t.0) }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ValArray(Pooled<ValArrayInner>);
+impl ValArrayBase {
+    fn new_with_len(pool: WeakPool<Self>, len: usize) -> Self {
+        let iter = (0..len).map(|_| Value::Bool(false));
+        let t = ThinArc::from_header_and_iter(pool, iter);
+        Self(ManuallyDrop::new(t))
+    }
+}
+
+impl PartialEq for ValArrayBase {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.slice == other.0.slice
+    }
+}
+
+impl Eq for ValArrayBase {}
+
+impl PartialOrd for ValArrayBase {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.0.slice.partial_cmp(&other.0.slice)
+    }
+}
+
+impl Ord for ValArrayBase {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.slice.cmp(&other.0.slice)
+    }
+}
+
+impl Hash for ValArrayBase {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.slice.hash(state)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ValArraySlice {
+    base: ValArrayBase,
+    start: Bound<usize>,
+    end: Bound<usize>,
+}
+
+impl Deref for ValArraySlice {
+    type Target = [Value];
+
+    fn deref(&self) -> &Self::Target {
+        &self.base[(self.start, self.end)]
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ValArray {
+    Base(ValArrayBase),
+    Slice(PArc<Option<ValArraySlice>>),
+}
 
 impl Deref for ValArray {
     type Target = [Value];
 
     fn deref(&self) -> &Self::Target {
-        &(self.0).0.slice
+        match self {
+            Self::Base(a) => &*a,
+            Self::Slice(s) => match &**s {
+                Some(s) => &*s,
+                None => &[],
+            },
+        }
+    }
+}
+
+impl PartialEq for ValArray {
+    fn eq(&self, other: &Self) -> bool {
+        &self[..] == &other[..]
+    }
+}
+
+impl Eq for ValArray {}
+
+impl PartialOrd for ValArray {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self[..].partial_cmp(&other[..])
+    }
+}
+
+impl Ord for ValArray {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self[..].cmp(&other[..])
+    }
+}
+
+impl Hash for ValArray {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self[..].hash(state)
     }
 }
 
 impl Borrow<[Value]> for ValArray {
     fn borrow(&self) -> &[Value] {
-        &(self.0).0.slice
+        &*self
     }
 }
 
@@ -159,7 +260,71 @@ impl ValArray {
                 res.slice[i] = v;
             }
         });
-        Self(res)
+        Self::Base(res)
+    }
+
+    /// create a zero copy owned subslice of the array. This will
+    /// panic if the range is out of the array bounds, just like a
+    /// normal slice range.
+    pub fn subslice<R: RangeBounds<usize>>(&self, r: R) -> Self {
+        match self {
+            Self::Base(a) => {
+                // check bounds
+                let (start, end) =
+                    (r.start_bound().map(|i| *i), r.end_bound().map(|i| *i));
+                let _ = a[(start, end)];
+                let t = Some(ValArraySlice { base: a.clone(), start, end });
+                SPOOL.with(|pool| Self::Slice(PArc::new(pool, t)))
+            }
+            Self::Slice(s) => match &**s {
+                None => panic!("index out of bounds"),
+                Some(s) => {
+                    let (start, end) =
+                        (r.start_bound().map(|i| *i), r.end_bound().map(|i| *i));
+                    let start = match (s.start, start) {
+                        (Bound::Unbounded, Bound::Unbounded) => Bound::Unbounded,
+                        (Bound::Unbounded, Bound::Excluded(i)) => Bound::Excluded(i),
+                        (Bound::Unbounded, Bound::Included(i)) => Bound::Included(i),
+                        (Bound::Excluded(i), Bound::Unbounded) => Bound::Excluded(i),
+                        (Bound::Excluded(i), Bound::Included(j)) => {
+                            Bound::Excluded(i + j)
+                        }
+                        (Bound::Excluded(i), Bound::Excluded(j)) => {
+                            Bound::Excluded(i + j)
+                        }
+                        (Bound::Included(i), Bound::Unbounded) => Bound::Included(i),
+                        (Bound::Included(i), Bound::Included(j)) => {
+                            Bound::Included(i + j)
+                        }
+                        (Bound::Included(i), Bound::Excluded(j)) => {
+                            Bound::Excluded(i + j)
+                        }
+                    };
+                    let end = match (s.end, end) {
+                        (Bound::Unbounded, Bound::Unbounded) => Bound::Unbounded,
+                        (Bound::Unbounded, Bound::Excluded(i)) => Bound::Excluded(i),
+                        (Bound::Unbounded, Bound::Included(i)) => Bound::Included(i),
+                        (Bound::Excluded(i), Bound::Unbounded) => Bound::Excluded(i),
+                        (Bound::Excluded(i), Bound::Excluded(j)) => {
+                            Bound::Excluded(i - j)
+                        }
+                        (Bound::Excluded(i), Bound::Included(j)) => {
+                            Bound::Excluded(i - j)
+                        }
+                        (Bound::Included(i), Bound::Unbounded) => Bound::Included(i),
+                        (Bound::Included(i), Bound::Excluded(j)) => {
+                            Bound::Excluded(i - j)
+                        }
+                        (Bound::Included(i), Bound::Included(j)) => {
+                            Bound::Included(i - j)
+                        }
+                    };
+                    let _ = s.base[(start, end)];
+                    let t = Some(ValArraySlice { base: s.base.clone(), start, end });
+                    SPOOL.with(|pool| Self::Slice(PArc::new(pool, t)))
+                }
+            },
+        }
     }
 }
 
@@ -233,6 +398,6 @@ impl Pack for ValArray {
             }
             Ok(())
         })?;
-        Ok(Self(data))
+        Ok(Self::Base(data))
     }
 }

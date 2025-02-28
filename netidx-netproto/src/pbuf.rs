@@ -1,49 +1,26 @@
 /// Why? Because Bytes is 5 words. This module export PBytes, which
-/// reduces Bytes from 5 words to 2 words by wrapping it in a pooled
+/// reduces Bytes from 5 words to 1 words by wrapping it in a pooled
 /// arc. This allows us to reduce the size of Value from 5 words to 3
 /// words, while only paying the cost of a double indirection when
 /// accessing a zero copy Bytes.
 use bytes::{Buf, BufMut, Bytes};
 use netidx_core::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
-    pool::{Pool, Poolable, Pooled},
+    pool::{pooled::PArc, RawPool},
 };
 use serde::{de::Visitor, Deserialize, Serialize};
 use std::{borrow::Borrow, mem, ops::Deref, sync::LazyLock};
-use triomphe::Arc;
 
-static POOL: LazyLock<Pool<ArcBytes>> = LazyLock::new(|| Pool::new(8124, 64));
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct ArcBytes(Arc<Bytes>);
-
-impl Poolable for ArcBytes {
-    fn capacity(&self) -> usize {
-        1
-    }
-
-    fn empty() -> Self {
-        Self(Arc::new(Bytes::new()))
-    }
-
-    fn really_dropped(&self) -> bool {
-        Arc::is_unique(&self.0)
-    }
-
-    fn reset(&mut self) {
-        // drop the contained bytes and replace it with an empty one
-        let _: Bytes = mem::take(Arc::make_mut(&mut self.0));
-    }
-}
+static POOL: LazyLock<RawPool<PArc<Bytes>>> = LazyLock::new(|| RawPool::new(8124, 64));
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PBytes(Pooled<ArcBytes>);
+pub struct PBytes(PArc<Bytes>);
 
 impl Deref for PBytes {
     type Target = Bytes;
 
     fn deref(&self) -> &Self::Target {
-        &*(self.0).0
+        &*self.0
     }
 }
 
@@ -67,9 +44,7 @@ impl AsRef<[u8]> for PBytes {
 
 impl PBytes {
     pub fn new(b: Bytes) -> Self {
-        let mut t = POOL.take();
-        *Arc::make_mut(&mut t.0) = b;
-        Self(t)
+        Self(PArc::new(&POOL, b))
     }
 }
 
@@ -81,7 +56,10 @@ impl From<Bytes> for PBytes {
 
 impl Into<Bytes> for PBytes {
     fn into(mut self) -> Bytes {
-        mem::take(Arc::make_mut(&mut (self.0).0))
+        match PArc::get_mut(&mut self.0) {
+            Some(b) => mem::take(b),
+            None => (*self.0).clone(),
+        }
     }
 }
 
@@ -90,7 +68,7 @@ impl Serialize for PBytes {
     where
         S: serde::Serializer,
     {
-        let bytes: &Bytes = &*(self.0).0;
+        let bytes: &Bytes = &*self.0;
         bytes.serialize(serializer)
     }
 }

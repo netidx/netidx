@@ -2,7 +2,7 @@ use crate::{
     env::{Bind, LambdaBind},
     expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern, StructurePattern},
     typ::{FnType, NoRefs, Refs, TVar, Type},
-    Apply, ApplyTyped, BindId, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars,
+    Apply, ApplyTyped, BindId, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars, VAR_BATCH,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
@@ -1310,6 +1310,26 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         let arg_up = arg.update(ctx, event);
         macro_rules! set_args {
             ($i:expr) => {{
+                match arms[$i].0.structure_predicate {
+                    StructPatternNode::BindAll { name: None } => (),
+                    StructPatternNode::BindAll { name: Some(id) } => {
+                        if let Some(arg) = arg.cached.as_ref() {
+                            val_up[$i] |=
+                                arms[$i].1.update(ctx, &Event::Variable(id, arg.clone()));
+                        }
+                    }
+                    StructPatternNode::Slice { binds } => {
+                        if let Some(Value::Array(a)) = arg.cached.as_ref() {
+                            let mut vars = VAR_BATCH.take();
+                            for (j, id) in binds.iter().enumerate() {
+                                if let Some(id) = id {
+                                    vars.push((*id, a[j].clone()))
+                                }
+                            }
+                            val_up[$i] = arms[$i].1.update(ctx, &Event::VarBatch(vars));
+                        }
+                    }
+                }
                 let id = arms[$i].0.bind;
                 if let Some(arg) = arg.cached.as_ref() {
                     val_up[$i] |=

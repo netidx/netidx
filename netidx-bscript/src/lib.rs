@@ -24,6 +24,7 @@ use arcstr::ArcStr;
 use fxhash::FxHashMap;
 use netidx::{
     path::Path,
+    pool::{Pool, Pooled},
     subscriber::{Dval, SubId, UpdatesFlags, Value},
 };
 use std::{
@@ -38,11 +39,17 @@ mod tests;
 
 atomic_id!(BindId);
 
+pub const VAR_BATCH: LazyLock<Pool<Vec<(BindId, Value)>>> =
+    LazyLock::new(|| Pool::new(1024, 128));
+pub const NET_BATCH: LazyLock<Pool<Vec<(SubId, Value)>>> =
+    LazyLock::new(|| Pool::new(1024, 1024));
+
 #[derive(Clone, Debug)]
 pub enum Event<E: Debug> {
     Init,
     Variable(BindId, Value),
-    Netidx(SubId, Value),
+    VarBatch(Pooled<Vec<(BindId, Value)>>),
+    Netidx(Pooled<Vec<(SubId, Value)>>),
     User(E),
 }
 
