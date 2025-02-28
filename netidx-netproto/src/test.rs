@@ -614,20 +614,30 @@ fn array_subslicing() -> Result<()> {
     for (i, v) in a.iter().enumerate() {
         assert_eq!(v, &Value::U64(i as u64))
     }
+    assert!(a.subslice(1001..).is_err());
+    assert!(a.subslice(0..2000).is_err());
+    assert!(a.subslice(..2000).is_err());
+    assert!(a.subslice(0..=1000).is_err());
     let a0 = a.subslice(100..200)?;
-    dbg!(&a0);
+    assert!(a0.subslice(101..).is_err());
+    assert!(a0.subslice(0..101).is_err());
+    assert!(a0.subslice(0..=100).is_err());
     assert_eq!(a0.len(), 100);
     for (i, v) in a0.iter().enumerate() {
         assert_eq!(v, &Value::U64((100 + i) as u64));
     }
     let a1 = a0.subslice(10..20)?;
-    dbg!(&a1);
+    assert!(a1.subslice(11..).is_err());
+    assert!(a1.subslice(0..11).is_err());
+    assert!(a1.subslice(0..=10).is_err());
     assert_eq!(a1.len(), 10);
     for (i, v) in a1.iter().enumerate() {
         assert_eq!(v, &Value::U64((110 + i) as u64));
     }
     let a2 = a1.subslice(5..)?;
-    dbg!(&a2);
+    assert!(a2.subslice(6..).is_err());
+    assert!(a2.subslice(0..6).is_err());
+    assert!(a2.subslice(0..=5).is_err());
     assert_eq!(a2.len(), 5);
     for (i, v) in a2.iter().enumerate() {
         assert_eq!(v, &Value::U64((115 + i) as u64));

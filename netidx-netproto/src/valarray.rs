@@ -261,9 +261,8 @@ impl ValArray {
         Self::Base(res)
     }
 
-    /// create a zero copy owned subslice of the array. This will
-    /// panic if the range is out of the array bounds, just like a
-    /// normal slice range.
+    /// create a zero copy owned subslice of the array. Returns an
+    /// error if the subslice is out of bounds.
     pub fn subslice<R: RangeBounds<usize>>(&self, r: R) -> Result<Self> {
         fn check_bounds(
             a: &ValArrayBase,
@@ -325,14 +324,25 @@ impl ValArray {
             Self::Slice(s) => match &**s {
                 None => bail!("can't subslice an empty subslice"),
                 Some(s) => {
+                    let max_i = match s.end {
+                        Bound::Unbounded => s.base.len(),
+                        Bound::Excluded(i) => i + 1,
+                        Bound::Included(i) => i,
+                    };
                     let (start, end) =
                         (r.start_bound().map(|i| *i), r.end_bound().map(|i| *i));
                     let (start_i, start_off, start) = match (s.start, start) {
                         (Bound::Unbounded, Bound::Unbounded) => (0, 0, Bound::Unbounded),
                         (Bound::Unbounded, Bound::Excluded(i)) => {
+                            if i > max_i {
+                                bail!("slice start {i} is out of bounds {max_i}")
+                            }
                             (i, i, Bound::Excluded(i))
                         }
                         (Bound::Unbounded, Bound::Included(i)) => {
+                            if i >= max_i {
+                                bail!("slice start {i} is out of bounds {max_i}")
+                            }
                             (i, i, Bound::Included(i))
                         }
                         (Bound::Excluded(i), Bound::Unbounded) => {
@@ -340,10 +350,16 @@ impl ValArray {
                         }
                         (Bound::Excluded(i), Bound::Included(j)) => {
                             let si = i + j;
+                            if si > max_i {
+                                bail!("slice start {si} is out of bounds {max_i}")
+                            }
                             (si, j, Bound::Excluded(si))
                         }
                         (Bound::Excluded(i), Bound::Excluded(j)) => {
                             let si = i + j;
+                            if si > max_i {
+                                bail!("slice start {si} is out of bounds {max_i}")
+                            }
                             (si, j, Bound::Excluded(si))
                         }
                         (Bound::Included(i), Bound::Unbounded) => {
@@ -351,10 +367,16 @@ impl ValArray {
                         }
                         (Bound::Included(i), Bound::Included(j)) => {
                             let si = i + j;
+                            if si >= max_i {
+                                bail!("slice start {si} is out of bounds {max_i}")
+                            }
                             (si, j, Bound::Included(si))
                         }
                         (Bound::Included(i), Bound::Excluded(j)) => {
                             let si = i + j;
+                            if si > max_i {
+                                bail!("slice start {si} is out of bounds {max_i}")
+                            }
                             (si, j, Bound::Excluded(si))
                         }
                     };
@@ -415,7 +437,6 @@ impl ValArray {
                             Bound::Included(r)
                         }
                     };
-                    check_bounds(&s.base, start, end)?;
                     let t = Some(ValArraySlice { base: s.base.clone(), start, end });
                     Ok(Self::Slice(PArc::new(&SPOOL, t)))
                 }
