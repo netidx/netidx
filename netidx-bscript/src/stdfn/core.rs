@@ -413,30 +413,18 @@ impl EvalCached for SliceEv {
         match &from.0[0] {
             Some(Value::Array(elts)) => match (start, end) {
                 (None, None) => Some(Value::Array(elts.clone())),
-                (Some(i), Some(j)) => {
-                    if i < elts.len() && j <= elts.len() && i < j {
-                        let a = ValArray::from_iter_exact(elts[i..j].iter().cloned());
-                        Some(Value::Array(a))
-                    } else {
-                        err!("array index out of bounds or empty/crossed slice")
-                    }
-                }
-                (Some(i), None) => {
-                    if i < elts.len() {
-                        let a = ValArray::from_iter_exact(elts[i..].iter().cloned());
-                        Some(Value::Array(a))
-                    } else {
-                        err!("array index out of bounds")
-                    }
-                }
-                (None, Some(i)) => {
-                    if i <= elts.len() {
-                        let a = ValArray::from_iter_exact(elts[..i].iter().cloned());
-                        Some(Value::Array(a))
-                    } else {
-                        err!("array index out of bounds")
-                    }
-                }
+                (Some(i), Some(j)) => match elts.subslice(i..j) {
+                    Ok(a) => Some(Value::Array(a)),
+                    Err(e) => Some(Value::Error(e.to_string().into())),
+                },
+                (Some(i), None) => match elts.subslice(i..) {
+                    Ok(a) => Some(Value::Array(a)),
+                    Err(e) => Some(Value::Error(e.to_string().into())),
+                },
+                (None, Some(i)) => match elts.subslice(..i) {
+                    Ok(a) => Some(Value::Array(a)),
+                    Err(e) => Some(Value::Error(e.to_string().into())),
+                },
             },
             Some(_) => err!("expected array"),
             None => None,
@@ -446,24 +434,53 @@ impl EvalCached for SliceEv {
 
 type Slice = CachedArgs<SliceEv>;
 
-struct FilterEv;
+struct Filter<C: Ctx + 'static, E: Debug + Clone + 'static> {
+    pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
+    x: BindId,
+    from: [Node<C, E>; 1],
+}
 
-impl EvalCached for FilterEv {
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Filter<C, E> {
     const NAME: &str = "filter";
-    deftype!("fn(bool, 'a) -> 'a");
+    deftype!("fn('a, fn('a) -> bool) -> 'a");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
-        let (pred, s) = (&from.0[0], &from.0[1]);
-        match pred {
-            None => None,
-            Some(Value::Bool(true)) => s.clone(),
-            Some(Value::Bool(false)) => None,
-            _ => err!("filter(predicate, source) expected boolean predicate"),
-        }
+    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|ctx, scope, from, top_id| match from {
+            [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
+                let x = ctx.env.bind_variable(scope, "x", from[0].typ.clone()).id;
+                ctx.user.ref_var(x, top_id);
+                let mut from = [Node {
+                    spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
+                    typ: from[0].typ.clone(),
+                    kind: NodeKind::Ref(x),
+                }];
+                let pred = (lb.init)(ctx, &mut from, top_id)?;
+                Ok(Box::new(Self { pred, x, from }))
+            }
+            _ => bail!("expected a function"),
+        })
     }
 }
 
-type Filter = CachedArgs<FilterEv>;
+impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Filter<C, E> {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &Event<E>,
+    ) -> Option<Value> {
+        self.pred.update(ctx, &mut self.from, event);
+        from[0].update(ctx, event).and_then(|v| {
+            let e = Event::Variable(self.x, v.clone());
+            match self.pred.update(ctx, &mut self.from, &e) {
+                Some(Value::Bool(true)) => Some(v),
+                _ => None,
+            }
+        })
+    }
+}
+
+struct Ungroup(BindId);
 
 struct Count {
     count: u64,
@@ -745,7 +762,7 @@ pub mod core {
     pub let count = |@args| 'count
     pub let divide = |@args| 'divide
     pub let filter_err = |e| 'filter_err
-    pub let filter = |predicate, v| 'filter
+    pub let filter = |v, f| 'filter
     pub let group = |v, f| 'group
     pub let is_err = |e| 'is_error
     pub let error = |e| 'error
