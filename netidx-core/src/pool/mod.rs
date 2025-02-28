@@ -20,6 +20,8 @@ use std::{
 };
 
 pub mod pooled;
+#[cfg(test)]
+mod test;
 
 /// Implementing this trait allows full low level control over where
 /// the pool pointer is stored. For example if you are pooling an

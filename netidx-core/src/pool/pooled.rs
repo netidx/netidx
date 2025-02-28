@@ -208,4 +208,8 @@ impl<T: Default + Send + Sync + 'static> PArc<T> {
     pub fn strong_count(&self) -> usize {
         Arc::strong_count(&*self.inner)
     }
+
+    pub fn as_ptr(&self) -> *const (WeakPool<Self>, T) {
+        Arc::as_ptr(&*self.inner)
+    }
 }
