@@ -361,6 +361,60 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         }
     }
 
+    fn bind_event(&self, v: &Value) -> Option<Event<E>> {
+        match &self.structure_predicate {
+            StructPatternNode::BindAll { name: None } => None,
+            StructPatternNode::BindAll { name: Some(id) } => {
+                Some(Event::Variable(*id, v.clone()))
+            }
+            StructPatternNode::Slice { binds } => match v {
+                Value::Array(a) if a.len() >= binds.len() => {
+                    let mut vars = VAR_BATCH.take();
+                    for (j, id) in binds.iter().enumerate() {
+                        if let Some(id) = id {
+                            vars.push((*id, a[j].clone()))
+                        }
+                    }
+                    Some(Event::VarBatch(vars))
+                }
+                _ => None,
+            },
+            StructPatternNode::SlicePrefix { prefix, tail } => match v {
+                Value::Array(a) if a.len() >= prefix.len() => {
+                    let mut vars = VAR_BATCH.take();
+                    for (j, id) in prefix.iter().enumerate() {
+                        if let Some(id) = id {
+                            vars.push((*id, a[j].clone()))
+                        }
+                    }
+                    if let Some(id) = tail {
+                        let ss = a.subslice(prefix.len()..).unwrap();
+                        vars.push((*id, Value::Array(ss)))
+                    }
+                    Some(Event::VarBatch(vars))
+                }
+                _ => None,
+            },
+            StructPatternNode::SliceSuffix { head, suffix } => match v {
+                Value::Array(a) if a.len() >= suffix.len() => {
+                    let mut vars = VAR_BATCH.take();
+                    if let Some(id) = head {
+                        let ss = a.subslice(..suffix.len()).unwrap();
+                        vars.push((*id, Value::Array(ss)))
+                    }
+                    let tail = a.subslice(suffix.len()..).unwrap();
+                    for (j, id) in suffix.iter().enumerate() {
+                        if let Some(id) = id {
+                            vars.push((*id, tail[j].clone()))
+                        }
+                    }
+                    Some(Event::VarBatch(vars))
+                }
+                _ => None,
+            },
+        }
+    }
+
     fn is_match(&self, typ: Typ, v: &Value) -> bool {
         let tmatch = match (&self.type_predicate, typ) {
             (Type::Array(_), Typ::Array) => true,
@@ -1310,30 +1364,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         let arg_up = arg.update(ctx, event);
         macro_rules! set_args {
             ($i:expr) => {{
-                match arms[$i].0.structure_predicate {
-                    StructPatternNode::BindAll { name: None } => (),
-                    StructPatternNode::BindAll { name: Some(id) } => {
-                        if let Some(arg) = arg.cached.as_ref() {
-                            val_up[$i] |=
-                                arms[$i].1.update(ctx, &Event::Variable(id, arg.clone()));
-                        }
-                    }
-                    StructPatternNode::Slice { binds } => {
-                        if let Some(Value::Array(a)) = arg.cached.as_ref() {
-                            let mut vars = VAR_BATCH.take();
-                            for (j, id) in binds.iter().enumerate() {
-                                if let Some(id) = id {
-                                    vars.push((*id, a[j].clone()))
-                                }
-                            }
-                            val_up[$i] = arms[$i].1.update(ctx, &Event::VarBatch(vars));
-                        }
-                    }
-                }
-                let id = arms[$i].0.bind;
                 if let Some(arg) = arg.cached.as_ref() {
-                    val_up[$i] |=
-                        arms[$i].1.update(ctx, &Event::Variable(id, arg.clone()));
+                    if let Some(event) = arms[$i].0.bind_event(arg) {
+                        val_up[$i] |= arms[$i].1.update(ctx, &event);
+                    }
                 }
             }};
         }
@@ -1354,7 +1388,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             pat_up |= pat.update(ctx, event);
             if arg_up && pat.guard.is_some() {
                 if let Some(arg) = arg.cached.as_ref() {
-                    pat_up |= pat.update(ctx, &Event::Variable(pat.bind, arg.clone()));
+                    if let Some(event) = pat.bind_event(arg) {
+                        pat_up |= pat.update(ctx, &event);
+                    }
                 }
             }
             val_up.push(val.update(ctx, event));
@@ -1443,7 +1479,10 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             NodeKind::Error { .. } => None,
             NodeKind::Constant(v) => match event {
                 Event::Init => Some(v.clone()),
-                Event::Netidx(_, _) | Event::User(_) | Event::Variable(_, _) => None,
+                Event::Netidx(_)
+                | Event::User(_)
+                | Event::Variable(_, _)
+                | Event::VarBatch(_) => None,
             },
             NodeKind::Array { args } => {
                 let mut updated = false;
@@ -1472,8 +1511,13 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             }
             NodeKind::Ref(bid) => match event {
                 Event::Variable(id, v) if bid == id => Some(v.clone()),
+                Event::VarBatch(batch) => {
+                    batch.iter().find_map(
+                        |(id, v)| if bid == id { Some(v.clone()) } else { None },
+                    )
+                }
                 Event::Init
-                | Event::Netidx(_, _)
+                | Event::Netidx(_)
                 | Event::User(_)
                 | Event::Variable { .. } => None,
             },
