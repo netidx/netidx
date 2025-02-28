@@ -28,6 +28,7 @@ netidx-derive = { version = "0.22", path = "../netidx-derive" }
 rust_decimal = { workspace = true }
 serde_derive = { workspace = true }
 serde = { workspace = true }
+seq-macro = { workspace = true }
 smallvec = { workspace = true }
 triomphe = { workspace = true }
 uuid = { workspace = true }

@@ -1,47 +1,45 @@
 use crate::value::Value;
+use anyhow::Result;
 use bytes::{Buf, BufMut};
-use fxhash::FxHashMap;
 use netidx_core::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError, MAX_VEC},
     pool::{pooled::PArc, RawPool, RawPoolable, WeakPool},
 };
+use seq_macro::seq;
 use serde::{de::Visitor, ser::SerializeSeq, Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::{
     borrow::Borrow,
-    cell::RefCell,
-    collections::HashMap,
     fmt::Debug,
     hash::{Hash, Hasher},
     mem::ManuallyDrop,
     ops::{Bound, Deref, RangeBounds},
     ptr,
+    sync::LazyLock,
 };
 use triomphe::{Arc, ThinArc};
 
 const MAX_LEN: usize = 128;
 
-thread_local! {
-    static POOLS: RefCell<FxHashMap<usize, RawPool<ValArrayBase>>> = RefCell::new(HashMap::default());
-    static SPOOL: RawPool<PArc<Option<ValArraySlice>>> = RawPool::new(1024, 64);
-}
+const POOLS: [LazyLock<RawPool<ValArrayBase>>; 129] = seq!(N in 0..=128 {
+    [
+        #(LazyLock::new(|| RawPool::new(32 * (MAX_LEN + 1 - N), 1)),)*
+    ]
+});
 
-fn init_pool(len: usize) -> RawPool<ValArrayBase> {
-    RawPool::new(64 * (MAX_LEN + 1 - len), 64)
-}
+const SPOOL: LazyLock<RawPool<PArc<Option<ValArraySlice>>>> =
+    LazyLock::new(|| RawPool::new(1024, 64));
 
 fn get_by_size(len: usize) -> ValArrayBase {
-    POOLS.with_borrow_mut(|pools| {
-        if len > 0 && len <= MAX_LEN {
-            let pool = pools.entry(len).or_insert_with(|| init_pool(len));
-            match pool.try_take() {
-                Some(t) => t,
-                None => ValArrayBase::new_with_len(pool.downgrade(), len),
-            }
-        } else {
-            ValArrayBase::new_with_len(WeakPool::new(), len)
+    if len <= MAX_LEN {
+        let pool = &POOLS[len];
+        match pool.try_take() {
+            Some(t) => t,
+            None => ValArrayBase::new_with_len(pool.downgrade(), len),
         }
-    })
+    } else {
+        ValArrayBase::new_with_len(WeakPool::new(), len)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -266,62 +264,160 @@ impl ValArray {
     /// create a zero copy owned subslice of the array. This will
     /// panic if the range is out of the array bounds, just like a
     /// normal slice range.
-    pub fn subslice<R: RangeBounds<usize>>(&self, r: R) -> Self {
+    pub fn subslice<R: RangeBounds<usize>>(&self, r: R) -> Result<Self> {
+        fn check_bounds(
+            a: &ValArrayBase,
+            start: Bound<usize>,
+            end: Bound<usize>,
+        ) -> Result<()> {
+            let len = a.len();
+            match start {
+                Bound::Unbounded => (),
+                Bound::Excluded(i) => {
+                    if i >= len - 1 {
+                        bail!("start index {i} out of bounds {len}")
+                    }
+                }
+                Bound::Included(i) => {
+                    if i >= len {
+                        bail!("start index {i} out of bounds {len}")
+                    }
+                }
+            }
+            match end {
+                Bound::Unbounded => (),
+                Bound::Excluded(i) => {
+                    if i > len {
+                        bail!("end index {i} out of bounds {len}")
+                    }
+                }
+                Bound::Included(i) => {
+                    if i >= len {
+                        bail!("end index {i} out of bounds {len}")
+                    }
+                }
+            }
+            match (start, end) {
+                (
+                    Bound::Unbounded,
+                    Bound::Unbounded | Bound::Included(_) | Bound::Excluded(_),
+                )
+                | (Bound::Included(_) | Bound::Excluded(_), Bound::Unbounded) => (),
+                (
+                    Bound::Included(i) | Bound::Excluded(i),
+                    Bound::Included(j) | Bound::Excluded(j),
+                ) => {
+                    if j < i {
+                        bail!("array index starts at {i} but ends at {j}")
+                    }
+                }
+            }
+            Ok(())
+        }
         match self {
             Self::Base(a) => {
-                // check bounds
                 let (start, end) =
                     (r.start_bound().map(|i| *i), r.end_bound().map(|i| *i));
-                let _ = a[(start, end)];
                 let t = Some(ValArraySlice { base: a.clone(), start, end });
-                SPOOL.with(|pool| Self::Slice(PArc::new(pool, t)))
+                check_bounds(&a, start, end)?;
+                Ok(Self::Slice(PArc::new(&SPOOL, t)))
             }
             Self::Slice(s) => match &**s {
-                None => panic!("index out of bounds"),
+                None => bail!("can't subslice an empty subslice"),
                 Some(s) => {
                     let (start, end) =
                         (r.start_bound().map(|i| *i), r.end_bound().map(|i| *i));
-                    let start = match (s.start, start) {
-                        (Bound::Unbounded, Bound::Unbounded) => Bound::Unbounded,
-                        (Bound::Unbounded, Bound::Excluded(i)) => Bound::Excluded(i),
-                        (Bound::Unbounded, Bound::Included(i)) => Bound::Included(i),
-                        (Bound::Excluded(i), Bound::Unbounded) => Bound::Excluded(i),
+                    let (start_i, start_off, start) = match (s.start, start) {
+                        (Bound::Unbounded, Bound::Unbounded) => (0, 0, Bound::Unbounded),
+                        (Bound::Unbounded, Bound::Excluded(i)) => {
+                            (i, i, Bound::Excluded(i))
+                        }
+                        (Bound::Unbounded, Bound::Included(i)) => {
+                            (i, i, Bound::Included(i))
+                        }
+                        (Bound::Excluded(i), Bound::Unbounded) => {
+                            (i, 0, Bound::Excluded(i))
+                        }
                         (Bound::Excluded(i), Bound::Included(j)) => {
-                            Bound::Excluded(i + j)
+                            let si = i + j;
+                            (si, j, Bound::Excluded(si))
                         }
                         (Bound::Excluded(i), Bound::Excluded(j)) => {
-                            Bound::Excluded(i + j)
+                            let si = i + j;
+                            (si, j, Bound::Excluded(si))
                         }
-                        (Bound::Included(i), Bound::Unbounded) => Bound::Included(i),
+                        (Bound::Included(i), Bound::Unbounded) => {
+                            (i, 0, Bound::Included(i))
+                        }
                         (Bound::Included(i), Bound::Included(j)) => {
-                            Bound::Included(i + j)
+                            let si = i + j;
+                            (si, j, Bound::Included(si))
                         }
                         (Bound::Included(i), Bound::Excluded(j)) => {
-                            Bound::Excluded(i + j)
+                            let si = i + j;
+                            (si, j, Bound::Excluded(si))
                         }
                     };
                     let end = match (s.end, end) {
                         (Bound::Unbounded, Bound::Unbounded) => Bound::Unbounded,
-                        (Bound::Unbounded, Bound::Excluded(i)) => Bound::Excluded(i),
-                        (Bound::Unbounded, Bound::Included(i)) => Bound::Included(i),
+                        (Bound::Unbounded, Bound::Excluded(j)) => {
+                            if j < start_off {
+                                bail!("array index starts at {start_off} but ends at {j}")
+                            }
+                            Bound::Excluded(start_i + (j - start_off))
+                        }
+                        (Bound::Unbounded, Bound::Included(j)) => {
+                            if j < start_off {
+                                bail!("array index starts at {start_off} but ends at {j}")
+                            }
+                            Bound::Included(start_i + (j - start_off))
+                        }
                         (Bound::Excluded(i), Bound::Unbounded) => Bound::Excluded(i),
                         (Bound::Excluded(i), Bound::Excluded(j)) => {
-                            Bound::Excluded(i - j)
+                            if j < start_off {
+                                bail!("array index starts at {start_off} but ends at {j}")
+                            }
+                            let r = start_i + (j - start_off);
+                            if r > i {
+                                bail!("slice end {r} is out of bounds {i}")
+                            }
+                            Bound::Excluded(r)
                         }
                         (Bound::Excluded(i), Bound::Included(j)) => {
-                            Bound::Excluded(i - j)
+                            if j < start_off {
+                                bail!("array index starts at {start_off} but ends at {j}")
+                            }
+                            let r = start_i + (j - start_off);
+                            if r >= i {
+                                bail!("slice end {r} is out of bounds {i}")
+                            }
+                            Bound::Included(r)
                         }
                         (Bound::Included(i), Bound::Unbounded) => Bound::Included(i),
                         (Bound::Included(i), Bound::Excluded(j)) => {
-                            Bound::Excluded(i - j)
+                            if j < start_off {
+                                bail!("array index starts at {start_off} but ends at {j}")
+                            }
+                            let r = start_i + (j - start_off);
+                            if r > i + 1 {
+                                bail!("slice end {r} is out of bounds {i}")
+                            }
+                            Bound::Excluded(r)
                         }
                         (Bound::Included(i), Bound::Included(j)) => {
-                            Bound::Included(i - j)
+                            if j < start_off {
+                                bail!("array index starts at {start_off} but ends at {j}")
+                            }
+                            let r = start_i + (j - start_off);
+                            if r > i {
+                                bail!("slice end {r} is out of bound {i}")
+                            }
+                            Bound::Included(r)
                         }
                     };
-                    let _ = s.base[(start, end)];
+                    check_bounds(&s.base, start, end)?;
                     let t = Some(ValArraySlice { base: s.base.clone(), start, end });
-                    SPOOL.with(|pool| Self::Slice(PArc::new(pool, t)))
+                    Ok(Self::Slice(PArc::new(&SPOOL, t)))
                 }
             },
         }

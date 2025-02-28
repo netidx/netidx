@@ -3,6 +3,7 @@ use crate::{
     valarray::ValArray,
     value::{Typ, Value},
 };
+use anyhow::Result;
 use arcstr::{literal, ArcStr};
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Utc};
@@ -603,4 +604,33 @@ fn value_typ_discriminants() {
         Value::Error(_) => (),
         Value::Array(_) => (),
     }
+}
+
+#[test]
+fn array_subslicing() -> Result<()> {
+    let a = (0..1000).into_iter().map(|i| Value::U64(i as u64));
+    let a = ValArray::from_iter_exact(a);
+    assert_eq!(a.len(), 1000);
+    for (i, v) in a.iter().enumerate() {
+        assert_eq!(v, &Value::U64(i as u64))
+    }
+    let a0 = a.subslice(100..200)?;
+    dbg!(&a0);
+    assert_eq!(a0.len(), 100);
+    for (i, v) in a0.iter().enumerate() {
+        assert_eq!(v, &Value::U64((100 + i) as u64));
+    }
+    let a1 = a0.subslice(10..20)?;
+    dbg!(&a1);
+    assert_eq!(a1.len(), 10);
+    for (i, v) in a1.iter().enumerate() {
+        assert_eq!(v, &Value::U64((110 + i) as u64));
+    }
+    let a2 = a1.subslice(5..)?;
+    dbg!(&a2);
+    assert_eq!(a2.len(), 5);
+    for (i, v) in a2.iter().enumerate() {
+        assert_eq!(v, &Value::U64((115 + i) as u64));
+    }
+    Ok(())
 }
