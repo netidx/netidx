@@ -419,7 +419,7 @@ fn arith_nested() {
 }
 
 #[test]
-fn select() {
+fn select0() {
     let arms = Arc::from_iter([
         (
             Pattern {
@@ -464,6 +464,75 @@ fn select() {
     );
     let exp = ExprKind::Select { arg, arms }.to_expr();
     let s = r#"select foo(b) { i64 as a if a < 10 => a * 2, _ as a => a }"#;
+    assert_eq!(exp, parse_expr(s).unwrap());
+}
+
+#[test]
+fn select1() {
+    let arms = Arc::from_iter([
+        (
+            Pattern {
+                type_predicate: Type::Array(Arc::new(Type::Primitive(Typ::I64.into()))),
+                structure_predicate: StructurePattern::Slice {
+                    binds: Arc::from_iter([
+                        Some(literal!("a")),
+                        None,
+                        Some(literal!("b")),
+                    ]),
+                },
+                guard: Some(
+                    ExprKind::Lt {
+                        lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
+                        rhs: Arc::new(ExprKind::Constant(Value::I64(10)).to_expr()),
+                    }
+                    .to_expr(),
+                ),
+            },
+            ExprKind::Mul {
+                lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
+                rhs: Arc::new(ExprKind::Constant(Value::I64(2)).to_expr()),
+            }
+            .to_expr(),
+        ),
+        (
+            Pattern {
+                type_predicate: Type::Array(Arc::new(Type::Primitive(Typ::I64.into()))),
+                structure_predicate: StructurePattern::SlicePrefix {
+                    prefix: Arc::from_iter([Some(literal!("a"))]),
+                    tail: Some(literal!("b")),
+                },
+                guard: None,
+            },
+            ExprKind::Ref { name: ["a"].into() }.to_expr(),
+        ),
+        (
+            Pattern {
+                type_predicate: Type::Bottom(PhantomData),
+                structure_predicate: StructurePattern::BindAll {
+                    name: Some(literal!("a")),
+                },
+                guard: None,
+            },
+            ExprKind::Ref { name: ModPath::from(["a"]) }.to_expr(),
+        ),
+    ]);
+    let arg = Arc::new(
+        ExprKind::Apply {
+            args: Arc::from_iter([(
+                None,
+                ExprKind::Ref { name: ["b"].into() }.to_expr(),
+            )]),
+            function: ["foo"].into(),
+        }
+        .to_expr(),
+    );
+    let exp = ExprKind::Select { arg, arms }.to_expr();
+    let s = r#"
+select foo(b) {
+    Array<i64> as [a, _, b] if a < 10 => a * 2,
+    Array<i64> as [a, b..] => a,
+    _ as a => a
+}"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
