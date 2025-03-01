@@ -242,11 +242,34 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
     })
 }
 
+fn structure_pattern() -> impl Strategy<Value = StructurePattern> {
+    prop_oneof![
+        option::of(random_fname()).prop_map(|name| StructurePattern::BindAll { name }),
+        collection::vec(option::of(random_fname()), (1, 10)).prop_map(|b| {
+            StructurePattern::Slice { binds: Arc::from_iter(b.into_iter()) }
+        }),
+        (
+            collection::vec(option::of(random_fname()), (1, 10)),
+            option::of(random_fname())
+        )
+            .prop_map(|(p, tail)| StructurePattern::SlicePrefix {
+                prefix: Arc::from_iter(p.into_iter()),
+                tail
+            }),
+        (
+            option::of(random_fname()),
+            collection::vec(option::of(random_fname()), (1, 10))
+        )
+            .prop_map(|(head, s)| StructurePattern::SliceSuffix {
+                head,
+                suffix: Arc::from_iter(s.into_iter())
+            })
+    ]
+}
+
 fn pattern() -> impl Strategy<Value = Pattern> {
-    (typexp(), random_fname()).prop_map(|(predicate, bind)| Pattern {
-        predicate,
-        bind,
-        guard: None,
+    (typexp(), structure_pattern()).prop_map(|(type_predicate, structure_predicate)| {
+        Pattern { type_predicate, structure_predicate, guard: None }
     })
 }
 

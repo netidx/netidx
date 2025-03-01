@@ -423,8 +423,10 @@ fn select() {
     let arms = Arc::from_iter([
         (
             Pattern {
-                predicate: Type::Primitive(Typ::I64.into()),
-                bind: literal!("a"),
+                type_predicate: Type::Primitive(Typ::I64.into()),
+                structure_predicate: StructurePattern::BindAll {
+                    name: Some(literal!("a")),
+                },
                 guard: Some(
                     ExprKind::Lt {
                         lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
@@ -441,8 +443,10 @@ fn select() {
         ),
         (
             Pattern {
-                predicate: Type::Bottom(PhantomData),
-                bind: literal!("a"),
+                type_predicate: Type::Bottom(PhantomData),
+                structure_predicate: StructurePattern::BindAll {
+                    name: Some(literal!("a")),
+                },
                 guard: None,
             },
             ExprKind::Ref { name: ModPath::from(["a"]) }.to_expr(),
