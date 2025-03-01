@@ -480,8 +480,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Filter<C, E> 
     }
 }
 
-struct Ungroup(BindId);
-
 struct Count {
     count: u64,
 }
@@ -788,7 +786,7 @@ pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Any>();
     ctx.register_builtin::<Count>();
     ctx.register_builtin::<Divide>();
-    ctx.register_builtin::<Filter>();
+    ctx.register_builtin::<Filter<C, E>>();
     ctx.register_builtin::<FilterErr>();
     ctx.register_builtin::<Group<C, E>>();
     ctx.register_builtin::<Index>();

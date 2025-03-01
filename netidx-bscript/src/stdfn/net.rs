@@ -173,9 +173,15 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Load {
             }
         }
         self.cur.as_ref().and_then(|(_, dv)| match event {
-            Event::Variable { .. } | Event::User(_) | Event::Init => None,
-            Event::Netidx(id, value) if dv.id() == *id => Some(value.clone()),
-            Event::Netidx(_, _) => None,
+            Event::Netidx(batch) => {
+                batch.iter().find_map(
+                    |(id, v)| if dv.id() == *id { Some(v.clone()) } else { None },
+                )
+            }
+            Event::Variable { .. }
+            | Event::VarBatch(_)
+            | Event::User(_)
+            | Event::Init => None,
         })
     }
 }
@@ -245,7 +251,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for RpcCall {
             ((None, _), (_, _)) | ((_, None), (_, _)) | ((_, _), (false, false)) => (),
         }
         match event {
-            Event::Init | Event::Netidx(_, _) | Event::User(_) => None,
+            Event::Init | Event::Netidx(_) | Event::User(_) | Event::VarBatch(_) => None,
             Event::Variable(id, val) => {
                 if self.pending.remove(id) {
                     Some(val.clone())

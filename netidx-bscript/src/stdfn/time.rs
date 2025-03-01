@@ -59,7 +59,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for AfterIdle {
             | ((Some(_), Some(_)), (false, _)) => (),
         };
         match event {
-            Event::Init | Event::Netidx(_, _) | Event::User(_) => None,
+            Event::Init | Event::Netidx(_) | Event::User(_) | Event::VarBatch(_) => None,
             Event::Variable(id, _) => {
                 if self.id != Some(*id) {
                     None
@@ -194,7 +194,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Timer {
             | ((_, None), (false, true)) => (),
         }
         match event {
-            Event::Init | Event::Netidx(_, _) | Event::User(_) => None,
+            Event::Init | Event::Netidx(_) | Event::User(_) | Event::VarBatch(_) => None,
             Event::Variable(id, now) => {
                 if self.id != Some(*id) {
                     None
