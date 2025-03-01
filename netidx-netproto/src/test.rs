@@ -16,7 +16,13 @@ use netidx_core::{
 };
 use proptest::{collection, prelude::*, string::string_regex};
 use rust_decimal::Decimal;
-use std::{fmt::Debug, net::SocketAddr, time::Duration};
+use std::{
+    fmt::Debug,
+    net::SocketAddr,
+    ops::Bound,
+    panic::{catch_unwind, AssertUnwindSafe},
+    time::Duration,
+};
 
 fn check<T: Pack + Debug + PartialEq>(t: T) {
     let mut bytes = pack(&t).expect("encode failed");
@@ -606,39 +612,71 @@ fn value_typ_discriminants() {
     }
 }
 
+fn test_array(s: &[usize], b: (Bound<usize>, Bound<usize>)) -> Result<usize> {
+    catch_unwind(AssertUnwindSafe(|| s[b].len())).map_err(|e| anyhow!("{e:?}"))
+}
+
+fn test_array_model(a: &ValArray, len: usize) {
+    let model = vec![0; len];
+    macro_rules! check {
+        ($f:expr) => {
+            for i in 0..=len + 1 {
+                let b = $f(i);
+                let ss = a.subslice(b);
+                let rs = test_array(&model, b);
+                match (&ss, &rs) {
+                    (Err(_), Err(_)) => (),
+                    (Ok(ss), Ok(len)) => assert_eq!(ss.len(), *len),
+                    (_, _) => panic!(
+                        "differ at {b:?} {} vs {}",
+                        match ss {
+                            Err(e) => format!("Err({e:?})"),
+                            Ok(_) => format!("Ok"),
+                        },
+                        match rs {
+                            Err(e) => format!("Err({e:?})"),
+                            Ok(_) => format!("Ok"),
+                        }
+                    ),
+                }
+            }
+        };
+    }
+    check!(|_| (Bound::Unbounded, Bound::Unbounded));
+    check!(|i| (Bound::Unbounded, Bound::Included(i)));
+    check!(|i| (Bound::Unbounded, Bound::Excluded(i)));
+    check!(|i| (Bound::Included(i), Bound::Unbounded));
+    check!(|i| (Bound::Included(i / 2), Bound::Included(i)));
+    check!(|i| (Bound::Included(i / 2), Bound::Excluded(i)));
+    check!(|i| (Bound::Excluded(i), Bound::Unbounded));
+    check!(|i| (Bound::Excluded(i / 2), Bound::Included(i)));
+    check!(|i| (Bound::Excluded(i / 2), Bound::Excluded(i)));
+}
+
 #[test]
 fn array_subslicing() -> Result<()> {
     let a = (0..1000).into_iter().map(|i| Value::U64(i as u64));
     let a = ValArray::from_iter_exact(a);
     assert_eq!(a.len(), 1000);
+    test_array_model(&a, 1000);
     for (i, v) in a.iter().enumerate() {
         assert_eq!(v, &Value::U64(i as u64))
     }
-    assert!(a.subslice(1001..).is_err());
-    assert!(a.subslice(0..2000).is_err());
-    assert!(a.subslice(..2000).is_err());
-    assert!(a.subslice(0..=1000).is_err());
     let a0 = a.subslice(100..200)?;
-    assert!(a0.subslice(101..).is_err());
-    assert!(a0.subslice(0..101).is_err());
-    assert!(a0.subslice(0..=100).is_err());
     assert_eq!(a0.len(), 100);
+    test_array_model(&a0, 100);
     for (i, v) in a0.iter().enumerate() {
         assert_eq!(v, &Value::U64((100 + i) as u64));
     }
     let a1 = a0.subslice(10..20)?;
-    assert!(a1.subslice(11..).is_err());
-    assert!(a1.subslice(0..11).is_err());
-    assert!(a1.subslice(0..=10).is_err());
     assert_eq!(a1.len(), 10);
+    test_array_model(&a1, 10);
     for (i, v) in a1.iter().enumerate() {
         assert_eq!(v, &Value::U64((110 + i) as u64));
     }
     let a2 = a1.subslice(5..)?;
-    assert!(a2.subslice(6..).is_err());
-    assert!(a2.subslice(0..6).is_err());
-    assert!(a2.subslice(0..=5).is_err());
     assert_eq!(a2.len(), 5);
+    test_array_model(&a2, 5);
     for (i, v) in a2.iter().enumerate() {
         assert_eq!(v, &Value::U64((115 + i) as u64));
     }

@@ -154,9 +154,10 @@ macro_rules! run {
             state.ctx.dbg_ctx.trace = false;
             let mut n = Node::compile(&mut state.ctx, &ModPath::root(), $code.parse()?);
             if let Some(e) = n.extract_err() {
-                if $pred(Err(dbg!(anyhow!("compilation failed {e}")))) {
+                if $pred(Err(anyhow!("compilation failed {e}"))) {
                     return Ok(());
                 }
+                bail!("compilation failed {e}")
             }
             dbg!("compilation succeeded");
             assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
@@ -685,5 +686,54 @@ run!(array_indexing6, ARRAY_INDEXING6, |v: Result<&Value>| match v {
                 Value::I64(7)
             ] =>
         true,
+    _ => false,
+});
+
+const ARRAY_MATCH0: &str = r#"
+{
+  let a = [0, 1, 2, 3, 4, 5, 6];
+  select a {
+    Array<i64> as [a, b, c, d, ..] => a + b + c + d
+  }
+}
+"#;
+
+run!(array_match0, ARRAY_MATCH0, |v: Result<&Value>| match v {
+    Ok(Value::I64(6)) => true,
+    _ => false,
+});
+
+const ARRAY_MATCH1: &str = r#"
+{
+  let a = [0, 1, 2, 3, 4, 5, 6, 7];
+  let out = select a {
+    Array<i64> as [x, y, tl..] => {
+      a <- tl;
+      [x, y]
+    }
+  };
+  group(out, |i, x| i == 4)
+}
+"#;
+
+run!(array_match1, ARRAY_MATCH1, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => {
+        a.len() == 4 && {
+            a.iter().enumerate().all(|(i, a)| match a {
+                Value::Array(a) => {
+                    a.len() == 2
+                        && match &a[0] {
+                            Value::I64(x) => *x as usize == i * 2,
+                            _ => false,
+                        }
+                        && match &a[1] {
+                            Value::I64(x) => *x as usize == i * 2 + 1,
+                            _ => false,
+                        }
+                }
+                _ => false,
+            })
+        }
+    }
     _ => false,
 });

@@ -298,9 +298,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
                         if !uniq(names) {
                             bail!("bound variables must have unique names")
                         }
-                        let single = $single
-                            .as_ref()
-                            .map(|n| ctx.env.bind_variable(scope, n, (**et).clone()).id);
+                        let single = $single.as_ref().map(|n| {
+                            ctx.env.bind_variable(scope, n, type_predicate.clone()).id
+                        });
                         let multi = $multi.iter().map(|n| {
                             n.as_ref().map(|n| {
                                 ctx.env.bind_variable(scope, n, (**et).clone()).id
@@ -380,7 +380,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
                 _ => None,
             },
             StructPatternNode::SlicePrefix { prefix, tail } => match v {
-                Value::Array(a) if a.len() >= prefix.len() => {
+                Value::Array(a) if a.len() > prefix.len() => {
                     let mut vars = VAR_BATCH.take();
                     for (j, id) in prefix.iter().enumerate() {
                         if let Some(id) = id {
@@ -396,7 +396,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
                 _ => None,
             },
             StructPatternNode::SliceSuffix { head, suffix } => match v {
-                Value::Array(a) if a.len() >= suffix.len() => {
+                Value::Array(a) if a.len() > suffix.len() => {
                     let mut vars = VAR_BATCH.take();
                     if let Some(id) = head {
                         let ss = a.subslice(..suffix.len()).unwrap();

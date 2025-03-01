@@ -273,12 +273,12 @@ impl ValArray {
             match start {
                 Bound::Unbounded => (),
                 Bound::Excluded(i) => {
-                    if i >= len - 1 {
+                    if i > len - 1 {
                         bail!("start index {i} out of bounds {len}")
                     }
                 }
                 Bound::Included(i) => {
-                    if i >= len {
+                    if i > len {
                         bail!("start index {i} out of bounds {len}")
                     }
                 }
@@ -302,12 +302,16 @@ impl ValArray {
                     Bound::Unbounded | Bound::Included(_) | Bound::Excluded(_),
                 )
                 | (Bound::Included(_) | Bound::Excluded(_), Bound::Unbounded) => (),
-                (
-                    Bound::Included(i) | Bound::Excluded(i),
-                    Bound::Included(j) | Bound::Excluded(j),
-                ) => {
+                (Bound::Included(i), Bound::Included(j))
+                | (Bound::Excluded(i), Bound::Included(j))
+                | (Bound::Included(i), Bound::Excluded(j)) => {
                     if j < i {
                         bail!("array index starts at {i} but ends at {j}")
+                    }
+                }
+                (Bound::Excluded(i), Bound::Excluded(j)) => {
+                    if j <= i {
+                        bail!("array index starts at ex {i} but ends at ex {j}")
                     }
                 }
             }
@@ -326,21 +330,30 @@ impl ValArray {
                 Some(s) => {
                     let max_i = match s.end {
                         Bound::Unbounded => s.base.len(),
-                        Bound::Excluded(i) => i + 1,
+                        Bound::Excluded(i) => i,
                         Bound::Included(i) => i,
                     };
                     let (start, end) =
                         (r.start_bound().map(|i| *i), r.end_bound().map(|i| *i));
+                    match (start, end) {
+                        (Bound::Excluded(i), Bound::Excluded(j)) if j <= i => {
+                            bail!("negative size slice ex {i}, ex {j}")
+                        }
+                        (Bound::Included(i), Bound::Included(j)) if j < i => {
+                            bail!("negative size slice {i}, {j}")
+                        }
+                        (_, _) => (),
+                    }
                     let (start_i, start_off, start) = match (s.start, start) {
                         (Bound::Unbounded, Bound::Unbounded) => (0, 0, Bound::Unbounded),
                         (Bound::Unbounded, Bound::Excluded(i)) => {
-                            if i > max_i {
+                            if i >= max_i {
                                 bail!("slice start {i} is out of bounds {max_i}")
                             }
                             (i, i, Bound::Excluded(i))
                         }
                         (Bound::Unbounded, Bound::Included(i)) => {
-                            if i >= max_i {
+                            if i > max_i {
                                 bail!("slice start {i} is out of bounds {max_i}")
                             }
                             (i, i, Bound::Included(i))
@@ -350,14 +363,14 @@ impl ValArray {
                         }
                         (Bound::Excluded(i), Bound::Included(j)) => {
                             let si = i + j;
-                            if si > max_i {
+                            if si >= max_i {
                                 bail!("slice start {si} is out of bounds {max_i}")
                             }
                             (si, j, Bound::Excluded(si))
                         }
                         (Bound::Excluded(i), Bound::Excluded(j)) => {
                             let si = i + j;
-                            if si > max_i {
+                            if si >= max_i {
                                 bail!("slice start {si} is out of bounds {max_i}")
                             }
                             (si, j, Bound::Excluded(si))
@@ -367,14 +380,14 @@ impl ValArray {
                         }
                         (Bound::Included(i), Bound::Included(j)) => {
                             let si = i + j;
-                            if si >= max_i {
+                            if si > max_i {
                                 bail!("slice start {si} is out of bounds {max_i}")
                             }
                             (si, j, Bound::Included(si))
                         }
                         (Bound::Included(i), Bound::Excluded(j)) => {
                             let si = i + j;
-                            if si > max_i {
+                            if si >= max_i {
                                 bail!("slice start {si} is out of bounds {max_i}")
                             }
                             (si, j, Bound::Excluded(si))
@@ -386,13 +399,21 @@ impl ValArray {
                             if j < start_off {
                                 bail!("array index starts at {start_off} but ends at {j}")
                             }
-                            Bound::Excluded(start_i + (j - start_off))
+                            let r = start_i + (j - start_off);
+                            if r > max_i {
+                                bail!("slice end {r} is out of bounds {max_i}")
+                            }
+                            Bound::Excluded(r)
                         }
                         (Bound::Unbounded, Bound::Included(j)) => {
                             if j < start_off {
                                 bail!("array index starts at {start_off} but ends at {j}")
                             }
-                            Bound::Included(start_i + (j - start_off))
+                            let r = start_i + (j - start_off);
+                            if r > max_i {
+                                bail!("slice end {r} is out of bounds {max_i}")
+                            }
+                            Bound::Included(r)
                         }
                         (Bound::Excluded(i), Bound::Unbounded) => Bound::Excluded(i),
                         (Bound::Excluded(i), Bound::Excluded(j)) => {
