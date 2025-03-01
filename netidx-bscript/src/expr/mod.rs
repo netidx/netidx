@@ -100,7 +100,7 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StructurePattern {
     BindAll { name: Option<ArcStr> },
     Slice { binds: Arc<[Option<ArcStr>]> },

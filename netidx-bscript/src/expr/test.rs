@@ -655,8 +655,8 @@ fn check_type_opt(t0: &Option<Type<Refs>>, t1: &Option<Type<Refs>>) -> bool {
 }
 
 fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
-    dbg!(check_type(&pat0.predicate, &pat1.predicate))
-        && dbg!(pat0.bind == pat1.bind)
+    dbg!(check_type(&pat0.type_predicate, &pat1.type_predicate))
+        && dbg!(pat0.structure_predicate == pat1.structure_predicate)
         && dbg!(match (&pat0.guard, &pat1.guard) {
             (Some(g0), Some(g1)) => check(g0, g1),
             (None, None) => true,
