@@ -507,6 +507,17 @@ fn select1() {
         ),
         (
             Pattern {
+                type_predicate: Type::Array(Arc::new(Type::Primitive(Typ::I64.into()))),
+                structure_predicate: StructurePattern::SliceSuffix {
+                    suffix: Arc::from_iter([Some(literal!("b"))]),
+                    head: Some(literal!("a")),
+                },
+                guard: None,
+            },
+            ExprKind::Ref { name: ["a"].into() }.to_expr(),
+        ),
+        (
+            Pattern {
                 type_predicate: Type::Bottom(PhantomData),
                 structure_predicate: StructurePattern::BindAll {
                     name: Some(literal!("a")),
@@ -531,6 +542,7 @@ fn select1() {
 select foo(b) {
     Array<i64> as [a, _, b] if a < 10 => a * 2,
     Array<i64> as [a, b..] => a,
+    Array<i64> as [a.., b] => a,
     _ as a => a
 }"#;
     assert_eq!(exp, parse_expr(s).unwrap());
