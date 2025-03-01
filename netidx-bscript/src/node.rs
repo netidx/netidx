@@ -368,7 +368,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
                 Some(Event::Variable(*id, v.clone()))
             }
             StructPatternNode::Slice { binds } => match v {
-                Value::Array(a) if a.len() >= binds.len() => {
+                Value::Array(a) if a.len() == binds.len() => {
                     let mut vars = VAR_BATCH.take();
                     for (j, id) in binds.iter().enumerate() {
                         if let Some(id) = id {
@@ -380,7 +380,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
                 _ => None,
             },
             StructPatternNode::SlicePrefix { prefix, tail } => match v {
-                Value::Array(a) if a.len() > prefix.len() => {
+                Value::Array(a) if a.len() >= prefix.len() => {
                     let mut vars = VAR_BATCH.take();
                     for (j, id) in prefix.iter().enumerate() {
                         if let Some(id) = id {
@@ -396,7 +396,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
                 _ => None,
             },
             StructPatternNode::SliceSuffix { head, suffix } => match v {
-                Value::Array(a) if a.len() > suffix.len() => {
+                Value::Array(a) if a.len() >= suffix.len() => {
                     let mut vars = VAR_BATCH.take();
                     if let Some(id) = head {
                         let ss = a.subslice(..suffix.len()).unwrap();
