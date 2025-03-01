@@ -121,6 +121,7 @@ impl TVar<NoRefs> {
                 Type::Primitive(_) | Type::Bottom(_) | Type::Ref(_) => false,
                 Type::TVar(t) => Arc::as_ptr(&*t.read()).addr() == addr,
                 Type::Array(a) => would_cycle(addr, &**a),
+                Type::Tuple(ts) => ts.iter().any(|t| would_cycle(addr, t)),
                 Type::Set(s) => s.iter().any(|t| would_cycle(addr, t)),
                 Type::Fn(f) => {
                     let FnType { args, vargs, rtype, constraints } = &**f;
@@ -200,6 +201,7 @@ pub enum Type<T: TypeMark> {
     Set(Arc<[Type<T>]>),
     TVar(TVar<T>),
     Array(Arc<Type<T>>),
+    Tuple(Arc<[Type<T>]>),
 }
 
 impl Type<NoRefs> {
@@ -222,7 +224,8 @@ impl Type<NoRefs> {
             | Self::Primitive(_)
             | Self::Fn(_)
             | Self::Set(_)
-            | Self::Array(_) => true,
+            | Self::Array(_)
+            | Self::Tuple(_) => true,
             Self::TVar(tv) => tv.read().read().is_some(),
             Self::Ref(_) => unreachable!(),
         }
@@ -234,7 +237,8 @@ impl Type<NoRefs> {
             | Self::Primitive(_)
             | Self::Fn(_)
             | Self::Set(_)
-            | Self::Array(_) => f(Some(self)),
+            | Self::Array(_)
+            | Self::Tuple(_) => f(Some(self)),
             Self::TVar(tv) => f(tv.read().read().as_ref()),
             Self::Ref(_) => unreachable!(),
         }
@@ -257,6 +261,14 @@ impl Type<NoRefs> {
                 t0.contains(&Type::Primitive(BitFlags::all()))
             }
             (Self::Array(_), Self::Primitive(_)) => false,
+            (Self::Tuple(t0), Self::Tuple(t1)) => {
+                t0.len() == t1.len()
+                    && t0.iter().zip(t1.iter()).all(|(t0, t1)| t0.contains(t1))
+            }
+            (Self::Tuple(_), Self::Array(_))
+            | (Self::Array(_), Self::Tuple(_))
+            | (Self::Tuple(_), Self::Primitive(_))
+            | (Self::Primitive(_), Self::Tuple(_)) => false,
             (Self::Primitive(_), Self::Array(_)) => {
                 self.contains(&Type::Primitive(Typ::Array.into()))
             }
@@ -359,6 +371,16 @@ impl Type<NoRefs> {
             (Type::Set(s), t) | (t, Type::Set(s)) => {
                 Self::flatten_set(s.iter().cloned().chain(iter::once(t.clone())))
             }
+            (Type::Tuple(t0), Type::Tuple(t1)) => {
+                if t0 == t1 {
+                    self.clone()
+                } else {
+                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+                }
+            }
+            (Type::Tuple(_), t) | (t, Type::Tuple(_)) => {
+                Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+            }
             (Type::Fn(f0), Type::Fn(f1)) => {
                 if f0 == f1 {
                     Type::Fn(f0.clone())
@@ -430,6 +452,14 @@ impl Type<NoRefs> {
                 }
                 Ok(t)
             }
+            (Type::Tuple(t0), Type::Tuple(t1)) => {
+                if t0 == t1 {
+                    Ok(Type::Primitive(BitFlags::empty()))
+                } else {
+                    Ok(self.clone())
+                }
+            }
+            (Type::Tuple(_), _) | (_, Type::Tuple(_)) => Ok(self.clone()),
             (Type::Fn(f0), Type::Fn(f1)) => {
                 if f0 == f1 {
                     Ok(Type::Primitive(BitFlags::empty()))
@@ -483,6 +513,11 @@ impl Type<NoRefs> {
             Type::Bottom(_) | Type::Primitive(_) => (),
             Type::Ref(_) => unreachable!(),
             Type::Array(t) => t.alias_unbound(known),
+            Type::Tuple(ts) => {
+                for t in ts.iter() {
+                    t.alias_unbound(known)
+                }
+            }
             Type::TVar(tv) => match known.entry(tv.name.clone()) {
                 Entry::Vacant(e) => {
                     e.insert(tv.clone());
@@ -526,6 +561,9 @@ impl Type<NoRefs> {
             Type::Primitive(p) => Type::Primitive(*p),
             Type::Ref(_) => unreachable!(),
             Type::Array(t0) => Type::Array(Arc::new(t0.reset_tvars())),
+            Type::Tuple(ts) => {
+                Type::Tuple(Arc::from_iter(ts.iter().map(|t| t.reset_tvars())))
+            }
             Type::TVar(tv) => Type::TVar(TVar::empty_named(tv.name.clone())),
             Type::Set(s) => Type::Set(Arc::from_iter(s.iter().map(|t| t.reset_tvars()))),
             Type::Fn(fntyp) => {
@@ -552,7 +590,9 @@ impl Type<NoRefs> {
             Type::Fn(_) => None,
             Type::Set(s) => s.iter().find_map(|t| t.first_prim()),
             Type::TVar(tv) => tv.read().read().as_ref().and_then(|t| t.first_prim()),
+            // array and tuple casting are handled directly
             Type::Array(_) => None,
+            Type::Tuple(_) => None,
         }
     }
 
@@ -570,6 +610,9 @@ impl Type<NoRefs> {
                 None => bail!("can't cast a value to a free type variable"),
             },
             Type::Array(et) => et.check_cast(),
+            Type::Tuple(ts) => Ok(for t in ts.iter() {
+                t.check_cast()?
+            }),
         }
     }
 
@@ -613,10 +656,34 @@ impl Type<NoRefs> {
                     v => Value::Array([v].into()),
                 },
             },
+            Type::Tuple(ts) => match v {
+                Value::Array(elts) => {
+                    if elts.len() != ts.len() {
+                        let e = format!(
+                            "tuple size mismatch {self} with {}",
+                            Value::Array(elts)
+                        );
+                        return Value::Error(e.into());
+                    }
+                    let ok = ts
+                        .iter()
+                        .zip(elts.iter())
+                        .all(|(t, el)| t.contains(&Type::Primitive(Typ::get(el).into())));
+                    if ok {
+                        return Value::Array(elts);
+                    }
+                    let i = ts
+                        .iter()
+                        .zip(elts.iter())
+                        .map(|(t, el)| t.cast_value(el.clone()));
+                    Value::Array(ValArray::from_iter_exact(i))
+                }
+                v => Value::Error(format!("can't cast {v} to {self}").into()),
+            },
             t => match t.first_prim() {
                 None => Value::Error(literal!("empty or non primitive cast")),
                 Some(t) => v.clone().cast(t).unwrap_or_else(|| {
-                    Value::Error(format_compact!("can't cast {v} to {t}").as_str().into())
+                    Value::Error(format!("can't cast {v} to {t}").into())
                 }),
             },
         }
@@ -632,6 +699,7 @@ impl<T: TypeMark + Clone> Type<T> {
             | Type::Ref(_)
             | Type::Fn(_)
             | Type::Array(_)
+            | Type::Tuple(_)
             | Type::Set(_) => false,
         }
     }
@@ -712,6 +780,14 @@ impl<T: TypeMark + Clone> Type<T> {
             (Type::Set(s), t) | (t, Type::Set(s)) => {
                 Some(Self::flatten_set(s.iter().cloned().chain(iter::once(t.clone()))))
             }
+            (Type::Tuple(t0), Type::Tuple(t1)) => {
+                if t0 == t1 {
+                    Some(Type::Tuple(t0.clone()))
+                } else {
+                    None
+                }
+            }
+            (Type::Tuple(_), _) | (_, Type::Tuple(_)) => None,
             (Type::Ref(r0), Type::Ref(r1)) => {
                 if r0 == r1 {
                     Some(Type::Ref(r0.clone()))
@@ -736,6 +812,14 @@ impl<T: TypeMark + Clone> Type<T> {
             Type::Bottom(_) => Ok(Type::Bottom(PhantomData)),
             Type::Primitive(s) => Ok(Type::Primitive(*s)),
             Type::Array(t0) => Ok(Type::Array(Arc::new(t0.resolve_typrefs(scope, env)?))),
+            Type::Tuple(ts) => {
+                let i = ts
+                    .iter()
+                    .map(|t| t.resolve_typrefs(scope, env))
+                    .collect::<Result<SmallVec<[Type<NoRefs>; 8]>>>()?
+                    .into_iter();
+                Ok(Type::Tuple(Arc::from_iter(i)))
+            }
             Type::TVar(tv) => match &*tv.read().read() {
                 None => Ok(Type::TVar(TVar::empty_named(tv.name.clone()))),
                 Some(typ) => {
@@ -751,7 +835,7 @@ impl<T: TypeMark + Clone> Type<T> {
                 })
                 .ok_or_else(|| anyhow!("undefined type {name} in scope {scope}")),
             Type::Set(ts) => {
-                let mut res: SmallVec<[Type<NoRefs>; 20]> = smallvec![];
+                let mut res: SmallVec<[Type<NoRefs>; 8]> = smallvec![];
                 for t in ts.iter() {
                     res.push(t.resolve_typrefs(scope, env)?)
                 }
@@ -764,7 +848,7 @@ impl<T: TypeMark + Clone> Type<T> {
                     .map(|t| t.resolve_typrefs(scope, env))
                     .transpose()?;
                 let rtype = f.rtype.resolve_typrefs(scope, env)?;
-                let mut res: SmallVec<[FnArgType<NoRefs>; 20]> = smallvec![];
+                let mut res: SmallVec<[FnArgType<NoRefs>; 8]> = smallvec![];
                 for a in f.args.iter() {
                     let typ = a.typ.resolve_typrefs(scope, env)?;
                     let a = FnArgType { label: a.label.clone(), typ };
@@ -795,6 +879,16 @@ impl<T: TypeMark> fmt::Display for Type<T> {
             Self::TVar(tv) => write!(f, "{tv}"),
             Self::Fn(t) => write!(f, "{t}"),
             Self::Array(t) => write!(f, "Array<{t}>"),
+            Self::Tuple(ts) => {
+                write!(f, "(")?;
+                for (i, t) in ts.iter().enumerate() {
+                    write!(f, "{t}")?;
+                    if i < ts.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, ")")
+            }
             Self::Set(s) => {
                 write!(f, "[")?;
                 for (i, t) in s.iter().enumerate() {
