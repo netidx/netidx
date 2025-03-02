@@ -225,6 +225,9 @@ pub enum ExprKind {
     Array {
         args: Arc<[Expr]>,
     },
+    Tuple {
+        args: Arc<[Expr]>,
+    },
     Select {
         arg: Arc<Expr>,
         arms: Arc<[(Pattern, Expr)]>,

@@ -612,6 +612,11 @@ where
             between(sptoken('['), sptoken(']'), sep_by(typexp(), csep()))
                 .map(|ts: SmallVec<[Type<Refs>; 16]>| Type::flatten_set(ts)),
         ),
+        attempt(
+            between(sptoken('('), sptoken(')'), sep_by1(typexp(), csep())).map(
+                |exps: SmallVec<[Type<Refs>; 16]>| Type::Tuple(Arc::from_iter(exps)),
+            ),
+        ),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(spstring("Array").with(between(sptoken('<'), sptoken('>'), typexp())))
             .map(|t| Type::Array(Arc::new(t))),
@@ -784,10 +789,8 @@ where
 {
     choice((
         attempt(spaces().with(qop(do_block()))),
-        attempt(spaces().with(array())),
         attempt(spaces().with(qop(select()))),
         attempt(spaces().with(qop(apply()))),
-        attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
         attempt(spaces().with(qop(arrayref()))),
         attempt(spaces().with(qop(reference()))),
@@ -1023,6 +1026,19 @@ where
         .map(|(name, typ)| ExprKind::TypeDef { name, typ }.to_expr())
 }
 
+fn tuple<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    between(token('('), sptoken(')'), sep_by1(expr(), csep())).map(
+        |exprs: SmallVec<[Expr; 8]>| {
+            ExprKind::Tuple { args: Arc::from_iter(exprs) }.to_expr()
+        },
+    )
+}
+
 fn expr_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -1031,6 +1047,7 @@ where
 {
     choice((
         attempt(spaces().with(arith())),
+        attempt(spaces().with(tuple())),
         attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(array())),
         attempt(spaces().with(lambda())),
