@@ -796,6 +796,7 @@ where
         attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(qop(select()))),
         attempt(spaces().with(qop(apply()))),
+        attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
         attempt(spaces().with(qop(arrayref()))),
         attempt(spaces().with(qop(reference()))),
