@@ -80,10 +80,16 @@ fn interpolated0() {
 
 #[test]
 fn interpolated1() {
-    let s = r#""[true]""#;
-    let p = ExprKind::Apply {
-        args: Arc::from_iter([(None, ExprKind::Constant(Value::Bool(true)).to_expr())]),
-        function: ["str", "concat"].into(),
+    let s = r#"{"[true]"}"#;
+    let p = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::Apply {
+            args: Arc::from_iter([(
+                None,
+                ExprKind::Constant(Value::Bool(true)).to_expr(),
+            )]),
+            function: ["str", "concat"].into(),
+        }
+        .to_expr()]),
     }
     .to_expr();
     assert_eq!(p, parse(s).unwrap());
@@ -618,26 +624,29 @@ fn usemodule() {
 
 #[test]
 fn array() {
-    let exp = ExprKind::Array {
-        args: Arc::from_iter([
-            ExprKind::Array {
-                args: Arc::from_iter([
-                    ExprKind::Constant(Value::from("foo")).to_expr(),
-                    ExprKind::Constant(Value::from(42)).to_expr(),
-                ]),
-            }
-            .to_expr(),
-            ExprKind::Array {
-                args: Arc::from_iter([
-                    ExprKind::Constant(Value::from("bar")).to_expr(),
-                    ExprKind::Constant(Value::from(42)).to_expr(),
-                ]),
-            }
-            .to_expr(),
-        ]),
+    let exp = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::Array {
+            args: Arc::from_iter([
+                ExprKind::Array {
+                    args: Arc::from_iter([
+                        ExprKind::Constant(Value::from("foo")).to_expr(),
+                        ExprKind::Constant(Value::from(42)).to_expr(),
+                    ]),
+                }
+                .to_expr(),
+                ExprKind::Array {
+                    args: Arc::from_iter([
+                        ExprKind::Constant(Value::from("bar")).to_expr(),
+                        ExprKind::Constant(Value::from(42)).to_expr(),
+                    ]),
+                }
+                .to_expr(),
+            ]),
+        }
+        .to_expr()]),
     }
     .to_expr();
-    let s = r#"[["foo", 42], ["bar", 42]]"#;
+    let s = r#"{[["foo", 42], ["bar", 42]]}"#;
     assert_eq!(exp, parse(s).unwrap());
 }
 
@@ -788,17 +797,20 @@ fn mod_interpolate() {
     let e = ExprKind::Module {
         name: literal!("a"),
         export: false,
-        value: Some(Arc::from_iter([ExprKind::Apply {
-            function: ["str", "concat"].into(),
-            args: Arc::from_iter([
-                (None, ExprKind::Constant(Value::from("foo_")).to_expr()),
-                (None, ExprKind::Constant(Value::I64(42)).to_expr()),
-            ]),
+        value: Some(Arc::from_iter([ExprKind::Do {
+            exprs: Arc::from_iter([ExprKind::Apply {
+                function: ["str", "concat"].into(),
+                args: Arc::from_iter([
+                    (None, ExprKind::Constant(Value::from("foo_")).to_expr()),
+                    (None, ExprKind::Constant(Value::I64(42)).to_expr()),
+                ]),
+            }
+            .to_expr()]),
         }
         .to_expr()])),
     }
     .to_expr();
-    let s = "mod a{\"foo_[42]\"}";
+    let s = "mod a{{\"foo_[42]\"}}";
     let pe = parse(s).unwrap();
     assert_eq!(e, pe)
 }
@@ -1032,7 +1044,32 @@ fn qop() {
 }
 
 #[test]
+fn tuple0() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::Tuple {
+            args: Arc::from_iter([
+                ExprKind::Constant(Value::I64(42)).to_expr(),
+                ExprKind::Ref { name: ["a"].into() }.to_expr(),
+                ExprKind::Apply {
+                    function: ["f"].into(),
+                    args: Arc::from_iter([(
+                        None,
+                        ExprKind::Ref { name: ["b"].into() }.to_expr(),
+                    )]),
+                }
+                .to_expr(),
+            ]),
+        }
+        .to_expr()]),
+    }
+    .to_expr();
+    let s = "{(42, a, f(b))}";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
 fn prop0() {
-    let s = "mod a{mod a{[a?]}}";
+    let s = "mod a{mod a{{[a?]}}}";
     dbg!(parse(s).unwrap());
 }

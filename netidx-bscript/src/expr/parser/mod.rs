@@ -613,11 +613,15 @@ where
             between(sptoken('['), sptoken(']'), sep_by(typexp(), csep()))
                 .map(|ts: SmallVec<[Type<Refs>; 16]>| Type::flatten_set(ts)),
         ),
-        attempt(
-            between(sptoken('('), sptoken(')'), sep_by1(typexp(), csep())).map(
-                |exps: SmallVec<[Type<Refs>; 16]>| Type::Tuple(Arc::from_iter(exps)),
-            ),
-        ),
+        attempt(between(sptoken('('), sptoken(')'), sep_by1(typexp(), csep())).then(
+            |exps: SmallVec<[Type<Refs>; 16]>| {
+                if exps.len() < 2 {
+                    unexpected_any("tuples must have at least 2 elements").left()
+                } else {
+                    value(Type::Tuple(Arc::from_iter(exps))).right()
+                }
+            },
+        )),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(spstring("Array").with(between(sptoken('<'), sptoken('>'), typexp())))
             .map(|t| Type::Array(Arc::new(t))),
@@ -1033,9 +1037,13 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    between(token('('), sptoken(')'), sep_by1(expr(), csep())).map(
+    between(token('('), sptoken(')'), sep_by1(expr(), csep())).then(
         |exprs: SmallVec<[Expr; 8]>| {
-            ExprKind::Tuple { args: Arc::from_iter(exprs) }.to_expr()
+            if exprs.len() < 2 {
+                unexpected_any("tuples must have at least 2 elements").left()
+            } else {
+                value(ExprKind::Tuple { args: Arc::from_iter(exprs) }.to_expr()).right()
+            }
         },
     )
 }
@@ -1047,10 +1055,10 @@ where
     I::Range: Range,
 {
     choice((
+        attempt(spaces().with(array())),
         attempt(spaces().with(arith())),
         attempt(spaces().with(tuple())),
         attempt(spaces().with(qop(do_block()))),
-        attempt(spaces().with(array())),
         attempt(spaces().with(lambda())),
         attempt(spaces().with(letbind())),
         attempt(spaces().with(connect())),
@@ -1080,13 +1088,11 @@ where
 {
     choice((
         attempt(spaces().with(module())),
+        attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(use_module())),
         attempt(spaces().with(typedef())),
-        attempt(spaces().with(qop(do_block()))),
-        attempt(spaces().with(array())),
         attempt(spaces().with(letbind())),
         attempt(spaces().with(connect())),
-        attempt(spaces().with(interpolated())),
         attempt(spaces().with(qop(apply()))),
     ))
 }

@@ -94,7 +94,6 @@ fn valid_fname() -> impl Strategy<Value = ArcStr> {
         Just(ArcStr::from("product")),
         Just(ArcStr::from("divide")),
         Just(ArcStr::from("mean")),
-        Just(ArcStr::from("mkarray")),
         Just(ArcStr::from("min")),
         Just(ArcStr::from("max")),
         Just(ArcStr::from("and")),
@@ -138,7 +137,6 @@ fn valid_modpath() -> impl Strategy<Value = ModPath> {
         Just(ModPath::from_iter(["product"])),
         Just(ModPath::from_iter(["divide"])),
         Just(ModPath::from_iter(["mean"])),
-        Just(ModPath::from_iter(["mkarray"])),
         Just(ModPath::from_iter(["min"])),
         Just(ModPath::from_iter(["max"])),
         Just(ModPath::from_iter(["and"])),
@@ -210,6 +208,8 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
     leaf.prop_recursive(5, 25, 5, |inner| {
         prop_oneof![
             collection::vec(inner.clone(), (1, 20)).prop_map(|t| Type::Set(Arc::from(t))),
+            collection::vec(inner.clone(), (2, 20))
+                .prop_map(|t| Type::Tuple(Arc::from(t))),
             inner.clone().prop_map(|t| Type::Array(Arc::new(t))),
             random_fname().prop_map(|a| Type::TVar(TVar::empty_named(a))),
             (
@@ -300,13 +300,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
                 modpath()
             )
                 .prop_map(|(mut s, f)| {
-                    if &*f.0 == "/mkarray" {
-                        for a in &mut s {
-                            a.0 = None;
-                        }
-                    } else {
-                        s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
-                    }
+                    s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
                     ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
                 }),
             inner.clone().prop_map(|e0| ExprKind::Not { expr: Arc::new(e0) }.to_expr()),
@@ -424,13 +418,7 @@ fn expr() -> impl Strategy<Value = Expr> {
                 modpath()
             )
                 .prop_map(|(mut s, f)| {
-                    if &*f.0 == "/mkarray" {
-                        for a in &mut s {
-                            a.0 = None;
-                        }
-                    } else {
-                        s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
-                    }
+                    s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
                     ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
                 }),
             (inner.clone(), typexp()).prop_map(|(expr, typ)| ExprKind::TypeCast {
@@ -522,6 +510,10 @@ fn expr() -> impl Strategy<Value = Expr> {
                 )
             )
                 .prop_map(|(arg, arms)| build_pattern(arg, arms)),
+            collection::vec(inner.clone(), (0, 10))
+                .prop_map(|a| { ExprKind::Array { args: Arc::from_iter(a) } }.to_expr()),
+            collection::vec(inner.clone(), (2, 10))
+                .prop_map(|a| { ExprKind::Tuple { args: Arc::from_iter(a) } }.to_expr()),
         ]
     })
 }
@@ -530,11 +522,14 @@ fn modexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![
         (collection::vec((option::of(random_fname()), expr()), (0, 10)), modpath())
             .prop_map(|(mut s, f)| {
+                let f = if f == ModPath::from(["str", "concat"]) {
+                    ["str", "concat1"].into() // str::concat is illegal at the module level
+                } else {
+                    f
+                };
                 s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
                 ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
             }),
-        collection::vec(expr(), (0, 10))
-            .prop_map(|a| { ExprKind::Array { args: Arc::from_iter(a) } }.to_expr()),
         collection::vec(expr(), (1, 10))
             .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
         modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
@@ -641,6 +636,10 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
             }
         }
         (Type::Array(t0), Type::Array(t1)) => dbg!(check_type(t0, t1)),
+        (Type::Tuple(t0), Type::Tuple(t1)) => {
+            dbg!(t0.len() == t1.len())
+                && dbg!(t0.iter().zip(t1.iter()).all(|(t0, t1)| check_type(t0, t1)))
+        }
         (Type::TVar(tv0), Type::TVar(tv1)) => tv0.name == tv1.name,
         (_, _) => false,
     }
@@ -691,7 +690,8 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             (Value::F64(v0), Value::F64(v1)) => dbg!(v0 == v1 || (v0 - v1).abs() < 1e-8),
             (v0, v1) => dbg!(v0 == v1),
         },
-        (ExprKind::Array { args: a0 }, ExprKind::Array { args: a1 }) => {
+        (ExprKind::Array { args: a0 }, ExprKind::Array { args: a1 })
+        | (ExprKind::Tuple { args: a0 }, ExprKind::Tuple { args: a1 }) => {
             a0.len() == a1.len() && a0.iter().zip(a1.iter()).all(|(e0, e1)| check(e0, e1))
         }
         (
