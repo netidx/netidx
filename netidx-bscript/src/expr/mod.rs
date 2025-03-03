@@ -427,7 +427,11 @@ impl ExprKind {
             }
             ExprKind::Array { args } => {
                 try_single_line!(true);
-                pretty_print_exprs_int(indent, limit, buf, args, "[", "]", ",", |a| a)
+                pretty_print_exprs(indent, limit, buf, args, "[", "]", ",")
+            }
+            ExprKind::Tuple { args } => {
+                try_single_line!(true);
+                pretty_print_exprs(indent, limit, buf, args, "(", ")", ",")
             }
             ExprKind::Qop(e) => {
                 try_single_line!(true);
@@ -696,16 +700,8 @@ impl fmt::Display for ExprKind {
                     Either::Left(body) => write!(f, "{body}"),
                 }
             }
-            ExprKind::Array { args } => {
-                write!(f, "[")?;
-                for i in 0..args.len() {
-                    write!(f, "{}", &args[i])?;
-                    if i < args.len() - 1 {
-                        write!(f, ", ")?
-                    }
-                }
-                write!(f, "]")
-            }
+            ExprKind::Array { args } => print_exprs(f, args, "[", "]", ", "),
+            ExprKind::Tuple { args } => print_exprs(f, args, "(", ")", ", "),
             ExprKind::Apply { args, function }
                 if function == &["str", "concat"] && args.len() > 0 =>
             {

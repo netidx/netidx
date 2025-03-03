@@ -268,6 +268,7 @@ where
                     }
                     (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Array { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Tuple { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Qop(_), .. }), _)
                     | (Some(Expr { kind: ExprKind::Do { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Module { .. }, .. }), _)

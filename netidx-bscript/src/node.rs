@@ -7,6 +7,7 @@ use crate::{
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::{format_compact, CompactString};
+use enumflags2::BitFlags;
 use fxhash::{FxHashMap, FxHashSet};
 use immutable_chunkmap::set::SetS as Set;
 use netidx::{publisher::Typ, subscriber::Value, utils::Either};
@@ -284,7 +285,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
             | Type::Primitive(_)
             | Type::Set(_)
             | Type::TVar(_)
-            | Type::Array(_) => (),
+            | Type::Array(_)
+            | Type::Tuple(_) => (),
             Type::Ref(_) => unreachable!(),
         }
         macro_rules! with_pref_suf {
@@ -467,6 +469,9 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Array {
         args: Box<[Cached<C, E>]>,
     },
+    Tuple {
+        args: Box<[Cached<C, E>]>,
+    },
     Apply {
         args: Box<[Node<C, E>]>,
         function: Box<dyn ApplyTyped<C, E> + Send + Sync>,
@@ -554,6 +559,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Ref(_)
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
+            | NodeKind::Tuple { .. }
             | NodeKind::Apply { .. }
             | NodeKind::Error { .. }
             | NodeKind::Qop(_, _)
@@ -591,6 +597,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Qop(_, _)
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
+            | NodeKind::Tuple { .. }
             | NodeKind::Apply { .. }
             | NodeKind::Module(_)
             | NodeKind::Eq { .. }
@@ -642,6 +649,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Qop(_, _)
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
+            | NodeKind::Tuple { .. }
             | NodeKind::Apply { .. }
             | NodeKind::Module(_)
             | NodeKind::Eq { .. }
@@ -978,6 +986,17 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     Node { kind: NodeKind::Array { args }, spec: Box::new(spec), typ }
                 }
             }
+            Expr { kind: ExprKind::Tuple { args }, id: _ } => {
+                let (error, args) = subexprs!(scope, args);
+                if error {
+                    error!("", args)
+                } else {
+                    let typ =
+                        Type::Tuple(Arc::from_iter(args.iter().map(|n| n.typ.clone())));
+                    let args = Box::from_iter(args.into_iter().map(|n| Cached::new(n)));
+                    Node { kind: NodeKind::Tuple { args }, spec: Box::new(spec), typ }
+                }
+            }
             Expr { kind: ExprKind::Module { name, export: _, value }, id: _ } => {
                 let scope = ModPath(scope.append(&name));
                 match value {
@@ -1285,11 +1304,29 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 for n in args.iter_mut() {
                     wrap!(n.node, n.node.typecheck(ctx))?
                 }
-                let rtype = args
-                    .iter()
-                    .fold(Type::Bottom(PhantomData), |rtype, n| n.node.typ.union(&rtype));
+                let rtype =
+                    args.iter().fold(Type::Primitive(BitFlags::empty()), |rtype, n| {
+                        n.node.typ.union(&rtype)
+                    });
                 let rtype = Type::Array(Arc::new(rtype));
                 Ok(self.typ.check_contains(&rtype)?)
+            }
+            NodeKind::Tuple { args } => {
+                for n in args.iter_mut() {
+                    wrap!(n.node, n.node.typecheck(ctx))?
+                }
+                match &self.typ {
+                    Type::Tuple(typs) => {
+                        if args.len() != typs.len() {
+                            bail!("tuple arity mismatch {} vs {}", args.len(), typs.len())
+                        }
+                        for (t, n) in typs.iter().zip(args.iter()) {
+                            t.check_contains(&n.node.typ)?
+                        }
+                    }
+                    _ => bail!("BUG: unexpected tuple rtype"),
+                }
+                Ok(())
             }
             NodeKind::Apply { args, function } => {
                 for n in args.iter_mut() {
@@ -1484,7 +1521,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 | Event::Variable(_, _)
                 | Event::VarBatch(_) => None,
             },
-            NodeKind::Array { args } => {
+            NodeKind::Array { args } | NodeKind::Tuple { args } => {
                 let mut updated = false;
                 let mut determined = true;
                 for n in args.iter_mut() {
