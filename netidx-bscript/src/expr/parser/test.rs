@@ -182,7 +182,7 @@ fn letbind() {
         ExprKind::Bind {
             export: false,
             typ: None,
-            name: "foo".into(),
+            names: Arc::from_iter([Some("foo".into())]),
             value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
         }
         .to_expr(),
@@ -196,7 +196,7 @@ fn typed_letbind() {
         ExprKind::Bind {
             export: false,
             typ: Some(Type::Primitive(Typ::I64.into())),
-            name: "foo".into(),
+            names: Arc::from_iter([Some("foo".into())]),
             value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
         }
         .to_expr(),
@@ -586,14 +586,14 @@ fn inline_module() {
             ExprKind::Bind {
                 typ: None,
                 export: true,
-                name: literal!("z"),
+                names: Arc::from_iter([Some(literal!("z"))]),
                 value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr()),
             }
             .to_expr(),
             ExprKind::Bind {
                 typ: None,
                 export: false,
-                name: literal!("m"),
+                names: Arc::from_iter([Some(literal!("m"))]),
                 value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr()),
             }
             .to_expr(),
@@ -657,7 +657,7 @@ fn doexpr() {
             ExprKind::Bind {
                 typ: None,
                 export: false,
-                name: literal!("baz"),
+                names: Arc::from_iter([Some(literal!("baz"))]),
                 value: Arc::new(ExprKind::Constant(Value::from(42)).to_expr()),
             }
             .to_expr(),
@@ -835,7 +835,7 @@ fn typed_array() {
     let e = ExprKind::Do {
         exprs: Arc::from_iter([ExprKind::Bind {
             export: false,
-            name: "f".into(),
+            names: Arc::from_iter([Some(literal!("f"))]),
             typ: None,
             value: Arc::new(
                 ExprKind::Lambda {
@@ -869,7 +869,7 @@ fn labeled_argument_lambda() {
     let e = ExprKind::Do {
         exprs: Arc::from_iter([ExprKind::Bind {
             export: false,
-            name: "a".into(),
+            names: Arc::from_iter([Some("a".into())]),
             typ: Some(Type::Fn(Arc::new(FnType {
                 args: Arc::from_iter([
                     FnArgType {

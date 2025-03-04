@@ -494,10 +494,20 @@ fn expr() -> impl Strategy<Value = Expr> {
                     }
                     .to_expr()
                 }),
-            (inner.clone(), random_fname(), any::<bool>(), option::of(typexp()))
+            (
+                inner.clone(),
+                collection::vec(option::of(random_fname()), (1, 10)),
+                any::<bool>(),
+                option::of(typexp())
+            )
                 .prop_map(|(e, n, exp, typ)| {
-                    ExprKind::Bind { export: exp, name: n, value: Arc::new(e), typ }
-                        .to_expr()
+                    ExprKind::Bind {
+                        export: exp,
+                        names: Arc::from_iter(n),
+                        value: Arc::new(e),
+                        typ,
+                    }
+                    .to_expr()
                 }),
             (inner.clone(), modpath()).prop_map(|(e, n)| {
                 ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
@@ -538,11 +548,21 @@ fn modexpr() -> impl Strategy<Value = Expr> {
             typ
         }
         .to_expr()),
-        (expr(), random_fname(), any::<bool>(), option::of(typexp())).prop_map(
-            |(e, n, exp, typ)| {
-                ExprKind::Bind { export: exp, name: n, value: Arc::new(e), typ }.to_expr()
-            }
-        ),
+        (
+            expr(),
+            collection::vec(option::of(random_fname()), (1, 10)),
+            any::<bool>(),
+            option::of(typexp())
+        )
+            .prop_map(|(e, n, exp, typ)| {
+                ExprKind::Bind {
+                    export: exp,
+                    names: Arc::from_iter(n),
+                    value: Arc::new(e),
+                    typ,
+                }
+                .to_expr()
+            }),
         (expr(), modpath()).prop_map(|(e, n)| {
             ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
         }),
@@ -800,8 +820,8 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             dbg!(name0 == name1)
         }
         (
-            ExprKind::Bind { name: name0, export: export0, value: value0, typ: typ0 },
-            ExprKind::Bind { name: name1, export: export1, value: value1, typ: typ1 },
+            ExprKind::Bind { names: name0, export: export0, value: value0, typ: typ0 },
+            ExprKind::Bind { names: name1, export: export1, value: value1, typ: typ1 },
         ) => dbg!(
             dbg!(name0 == name1)
                 && dbg!(export0 == export1)
