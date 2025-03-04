@@ -786,8 +786,13 @@ impl<T: TypeMark + Clone> Type<T> {
                 Some(Self::flatten_set(s.iter().cloned().chain(iter::once(t.clone()))))
             }
             (Type::Tuple(t0), Type::Tuple(t1)) => {
-                if t0 == t1 {
-                    Some(Type::Tuple(t0.clone()))
+                if t0.len() == t1.len() {
+                    let t = t0
+                        .iter()
+                        .zip(t1.iter())
+                        .map(|(t0, t1)| t0.merge(t1))
+                        .collect::<Option<SmallVec<[Type<T>; 8]>>>()?;
+                    Some(Type::Tuple(Arc::from_iter(t)))
                 } else {
                     None
                 }

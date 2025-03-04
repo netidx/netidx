@@ -1100,6 +1100,6 @@ fn tuple1() {
 
 #[test]
 fn prop0() {
-    let s = "mod a{mod a{a((\"[bytes:]\" == u32:0))}}";
+    let s = "mod a{let _: [(_, _), (_, [_])] = u32:0}";
     dbg!(parse(s).unwrap());
 }
