@@ -1,5 +1,5 @@
 use crate::{
-    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern},
+    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern, StructurePattern},
     typ::{FnArgType, FnType, Refs, TVar, Type},
 };
 use anyhow::{bail, Result};
@@ -27,8 +27,6 @@ use netidx_netproto::value_parser::{escaped_string, value as netidx_value};
 use smallvec::SmallVec;
 use std::{marker::PhantomData, sync::LazyLock};
 use triomphe::Arc;
-
-use super::StructurePattern;
 
 #[cfg(test)]
 mod test;
@@ -735,12 +733,36 @@ where
         optional(string("pub").skip(space())).map(|o| o.is_some()),
         spstring("let")
             .with(space())
-            .with((spfname(), optional(attempt(sptoken(':').with(typexp())))))
+            .with((
+                choice((
+                    attempt(sptoken('_')).map(|_| Arc::from_iter([None])),
+                    attempt(spfname()).map(|n| Arc::from_iter([Some(n)])),
+                    between(
+                        sptoken('('),
+                        sptoken(')'),
+                        sep_by1(
+                            choice((
+                                attempt(sptoken('_')).map(|_| None),
+                                spfname().map(|n| Some(n)),
+                            )),
+                            csep(),
+                        ),
+                    )
+                    .then(|n: SmallVec<[Option<ArcStr>; 8]>| {
+                        if n.len() < 2 {
+                            unexpected_any("tuples require at least 2 arguments").left()
+                        } else {
+                            value(Arc::from_iter(n)).right()
+                        }
+                    }),
+                )),
+                optional(attempt(sptoken(':').with(typexp()))),
+            ))
             .skip(spstring("=")),
         expr(),
     )
-        .map(|(export, (name, typ), value)| {
-            ExprKind::Bind { export, name, typ, value: Arc::new(value) }.to_expr()
+        .map(|(export, (names, typ), value)| {
+            ExprKind::Bind { export, names, typ, value: Arc::new(value) }.to_expr()
         })
 }
 

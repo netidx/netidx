@@ -737,3 +737,18 @@ run!(array_match1, ARRAY_MATCH1, |v: Result<&Value>| match v {
     }
     _ => false,
 });
+
+const TUPLES0: &str = r#"
+{
+  let t: (string, Number, Number) = ("foo", 42, 23.5);
+  t
+}
+"#;
+
+run!(tuples0, TUPLES0, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::String(s), Value::I64(42), Value::F64(23.5)] => &*s == "foo",
+        _ => false,
+    },
+    _ => false,
+});

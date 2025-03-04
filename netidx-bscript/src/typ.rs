@@ -342,6 +342,9 @@ impl Type<NoRefs> {
     pub fn union(&self, t: &Self) -> Self {
         match (self, t) {
             (Type::Bottom(_), t) | (t, Type::Bottom(_)) => t.clone(),
+            (Type::Primitive(p), t) | (t, Type::Primitive(p)) if p.is_empty() => {
+                t.clone()
+            }
             (Type::Primitive(s0), Type::Primitive(s1)) => {
                 let mut s = *s0;
                 s.insert(*s1);
@@ -352,17 +355,14 @@ impl Type<NoRefs> {
                 if p.contains(Typ::Array) {
                     Type::Primitive(*p)
                 } else {
-                    Type::Set(Arc::from_iter([
-                        Type::Primitive(*p),
-                        Type::Array(t.clone()),
-                    ]))
+                    Self::flatten_set([Type::Primitive(*p), Type::Array(t.clone())])
                 }
             }
             (Type::Array(t0), Type::Array(t1)) => {
                 if t0 == t1 {
                     Type::Array(t0.clone())
                 } else {
-                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+                    Self::flatten_set([self.clone(), t.clone()])
                 }
             }
             (Type::Set(s0), Type::Set(s1)) => {
@@ -375,34 +375,31 @@ impl Type<NoRefs> {
                 if t0 == t1 {
                     self.clone()
                 } else {
-                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+                    Self::flatten_set([self.clone(), t.clone()])
                 }
             }
             (Type::Tuple(_), t) | (t, Type::Tuple(_)) => {
-                Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+                Self::flatten_set([self.clone(), t.clone()])
             }
             (Type::Fn(f0), Type::Fn(f1)) => {
                 if f0 == f1 {
                     Type::Fn(f0.clone())
                 } else {
-                    Type::Set(Arc::from_iter([
-                        Type::Fn(f0.clone()),
-                        Type::Fn(f1.clone()),
-                    ]))
+                    Self::flatten_set([Type::Fn(f0.clone()), Type::Fn(f1.clone())])
                 }
             }
             (f @ Type::Fn(_), t) | (t, f @ Type::Fn(_)) => {
-                Type::Set(Arc::from_iter([f.clone(), t.clone()]))
+                Self::flatten_set([f.clone(), t.clone()])
             }
             (t0 @ Type::TVar(_), t1 @ Type::TVar(_)) => {
                 if t0 == t1 {
                     t0.clone()
                 } else {
-                    Type::Set(Arc::from_iter([t0.clone(), t1.clone()]))
+                    Self::flatten_set([t0.clone(), t1.clone()])
                 }
             }
             (t0 @ Type::TVar(_), t1) | (t1, t0 @ Type::TVar(_)) => {
-                Type::Set(Arc::from_iter([t0.clone(), t1.clone()]))
+                Self::flatten_set([t0.clone(), t1.clone()])
             }
             (Type::Ref(_), _) | (_, Type::Ref(_)) => unreachable!(),
         }
@@ -746,6 +743,9 @@ impl<T: TypeMark + Clone> Type<T> {
     fn merge(&self, t: &Self) -> Option<Self> {
         match (self, t) {
             (Type::Bottom(_), t) | (t, Type::Bottom(_)) => Some(t.clone()),
+            (Type::Primitive(p), t) | (t, Type::Primitive(p)) if p.is_empty() => {
+                Some(t.clone())
+            }
             (Type::Primitive(s0), Type::Primitive(s1)) => {
                 let mut s = *s0;
                 s.insert(*s1);
@@ -776,6 +776,11 @@ impl<T: TypeMark + Clone> Type<T> {
             (Type::Array(_), _) | (_, Type::Array(_)) => None,
             (Type::Set(s0), Type::Set(s1)) => {
                 Some(Self::flatten_set(s0.iter().cloned().chain(s1.iter().cloned())))
+            }
+            (Type::Set(s), Type::Primitive(p)) | (Type::Primitive(p), Type::Set(s))
+                if p.is_empty() =>
+            {
+                Some(Type::Set(s.clone()))
             }
             (Type::Set(s), t) | (t, Type::Set(s)) => {
                 Some(Self::flatten_set(s.iter().cloned().chain(iter::once(t.clone()))))
