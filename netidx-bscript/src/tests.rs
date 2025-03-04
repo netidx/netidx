@@ -1,22 +1,23 @@
 use crate::{
     expr::{Expr, ExprId, ModPath},
     node::Node,
-    BindId, Ctx, Event, ExecCtx,
+    BindId, Ctx, Event, ExecCtx, VAR_BATCH,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use fxhash::FxHashMap;
 use netidx::{
+    pool::Pooled,
     publisher::{Publisher, PublisherBuilder, Value},
     resolver_server,
     subscriber::{Subscriber, SubscriberBuilder},
 };
 use smallvec::SmallVec;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 struct TestCtx {
     by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
-    var_updates: VecDeque<(BindId, Value)>,
+    var_updates: Vec<(BindId, Value)>,
     _resolver: resolver_server::Server,
     _publisher: Publisher,
     _subscriber: Subscriber,
@@ -50,7 +51,7 @@ impl TestCtx {
         let subscriber = SubscriberBuilder::new(cfg).build()?;
         Ok(Self {
             by_ref: HashMap::default(),
-            var_updates: VecDeque::new(),
+            var_updates: Vec::new(),
             _resolver: resolver,
             _publisher: publisher,
             _subscriber: subscriber,
@@ -108,7 +109,13 @@ impl Ctx for TestCtx {
     }
 
     fn set_var(&mut self, id: BindId, value: Value) {
-        self.var_updates.push_back((id, value));
+        self.var_updates.push((id, value));
+    }
+
+    fn set_vars(&mut self, mut batch: Pooled<Vec<(BindId, Value)>>) {
+        for (i, v) in batch.drain(..) {
+            self.var_updates.push((i, v));
+        }
     }
 }
 
@@ -140,7 +147,7 @@ async fn bind_ref_arith() -> Result<()> {
     assert_eq!(state.ctx.user.var_updates.len(), 1);
     let (_, v) = &state.ctx.user.var_updates[0];
     assert_eq!(v, &Value::I64(1));
-    let (id, v) = state.ctx.user.var_updates.pop_front().unwrap();
+    let (id, v) = state.ctx.user.var_updates.remove(0);
     assert_eq!(n.update(&mut state.ctx, &Event::Variable(id, v)), Some(Value::I64(1)));
     assert_eq!(state.ctx.user.var_updates.len(), 0);
     Ok(())
@@ -162,8 +169,10 @@ macro_rules! run {
             dbg!("compilation succeeded");
             assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
             let mut fin = false;
-            while let Some((id, v)) = state.ctx.user.var_updates.pop_front() {
-                match n.update(&mut state.ctx, &Event::Variable(id, v)) {
+            while state.ctx.user.var_updates.len() > 0 {
+                let mut batch = VAR_BATCH.take();
+                batch.extend(state.ctx.user.var_updates.drain(..));
+                match n.update(&mut state.ctx, &Event::VarBatch(batch)) {
                     None => (),
                     Some(v) if !fin && $pred(Ok(&v)) => fin = true,
                     v => {
