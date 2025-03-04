@@ -1069,6 +1069,36 @@ fn tuple0() {
 }
 
 #[test]
+fn tuple1() {
+    let e = ExprKind::Bind {
+        export: false,
+        names: Arc::from_iter([None, Some(literal!("x")), Some(literal!("y"))]),
+        typ: None,
+        value: Arc::new(
+            ExprKind::Tuple {
+                args: Arc::from_iter([
+                    ExprKind::Constant(Value::I64(42)).to_expr(),
+                    ExprKind::Ref { name: ["a"].into() }.to_expr(),
+                    ExprKind::Apply {
+                        function: ["f"].into(),
+                        args: Arc::from_iter([(
+                            None,
+                            ExprKind::Ref { name: ["b"].into() }.to_expr(),
+                        )]),
+                    }
+                    .to_expr(),
+                ]),
+            }
+            .to_expr(),
+        ),
+    }
+    .to_expr();
+    let s = "let (_, x, y) = (42, a, f(b))";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
 fn prop0() {
     let s = "mod a{mod a{a((\"[bytes:]\" == u32:0))}}";
     dbg!(parse(s).unwrap());

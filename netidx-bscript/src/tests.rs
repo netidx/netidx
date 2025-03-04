@@ -13,11 +13,11 @@ use netidx::{
     subscriber::{Subscriber, SubscriberBuilder},
 };
 use smallvec::SmallVec;
-use std::collections::HashMap;
+use std::{collections::HashMap, mem};
 
 struct TestCtx {
     by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
-    var_updates: Vec<(BindId, Value)>,
+    var_updates: Pooled<Vec<(BindId, Value)>>,
     _resolver: resolver_server::Server,
     _publisher: Publisher,
     _subscriber: Subscriber,
@@ -51,7 +51,7 @@ impl TestCtx {
         let subscriber = SubscriberBuilder::new(cfg).build()?;
         Ok(Self {
             by_ref: HashMap::default(),
-            var_updates: Vec::new(),
+            var_updates: VAR_BATCH.take(),
             _resolver: resolver,
             _publisher: publisher,
             _subscriber: subscriber,
@@ -170,8 +170,8 @@ macro_rules! run {
             assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
             let mut fin = false;
             while state.ctx.user.var_updates.len() > 0 {
-                let mut batch = VAR_BATCH.take();
-                batch.extend(state.ctx.user.var_updates.drain(..));
+                let batch =
+                    mem::replace(&mut state.ctx.user.var_updates, VAR_BATCH.take());
                 match n.update(&mut state.ctx, &Event::VarBatch(batch)) {
                     None => (),
                     Some(v) if !fin && $pred(Ok(&v)) => fin = true,
