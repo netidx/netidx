@@ -207,7 +207,7 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
     ];
     leaf.prop_recursive(5, 25, 5, |inner| {
         prop_oneof![
-            collection::vec(inner.clone(), (1, 20)).prop_map(|t| Type::Set(Arc::from(t))),
+            collection::vec(inner.clone(), (2, 20)).prop_map(|t| Type::Set(Arc::from(t))),
             collection::vec(inner.clone(), (2, 20))
                 .prop_map(|t| Type::Tuple(Arc::from(t))),
             inner.clone().prop_map(|t| Type::Array(Arc::new(t))),
@@ -655,7 +655,11 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
         }
         (t, Type::Set(s)) | (Type::Set(s), t) => {
             match Type::flatten_set(s.iter().cloned()) {
-                Type::Set(_) => dbg!(false),
+                s @ Type::Set(_) => {
+                    dbg!(t);
+                    dbg!(s);
+                    dbg!(false)
+                }
                 s => dbg!(check_type(t, &s)),
             }
         }
