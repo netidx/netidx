@@ -100,18 +100,61 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialOrd, Ord)]
 pub enum ValPat {
     Ignore,
     Literal(Value),
     Bind(ArcStr),
 }
 
+impl fmt::Display for ValPat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ValPat::Ignore => write!(f, "_"),
+            ValPat::Literal(v) => write!(f, "{v}"),
+            ValPat::Bind(name) => write!(f, "{name}"),
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl PartialEq for ValPat {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Ignore, Self::Ignore) => true,
+            (Self::Bind(t0), Self::Bind(t1)) => t0 == t1,
+            (Self::Literal(v0), Self::Literal(v1)) => v0 == v1,
+            (_, _) => false,
+        }
+    }
+}
+
+#[cfg(test)]
+impl PartialEq for ValPat {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Ignore, Self::Ignore) => true,
+            (Self::Bind(t0), Self::Bind(t1)) => t0 == t1,
+            (Self::Literal(v0), Self::Literal(v1)) => v0.approx_eq(v1),
+            (_, _) => false,
+        }
+    }
+}
+
+impl Eq for ValPat {}
+
 impl ValPat {
     pub fn name(&self) -> Option<&ArcStr> {
         match self {
             ValPat::Ignore | ValPat::Literal(_) => None,
             ValPat::Bind(s) => Some(s),
+        }
+    }
+
+    pub fn lit(&self) -> bool {
+        match self {
+            ValPat::Ignore | ValPat::Bind(_) => false,
+            ValPat::Literal(_) => true,
         }
     }
 }
@@ -130,11 +173,7 @@ impl fmt::Display for StructurePattern {
         macro_rules! with_sep {
             ($binds:expr) => {
                 for (i, b) in $binds.iter().enumerate() {
-                    match b {
-                        ValPat::Ignore => write!(f, "_"),
-                        ValPat::Literal(v) => write!(f, "{v}"),
-                        ValPat::Bind(name) => write!(f, "{name}"),
-                    }?;
+                    write!(f, "{b}")?;
                     if i < $binds.len() - 1 {
                         write!(f, ", ")?
                     }
@@ -142,11 +181,7 @@ impl fmt::Display for StructurePattern {
             };
         }
         match self {
-            StructurePattern::BindAll { name } => match name {
-                ValPat::Ignore => write!(f, "_"),
-                ValPat::Literal(v) => write!(f, "{v}"),
-                ValPat::Bind(name) => write!(f, "{name}"),
-            },
+            StructurePattern::BindAll { name } => write!(f, "{name}"),
             StructurePattern::Slice { all, binds } => {
                 if let Some(all) = all {
                     write!(f, "{all}@ ")?
@@ -161,11 +196,7 @@ impl fmt::Display for StructurePattern {
                 }
                 write!(f, "[")?;
                 for b in prefix.iter() {
-                    match b {
-                        ValPat::Ignore => write!(f, "_, ")?,
-                        ValPat::Literal(v) => write!(f, "{v}, ")?,
-                        ValPat::Bind(name) => write!(f, "{name}, ")?,
-                    }
+                    write!(f, "{b}, ")?
                 }
                 match tail {
                     None => write!(f, "..]"),

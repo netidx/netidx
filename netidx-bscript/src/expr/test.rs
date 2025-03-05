@@ -8,6 +8,7 @@ use netidx_netproto::pbuf::PBytes;
 use parser::{parse, RESERVED};
 use prop::option;
 use proptest::{collection, prelude::*};
+use smallvec::SmallVec;
 use std::{marker::PhantomData, time::Duration};
 
 const SLEN: usize = 16;
@@ -242,25 +243,46 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
     })
 }
 
+fn val_pat() -> impl Strategy<Value = ValPat> {
+    prop_oneof![
+        value().prop_map(|v| ValPat::Literal(v)),
+        option::of(random_fname()).prop_map(|name| match name {
+            None => ValPat::Ignore,
+            Some(name) => ValPat::Bind(name),
+        }),
+    ]
+}
+
 fn structure_pattern() -> impl Strategy<Value = StructurePattern> {
     prop_oneof![
-        option::of(random_fname()).prop_map(|name| StructurePattern::BindAll { name }),
-        collection::vec(option::of(random_fname()), (1, 10)).prop_map(|b| {
-            StructurePattern::Slice { binds: Arc::from_iter(b.into_iter()) }
-        }),
+        val_pat().prop_map(|name| StructurePattern::BindAll { name }),
+        (option::of(random_fname()), collection::vec(val_pat(), (0, 10))).prop_map(
+            |(all, b)| {
+                StructurePattern::Slice { all, binds: Arc::from_iter(b.into_iter()) }
+            }
+        ),
+        (option::of(random_fname()), collection::vec(val_pat(), (2, 10))).prop_map(
+            |(all, b)| {
+                StructurePattern::Tuple { all, binds: Arc::from_iter(b.into_iter()) }
+            }
+        ),
         (
-            collection::vec(option::of(random_fname()), (1, 10)),
+            option::of(random_fname()),
+            collection::vec(val_pat(), (1, 10)),
             option::of(random_fname())
         )
-            .prop_map(|(p, tail)| StructurePattern::SlicePrefix {
+            .prop_map(|(all, p, tail)| StructurePattern::SlicePrefix {
+                all,
                 prefix: Arc::from_iter(p.into_iter()),
                 tail
             }),
         (
             option::of(random_fname()),
-            collection::vec(option::of(random_fname()), (1, 10))
+            option::of(random_fname()),
+            collection::vec(val_pat(), (1, 10))
         )
-            .prop_map(|(head, s)| StructurePattern::SliceSuffix {
+            .prop_map(|(all, head, s)| StructurePattern::SliceSuffix {
+                all,
                 head,
                 suffix: Arc::from_iter(s.into_iter())
             })
@@ -639,7 +661,29 @@ fn check_type_opt(t0: &Option<Type<Refs>>, t1: &Option<Type<Refs>>) -> bool {
 
 fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
     dbg!(check_type(&pat0.type_predicate, &pat1.type_predicate))
-        && dbg!(pat0.structure_predicate == pat1.structure_predicate)
+        && match (&pat0.structure_predicate, &pat1.structure_predicate) {
+            (
+                StructurePattern::BindAll { name: ValPat::Literal(Value::Array(a)) },
+                StructurePattern::Slice { all: None, binds },
+            )
+            | (
+                StructurePattern::Slice { all: None, binds },
+                StructurePattern::BindAll { name: ValPat::Literal(Value::Array(a)) },
+            ) => {
+                binds.iter().all(|n| n.lit()) && {
+                    let binds = binds
+                        .iter()
+                        .filter_map(|n| match n {
+                            ValPat::Literal(l) => Some(l),
+                            _ => None,
+                        })
+                        .collect::<SmallVec<[&Value; 16]>>();
+                    binds.len() == a.len()
+                        && binds.iter().zip(a.iter()).all(|(v0, v1)| *v0 == v1)
+                }
+            }
+            (p0, p1) => p0 == p1,
+        }
         && dbg!(match (&pat0.guard, &pat1.guard) {
             (Some(g0), Some(g1)) => check(g0, g1),
             (None, None) => true,

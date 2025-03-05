@@ -1040,6 +1040,52 @@ pub trait FromValue {
 }
 
 impl Value {
+    pub fn approx_eq(&self, v: &Self) -> bool {
+        use std::num::FpCategory::*;
+        match (self, v) {
+            (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => l == r,
+            (Value::I32(l) | Value::Z32(l), Value::I32(r) | Value::Z32(r)) => l == r,
+            (Value::U64(l) | Value::V64(l), Value::U64(r) | Value::V64(r)) => l == r,
+            (Value::I64(l) | Value::Z64(l), Value::I64(r) | Value::Z64(r)) => l == r,
+            (Value::F32(l), Value::F32(r)) => match (l.classify(), r.classify()) {
+                (Nan, Nan) => true,
+                (Zero, Zero) => true,
+                (_, _) => (l - r).abs() <= f32::EPSILON,
+            },
+            (Value::F64(l), Value::F64(r)) => match (l.classify(), r.classify()) {
+                (Nan, Nan) => true,
+                (Zero, Zero) => true,
+                (_, _) => (l - r).abs() <= f64::EPSILON,
+            },
+            (Value::Decimal(l), Value::Decimal(r)) => l == r,
+            (Value::DateTime(l), Value::DateTime(r)) => l == r,
+            (Value::Duration(l), Value::Duration(r)) => {
+                (l.as_secs_f64() - r.as_secs_f64()).abs() <= f64::EPSILON
+            }
+            (Value::String(l), Value::String(r)) => l == r,
+            (Value::Bytes(l), Value::Bytes(r)) => l == r,
+            (Value::Bool(l), Value::Bool(r)) => l == r,
+            (Value::Null, Value::Null) => true,
+            (Value::Error(l), Value::Error(r)) => l == r,
+            (Value::Array(l), Value::Array(r)) => {
+                l.len() == r.len()
+                    && l.iter().zip(r.iter()).all(|(v0, v1)| v0.approx_eq(v1))
+            }
+            (Value::Array(_), _) | (_, Value::Array(_)) => false,
+            (l, r) if l.number() || r.number() => {
+                match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
+                    (Ok(l), Ok(r)) => match (l.classify(), r.classify()) {
+                        (Nan, Nan) => true,
+                        (Zero, Zero) => true,
+                        (_, _) => (l - r).abs() <= f64::EPSILON,
+                    },
+                    (_, _) => false,
+                }
+            }
+            (_, _) => false,
+        }
+    }
+
     pub fn discriminant(&self) -> u32 {
         unsafe { *<*const _>::from(self).cast::<u32>() }
     }

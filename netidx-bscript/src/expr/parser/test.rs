@@ -431,7 +431,7 @@ fn select0() {
             Pattern {
                 type_predicate: Type::Primitive(Typ::I64.into()),
                 structure_predicate: StructurePattern::BindAll {
-                    name: Some(literal!("a")),
+                    name: ValPat::Bind(literal!("a")),
                 },
                 guard: Some(
                     ExprKind::Lt {
@@ -451,7 +451,7 @@ fn select0() {
             Pattern {
                 type_predicate: Type::Bottom(PhantomData),
                 structure_predicate: StructurePattern::BindAll {
-                    name: Some(literal!("a")),
+                    name: ValPat::Bind(literal!("a")),
                 },
                 guard: None,
             },
@@ -480,10 +480,11 @@ fn select1() {
             Pattern {
                 type_predicate: Type::Array(Arc::new(Type::Primitive(Typ::I64.into()))),
                 structure_predicate: StructurePattern::Slice {
+                    all: None,
                     binds: Arc::from_iter([
-                        Some(literal!("a")),
-                        None,
-                        Some(literal!("b")),
+                        ValPat::Bind(literal!("a")),
+                        ValPat::Ignore,
+                        ValPat::Bind(literal!("b")),
                     ]),
                 },
                 guard: Some(
@@ -504,7 +505,8 @@ fn select1() {
             Pattern {
                 type_predicate: Type::Array(Arc::new(Type::Primitive(Typ::I64.into()))),
                 structure_predicate: StructurePattern::SlicePrefix {
-                    prefix: Arc::from_iter([Some(literal!("a"))]),
+                    all: None,
+                    prefix: Arc::from_iter([ValPat::Bind(literal!("a"))]),
                     tail: Some(literal!("b")),
                 },
                 guard: None,
@@ -515,7 +517,8 @@ fn select1() {
             Pattern {
                 type_predicate: Type::Array(Arc::new(Type::Primitive(Typ::I64.into()))),
                 structure_predicate: StructurePattern::SliceSuffix {
-                    suffix: Arc::from_iter([Some(literal!("b"))]),
+                    all: None,
+                    suffix: Arc::from_iter([ValPat::Bind(literal!("b"))]),
                     head: Some(literal!("a")),
                 },
                 guard: None,
@@ -526,7 +529,7 @@ fn select1() {
             Pattern {
                 type_predicate: Type::Bottom(PhantomData),
                 structure_predicate: StructurePattern::BindAll {
-                    name: Some(literal!("a")),
+                    name: ValPat::Bind(literal!("a")),
                 },
                 guard: None,
             },
@@ -555,9 +558,15 @@ select foo(b) {
 }
 
 #[test]
-fn pattern() {
+fn pattern0() {
     let s = r#"i64 as a if a < 10"#;
     dbg!(super::pattern().easy_parse(position::Stream::new(s)).unwrap());
+}
+
+#[test]
+fn pattern1() {
+    let s = r#"[a.., b]"#;
+    dbg!(super::slice_pattern().easy_parse(position::Stream::new(s)).unwrap());
 }
 
 #[test]
@@ -1100,6 +1109,6 @@ fn tuple1() {
 
 #[test]
 fn prop0() {
-    let s = "mod a{let _: [(_, _), (_, [_])] = u32:0}";
+    let s = "mod a{mod a{{(select u32:0 {_ as (error:\"[\", u32:0) => u32:0}, u32:0)}}}";
     dbg!(parse(s).unwrap());
 }

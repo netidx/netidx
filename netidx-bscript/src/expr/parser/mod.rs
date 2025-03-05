@@ -23,7 +23,7 @@ use netidx::{
     publisher::{Typ, Value},
     utils::Either,
 };
-use netidx_netproto::value_parser::{escaped_string, value as netidx_value};
+use netidx_netproto::value_parser::{escaped_string, value as netidx_value, VAL_ESC};
 use smallvec::SmallVec;
 use std::{marker::PhantomData, sync::LazyLock};
 use triomphe::Arc;
@@ -925,9 +925,9 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(spaces().with(sptoken('_'))).map(|_| ValPat::Ignore),
-        attempt(spaces().with(netidx_value(&BSCRIPT_ESC))).map(|v| ValPat::Literal(v)),
-        spaces().with(spfname()).map(|name| ValPat::Bind(name)),
+        attempt(netidx_value(&VAL_ESC)).map(|v| ValPat::Literal(v)),
+        attempt(sptoken('_')).map(|_| ValPat::Ignore),
+        spfname().map(|name| ValPat::Bind(name)),
     ))
 }
 
@@ -960,10 +960,10 @@ where
             sptoken(']'),
             sep_by(
                 choice((
-                    attempt(val_pat()).map(|v| Either::Left(v)),
                     attempt(spstring("..")).map(|_| Either::Right(None)),
                     attempt(spfname().skip(spstring("..")))
                         .map(|s| Either::Right(Some(s))),
+                    val_pat().map(|v| Either::Left(v)),
                 )),
                 csep(),
             ),
@@ -1023,10 +1023,15 @@ where
 {
     (
         optional(attempt(spfname().skip(sptoken('@')))),
-        between(sptoken('('), sptoken(')'), sep_by1(val_pat(), csep())),
+        between(sptoken('('), sptoken(')'), sep_by1(val_pat().map(|x| dbg!(x)), csep())),
     )
-        .map(|(all, binds): (Option<ArcStr>, SmallVec<[ValPat; 8]>)| {
-            StructurePattern::Tuple { all, binds: Arc::from_iter(binds) }
+        .then(|(all, binds): (Option<ArcStr>, SmallVec<[ValPat; 8]>)| {
+            if binds.len() < 2 {
+                unexpected_any("tuples must have at least 2 elements").left()
+            } else {
+                value(StructurePattern::Tuple { all, binds: Arc::from_iter(binds) })
+                    .right()
+            }
         })
 }
 
@@ -1037,9 +1042,9 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(val_pat()).map(|name| StructurePattern::BindAll { name }),
         attempt(slice_pattern()),
-        tuple_pattern(),
+        attempt(tuple_pattern()),
+        val_pat().map(|name| StructurePattern::BindAll { name }),
     ))
 }
 
