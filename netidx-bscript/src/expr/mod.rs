@@ -101,39 +101,70 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ValPat {
+    Ignore,
+    Literal(Value),
+    Bind(ArcStr),
+}
+
+impl ValPat {
+    pub fn name(&self) -> Option<&ArcStr> {
+        match self {
+            ValPat::Ignore | ValPat::Literal(_) => None,
+            ValPat::Bind(s) => Some(s),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StructurePattern {
-    BindAll { name: Option<ArcStr> },
-    Slice { binds: Arc<[Option<ArcStr>]> },
-    SlicePrefix { prefix: Arc<[Option<ArcStr>]>, tail: Option<ArcStr> },
-    SliceSuffix { head: Option<ArcStr>, suffix: Arc<[Option<ArcStr>]> },
+    BindAll { name: ValPat },
+    Slice { all: Option<ArcStr>, binds: Arc<[ValPat]> },
+    SlicePrefix { all: Option<ArcStr>, prefix: Arc<[ValPat]>, tail: Option<ArcStr> },
+    SliceSuffix { all: Option<ArcStr>, head: Option<ArcStr>, suffix: Arc<[ValPat]> },
+    Tuple { all: Option<ArcStr>, binds: Arc<[ValPat]> },
 }
 
 impl fmt::Display for StructurePattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StructurePattern::BindAll { name } => match name {
-                None => write!(f, "_"),
-                Some(name) => write!(f, "{name}"),
-            },
-            StructurePattern::Slice { binds } => {
-                write!(f, "[")?;
-                for (i, b) in binds.iter().enumerate() {
+        macro_rules! with_sep {
+            ($binds:expr) => {
+                for (i, b) in $binds.iter().enumerate() {
                     match b {
-                        None => write!(f, "_"),
-                        Some(name) => write!(f, "{name}"),
+                        ValPat::Ignore => write!(f, "_"),
+                        ValPat::Literal(v) => write!(f, "{v}"),
+                        ValPat::Bind(name) => write!(f, "{name}"),
                     }?;
-                    if i < binds.len() - 1 {
+                    if i < $binds.len() - 1 {
                         write!(f, ", ")?
                     }
                 }
+            };
+        }
+        match self {
+            StructurePattern::BindAll { name } => match name {
+                ValPat::Ignore => write!(f, "_"),
+                ValPat::Literal(v) => write!(f, "{v}"),
+                ValPat::Bind(name) => write!(f, "{name}"),
+            },
+            StructurePattern::Slice { all, binds } => {
+                if let Some(all) = all {
+                    write!(f, "{all}@ ")?
+                }
+                write!(f, "[")?;
+                with_sep!(binds);
                 write!(f, "]")
             }
-            StructurePattern::SlicePrefix { prefix, tail } => {
+            StructurePattern::SlicePrefix { all, prefix, tail } => {
+                if let Some(all) = all {
+                    write!(f, "{all}@ ")?
+                }
                 write!(f, "[")?;
                 for b in prefix.iter() {
                     match b {
-                        None => write!(f, "_, ")?,
-                        Some(name) => write!(f, "{name}, ")?,
+                        ValPat::Ignore => write!(f, "_, ")?,
+                        ValPat::Literal(v) => write!(f, "{v}, ")?,
+                        ValPat::Bind(name) => write!(f, "{name}, ")?,
                     }
                 }
                 match tail {
@@ -141,22 +172,25 @@ impl fmt::Display for StructurePattern {
                     Some(name) => write!(f, "{name}..]"),
                 }
             }
-            StructurePattern::SliceSuffix { head, suffix } => {
+            StructurePattern::SliceSuffix { all, head, suffix } => {
+                if let Some(all) = all {
+                    write!(f, "{all}@ ")?
+                }
                 write!(f, "[")?;
                 match head {
                     None => write!(f, ".., ")?,
                     Some(name) => write!(f, "{name}.., ")?,
                 }
-                for (i, b) in suffix.iter().enumerate() {
-                    match b {
-                        None => write!(f, "_")?,
-                        Some(name) => write!(f, "{name}")?,
-                    }
-                    if i < suffix.len() - 1 {
-                        write!(f, ", ")?
-                    }
-                }
+                with_sep!(suffix);
                 write!(f, "]")
+            }
+            StructurePattern::Tuple { all, binds } => {
+                if let Some(all) = all {
+                    write!(f, "{all}@ ")?
+                }
+                write!(f, "(")?;
+                with_sep!(binds);
+                write!(f, ")")
             }
         }
     }

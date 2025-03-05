@@ -1,5 +1,5 @@
 use crate::{
-    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern, StructurePattern},
+    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern, StructurePattern, ValPat},
     typ::{FnArgType, FnType, Refs, TVar, Type},
 };
 use anyhow::{bail, Result};
@@ -918,6 +918,19 @@ parser! {
     }
 }
 
+fn val_pat<I>() -> impl Parser<I, Output = ValPat>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        attempt(spaces().with(sptoken('_'))).map(|_| ValPat::Ignore),
+        attempt(spaces().with(netidx_value(&BSCRIPT_ESC))).map(|v| ValPat::Literal(v)),
+        spaces().with(spfname()).map(|name| ValPat::Bind(name)),
+    ))
+}
+
 fn slice_pattern<I>() -> impl Parser<I, Output = StructurePattern>
 where
     I: RangeStream<Token = char>,
@@ -929,9 +942,9 @@ where
             let mut err = false;
             let pats = Arc::from_iter($pats.into_iter().map(|s| match s {
                 Either::Left(s) => s,
-                Either::Right(s) => {
+                Either::Right(_) => {
                     err = true;
-                    s
+                    ValPat::Ignore
                 }
             }));
             if err {
@@ -940,50 +953,81 @@ where
             pats
         }};
     }
-    between(
-        sptoken('['),
-        sptoken(']'),
-        sep_by(
-            choice((
-                attempt(sptoken('_')).map(|_| Either::Left(None)),
-                attempt(spstring("..")).map(|_| Either::Right(None)),
-                attempt(spfname().skip(spstring(".."))).map(|s| Either::Right(Some(s))),
-                attempt(spfname()).map(|s| Either::Left(Some(s))),
-            )),
-            csep(),
+    (
+        optional(attempt(spfname().skip(sptoken('@')))),
+        between(
+            sptoken('['),
+            sptoken(']'),
+            sep_by(
+                choice((
+                    attempt(val_pat()).map(|v| Either::Left(v)),
+                    attempt(spstring("..")).map(|_| Either::Right(None)),
+                    attempt(spfname().skip(spstring("..")))
+                        .map(|s| Either::Right(Some(s))),
+                )),
+                csep(),
+            ),
         ),
     )
-    .then(|mut pats: SmallVec<[Either<Option<ArcStr>, Option<ArcStr>>; 8]>| {
-        if pats.len() == 0 {
-            value(StructurePattern::Slice { binds: Arc::from_iter([]) }).right()
-        } else if pats.len() == 1 {
-            match pats.pop().unwrap() {
-                Either::Left(s) => {
-                    value(StructurePattern::Slice { binds: Arc::from_iter([s]) }).right()
+        .then(
+            |(all, mut pats): (
+                Option<ArcStr>,
+                SmallVec<[Either<ValPat, Option<ArcStr>>; 8]>,
+            )| {
+                if pats.len() == 0 {
+                    value(StructurePattern::Slice { all, binds: Arc::from_iter([]) })
+                        .right()
+                } else if pats.len() == 1 {
+                    match pats.pop().unwrap() {
+                        Either::Left(s) => value(StructurePattern::Slice {
+                            all,
+                            binds: Arc::from_iter([s]),
+                        })
+                        .right(),
+                        Either::Right(_) => {
+                            unexpected_any("invalid singular range match").left()
+                        }
+                    }
+                } else {
+                    match (&pats[0], &pats[pats.len() - 1]) {
+                        (Either::Right(_), Either::Right(_)) => {
+                            unexpected_any("invalid pattern").left()
+                        }
+                        (Either::Right(_), Either::Left(_)) => {
+                            let head = pats.remove(0).right().unwrap();
+                            let suffix = all_left!(pats);
+                            value(StructurePattern::SliceSuffix { all, head, suffix })
+                                .right()
+                        }
+                        (Either::Left(_), Either::Right(_)) => {
+                            let tail = pats.pop().unwrap().right().unwrap();
+                            let prefix = all_left!(pats);
+                            value(StructurePattern::SlicePrefix { all, tail, prefix })
+                                .right()
+                        }
+                        (Either::Left(_), Either::Left(_)) => {
+                            value(StructurePattern::Slice { all, binds: all_left!(pats) })
+                                .right()
+                        }
+                    }
                 }
-                Either::Right(_) => unexpected_any("invalid singular range match").left(),
-            }
-        } else {
-            match (&pats[0], &pats[pats.len() - 1]) {
-                (Either::Right(_), Either::Right(_)) => {
-                    unexpected_any("invalid pattern").left()
-                }
-                (Either::Right(_), Either::Left(_)) => {
-                    let head = pats.remove(0).right().unwrap();
-                    let suffix = all_left!(pats);
-                    value(StructurePattern::SliceSuffix { head, suffix }).right()
-                }
-                (Either::Left(_), Either::Right(_)) => {
-                    let tail = pats.pop().unwrap().right().unwrap();
-                    let prefix = all_left!(pats);
-                    value(StructurePattern::SlicePrefix { tail, prefix }).right()
-                }
-                (Either::Left(_), Either::Left(_)) => {
-                    value(StructurePattern::Slice { binds: all_left!(pats) }).right()
-                }
-            }
-        }
-    })
+            },
+        )
+}
+
+fn tuple_pattern<I>() -> impl Parser<I, Output = StructurePattern>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        optional(attempt(spfname().skip(sptoken('@')))),
+        between(sptoken('('), sptoken(')'), sep_by1(val_pat(), csep())),
+    )
+        .map(|(all, binds): (Option<ArcStr>, SmallVec<[ValPat; 8]>)| {
+            StructurePattern::Tuple { all, binds: Arc::from_iter(binds) }
+        })
 }
 
 fn structure_pattern<I>() -> impl Parser<I, Output = StructurePattern>
@@ -993,9 +1037,9 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(sptoken('_')).map(|_| StructurePattern::BindAll { name: None }),
-        attempt(spfname()).map(|name| StructurePattern::BindAll { name: Some(name) }),
+        attempt(val_pat()).map(|name| StructurePattern::BindAll { name }),
         attempt(slice_pattern()),
+        tuple_pattern(),
     ))
 }
 
