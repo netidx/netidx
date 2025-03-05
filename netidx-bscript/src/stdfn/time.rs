@@ -36,7 +36,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for AfterIdle {
         event: &Event<E>,
     ) -> Option<Value> {
         let up = self.args.update_diff(ctx, from, event);
-        // CR estokes: THis implementation is wrong, it should reset the timer when the value ticks
+        // CR estokes: This implementation is wrong, it should reset the timer when the value ticks
         let ((timeout, val), (timeout_up, val_up)) = arity2!(self.args.0, up);
         match ((timeout, val), (timeout_up, val_up)) {
             ((Some(secs), _), (true, _)) => match secs.clone().cast_to::<Duration>() {
@@ -58,16 +58,20 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for AfterIdle {
             | ((_, None), (_, _))
             | ((Some(_), Some(_)), (false, _)) => (),
         };
-        match event {
-            Event::Init | Event::Netidx(_) | Event::User(_) | Event::VarBatch(_) => None,
-            Event::Variable(id, _) => {
-                if self.id != Some(*id) {
+        macro_rules! check {
+            ($id:expr) => {
+                if self.id != Some(*$id) {
                     None
                 } else {
                     self.id = None;
                     self.args.0.get(1).and_then(|v| v.clone())
                 }
-            }
+            };
+        }
+        match event {
+            Event::Init | Event::Netidx(_) | Event::User(_) => None,
+            Event::Variable(id, _) => check!(id),
+            Event::VarBatch(batch) => batch.iter().find_map(|(id, _)| check!(id)),
         }
     }
 }
@@ -193,10 +197,9 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Timer {
             | ((None, _), (true, false))
             | ((_, None), (false, true)) => (),
         }
-        match event {
-            Event::Init | Event::Netidx(_) | Event::User(_) | Event::VarBatch(_) => None,
-            Event::Variable(id, now) => {
-                if self.id != Some(*id) {
+        macro_rules! check {
+            ($id:expr, $now:expr) => {
+                if self.id != Some(*$id) {
                     None
                 } else {
                     self.id = None;
@@ -206,9 +209,14 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Timer {
                             schedule!(dur)
                         }
                     }
-                    Some(now.clone())
+                    Some($now.clone())
                 }
-            }
+            };
+        }
+        match event {
+            Event::Init | Event::Netidx(_) | Event::User(_) => None,
+            Event::Variable(id, now) => check!(id, now),
+            Event::VarBatch(batch) => batch.iter().find_map(|(id, v)| check!(id, v)),
         }
     }
 }

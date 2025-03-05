@@ -250,15 +250,19 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for RpcCall {
             },
             ((None, _), (_, _)) | ((_, None), (_, _)) | ((_, _), (false, false)) => (),
         }
-        match event {
-            Event::Init | Event::Netidx(_) | Event::User(_) | Event::VarBatch(_) => None,
-            Event::Variable(id, val) => {
-                if self.pending.remove(id) {
-                    Some(val.clone())
+        macro_rules! check {
+            ($id:expr, $val:expr) => {
+                if self.pending.remove($id) {
+                    Some($val.clone())
                 } else {
                     None
                 }
-            }
+            };
+        }
+        match event {
+            Event::Init | Event::Netidx(_) | Event::User(_) => None,
+            Event::Variable(id, val) => check!(id, val),
+            Event::VarBatch(batch) => batch.iter().find_map(|(id, val)| check!(id, val)),
         }
     }
 }

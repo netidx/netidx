@@ -64,7 +64,8 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Constant(Value),
     Module(Box<[Node<C, E>]>),
     Do(Box<[Node<C, E>]>),
-    Bind(Box<[Option<BindId>]>, Box<Node<C, E>>),
+    Bind(Option<BindId>, Box<Node<C, E>>),
+    BindTuple(Box<[Option<BindId>]>, Box<Node<C, E>>),
     Ref(BindId),
     Connect(BindId, Box<Node<C, E>>),
     Lambda(Arc<LambdaBind<C, E>>),
@@ -166,6 +167,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Do(_)
             | NodeKind::Use
             | NodeKind::Bind(_, _)
+            | NodeKind::BindTuple(_, _)
             | NodeKind::Ref(_)
             | NodeKind::Qop(_, _)
             | NodeKind::Connect(_, _)
@@ -218,6 +220,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Do(_)
             | NodeKind::Use
             | NodeKind::Bind(_, _)
+            | NodeKind::BindTuple(_, _)
             | NodeKind::Ref(_)
             | NodeKind::Qop(_, _)
             | NodeKind::Connect(_, _)
@@ -412,38 +415,36 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 }
             }
             NodeKind::Apply { args, function } => function.update(ctx, args, event),
-            NodeKind::Bind(binds, rhs) => {
+            NodeKind::BindTuple(binds, rhs) => {
                 if let Some(v) = rhs.update(ctx, event) {
                     if ctx.dbg_ctx.trace {
                         ctx.dbg_ctx.add_event(eid, Some(event.clone()), v.clone())
                     }
-                    match &binds[..] {
-                        [Some(id)] => ctx.user.set_var(*id, v),
-                        [] | [None] => (),
-                        ids => {
-                            if let Value::Array(a) = v {
-                                if ids.len() == a.len() {
-                                    let mut batch = VAR_BATCH.take();
-                                    for (id, v) in ids.iter().zip(a.iter()) {
-                                        if let Some(id) = id {
-                                            batch.push((*id, v.clone()));
-                                        }
-                                    }
-                                    ctx.user.set_vars(batch);
+                    if let Value::Array(a) = v {
+                        if binds.len() == a.len() {
+                            let mut batch = VAR_BATCH.take();
+                            for (id, v) in binds.iter().zip(a.iter()) {
+                                if let Some(id) = id {
+                                    batch.push((*id, v.clone()));
                                 }
                             }
+                            ctx.user.set_vars(batch);
                         }
                     }
                 }
                 None
             }
-            NodeKind::Connect(id, rhs) => {
+            NodeKind::Connect(id, rhs) | NodeKind::Bind(Some(id), rhs) => {
                 if let Some(v) = rhs.update(ctx, event) {
                     if ctx.dbg_ctx.trace {
                         ctx.dbg_ctx.add_event(eid, Some(event.clone()), v.clone())
                     }
                     ctx.user.set_var(*id, v)
                 }
+                None
+            }
+            NodeKind::Bind(None, rhs) => {
+                rhs.update(ctx, event);
                 None
             }
             NodeKind::Ref(bid) => match event {

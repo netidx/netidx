@@ -9,9 +9,9 @@ use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use compact_str::{format_compact, CompactString};
 use fxhash::FxHashMap;
-use netidx::{publisher::Typ, utils::Either};
+use netidx::publisher::Typ;
 use smallvec::{smallvec, SmallVec};
-use std::{fmt::Debug, hash::Hash, iter, marker::PhantomData};
+use std::{fmt::Debug, hash::Hash, marker::PhantomData};
 use triomphe::Arc;
 
 atomic_id!(SelectId);
@@ -271,7 +271,30 @@ pub(super) fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
             let (args, f) = (args.clone(), f.clone());
             compile_apply(ctx, spec, scope, top_id, args, f)
         }
-        Expr { kind: ExprKind::Bind { export: _, names, typ, value }, id: _ } => {
+        Expr { kind: ExprKind::Bind { name, typ, export: _, value }, id: _ } => {
+            let node = compile(ctx, (**value).clone(), &scope, top_id);
+            if node.is_err() {
+                return error!("", vec![node]);
+            }
+            let typ = match typ {
+                None => node.typ.clone(),
+                Some(typ) => match typ.resolve_typrefs(scope, &ctx.env) {
+                    Ok(typ) => typ.clone(),
+                    Err(e) => return error!("{e}", vec![node]),
+                },
+            };
+            let id = name.as_ref().map(|name| {
+                let bind = ctx.env.bind_variable(scope, &**name, typ.clone());
+                bind.fun = node.find_lambda();
+                bind.id
+            });
+            let kind = NodeKind::Bind(id, Box::new(node));
+            Node { spec: Box::new(spec), typ, kind }
+        }
+        Expr { kind: ExprKind::BindTuple { export: _, names, typ, value }, id: _ } => {
+            if names.len() < 2 {
+                return error!("BindTuple expected a tuple", vec![]);
+            }
             let node = compile(ctx, (**value).clone(), &scope, top_id);
             if node.is_err() {
                 return error!("", vec![node]);
@@ -281,14 +304,13 @@ pub(super) fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
                     Ok(typ) => typ.clone(),
                     Err(e) => return error!("{e}", vec![node]),
                 },
-                None if names.len() > 1 => Type::Tuple(Arc::from_iter(
+                None => Type::Tuple(Arc::from_iter(
                     (0..names.len()).map(|_| Type::empty_tvar()),
                 )),
-                None => node.typ.clone(),
             };
             let (tlen, typs) = match &typ {
-                Type::Tuple(inner) => (inner.len(), Either::Right(inner.iter())),
-                t => (1, Either::Left(iter::once(t))),
+                Type::Tuple(inner) => (inner.len(), inner.iter()),
+                _ => return error!("BindTuple expected a tuple type", vec![node]),
             };
             if tlen != names.len() {
                 return error!("expected tuple of length {}", vec![node], names.len());
@@ -300,7 +322,7 @@ pub(super) fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
                     bind.id
                 })
             });
-            let kind = NodeKind::Bind(Box::from_iter(ids), Box::new(node));
+            let kind = NodeKind::BindTuple(Box::from_iter(ids), Box::new(node));
             Node { spec: Box::new(spec), typ, kind }
         }
         Expr { kind: ExprKind::Qop(e), id: _ } => {

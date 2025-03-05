@@ -741,6 +741,7 @@ impl<T: TypeMark + Clone> Type<T> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn normalize(&self) -> Self {
         match self {
             Type::Ref(_) | Type::Bottom(_) | Type::Primitive(_) | Type::TVar(_) => {
@@ -971,6 +972,7 @@ impl<T: TypeMark + Clone> FnType<T> {
         }
     }
 
+    #[cfg(test)]
     fn normalize(&self) -> Self {
         let Self { args, vargs, rtype, constraints } = self;
         let args = Arc::from_iter(

@@ -191,6 +191,12 @@ pub enum ExprKind {
         name: ModPath,
     },
     Bind {
+        name: Option<ArcStr>,
+        typ: Option<Type<Refs>>,
+        export: bool,
+        value: Arc<Expr>,
+    },
+    BindTuple {
         names: Arc<[Option<ArcStr>]>,
         typ: Option<Type<Refs>>,
         export: bool,
@@ -400,29 +406,29 @@ impl ExprKind {
                 }
                 writeln!(buf, "{self}")
             }
-            ExprKind::Bind { export, names, typ, value } => {
+            ExprKind::Bind { name, typ, export, value } => {
                 try_single_line!(true);
-                match &names[..] {
-                    [] | [None] => {
-                        writeln!(buf, "{}let _{} = ", exp(*export), typ!(typ))?
-                    }
-                    [Some(n)] => {
-                        writeln!(buf, "{}let {n}{} = ", exp(*export), typ!(typ))?
-                    }
-                    names => {
-                        write!(buf, "{}let (", exp(*export))?;
-                        for (i, n) in names.iter().enumerate() {
-                            match n {
-                                None => write!(buf, "_")?,
-                                Some(n) => write!(buf, "{n}")?,
-                            }
-                            if i < names.len() - 1 {
-                                write!(buf, ", ")?
-                            }
-                        }
-                        writeln!(buf, "){} = ", typ!(typ))?
+                match name {
+                    None => writeln!(buf, "{}let _{} = ", exp(*export), typ!(typ))?,
+                    Some(name) => {
+                        writeln!(buf, "{}let {name}{} = ", exp(*export), typ!(typ))?
                     }
                 }
+                value.kind.pretty_print(indent + 2, limit, false, buf)
+            }
+            ExprKind::BindTuple { export, names, typ, value } => {
+                try_single_line!(true);
+                write!(buf, "{}let (", exp(*export))?;
+                for (i, n) in names.iter().enumerate() {
+                    match n {
+                        None => write!(buf, "_")?,
+                        Some(n) => write!(buf, "{n}")?,
+                    }
+                    if i < names.len() - 1 {
+                        write!(buf, ", ")?
+                    }
+                }
+                writeln!(buf, "){} = ", typ!(typ))?;
                 value.kind.pretty_print(indent + 2, limit, false, buf)
             }
             ExprKind::Module { name, export, value: Some(exprs) } => {
@@ -662,23 +668,25 @@ impl fmt::Display for ExprKind {
         let exp = |export| if export { "pub " } else { "" };
         match self {
             ExprKind::Constant(v) => v.fmt_ext(f, &parser::BSCRIPT_ESC, true),
-            ExprKind::Bind { export, names, typ, value } => match &names[..] {
-                [] | [None] => write!(f, "{}let _{} = {value}", exp(*export), typ!(typ)),
-                [Some(n)] => write!(f, "{}let {n}{} = {value}", exp(*export), typ!(typ)),
-                names => {
-                    write!(f, "{}let (", exp(*export))?;
-                    for (i, n) in names.iter().enumerate() {
-                        match n {
-                            None => write!(f, "_")?,
-                            Some(n) => write!(f, "{n}")?,
-                        }
-                        if i < names.len() - 1 {
-                            write!(f, ", ")?
-                        }
+            ExprKind::Bind { name: Some(name), typ, export, value } => {
+                write!(f, "{}let {name}{} = {value}", exp(*export), typ!(typ))
+            }
+            ExprKind::Bind { name: None, typ, export, value } => {
+                write!(f, "{}let _{} = {value}", exp(*export), typ!(typ))
+            }
+            ExprKind::BindTuple { export, names, typ, value } => {
+                write!(f, "{}let (", exp(*export))?;
+                for (i, n) in names.iter().enumerate() {
+                    match n {
+                        None => write!(f, "_")?,
+                        Some(n) => write!(f, "{n}")?,
                     }
-                    write!(f, "){} = {value}", typ!(typ))
+                    if i < names.len() - 1 {
+                        write!(f, ", ")?
+                    }
                 }
-            },
+                write!(f, "){} = {value}", typ!(typ))
+            }
             ExprKind::Connect { name, value } => write!(f, "{name} <- {value}"),
             ExprKind::Use { name } => {
                 write!(f, "use {name}")

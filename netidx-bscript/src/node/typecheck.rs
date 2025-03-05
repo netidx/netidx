@@ -69,7 +69,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 }
                 Ok(())
             }
-            NodeKind::Bind(_, node) => {
+            NodeKind::Bind(_, node) | NodeKind::BindTuple(_, node) => {
                 wrap!(node.typecheck(ctx))?;
                 wrap!(self.typ.check_contains(&node.typ))?;
                 Ok(())

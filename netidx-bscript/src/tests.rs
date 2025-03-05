@@ -12,12 +12,12 @@ use netidx::{
     resolver_server,
     subscriber::{Subscriber, SubscriberBuilder},
 };
-use smallvec::SmallVec;
-use std::{collections::HashMap, mem};
+use smallvec::{smallvec, SmallVec};
+use std::collections::{HashMap, VecDeque};
 
 struct TestCtx {
     by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
-    var_updates: Pooled<Vec<(BindId, Value)>>,
+    var_updates: VecDeque<(BindId, Value)>,
     _resolver: resolver_server::Server,
     _publisher: Publisher,
     _subscriber: Subscriber,
@@ -51,7 +51,7 @@ impl TestCtx {
         let subscriber = SubscriberBuilder::new(cfg).build()?;
         Ok(Self {
             by_ref: HashMap::default(),
-            var_updates: VAR_BATCH.take(),
+            var_updates: VecDeque::new(),
             _resolver: resolver,
             _publisher: publisher,
             _subscriber: subscriber,
@@ -109,12 +109,12 @@ impl Ctx for TestCtx {
     }
 
     fn set_var(&mut self, id: BindId, value: Value) {
-        self.var_updates.push((id, value));
+        self.var_updates.push_back((id, value));
     }
 
     fn set_vars(&mut self, mut batch: Pooled<Vec<(BindId, Value)>>) {
         for (i, v) in batch.drain(..) {
-            self.var_updates.push((i, v));
+            self.var_updates.push_back((i, v));
         }
     }
 }
@@ -147,7 +147,7 @@ async fn bind_ref_arith() -> Result<()> {
     assert_eq!(state.ctx.user.var_updates.len(), 1);
     let (_, v) = &state.ctx.user.var_updates[0];
     assert_eq!(v, &Value::I64(1));
-    let (id, v) = state.ctx.user.var_updates.remove(0);
+    let (id, v) = state.ctx.user.var_updates.pop_front().unwrap();
     assert_eq!(n.update(&mut state.ctx, &Event::Variable(id, v)), Some(Value::I64(1)));
     assert_eq!(state.ctx.user.var_updates.len(), 0);
     Ok(())
@@ -170,8 +170,16 @@ macro_rules! run {
             assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
             let mut fin = false;
             while state.ctx.user.var_updates.len() > 0 {
-                let batch =
-                    mem::replace(&mut state.ctx.user.var_updates, VAR_BATCH.take());
+                let mut ids: SmallVec<[BindId; 24]> = smallvec![];
+                let mut batch = VAR_BATCH.take();
+                while let Some((id, v)) = state.ctx.user.var_updates.pop_front() {
+                    if ids.contains(&id) {
+                        state.ctx.user.var_updates.push_front((id, v));
+                        break;
+                    }
+                    ids.push(id);
+                    batch.push((id, v))
+                }
                 match n.update(&mut state.ctx, &Event::VarBatch(batch)) {
                     None => (),
                     Some(v) if !fin && $pred(Ok(&v)) => fin = true,
@@ -759,5 +767,18 @@ run!(tuples0, TUPLES0, |v: Result<&Value>| match v {
         [Value::String(s), Value::I64(42), Value::F64(23.5)] => &*s == "foo",
         _ => false,
     },
+    _ => false,
+});
+
+const TUPLES1: &str = r#"
+{
+  let t: (string, Number, Number) = ("foo", 42, 23.5);
+  let (_, y, z) = t;
+  y + z
+}
+"#;
+
+run!(tuples1, TUPLES1, |v: Result<&Value>| match v {
+    Ok(Value::F64(63.5)) => true,
     _ => false,
 });

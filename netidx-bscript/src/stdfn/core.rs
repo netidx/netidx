@@ -723,6 +723,13 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Ungroup {
             Some(v) => Some(v),
             None => match event {
                 Event::Variable(id, v) if id == &self.0 => Some(v.clone()),
+                Event::VarBatch(batch) => batch.iter().find_map(|(id, v)| {
+                    if &self.0 == id {
+                        Some(v.clone())
+                    } else {
+                        None
+                    }
+                }),
                 _ => None,
             },
         }

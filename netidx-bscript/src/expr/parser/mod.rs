@@ -265,6 +265,7 @@ where
                         )
                     }
                     (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::BindTuple { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Array { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Tuple { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Qop(_), .. }), _)
@@ -735,8 +736,8 @@ where
             .with(space())
             .with((
                 choice((
-                    attempt(sptoken('_')).map(|_| Arc::from_iter([None])),
-                    attempt(spfname()).map(|n| Arc::from_iter([Some(n)])),
+                    attempt(sptoken('_')).map(|_| Either::Left(None)),
+                    attempt(spfname()).map(|n| Either::Left(Some(n))),
                     between(
                         sptoken('('),
                         sptoken(')'),
@@ -752,7 +753,7 @@ where
                         if n.len() < 2 {
                             unexpected_any("tuples require at least 2 arguments").left()
                         } else {
-                            value(Arc::from_iter(n)).right()
+                            value(Either::Right(Arc::from_iter(n))).right()
                         }
                     }),
                 )),
@@ -762,7 +763,15 @@ where
         expr(),
     )
         .map(|(export, (names, typ), value)| {
-            ExprKind::Bind { export, names, typ, value: Arc::new(value) }.to_expr()
+            let value = Arc::new(value);
+            match names {
+                Either::Left(name) => {
+                    ExprKind::Bind { export, name, typ, value }.to_expr()
+                }
+                Either::Right(names) => {
+                    ExprKind::BindTuple { export, names, typ, value }.to_expr()
+                }
+            }
         })
 }
 

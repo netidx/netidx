@@ -164,13 +164,17 @@ pub trait Ctx {
 
     /// Called when a variable updates. All expressions that ref the
     /// id should be updated with a Variable event when this happens.
-    /// The runtime may at it's discression batch variable updates
-    /// into a VarBatch to improve performance.
+    /// The runtime may elect to batch var updates for improved
+    /// performance so long as it never places multiple updates to the
+    /// same variable in a batch.
+    ///
+    /// User defined builtins MUST regard Event::Variable and
+    /// Event::VarBatch as equivelent.
     fn set_var(&mut self, id: BindId, value: Value);
 
     /// Called when multiple variables update at the same time. The
-    /// runtime must preserve batching by sending a VarBatch event
-    /// otherwise semantics may not be preserved.
+    /// runtime MUST preserve batching by sending a VarBatch event
+    /// containing at least the contents of [batch].
     fn set_vars(&mut self, batch: Pooled<Vec<(BindId, Value)>>);
 
     /// For a given name, this must have at most one outstanding call

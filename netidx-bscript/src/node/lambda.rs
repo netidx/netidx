@@ -205,6 +205,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             NodeKind::Constant(_)
             | NodeKind::Use
             | NodeKind::Bind(_, _)
+            | NodeKind::BindTuple(_, _)
             | NodeKind::Ref(_)
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
