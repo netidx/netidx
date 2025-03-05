@@ -779,6 +779,6 @@ const TUPLES1: &str = r#"
 "#;
 
 run!(tuples1, TUPLES1, |v: Result<&Value>| match v {
-    Ok(Value::F64(63.5)) => true,
+    Ok(Value::F64(65.5)) => true,
     _ => false,
 });

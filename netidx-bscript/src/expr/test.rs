@@ -496,12 +496,22 @@ fn expr() -> impl Strategy<Value = Expr> {
                 }),
             (
                 inner.clone(),
-                collection::vec(option::of(random_fname()), (1, 10)),
+                option::of(random_fname()),
                 any::<bool>(),
                 option::of(typexp())
             )
                 .prop_map(|(e, n, exp, typ)| {
-                    ExprKind::Bind {
+                    ExprKind::Bind { export: exp, name: n, value: Arc::new(e), typ }
+                        .to_expr()
+                }),
+            (
+                inner.clone(),
+                collection::vec(option::of(random_fname()), (2, 10)),
+                any::<bool>(),
+                option::of(typexp())
+            )
+                .prop_map(|(e, n, exp, typ)| {
+                    ExprKind::BindTuple {
                         export: exp,
                         names: Arc::from_iter(n),
                         value: Arc::new(e),
@@ -548,14 +558,18 @@ fn modexpr() -> impl Strategy<Value = Expr> {
             typ
         }
         .to_expr()),
+        (expr(), option::of(random_fname()), any::<bool>(), option::of(typexp()))
+            .prop_map(|(e, n, exp, typ)| {
+                ExprKind::Bind { export: exp, name: n, value: Arc::new(e), typ }.to_expr()
+            }),
         (
             expr(),
-            collection::vec(option::of(random_fname()), (1, 10)),
+            collection::vec(option::of(random_fname()), (2, 10)),
             any::<bool>(),
             option::of(typexp())
         )
             .prop_map(|(e, n, exp, typ)| {
-                ExprKind::Bind {
+                ExprKind::BindTuple {
                     export: exp,
                     names: Arc::from_iter(n),
                     value: Arc::new(e),
@@ -612,77 +626,19 @@ fn acc_strings<'a>(args: impl IntoIterator<Item = &'a Expr> + 'a) -> Arc<[Expr]>
 }
 
 fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
-    match (t0, t1) {
-        (Type::Bottom(_), Type::Bottom(_)) => true,
-        (Type::Bottom(_), Type::Primitive(p)) | (Type::Primitive(p), Type::Bottom(_)) => {
-            dbg!(p.is_empty())
-        }
-        (Type::Primitive(p0), Type::Primitive(p1)) => dbg!(p0 == p1),
-        (Type::Ref(m0), Type::Ref(m1)) => dbg!(m0 == m1),
-        (Type::Fn(f0), Type::Fn(f1)) => {
-            let FnType { args: args0, vargs: vargs0, rtype: rtype0, constraints: c0 } =
-                &**f0;
-            let FnType { args: args1, vargs: vargs1, rtype: rtype1, constraints: c1 } =
-                &**f1;
-            dbg!(
-                args0
-                    .iter()
-                    .zip(args1.iter())
-                    .all(|(a0, a1)| a0.label == a1.label && check_type(&a0.typ, &a1.typ))
-                    && vargs0
-                        .iter()
-                        .zip(vargs1.iter())
-                        .all(|(t0, t1)| check_type(t0, t1))
-                    && check_type(rtype0, rtype1)
-                    && c0.iter().zip(c1.iter()).all(|((tv0, tc0), (tv1, tc1))| {
-                        tv0.name == tv1.name && check_type(tc0, tc1)
-                    })
-            )
-        }
-        (Type::Set(s0), Type::Set(s1)) => {
-            let s0f = dbg!(Type::flatten_set(s0.iter().cloned()));
-            let s1f = dbg!(Type::flatten_set(s1.iter().cloned()));
-            match (s0f, s1f) {
-                (Type::Set(s0), Type::Set(s1)) => {
-                    dbg!(s0.len() == s1.len())
-                        && s0
-                            .iter()
-                            .zip(s1.iter())
-                            .all(|(t0, t1)| dbg!(check_type(t0, t1)))
-                }
-                (t0, t1) => dbg!(check_type(&t0, &t1)),
-            }
-        }
-        (t, Type::Set(s)) | (Type::Set(s), t) => {
-            match Type::flatten_set(s.iter().cloned()) {
-                Type::Set(_) => dbg!(false),
-                s => dbg!(check_type(t, &s)),
-            }
-        }
-        (Type::Array(t0), Type::Array(t1)) => dbg!(check_type(t0, t1)),
-        (Type::Tuple(t0), Type::Tuple(t1)) => {
-            dbg!(t0.len() == t1.len())
-                && dbg!(t0.iter().zip(t1.iter()).all(|(t0, t1)| check_type(t0, t1)))
-        }
-        (Type::TVar(tv0), Type::TVar(tv1)) => dbg!(tv0.name == tv1.name),
-        (t0, t1) => {
-            dbg!(t0);
-            dbg!(t1);
-            dbg!(false)
-        }
-    }
+    t0.normalize() == t1.normalize()
 }
 
 fn check_type_opt(t0: &Option<Type<Refs>>, t1: &Option<Type<Refs>>) -> bool {
     match (t0, t1) {
-        (Some(t0), Some(t1)) => check_type(&t0.normalize(), &t1.normalize()),
+        (Some(t0), Some(t1)) => check_type(&t0, &t1),
         (None, None) => true,
         (_, _) => false,
     }
 }
 
 fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
-    dbg!(check_type(&pat0.type_predicate.normalize(), &pat1.type_predicate.normalize()))
+    dbg!(check_type(&pat0.type_predicate, &pat1.type_predicate))
         && dbg!(pat0.structure_predicate == pat1.structure_predicate)
         && dbg!(match (&pat0.guard, &pat1.guard) {
             (Some(g0), Some(g1)) => check(g0, g1),
@@ -828,8 +784,27 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             dbg!(name0 == name1)
         }
         (
-            ExprKind::Bind { names: name0, export: export0, value: value0, typ: typ0 },
-            ExprKind::Bind { names: name1, export: export1, value: value1, typ: typ1 },
+            ExprKind::Bind { name: name0, export: export0, value: value0, typ: typ0 },
+            ExprKind::Bind { name: name1, export: export1, value: value1, typ: typ1 },
+        ) => dbg!(
+            dbg!(name0 == name1)
+                && dbg!(export0 == export1)
+                && dbg!(check_type_opt(typ0, typ1))
+                && dbg!(check(value0, value1))
+        ),
+        (
+            ExprKind::BindTuple {
+                names: name0,
+                export: export0,
+                value: value0,
+                typ: typ0,
+            },
+            ExprKind::BindTuple {
+                names: name1,
+                export: export1,
+                value: value1,
+                typ: typ1,
+            },
         ) => dbg!(
             dbg!(name0 == name1)
                 && dbg!(export0 == export1)
@@ -870,7 +845,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                     .iter()
                     .zip(constraints1.iter())
                     .all(|((tv0, tc0), (tv1, tc1))| tv0.name == tv1.name
-                        && check_type(&tc0.normalize(), &tc1.normalize())))
+                        && check_type(&tc0, &tc1)))
                 && dbg!(check(body0, body1))
         ),
         (
@@ -900,7 +875,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                     .iter()
                     .zip(constraints1.iter())
                     .all(|((tv0, tc0), (tv1, tc1))| tv0.name == tv1.name
-                        && check_type(&tc0.normalize(), &tc1.normalize())))
+                        && check_type(&tc0, &tc1)))
                 && dbg!(b0 == b1)
         ),
         (
@@ -920,16 +895,11 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (
             ExprKind::TypeDef { name: name0, typ: typ0 },
             ExprKind::TypeDef { name: name1, typ: typ1 },
-        ) => {
-            dbg!(name0 == name1) && dbg!(check_type(&typ0.normalize(), &typ1.normalize()))
-        }
+        ) => dbg!(name0 == name1) && dbg!(check_type(&typ0, &typ1)),
         (
             ExprKind::TypeCast { expr: expr0, typ: typ0 },
             ExprKind::TypeCast { expr: expr1, typ: typ1 },
-        ) => {
-            dbg!(check(expr0, expr1))
-                && dbg!(check_type(&typ0.normalize(), &typ1.normalize()))
-        }
+        ) => dbg!(check(expr0, expr1)) && dbg!(check_type(&typ0, &typ1)),
         (_, _) => false,
     }
 }
