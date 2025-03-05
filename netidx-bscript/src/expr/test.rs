@@ -640,8 +640,8 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
             )
         }
         (Type::Set(s0), Type::Set(s1)) => {
-            let s0f = Type::flatten_set(s0.iter().cloned());
-            let s1f = Type::flatten_set(s1.iter().cloned());
+            let s0f = dbg!(Type::flatten_set(s0.iter().cloned()));
+            let s1f = dbg!(Type::flatten_set(s1.iter().cloned()));
             match (s0f, s1f) {
                 (Type::Set(s0), Type::Set(s1)) => {
                     dbg!(s0.len() == s1.len())
@@ -655,11 +655,7 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
         }
         (t, Type::Set(s)) | (Type::Set(s), t) => {
             match Type::flatten_set(s.iter().cloned()) {
-                s @ Type::Set(_) => {
-                    dbg!(t);
-                    dbg!(s);
-                    dbg!(false)
-                }
+                Type::Set(_) => dbg!(false),
                 s => dbg!(check_type(t, &s)),
             }
         }
@@ -669,20 +665,24 @@ fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
                 && dbg!(t0.iter().zip(t1.iter()).all(|(t0, t1)| check_type(t0, t1)))
         }
         (Type::TVar(tv0), Type::TVar(tv1)) => dbg!(tv0.name == tv1.name),
-        (_, _) => dbg!(false),
+        (t0, t1) => {
+            dbg!(t0);
+            dbg!(t1);
+            dbg!(false)
+        }
     }
 }
 
 fn check_type_opt(t0: &Option<Type<Refs>>, t1: &Option<Type<Refs>>) -> bool {
     match (t0, t1) {
-        (Some(t0), Some(t1)) => check_type(t0, t1),
+        (Some(t0), Some(t1)) => check_type(&t0.normalize(), &t1.normalize()),
         (None, None) => true,
         (_, _) => false,
     }
 }
 
 fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
-    dbg!(check_type(&pat0.type_predicate, &pat1.type_predicate))
+    dbg!(check_type(&pat0.type_predicate.normalize(), &pat1.type_predicate.normalize()))
         && dbg!(pat0.structure_predicate == pat1.structure_predicate)
         && dbg!(match (&pat0.guard, &pat1.guard) {
             (Some(g0), Some(g1)) => check(g0, g1),
@@ -870,7 +870,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                     .iter()
                     .zip(constraints1.iter())
                     .all(|((tv0, tc0), (tv1, tc1))| tv0.name == tv1.name
-                        && check_type(tc0, tc1)))
+                        && check_type(&tc0.normalize(), &tc1.normalize())))
                 && dbg!(check(body0, body1))
         ),
         (
@@ -900,7 +900,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                     .iter()
                     .zip(constraints1.iter())
                     .all(|((tv0, tc0), (tv1, tc1))| tv0.name == tv1.name
-                        && check_type(tc0, tc1)))
+                        && check_type(&tc0.normalize(), &tc1.normalize())))
                 && dbg!(b0 == b1)
         ),
         (
@@ -920,11 +920,16 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (
             ExprKind::TypeDef { name: name0, typ: typ0 },
             ExprKind::TypeDef { name: name1, typ: typ1 },
-        ) => dbg!(name0 == name1) && dbg!(check_type(typ0, typ1)),
+        ) => {
+            dbg!(name0 == name1) && dbg!(check_type(&typ0.normalize(), &typ1.normalize()))
+        }
         (
             ExprKind::TypeCast { expr: expr0, typ: typ0 },
             ExprKind::TypeCast { expr: expr1, typ: typ1 },
-        ) => dbg!(check(expr0, expr1)) && dbg!(check_type(typ0, typ1)),
+        ) => {
+            dbg!(check(expr0, expr1))
+                && dbg!(check_type(&typ0.normalize(), &typ1.normalize()))
+        }
         (_, _) => false,
     }
 }

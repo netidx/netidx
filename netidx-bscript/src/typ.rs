@@ -733,6 +733,7 @@ impl<T: TypeMark + Clone> Type<T> {
                 },
             }
         }
+        acc.sort();
         match &*acc {
             [] => Type::Primitive(BitFlags::empty()),
             [t] => t.clone(),
@@ -740,8 +741,30 @@ impl<T: TypeMark + Clone> Type<T> {
         }
     }
 
+    pub(crate) fn normalize(&self) -> Self {
+        match self {
+            Type::Ref(_) | Type::Bottom(_) | Type::Primitive(_) | Type::TVar(_) => {
+                self.clone()
+            }
+            Type::Set(s) => Self::flatten_set(s.iter().map(|t| t.normalize())),
+            Type::Array(t) => Type::Array(Arc::new(t.normalize())),
+            Type::Tuple(t) => {
+                Type::Tuple(Arc::from_iter(t.iter().map(|t| t.normalize())))
+            }
+            Type::Fn(ft) => Type::Fn(Arc::new(ft.normalize())),
+        }
+    }
+
     fn merge(&self, t: &Self) -> Option<Self> {
         match (self, t) {
+            (Type::Ref(r0), Type::Ref(r1)) => {
+                if r0 == r1 {
+                    Some(Type::Ref(r0.clone()))
+                } else {
+                    None
+                }
+            }
+            (Type::Ref(_), _) | (_, Type::Ref(_)) => None,
             (Type::Bottom(_), t) | (t, Type::Bottom(_)) => Some(t.clone()),
             (Type::Primitive(p), t) | (t, Type::Primitive(p)) if p.is_empty() => {
                 Some(t.clone())
@@ -798,14 +821,6 @@ impl<T: TypeMark + Clone> Type<T> {
                 }
             }
             (Type::Tuple(_), _) | (_, Type::Tuple(_)) => None,
-            (Type::Ref(r0), Type::Ref(r1)) => {
-                if r0 == r1 {
-                    Some(Type::Ref(r0.clone()))
-                } else {
-                    None
-                }
-            }
-            (Type::Ref(_), _) | (_, Type::Ref(_)) => None,
             (_, Type::TVar(_))
             | (Type::TVar(_), _)
             | (_, Type::Fn(_))
@@ -954,6 +969,19 @@ impl<T: TypeMark + Clone> FnType<T> {
             Type::Fn(f) => Ok((*f).clone()),
             _ => bail!("unexpected fn resolution"),
         }
+    }
+
+    fn normalize(&self) -> Self {
+        let Self { args, vargs, rtype, constraints } = self;
+        let args = Arc::from_iter(
+            args.iter()
+                .map(|a| FnArgType { label: a.label.clone(), typ: a.typ.normalize() }),
+        );
+        let vargs = vargs.as_ref().map(|t| t.normalize());
+        let rtype = rtype.normalize();
+        let constraints =
+            Arc::from_iter(constraints.iter().map(|(tv, t)| (tv.clone(), t.normalize())));
+        FnType { args, vargs, rtype, constraints }
     }
 }
 
