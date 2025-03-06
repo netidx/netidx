@@ -51,6 +51,8 @@ fn _test_valarray() {
 
 type Result<T> = result::Result<T, PackError>;
 
+// Each Typ corresponds directly to the tag of a Value, the bits are
+// the same, and they can be used interchangeably.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u32)]
 #[bitflags]

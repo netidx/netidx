@@ -192,6 +192,25 @@ impl<T: TypeMark> Ord for TVar<T> {
     }
 }
 
+fn with_sorted_structs<'a: 'b, 'b, T, R, F>(
+    t0: &'a Arc<[(ArcStr, Type<T>)]>,
+    t1: &'a Arc<[(ArcStr, Type<T>)]>,
+    f: F,
+) -> R
+where
+    T: TypeMark,
+    F: Fn(
+        &'b SmallVec<[&'a (ArcStr, Type<T>); 16]>,
+        &'b SmallVec<[&'a (ArcStr, Type<T>); 16]>,
+    ) -> R,
+{
+    let mut t0s: SmallVec<[&(ArcStr, Type<T>); 16]> = t0.iter().collect();
+    let mut t1s: SmallVec<[&(ArcStr, Type<T>); 16]> = t1.iter().collect();
+    t0s.sort_by_key(|(n, _)| n);
+    t1s.sort_by_key(|(n, _)| n);
+    f(&t0s, &t1s)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Type<T: TypeMark> {
     Bottom(PhantomData<T>),
@@ -202,6 +221,7 @@ pub enum Type<T: TypeMark> {
     TVar(TVar<T>),
     Array(Arc<Type<T>>),
     Tuple(Arc<[Type<T>]>),
+    Struct(Arc<[(ArcStr, Type<T>)]>),
 }
 
 impl Type<NoRefs> {
@@ -225,7 +245,8 @@ impl Type<NoRefs> {
             | Self::Fn(_)
             | Self::Set(_)
             | Self::Array(_)
-            | Self::Tuple(_) => true,
+            | Self::Tuple(_)
+            | Self::Struct(_) => true,
             Self::TVar(tv) => tv.read().read().is_some(),
             Self::Ref(_) => unreachable!(),
         }
@@ -238,7 +259,8 @@ impl Type<NoRefs> {
             | Self::Fn(_)
             | Self::Set(_)
             | Self::Array(_)
-            | Self::Tuple(_) => f(Some(self)),
+            | Self::Tuple(_)
+            | Self::Struct(_) => f(Some(self)),
             Self::TVar(tv) => f(tv.read().read().as_ref()),
             Self::Ref(_) => unreachable!(),
         }
@@ -256,22 +278,35 @@ impl Type<NoRefs> {
         match (self, t) {
             (Self::Bottom(_), _) | (_, Self::Bottom(_)) => true,
             (Self::Primitive(p0), Self::Primitive(p1)) => p0.contains(*p1),
+            (Self::Primitive(p), Self::Array(_) | Self::Tuple(_) | Self::Struct(_)) => {
+                p.contains(Typ::Array)
+            }
             (Self::Array(t0), Self::Array(t1)) => t0.contains(t1),
             (Self::Array(t0), Self::Primitive(p)) if *p == BitFlags::from(Typ::Array) => {
                 t0.contains(&Type::Primitive(BitFlags::all()))
             }
-            (Self::Array(_), Self::Primitive(_)) => false,
             (Self::Tuple(t0), Self::Tuple(t1)) => {
                 t0.len() == t1.len()
                     && t0.iter().zip(t1.iter()).all(|(t0, t1)| t0.contains(t1))
             }
-            (Self::Tuple(_), Self::Array(_))
-            | (Self::Array(_), Self::Tuple(_))
-            | (Self::Tuple(_), Self::Primitive(_))
-            | (Self::Primitive(_), Self::Tuple(_)) => false,
-            (Self::Primitive(_), Self::Array(_)) => {
-                self.contains(&Type::Primitive(Typ::Array.into()))
+            (Self::Struct(t0), Self::Struct(t1)) => {
+                t0.len() == t1.len() && {
+                    with_sorted_structs(t0, t1, |t0, t1| {
+                        t0.iter()
+                            .zip(t1.iter())
+                            .all(|((n0, t0), (n1, t1))| n0 == n1 && t0.contains(t1))
+                    })
+                }
             }
+            (Self::Tuple(_), Self::Array(_))
+            | (Self::Tuple(_), Self::Primitive(_))
+            | (Self::Tuple(_), Self::Struct(_))
+            | (Self::Array(_), Self::Primitive(_))
+            | (Self::Array(_), Self::Tuple(_))
+            | (Self::Array(_), Self::Struct(_))
+            | (Self::Struct(_), Self::Primitive(_))
+            | (Self::Struct(_), Self::Array(_))
+            | (Self::Struct(_), Self::Tuple(_)) => false,
             (Self::TVar(t0), Self::TVar(t1)) => {
                 let alias = {
                     let t0 = t0.read();
@@ -355,51 +390,69 @@ impl Type<NoRefs> {
                 if p.contains(Typ::Array) {
                     Type::Primitive(*p)
                 } else {
-                    Self::flatten_set([Type::Primitive(*p), Type::Array(t.clone())])
+                    Type::Set(Arc::from_iter([
+                        Type::Primitive(*p),
+                        Type::Array(t.clone()),
+                    ]))
                 }
             }
             (Type::Array(t0), Type::Array(t1)) => {
                 if t0 == t1 {
                     Type::Array(t0.clone())
                 } else {
-                    Self::flatten_set([self.clone(), t.clone()])
+                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
                 }
             }
             (Type::Set(s0), Type::Set(s1)) => {
-                Self::flatten_set(s0.iter().cloned().chain(s1.iter().cloned()))
+                Type::Set(Arc::from_iter(s0.iter().cloned().chain(s1.iter().cloned())))
             }
             (Type::Set(s), t) | (t, Type::Set(s)) => {
-                Self::flatten_set(s.iter().cloned().chain(iter::once(t.clone())))
+                Type::Set(Arc::from_iter(s.iter().cloned().chain(iter::once(t.clone()))))
+            }
+            (Type::Struct(t0), Type::Struct(t1)) => {
+                let same = t0.len() == t1.len()
+                    && with_sorted_structs(t0, t1, |t0, t1| t0 == t1);
+                if same {
+                    self.clone()
+                } else {
+                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+                }
+            }
+            (Type::Struct(_), t) | (t, Type::Struct(_)) => {
+                Type::Set(Arc::from_iter([self.clone(), t.clone()]))
             }
             (Type::Tuple(t0), Type::Tuple(t1)) => {
                 if t0 == t1 {
                     self.clone()
                 } else {
-                    Self::flatten_set([self.clone(), t.clone()])
+                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
                 }
             }
             (Type::Tuple(_), t) | (t, Type::Tuple(_)) => {
-                Self::flatten_set([self.clone(), t.clone()])
+                Type::Set(Arc::from_iter([self.clone(), t.clone()]))
             }
             (Type::Fn(f0), Type::Fn(f1)) => {
                 if f0 == f1 {
                     Type::Fn(f0.clone())
                 } else {
-                    Self::flatten_set([Type::Fn(f0.clone()), Type::Fn(f1.clone())])
+                    Type::Set(Arc::from_iter([
+                        Type::Fn(f0.clone()),
+                        Type::Fn(f1.clone()),
+                    ]))
                 }
             }
             (f @ Type::Fn(_), t) | (t, f @ Type::Fn(_)) => {
-                Self::flatten_set([f.clone(), t.clone()])
+                Type::Set(Arc::from_iter([f.clone(), t.clone()]))
             }
             (t0 @ Type::TVar(_), t1 @ Type::TVar(_)) => {
                 if t0 == t1 {
                     t0.clone()
                 } else {
-                    Self::flatten_set([t0.clone(), t1.clone()])
+                    Type::Set(Arc::from_iter([t0.clone(), t1.clone()]))
                 }
             }
             (t0 @ Type::TVar(_), t1) | (t1, t0 @ Type::TVar(_)) => {
-                Self::flatten_set([t0.clone(), t1.clone()])
+                Type::Set(Arc::from_iter([t0.clone(), t1.clone()]))
             }
             (Type::Ref(_), _) | (_, Type::Ref(_)) => unreachable!(),
         }
@@ -461,6 +514,16 @@ impl Type<NoRefs> {
                 }
             }
             (Type::Tuple(_), _) | (_, Type::Tuple(_)) => Ok(self.clone()),
+            (Type::Struct(t0), Type::Struct(t1)) => {
+                let same = t0.len() == t1.len()
+                    && with_sorted_structs(t0, t1, |t0, t1| t0 == t1);
+                if same {
+                    Ok(Type::Primitive(BitFlags::empty()))
+                } else {
+                    Ok(self.clone())
+                }
+            }
+            (Type::Struct(_), _) | (_, Type::Struct(_)) => Ok(self.clone()),
             (Type::Fn(f0), Type::Fn(f1)) => {
                 if f0 == f1 {
                     Ok(Type::Primitive(BitFlags::empty()))
@@ -523,6 +586,11 @@ impl Type<NoRefs> {
                     t.alias_unbound(known)
                 }
             }
+            Type::Struct(ts) => {
+                for (_, t) in ts.iter() {
+                    t.alias_unbound(known)
+                }
+            }
             Type::TVar(tv) => match known.entry(tv.name.clone()) {
                 Entry::Vacant(e) => {
                     e.insert(tv.clone());
@@ -569,6 +637,9 @@ impl Type<NoRefs> {
             Type::Tuple(ts) => {
                 Type::Tuple(Arc::from_iter(ts.iter().map(|t| t.reset_tvars())))
             }
+            Type::Struct(ts) => Type::Struct(Arc::from_iter(
+                ts.iter().map(|(n, t)| (n.clone(), t.reset_tvars())),
+            )),
             Type::TVar(tv) => Type::TVar(TVar::empty_named(tv.name.clone())),
             Type::Set(s) => Type::Set(Arc::from_iter(s.iter().map(|t| t.reset_tvars()))),
             Type::Fn(fntyp) => {
@@ -595,9 +666,8 @@ impl Type<NoRefs> {
             Type::Fn(_) => None,
             Type::Set(s) => s.iter().find_map(|t| t.first_prim()),
             Type::TVar(tv) => tv.read().read().as_ref().and_then(|t| t.first_prim()),
-            // array and tuple casting are handled directly
-            Type::Array(_) => None,
-            Type::Tuple(_) => None,
+            // array, tuple, and struct casting are handled directly
+            Type::Array(_) | Type::Tuple(_) | Type::Struct(_) => None,
         }
     }
 
@@ -618,6 +688,9 @@ impl Type<NoRefs> {
             Type::Tuple(ts) => Ok(for t in ts.iter() {
                 t.check_cast()?
             }),
+            Type::Struct(ts) => Ok(for (_, t) in ts.iter() {
+                t.check_cast()?
+            }),
         }
     }
 
@@ -631,66 +704,130 @@ impl Type<NoRefs> {
         })
     }
 
-    pub fn cast_value(&self, v: Value) -> Value {
+    fn cast_value_int(&self, v: Value) -> Result<Value> {
         if self.contains(&Type::Primitive(Typ::get(&v).into())) {
-            return v;
+            return Ok(v);
         }
         match self {
             Type::Array(et) => match v {
                 Value::Array(elts) => {
                     if et.check_array(&elts) {
-                        return Value::Array(elts);
+                        return Ok(Value::Array(elts));
                     }
-                    let mut error = None;
-                    let va = ValArray::from_iter_exact(elts.iter().map(|el| {
-                        match et.cast_value(el.clone()) {
-                            Value::Error(e) => {
-                                error = Some(e.clone());
-                                Value::Error(e)
-                            }
-                            v => v,
-                        }
-                    }));
-                    match error {
-                        None => Value::Array(va),
-                        Some(e) => Value::Error(e),
-                    }
+                    let va = elts
+                        .iter()
+                        .map(|el| et.cast_value_int(el.clone()))
+                        .collect::<Result<SmallVec<[Value; 8]>>>()?;
+                    Ok(Value::Array(ValArray::from_iter_exact(va.into_iter())))
                 }
-                v => match et.cast_value(v) {
-                    Value::Error(e) => Value::Error(e),
-                    v => Value::Array([v].into()),
-                },
+                v => Ok(Value::Array([et.cast_value_int(v)?].into())),
             },
             Type::Tuple(ts) => match v {
                 Value::Array(elts) => {
                     if elts.len() != ts.len() {
-                        let e = format!(
-                            "tuple size mismatch {self} with {}",
-                            Value::Array(elts)
-                        );
-                        return Value::Error(e.into());
+                        bail!("tuple size mismatch {self} with {}", Value::Array(elts))
                     }
                     let ok = ts
                         .iter()
                         .zip(elts.iter())
-                        .all(|(t, el)| t.contains(&Type::Primitive(Typ::get(el).into())));
+                        .all(|(t, v)| t.contains(&Type::Primitive(Typ::get(v).into())));
                     if ok {
-                        return Value::Array(elts);
+                        return Ok(Value::Array(elts));
                     }
-                    let i = ts
+                    let a = ts
                         .iter()
                         .zip(elts.iter())
-                        .map(|(t, el)| t.cast_value(el.clone()));
-                    Value::Array(ValArray::from_iter_exact(i))
+                        .map(|(t, el)| t.cast_value_int(el.clone()))
+                        .collect::<Result<SmallVec<[Value; 8]>>>()?;
+                    Ok(Value::Array(ValArray::from_iter_exact(a.into_iter())))
                 }
-                v => Value::Error(format!("can't cast {v} to {self}").into()),
+                v => bail!("can't cast {v} to {self}"),
+            },
+            Type::Struct(ts) => match v {
+                Value::Array(elts) => {
+                    if elts.len() != ts.len() {
+                        bail!("struct size mismatch {self} with {}", Value::Array(elts))
+                    }
+                    let is_pairs = elts.iter().all(|v| match v {
+                        Value::Array(a) if a.len() == 2 => match &a[0] {
+                            Value::String(_) => true,
+                            _ => false,
+                        },
+                        _ => false,
+                    });
+                    if !is_pairs {
+                        bail!("expected array of pairs, got {}", Value::Array(elts))
+                    }
+                    let mut elts_s: SmallVec<[&Value; 16]> = elts.iter().collect();
+                    let mut ts_s: SmallVec<[&(ArcStr, Type<NoRefs>); 16]> =
+                        ts.iter().collect();
+                    elts_s.sort_by_key(|v| match v {
+                        Value::Array(a) => match &a[0] {
+                            Value::String(s) => s,
+                            _ => unreachable!(),
+                        },
+                        _ => unreachable!(),
+                    });
+                    ts_s.sort_by_key(|(n, _)| n);
+                    let (keys_ok, ok) = ts_s.iter().zip(elts_s.iter()).fold(
+                        (true, true),
+                        |(kok, ok), ((fname, t), v)| {
+                            let (name, v) = match v {
+                                Value::Array(a) => match (&a[0], &a[1]) {
+                                    (Value::String(n), v) => (n, v),
+                                    _ => unreachable!(),
+                                },
+                                _ => unreachable!(),
+                            };
+                            (
+                                kok && name == fname,
+                                ok && kok
+                                    && t.contains(&Type::Primitive(Typ::get(v).into())),
+                            )
+                        },
+                    );
+                    if ok {
+                        drop(elts_s);
+                        return Ok(Value::Array(elts));
+                    } else if keys_ok {
+                        let elts = ts_s
+                            .iter()
+                            .zip(elts_s.iter())
+                            .map(|((n, t), v)| match v {
+                                Value::Array(a) => {
+                                    let a = [
+                                        Value::String(n.clone()),
+                                        t.cast_value_int(a[1].clone())?,
+                                    ];
+                                    Ok(Value::Array(ValArray::from_iter_exact(
+                                        a.into_iter(),
+                                    )))
+                                }
+                                _ => unreachable!(),
+                            })
+                            .collect::<Result<SmallVec<[Value; 8]>>>()?;
+                        Ok(Value::Array(ValArray::from_iter_exact(elts.into_iter())))
+                    } else {
+                        drop(elts_s);
+                        bail!("struct fields mismatch {self}, {}", Value::Array(elts))
+                    }
+                }
+                v => bail!("can't cast {v} to {self}"),
             },
             t => match t.first_prim() {
-                None => Value::Error(literal!("empty or non primitive cast")),
-                Some(t) => v.clone().cast(t).unwrap_or_else(|| {
-                    Value::Error(format!("can't cast {v} to {t}").into())
-                }),
+                None => bail!("empty or non primitive cast"),
+                Some(t) => Ok(v
+                    .clone()
+                    .cast(t)
+                    .ok_or_else(|| anyhow!("can't cast {v} to {t}"))?),
             },
+        }
+    }
+
+    pub fn cast_value(&self, v: Value) -> Value {
+        match self.cast_value_int(v) {
+            Ok(v) => v,
+            Err(e) => Value::Error(e.to_string().into()),
         }
     }
 }
@@ -705,6 +842,7 @@ impl<T: TypeMark + Clone> Type<T> {
             | Type::Fn(_)
             | Type::Array(_)
             | Type::Tuple(_)
+            | Type::Struct(_)
             | Type::Set(_) => false,
         }
     }
@@ -759,6 +897,9 @@ impl<T: TypeMark + Clone> Type<T> {
             Type::Tuple(t) => {
                 Type::Tuple(Arc::from_iter(t.iter().map(|t| t.normalize())))
             }
+            Type::Struct(t) => Type::Struct(Arc::from_iter(
+                t.iter().map(|(n, t)| (n.clone(), t.normalize())),
+            )),
             Type::Fn(ft) => Type::Fn(Arc::new(ft.normalize())),
         }
     }
@@ -828,6 +969,23 @@ impl<T: TypeMark + Clone> Type<T> {
                     None
                 }
             }
+            (Type::Struct(t0), Type::Struct(t1)) => {
+                if t0.len() == t1.len() {
+                    let t = with_sorted_structs(t0, t1, |t0, t1| {
+                        t0.iter().zip(t1.iter()).map(|((n0, t0), (n1, t1))| {
+                            if n0 != n1 {
+                                None
+                            } else {
+                                t0.merge(t1).map(|t| (n0.clone(), t))
+                            }
+                        })
+                    })
+                    .collect::<Option<SmallVec<[(ArcStr, Type<T>); 8]>>>()?;
+                    Some(Type::Struct(Arc::from_iter(t)))
+                } else {
+                    None
+                }
+            }
             (Type::Tuple(_), _) | (_, Type::Tuple(_)) => None,
             (_, Type::TVar(_))
             | (Type::TVar(_), _)
@@ -852,6 +1010,14 @@ impl<T: TypeMark + Clone> Type<T> {
                     .collect::<Result<SmallVec<[Type<NoRefs>; 8]>>>()?
                     .into_iter();
                 Ok(Type::Tuple(Arc::from_iter(i)))
+            }
+            Type::Struct(ts) => {
+                let i = ts
+                    .iter()
+                    .map(|(n, t)| Ok((n.clone(), t.resolve_typrefs(scope, env)?)))
+                    .collect::<Result<SmallVec<[(ArcStr, Type<NoRefs>); 8]>>>()?
+                    .into_iter();
+                Ok(Type::Struct(Arc::from_iter(i)))
             }
             Type::TVar(tv) => match &*tv.read().read() {
                 None => Ok(Type::TVar(TVar::empty_named(tv.name.clone()))),

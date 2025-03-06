@@ -785,9 +785,10 @@ run!(tuples1, TUPLES1, |v: Result<&Value>| match v {
 
 const TUPLES2: &str = r#"
 {
-  let t = ("foo", 42, 23.5);
+  type T = (string, i64, f64);
+  let t: T = ("foo", 42, 23.5);
   select t {
-    (string, i64, f64) as ("foo", x, y) => x + y
+    T as ("foo", x, y) => x + y
   }
 }
 "#;
