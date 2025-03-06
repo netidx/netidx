@@ -632,6 +632,21 @@ where
                 }
             },
         )),
+        attempt(
+            between(
+                sptoken('{'),
+                sptoken('}'),
+                sep_by1((spfname().skip(sptoken(':')), typexp()), csep()),
+            )
+            .then(|exps: SmallVec<[(ArcStr, Type<Refs>); 16]>| {
+                let s = exps.iter().map(|(n, _)| n).collect::<FxHashSet<_>>();
+                if s.len() < exps.len() {
+                    unexpected_any("struct field names must be unique").left()
+                } else {
+                    value(Type::Struct(Arc::from_iter(exps))).right()
+                }
+            }),
+        ),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(spstring("Array").with(between(sptoken('<'), sptoken('>'), typexp())))
             .map(|t| Type::Array(Arc::new(t))),
@@ -1140,6 +1155,27 @@ where
     )
 }
 
+fn structure<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    between(
+        token('{'),
+        sptoken('}'),
+        sep_by1((spfname().skip(sptoken(':')), expr()), csep()),
+    )
+    .then(|exprs: SmallVec<[(ArcStr, Expr); 8]>| {
+        let s = exprs.iter().map(|(n, _)| n).collect::<FxHashSet<_>>();
+        if s.len() < exprs.len() {
+            unexpected_any("struct fields must be unique").left()
+        } else {
+            value(ExprKind::Struct { args: Arc::from_iter(exprs) }.to_expr()).right()
+        }
+    })
+}
+
 fn expr_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -1150,6 +1186,7 @@ where
         attempt(spaces().with(array())),
         attempt(spaces().with(arith())),
         attempt(spaces().with(tuple())),
+        attempt(spaces().with(structure())),
         attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(lambda())),
         attempt(spaces().with(letbind())),

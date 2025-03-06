@@ -299,6 +299,9 @@ pub enum ExprKind {
     Tuple {
         args: Arc<[Expr]>,
     },
+    Struct {
+        args: Arc<[(ArcStr, Expr)]>,
+    },
     Select {
         arg: Arc<Expr>,
         arms: Arc<[(Pattern, Expr)]>,
