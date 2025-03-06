@@ -448,8 +448,19 @@ fn expr() -> impl Strategy<Value = Expr> {
                 typ
             }
             .to_expr()),
-            collection::vec(inner.clone(), (1, 10))
-                .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
+            collection::vec(
+                prop_oneof![
+                    (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef {
+                        name: ArcStr::from(name),
+                        typ
+                    }
+                    .to_expr()),
+                    modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
+                    inner.clone()
+                ],
+                (1, 10)
+            )
+            .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
             (
                 collection::vec(
                     (
@@ -572,8 +583,19 @@ fn modexpr() -> impl Strategy<Value = Expr> {
                 s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
                 ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
             }),
-        collection::vec(expr(), (1, 10))
-            .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
+        collection::vec(
+            prop_oneof![
+                (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef {
+                    name: ArcStr::from(name),
+                    typ
+                }
+                .to_expr()),
+                modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
+                expr()
+            ],
+            (1, 10)
+        )
+        .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
         modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
         (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef {
             name: ArcStr::from(name),

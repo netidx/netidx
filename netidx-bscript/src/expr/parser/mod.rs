@@ -343,8 +343,19 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    between(token('{'), sptoken('}'), sep_by(expr(), attempt(sptoken(';'))))
-        .map(|args: Vec<Expr>| ExprKind::Do { exprs: Arc::from(args) }.to_expr())
+    between(
+        token('{'),
+        sptoken('}'),
+        sep_by(
+            choice((
+                attempt(spaces().with(use_module())),
+                attempt(spaces().with(typedef())),
+                expr(),
+            )),
+            attempt(sptoken(';')),
+        ),
+    )
+    .map(|args: Vec<Expr>| ExprKind::Do { exprs: Arc::from(args) }.to_expr())
 }
 
 fn array<I>() -> impl Parser<I, Output = Expr>
