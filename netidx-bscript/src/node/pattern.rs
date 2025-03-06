@@ -10,6 +10,7 @@ use fxhash::FxHashSet;
 use netidx::{publisher::Typ, subscriber::Value};
 use std::{fmt::Debug, hash::Hash, iter};
 
+#[derive(Debug)]
 pub enum ValPNode {
     Ignore,
     Literal(Value),
@@ -52,6 +53,7 @@ impl ValPNode {
     }
 }
 
+#[derive(Debug)]
 pub enum StructPatternNode {
     BindAll { name: ValPNode },
     Slice { all: Option<BindId>, binds: Box<[ValPNode]> },
@@ -282,7 +284,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
 
     pub(super) fn is_match(&self, typ: Typ, v: &Value) -> bool {
         let tmatch = match (&self.type_predicate, typ) {
-            (Type::Array(_), Typ::Array) => true,
+            (Type::Array(_), Typ::Array) | (Type::Tuple(_), Typ::Array) => true,
             _ => self.type_predicate.contains(&Type::Primitive(typ.into())),
         };
         tmatch && {

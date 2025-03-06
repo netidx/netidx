@@ -782,3 +782,17 @@ run!(tuples1, TUPLES1, |v: Result<&Value>| match v {
     Ok(Value::F64(65.5)) => true,
     _ => false,
 });
+
+const TUPLES2: &str = r#"
+{
+  let t = ("foo", 42, 23.5);
+  select t {
+    (string, i64, f64) as ("foo", x, y) => x + y
+  }
+}
+"#;
+
+run!(tuples2, TUPLES2, |v: Result<&Value>| match v {
+    Ok(Value::F64(65.5)) => true,
+    _ => false,
+});

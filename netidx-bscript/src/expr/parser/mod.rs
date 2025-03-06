@@ -1023,7 +1023,7 @@ where
 {
     (
         optional(attempt(spfname().skip(sptoken('@')))),
-        between(sptoken('('), sptoken(')'), sep_by1(val_pat().map(|x| dbg!(x)), csep())),
+        between(sptoken('('), sptoken(')'), sep_by1(val_pat(), csep())),
     )
         .then(|(all, binds): (Option<ArcStr>, SmallVec<[ValPat; 8]>)| {
             if binds.len() < 2 {
