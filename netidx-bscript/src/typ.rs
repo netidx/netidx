@@ -1088,6 +1088,16 @@ impl<T: TypeMark> fmt::Display for Type<T> {
                 }
                 write!(f, ")")
             }
+            Self::Struct(ts) => {
+                write!(f, "{{")?;
+                for (i, (n, t)) in ts.iter().enumerate() {
+                    write!(f, "{n}: {t}")?;
+                    if i < ts.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                write!(f, "}}")
+            }
             Self::Set(s) => {
                 write!(f, "[")?;
                 for (i, t) in s.iter().enumerate() {
