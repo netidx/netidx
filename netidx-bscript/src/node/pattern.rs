@@ -22,13 +22,17 @@ impl ValPNode {
         type_predicate: &Type<NoRefs>,
         spec: &ValPat,
         scope: &ModPath,
-    ) -> Self {
+    ) -> Result<Self> {
         match spec {
-            ValPat::Ignore => Self::Ignore,
-            ValPat::Literal(v) => Self::Literal(v.clone()),
+            ValPat::Ignore => Ok(Self::Ignore),
+            ValPat::Literal(v) => {
+                let t = Type::Primitive(Typ::get(v).into());
+                type_predicate.check_contains(&t)?;
+                Ok(Self::Literal(v.clone()))
+            }
             ValPat::Bind(name) => {
                 let id = ctx.env.bind_variable(scope, name, type_predicate.clone()).id;
-                Self::Bind(id)
+                Ok(Self::Bind(id))
             }
         }
     }
@@ -81,9 +85,10 @@ impl StructPatternNode {
                         let single = $single.as_ref().map(|n| {
                             ctx.env.bind_variable(scope, n, type_predicate.clone()).id
                         });
-                        let multi =
-                            $multi.iter().map(|n| ValPNode::compile(ctx, et, n, scope));
-                        let multi = Box::from_iter(multi);
+                        let multi = $multi
+                            .iter()
+                            .map(|n| ValPNode::compile(ctx, et, n, scope))
+                            .collect::<Result<Box<[ValPNode]>>>()?;
                         (all, single, multi)
                     }
                     t => bail!("slice patterns can't match {t}"),
@@ -92,7 +97,7 @@ impl StructPatternNode {
         }
         let t = match &spec {
             StructurePattern::BindAll { name } => StructPatternNode::BindAll {
-                name: ValPNode::compile(ctx, type_predicate, &name, scope),
+                name: ValPNode::compile(ctx, type_predicate, &name, scope)?,
             },
             StructurePattern::SlicePrefix { all, prefix, tail } => {
                 let (all, tail, prefix) = with_pref_suf!(all, tail, prefix);
@@ -102,8 +107,7 @@ impl StructPatternNode {
                 let (all, head, suffix) = with_pref_suf!(all, head, suffix);
                 StructPatternNode::SliceSuffix { all, head, suffix }
             }
-            StructurePattern::Slice { all, binds }
-            | StructurePattern::Tuple { all, binds } => match &type_predicate {
+            StructurePattern::Slice { all, binds } => match &type_predicate {
                 Type::Array(et) => {
                     let names = binds
                         .iter()
@@ -116,10 +120,38 @@ impl StructPatternNode {
                     let all = all.as_ref().map(|n| {
                         ctx.env.bind_variable(scope, n, type_predicate.clone()).id
                     });
-                    let ids = binds.iter().map(|b| ValPNode::compile(ctx, et, b, scope));
-                    StructPatternNode::Slice { all, binds: Box::from_iter(ids) }
+                    let binds = binds
+                        .iter()
+                        .map(|b| ValPNode::compile(ctx, et, b, scope))
+                        .collect::<Result<Box<[ValPNode]>>>()?;
+                    StructPatternNode::Slice { all, binds }
                 }
-                t => bail!("slice or tuple patterns can't match {t}"),
+                t => bail!("slice patterns can't match {t}"),
+            },
+            StructurePattern::Tuple { all, binds } => match &type_predicate {
+                Type::Tuple(elts) => {
+                    let names = binds
+                        .iter()
+                        .map(|x| x.name())
+                        .chain(iter::once(all.as_ref()))
+                        .filter_map(|x| x);
+                    if !uniq(names) {
+                        bail!("bound variables must have unique names")
+                    }
+                    if binds.len() != elts.len() {
+                        bail!("expected a tuple of length {}", elts.len())
+                    }
+                    let all = all.as_ref().map(|n| {
+                        ctx.env.bind_variable(scope, n, type_predicate.clone()).id
+                    });
+                    let binds = elts
+                        .iter()
+                        .zip(binds.iter())
+                        .map(|(t, b)| ValPNode::compile(ctx, t, b, scope))
+                        .collect::<Result<Box<[ValPNode]>>>()?;
+                    StructPatternNode::Slice { all, binds }
+                }
+                t => bail!("tuple patterns can't match {t}"),
             },
         };
         Ok(t)
