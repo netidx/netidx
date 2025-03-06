@@ -1,6 +1,6 @@
 use crate::{env::Env, expr::ModPath, Ctx};
 use anyhow::{anyhow, bail, Result};
-use arcstr::{literal, ArcStr};
+use arcstr::ArcStr;
 use compact_str::format_compact;
 use enumflags2::BitFlags;
 use fxhash::FxHashMap;
@@ -38,13 +38,13 @@ pub struct NoRefs;
 impl TypeMark for NoRefs {}
 
 #[derive(Debug)]
-pub struct TVarInner<T: TypeMark> {
+pub struct TVarInner<T: TypeMark + 'static> {
     pub name: ArcStr,
     typ: RwLock<Arc<RwLock<Option<Type<T>>>>>,
 }
 
 #[derive(Debug, Clone)]
-pub struct TVar<T: TypeMark>(Arc<TVarInner<T>>);
+pub struct TVar<T: TypeMark + 'static>(Arc<TVarInner<T>>);
 
 thread_local! {
     static TVAR_DEREF: Cell<bool> = Cell::new(false);
@@ -60,7 +60,7 @@ pub fn format_with_deref<R, F: FnOnce() -> R>(f: F) -> R {
     res
 }
 
-impl<T: TypeMark> fmt::Display for TVar<T> {
+impl<T: TypeMark + 'static> fmt::Display for TVar<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !TVAR_DEREF.get() {
             write!(f, "'{}", self.name)
@@ -74,7 +74,7 @@ impl<T: TypeMark> fmt::Display for TVar<T> {
     }
 }
 
-impl<T: TypeMark> Default for TVar<T> {
+impl<T: TypeMark + 'static> Default for TVar<T> {
     fn default() -> Self {
         Self::empty_named(ArcStr::from(
             format_compact!("default{}", TVarId::new().0).as_str(),
@@ -82,7 +82,7 @@ impl<T: TypeMark> Default for TVar<T> {
     }
 }
 
-impl<T: TypeMark> TVar<T> {
+impl<T: TypeMark + 'static> TVar<T> {
     pub fn empty_named(name: ArcStr) -> Self {
         Self(Arc::new(TVarInner { name, typ: RwLock::new(Arc::new(RwLock::new(None))) }))
     }
@@ -122,6 +122,7 @@ impl TVar<NoRefs> {
                 Type::TVar(t) => Arc::as_ptr(&*t.read()).addr() == addr,
                 Type::Array(a) => would_cycle(addr, &**a),
                 Type::Tuple(ts) => ts.iter().any(|t| would_cycle(addr, t)),
+                Type::Struct(ts) => ts.iter().any(|(_, t)| would_cycle(addr, t)),
                 Type::Set(s) => s.iter().any(|t| would_cycle(addr, t)),
                 Type::Fn(f) => {
                     let FnType { args, vargs, rtype, constraints } = &**f;
@@ -142,7 +143,7 @@ impl TVar<NoRefs> {
     }
 }
 
-impl<T: TypeMark> Deref for TVar<T> {
+impl<T: TypeMark + 'static> Deref for TVar<T> {
     type Target = TVarInner<T>;
 
     fn deref(&self) -> &Self::Target {
@@ -150,7 +151,7 @@ impl<T: TypeMark> Deref for TVar<T> {
     }
 }
 
-impl<T: TypeMark> PartialEq for TVar<T> {
+impl<T: TypeMark + 'static> PartialEq for TVar<T> {
     fn eq(&self, other: &Self) -> bool {
         let t0 = self.read();
         let t1 = other.read();
@@ -162,9 +163,9 @@ impl<T: TypeMark> PartialEq for TVar<T> {
     }
 }
 
-impl<T: TypeMark> Eq for TVar<T> {}
+impl<T: TypeMark + 'static> Eq for TVar<T> {}
 
-impl<T: TypeMark> PartialOrd for TVar<T> {
+impl<T: TypeMark + 'static> PartialOrd for TVar<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         let t0 = self.read();
         let t1 = other.read();
@@ -178,7 +179,7 @@ impl<T: TypeMark> PartialOrd for TVar<T> {
     }
 }
 
-impl<T: TypeMark> Ord for TVar<T> {
+impl<T: TypeMark + 'static> Ord for TVar<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         let t0 = self.read();
         let t1 = other.read();
@@ -192,17 +193,16 @@ impl<T: TypeMark> Ord for TVar<T> {
     }
 }
 
-fn with_sorted_structs<'a: 'b, 'b, T, R, F>(
-    t0: &'a Arc<[(ArcStr, Type<T>)]>,
-    t1: &'a Arc<[(ArcStr, Type<T>)]>,
+fn with_sorted_structs<T, R, F>(
+    t0: &Arc<[(ArcStr, Type<T>)]>,
+    t1: &Arc<[(ArcStr, Type<T>)]>,
     f: F,
 ) -> R
 where
-    T: TypeMark,
-    F: Fn(
-        &'b SmallVec<[&'a (ArcStr, Type<T>); 16]>,
-        &'b SmallVec<[&'a (ArcStr, Type<T>); 16]>,
-    ) -> R,
+    R: 'static,
+    T: TypeMark + 'static,
+    F: Fn(&SmallVec<[&(ArcStr, Type<T>); 16]>, &SmallVec<[&(ArcStr, Type<T>); 16]>) -> R
+        + 'static,
 {
     let mut t0s: SmallVec<[&(ArcStr, Type<T>); 16]> = t0.iter().collect();
     let mut t1s: SmallVec<[&(ArcStr, Type<T>); 16]> = t1.iter().collect();
@@ -212,7 +212,7 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Type<T: TypeMark> {
+pub enum Type<T: TypeMark + 'static> {
     Bottom(PhantomData<T>),
     Primitive(BitFlags<Typ>),
     Ref(ModPath),
@@ -832,7 +832,7 @@ impl Type<NoRefs> {
     }
 }
 
-impl<T: TypeMark + Clone> Type<T> {
+impl<T: TypeMark + Clone + 'static> Type<T> {
     pub fn is_bot(&self) -> bool {
         match self {
             Type::Bottom(_) => true,
@@ -972,22 +972,27 @@ impl<T: TypeMark + Clone> Type<T> {
             (Type::Struct(t0), Type::Struct(t1)) => {
                 if t0.len() == t1.len() {
                     let t = with_sorted_structs(t0, t1, |t0, t1| {
-                        t0.iter().zip(t1.iter()).map(|((n0, t0), (n1, t1))| {
-                            if n0 != n1 {
-                                None
-                            } else {
-                                t0.merge(t1).map(|t| (n0.clone(), t))
-                            }
-                        })
-                    })
-                    .collect::<Option<SmallVec<[(ArcStr, Type<T>); 8]>>>()?;
+                        t0.iter()
+                            .zip(t1.iter())
+                            .map(|((n0, t0), (n1, t1))| {
+                                if n0 != n1 {
+                                    None
+                                } else {
+                                    t0.merge(t1).map(|t| (n0.clone(), t))
+                                }
+                            })
+                            .collect::<Option<SmallVec<[(ArcStr, Type<T>); 8]>>>()
+                    })?;
                     Some(Type::Struct(Arc::from_iter(t)))
                 } else {
                     None
                 }
             }
-            (Type::Tuple(_), _) | (_, Type::Tuple(_)) => None,
-            (_, Type::TVar(_))
+            (Type::Tuple(_), _)
+            | (_, Type::Tuple(_))
+            | (Type::Struct(_), _)
+            | (_, Type::Struct(_))
+            | (_, Type::TVar(_))
             | (Type::TVar(_), _)
             | (_, Type::Fn(_))
             | (Type::Fn(_), _) => None,
@@ -1070,7 +1075,7 @@ impl<T: TypeMark + Clone> Type<T> {
     }
 }
 
-impl<T: TypeMark> fmt::Display for Type<T> {
+impl<T: TypeMark + 'static> fmt::Display for Type<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bottom(_) => write!(f, "_"),
@@ -1129,20 +1134,20 @@ impl<T: TypeMark> fmt::Display for Type<T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FnArgType<T: TypeMark> {
+pub struct FnArgType<T: TypeMark + 'static> {
     pub label: Option<(ArcStr, bool)>,
     pub typ: Type<T>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FnType<T: TypeMark> {
+pub struct FnType<T: TypeMark + 'static> {
     pub args: Arc<[FnArgType<T>]>,
     pub vargs: Option<Type<T>>,
     pub rtype: Type<T>,
     pub constraints: Arc<[(TVar<T>, Type<T>)]>,
 }
 
-impl<T: TypeMark + Clone> FnType<T> {
+impl<T: TypeMark + Clone + 'static> FnType<T> {
     pub fn resolve_typerefs<'a, C: Ctx + 'static, E: Debug + Clone + 'static>(
         &self,
         scope: &ModPath,
@@ -1237,7 +1242,7 @@ impl FnType<NoRefs> {
     }
 }
 
-impl<T: TypeMark> fmt::Display for FnType<T> {
+impl<T: TypeMark + 'static> fmt::Display for FnType<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.constraints.len() == 0 {
             write!(f, "fn(")?;
