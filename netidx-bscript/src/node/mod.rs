@@ -405,9 +405,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 | Event::Variable(_, _)
                 | Event::VarBatch(_) => None,
             },
-            NodeKind::Array { args }
-            | NodeKind::Tuple { args }
-            | NodeKind::Struct { names: _, args } => {
+            NodeKind::Array { args } | NodeKind::Tuple { args } => {
                 let mut updated = false;
                 let mut determined = true;
                 for n in args.iter_mut() {
@@ -416,8 +414,25 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 }
                 if updated && determined {
                     let iter = args.iter().map(|n| n.cached.clone().unwrap());
-                    let a = ValArray::from_iter_exact(iter);
-                    Some(Value::Array(a))
+                    Some(Value::Array(ValArray::from_iter_exact(iter)))
+                } else {
+                    None
+                }
+            }
+            NodeKind::Struct { names, args } => {
+                let mut updated = false;
+                let mut determined = true;
+                for n in args.iter_mut() {
+                    updated |= n.update(ctx, event);
+                    determined &= n.cached.is_some() || n.node.find_lambda().is_some();
+                }
+                if updated && determined {
+                    let iter = names.iter().zip(args.iter()).map(|(name, n)| {
+                        let name = Value::String(name.clone());
+                        let v = n.cached.clone().unwrap_or(Value::Null);
+                        Value::Array(ValArray::from_iter_exact([name, v].into_iter()))
+                    });
+                    Some(Value::Array(ValArray::from_iter_exact(iter)))
                 } else {
                     None
                 }

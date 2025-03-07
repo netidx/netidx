@@ -797,3 +797,34 @@ run!(tuples2, TUPLES2, |v: Result<&Value>| match v {
     Ok(Value::F64(65.5)) => true,
     _ => false,
 });
+
+const STRUCTS0: &str = r#"
+{
+  let x = { foo: "bar", bar: 42, baz: 84.0 };
+  x
+}
+"#;
+
+run!(structs0, STRUCTS0, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) if a.len() == 3 => match &a[..] {
+        [Value::Array(f0), Value::Array(f1), Value::Array(f2)]
+            if f0.len() == 2 && f1.len() == 2 && f2.len() == 2 =>
+        {
+            let f0 = match &f0[..] {
+                [Value::String(n), Value::String(s)] if n == "foo" && s == "bar" => true,
+                _ => false,
+            };
+            let f1 = match &f1[..] {
+                [Value::String(n), Value::I64(42)] if n == "bar" => true,
+                _ => false,
+            };
+            let f2 = match &f2[..] {
+                [Value::String(n), Value::F64(84.0)] if n == "baz" => true,
+                _ => false,
+            };
+            f0 && f1 && f2
+        }
+        _ => false,
+    },
+    _ => false,
+});
