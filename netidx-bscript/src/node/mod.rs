@@ -80,6 +80,10 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Tuple {
         args: Box<[Cached<C, E>]>,
     },
+    Struct {
+        names: Box<[ArcStr]>,
+        args: Box<[Cached<C, E>]>,
+    },
     Apply {
         args: Box<[Node<C, E>]>,
         function: Box<dyn ApplyTyped<C, E> + Send + Sync>,
@@ -173,6 +177,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
             | NodeKind::Tuple { .. }
+            | NodeKind::Struct { .. }
             | NodeKind::Apply { .. }
             | NodeKind::Module(_)
             | NodeKind::Eq { .. }
@@ -226,6 +231,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
             | NodeKind::Tuple { .. }
+            | NodeKind::Struct { .. }
             | NodeKind::Apply { .. }
             | NodeKind::Module(_)
             | NodeKind::Eq { .. }
@@ -399,7 +405,9 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 | Event::Variable(_, _)
                 | Event::VarBatch(_) => None,
             },
-            NodeKind::Array { args } | NodeKind::Tuple { args } => {
+            NodeKind::Array { args }
+            | NodeKind::Tuple { args }
+            | NodeKind::Struct { names: _, args } => {
                 let mut updated = false;
                 let mut determined = true;
                 for n in args.iter_mut() {

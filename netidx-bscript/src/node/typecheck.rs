@@ -124,6 +124,27 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 }
                 Ok(())
             }
+            NodeKind::Struct { names: _, args } => {
+                for n in args.iter_mut() {
+                    wrap!(n.node, n.node.typecheck(ctx))?
+                }
+                match &self.typ {
+                    Type::Struct(typs) => {
+                        if args.len() != typs.len() {
+                            bail!(
+                                "struct length mismatch {} fields expected vs {}",
+                                typs.len(),
+                                args.len()
+                            )
+                        }
+                        for ((_, t), n) in typs.iter().zip(args.iter()) {
+                            t.check_contains(&n.node.typ)?
+                        }
+                    }
+                    _ => bail!("BUG: expected a struct rtype"),
+                }
+                Ok(())
+            }
             NodeKind::Apply { args, function } => {
                 for n in args.iter_mut() {
                     wrap!(n, n.typecheck(ctx))?

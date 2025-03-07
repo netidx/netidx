@@ -193,7 +193,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
             | Type::Set(_)
             | Type::TVar(_)
             | Type::Array(_)
-            | Type::Tuple(_) => (),
+            | Type::Tuple(_)
+            | Type::Struct(_) => (),
             Type::Ref(_) => unreachable!(),
         }
         let structure_predicate = StructPatternNode::compile(

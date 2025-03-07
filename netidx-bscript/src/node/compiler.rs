@@ -213,6 +213,29 @@ pub(super) fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
                 Node { kind: NodeKind::Tuple { args }, spec: Box::new(spec), typ }
             }
         }
+        Expr { kind: ExprKind::Struct { args }, id: _ } => {
+            let mut error = false;
+            let mut names = Vec::with_capacity(args.len());
+            let mut nodes = Vec::with_capacity(args.len());
+            for (name, spec) in args.iter() {
+                let n = compile(ctx, spec.clone(), &scope, top_id);
+                error |= n.is_err();
+                names.push(name.clone());
+                nodes.push(Cached::new(n));
+            }
+            if error {
+                error!("", nodes.into_iter().map(|c| c.node).collect::<Vec<_>>())
+            } else {
+                let names: Box<[ArcStr]> = Box::from(names);
+                let args: Box<[Cached<C, E>]> = Box::from(nodes);
+                let typs = names
+                    .iter()
+                    .zip(args.iter())
+                    .map(|(n, a)| (n.clone(), a.node.typ.clone()));
+                let typ = Type::Struct(Arc::from_iter(typs));
+                Node { kind: NodeKind::Struct { args, names }, spec: Box::new(spec), typ }
+            }
+        }
         Expr { kind: ExprKind::Module { name, export: _, value }, id: _ } => {
             let scope = ModPath(scope.append(&name));
             match value {

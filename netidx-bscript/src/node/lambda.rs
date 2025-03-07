@@ -202,6 +202,8 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<
 impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
     pub(super) fn find_lambda(&self) -> Option<Arc<LambdaBind<C, E>>> {
         match &self.kind {
+            NodeKind::Lambda(l) => Some(l.clone()),
+            NodeKind::Do(children) => children.last().and_then(|t| t.find_lambda()),
             NodeKind::Constant(_)
             | NodeKind::Use
             | NodeKind::Bind(_, _)
@@ -210,6 +212,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
             | NodeKind::Tuple { .. }
+            | NodeKind::Struct { .. }
             | NodeKind::Apply { .. }
             | NodeKind::Error { .. }
             | NodeKind::Qop(_, _)
@@ -230,8 +233,6 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::TypeCast { .. }
             | NodeKind::TypeDef
             | NodeKind::Select { .. } => None,
-            NodeKind::Lambda(l) => Some(l.clone()),
-            NodeKind::Do(children) => children.last().and_then(|t| t.find_lambda()),
         }
     }
 }
