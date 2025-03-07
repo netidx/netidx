@@ -748,6 +748,13 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         | (ExprKind::Tuple { args: a0 }, ExprKind::Tuple { args: a1 }) => {
             a0.len() == a1.len() && a0.iter().zip(a1.iter()).all(|(e0, e1)| check(e0, e1))
         }
+        (ExprKind::Struct { args: a0 }, ExprKind::Struct { args: a1 }) => {
+            a0.len() == a1.len()
+                && a0
+                    .iter()
+                    .zip(a1.iter())
+                    .all(|((n0, e0), (n1, e1))| n0 == n1 && check(e0, e1))
+        }
         (
             ExprKind::Apply { args: srs0, function: fn0 },
             ExprKind::Constant(Value::String(c1)),
