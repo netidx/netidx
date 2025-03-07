@@ -1125,6 +1125,39 @@ fn tuple1() {
 }
 
 #[test]
+fn struct0() {
+    let e = ExprKind::Bind {
+        export: false,
+        name: Some(literal!("a")),
+        typ: None,
+        value: Arc::new(
+            ExprKind::Struct {
+                args: Arc::from_iter([
+                    ("foo".into(), ExprKind::Constant(Value::I64(42)).to_expr()),
+                    ("bar".into(), ExprKind::Ref { name: ["a"].into() }.to_expr()),
+                    (
+                        "baz".into(),
+                        ExprKind::Apply {
+                            function: ["f"].into(),
+                            args: Arc::from_iter([(
+                                None,
+                                ExprKind::Ref { name: ["b"].into() }.to_expr(),
+                            )]),
+                        }
+                        .to_expr(),
+                    ),
+                ]),
+            }
+            .to_expr(),
+        ),
+    }
+    .to_expr();
+    let s = "let a = { foo: 42, bar: a, baz: f(b) }";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
 fn prop0() {
     let s = "mod a{mod a{{(select u32:0 {_ as (error:\"[\", u32:0) => u32:0}, u32:0)}}}";
     dbg!(parse(s).unwrap());

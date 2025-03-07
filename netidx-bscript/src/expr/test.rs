@@ -211,6 +211,8 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
             collection::vec(inner.clone(), (2, 20)).prop_map(|t| Type::Set(Arc::from(t))),
             collection::vec(inner.clone(), (2, 20))
                 .prop_map(|t| Type::Tuple(Arc::from(t))),
+            collection::vec((random_fname(), inner.clone()), (1, 20))
+                .prop_map(|t| Type::Struct(Arc::from(t))),
             inner.clone().prop_map(|t| Type::Array(Arc::new(t))),
             random_fname().prop_map(|a| Type::TVar(TVar::empty_named(a))),
             (
@@ -567,6 +569,8 @@ fn expr() -> impl Strategy<Value = Expr> {
                 .prop_map(|a| { ExprKind::Array { args: Arc::from_iter(a) } }.to_expr()),
             collection::vec(inner.clone(), (2, 10))
                 .prop_map(|a| { ExprKind::Tuple { args: Arc::from_iter(a) } }.to_expr()),
+            collection::vec((random_fname(), inner.clone()), (1, 10))
+                .prop_map(|a| { ExprKind::Struct { args: Arc::from_iter(a) } }.to_expr()),
         ]
     })
 }
