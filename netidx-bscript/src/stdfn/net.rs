@@ -6,12 +6,12 @@ use crate::{
     Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn,
 };
 use anyhow::{anyhow, bail, Result};
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use fxhash::FxHashSet;
 use netidx::{
     path::Path,
-    subscriber::{Dval, UpdatesFlags, Value},
+    subscriber::{self, Dval, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
 use std::{collections::HashSet, fmt::Debug, sync::Arc};
@@ -29,19 +29,19 @@ fn as_path(v: Value) -> Option<Path> {
     }
 }
 
-struct Store {
+struct Write {
     args: CachedVals,
     top_id: ExprId,
     dv: Either<(Path, Dval), Vec<Value>>,
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Store {
-    const NAME: &str = "store";
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Write {
+    const NAME: &str = "write";
     deftype!("fn(string, Any) -> _");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, from, top_id| {
-            Ok(Box::new(Store {
+            Ok(Box::new(Write {
                 args: CachedVals::new(from),
                 dv: Either::Right(vec![]),
                 top_id,
@@ -50,12 +50,12 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Store {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Store {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Write {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         fn set(dv: &mut Either<(Path, Dval), Vec<Value>>, val: &Value) {
             match dv {
@@ -83,7 +83,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Store {
                     if let Either::Left(_) = &self.dv {
                         self.dv = Either::Right(vec![]);
                     }
-                    return errf!("set(path, val): invalid path {path:?}");
+                    return errf!("write(path, val): invalid path {path:?}");
                 }
                 Some(path) => {
                     let dv = ctx.user.durable_subscribe(
@@ -110,7 +110,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Store {
     }
 }
 
-impl Store {
+impl Write {
     fn same_path(&self, new_path: &Value) -> bool {
         match (new_path, &self.dv) {
             (Value::String(p0), Either::Left((p1, _))) => &**p0 == &**p1,
@@ -119,29 +119,29 @@ impl Store {
     }
 }
 
-struct Load {
+struct Subscribe {
     args: CachedVals,
     cur: Option<(Path, Dval)>,
     top_id: ExprId,
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Load {
-    const NAME: &str = "load";
+impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Subscribe {
+    const NAME: &str = "subscribe";
     deftype!("fn(string) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
         Arc::new(|_, _, from, top_id| {
-            Ok(Box::new(Load { args: CachedVals::new(from), cur: None, top_id }))
+            Ok(Box::new(Subscribe { args: CachedVals::new(from), cur: None, top_id }))
         })
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Load {
+impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Subscribe {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         let up = self.args.update_diff(ctx, from, event);
         let (path, path_up) = arity1!(self.args.0, up);
@@ -158,7 +158,9 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Load {
                     ctx.user.unsubscribe(path, dv, self.top_id)
                 }
                 match as_path(path.clone()) {
-                    None => return errf!("load(path): invalid absolute path {path:?}"),
+                    None => {
+                        return errf!("subscribe(path): invalid absolute path {path:?}")
+                    }
                     Some(path) => {
                         self.cur = Some((
                             path.clone(),
@@ -172,16 +174,11 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Load {
                 }
             }
         }
-        self.cur.as_ref().and_then(|(_, dv)| match event {
-            Event::Netidx(batch) => {
-                batch.iter().find_map(
-                    |(id, v)| if dv.id() == *id { Some(v.clone()) } else { None },
-                )
-            }
-            Event::Variable { .. }
-            | Event::VarBatch(_)
-            | Event::User(_)
-            | Event::Init => None,
+        self.cur.as_ref().and_then(|(_, dv)| {
+            event.netidx.get(&dv.id()).map(|e| match e {
+                subscriber::Event::Unsubscribed => Value::Error(literal!("unsubscribed")),
+                subscriber::Event::Update(v) => v.clone(),
+            })
         })
     }
 }
@@ -212,7 +209,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for RpcCall {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         fn parse_args(
             path: &Value,
@@ -250,34 +247,36 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for RpcCall {
             },
             ((None, _), (_, _)) | ((_, None), (_, _)) | ((_, _), (false, false)) => (),
         }
-        macro_rules! check {
-            ($id:expr, $val:expr) => {
-                if self.pending.remove($id) {
-                    Some($val.clone())
-                } else {
-                    None
+        let mut res = None;
+        self.pending.retain(|id| match event.variables.get(id) {
+            None => true,
+            Some(v) => match res {
+                None => {
+                    res = Some(v.clone());
+                    false
                 }
-            };
-        }
-        match event {
-            Event::Init | Event::Netidx(_) | Event::User(_) => None,
-            Event::Variable(id, val) => check!(id, val),
-            Event::VarBatch(batch) => batch.iter().find_map(|(id, val)| check!(id, val)),
-        }
+                Some(_) => {
+                    // multiple calls resolved simultaneously, defer until the next cycle
+                    ctx.user.set_var(*id, v.clone());
+                    true
+                }
+            },
+        });
+        res
     }
 }
 
 const MOD: &str = r#"
 pub mod net {
-    pub let store = |path, value| 'store
-    pub let load = |path| 'load
+    pub let write = |path, value| 'write
+    pub let subscribe = |path| 'subscribe
     pub let call = |path, args| 'call
 }
 "#;
 
 pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<Store>();
-    ctx.register_builtin::<Load>();
+    ctx.register_builtin::<Write>();
+    ctx.register_builtin::<Subscribe>();
     ctx.register_builtin::<RpcCall>();
     MOD.parse().unwrap()
 }

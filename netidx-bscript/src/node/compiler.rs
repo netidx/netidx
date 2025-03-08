@@ -224,17 +224,16 @@ pub(super) fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
                 nodes.push(Cached::new(n));
             }
             if error {
-                error!("", nodes.into_iter().map(|c| c.node).collect::<Vec<_>>())
-            } else {
-                let names: Box<[ArcStr]> = Box::from(names);
-                let args: Box<[Cached<C, E>]> = Box::from(nodes);
-                let typs = names
-                    .iter()
-                    .zip(args.iter())
-                    .map(|(n, a)| (n.clone(), a.node.typ.clone()));
-                let typ = Type::Struct(Arc::from_iter(typs));
-                Node { kind: NodeKind::Struct { args, names }, spec: Box::new(spec), typ }
+                return error!("", nodes.into_iter().map(|c| c.node).collect::<Vec<_>>());
             }
+            let names: Box<[ArcStr]> = Box::from(names);
+            let args: Box<[Cached<C, E>]> = Box::from(nodes);
+            let typs = names
+                .iter()
+                .zip(args.iter())
+                .map(|(n, a)| (n.clone(), a.node.typ.clone()));
+            let typ = Type::Struct(Arc::from_iter(typs));
+            Node { kind: NodeKind::Struct { args, names }, spec: Box::new(spec), typ }
         }
         Expr { kind: ExprKind::Module { name, export: _, value }, id: _ } => {
             let scope = ModPath(scope.append(&name));
@@ -339,13 +338,36 @@ pub(super) fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
                 return error!("expected tuple of length {}", vec![node], names.len());
             }
             let ids = names.iter().zip(typs.into_iter()).map(|(n, t)| {
-                n.as_ref().map(|n| {
-                    let bind = ctx.env.bind_variable(scope, &n, t.clone());
-                    bind.fun = node.find_lambda();
-                    bind.id
-                })
+                n.as_ref().map(|n| ctx.env.bind_variable(scope, &n, t.clone()).id)
             });
             let kind = NodeKind::BindTuple(Box::from_iter(ids), Box::new(node));
+            Node { spec: Box::new(spec), typ, kind }
+        }
+        Expr { kind: ExprKind::BindStruct { export: _, names, typ, value }, id: _ } => {
+            let node = compile(ctx, (**value).clone(), &scope, top_id);
+            if node.is_err() {
+                return error!("", vec![node]);
+            }
+            let typ = match typ {
+                Some(typ) => match typ.resolve_typrefs(scope, &ctx.env) {
+                    Ok(typ) => typ.clone(),
+                    Err(e) => return error!("{e}", vec![node]),
+                },
+                None => Type::Struct(Arc::from_iter(
+                    names.iter().map(|(name, _)| (name.clone(), Type::empty_tvar())),
+                )),
+            };
+            let (tlen, typs) = match &typ {
+                Type::Struct(inner) => (inner.len(), inner.iter()),
+                _ => return error!("BindStruct expected a struct type", vec![node]),
+            };
+            if tlen != names.len() {
+                return error!("expected struct of length {}", vec![node], names.len());
+            }
+            let ids = names.iter().zip(typs.into_iter()).map(|((_, n), (_, t))| {
+                n.as_ref().map(|n| ctx.env.bind_variable(scope, &n, t.clone()).id)
+            });
+            let kind = NodeKind::BindStruct(Box::from_iter(ids), Box::new(node));
             Node { spec: Box::new(spec), typ, kind }
         }
         Expr { kind: ExprKind::Qop(e), id: _ } => {
@@ -374,6 +396,35 @@ pub(super) fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
                         Some(i) => Node { spec, typ, kind: NodeKind::Lambda(i.clone()) },
                     }
                 }
+            }
+        }
+        Expr { kind: ExprKind::TupleRef { name, field }, id: _ } => {
+            match ctx.env.lookup_bind(scope, name) {
+                None => error!("{name} not defined"),
+                Some((_, bind)) => match &bind.fun {
+                    Some(_) => error!("can't deref a function"),
+                    None => {
+                        ctx.user.ref_var(bind.id, top_id);
+                        let typ = Type::empty_tvar();
+                        let spec = Box::new(spec);
+                        Node { spec, typ, kind: NodeKind::TupleRef(bind.id, *field) }
+                    }
+                },
+            }
+        }
+        Expr { kind: ExprKind::StructRef { name, field }, id: _ } => {
+            match ctx.env.lookup_bind(scope, name) {
+                None => error!("{name} not defined"),
+                Some((_, bind)) => match &bind.fun {
+                    Some(_) => error!("can't deref a function"),
+                    None => {
+                        ctx.user.ref_var(bind.id, top_id);
+                        let typ = Type::empty_tvar();
+                        let spec = Box::new(spec);
+                        // typcheck will resolve the field index
+                        Node { spec, typ, kind: NodeKind::StructRef(bind.id, 0) }
+                    }
+                },
             }
         }
         Expr { kind: ExprKind::Select { arg, arms }, id: _ } => {

@@ -3,7 +3,7 @@ use crate::{
     expr::{Expr, ModPath},
     node::pattern::PatternNode,
     typ::{NoRefs, Type},
-    ApplyTyped, BindId, Ctx, Event, ExecCtx, VAR_BATCH,
+    ApplyTyped, BindId, Ctx, Event, ExecCtx,
 };
 use arcstr::{literal, ArcStr};
 use compact_str::{format_compact, CompactString};
@@ -34,7 +34,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Cached<C, E> {
     /// update the node, return whether the node updated. If it did,
     /// the updated value will be stored in the cached field, if not,
     /// the previous value will remain there.
-    pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> bool {
+    pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> bool {
         match self.node.update(ctx, event) {
             None => false,
             Some(v) => {
@@ -47,7 +47,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Cached<C, E> {
     /// update the node, return true if the node updated AND the new
     /// value is different from the old value. The cached field will
     /// only be updated if the value changed.
-    pub fn update_changed(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> bool {
+    pub fn update_changed(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        event: &mut Event<E>,
+    ) -> bool {
         match self.node.update(ctx, event) {
             v @ Some(_) if v != self.cached => {
                 self.cached = v;
@@ -66,7 +70,10 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Do(Box<[Node<C, E>]>),
     Bind(Option<BindId>, Box<Node<C, E>>),
     BindTuple(Box<[Option<BindId>]>, Box<Node<C, E>>),
+    BindStruct(Box<[Option<BindId>]>, Box<Node<C, E>>),
     Ref(BindId),
+    StructRef(BindId, usize),
+    TupleRef(BindId, usize),
     Connect(BindId, Box<Node<C, E>>),
     Lambda(Arc<LambdaBind<C, E>>),
     Qop(BindId, Box<Node<C, E>>),
@@ -83,6 +90,11 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     Struct {
         names: Box<[ArcStr]>,
         args: Box<[Cached<C, E>]>,
+    },
+    StructWith {
+        name: BindId,
+        current: Option<ValArray>,
+        replace: Box<[(usize, Cached<C, E>)]>,
     },
     Apply {
         args: Box<[Node<C, E>]>,
@@ -166,36 +178,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
     pub fn is_err(&self) -> bool {
         match &self.kind {
             NodeKind::Error { .. } => true,
-            NodeKind::Constant(_)
-            | NodeKind::Lambda { .. }
-            | NodeKind::Do(_)
-            | NodeKind::Use
-            | NodeKind::Bind(_, _)
-            | NodeKind::BindTuple(_, _)
-            | NodeKind::Ref(_)
-            | NodeKind::Qop(_, _)
-            | NodeKind::Connect(_, _)
-            | NodeKind::Array { .. }
-            | NodeKind::Tuple { .. }
-            | NodeKind::Struct { .. }
-            | NodeKind::Apply { .. }
-            | NodeKind::Module(_)
-            | NodeKind::Eq { .. }
-            | NodeKind::Ne { .. }
-            | NodeKind::Lt { .. }
-            | NodeKind::Gt { .. }
-            | NodeKind::Gte { .. }
-            | NodeKind::Lte { .. }
-            | NodeKind::And { .. }
-            | NodeKind::Or { .. }
-            | NodeKind::Not { .. }
-            | NodeKind::Add { .. }
-            | NodeKind::Sub { .. }
-            | NodeKind::Mul { .. }
-            | NodeKind::Div { .. }
-            | NodeKind::TypeCast { .. }
-            | NodeKind::TypeDef
-            | NodeKind::Select { .. } => false,
+            _ => false,
         }
     }
 
@@ -220,36 +203,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     None
                 }
             }
-            NodeKind::Constant(_)
-            | NodeKind::Lambda { .. }
-            | NodeKind::Do(_)
-            | NodeKind::Use
-            | NodeKind::Bind(_, _)
-            | NodeKind::BindTuple(_, _)
-            | NodeKind::Ref(_)
-            | NodeKind::Qop(_, _)
-            | NodeKind::Connect(_, _)
-            | NodeKind::Array { .. }
-            | NodeKind::Tuple { .. }
-            | NodeKind::Struct { .. }
-            | NodeKind::Apply { .. }
-            | NodeKind::Module(_)
-            | NodeKind::Eq { .. }
-            | NodeKind::Ne { .. }
-            | NodeKind::Lt { .. }
-            | NodeKind::Gt { .. }
-            | NodeKind::Gte { .. }
-            | NodeKind::Lte { .. }
-            | NodeKind::And { .. }
-            | NodeKind::Or { .. }
-            | NodeKind::Not { .. }
-            | NodeKind::Add { .. }
-            | NodeKind::Sub { .. }
-            | NodeKind::Mul { .. }
-            | NodeKind::Div { .. }
-            | NodeKind::TypeCast { .. }
-            | NodeKind::TypeDef
-            | NodeKind::Select { .. } => None,
+            _ => None,
         }
     }
 
@@ -279,7 +233,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         selected: &mut Option<usize>,
         arg: &mut Cached<C, E>,
         arms: &mut [(PatternNode<C, E>, Cached<C, E>)],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         let mut val_up: SmallVec<[bool; 64]> = smallvec![];
         let arg_up = arg.update(ctx, event);
@@ -348,7 +302,11 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         }
     }
 
-    pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> Option<Value> {
+    pub fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        event: &mut Event<E>,
+    ) -> Option<Value> {
         macro_rules! binary_op {
             ($op:tt, $lhs:expr, $rhs:expr) => {{
                 let lhs_up = $lhs.update(ctx, event);
@@ -398,13 +356,13 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
         let eid = self.spec.id;
         let res = match &mut self.kind {
             NodeKind::Error { .. } => None,
-            NodeKind::Constant(v) => match event {
-                Event::Init => Some(v.clone()),
-                Event::Netidx(_)
-                | Event::User(_)
-                | Event::Variable(_, _)
-                | Event::VarBatch(_) => None,
-            },
+            NodeKind::Constant(v) => {
+                if event.init {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            }
             NodeKind::Array { args } | NodeKind::Tuple { args } => {
                 let mut updated = false;
                 let mut determined = true;
@@ -424,14 +382,48 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 let mut determined = true;
                 for n in args.iter_mut() {
                     updated |= n.update(ctx, event);
-                    determined &= n.cached.is_some() || n.node.find_lambda().is_some();
+                    determined &= n.cached.is_some();
                 }
                 if updated && determined {
                     let iter = names.iter().zip(args.iter()).map(|(name, n)| {
                         let name = Value::String(name.clone());
-                        let v = n.cached.clone().unwrap_or(Value::Null);
+                        let v = n.cached.clone().unwrap();
                         Value::Array(ValArray::from_iter_exact([name, v].into_iter()))
                     });
+                    Some(Value::Array(ValArray::from_iter_exact(iter)))
+                } else {
+                    None
+                }
+            }
+            NodeKind::StructWith { name, current, replace } => {
+                let mut updated = event
+                    .variables
+                    .get(name)
+                    .map(|v| match v {
+                        Value::Array(a) => {
+                            *current = Some(a.clone());
+                            true
+                        }
+                        _ => false,
+                    })
+                    .unwrap_or(false);
+                let mut determined = current.is_some();
+                for (_, n) in replace.iter_mut() {
+                    updated |= n.update(ctx, event);
+                    determined &= n.cached.is_some();
+                }
+                if updated && determined {
+                    let mut si = 0;
+                    let iter =
+                        current.as_ref().unwrap().iter().enumerate().map(|(i, v)| {
+                            if si < replace.len() && i == replace[si].0 {
+                                let r = replace[si].1.cached.clone().unwrap();
+                                si += 1;
+                                r
+                            } else {
+                                v.clone()
+                            }
+                        });
                     Some(Value::Array(ValArray::from_iter_exact(iter)))
                 } else {
                     None
@@ -445,13 +437,31 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     }
                     if let Value::Array(a) = v {
                         if binds.len() == a.len() {
-                            let mut batch = VAR_BATCH.take();
                             for (id, v) in binds.iter().zip(a.iter()) {
                                 if let Some(id) = id {
-                                    batch.push((*id, v.clone()));
+                                    ctx.user.set_var(*id, v.clone());
                                 }
                             }
-                            ctx.user.set_vars(batch);
+                        }
+                    }
+                }
+                None
+            }
+            NodeKind::BindStruct(binds, rhs) => {
+                if let Some(v) = rhs.update(ctx, event) {
+                    if ctx.dbg_ctx.trace {
+                        ctx.dbg_ctx.add_event(eid, Some(event.clone()), v.clone())
+                    }
+                    if let Value::Array(a) = v {
+                        if binds.len() == a.len() {
+                            for (id, v) in binds.iter().zip(a.iter()) {
+                                match (id, v) {
+                                    (Some(id), Value::Array(a)) if a.len() == 2 => {
+                                        ctx.user.set_var(*id, a[1].clone());
+                                    }
+                                    _ => (),
+                                }
+                            }
                         }
                     }
                 }
@@ -470,18 +480,24 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 rhs.update(ctx, event);
                 None
             }
-            NodeKind::Ref(bid) => match event {
-                Event::Variable(id, v) if bid == id => Some(v.clone()),
-                Event::VarBatch(batch) => {
-                    batch.iter().find_map(
-                        |(id, v)| if bid == id { Some(v.clone()) } else { None },
-                    )
-                }
-                Event::Init
-                | Event::Netidx(_)
-                | Event::User(_)
-                | Event::Variable { .. } => None,
-            },
+            NodeKind::Ref(bid) => event.variables.get(bid).map(|v| v.clone()),
+            NodeKind::TupleRef(bid, i) => {
+                event.variables.get(bid).and_then(|v| match v {
+                    Value::Array(a) => a.get(*i).map(|v| v.clone()),
+                    _ => None,
+                })
+            }
+            NodeKind::StructRef(bid, i) => event
+                .variables
+                .get(bid)
+                .and_then(|v| match v {
+                    Value::Array(a) => a.get(*i),
+                    _ => None,
+                })
+                .and_then(|v| match v {
+                    Value::Array(a) => a.get(1).map(|v| v.clone()),
+                    _ => None,
+                }),
             NodeKind::Qop(id, n) => match n.update(ctx, event) {
                 None => None,
                 Some(e @ Value::Error(_)) => {

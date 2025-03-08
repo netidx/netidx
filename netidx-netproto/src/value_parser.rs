@@ -60,7 +60,7 @@ where
     })
 }
 
-fn int<I, T: FromStr + Clone + Copy>() -> impl Parser<I, Output = T>
+pub fn int<I, T: FromStr + Clone + Copy>() -> impl Parser<I, Output = T>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,

@@ -193,24 +193,6 @@ impl<T: TypeMark + 'static> Ord for TVar<T> {
     }
 }
 
-fn with_sorted_structs<T, R, F>(
-    t0: &Arc<[(ArcStr, Type<T>)]>,
-    t1: &Arc<[(ArcStr, Type<T>)]>,
-    f: F,
-) -> R
-where
-    R: 'static,
-    T: TypeMark + 'static,
-    F: Fn(&SmallVec<[&(ArcStr, Type<T>); 16]>, &SmallVec<[&(ArcStr, Type<T>); 16]>) -> R
-        + 'static,
-{
-    let mut t0s: SmallVec<[&(ArcStr, Type<T>); 16]> = t0.iter().collect();
-    let mut t1s: SmallVec<[&(ArcStr, Type<T>); 16]> = t1.iter().collect();
-    t0s.sort_by_key(|(n, _)| n);
-    t1s.sort_by_key(|(n, _)| n);
-    f(&t0s, &t1s)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Type<T: TypeMark + 'static> {
     Bottom(PhantomData<T>),
@@ -291,11 +273,10 @@ impl Type<NoRefs> {
             }
             (Self::Struct(t0), Self::Struct(t1)) => {
                 t0.len() == t1.len() && {
-                    with_sorted_structs(t0, t1, |t0, t1| {
-                        t0.iter()
-                            .zip(t1.iter())
-                            .all(|((n0, t0), (n1, t1))| n0 == n1 && t0.contains(t1))
-                    })
+                    // struct types are always sorted by field name
+                    t0.iter()
+                        .zip(t1.iter())
+                        .all(|((n0, t0), (n1, t1))| n0 == n1 && t0.contains(t1))
                 }
             }
             (Self::Tuple(_), Self::Array(_))
@@ -410,9 +391,7 @@ impl Type<NoRefs> {
                 Type::Set(Arc::from_iter(s.iter().cloned().chain(iter::once(t.clone()))))
             }
             (Type::Struct(t0), Type::Struct(t1)) => {
-                let same = t0.len() == t1.len()
-                    && with_sorted_structs(t0, t1, |t0, t1| t0 == t1);
-                if same {
+                if t0.len() == t1.len() && t0 == t1 {
                     self.clone()
                 } else {
                     Type::Set(Arc::from_iter([self.clone(), t.clone()]))
@@ -515,9 +494,7 @@ impl Type<NoRefs> {
             }
             (Type::Tuple(_), _) | (_, Type::Tuple(_)) => Ok(self.clone()),
             (Type::Struct(t0), Type::Struct(t1)) => {
-                let same = t0.len() == t1.len()
-                    && with_sorted_structs(t0, t1, |t0, t1| t0 == t1);
-                if same {
+                if t0.len() == t1.len() && t0 == t1 {
                     Ok(Type::Primitive(BitFlags::empty()))
                 } else {
                     Ok(self.clone())
@@ -759,8 +736,6 @@ impl Type<NoRefs> {
                         bail!("expected array of pairs, got {}", Value::Array(elts))
                     }
                     let mut elts_s: SmallVec<[&Value; 16]> = elts.iter().collect();
-                    let mut ts_s: SmallVec<[&(ArcStr, Type<NoRefs>); 16]> =
-                        ts.iter().collect();
                     elts_s.sort_by_key(|v| match v {
                         Value::Array(a) => match &a[0] {
                             Value::String(s) => s,
@@ -768,8 +743,7 @@ impl Type<NoRefs> {
                         },
                         _ => unreachable!(),
                     });
-                    ts_s.sort_by_key(|(n, _)| n);
-                    let (keys_ok, ok) = ts_s.iter().zip(elts_s.iter()).fold(
+                    let (keys_ok, ok) = ts.iter().zip(elts_s.iter()).fold(
                         (true, true),
                         |(kok, ok), ((fname, t), v)| {
                             let (name, v) = match v {
@@ -790,7 +764,7 @@ impl Type<NoRefs> {
                         drop(elts_s);
                         return Ok(Value::Array(elts));
                     } else if keys_ok {
-                        let elts = ts_s
+                        let elts = ts
                             .iter()
                             .zip(elts_s.iter())
                             .map(|((n, t), v)| match v {
@@ -971,18 +945,17 @@ impl<T: TypeMark + Clone + 'static> Type<T> {
             }
             (Type::Struct(t0), Type::Struct(t1)) => {
                 if t0.len() == t1.len() {
-                    let t = with_sorted_structs(t0, t1, |t0, t1| {
-                        t0.iter()
-                            .zip(t1.iter())
-                            .map(|((n0, t0), (n1, t1))| {
-                                if n0 != n1 {
-                                    None
-                                } else {
-                                    t0.merge(t1).map(|t| (n0.clone(), t))
-                                }
-                            })
-                            .collect::<Option<SmallVec<[(ArcStr, Type<T>); 8]>>>()
-                    })?;
+                    let t = t0
+                        .iter()
+                        .zip(t1.iter())
+                        .map(|((n0, t0), (n1, t1))| {
+                            if n0 != n1 {
+                                None
+                            } else {
+                                t0.merge(t1).map(|t| (n0.clone(), t))
+                            }
+                        })
+                        .collect::<Option<SmallVec<[(ArcStr, Type<T>); 8]>>>()?;
                     Some(Type::Struct(Arc::from_iter(t)))
                 } else {
                     None

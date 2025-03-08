@@ -33,13 +33,15 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for AfterIdle {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         let up = self.args.update_diff(ctx, from, event);
-        // CR estokes: This implementation is wrong, it should reset the timer when the value ticks
         let ((timeout, val), (timeout_up, val_up)) = arity2!(self.args.0, up);
         match ((timeout, val), (timeout_up, val_up)) {
-            ((Some(secs), _), (true, _)) => match secs.clone().cast_to::<Duration>() {
+            ((Some(secs), _), (true, _)) | ((Some(secs), _), (_, true)) => match secs
+                .clone()
+                .cast_to::<Duration>()
+            {
                 Err(e) => {
                     self.id = None;
                     return errf!("after_idle(timeout, cur): expected duration {e:?}");
@@ -51,28 +53,18 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for AfterIdle {
                     return None;
                 }
             },
-            ((Some(_), Some(val)), (false, true)) if self.id.is_none() => {
-                return Some(val.clone())
-            }
             ((None, _), (_, _))
             | ((_, None), (_, _))
             | ((Some(_), Some(_)), (false, _)) => (),
         };
-        macro_rules! check {
-            ($id:expr) => {
-                if self.id != Some(*$id) {
-                    None
-                } else {
-                    self.id = None;
-                    self.args.0.get(1).and_then(|v| v.clone())
-                }
-            };
-        }
-        match event {
-            Event::Init | Event::Netidx(_) | Event::User(_) => None,
-            Event::Variable(id, _) => check!(id),
-            Event::VarBatch(batch) => batch.iter().find_map(|(id, _)| check!(id)),
-        }
+        self.id.and_then(|id| {
+            if event.variables.contains_key(&id) {
+                self.id = None;
+                self.args.0.get(1).and_then(|v| v.clone())
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -145,7 +137,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Timer {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         macro_rules! error {
             () => {{
@@ -197,27 +189,16 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Timer {
             | ((None, _), (true, false))
             | ((_, None), (false, true)) => (),
         }
-        macro_rules! check {
-            ($id:expr, $now:expr) => {
-                if self.id != Some(*$id) {
-                    None
-                } else {
-                    self.id = None;
-                    self.repeat -= 1;
-                    if let Some(dur) = self.timeout {
-                        if self.repeat.will_repeat() {
-                            schedule!(dur)
-                        }
-                    }
-                    Some($now.clone())
+        self.id.and_then(|id| event.variables.get(&id)).map(|now| {
+            self.id = None;
+            self.repeat -= 1;
+            if let Some(dur) = self.timeout {
+                if self.repeat.will_repeat() {
+                    schedule!(dur)
                 }
-            };
-        }
-        match event {
-            Event::Init | Event::Netidx(_) | Event::User(_) => None,
-            Event::Variable(id, now) => check!(id, now),
-            Event::VarBatch(batch) => batch.iter().find_map(|(id, v)| check!(id, v)),
-        }
+            }
+            now.clone()
+        })
     }
 }
 

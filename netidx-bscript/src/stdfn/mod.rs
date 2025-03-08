@@ -73,7 +73,7 @@ impl CachedVals {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> bool {
         from.into_iter().enumerate().fold(false, |res, (i, src)| {
             match src.update(ctx, event) {
@@ -92,7 +92,7 @@ impl CachedVals {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> SmallVec<[bool; 4]> {
         from.into_iter()
             .enumerate()
@@ -111,7 +111,7 @@ impl CachedVals {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> SmallVec<[bool; 4]> {
         from.into_iter()
             .enumerate()
@@ -166,7 +166,7 @@ impl<C: Ctx, E: Debug + Clone, T: EvalCached + Send + Sync + 'static> Apply<C, E
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         if self.cached.update(ctx, from, event) {
             T::eval(&self.cached)

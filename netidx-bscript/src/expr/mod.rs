@@ -166,6 +166,7 @@ pub enum StructurePattern {
     SlicePrefix { all: Option<ArcStr>, prefix: Arc<[ValPat]>, tail: Option<ArcStr> },
     SliceSuffix { all: Option<ArcStr>, head: Option<ArcStr>, suffix: Arc<[ValPat]> },
     Tuple { all: Option<ArcStr>, binds: Arc<[ValPat]> },
+    Struct { exhaustive: bool, all: Option<ArcStr>, binds: Arc<[(ArcStr, ValPat)]> },
 }
 
 impl fmt::Display for StructurePattern {
@@ -223,6 +224,22 @@ impl fmt::Display for StructurePattern {
                 with_sep!(binds);
                 write!(f, ")")
             }
+            StructurePattern::Struct { exhaustive, all, binds } => {
+                if let Some(all) = all {
+                    write!(f, "{all}@ ")?
+                }
+                write!(f, "{{")?;
+                for (i, (name, pat)) in binds.iter().enumerate() {
+                    write!(f, "{name}: {pat}")?;
+                    if !exhaustive || i < binds.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                if *exhaustive {
+                    write!(f, "..")?
+                }
+                write!(f, "}}")
+            }
         }
     }
 }
@@ -267,8 +284,26 @@ pub enum ExprKind {
         export: bool,
         value: Arc<Expr>,
     },
+    BindStruct {
+        names: Arc<[(ArcStr, Option<ArcStr>)]>,
+        typ: Option<Type<Refs>>,
+        export: bool,
+        value: Arc<Expr>,
+    },
     Ref {
         name: ModPath,
+    },
+    StructRef {
+        name: ModPath,
+        field: ArcStr,
+    },
+    TupleRef {
+        name: ModPath,
+        field: usize,
+    },
+    StructWith {
+        name: ModPath,
+        replace: Arc<[(ArcStr, Expr)]>,
     },
     Connect {
         name: ModPath,
@@ -465,9 +500,11 @@ impl ExprKind {
         let exp = |export| if export { "pub " } else { "" };
         match self {
             ExprKind::Constant(_)
-            | ExprKind::Use { name: _ }
-            | ExprKind::Ref { name: _ }
-            | ExprKind::TypeDef { name: _, typ: _ }
+            | ExprKind::Use { .. }
+            | ExprKind::Ref { .. }
+            | ExprKind::StructRef { .. }
+            | ExprKind::TupleRef { .. }
+            | ExprKind::TypeDef { .. }
             | ExprKind::Module { name: _, export: _, value: None } => {
                 if newline {
                     push_indent(indent, buf);
@@ -498,6 +535,37 @@ impl ExprKind {
                 }
                 writeln!(buf, "){} = ", typ!(typ))?;
                 value.kind.pretty_print(indent + 2, limit, false, buf)
+            }
+            ExprKind::BindStruct { names, typ, export, value } => {
+                try_single_line!(true);
+                write!(buf, "{}let {{", exp(*export))?;
+                for (i, (name, n)) in names.iter().enumerate() {
+                    match n {
+                        None => write!(buf, "{name}: _")?,
+                        Some(n) if n == name => write!(buf, "{n}")?,
+                        Some(n) => write!(buf, "{name}: {n}")?,
+                    }
+                    if i < names.len() - 1 {
+                        write!(buf, ", ")?
+                    }
+                }
+                writeln!(buf, "}}{} = ", typ!(typ))?;
+                value.kind.pretty_print(indent + 2, limit, false, buf)
+            }
+            ExprKind::StructWith { name, replace } => {
+                try_single_line!(true);
+                writeln!(buf, "{{ {name} with")?;
+                let indent = indent + 2;
+                for (i, (name, e)) in replace.iter().enumerate() {
+                    push_indent(indent, buf);
+                    write!(buf, "{name}: ")?;
+                    e.kind.pretty_print(indent + 2, limit, false, buf)?;
+                    if i < replace.len() - 1 {
+                        kill_newline!(buf);
+                        writeln!(buf, ",")?
+                    }
+                }
+                writeln!(buf, "}}")
             }
             ExprKind::Module { name, export, value: Some(exprs) } => {
                 try_single_line!(true);
@@ -770,12 +838,42 @@ impl fmt::Display for ExprKind {
                 }
                 write!(f, "){} = {value}", typ!(typ))
             }
+            ExprKind::BindStruct { export, names, typ, value } => {
+                write!(f, "{}let {{", exp(*export))?;
+                for (i, (name, n)) in names.iter().enumerate() {
+                    match n {
+                        None => write!(f, "_")?,
+                        Some(n) if n == name => write!(f, "{n}")?,
+                        Some(n) => write!(f, "{name}: {n}")?,
+                    }
+                    if i < names.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                write!(f, "}}{} = {value}", typ!(typ))
+            }
+            ExprKind::StructWith { name, replace } => {
+                write!(f, "{{ {name} with ")?;
+                for (i, (name, e)) in replace.iter().enumerate() {
+                    write!(f, "{name}: {e}")?;
+                    if i < replace.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                write!(f, " }}")
+            }
             ExprKind::Connect { name, value } => write!(f, "{name} <- {value}"),
             ExprKind::Use { name } => {
                 write!(f, "use {name}")
             }
             ExprKind::Ref { name } => {
                 write!(f, "{name}")
+            }
+            ExprKind::StructRef { name, field } => {
+                write!(f, "{name}.{field}")
+            }
+            ExprKind::TupleRef { name, field } => {
+                write!(f, "{name}.{field}")
             }
             ExprKind::Module { name, export, value } => {
                 write!(f, "{}mod {name}", exp(*export))?;

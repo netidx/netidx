@@ -30,7 +30,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Any {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         from.iter_mut()
             .filter_map(|s| s.update(ctx, event))
@@ -54,7 +54,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for IsErr {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         from[0].update(ctx, event).map(|v| match v {
             Value::Error(_) => Value::Bool(true),
@@ -79,7 +79,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for FilterErr {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         from[0].update(ctx, event).and_then(|v| match v {
             v @ Value::Error(_) => Some(v),
@@ -104,7 +104,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for ToError {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         from[0].update(ctx, event).map(|v| match v.cast_to::<ArcStr>() {
             Ok(s) => Value::Error(s),
@@ -131,7 +131,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Once {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         match from {
             [s] => s.update(ctx, event).and_then(|v| {
@@ -467,12 +467,12 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Filter<C, E> 
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         self.pred.update(ctx, &mut self.from, event);
         from[0].update(ctx, event).and_then(|v| {
-            let e = Event::Variable(self.x, v.clone());
-            match self.pred.update(ctx, &mut self.from, &e) {
+            event.variables.insert(self.x, v.clone());
+            match self.pred.update(ctx, &mut self.from, event) {
                 Some(Value::Bool(true)) => Some(v),
                 _ => None,
             }
@@ -498,7 +498,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Count {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         if from.into_iter().fold(false, |u, n| u || n.update(ctx, event).is_some()) {
             self.count += 1;
@@ -527,7 +527,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Sample {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         match from {
             [trigger, source] => {
@@ -590,7 +590,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Uniq {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         match from {
             [e] => e.update(ctx, event).and_then(|v| {
@@ -622,7 +622,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Never {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         for n in from {
             n.update(ctx, event);
@@ -676,12 +676,12 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Group<C, E> {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         if let Some(val) = from[0].update(ctx, event) {
             self.buf.push(val.clone());
-            ctx.user.set_var(self.n, self.buf.len().into());
-            ctx.user.set_var(self.x, val);
+            event.variables.insert(self.n, self.buf.len().into());
+            event.variables.insert(self.x, val);
         }
         match self.pred.update(ctx, &mut self.from, event) {
             Some(Value::Bool(true)) => {
@@ -708,31 +708,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Ungroup {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
-        match from[0].update(ctx, event) {
-            Some(Value::Array(a)) => match &*a {
-                [] => None,
-                [hd, tl @ ..] => {
-                    for v in tl {
-                        ctx.user.set_var(self.0, v.clone());
-                    }
-                    Some(hd.clone())
-                }
-            },
-            Some(v) => Some(v),
-            None => match event {
-                Event::Variable(id, v) if id == &self.0 => Some(v.clone()),
-                Event::VarBatch(batch) => batch.iter().find_map(|(id, v)| {
-                    if &self.0 == id {
-                        Some(v.clone())
-                    } else {
-                        None
-                    }
-                }),
-                _ => None,
-            },
+        if let Some(Value::Array(a)) = from[0].update(ctx, event) {
+            for v in a.iter() {
+                ctx.user.set_var(self.0, v.clone());
+            }
         }
+        event.variables.get(&self.0).map(|v| v.clone())
     }
 }
 

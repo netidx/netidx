@@ -24,10 +24,10 @@ use arcstr::ArcStr;
 use fxhash::FxHashMap;
 use netidx::{
     path::Path,
-    pool::{Pool, Pooled},
-    subscriber::{Dval, SubId, UpdatesFlags, Value},
+    subscriber::{self, Dval, SubId, UpdatesFlags, Value},
 };
 use std::{
+    collections::HashMap,
     fmt::Debug,
     sync::{self, LazyLock},
     time::Duration,
@@ -39,18 +39,17 @@ mod tests;
 
 atomic_id!(BindId);
 
-pub const VAR_BATCH: LazyLock<Pool<Vec<(BindId, Value)>>> =
-    LazyLock::new(|| Pool::new(1024, 128));
-pub const NET_BATCH: LazyLock<Pool<Vec<(SubId, Value)>>> =
-    LazyLock::new(|| Pool::new(1024, 1024));
-
+/// Event represents all the things that happened simultaneously in a
+/// given execution cycle. Event may contain only one update for each
+/// variable and netidx subscription in a given cycle, if more updates
+/// happen simultaneously they must be queued and deferred to later
+/// cycles.
 #[derive(Clone, Debug)]
-pub enum Event<E: Debug> {
-    Init,
-    Variable(BindId, Value),
-    VarBatch(Pooled<Vec<(BindId, Value)>>),
-    Netidx(Pooled<Vec<(SubId, Value)>>),
-    User(E),
+pub struct Event<E: Debug> {
+    pub init: bool,
+    pub variables: FxHashMap<BindId, Value>,
+    pub netidx: FxHashMap<SubId, subscriber::Event>,
+    pub user: E,
 }
 
 pub type InitFn<C, E> = sync::Arc<
@@ -120,7 +119,7 @@ pub trait Apply<C: Ctx, E: Debug + Clone> {
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value>;
 }
 
@@ -163,19 +162,12 @@ pub trait Ctx {
     fn unref_var(&mut self, id: BindId, ref_by: ExprId);
 
     /// Called when a variable updates. All expressions that ref the
-    /// id should be updated with a Variable event when this happens.
-    /// The runtime may elect to batch var updates for improved
-    /// performance so long as it never places multiple updates to the
-    /// same variable in a batch.
+    /// id should be updated when this happens.
     ///
-    /// User defined builtins MUST regard Event::Variable and
-    /// Event::VarBatch as equivelent.
+    /// The runtime must deliver all set_vars in a single event except
+    /// that set_vars for the same variable in the same cycle must be
+    /// queued and deferred to the next cycle.
     fn set_var(&mut self, id: BindId, value: Value);
-
-    /// Called when multiple variables update at the same time. The
-    /// runtime MUST preserve batching by sending a VarBatch event
-    /// containing at least the contents of [batch].
-    fn set_vars(&mut self, batch: Pooled<Vec<(BindId, Value)>>);
 
     /// For a given name, this must have at most one outstanding call
     /// at a time, and must preserve the order of the calls. Calls to
