@@ -405,14 +405,15 @@ pub(super) fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
                     Some(_) => error!("can't deref a function"),
                     None => {
                         ctx.user.ref_var(bind.id, top_id);
+                        let field = *field;
                         let typ = Type::empty_tvar();
                         let spec = Box::new(spec);
-                        Node { spec, typ, kind: NodeKind::TupleRef(bind.id, *field) }
+                        Node { spec, typ, kind: NodeKind::TupleRef(bind.id, field) }
                     }
                 },
             }
         }
-        Expr { kind: ExprKind::StructRef { name, field }, id: _ } => {
+        Expr { kind: ExprKind::StructRef { name, field: _ }, id: _ } => {
             match ctx.env.lookup_bind(scope, name) {
                 None => error!("{name} not defined"),
                 Some((_, bind)) => match &bind.fun {
@@ -423,6 +424,34 @@ pub(super) fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
                         let spec = Box::new(spec);
                         // typcheck will resolve the field index
                         Node { spec, typ, kind: NodeKind::StructRef(bind.id, 0) }
+                    }
+                },
+            }
+        }
+        Expr { kind: ExprKind::StructWith { name, replace }, id: _ } => {
+            let mut error = false;
+            let mut nodes = Vec::with_capacity(replace.len());
+            for (_, e) in replace.iter() {
+                let n = compile(ctx, e.clone(), scope, top_id);
+                error |= n.is_err();
+                nodes.push((0, Cached::new(n)));
+            }
+            if error {
+                let nodes: Vec<_> = nodes.into_iter().map(|(_, c)| c.node).collect();
+                return error!("", nodes);
+            }
+            match ctx.env.lookup_bind(scope, name) {
+                None => error!("{name} not defined"),
+                Some((_, bind)) => match &bind.fun {
+                    Some(_) => error!("expected a struct, got a lambda"),
+                    None => {
+                        ctx.user.ref_var(bind.id, top_id);
+                        let name = bind.id;
+                        let typ = Type::empty_tvar();
+                        let spec = Box::new(spec);
+                        let replace = Box::from(nodes);
+                        let kind = NodeKind::StructWith { current: None, name, replace };
+                        Node { spec, typ, kind }
                     }
                 },
             }

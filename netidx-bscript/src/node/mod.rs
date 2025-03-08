@@ -414,16 +414,22 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 }
                 if updated && determined {
                     let mut si = 0;
-                    let iter =
-                        current.as_ref().unwrap().iter().enumerate().map(|(i, v)| {
-                            if si < replace.len() && i == replace[si].0 {
-                                let r = replace[si].1.cached.clone().unwrap();
-                                si += 1;
-                                r
-                            } else {
-                                v.clone()
+                    let iter = current.as_ref().unwrap().iter().enumerate().map(
+                        |(i, v)| match v {
+                            Value::Array(v) if v.len() == 2 => {
+                                if si < replace.len() && i == replace[si].0 {
+                                    let r = replace[si].1.cached.clone().unwrap();
+                                    si += 1;
+                                    Value::Array(ValArray::from_iter_exact(
+                                        [v[0].clone(), r].into_iter(),
+                                    ))
+                                } else {
+                                    Value::Array(v.clone())
+                                }
                             }
-                        });
+                            _ => v.clone(),
+                        },
+                    );
                     Some(Value::Array(ValArray::from_iter_exact(iter)))
                 } else {
                     None
