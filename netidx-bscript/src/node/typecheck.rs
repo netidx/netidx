@@ -1,11 +1,14 @@
 use crate::{
+    expr::ExprKind,
     node::{Node, NodeKind},
     typ::Type,
     Ctx, ExecCtx,
 };
 use anyhow::{anyhow, bail, Result};
+use arcstr::ArcStr;
 use enumflags2::BitFlags;
 use netidx::publisher::Typ;
+use smallvec::SmallVec;
 use std::{fmt::Debug, marker::PhantomData};
 use triomphe::Arc;
 
@@ -144,6 +147,84 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                     _ => bail!("BUG: expected a struct rtype"),
                 }
                 Ok(())
+            }
+            NodeKind::TupleRef(id, i) => {
+                let bind =
+                    ctx.env.by_id.get(id).ok_or_else(|| anyhow!("BUG: missing bind"))?;
+                let etyp = bind.typ.with_deref(|typ| match typ {
+                    Some(Type::Tuple(flds)) if flds.len() > *i => Ok(flds[*i].clone()),
+                    None => bail!("type must be known, annotations needed"),
+                    _ => bail!("expected tuple with at least {i} elements"),
+                });
+                let etyp = wrap!(etyp)?;
+                wrap!(self.typ.check_contains(&etyp))
+            }
+            NodeKind::StructRef(id, i) => {
+                let bind =
+                    ctx.env.by_id.get(id).ok_or_else(|| anyhow!("BUG: missing bind"))?;
+                let field = match &self.spec.kind {
+                    ExprKind::StructRef { name: _, field } => field.clone(),
+                    _ => bail!("BUG: miscompiled struct ref"),
+                };
+                let etyp = bind.typ.with_deref(|typ| match typ {
+                    Some(Type::Struct(flds)) => {
+                        let typ = flds.iter().enumerate().find_map(|(i, (n, t))| {
+                            if &field == n {
+                                Some((i, t.clone()))
+                            } else {
+                                None
+                            }
+                        });
+                        match typ {
+                            Some((i, t)) => Ok((i, t)),
+                            None => bail!("in struct, unknown field {field}"),
+                        }
+                    }
+                    None => bail!("type must be known, annotations needed"),
+                    _ => bail!("expected struct"),
+                });
+                let (idx, typ) = wrap!(etyp)?;
+                *i = idx;
+                wrap!(self.typ.check_contains(&typ))
+            }
+            NodeKind::StructWith { name, current: _, replace } => {
+                let bind = ctx
+                    .env
+                    .by_id
+                    .get(name)
+                    .ok_or_else(|| anyhow!("BUG: missing bind"))?;
+                let fields = match &self.spec.kind {
+                    ExprKind::StructWith { name: _, replace } => replace
+                        .iter()
+                        .map(|(n, _)| n.clone())
+                        .collect::<SmallVec<[ArcStr; 8]>>(),
+                    _ => bail!("BUG: miscompiled structwith"),
+                };
+                wrap!(bind.typ.with_deref(|typ| match typ {
+                    Some(Type::Struct(flds)) => {
+                        for ((i, c), n) in replace.iter_mut().zip(fields.iter()) {
+                            let r =
+                                flds.iter().enumerate().find_map(|(i, (field, typ))| {
+                                    if field == n {
+                                        Some((i, typ))
+                                    } else {
+                                        None
+                                    }
+                                });
+                            match r {
+                                None => bail!("struct has no field named {n}"),
+                                Some((j, typ)) => {
+                                    typ.check_contains(&c.node.typ)?;
+                                    *i = j;
+                                }
+                            }
+                        }
+                        Ok(())
+                    }
+                    None => bail!("type must be known, annotations needed"),
+                    _ => bail!("expected a struct"),
+                }))?;
+                wrap!(self.typ.check_contains(&bind.typ))
             }
             NodeKind::Apply { args, function } => {
                 for n in args.iter_mut() {
