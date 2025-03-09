@@ -237,20 +237,22 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
     ) -> Option<Value> {
         let mut val_up: SmallVec<[bool; 64]> = smallvec![];
         let arg_up = arg.update(ctx, event);
-        macro_rules! set_args {
+        macro_rules! bind {
             ($i:expr) => {{
                 if let Some(arg) = arg.cached.as_ref() {
-                    if let Some(event) = arms[$i].0.bind_event(arg) {
-                        val_up[$i] |= arms[$i].1.update(ctx, &event);
-                    }
+                    arms[$i].0.bind_event(event, arg);
                 }
             }};
         }
+        macro_rules! update {
+            () => {
+                for (_, val) in arms.iter_mut() {
+                    val_up.push(val.update(ctx, event));
+                }
+            };
+        }
         macro_rules! val {
             ($i:expr) => {{
-                if arg_up {
-                    set_args!($i)
-                }
                 if val_up[$i] {
                     arms[$i].1.cached.clone()
                 } else {
@@ -259,18 +261,19 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             }};
         }
         let mut pat_up = false;
-        for (pat, val) in arms.iter_mut() {
-            pat_up |= pat.update(ctx, event);
+        for (pat, _) in arms.iter_mut() {
             if arg_up && pat.guard.is_some() {
                 if let Some(arg) = arg.cached.as_ref() {
-                    if let Some(event) = pat.bind_event(arg) {
-                        pat_up |= pat.update(ctx, &event);
-                    }
+                    pat.bind_event(event, arg);
                 }
             }
-            val_up.push(val.update(ctx, event));
+            pat_up |= pat.update(ctx, event);
+            if arg_up && pat.guard.is_some() {
+                pat.unbind_event(event);
+            }
         }
         if !arg_up && !pat_up {
+            update!();
             selected.and_then(|i| val!(i))
         } else {
             let sel = match arg.cached.as_ref() {
@@ -287,17 +290,28 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
                 }
             };
             match (sel, *selected) {
-                (Some(i), Some(j)) if i == j => val!(i),
+                (Some(i), Some(j)) if i == j => {
+                    if arg_up {
+                        bind!(i);
+                    }
+                    update!();
+                    val!(i)
+                }
                 (Some(i), Some(_) | None) => {
-                    set_args!(i);
+                    bind!(i);
+                    update!();
                     *selected = Some(i);
-                    arms[i].1.cached.clone()
+                    val!(i)
                 }
                 (None, Some(_)) => {
+                    update!();
                     *selected = None;
                     None
                 }
-                (None, None) => None,
+                (None, None) => {
+                    update!();
+                    None
+                }
             }
         }
     }
