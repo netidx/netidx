@@ -397,6 +397,221 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
     })
 }
 
+macro_rules! bind_struct {
+    ($inner:expr) => {
+        (
+            $inner.clone(),
+            collection::vec((random_fname(), option::of(random_fname())), (1, 10)),
+            any::<bool>(),
+            option::of(typexp()),
+        )
+            .prop_map(|(e, n, exp, typ)| {
+                ExprKind::BindStruct {
+                    names: Arc::from_iter(n),
+                    typ,
+                    export: exp,
+                    value: Arc::new(e),
+                }
+                .to_expr()
+            })
+    };
+}
+
+macro_rules! bind_tuple {
+    ($inner:expr) => {
+        (
+            $inner.clone(),
+            collection::vec(option::of(random_fname()), (2, 10)),
+            any::<bool>(),
+            option::of(typexp()),
+        )
+            .prop_map(|(e, n, exp, typ)| {
+                ExprKind::BindTuple {
+                    export: exp,
+                    names: Arc::from_iter(n),
+                    value: Arc::new(e),
+                    typ,
+                }
+                .to_expr()
+            })
+    };
+}
+
+macro_rules! bind {
+    ($inner:expr) => {
+        ($inner.clone(), option::of(random_fname()), any::<bool>(), option::of(typexp()))
+            .prop_map(|(e, n, exp, typ)| {
+                ExprKind::Bind { export: exp, name: n, value: Arc::new(e), typ }.to_expr()
+            })
+    };
+}
+
+macro_rules! qop {
+    ($inner:expr) => {
+        ($inner.clone()).prop_map(|e| match &e.kind {
+            ExprKind::Do { .. }
+            | ExprKind::Select { .. }
+            | ExprKind::TypeCast { .. }
+            | ExprKind::Ref { .. } => ExprKind::Apply {
+                function: ["op", "question"].into(),
+                args: Arc::from_iter([(None, e)]),
+            }
+            .to_expr(),
+            ExprKind::Apply { function, .. }
+                if function != &["op", "question"] && function != &["str", "concat"] =>
+            {
+                ExprKind::Apply {
+                    function: ["op", "question"].into(),
+                    args: Arc::from_iter([(None, e)]),
+                }
+                .to_expr()
+            }
+            _ => e,
+        })
+    };
+}
+
+macro_rules! slice {
+    ($inner:expr) => {
+        (modpath(), option::of($inner.clone()), option::of($inner.clone())).prop_map(
+            |(name, start, end)| {
+                let a = ExprKind::Ref { name }.to_expr();
+                let start = start.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
+                let end = end.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
+                ExprKind::Apply {
+                    function: ["op", "slice"].into(),
+                    args: Arc::from_iter([(None, a), (None, start), (None, end)]),
+                }
+                .to_expr()
+            },
+        )
+    };
+}
+
+macro_rules! apply {
+    ($inner:expr) => {
+        (
+            collection::vec((option::of(random_fname()), $inner.clone()), (0, 10)),
+            modpath(),
+        )
+            .prop_map(|(mut s, f)| {
+                s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
+                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
+            })
+    };
+}
+
+macro_rules! do_block {
+    ($inner:expr) => {
+        collection::vec(
+            prop_oneof![
+                (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef {
+                    name: ArcStr::from(name),
+                    typ
+                }
+                .to_expr()),
+                modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
+                $inner.clone()
+            ],
+            (1, 10),
+        )
+        .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr())
+    };
+}
+
+macro_rules! lambda {
+    ($inner:expr) => {
+        (
+            collection::vec(
+                (
+                    any::<bool>(),
+                    random_fname(),
+                    option::of(typexp()),
+                    option::of($inner.clone()),
+                ),
+                (0, 10),
+            ),
+            option::of(option::of(typexp())),
+            option::of(typexp()),
+            collection::vec((random_fname(), typexp()), (0, 4)),
+            $inner.clone(),
+        )
+            .prop_map(|(mut args, vargs, rtype, constraints, body)| {
+                args.sort_unstable_by(|(k0, _, _, _), (k1, _, _, _)| k1.cmp(k0));
+                let args =
+                    args.into_iter().map(|(labeled, name, constraint, default)| Arg {
+                        labeled: labeled.then_some(default),
+                        name,
+                        constraint,
+                    });
+                let constraints = Arc::from_iter(
+                    constraints.into_iter().map(|(a, t)| (TVar::empty_named(a), t)),
+                );
+                ExprKind::Lambda {
+                    args: Arc::from_iter(args),
+                    vargs,
+                    rtype,
+                    constraints,
+                    body: Either::Left(Arc::new(body)),
+                }
+                .to_expr()
+            })
+    };
+}
+
+macro_rules! builtin {
+    ($inner:expr) => {
+        (
+            collection::vec(
+                (
+                    any::<bool>(),
+                    random_fname(),
+                    option::of(typexp()),
+                    option::of($inner.clone()),
+                ),
+                (0, 10),
+            ),
+            option::of(option::of(typexp())),
+            option::of(typexp()),
+            collection::vec((random_fname(), typexp()), (0, 4)),
+            random_fname(),
+        )
+            .prop_map(|(mut args, vargs, rtype, constraints, body)| {
+                args.sort_unstable_by_key(|(k, _, _, _)| !*k);
+                let args =
+                    args.into_iter().map(|(labeled, name, constraint, default)| Arg {
+                        labeled: labeled.then_some(default),
+                        name,
+                        constraint,
+                    });
+                let constraints = Arc::from_iter(
+                    constraints.into_iter().map(|(a, t)| (TVar::empty_named(a), t)),
+                );
+                ExprKind::Lambda {
+                    args: Arc::from_iter(args),
+                    vargs,
+                    rtype,
+                    constraints,
+                    body: Either::Right(body),
+                }
+                .to_expr()
+            })
+    };
+}
+
+macro_rules! select {
+    ($inner:expr) => {
+        (
+            $inner.clone(),
+            collection::vec(
+                (option::of($inner.clone()), pattern(), $inner.clone()),
+                (1, 10),
+            ),
+        )
+            .prop_map(|(arg, arms)| build_pattern(arg, arms))
+    };
+}
+
 fn expr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
     leaf.prop_recursive(10, 100, 10, |inner| {
@@ -409,167 +624,25 @@ fn expr() -> impl Strategy<Value = Expr> {
                 }
                 .to_expr()
             }),
-            (inner.clone()).prop_map(|e| match &e.kind {
-                ExprKind::Do { .. }
-                | ExprKind::Select { .. }
-                | ExprKind::TypeCast { .. }
-                | ExprKind::Ref { .. } => ExprKind::Apply {
-                    function: ["op", "question"].into(),
-                    args: Arc::from_iter([(None, e)]),
-                }
-                .to_expr(),
-                ExprKind::Apply { function, .. }
-                    if function != &["op", "question"]
-                        && function != &["str", "concat"] =>
-                    ExprKind::Apply {
-                        function: ["op", "question"].into(),
-                        args: Arc::from_iter([(None, e)]),
-                    }
-                    .to_expr(),
-                _ => e,
-            }),
-            (modpath(), option::of(inner.clone()), option::of(inner.clone())).prop_map(
-                |(name, start, end)| {
-                    let a = ExprKind::Ref { name }.to_expr();
-                    let start =
-                        start.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
-                    let end = end.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
-                    ExprKind::Apply {
-                        function: ["op", "slice"].into(),
-                        args: Arc::from_iter([(None, a), (None, start), (None, end)]),
-                    }
-                    .to_expr()
-                }
-            ),
+            qop!(inner),
+            slice!(inner),
             arithexpr(),
-            (
-                collection::vec((option::of(random_fname()), inner.clone()), (0, 10)),
-                modpath()
-            )
-                .prop_map(|(mut s, f)| {
-                    s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
-                    ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
-                }),
+            apply!(inner),
             (inner.clone(), typexp()).prop_map(|(expr, typ)| ExprKind::TypeCast {
                 expr: Arc::new(expr),
                 typ
             }
             .to_expr()),
-            collection::vec(
-                prop_oneof![
-                    (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef {
-                        name: ArcStr::from(name),
-                        typ
-                    }
-                    .to_expr()),
-                    modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
-                    inner.clone()
-                ],
-                (1, 10)
-            )
-            .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
-            (
-                collection::vec(
-                    (
-                        any::<bool>(),
-                        random_fname(),
-                        option::of(typexp()),
-                        option::of(inner.clone())
-                    ),
-                    (0, 10)
-                ),
-                option::of(option::of(typexp())),
-                option::of(typexp()),
-                collection::vec((random_fname(), typexp()), (0, 4)),
-                inner.clone()
-            )
-                .prop_map(|(mut args, vargs, rtype, constraints, body)| {
-                    args.sort_unstable_by(|(k0, _, _, _), (k1, _, _, _)| k1.cmp(k0));
-                    let args =
-                        args.into_iter().map(|(labeled, name, constraint, default)| {
-                            Arg { labeled: labeled.then_some(default), name, constraint }
-                        });
-                    let constraints = Arc::from_iter(
-                        constraints.into_iter().map(|(a, t)| (TVar::empty_named(a), t)),
-                    );
-                    ExprKind::Lambda {
-                        args: Arc::from_iter(args),
-                        vargs,
-                        rtype,
-                        constraints,
-                        body: Either::Left(Arc::new(body)),
-                    }
-                    .to_expr()
-                }),
-            (
-                collection::vec(
-                    (
-                        any::<bool>(),
-                        random_fname(),
-                        option::of(typexp()),
-                        option::of(inner.clone())
-                    ),
-                    (0, 10)
-                ),
-                option::of(option::of(typexp())),
-                option::of(typexp()),
-                collection::vec((random_fname(), typexp()), (0, 4)),
-                random_fname()
-            )
-                .prop_map(|(mut args, vargs, rtype, constraints, body)| {
-                    args.sort_unstable_by_key(|(k, _, _, _)| !*k);
-                    let args =
-                        args.into_iter().map(|(labeled, name, constraint, default)| {
-                            Arg { labeled: labeled.then_some(default), name, constraint }
-                        });
-                    let constraints = Arc::from_iter(
-                        constraints.into_iter().map(|(a, t)| (TVar::empty_named(a), t)),
-                    );
-                    ExprKind::Lambda {
-                        args: Arc::from_iter(args),
-                        vargs,
-                        rtype,
-                        constraints,
-                        body: Either::Right(body),
-                    }
-                    .to_expr()
-                }),
-            (
-                inner.clone(),
-                option::of(random_fname()),
-                any::<bool>(),
-                option::of(typexp())
-            )
-                .prop_map(|(e, n, exp, typ)| {
-                    ExprKind::Bind { export: exp, name: n, value: Arc::new(e), typ }
-                        .to_expr()
-                }),
-            (
-                inner.clone(),
-                collection::vec(option::of(random_fname()), (2, 10)),
-                any::<bool>(),
-                option::of(typexp())
-            )
-                .prop_map(|(e, n, exp, typ)| {
-                    ExprKind::BindTuple {
-                        export: exp,
-                        names: Arc::from_iter(n),
-                        value: Arc::new(e),
-                        typ,
-                    }
-                    .to_expr()
-                }),
+            do_block!(inner),
+            lambda!(inner),
+            builtin!(inner),
+            bind!(inner),
+            bind_tuple!(inner),
+            bind_struct!(inner),
             (inner.clone(), modpath()).prop_map(|(e, n)| {
                 ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
             }),
-            (
-                inner.clone(),
-                collection::vec(
-                    (option::of(inner.clone()), pattern(), inner.clone()),
-                    (1, 10)
-                )
-            )
-                .prop_map(|(arg, arms)| build_pattern(arg, arms)),
+            select!(inner),
             collection::vec(inner.clone(), (0, 10))
                 .prop_map(|a| { ExprKind::Array { args: Arc::from_iter(a) } }.to_expr()),
             collection::vec(inner.clone(), (2, 10))
