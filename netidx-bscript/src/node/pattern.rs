@@ -4,10 +4,11 @@ use crate::{
     typ::{NoRefs, Type},
     BindId, Ctx, Event, ExecCtx,
 };
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use fxhash::FxHashSet;
 use netidx::{publisher::Typ, subscriber::Value};
+use smallvec::SmallVec;
 use std::{fmt::Debug, hash::Hash, iter};
 
 #[derive(Debug)]
@@ -59,7 +60,7 @@ pub enum StructPatternNode {
     Slice { all: Option<BindId>, binds: Box<[ValPNode]> },
     SlicePrefix { all: Option<BindId>, prefix: Box<[ValPNode]>, tail: Option<BindId> },
     SliceSuffix { all: Option<BindId>, head: Option<BindId>, suffix: Box<[ValPNode]> },
-    Struct { all: Option<BindId>, exhaustive: bool, binds: Box<[ValPNode]> },
+    Struct { all: Option<BindId>, binds: Box<[(usize, ValPNode)]> },
 }
 
 impl StructPatternNode {
@@ -98,6 +99,18 @@ impl StructPatternNode {
                 }
             };
         }
+        macro_rules! check_names {
+            ($binds:expr, $all:expr, $map:expr) => {{
+                let names = $binds
+                    .iter()
+                    .map($map)
+                    .chain(iter::once($all.as_ref()))
+                    .filter_map(|x| x);
+                if !uniq(names) {
+                    bail!("bound variables must have unique names")
+                }
+            }};
+        }
         let t = match &spec {
             StructurePattern::BindAll { name } => StructPatternNode::BindAll {
                 name: ValPNode::compile(ctx, type_predicate, &name, scope)?,
@@ -112,14 +125,7 @@ impl StructPatternNode {
             }
             StructurePattern::Slice { all, binds } => match &type_predicate {
                 Type::Array(et) => {
-                    let names = binds
-                        .iter()
-                        .map(|x| x.name())
-                        .chain(iter::once(all.as_ref()))
-                        .filter_map(|x| x);
-                    if !uniq(names) {
-                        bail!("bound variables must have unique names")
-                    }
+                    check_names!(binds, all, |x| x.name());
                     let all = all.as_ref().map(|n| {
                         ctx.env.bind_variable(scope, n, type_predicate.clone()).id
                     });
@@ -133,14 +139,7 @@ impl StructPatternNode {
             },
             StructurePattern::Tuple { all, binds } => match &type_predicate {
                 Type::Tuple(elts) => {
-                    let names = binds
-                        .iter()
-                        .map(|x| x.name())
-                        .chain(iter::once(all.as_ref()))
-                        .filter_map(|x| x);
-                    if !uniq(names) {
-                        bail!("bound variables must have unique names")
-                    }
+                    check_names!(binds, all, |x| x.name());
                     if binds.len() != elts.len() {
                         bail!("expected a tuple of length {}", elts.len())
                     }
@@ -159,7 +158,35 @@ impl StructPatternNode {
             StructurePattern::Struct { exhaustive, all, binds } => {
                 match &type_predicate {
                     Type::Struct(elts) => {
-                        todo!()
+                        let binds = binds
+                            .iter()
+                            .map(|(field, pat)| {
+                                let r = elts.iter().enumerate().find_map(
+                                    |(i, (name, typ))| {
+                                        if field == name {
+                                            Some((i, pat.clone(), typ.clone()))
+                                        } else {
+                                            None
+                                        }
+                                    },
+                                );
+                                r.ok_or_else(|| anyhow!("no such struct field {field}"))
+                            })
+                            .collect::<Result<SmallVec<[(usize, ValPat, Type<NoRefs>); 8]>>>()?;
+                        check_names!(binds, all, |(_, p, _)| p.name());
+                        if *exhaustive && binds.len() < elts.len() {
+                            bail!("missing bindings for struct fields")
+                        }
+                        let all = all.as_ref().map(|n| {
+                            ctx.env.bind_variable(scope, n, type_predicate.clone()).id
+                        });
+                        let binds = binds
+                            .iter()
+                            .map(|(i, p, t)| {
+                                Ok((*i, ValPNode::compile(ctx, t, p, scope)?))
+                            })
+                            .collect::<Result<Box<[(usize, ValPNode)]>>>()?;
+                        StructPatternNode::Struct { all, binds }
                     }
                     t => bail!("struct patterns can't match {t}"),
                 }
