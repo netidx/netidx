@@ -2,7 +2,7 @@ use crate::{
     expr::{ExprId, ModPath, Pattern, StructurePattern, ValPat},
     node::{compiler, Cached},
     typ::{NoRefs, Type},
-    BindId, Ctx, Event, ExecCtx, VAR_BATCH,
+    BindId, Ctx, Event, ExecCtx,
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
@@ -59,6 +59,7 @@ pub enum StructPatternNode {
     Slice { all: Option<BindId>, binds: Box<[ValPNode]> },
     SlicePrefix { all: Option<BindId>, prefix: Box<[ValPNode]>, tail: Option<BindId> },
     SliceSuffix { all: Option<BindId>, head: Option<BindId>, suffix: Box<[ValPNode]> },
+    Struct { all: Option<BindId>, exhaustive: bool, binds: Box<[ValPNode]> },
 }
 
 impl StructPatternNode {
@@ -155,6 +156,14 @@ impl StructPatternNode {
                 }
                 t => bail!("tuple patterns can't match {t}"),
             },
+            StructurePattern::Struct { exhaustive, all, binds } => {
+                match &type_predicate {
+                    Type::Struct(elts) => {
+                        todo!()
+                    }
+                    t => bail!("struct patterns can't match {t}"),
+                }
+            }
         };
         Ok(t)
     }

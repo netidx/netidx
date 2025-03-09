@@ -3,7 +3,7 @@ use crate::{
     typ::{FnArgType, FnType, Refs, TVar, Type},
 };
 use anyhow::{bail, Result};
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 use combine::{
     attempt, between, chainl1, choice, eof, look_ahead, many, many1, not_followed_by,
     optional,
@@ -26,7 +26,7 @@ use netidx::{
 use netidx_netproto::value_parser::{
     escaped_string, int, value as netidx_value, VAL_ESC,
 };
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::{marker::PhantomData, sync::LazyLock};
 use triomphe::Arc;
 
@@ -783,46 +783,65 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
+    macro_rules! get_name {
+        ($p:expr) => {
+            match $p {
+                ValPat::Ignore => None,
+                ValPat::Bind(n) => Some(n.clone()),
+                ValPat::Literal(_) => {
+                    return unexpected_any("literals are not allowed in let").left()
+                }
+            }
+        };
+    }
     (
         optional(string("pub").skip(space())).map(|o| o.is_some()),
         spstring("let")
             .with(space())
-            .with((
-                choice((
-                    attempt(sptoken('_')).map(|_| Either::Left(None)),
-                    attempt(spfname()).map(|n| Either::Left(Some(n))),
-                    between(
-                        sptoken('('),
-                        sptoken(')'),
-                        sep_by1(
-                            choice((
-                                attempt(sptoken('_')).map(|_| None),
-                                spfname().map(|n| Some(n)),
-                            )),
-                            csep(),
-                        ),
-                    )
-                    .then(|n: SmallVec<[Option<ArcStr>; 8]>| {
-                        if n.len() < 2 {
-                            unexpected_any("tuples require at least 2 arguments").left()
-                        } else {
-                            value(Either::Right(Arc::from_iter(n))).right()
-                        }
-                    }),
-                )),
-                optional(attempt(sptoken(':').with(typexp()))),
-            ))
+            .with((structure_pattern(), optional(attempt(sptoken(':').with(typexp())))))
             .skip(spstring("=")),
         expr(),
     )
-        .map(|(export, (names, typ), value)| {
-            let value = Arc::new(value);
-            match names {
-                Either::Left(name) => {
-                    ExprKind::Bind { export, name, typ, value }.to_expr()
+        .then(|(export, (pat, typ), v)| {
+            let v = Arc::new(v);
+            match pat {
+                StructurePattern::BindAll { name } => value(
+                    ExprKind::Bind { export, name: get_name!(name), typ, value: v }
+                        .to_expr(),
+                )
+                .right(),
+                StructurePattern::Tuple { all: None, binds } => {
+                    let mut names: SmallVec<[Option<ArcStr>; 8]> = smallvec![];
+                    for p in binds.iter() {
+                        names.push(get_name!(p));
+                    }
+                    let names = Arc::from_iter(names);
+                    value(ExprKind::BindTuple { export, names, typ, value: v }.to_expr())
+                        .right()
                 }
-                Either::Right(names) => {
-                    ExprKind::BindTuple { export, names, typ, value }.to_expr()
+                StructurePattern::Struct { exhaustive, all: None, binds } => {
+                    let mut names: SmallVec<[(ArcStr, Option<ArcStr>); 8]> = smallvec![];
+                    for (n, p) in binds.iter() {
+                        names.push((n.clone(), get_name!(p)));
+                    }
+                    let names = Arc::from_iter(names);
+                    value(ExprKind::BindStruct {
+                        exhaustive,
+                        names,
+                        typ,
+                        export,
+                        value: v,
+                    })
+                    .right()
+                }
+                StructurePattern::Struct { all: Some(_), .. }
+                | StructurePattern::Tuple { all: Some(_), .. } => {
+                    unexpected_any("all binds are not allowed in let").left()
+                }
+                StructurePattern::Slice { .. }
+                | StructurePattern::SlicePrefix { .. }
+                | StructurePattern::SliceSuffix { .. } => {
+                    unexpected_any("slice patterns are not allowed in let").left()
                 }
             }
         })
@@ -1090,6 +1109,53 @@ where
         })
 }
 
+fn struct_pattern<I>() -> impl Parser<I, Output = StructurePattern>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        optional(attempt(spfname().skip(sptoken('@')))),
+        between(
+            sptoken('{'),
+            sptoken('}'),
+            sep_by1(
+                choice((
+                    attempt((spfname().skip(sptoken(':')), val_pat()))
+                        .map(|(s, p)| (s, p, true)),
+                    attempt(spfname()).map(|s| {
+                        let p = ValPat::Bind(s.clone());
+                        (s, p, true)
+                    }),
+                    spstring("..").map(|_| (literal!(""), ValPat::Ignore, false)),
+                )),
+                csep(),
+            ),
+        ),
+    )
+        .then(
+            |(all, mut binds): (
+                Option<ArcStr>,
+                SmallVec<[(ArcStr, ValPat, bool); 8]>,
+            )| {
+                let mut exhaustive = true;
+                binds.retain(|(_, _, ex)| {
+                    exhaustive &= *ex;
+                    *ex
+                });
+                binds.sort_by_key(|(s, _, _)| s.clone());
+                let s = binds.iter().map(|(s, _, _)| s).collect::<FxHashSet<_>>();
+                if s.len() < binds.len() {
+                    unexpected_any("struct fields must be unique").left()
+                } else {
+                    let binds = Arc::from_iter(binds.into_iter().map(|(s, p, _)| (s, p)));
+                    value(StructurePattern::Struct { all, exhaustive, binds }).right()
+                }
+            },
+        )
+}
+
 fn structure_pattern<I>() -> impl Parser<I, Output = StructurePattern>
 where
     I: RangeStream<Token = char>,
@@ -1099,6 +1165,7 @@ where
     choice((
         attempt(slice_pattern()),
         attempt(tuple_pattern()),
+        attempt(struct_pattern()),
         val_pat().map(|name| StructurePattern::BindAll { name }),
     ))
 }

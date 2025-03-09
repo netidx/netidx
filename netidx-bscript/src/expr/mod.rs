@@ -287,6 +287,7 @@ pub enum ExprKind {
     BindStruct {
         names: Arc<[(ArcStr, Option<ArcStr>)]>,
         typ: Option<Type<Refs>>,
+        exhaustive: bool,
         export: bool,
         value: Arc<Expr>,
     },
