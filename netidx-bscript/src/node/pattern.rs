@@ -261,7 +261,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         }
     }
 
-    pub(super) fn bind_event(&self, v: &Value, event: &mut Event<E>) {
+    pub(super) fn bind_event(&self, event: &mut Event<E>, v: &Value) {
         match &self.structure_predicate {
             StructPatternNode::BindAll { name } => {
                 if let Some(id) = name.id() {
@@ -334,6 +334,40 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         }
     }
 
+    pub(super) fn unbind_event(&self, event: &mut Event<E>) {
+        match &self.structure_predicate {
+            StructPatternNode::BindAll { name } => {
+                name.id().map(|id| event.variables.remove(&id));
+            }
+            StructPatternNode::Slice { all, binds } => {
+                all.iter().map(|id| event.variables.remove(id));
+                for id in binds.iter().filter_map(|b| b.id()) {
+                    event.variables.remove(&id);
+                }
+            }
+            StructPatternNode::SlicePrefix { all, prefix, tail } => {
+                all.iter().map(|id| event.variables.remove(id));
+                tail.iter().map(|id| event.variables.remove(id));
+                for id in prefix.iter().filter_map(|n| n.id()) {
+                    event.variables.remove(&id);
+                }
+            }
+            StructPatternNode::SliceSuffix { all, head, suffix } => {
+                all.iter().map(|id| event.variables.remove(id));
+                head.iter().map(|id| event.variables.remove(id));
+                for id in suffix.iter().filter_map(|p| p.id()) {
+                    event.variables.remove(&id);
+                }
+            }
+            StructPatternNode::Struct { all, binds } => {
+                all.iter().map(|id| event.variables.remove(id));
+                for id in binds.iter().filter_map(|(_, p)| p.id()) {
+                    event.variables.remove(&id);
+                }
+            }
+        }
+    }
+
     pub(super) fn is_match(&self, typ: Typ, v: &Value) -> bool {
         let tmatch = match (&self.type_predicate, typ) {
             (Type::Array(_), Typ::Array) | (Type::Tuple(_), Typ::Array) => true,
@@ -363,6 +397,16 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
                                 .iter()
                                 .zip(a.iter().skip(a.len() - suffix.len()))
                                 .all(|(b, v)| b.is_match(v))
+                    }
+                    _ => false,
+                },
+                StructPatternNode::Struct { all: _, binds } => match v {
+                    Value::Array(a) => {
+                        a.len() >= binds.len()
+                            && binds.iter().all(|(i, p)| match a.get(*i) {
+                                Some(v) => p.is_match(v),
+                                None => false,
+                            })
                     }
                     _ => false,
                 },
