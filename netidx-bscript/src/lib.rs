@@ -27,7 +27,6 @@ use netidx::{
     subscriber::{self, Dval, SubId, UpdatesFlags, Value},
 };
 use std::{
-    collections::HashMap,
     fmt::Debug,
     sync::{self, LazyLock},
     time::Duration,

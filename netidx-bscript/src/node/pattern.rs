@@ -337,30 +337,44 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
     pub(super) fn unbind_event(&self, event: &mut Event<E>) {
         match &self.structure_predicate {
             StructPatternNode::BindAll { name } => {
-                name.id().map(|id| event.variables.remove(&id));
+                if let Some(id) = name.id() {
+                    event.variables.remove(&id);
+                }
             }
             StructPatternNode::Slice { all, binds } => {
-                all.iter().map(|id| event.variables.remove(id));
+                if let Some(id) = all {
+                    event.variables.remove(id);
+                }
                 for id in binds.iter().filter_map(|b| b.id()) {
                     event.variables.remove(&id);
                 }
             }
             StructPatternNode::SlicePrefix { all, prefix, tail } => {
-                all.iter().map(|id| event.variables.remove(id));
-                tail.iter().map(|id| event.variables.remove(id));
+                if let Some(id) = all {
+                    event.variables.remove(id);
+                }
+                if let Some(id) = tail {
+                    event.variables.remove(id);
+                }
                 for id in prefix.iter().filter_map(|n| n.id()) {
                     event.variables.remove(&id);
                 }
             }
             StructPatternNode::SliceSuffix { all, head, suffix } => {
-                all.iter().map(|id| event.variables.remove(id));
-                head.iter().map(|id| event.variables.remove(id));
+                if let Some(id) = all {
+                    event.variables.remove(id);
+                }
+                if let Some(id) = head {
+                    event.variables.remove(id);
+                }
                 for id in suffix.iter().filter_map(|p| p.id()) {
                     event.variables.remove(&id);
                 }
             }
             StructPatternNode::Struct { all, binds } => {
-                all.iter().map(|id| event.variables.remove(id));
+                if let Some(id) = all {
+                    event.variables.remove(id);
+                }
                 for id in binds.iter().filter_map(|(_, p)| p.id()) {
                     event.variables.remove(&id);
                 }

@@ -28,7 +28,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Lambda<C, E> 
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         for (arg, id) in from.iter_mut().zip(&self.argids) {
             match arg {
@@ -136,7 +136,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for BuiltIn<C, E>
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
-        event: &Event<E>,
+        event: &mut Event<E>,
     ) -> Option<Value> {
         self.apply.update(ctx, from, event)
     }
@@ -208,11 +208,15 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
             | NodeKind::Use
             | NodeKind::Bind(_, _)
             | NodeKind::BindTuple(_, _)
+            | NodeKind::BindStruct(_, _)
             | NodeKind::Ref(_)
+            | NodeKind::StructRef(_, _)
+            | NodeKind::TupleRef(_, _)
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
             | NodeKind::Tuple { .. }
             | NodeKind::Struct { .. }
+            | NodeKind::StructWith { .. }
             | NodeKind::Apply { .. }
             | NodeKind::Error { .. }
             | NodeKind::Qop(_, _)

@@ -820,19 +820,17 @@ where
                         .right()
                 }
                 StructurePattern::Struct { exhaustive, all: None, binds } => {
+                    if !exhaustive {
+                        return unexpected_any("struct binds must be exhaustive in let")
+                            .left();
+                    }
                     let mut names: SmallVec<[(ArcStr, Option<ArcStr>); 8]> = smallvec![];
                     for (n, p) in binds.iter() {
                         names.push((n.clone(), get_name!(p)));
                     }
                     let names = Arc::from_iter(names);
-                    value(ExprKind::BindStruct {
-                        exhaustive,
-                        names,
-                        typ,
-                        export,
-                        value: v,
-                    })
-                    .right()
+                    value(ExprKind::BindStruct { names, typ, export, value: v }.to_expr())
+                        .right()
                 }
                 StructurePattern::Struct { all: Some(_), .. }
                 | StructurePattern::Tuple { all: Some(_), .. } => {
