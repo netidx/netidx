@@ -250,71 +250,86 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
         self.guard.as_ref().and_then(|n| n.node.extract_err())
     }
 
-    pub(super) fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &Event<E>) -> bool {
+    pub(super) fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        event: &mut Event<E>,
+    ) -> bool {
         match &mut self.guard {
             None => false,
             Some(g) => g.update(ctx, event),
         }
     }
 
-    pub(super) fn bind_event(&self, v: &Value) -> Option<Event<E>> {
+    pub(super) fn bind_event(&self, v: &Value, event: &mut Event<E>) {
         match &self.structure_predicate {
             StructPatternNode::BindAll { name } => {
-                name.id().map(|id| Event::Variable(id, v.clone()))
+                if let Some(id) = name.id() {
+                    event.variables.insert(id, v.clone());
+                }
             }
             StructPatternNode::Slice { all, binds } => match v {
                 Value::Array(a) if a.len() == binds.len() => {
-                    let mut vars = VAR_BATCH.take();
                     if let Some(id) = all {
-                        vars.push((*id, v.clone()));
+                        event.variables.insert(*id, v.clone());
                     }
                     for (j, n) in binds.iter().enumerate() {
                         if let Some(id) = n.id() {
-                            vars.push((id, a[j].clone()))
+                            event.variables.insert(id, a[j].clone());
                         }
                     }
-                    Some(Event::VarBatch(vars))
                 }
-                _ => None,
+                _ => (),
             },
             StructPatternNode::SlicePrefix { all, prefix, tail } => match v {
                 Value::Array(a) if a.len() >= prefix.len() => {
-                    let mut vars = VAR_BATCH.take();
                     if let Some(id) = all {
-                        vars.push((*id, v.clone()))
+                        event.variables.insert(*id, v.clone());
                     }
                     for (j, n) in prefix.iter().enumerate() {
                         if let Some(id) = n.id() {
-                            vars.push((id, a[j].clone()))
+                            event.variables.insert(id, a[j].clone());
                         }
                     }
                     if let Some(id) = tail {
                         let ss = a.subslice(prefix.len()..).unwrap();
-                        vars.push((*id, Value::Array(ss)))
+                        event.variables.insert(*id, Value::Array(ss));
                     }
-                    Some(Event::VarBatch(vars))
                 }
-                _ => None,
+                _ => (),
             },
             StructPatternNode::SliceSuffix { all, head, suffix } => match v {
                 Value::Array(a) if a.len() >= suffix.len() => {
-                    let mut vars = VAR_BATCH.take();
                     if let Some(id) = all {
-                        vars.push((*id, v.clone()));
+                        event.variables.insert(*id, v.clone());
                     }
                     if let Some(id) = head {
                         let ss = a.subslice(..suffix.len()).unwrap();
-                        vars.push((*id, Value::Array(ss)))
+                        event.variables.insert(*id, Value::Array(ss));
                     }
                     let tail = a.subslice(suffix.len()..).unwrap();
                     for (j, n) in suffix.iter().enumerate() {
                         if let Some(id) = n.id() {
-                            vars.push((id, tail[j].clone()))
+                            event.variables.insert(id, tail[j].clone());
                         }
                     }
-                    Some(Event::VarBatch(vars))
                 }
-                _ => None,
+                _ => (),
+            },
+            StructPatternNode::Struct { all, binds } => match v {
+                Value::Array(a) if a.len() >= binds.len() => {
+                    if let Some(id) = all {
+                        event.variables.insert(*id, v.clone());
+                    }
+                    for (i, id) in binds.iter() {
+                        if let Some(id) = id.id() {
+                            if let Some(v) = a.get(*i) {
+                                event.variables.insert(id, v.clone());
+                            }
+                        }
+                    }
+                }
+                _ => (),
             },
         }
     }
