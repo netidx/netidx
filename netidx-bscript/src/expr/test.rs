@@ -8,6 +8,7 @@ use netidx_netproto::pbuf::PBytes;
 use parser::{parse, RESERVED};
 use prop::option;
 use proptest::{collection, prelude::*};
+use rand::{thread_rng, Rng};
 use smallvec::SmallVec;
 use std::{marker::PhantomData, time::Duration};
 
@@ -275,6 +276,14 @@ fn structure_pattern() -> impl Strategy<Value = StructurePattern> {
         ),
         (
             option::of(random_fname()),
+            collection::vec((random_fname(), val_pat()), (1, 10)),
+            any::<bool>()
+        )
+            .prop_map(|(all, b, exhaustive)| {
+                StructurePattern::Struct { all, exhaustive, binds: Arc::from_iter(b) }
+            }),
+        (
+            option::of(random_fname()),
             collection::vec(val_pat(), (1, 10)),
             option::of(random_fname())
         )
@@ -292,7 +301,7 @@ fn structure_pattern() -> impl Strategy<Value = StructurePattern> {
                 all,
                 head,
                 suffix: Arc::from_iter(s.into_iter())
-            })
+            }),
     ]
 }
 
@@ -310,102 +319,45 @@ fn build_pattern(arg: Expr, arms: Vec<(Option<Expr>, Pattern, Expr)>) -> Expr {
     ExprKind::Select { arg: Arc::new(arg), arms: Arc::from_iter(arms) }.to_expr()
 }
 
-fn arithexpr() -> impl Strategy<Value = Expr> {
-    let leaf = prop_oneof![constant(), reference()];
-    leaf.prop_recursive(5, 25, 5, |inner| {
-        prop_oneof![
-            (
-                inner.clone(),
-                collection::vec(
-                    (option::of(inner.clone()), pattern(), inner.clone()),
-                    (1, 10)
-                )
-            )
-                .prop_map(|(arg, arms)| build_pattern(arg, arms)),
-            collection::vec(inner.clone(), (1, 10))
-                .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
-            (
-                collection::vec((option::of(random_fname()), inner.clone()), (0, 10)),
-                modpath()
-            )
-                .prop_map(|(mut s, f)| {
-                    s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
-                    ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
-                }),
-            inner.clone().prop_map(|e0| ExprKind::Not { expr: Arc::new(e0) }.to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Eq {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Ne {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Lt {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Gt {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Gte {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Lte {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::And {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Or {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Add {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Sub {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Mul {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-            (inner.clone(), inner.clone()).prop_map(|(e0, e1)| ExprKind::Div {
-                lhs: Arc::new(e0),
-                rhs: Arc::new(e1)
-            }
-            .to_expr()),
-        ]
+fn usestmt() -> impl Strategy<Value = Expr> {
+    modpath().prop_map(|name| ExprKind::Use { name }.to_expr())
+}
+
+fn typedef() -> impl Strategy<Value = Expr> {
+    (typart(), typexp()).prop_map(|(name, typ)| {
+        ExprKind::TypeDef { name: ArcStr::from(name), typ }.to_expr()
     })
+}
+
+fn structref() -> impl Strategy<Value = Expr> {
+    (modpath(), random_fname())
+        .prop_map(|(name, field)| ExprKind::StructRef { name, field }.to_expr())
+}
+
+fn tupleref() -> impl Strategy<Value = Expr> {
+    (modpath(), any::<usize>())
+        .prop_map(|(name, field)| ExprKind::TupleRef { name, field }.to_expr())
 }
 
 macro_rules! bind_struct {
     ($inner:expr) => {
         (
-            $inner.clone(),
+            $inner,
             collection::vec((random_fname(), option::of(random_fname())), (1, 10)),
             any::<bool>(),
             option::of(typexp()),
         )
-            .prop_map(|(e, n, exp, typ)| {
+            .prop_map(|(e, mut n, exp, typ)| {
+                for (field, name) in n.iter_mut() {
+                    match name {
+                        Some(_) => (),
+                        None => {
+                            if thread_rng().gen_bool(0.5) {
+                                *name = Some(field.clone())
+                            }
+                        }
+                    }
+                }
                 ExprKind::BindStruct {
                     names: Arc::from_iter(n),
                     typ,
@@ -420,7 +372,7 @@ macro_rules! bind_struct {
 macro_rules! bind_tuple {
     ($inner:expr) => {
         (
-            $inner.clone(),
+            $inner,
             collection::vec(option::of(random_fname()), (2, 10)),
             any::<bool>(),
             option::of(typexp()),
@@ -439,7 +391,7 @@ macro_rules! bind_tuple {
 
 macro_rules! bind {
     ($inner:expr) => {
-        ($inner.clone(), option::of(random_fname()), any::<bool>(), option::of(typexp()))
+        ($inner, option::of(random_fname()), any::<bool>(), option::of(typexp()))
             .prop_map(|(e, n, exp, typ)| {
                 ExprKind::Bind { export: exp, name: n, value: Arc::new(e), typ }.to_expr()
             })
@@ -448,7 +400,7 @@ macro_rules! bind {
 
 macro_rules! qop {
     ($inner:expr) => {
-        ($inner.clone()).prop_map(|e| match &e.kind {
+        $inner.prop_map(|e| match &e.kind {
             ExprKind::Do { .. }
             | ExprKind::Select { .. }
             | ExprKind::TypeCast { .. }
@@ -473,7 +425,7 @@ macro_rules! qop {
 
 macro_rules! slice {
     ($inner:expr) => {
-        (modpath(), option::of($inner.clone()), option::of($inner.clone())).prop_map(
+        (modpath(), option::of($inner), option::of($inner)).prop_map(
             |(name, start, end)| {
                 let a = ExprKind::Ref { name }.to_expr();
                 let start = start.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
@@ -489,12 +441,14 @@ macro_rules! slice {
 }
 
 macro_rules! apply {
-    ($inner:expr) => {
-        (
-            collection::vec((option::of(random_fname()), $inner.clone()), (0, 10)),
-            modpath(),
-        )
+    ($inner:expr, $concat:literal) => {
+        (collection::vec((option::of(random_fname()), $inner), (0, 10)), modpath())
             .prop_map(|(mut s, f)| {
+                let f = if $concat && f == ModPath::from(["str", "concat"]) {
+                    ["str", "concat1"].into() // str::concat is illegal at the module level
+                } else {
+                    f
+                };
                 s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
                 ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
             })
@@ -503,19 +457,8 @@ macro_rules! apply {
 
 macro_rules! do_block {
     ($inner:expr) => {
-        collection::vec(
-            prop_oneof![
-                (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef {
-                    name: ArcStr::from(name),
-                    typ
-                }
-                .to_expr()),
-                modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
-                $inner.clone()
-            ],
-            (1, 10),
-        )
-        .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr())
+        collection::vec(prop_oneof![typedef(), usestmt(), $inner], (1, 10))
+            .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr())
     };
 }
 
@@ -523,18 +466,13 @@ macro_rules! lambda {
     ($inner:expr) => {
         (
             collection::vec(
-                (
-                    any::<bool>(),
-                    random_fname(),
-                    option::of(typexp()),
-                    option::of($inner.clone()),
-                ),
+                (any::<bool>(), random_fname(), option::of(typexp()), option::of($inner)),
                 (0, 10),
             ),
             option::of(option::of(typexp())),
             option::of(typexp()),
             collection::vec((random_fname(), typexp()), (0, 4)),
-            $inner.clone(),
+            $inner,
         )
             .prop_map(|(mut args, vargs, rtype, constraints, body)| {
                 args.sort_unstable_by(|(k0, _, _, _), (k1, _, _, _)| k1.cmp(k0));
@@ -563,12 +501,7 @@ macro_rules! builtin {
     ($inner:expr) => {
         (
             collection::vec(
-                (
-                    any::<bool>(),
-                    random_fname(),
-                    option::of(typexp()),
-                    option::of($inner.clone()),
-                ),
+                (any::<bool>(), random_fname(), option::of(typexp()), option::of($inner)),
                 (0, 10),
             ),
             option::of(option::of(typexp())),
@@ -601,116 +534,130 @@ macro_rules! builtin {
 
 macro_rules! select {
     ($inner:expr) => {
-        (
-            $inner.clone(),
-            collection::vec(
-                (option::of($inner.clone()), pattern(), $inner.clone()),
-                (1, 10),
-            ),
-        )
+        ($inner, collection::vec((option::of($inner), pattern(), $inner), (1, 10)))
             .prop_map(|(arg, arms)| build_pattern(arg, arms))
     };
 }
 
+macro_rules! structure {
+    ($inner:expr) => {
+        collection::vec((random_fname(), $inner.clone()), (1, 10)).prop_map(|mut a| {
+            a.sort_by_key(|(n, _)| n.clone());
+            a.dedup_by_key(|(n, _)| n.clone());
+            ExprKind::Struct { args: Arc::from_iter(a) }.to_expr()
+        })
+    };
+}
+
+macro_rules! connect {
+    ($inner:expr) => {
+        ($inner, modpath()).prop_map(|(e, n)| {
+            ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
+        })
+    };
+}
+
+macro_rules! arrayidx {
+    ($inner:expr) => {
+        (modpath(), $inner).prop_map(|(name, e)| {
+            let a = ExprKind::Ref { name }.to_expr();
+            ExprKind::Apply {
+                function: ["op", "index"].into(),
+                args: Arc::from_iter([(None, a), (None, e)]),
+            }
+            .to_expr()
+        })
+    };
+}
+
+macro_rules! typecast {
+    ($inner:expr) => {
+        ($inner, typexp()).prop_map(|(expr, typ)| {
+            ExprKind::TypeCast { expr: Arc::new(expr), typ }.to_expr()
+        })
+    };
+}
+
+macro_rules! array {
+    ($inner:expr) => {
+        collection::vec($inner, (0, 10))
+            .prop_map(|a| { ExprKind::Array { args: Arc::from_iter(a) } }.to_expr())
+    };
+}
+
+macro_rules! tuple {
+    ($inner:expr) => {
+        collection::vec($inner, (2, 10))
+            .prop_map(|a| { ExprKind::Tuple { args: Arc::from_iter(a) } }.to_expr())
+    };
+}
+
+macro_rules! binop {
+    ($inner:expr, $op:ident) => {
+        ($inner, $inner).prop_map(|(e0, e1)| {
+            ExprKind::$op { lhs: Arc::new(e0), rhs: Arc::new(e1) }.to_expr()
+        })
+    };
+}
+
+fn arithexpr() -> impl Strategy<Value = Expr> {
+    let leaf = prop_oneof![constant(), reference(), structref(), tupleref()];
+    leaf.prop_recursive(5, 25, 5, |inner| {
+        prop_oneof![
+            select!(inner.clone()),
+            do_block!(inner.clone()),
+            apply!(inner.clone(), false),
+            binop!(inner.clone(), Eq),
+            binop!(inner.clone(), Ne),
+            binop!(inner.clone(), Lt),
+            binop!(inner.clone(), Gt),
+            binop!(inner.clone(), Gte),
+            binop!(inner.clone(), Lte),
+            binop!(inner.clone(), And),
+            binop!(inner.clone(), Or),
+            inner.clone().prop_map(|e0| ExprKind::Not { expr: Arc::new(e0) }.to_expr()),
+            binop!(inner.clone(), Add),
+            binop!(inner.clone(), Sub),
+            binop!(inner.clone(), Mul),
+            binop!(inner.clone(), Div),
+        ]
+    })
+}
+
 fn expr() -> impl Strategy<Value = Expr> {
-    let leaf = prop_oneof![constant(), reference()];
+    let leaf = prop_oneof![constant(), reference(), structref(), tupleref()];
     leaf.prop_recursive(10, 100, 10, |inner| {
         prop_oneof![
-            (modpath(), inner.clone()).prop_map(|(name, e)| {
-                let a = ExprKind::Ref { name }.to_expr();
-                ExprKind::Apply {
-                    function: ["op", "index"].into(),
-                    args: Arc::from_iter([(None, a), (None, e)]),
-                }
-                .to_expr()
-            }),
-            qop!(inner),
-            slice!(inner),
+            arrayidx!(inner.clone()),
+            qop!(inner.clone()),
+            slice!(inner.clone()),
             arithexpr(),
-            apply!(inner),
-            (inner.clone(), typexp()).prop_map(|(expr, typ)| ExprKind::TypeCast {
-                expr: Arc::new(expr),
-                typ
-            }
-            .to_expr()),
-            do_block!(inner),
-            lambda!(inner),
-            builtin!(inner),
-            bind!(inner),
-            bind_tuple!(inner),
-            bind_struct!(inner),
-            (inner.clone(), modpath()).prop_map(|(e, n)| {
-                ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
-            }),
-            select!(inner),
-            collection::vec(inner.clone(), (0, 10))
-                .prop_map(|a| { ExprKind::Array { args: Arc::from_iter(a) } }.to_expr()),
-            collection::vec(inner.clone(), (2, 10))
-                .prop_map(|a| { ExprKind::Tuple { args: Arc::from_iter(a) } }.to_expr()),
-            collection::vec((random_fname(), inner.clone()), (1, 10)).prop_map(
-                |mut a| {
-                    a.sort_by_key(|(n, _)| n.clone());
-                    a.dedup_by_key(|(n, _)| n.clone());
-                    ExprKind::Struct { args: Arc::from_iter(a) }.to_expr()
-                }
-            ),
+            apply!(inner.clone(), false),
+            typecast!(inner.clone()),
+            do_block!(inner.clone()),
+            lambda!(inner.clone()),
+            builtin!(inner.clone()),
+            bind!(inner.clone()),
+            bind_tuple!(inner.clone()),
+            bind_struct!(inner.clone()),
+            connect!(inner.clone()),
+            select!(inner.clone()),
+            array!(inner.clone()),
+            tuple!(inner.clone()),
+            structure!(inner),
         ]
     })
 }
 
 fn modexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![
-        (collection::vec((option::of(random_fname()), expr()), (0, 10)), modpath())
-            .prop_map(|(mut s, f)| {
-                let f = if f == ModPath::from(["str", "concat"]) {
-                    ["str", "concat1"].into() // str::concat is illegal at the module level
-                } else {
-                    f
-                };
-                s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
-                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
-            }),
-        collection::vec(
-            prop_oneof![
-                (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef {
-                    name: ArcStr::from(name),
-                    typ
-                }
-                .to_expr()),
-                modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
-                expr()
-            ],
-            (1, 10)
-        )
-        .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr()),
-        modpath().prop_map(|name| ExprKind::Use { name }.to_expr()),
-        (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef {
-            name: ArcStr::from(name),
-            typ
-        }
-        .to_expr()),
-        (expr(), option::of(random_fname()), any::<bool>(), option::of(typexp()))
-            .prop_map(|(e, n, exp, typ)| {
-                ExprKind::Bind { export: exp, name: n, value: Arc::new(e), typ }.to_expr()
-            }),
-        (
-            expr(),
-            collection::vec(option::of(random_fname()), (2, 10)),
-            any::<bool>(),
-            option::of(typexp())
-        )
-            .prop_map(|(e, n, exp, typ)| {
-                ExprKind::BindTuple {
-                    export: exp,
-                    names: Arc::from_iter(n),
-                    value: Arc::new(e),
-                    typ,
-                }
-                .to_expr()
-            }),
-        (expr(), modpath()).prop_map(|(e, n)| {
-            ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
-        }),
+        apply!(expr(), true),
+        do_block!(expr()),
+        usestmt(),
+        typedef(),
+        bind!(expr()),
+        bind_tuple!(expr()),
+        connect!(expr()),
     ];
     leaf.prop_recursive(10, 100, 10, |inner| {
         prop_oneof![
