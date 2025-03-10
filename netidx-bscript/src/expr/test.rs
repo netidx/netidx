@@ -541,7 +541,7 @@ macro_rules! select {
 
 macro_rules! structure {
     ($inner:expr) => {
-        collection::vec((random_fname(), $inner.clone()), (1, 10)).prop_map(|mut a| {
+        collection::vec((random_fname(), $inner), (1, 10)).prop_map(|mut a| {
             a.sort_by_key(|(n, _)| n.clone());
             a.dedup_by_key(|(n, _)| n.clone());
             ExprKind::Struct { args: Arc::from_iter(a) }.to_expr()
@@ -600,6 +600,16 @@ macro_rules! binop {
     };
 }
 
+macro_rules! structwith {
+    ($inner:expr) => {
+        (modpath(), collection::vec((random_fname(), $inner), (1, 10))).prop_map(
+            |(name, replace)| {
+                ExprKind::StructWith { name, replace: Arc::from_iter(replace) }.to_expr()
+            },
+        )
+    };
+}
+
 fn arithexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference(), structref(), tupleref()];
     leaf.prop_recursive(5, 25, 5, |inner| {
@@ -644,7 +654,8 @@ fn expr() -> impl Strategy<Value = Expr> {
             select!(inner.clone()),
             array!(inner.clone()),
             tuple!(inner.clone()),
-            structure!(inner),
+            structure!(inner.clone()),
+            structwith!(inner.clone()),
         ]
     })
 }
@@ -785,6 +796,25 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                     .zip(a1.iter())
                     .all(|((n0, e0), (n1, e1))| n0 == n1 && check(e0, e1))
         }
+        (
+            ExprKind::StructWith { name: n0, replace: r0 },
+            ExprKind::StructWith { name: n1, replace: r1 },
+        ) => {
+            n0 == n1
+                && r0.len() == r1.len()
+                && r0
+                    .iter()
+                    .zip(r1.iter())
+                    .all(|((n0, e0), (n1, e1))| n0 == n1 && check(e0, e1))
+        }
+        (
+            ExprKind::TupleRef { name: n0, field: f0 },
+            ExprKind::TupleRef { name: n1, field: f1 },
+        ) => n0 == n1 && f0 == f1,
+        (
+            ExprKind::StructRef { name: n0, field: f0 },
+            ExprKind::StructRef { name: n1, field: f1 },
+        ) => n0 == n1 && f0 == f1,
         (
             ExprKind::Apply { args: srs0, function: fn0 },
             ExprKind::Constant(Value::String(c1)),
