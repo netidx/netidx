@@ -1,13 +1,12 @@
 use crate::{
     expr::{Expr, ExprId, ModPath},
     node::Node,
-    BindId, Ctx, Event, ExecCtx, VAR_BATCH,
+    BindId, Ctx, Event, ExecCtx,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use fxhash::FxHashMap;
 use netidx::{
-    pool::Pooled,
     publisher::{Publisher, PublisherBuilder, Value},
     resolver_server,
     subscriber::{Subscriber, SubscriberBuilder},
@@ -111,21 +110,16 @@ impl Ctx for TestCtx {
     fn set_var(&mut self, id: BindId, value: Value) {
         self.var_updates.push_back((id, value));
     }
-
-    fn set_vars(&mut self, mut batch: Pooled<Vec<(BindId, Value)>>) {
-        for (i, v) in batch.drain(..) {
-            self.var_updates.push_back((i, v));
-        }
-    }
 }
 
 struct TestState {
     ctx: ExecCtx<TestCtx, ()>,
+    event: Event<()>,
 }
 
 impl TestState {
     async fn new() -> Result<Self> {
-        Ok(Self { ctx: ExecCtx::new(TestCtx::new().await?) })
+        Ok(Self { ctx: ExecCtx::new(TestCtx::new().await?), event: Event::new(()) })
     }
 }
 
@@ -143,12 +137,15 @@ async fn bind_ref_arith() -> Result<()> {
     if let Some(e) = n.extract_err() {
         bail!("compilation failed {e}")
     }
-    assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
+    state.event.init = true;
+    assert_eq!(n.update(&mut state.ctx, &mut state.event), None);
+    state.event.init = false;
     assert_eq!(state.ctx.user.var_updates.len(), 1);
     let (_, v) = &state.ctx.user.var_updates[0];
     assert_eq!(v, &Value::I64(1));
     let (id, v) = state.ctx.user.var_updates.pop_front().unwrap();
-    assert_eq!(n.update(&mut state.ctx, &Event::Variable(id, v)), Some(Value::I64(1)));
+    state.event.insert(id, v);
+    assert_eq!(n.update(&mut state.ctx, &mut state.event), Some(Value::I64(1)));
     assert_eq!(state.ctx.user.var_updates.len(), 0);
     Ok(())
 }

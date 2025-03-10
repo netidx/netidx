@@ -1,26 +1,23 @@
 use crate::{
     expr::{Arg, ModPath},
     typ::{NoRefs, Type},
-    BindId, Ctx, InitFnTyped,
+    BindId, Ctx, InitFnTyped, UserEvent,
 };
 use anyhow::{bail, Result};
 use compact_str::CompactString;
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::path::Path;
-use std::{
-    fmt::{self, Debug},
-    iter,
-};
+use std::{fmt, iter};
 use triomphe::Arc;
 
-pub struct LambdaBind<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub struct LambdaBind<C: Ctx, E: UserEvent> {
     pub env: Env<C, E>,
     pub scope: ModPath,
     pub argspec: Arc<[Arg]>,
     pub init: InitFnTyped<C, E>,
 }
 
-pub struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub struct Bind<C: Ctx, E: UserEvent> {
     pub id: BindId,
     pub export: bool,
     pub typ: Type<NoRefs>,
@@ -29,7 +26,7 @@ pub struct Bind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     name: CompactString,
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> fmt::Debug for Bind<C, E> {
+impl<C: Ctx, E: UserEvent> fmt::Debug for Bind<C, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -41,7 +38,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> fmt::Debug for Bind<C, E> {
     }
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
+impl<C: Ctx, E: UserEvent> Clone for Bind<C, E> {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
@@ -54,7 +51,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Bind<C, E> {
     }
 }
 
-pub struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub struct Env<C: Ctx, E: UserEvent> {
     pub by_id: Map<BindId, Bind<C, E>>,
     pub binds: Map<ModPath, Map<CompactString, BindId>>,
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
@@ -62,7 +59,7 @@ pub struct Env<C: Ctx + 'static, E: Debug + Clone + 'static> {
     pub typedefs: Map<ModPath, Map<CompactString, Type<NoRefs>>>,
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Env<C, E> {
+impl<C: Ctx, E: UserEvent> Clone for Env<C, E> {
     fn clone(&self) -> Self {
         Self {
             by_id: self.by_id.clone(),
@@ -74,7 +71,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Clone for Env<C, E> {
     }
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Env<C, E> {
+impl<C: Ctx, E: UserEvent> Env<C, E> {
     pub(super) fn new() -> Self {
         Self {
             by_id: Map::new(),

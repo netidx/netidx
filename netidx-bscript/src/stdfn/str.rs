@@ -2,11 +2,11 @@ use crate::{
     deftype, err,
     expr::Expr,
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    Ctx, ExecCtx,
+    Ctx, ExecCtx, UserEvent,
 };
 use arcstr::{literal, ArcStr};
 use netidx::{path::Path, subscriber::Value};
-use std::{cell::RefCell, fmt::Debug};
+use std::cell::RefCell;
 
 struct StartsWithEv;
 
@@ -337,7 +337,7 @@ pub mod str {
 }
 "#;
 
-pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
+pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<StartsWith>();
     ctx.register_builtin::<EndsWith>();
     ctx.register_builtin::<Contains>();

@@ -3,17 +3,14 @@ use crate::{
     expr::{Expr, ModPath},
     node::pattern::PatternNode,
     typ::{NoRefs, Type},
-    ApplyTyped, BindId, Ctx, Event, ExecCtx,
+    ApplyTyped, BindId, Ctx, Event, ExecCtx, UserEvent,
 };
 use arcstr::{literal, ArcStr};
 use compact_str::{format_compact, CompactString};
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
-use std::{
-    fmt::{self, Debug},
-    marker::PhantomData,
-};
+use std::{fmt, marker::PhantomData};
 use triomphe::Arc;
 
 mod compiler;
@@ -21,12 +18,12 @@ mod lambda;
 pub mod pattern;
 mod typecheck;
 
-pub struct Cached<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub struct Cached<C: Ctx, E: UserEvent> {
     pub cached: Option<Value>,
     pub node: Node<C, E>,
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Cached<C, E> {
+impl<C: Ctx, E: UserEvent> Cached<C, E> {
     pub fn new(node: Node<C, E>) -> Self {
         Self { cached: None, node }
     }
@@ -62,7 +59,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Cached<C, E> {
     }
 }
 
-pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub enum NodeKind<C: Ctx, E: UserEvent> {
     Use,
     TypeDef,
     Constant(Value),
@@ -162,19 +159,19 @@ pub enum NodeKind<C: Ctx + 'static, E: Debug + Clone + 'static> {
     },
 }
 
-pub struct Node<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub struct Node<C: Ctx, E: UserEvent> {
     pub spec: Box<Expr>,
     pub typ: Type<NoRefs>,
     pub kind: NodeKind<C, E>,
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> fmt::Display for Node<C, E> {
+impl<C: Ctx, E: UserEvent> fmt::Display for Node<C, E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", &self.spec)
     }
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
+impl<C: Ctx, E: UserEvent> Node<C, E> {
     pub fn is_err(&self) -> bool {
         match &self.kind {
             NodeKind::Error { .. } => true,

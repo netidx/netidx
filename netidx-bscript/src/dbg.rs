@@ -1,14 +1,13 @@
-use crate::{expr::ExprId, Event};
+use crate::{expr::ExprId, Event, UserEvent};
 use chrono::prelude::*;
 use fxhash::FxHashMap;
 use netidx::subscriber::Value;
 use std::{
     collections::{HashMap, VecDeque},
-    fmt::Debug,
     sync::{self, Weak},
 };
 
-pub struct DbgCtx<E: Debug> {
+pub struct DbgCtx<E: UserEvent> {
     pub trace: bool,
     events: VecDeque<(ExprId, (DateTime<Local>, Option<Event<E>>, Value))>,
     watch: FxHashMap<
@@ -18,7 +17,7 @@ pub struct DbgCtx<E: Debug> {
     current: FxHashMap<ExprId, (Option<Event<E>>, Value)>,
 }
 
-impl<E: Debug + Clone> DbgCtx<E> {
+impl<E: UserEvent> DbgCtx<E> {
     pub(super) fn new() -> Self {
         DbgCtx {
             trace: false,

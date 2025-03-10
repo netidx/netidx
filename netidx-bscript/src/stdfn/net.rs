@@ -3,7 +3,7 @@ use crate::{
     expr::{Expr, ExprId},
     node::Node,
     stdfn::CachedVals,
-    Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn,
+    Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
@@ -14,7 +14,7 @@ use netidx::{
     subscriber::{self, Dval, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
-use std::{collections::HashSet, fmt::Debug, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 fn as_path(v: Value) -> Option<Path> {
     match v.cast_to::<String>() {
@@ -35,7 +35,7 @@ struct Write {
     dv: Either<(Path, Dval), Vec<Value>>,
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Write {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Write {
     const NAME: &str = "write";
     deftype!("fn(string, Any) -> _");
 
@@ -50,7 +50,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Write {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Write {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Write {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -125,7 +125,7 @@ struct Subscribe {
     top_id: ExprId,
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Subscribe {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Subscribe {
     const NAME: &str = "subscribe";
     deftype!("fn(string) -> Any");
 
@@ -136,7 +136,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Subscribe {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Subscribe {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -189,7 +189,7 @@ struct RpcCall {
     pending: FxHashSet<BindId>,
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for RpcCall {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for RpcCall {
     const NAME: &str = "call";
     deftype!("fn(string, Array<Array<Any>>) -> Any");
 
@@ -204,7 +204,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for RpcCall {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for RpcCall {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for RpcCall {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -274,7 +274,7 @@ pub mod net {
 }
 "#;
 
-pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
+pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Write>();
     ctx.register_builtin::<Subscribe>();
     ctx.register_builtin::<RpcCall>();

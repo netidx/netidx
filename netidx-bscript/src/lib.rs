@@ -27,6 +27,7 @@ use netidx::{
     subscriber::{self, Dval, SubId, UpdatesFlags, Value},
 };
 use std::{
+    collections::HashMap,
     fmt::Debug,
     sync::{self, LazyLock},
     time::Duration,
@@ -38,17 +39,47 @@ mod tests;
 
 atomic_id!(BindId);
 
+pub trait UserEvent: Clone + Debug + 'static {
+    fn clear(&mut self);
+}
+
+#[derive(Debug, Clone)]
+pub struct NoUserEvent;
+
+impl UserEvent for NoUserEvent {
+    fn clear(&mut self) {}
+}
+
 /// Event represents all the things that happened simultaneously in a
 /// given execution cycle. Event may contain only one update for each
 /// variable and netidx subscription in a given cycle, if more updates
 /// happen simultaneously they must be queued and deferred to later
 /// cycles.
 #[derive(Clone, Debug)]
-pub struct Event<E: Debug> {
+pub struct Event<E: UserEvent> {
     pub init: bool,
     pub variables: FxHashMap<BindId, Value>,
     pub netidx: FxHashMap<SubId, subscriber::Event>,
     pub user: E,
+}
+
+impl<E: UserEvent> Event<E> {
+    pub fn new(user: E) -> Self {
+        Event {
+            init: false,
+            variables: HashMap::default(),
+            netidx: HashMap::default(),
+            user,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        let Self { init, variables, netidx, user } = self;
+        *init = false;
+        variables.clear();
+        netidx.clear();
+        user.clear();
+    }
 }
 
 pub type InitFn<C, E> = sync::Arc<
@@ -98,7 +129,7 @@ pub type InitFnTyped<C, E> = sync::Arc<
         + Sync,
 >;
 
-pub trait BuiltIn<C: Ctx, E: Debug + Clone> {
+pub trait BuiltIn<C: Ctx, E: UserEvent> {
     const NAME: &str;
     const TYP: LazyLock<FnType<Refs>>;
 
@@ -113,7 +144,7 @@ pub trait BuiltIn<C: Ctx, E: Debug + Clone> {
     }
 }
 
-pub trait Apply<C: Ctx, E: Debug + Clone> {
+pub trait Apply<C: Ctx, E: UserEvent> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -122,7 +153,7 @@ pub trait Apply<C: Ctx, E: Debug + Clone> {
     ) -> Option<Value>;
 }
 
-pub trait ApplyTyped<C: Ctx, E: Debug + Clone>: Apply<C, E> {
+pub trait ApplyTyped<C: Ctx, E: UserEvent>: Apply<C, E> {
     fn typecheck(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -132,7 +163,7 @@ pub trait ApplyTyped<C: Ctx, E: Debug + Clone>: Apply<C, E> {
     fn rtype(&self) -> &Type<NoRefs>;
 }
 
-pub trait Ctx {
+pub trait Ctx: 'static {
     fn clear(&mut self);
 
     /// Subscribe to the specified netidx path. When the subscription
@@ -166,6 +197,10 @@ pub trait Ctx {
     /// The runtime must deliver all set_vars in a single event except
     /// that set_vars for the same variable in the same cycle must be
     /// queued and deferred to the next cycle.
+    ///
+    /// The runtime MUST NOT change event while a cycle is in
+    /// progress. set_var must be queued until the cycle ends and then
+    /// presented as a new batch.
     fn set_var(&mut self, id: BindId, value: Value);
 
     /// For a given name, this must have at most one outstanding call
@@ -189,14 +224,14 @@ pub trait Ctx {
     fn set_timer(&mut self, id: BindId, timeout: Duration, ref_by: ExprId);
 }
 
-pub struct ExecCtx<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub struct ExecCtx<C: Ctx, E: UserEvent> {
     pub env: Env<C, E>,
     builtins: FxHashMap<&'static str, (FnType<Refs>, InitFn<C, E>)>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> ExecCtx<C, E> {
+impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
     pub fn clear(&mut self) {
         self.env.clear();
         self.dbg_ctx.clear();

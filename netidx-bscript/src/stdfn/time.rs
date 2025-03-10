@@ -3,13 +3,13 @@ use crate::{
     expr::{Expr, ExprId},
     node::Node,
     stdfn::CachedVals,
-    Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn,
+    Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, UserEvent,
 };
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use netidx::{publisher::FromValue, subscriber::Value};
-use std::{fmt::Debug, ops::SubAssign, sync::Arc, time::Duration};
+use std::{ops::SubAssign, sync::Arc, time::Duration};
 
 struct AfterIdle {
     args: CachedVals,
@@ -17,7 +17,7 @@ struct AfterIdle {
     eid: ExprId,
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for AfterIdle {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for AfterIdle {
     const NAME: &str = "after_idle";
     deftype!("fn([duration, Number], 'a) -> 'a");
 
@@ -28,7 +28,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for AfterIdle {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for AfterIdle {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for AfterIdle {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -115,7 +115,7 @@ struct Timer {
     eid: ExprId,
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Timer {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Timer {
     const NAME: &str = "timer";
     deftype!("fn([duration, Number], [bool, Number]) -> datetime");
 
@@ -132,7 +132,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Timer {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Timer {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -209,7 +209,7 @@ pub mod time {
 }
 "#;
 
-pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
+pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<AfterIdle>();
     ctx.register_builtin::<Timer>();
     MOD.parse().unwrap()

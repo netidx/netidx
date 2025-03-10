@@ -3,7 +3,7 @@ use crate::{
     expr::{Expr, ExprId, ExprKind, ModPath},
     node::{lambda, pattern::PatternNode, Cached, Node, NodeKind},
     typ::Type,
-    Ctx, ExecCtx,
+    Ctx, ExecCtx, UserEvent,
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
@@ -16,7 +16,7 @@ use triomphe::Arc;
 
 atomic_id!(SelectId);
 
-fn compile_apply_args<C: Ctx + 'static, E: Debug + Clone + 'static>(
+fn compile_apply_args<C: Ctx, E: UserEvent>(
     ctx: &mut ExecCtx<C, E>,
     scope: &ModPath,
     top_id: ExprId,
@@ -84,7 +84,7 @@ fn compile_apply_args<C: Ctx + 'static, E: Debug + Clone + 'static>(
     Ok(Box::from_iter(nodes))
 }
 
-fn compile_apply<C: Ctx + 'static, E: Debug + Clone + 'static>(
+fn compile_apply<C: Ctx, E: UserEvent>(
     ctx: &mut ExecCtx<C, E>,
     spec: Expr,
     scope: &ModPath,
@@ -130,7 +130,7 @@ fn compile_apply<C: Ctx + 'static, E: Debug + Clone + 'static>(
     }
 }
 
-pub(super) fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
+pub(super) fn compile<C: Ctx, E: UserEvent>(
     ctx: &mut ExecCtx<C, E>,
     spec: Expr,
     scope: &ModPath,

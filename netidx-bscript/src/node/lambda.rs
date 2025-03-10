@@ -3,7 +3,7 @@ use crate::{
     expr::{Arg, Expr, ExprId, ModPath},
     node::{compiler, Node, NodeKind},
     typ::{FnType, NoRefs, Refs, TVar, Type},
-    Apply, ApplyTyped, BindId, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars,
+    Apply, ApplyTyped, BindId, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
@@ -16,14 +16,14 @@ use triomphe::Arc;
 
 atomic_id!(LambdaId);
 
-pub(super) struct Lambda<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub(super) struct Lambda<C: Ctx, E: UserEvent> {
     eid: ExprId,
     argids: Vec<BindId>,
     spec: LambdaTVars,
     body: Node<C, E>,
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Lambda<C, E> {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Lambda<C, E> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -51,7 +51,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Lambda<C, E> 
     }
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C, E> {
+impl<C: Ctx, E: UserEvent> ApplyTyped<C, E> for Lambda<C, E> {
     fn typecheck(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -86,7 +86,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for Lambda<C
     }
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
+impl<C: Ctx, E: UserEvent> Lambda<C, E> {
     pub(super) fn new(
         ctx: &mut ExecCtx<C, E>,
         spec: LambdaTVars,
@@ -124,14 +124,14 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Lambda<C, E> {
     }
 }
 
-pub(super) struct BuiltIn<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub(super) struct BuiltIn<C: Ctx, E: UserEvent> {
     name: &'static str,
     typ: FnType<NoRefs>,
     spec: LambdaTVars,
     apply: Box<dyn Apply<C, E> + Send + Sync + 'static>,
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for BuiltIn<C, E> {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltIn<C, E> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -142,7 +142,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for BuiltIn<C, E>
     }
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<C, E> {
+impl<C: Ctx, E: UserEvent> ApplyTyped<C, E> for BuiltIn<C, E> {
     fn typecheck(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -199,7 +199,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> ApplyTyped<C, E> for BuiltIn<
     }
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
+impl<C: Ctx, E: UserEvent> Node<C, E> {
     pub(super) fn find_lambda(&self) -> Option<Arc<LambdaBind<C, E>>> {
         match &self.kind {
             NodeKind::Lambda(l) => Some(l.clone()),
@@ -241,7 +241,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
     }
 }
 
-pub(super) fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
+pub(super) fn compile<C: Ctx, E: UserEvent>(
     ctx: &mut ExecCtx<C, E>,
     spec: Expr,
     argspec: Arc<[Arg]>,

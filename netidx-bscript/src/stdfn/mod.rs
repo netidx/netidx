@@ -1,13 +1,12 @@
 use crate::{
     node::Node,
     typ::{FnType, Refs},
-    Apply, BuiltIn, Ctx, Event, ExecCtx, InitFn,
+    Apply, BuiltIn, Ctx, Event, ExecCtx, InitFn, UserEvent,
 };
 use netidx::subscriber::Value;
 use netidx_core::utils::Either;
 use smallvec::SmallVec;
 use std::{
-    fmt::Debug,
     iter,
     marker::PhantomData,
     sync::{Arc, LazyLock},
@@ -65,11 +64,11 @@ macro_rules! arity2 {
 pub struct CachedVals(pub SmallVec<[Option<Value>; 4]>);
 
 impl CachedVals {
-    pub fn new<C: Ctx, E: Debug + Clone>(from: &[Node<C, E>]) -> CachedVals {
+    pub fn new<C: Ctx, E: UserEvent>(from: &[Node<C, E>]) -> CachedVals {
         CachedVals(from.into_iter().map(|_| None).collect())
     }
 
-    pub fn update<C: Ctx, E: Debug + Clone>(
+    pub fn update<C: Ctx, E: UserEvent>(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
@@ -88,7 +87,7 @@ impl CachedVals {
 
     /// Like update, but return the indexes of the nodes that updated
     /// instead of a consolidated bool
-    pub fn update_diff<C: Ctx, E: Debug + Clone>(
+    pub fn update_diff<C: Ctx, E: UserEvent>(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
@@ -107,7 +106,7 @@ impl CachedVals {
     }
 
     /// Only update if the value changes, return the indexes of nodes that updated
-    pub fn update_changed<C: Ctx, E: Debug + Clone>(
+    pub fn update_changed<C: Ctx, E: UserEvent>(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
@@ -133,21 +132,19 @@ impl CachedVals {
     }
 }
 
-pub trait EvalCached {
+pub trait EvalCached: Send + Sync + 'static {
     const NAME: &str;
     const TYP: LazyLock<FnType<Refs>>;
 
     fn eval(from: &CachedVals) -> Option<Value>;
 }
 
-pub struct CachedArgs<T: EvalCached + Send + Sync> {
+pub struct CachedArgs<T: EvalCached> {
     cached: CachedVals,
     t: PhantomData<T>,
 }
 
-impl<C: Ctx, E: Debug + Clone, T: EvalCached + Send + Sync + 'static> BuiltIn<C, E>
-    for CachedArgs<T>
-{
+impl<C: Ctx, E: UserEvent, T: EvalCached> BuiltIn<C, E> for CachedArgs<T> {
     const NAME: &str = T::NAME;
     const TYP: LazyLock<FnType<Refs>> = T::TYP;
 
@@ -159,9 +156,7 @@ impl<C: Ctx, E: Debug + Clone, T: EvalCached + Send + Sync + 'static> BuiltIn<C,
     }
 }
 
-impl<C: Ctx, E: Debug + Clone, T: EvalCached + Send + Sync + 'static> Apply<C, E>
-    for CachedArgs<T>
-{
+impl<C: Ctx, E: UserEvent, T: EvalCached> Apply<C, E> for CachedArgs<T> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,

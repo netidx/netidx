@@ -1,4 +1,4 @@
-use crate::{env::Env, expr::ModPath, Ctx};
+use crate::{env::Env, expr::ModPath, Ctx, UserEvent};
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use compact_str::format_compact;
@@ -102,7 +102,7 @@ impl<T: TypeMark + 'static> TVar<T> {
         self.typ.write()
     }
 
-    pub fn resolve_typrefs<'a, C: Ctx + 'static, E: Debug + Clone + 'static>(
+    pub fn resolve_typrefs<'a, C: Ctx, E: UserEvent>(
         &self,
         scope: &ModPath,
         env: &Env<C, E>,
@@ -972,7 +972,7 @@ impl<T: TypeMark + Clone + 'static> Type<T> {
         }
     }
 
-    pub fn resolve_typrefs<'a, C: Ctx + 'static, E: Debug + Clone + 'static>(
+    pub fn resolve_typrefs<'a, C: Ctx, E: UserEvent>(
         &self,
         scope: &ModPath,
         env: &Env<C, E>,
@@ -1121,7 +1121,7 @@ pub struct FnType<T: TypeMark + 'static> {
 }
 
 impl<T: TypeMark + Clone + 'static> FnType<T> {
-    pub fn resolve_typerefs<'a, C: Ctx + 'static, E: Debug + Clone + 'static>(
+    pub fn resolve_typerefs<'a, C: Ctx, E: UserEvent>(
         &self,
         scope: &ModPath,
         env: &Env<C, E>,

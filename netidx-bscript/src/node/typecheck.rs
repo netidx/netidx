@@ -2,17 +2,17 @@ use crate::{
     expr::ExprKind,
     node::{Node, NodeKind},
     typ::Type,
-    Ctx, ExecCtx,
+    Ctx, ExecCtx, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use enumflags2::BitFlags;
 use netidx::publisher::Typ;
 use smallvec::SmallVec;
-use std::{fmt::Debug, marker::PhantomData};
+use std::marker::PhantomData;
 use triomphe::Arc;
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Node<C, E> {
+impl<C: Ctx, E: UserEvent> Node<C, E> {
     pub(super) fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         macro_rules! wrap {
             ($e:expr) => {

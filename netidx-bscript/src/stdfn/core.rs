@@ -4,7 +4,7 @@ use crate::{
     node::{Node, NodeKind},
     stdfn::{CachedArgs, CachedVals, EvalCached},
     typ::Type,
-    Apply, ApplyTyped, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn,
+    Apply, ApplyTyped, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, UserEvent,
 };
 use anyhow::bail;
 use arcstr::{literal, ArcStr};
@@ -12,11 +12,11 @@ use compact_str::format_compact;
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
-use std::{fmt::Debug, sync::Arc};
+use std::sync::Arc;
 
 struct Any;
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Any {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Any {
     const NAME: &str = "any";
     deftype!("fn(@args: Any) -> Any");
 
@@ -25,7 +25,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Any {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Any {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Any {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -40,7 +40,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Any {
 
 struct IsErr;
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for IsErr {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for IsErr {
     const NAME: &str = "is_error";
     deftype!("fn(Any) -> bool");
 
@@ -49,7 +49,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for IsErr {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for IsErr {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for IsErr {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -65,7 +65,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for IsErr {
 
 struct FilterErr;
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for FilterErr {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for FilterErr {
     const NAME: &str = "filter_err";
     deftype!("fn(Any) -> error");
 
@@ -74,7 +74,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for FilterErr {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for FilterErr {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for FilterErr {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -90,7 +90,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for FilterErr {
 
 struct ToError;
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for ToError {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for ToError {
     const NAME: &str = "error";
     deftype!("fn(Any) -> error");
 
@@ -99,7 +99,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for ToError {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for ToError {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for ToError {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -117,7 +117,7 @@ struct Once {
     val: bool,
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Once {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Once {
     const NAME: &str = "once";
     deftype!("fn('a) -> 'a");
 
@@ -126,7 +126,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Once {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Once {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Once {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -434,13 +434,13 @@ impl EvalCached for SliceEv {
 
 type Slice = CachedArgs<SliceEv>;
 
-struct Filter<C: Ctx + 'static, E: Debug + Clone + 'static> {
+struct Filter<C: Ctx, E: UserEvent> {
     pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
     x: BindId,
     from: [Node<C, E>; 1],
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Filter<C, E> {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
     const NAME: &str = "filter";
     deftype!("fn('a, fn('a) -> bool) -> 'a");
 
@@ -462,7 +462,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Filter<C, E> {
     }
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Filter<C, E> {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -484,7 +484,7 @@ struct Count {
     count: u64,
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Count {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Count {
     const NAME: &str = "count";
     deftype!("fn(Any) -> u64");
 
@@ -493,7 +493,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Count {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Count {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Count {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -513,7 +513,7 @@ struct Sample {
     last: Option<Value>,
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Sample {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Sample {
     const NAME: &str = "sample";
     deftype!("fn(Any, 'a) -> 'a");
 
@@ -522,7 +522,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Sample {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Sample {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Sample {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -576,7 +576,7 @@ type Mean = CachedArgs<MeanEv>;
 
 struct Uniq(Option<Value>);
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Uniq {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Uniq {
     const NAME: &str = "uniq";
     deftype!("fn('a) -> 'a");
 
@@ -585,7 +585,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Uniq {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Uniq {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Uniq {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -608,7 +608,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Uniq {
 
 struct Never;
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Never {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Never {
     const NAME: &str = "never";
     deftype!("fn(@args: Any) -> _");
 
@@ -617,7 +617,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Never {
     }
 }
 
-impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Never {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Never {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -631,7 +631,7 @@ impl<C: Ctx, E: Debug + Clone> Apply<C, E> for Never {
     }
 }
 
-struct Group<C: Ctx + 'static, E: Debug + Clone + 'static> {
+struct Group<C: Ctx, E: UserEvent> {
     buf: SmallVec<[Value; 16]>,
     pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
     n: BindId,
@@ -639,7 +639,7 @@ struct Group<C: Ctx + 'static, E: Debug + Clone + 'static> {
     from: [Node<C, E>; 2],
 }
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Group<C, E> {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
     const NAME: &str = "group";
     deftype!("fn('a, fn(u64, 'a) -> bool) -> Array<'a>");
 
@@ -671,7 +671,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Group<C, E> {
     }
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Group<C, E> {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -694,7 +694,7 @@ impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Group<C, E> {
 
 struct Ungroup(BindId);
 
-impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Ungroup {
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Ungroup {
     const NAME: &str = "ungroup";
     deftype!("fn(Array<'a>) -> 'a");
 
@@ -703,7 +703,7 @@ impl<C: Ctx, E: Debug + Clone> BuiltIn<C, E> for Ungroup {
     }
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> Apply<C, E> for Ungroup {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Ungroup {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -770,7 +770,7 @@ pub mod core {
 }
 "#;
 
-pub fn register<C: Ctx, E: Debug + Clone>(ctx: &mut ExecCtx<C, E>) -> Expr {
+pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<All>();
     ctx.register_builtin::<And>();
     ctx.register_builtin::<Any>();

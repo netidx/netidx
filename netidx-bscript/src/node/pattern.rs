@@ -2,7 +2,7 @@ use crate::{
     expr::{ExprId, ModPath, Pattern, StructurePattern, ValPat},
     node::{compiler, Cached},
     typ::{NoRefs, Type},
-    BindId, Ctx, Event, ExecCtx,
+    BindId, Ctx, Event, ExecCtx, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
@@ -19,7 +19,7 @@ pub enum ValPNode {
 }
 
 impl ValPNode {
-    fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
+    fn compile<C: Ctx, E: UserEvent>(
         ctx: &mut ExecCtx<C, E>,
         type_predicate: &Type<NoRefs>,
         spec: &ValPat,
@@ -64,7 +64,7 @@ pub enum StructPatternNode {
 }
 
 impl StructPatternNode {
-    fn compile<C: Ctx + 'static, E: Debug + Clone + 'static>(
+    fn compile<C: Ctx, E: UserEvent>(
         ctx: &mut ExecCtx<C, E>,
         type_predicate: &Type<NoRefs>,
         spec: &StructurePattern,
@@ -196,7 +196,7 @@ impl StructPatternNode {
     }
 }
 
-pub struct PatternNode<C: Ctx + 'static, E: Debug + Clone + 'static> {
+pub struct PatternNode<C: Ctx, E: UserEvent> {
     pub type_predicate: Type<NoRefs>,
     pub structure_predicate: StructPatternNode,
     pub guard: Option<Cached<C, E>>,
@@ -214,7 +214,7 @@ fn uniq<'a, T: Hash + Eq + 'a, I: IntoIterator<Item = &'a T> + 'a>(iter: I) -> b
     uniq
 }
 
-impl<C: Ctx + 'static, E: Debug + Clone + 'static> PatternNode<C, E> {
+impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
     pub(super) fn compile(
         ctx: &mut ExecCtx<C, E>,
         spec: &Pattern,
