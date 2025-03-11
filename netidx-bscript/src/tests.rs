@@ -817,15 +817,15 @@ run!(structs0, STRUCTS0, |v: Result<&Value>| match v {
             if f0.len() == 2 && f1.len() == 2 && f2.len() == 2 =>
         {
             let f0 = match &f0[..] {
-                [Value::String(n), Value::String(s)] if n == "foo" && s == "bar" => true,
-                _ => false,
-            };
-            let f1 = match &f1[..] {
                 [Value::String(n), Value::I64(42)] if n == "bar" => true,
                 _ => false,
             };
-            let f2 = match &f2[..] {
+            let f1 = match &f1[..] {
                 [Value::String(n), Value::F64(84.0)] if n == "baz" => true,
+                _ => false,
+            };
+            let f2 = match &f2[..] {
+                [Value::String(n), Value::String(s)] if n == "foo" && s == "bar" => true,
                 _ => false,
             };
             f0 && f1 && f2
