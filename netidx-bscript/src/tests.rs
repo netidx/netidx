@@ -1,7 +1,7 @@
 use crate::{
     expr::{Expr, ExprId, ModPath},
     node::Node,
-    BindId, Ctx, Event, ExecCtx,
+    BindId, Ctx, Event, ExecCtx, NoUserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
@@ -11,8 +11,8 @@ use netidx::{
     resolver_server,
     subscriber::{Subscriber, SubscriberBuilder},
 };
-use smallvec::{smallvec, SmallVec};
-use std::collections::{HashMap, VecDeque};
+use smallvec::SmallVec;
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
 
 struct TestCtx {
     by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
@@ -113,13 +113,16 @@ impl Ctx for TestCtx {
 }
 
 struct TestState {
-    ctx: ExecCtx<TestCtx, ()>,
-    event: Event<()>,
+    ctx: ExecCtx<TestCtx, NoUserEvent>,
+    event: Event<NoUserEvent>,
 }
 
 impl TestState {
     async fn new() -> Result<Self> {
-        Ok(Self { ctx: ExecCtx::new(TestCtx::new().await?), event: Event::new(()) })
+        Ok(Self {
+            ctx: ExecCtx::new(TestCtx::new().await?),
+            event: Event::new(NoUserEvent),
+        })
     }
 }
 
@@ -139,14 +142,15 @@ async fn bind_ref_arith() -> Result<()> {
     }
     state.event.init = true;
     assert_eq!(n.update(&mut state.ctx, &mut state.event), None);
-    state.event.init = false;
+    state.event.clear();
     assert_eq!(state.ctx.user.var_updates.len(), 1);
     let (_, v) = &state.ctx.user.var_updates[0];
     assert_eq!(v, &Value::I64(1));
     let (id, v) = state.ctx.user.var_updates.pop_front().unwrap();
-    state.event.insert(id, v);
+    state.event.variables.insert(id, v);
     assert_eq!(n.update(&mut state.ctx, &mut state.event), Some(Value::I64(1)));
     assert_eq!(state.ctx.user.var_updates.len(), 0);
+    state.event.clear();
     Ok(())
 }
 
@@ -164,20 +168,25 @@ macro_rules! run {
                 bail!("compilation failed {e}")
             }
             dbg!("compilation succeeded");
-            assert_eq!(n.update(&mut state.ctx, &Event::Init), None);
+            state.event.init = true;
+            assert_eq!(n.update(&mut state.ctx, &mut state.event), None);
+            state.event.clear();
             let mut fin = false;
             while state.ctx.user.var_updates.len() > 0 {
-                let mut ids: SmallVec<[BindId; 24]> = smallvec![];
-                let mut batch = VAR_BATCH.take();
-                while let Some((id, v)) = state.ctx.user.var_updates.pop_front() {
-                    if ids.contains(&id) {
-                        state.ctx.user.var_updates.push_front((id, v));
-                        break;
+                state.event.clear();
+                for _ in 0..state.ctx.user.var_updates.len() {
+                    if let Some((id, v)) = state.ctx.user.var_updates.pop_front() {
+                        match state.event.variables.entry(id) {
+                            Entry::Vacant(e) => {
+                                e.insert(v);
+                            }
+                            Entry::Occupied(_) => {
+                                state.ctx.user.var_updates.push_back((id, v));
+                            }
+                        }
                     }
-                    ids.push(id);
-                    batch.push((id, v))
                 }
-                match n.update(&mut state.ctx, &Event::VarBatch(batch)) {
+                match n.update(&mut state.ctx, &mut state.event) {
                     None => (),
                     Some(v) if !fin && $pred(Ok(&v)) => fin = true,
                     v => {

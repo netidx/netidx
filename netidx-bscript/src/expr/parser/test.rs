@@ -1133,7 +1133,6 @@ fn struct0() {
         value: Arc::new(
             ExprKind::Struct {
                 args: Arc::from_iter([
-                    ("foo".into(), ExprKind::Constant(Value::I64(42)).to_expr()),
                     ("bar".into(), ExprKind::Ref { name: ["a"].into() }.to_expr()),
                     (
                         "baz".into(),
@@ -1146,6 +1145,7 @@ fn struct0() {
                         }
                         .to_expr(),
                     ),
+                    ("foo".into(), ExprKind::Constant(Value::I64(42)).to_expr()),
                 ]),
             }
             .to_expr(),
@@ -1153,6 +1153,43 @@ fn struct0() {
     }
     .to_expr();
     let s = "let a = { foo: 42, bar: a, baz: f(b) }";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
+fn struct1() {
+    let e = ExprKind::BindStruct {
+        export: false,
+        names: Arc::from_iter([
+            (literal!("bar"), None),
+            (literal!("baz"), Some(literal!("zam"))),
+            (literal!("foo"), Some(literal!("foo"))),
+        ]),
+        typ: None,
+        value: Arc::new(
+            ExprKind::Struct {
+                args: Arc::from_iter([
+                    ("bar".into(), ExprKind::Ref { name: ["a"].into() }.to_expr()),
+                    (
+                        "baz".into(),
+                        ExprKind::Apply {
+                            function: ["f"].into(),
+                            args: Arc::from_iter([(
+                                None,
+                                ExprKind::Ref { name: ["b"].into() }.to_expr(),
+                            )]),
+                        }
+                        .to_expr(),
+                    ),
+                    ("foo".into(), ExprKind::Constant(Value::I64(42)).to_expr()),
+                ]),
+            }
+            .to_expr(),
+        ),
+    }
+    .to_expr();
+    let s = "let { foo, bar: _, baz: zam } = { foo: 42, bar: a, baz: f(b) }";
     let pe = parse(s).unwrap();
     assert_eq!(e, pe)
 }
