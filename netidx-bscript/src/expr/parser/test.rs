@@ -1158,7 +1158,7 @@ fn struct0() {
 }
 
 #[test]
-fn struct1() {
+fn bindstruct() {
     let e = ExprKind::BindStruct {
         export: false,
         names: Arc::from_iter([
@@ -1190,6 +1190,21 @@ fn struct1() {
     }
     .to_expr();
     let s = "let { foo, bar: _, baz: zam } = { foo: 42, bar: a, baz: f(b) }";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
+fn structref() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([ExprKind::StructRef {
+            name: ["a"].into(),
+            field: literal!("foo"),
+        }
+        .to_expr()]),
+    }
+    .to_expr();
+    let s = "{ a.foo }";
     let pe = parse(s).unwrap();
     assert_eq!(e, pe)
 }
