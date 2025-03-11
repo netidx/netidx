@@ -543,6 +543,23 @@ fn select1() {
         ),
         (
             Pattern {
+                type_predicate: Type::Ref(["Foo"].into()),
+                structure_predicate: StructurePattern::Struct {
+                    all: None,
+                    exhaustive: false,
+                    binds: Arc::from_iter([
+                        (literal!("bar"), ValPat::Ignore),
+                        (literal!("baz"), ValPat::Bind(literal!("baz"))),
+                        (literal!("foo"), ValPat::Literal(Value::I64(42))),
+                        (literal!("foobar"), ValPat::Bind(literal!("a"))),
+                    ]),
+                },
+                guard: None,
+            },
+            ExprKind::Ref { name: ["a"].into() }.to_expr(),
+        ),
+        (
+            Pattern {
                 type_predicate: Type::Bottom(PhantomData),
                 structure_predicate: StructurePattern::BindAll {
                     name: ValPat::Bind(literal!("a")),
@@ -569,6 +586,7 @@ select foo(b) {
     Array<i64> as [a, b..] => a,
     Array<i64> as [a.., b] => a,
     Array<i64> as [1, 2, 42, a] => a,
+    Foo as { foo: 42, bar: _, baz, foobar: a, .. } => a,
     _ as a => a
 }"#;
     assert_eq!(exp, parse_expr(s).unwrap());
@@ -1205,6 +1223,19 @@ fn structref() {
     }
     .to_expr();
     let s = "{ a.foo }";
+    let pe = parse(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
+fn tupleref() {
+    let e = ExprKind::Do {
+        exprs: Arc::from_iter([
+            ExprKind::TupleRef { name: ["a"].into(), field: 2 }.to_expr()
+        ]),
+    }
+    .to_expr();
+    let s = "{ a.2 }";
     let pe = parse(s).unwrap();
     assert_eq!(e, pe)
 }
