@@ -324,7 +324,12 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
                     for (i, id) in binds.iter() {
                         if let Some(id) = id.id() {
                             if let Some(v) = a.get(*i) {
-                                event.variables.insert(id, v.clone());
+                                match v {
+                                    Value::Array(a) if a.len() == 2 => {
+                                        event.variables.insert(id, a[1].clone());
+                                    }
+                                    _ => (),
+                                }
                             }
                         }
                     }
@@ -384,7 +389,9 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
 
     pub(super) fn is_match(&self, typ: Typ, v: &Value) -> bool {
         let tmatch = match (&self.type_predicate, typ) {
-            (Type::Array(_), Typ::Array) | (Type::Tuple(_), Typ::Array) => true,
+            (Type::Array(_), Typ::Array)
+            | (Type::Tuple(_), Typ::Array)
+            | (Type::Struct(_), Typ::Array) => true,
             _ => self.type_predicate.contains(&Type::Primitive(typ.into())),
         };
         tmatch && {

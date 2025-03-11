@@ -834,3 +834,82 @@ run!(structs0, STRUCTS0, |v: Result<&Value>| match v {
     },
     _ => false,
 });
+
+const BINDSTRUCT: &str = r#"
+{
+  let x = { foo: "bar", bar: 42, baz: 84.0 };
+  let { foo: _, bar, baz } = x;
+  bar + baz
+}
+"#;
+
+run!(bindstruct, BINDSTRUCT, |v: Result<&Value>| match v {
+    Ok(Value::F64(126.0)) => true,
+    _ => false,
+});
+
+const SELECTSTRUCT: &str = r#"
+{
+  type T = { foo: string, bar: i64, baz: f64 };
+  let x = { foo: "bar", bar: 42, baz: 84.0 };
+  select x {
+    T as { foo: "foo", bar: 8, baz } => baz,
+    T as { bar, baz, .. } => bar + baz
+  }
+}
+"#;
+
+run!(selectstruct, SELECTSTRUCT, |v: Result<&Value>| match v {
+    Ok(Value::F64(126.0)) => true,
+    _ => false,
+});
+
+const STRUCTACCESSOR: &str = r#"
+{
+  let x = { foo: "bar", bar: 42, baz: 84.0 };
+  x.foo
+}
+"#;
+
+run!(structaccessor, STRUCTACCESSOR, |v: Result<&Value>| match v {
+    Ok(Value::String(s)) => s == "bar",
+    _ => false,
+});
+
+const TUPLEACCESSOR: &str = r#"
+{
+  let x = ( "bar", 42, 84.0 );
+  x.1
+}
+"#;
+
+run!(tupleaccessor, TUPLEACCESSOR, |v: Result<&Value>| match v {
+    Ok(Value::I64(42)) => true,
+    _ => false,
+});
+
+const STRUCTWITH0: &str = r#"
+{
+  let x = { foo: "bar", bar: 42, baz: 84.0 };
+  let x = { x with foo: 1 };
+  x.foo
+}
+"#;
+
+run!(structwith0, STRUCTWITH0, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const STRUCTWITH1: &str = r#"
+{
+  let x = { foo: "bar", bar: 42, baz: 84.0 };
+  let x = { x with bar: 1 };
+  x.bar + x.baz
+}
+"#;
+
+run!(structwith1, STRUCTWITH1, |v: Result<&Value>| match v {
+    Ok(Value::F64(85.0)) => true,
+    _ => false,
+});
