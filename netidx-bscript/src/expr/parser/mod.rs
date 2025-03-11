@@ -1280,7 +1280,7 @@ where
         token('{'),
         sptoken('}'),
         (
-            spmodpath().skip(space()).skip(spstring("with ")),
+            spmodpath().skip(space()).skip(spstring("with")).skip(space()),
             sep_by1((spfname().skip(sptoken(':')), expr()), csep()),
         ),
     )

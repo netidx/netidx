@@ -279,7 +279,9 @@ fn structure_pattern() -> impl Strategy<Value = StructurePattern> {
             collection::vec((random_fname(), val_pat()), (1, 10)),
             any::<bool>()
         )
-            .prop_map(|(all, b, exhaustive)| {
+            .prop_map(|(all, mut b, exhaustive)| {
+                b.sort_by_key(|(f, _)| f.clone());
+                b.dedup_by_key(|(f, _)| f.clone());
                 StructurePattern::Struct { all, exhaustive, binds: Arc::from_iter(b) }
             }),
         (
@@ -358,6 +360,8 @@ macro_rules! bind_struct {
                         }
                     }
                 }
+                n.sort_by_key(|(n, _)| n.clone());
+                n.dedup_by_key(|(n, _)| n.clone());
                 ExprKind::BindStruct {
                     names: Arc::from_iter(n),
                     typ,
@@ -603,7 +607,9 @@ macro_rules! binop {
 macro_rules! structwith {
     ($inner:expr) => {
         (modpath(), collection::vec((random_fname(), $inner), (1, 10))).prop_map(
-            |(name, replace)| {
+            |(name, mut replace)| {
+                replace.sort_by_key(|(f, _)| f.clone());
+                replace.dedup_by_key(|(f, _)| f.clone());
                 ExprKind::StructWith { name, replace: Arc::from_iter(replace) }.to_expr()
             },
         )
@@ -937,6 +943,25 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                 typ: typ0,
             },
             ExprKind::BindTuple {
+                names: name1,
+                export: export1,
+                value: value1,
+                typ: typ1,
+            },
+        ) => dbg!(
+            dbg!(name0 == name1)
+                && dbg!(export0 == export1)
+                && dbg!(check_type_opt(typ0, typ1))
+                && dbg!(check(value0, value1))
+        ),
+        (
+            ExprKind::BindStruct {
+                names: name0,
+                export: export0,
+                value: value0,
+                typ: typ0,
+            },
+            ExprKind::BindStruct {
                 names: name1,
                 export: export1,
                 value: value1,

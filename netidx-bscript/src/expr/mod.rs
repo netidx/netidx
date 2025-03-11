@@ -235,7 +235,7 @@ impl fmt::Display for StructurePattern {
                         write!(f, ", ")?
                     }
                 }
-                if *exhaustive {
+                if !exhaustive {
                     write!(f, "..")?
                 }
                 write!(f, "}}")
@@ -842,7 +842,7 @@ impl fmt::Display for ExprKind {
                 write!(f, "{}let {{", exp(*export))?;
                 for (i, (name, n)) in names.iter().enumerate() {
                     match n {
-                        None => write!(f, "_")?,
+                        None => write!(f, "{name}: _")?,
                         Some(n) if n == name => write!(f, "{n}")?,
                         Some(n) => write!(f, "{name}: {n}")?,
                     }

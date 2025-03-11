@@ -1242,6 +1242,6 @@ fn tupleref() {
 
 #[test]
 fn prop0() {
-    let s = "mod a{mod a{{(select u32:0 {_ as (error:\"[\", u32:0) => u32:0}, u32:0)}}}";
+    let s = "mod a {\n  a(\n    { a with\n      a: u32:0,\n      b: a____::a__________::a__________.10000000000000000000\n}\n)\n}\n";
     dbg!(parse(s).unwrap());
 }
