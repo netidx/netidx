@@ -1,5 +1,5 @@
 use crate::{
-    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern, StructurePattern, ValPat},
+    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern, StructurePattern},
     typ::{FnArgType, FnType, Refs, TVar, Type},
 };
 use anyhow::{bail, Result};
@@ -939,19 +939,6 @@ parser! {
     }
 }
 
-fn val_pat<I>() -> impl Parser<I, Output = ValPat>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    choice((
-        attempt(netidx_value(&VAL_ESC)).map(|v| ValPat::Literal(v)),
-        attempt(sptoken('_')).map(|_| ValPat::Ignore),
-        spfname().map(|name| ValPat::Bind(name)),
-    ))
-}
-
 fn slice_pattern<I>() -> impl Parser<I, Output = StructurePattern>
 where
     I: RangeStream<Token = char>,
@@ -966,7 +953,7 @@ where
                     Either::Left(s) => s,
                     Either::Right(_) => {
                         err = true;
-                        StructurePattern::Prim(ValPat::Ignore)
+                        StructurePattern::Ignore
                     }
                 }));
             if err {
@@ -1071,12 +1058,11 @@ where
                     attempt((spfname().skip(sptoken(':')), structure_pattern()))
                         .map(|(s, p)| (s, p, true)),
                     attempt(spfname()).map(|s| {
-                        let p = StructurePattern::Prim(ValPat::Bind(s.clone()));
+                        let p = StructurePattern::Bind(s.clone());
                         (s, p, true)
                     }),
-                    spstring("..").map(|_| {
-                        (literal!(""), StructurePattern::Prim(ValPat::Ignore), false)
-                    }),
+                    spstring("..")
+                        .map(|_| (literal!(""), StructurePattern::Ignore, false)),
                 )),
                 csep(),
             ),
@@ -1114,7 +1100,9 @@ where
         attempt(slice_pattern()),
         attempt(tuple_pattern()),
         attempt(struct_pattern()),
-        val_pat().map(|pat| StructurePattern::Prim(pat)),
+        attempt(netidx_value(&VAL_ESC)).map(|v| StructurePattern::Literal(v)),
+        attempt(sptoken('_')).map(|_| StructurePattern::Ignore),
+        spfname().map(|name| StructurePattern::Bind(name)),
     ))
 }
 

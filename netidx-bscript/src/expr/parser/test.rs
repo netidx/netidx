@@ -182,7 +182,7 @@ fn letbind() {
         ExprKind::Bind {
             export: false,
             typ: None,
-            pattern: StructurePattern::BindAll { name: ValPat::Bind(literal!("foo")) },
+            pattern: StructurePattern::Prim(ValPat::Bind(literal!("foo"))),
             value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
         }
         .to_expr(),

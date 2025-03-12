@@ -103,68 +103,11 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
     }
 }
 
-#[derive(Debug, Clone, PartialOrd, Ord)]
-pub enum ValPat {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StructurePattern {
     Ignore,
     Literal(Value),
     Bind(ArcStr),
-}
-
-impl fmt::Display for ValPat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ValPat::Ignore => write!(f, "_"),
-            ValPat::Literal(v) => write!(f, "{v}"),
-            ValPat::Bind(name) => write!(f, "{name}"),
-        }
-    }
-}
-
-#[cfg(not(test))]
-impl PartialEq for ValPat {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Ignore, Self::Ignore) => true,
-            (Self::Bind(t0), Self::Bind(t1)) => t0 == t1,
-            (Self::Literal(v0), Self::Literal(v1)) => v0 == v1,
-            (_, _) => false,
-        }
-    }
-}
-
-#[cfg(test)]
-impl PartialEq for ValPat {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Ignore, Self::Ignore) => true,
-            (Self::Bind(t0), Self::Bind(t1)) => t0 == t1,
-            (Self::Literal(v0), Self::Literal(v1)) => v0.approx_eq(v1),
-            (_, _) => false,
-        }
-    }
-}
-
-impl Eq for ValPat {}
-
-impl ValPat {
-    pub fn name(&self) -> Option<&ArcStr> {
-        match self {
-            ValPat::Ignore | ValPat::Literal(_) => None,
-            ValPat::Bind(s) => Some(s),
-        }
-    }
-
-    pub fn lit(&self) -> bool {
-        match self {
-            ValPat::Ignore | ValPat::Bind(_) => false,
-            ValPat::Literal(_) => true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum StructurePattern {
-    Prim(ValPat),
     Slice {
         all: Option<ArcStr>,
         binds: Arc<[StructurePattern]>,
@@ -193,8 +136,8 @@ pub enum StructurePattern {
 impl StructurePattern {
     fn with_names<'a>(&'a self, mut f: impl FnMut(&'a ArcStr)) {
         match self {
-            Self::Prim(ValPat::Bind(n)) => f(n),
-            Self::Prim(ValPat::Ignore | ValPat::Literal(_)) => (),
+            Self::Bind(n) => f(n),
+            Self::Ignore | Self::Literal(_) => (),
             Self::Slice { all, binds } => {
                 if let Some(n) = all {
                     f(n)
@@ -255,8 +198,8 @@ impl StructurePattern {
 
     pub fn infer_type_predicate(&self) -> Type<NoRefs> {
         match self {
-            Self::Prim(ValPat::Bind(_) | ValPat::Ignore) => Type::empty_tvar(),
-            Self::Prim(ValPat::Literal(v)) => Type::Primitive(Typ::get(v).into()),
+            Self::Bind(_) | Self::Ignore => Type::empty_tvar(),
+            Self::Literal(v) => Type::Primitive(Typ::get(v).into()),
             Self::Tuple { all: _, binds } => {
                 let mut typs: SmallVec<[Type<NoRefs>; 8]> = smallvec![];
                 for p in binds.iter() {
@@ -297,7 +240,9 @@ impl fmt::Display for StructurePattern {
             };
         }
         match self {
-            StructurePattern::Prim(pat) => write!(f, "{pat}"),
+            StructurePattern::Ignore => write!(f, "_"),
+            StructurePattern::Literal(v) => write!(f, "{v}"),
+            StructurePattern::Bind(n) => write!(f, "{n}"),
             StructurePattern::Slice { all, binds } => {
                 if let Some(all) = all {
                     write!(f, "{all}@ ")?
