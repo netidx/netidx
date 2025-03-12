@@ -267,8 +267,6 @@ where
                         )
                     }
                     (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::BindTuple { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::BindStruct { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::StructWith { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Array { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::StructRef { .. }, .. }), _)
@@ -783,17 +781,6 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    macro_rules! get_name {
-        ($p:expr) => {
-            match $p {
-                ValPat::Ignore => None,
-                ValPat::Bind(n) => Some(n.clone()),
-                ValPat::Literal(_) => {
-                    return unexpected_any("literals are not allowed in let").left()
-                }
-            }
-        };
-    }
     (
         optional(string("pub").skip(space())).map(|o| o.is_some()),
         spstring("let")
@@ -802,46 +789,8 @@ where
             .skip(spstring("=")),
         expr(),
     )
-        .then(|(export, (pat, typ), v)| {
-            let v = Arc::new(v);
-            match pat {
-                StructurePattern::BindAll { name } => value(
-                    ExprKind::Bind { export, name: get_name!(name), typ, value: v }
-                        .to_expr(),
-                )
-                .right(),
-                StructurePattern::Tuple { all: None, binds } => {
-                    let mut names: SmallVec<[Option<ArcStr>; 8]> = smallvec![];
-                    for p in binds.iter() {
-                        names.push(get_name!(p));
-                    }
-                    let names = Arc::from_iter(names);
-                    value(ExprKind::BindTuple { export, names, typ, value: v }.to_expr())
-                        .right()
-                }
-                StructurePattern::Struct { exhaustive, all: None, binds } => {
-                    if !exhaustive {
-                        return unexpected_any("struct binds must be exhaustive in let")
-                            .left();
-                    }
-                    let mut names: SmallVec<[(ArcStr, Option<ArcStr>); 8]> = smallvec![];
-                    for (n, p) in binds.iter() {
-                        names.push((n.clone(), get_name!(p)));
-                    }
-                    let names = Arc::from_iter(names);
-                    value(ExprKind::BindStruct { names, typ, export, value: v }.to_expr())
-                        .right()
-                }
-                StructurePattern::Struct { all: Some(_), .. }
-                | StructurePattern::Tuple { all: Some(_), .. } => {
-                    unexpected_any("all binds are not allowed in let").left()
-                }
-                StructurePattern::Slice { .. }
-                | StructurePattern::SlicePrefix { .. }
-                | StructurePattern::SliceSuffix { .. } => {
-                    unexpected_any("slice patterns are not allowed in let").left()
-                }
-            }
+        .map(|(export, (pattern, typ), v)| {
+            ExprKind::Bind { export, pattern, typ, value: Arc::new(v) }.to_expr()
         })
 }
 
@@ -1012,13 +961,14 @@ where
     macro_rules! all_left {
         ($pats:expr) => {{
             let mut err = false;
-            let pats = Arc::from_iter($pats.into_iter().map(|s| match s {
-                Either::Left(s) => s,
-                Either::Right(_) => {
-                    err = true;
-                    ValPat::Ignore
-                }
-            }));
+            let pats: Arc<[StructurePattern]> =
+                Arc::from_iter($pats.into_iter().map(|s| match s {
+                    Either::Left(s) => s,
+                    Either::Right(_) => {
+                        err = true;
+                        StructurePattern::BindAll { name: ValPat::Ignore }
+                    }
+                }));
             if err {
                 return unexpected_any("invalid pattern").left();
             }
@@ -1033,9 +983,7 @@ where
             sep_by(
                 choice((
                     attempt(spstring("..")).map(|_| Either::Right(None)),
-                    attempt(spfname().skip(spstring("..")))
-                        .map(|s| Either::Right(Some(s))),
-                    val_pat().map(|v| Either::Left(v)),
+                    structure_pattern().map(|p| Either::Left(p)),
                 )),
                 csep(),
             ),
@@ -1044,7 +992,7 @@ where
         .then(
             |(all, mut pats): (
                 Option<ArcStr>,
-                SmallVec<[Either<ValPat, Option<ArcStr>>; 8]>,
+                SmallVec<[Either<StructurePattern, Option<ArcStr>>; 8]>,
             )| {
                 if pats.len() == 0 {
                     value(StructurePattern::Slice { all, binds: Arc::from_iter([]) })
@@ -1095,9 +1043,9 @@ where
 {
     (
         optional(attempt(spfname().skip(sptoken('@')))),
-        between(sptoken('('), sptoken(')'), sep_by1(val_pat(), csep())),
+        between(sptoken('('), sptoken(')'), sep_by1(structure_pattern(), csep())),
     )
-        .then(|(all, binds): (Option<ArcStr>, SmallVec<[ValPat; 8]>)| {
+        .then(|(all, binds): (Option<ArcStr>, SmallVec<[StructurePattern; 8]>)| {
             if binds.len() < 2 {
                 unexpected_any("tuples must have at least 2 elements").left()
             } else {
@@ -1120,13 +1068,20 @@ where
             sptoken('}'),
             sep_by1(
                 choice((
-                    attempt((spfname().skip(sptoken(':')), val_pat()))
+                    attempt((spfname().skip(sptoken(':')), structure_pattern()))
                         .map(|(s, p)| (s, p, true)),
                     attempt(spfname()).map(|s| {
-                        let p = ValPat::Bind(s.clone());
+                        let p =
+                            StructurePattern::BindAll { name: ValPat::Bind(s.clone()) };
                         (s, p, true)
                     }),
-                    spstring("..").map(|_| (literal!(""), ValPat::Ignore, false)),
+                    spstring("..").map(|_| {
+                        (
+                            literal!(""),
+                            StructurePattern::BindAll { name: ValPat::Ignore },
+                            false,
+                        )
+                    }),
                 )),
                 csep(),
             ),
@@ -1135,7 +1090,7 @@ where
         .then(
             |(all, mut binds): (
                 Option<ArcStr>,
-                SmallVec<[(ArcStr, ValPat, bool); 8]>,
+                SmallVec<[(ArcStr, StructurePattern, bool); 8]>,
             )| {
                 let mut exhaustive = true;
                 binds.retain(|(_, _, ex)| {
@@ -1154,7 +1109,7 @@ where
         )
 }
 
-fn structure_pattern<I>() -> impl Parser<I, Output = StructurePattern>
+fn structure_pattern_<I>() -> impl Parser<I, Output = StructurePattern>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -1168,6 +1123,14 @@ where
     ))
 }
 
+parser! {
+    fn structure_pattern[I]()(I) -> StructurePattern
+    where [I: RangeStream<Token = char>, I::Range: Range]
+    {
+        structure_pattern_()
+    }
+}
+
 fn pattern<I>() -> impl Parser<I, Output = Pattern>
 where
     I: RangeStream<Token = char>,
@@ -1175,13 +1138,13 @@ where
     I::Range: Range,
 {
     (
-        typexp().skip(space().with(spstring("as "))),
+        optional(attempt(typexp().skip(space().with(spstring("as "))))),
         structure_pattern(),
         optional(attempt(space().with(spstring("if").with(space()).with(expr())))),
     )
         .map(
             |(type_predicate, structure_predicate, guard): (
-                Type<Refs>,
+                Option<Type<Refs>>,
                 StructurePattern,
                 Option<Expr>,
             )| { Pattern { type_predicate, structure_predicate, guard } },

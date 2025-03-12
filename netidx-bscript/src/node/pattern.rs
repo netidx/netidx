@@ -8,8 +8,9 @@ use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use fxhash::FxHashSet;
 use netidx::{publisher::Typ, subscriber::Value};
-use smallvec::SmallVec;
-use std::{fmt::Debug, hash::Hash, iter};
+use smallvec::{smallvec, SmallVec};
+use std::{fmt::Debug, hash::Hash};
+use triomphe::Arc;
 
 #[derive(Debug)]
 pub enum ValPNode {
@@ -56,15 +57,44 @@ impl ValPNode {
 
 #[derive(Debug)]
 pub enum StructPatternNode {
-    BindAll { name: ValPNode },
-    Slice { all: Option<BindId>, binds: Box<[ValPNode]> },
-    SlicePrefix { all: Option<BindId>, prefix: Box<[ValPNode]>, tail: Option<BindId> },
-    SliceSuffix { all: Option<BindId>, head: Option<BindId>, suffix: Box<[ValPNode]> },
-    Struct { all: Option<BindId>, binds: Box<[(usize, ValPNode)]> },
+    BindAll {
+        name: ValPNode,
+    },
+    Slice {
+        tuple: bool,
+        all: Option<BindId>,
+        binds: Box<[StructPatternNode]>,
+    },
+    SlicePrefix {
+        all: Option<BindId>,
+        prefix: Box<[StructPatternNode]>,
+        tail: Option<BindId>,
+    },
+    SliceSuffix {
+        all: Option<BindId>,
+        head: Option<BindId>,
+        suffix: Box<[StructPatternNode]>,
+    },
+    Struct {
+        all: Option<BindId>,
+        binds: Box<[(usize, StructPatternNode)]>,
+    },
 }
 
 impl StructPatternNode {
-    fn compile<C: Ctx, E: UserEvent>(
+    pub fn compile<C: Ctx, E: UserEvent>(
+        ctx: &mut ExecCtx<C, E>,
+        type_predicate: &Type<NoRefs>,
+        spec: &StructurePattern,
+        scope: &ModPath,
+    ) -> Result<Self> {
+        if !spec.binds_uniq() {
+            bail!("bound variables must have unique names")
+        }
+        Self::compile_int(ctx, type_predicate, spec, scope)
+    }
+
+    fn compile_int<C: Ctx, E: UserEvent>(
         ctx: &mut ExecCtx<C, E>,
         type_predicate: &Type<NoRefs>,
         spec: &StructurePattern,
@@ -74,15 +104,6 @@ impl StructPatternNode {
             ($all:expr, $single:expr, $multi:expr) => {
                 match &type_predicate {
                     Type::Array(et) => {
-                        let names = $multi
-                            .iter()
-                            .map(|n| n.name())
-                            .chain(iter::once($single.as_ref()))
-                            .chain(iter::once($all.as_ref()))
-                            .filter_map(|x| x);
-                        if !uniq(names) {
-                            bail!("bound variables must have unique names")
-                        }
                         let all = $all.as_ref().map(|n| {
                             ctx.env.bind_variable(scope, n, type_predicate.clone()).id
                         });
@@ -91,25 +112,13 @@ impl StructPatternNode {
                         });
                         let multi = $multi
                             .iter()
-                            .map(|n| ValPNode::compile(ctx, et, n, scope))
-                            .collect::<Result<Box<[ValPNode]>>>()?;
+                            .map(|n| Self::compile_int(ctx, et, n, scope))
+                            .collect::<Result<Box<[Self]>>>()?;
                         (all, single, multi)
                     }
                     t => bail!("slice patterns can't match {t}"),
                 }
             };
-        }
-        macro_rules! check_names {
-            ($binds:expr, $all:expr, $map:expr) => {{
-                let names = $binds
-                    .iter()
-                    .map($map)
-                    .chain(iter::once($all.as_ref()))
-                    .filter_map(|x| x);
-                if !uniq(names) {
-                    bail!("bound variables must have unique names")
-                }
-            }};
         }
         let t = match &spec {
             StructurePattern::BindAll { name } => StructPatternNode::BindAll {
@@ -125,21 +134,19 @@ impl StructPatternNode {
             }
             StructurePattern::Slice { all, binds } => match &type_predicate {
                 Type::Array(et) => {
-                    check_names!(binds, all, |x| x.name());
                     let all = all.as_ref().map(|n| {
                         ctx.env.bind_variable(scope, n, type_predicate.clone()).id
                     });
                     let binds = binds
                         .iter()
-                        .map(|b| ValPNode::compile(ctx, et, b, scope))
-                        .collect::<Result<Box<[ValPNode]>>>()?;
-                    StructPatternNode::Slice { all, binds }
+                        .map(|b| Self::compile_int(ctx, et, b, scope))
+                        .collect::<Result<Box<[Self]>>>()?;
+                    StructPatternNode::Slice { tuple: false, all, binds }
                 }
                 t => bail!("slice patterns can't match {t}"),
             },
             StructurePattern::Tuple { all, binds } => match &type_predicate {
                 Type::Tuple(elts) => {
-                    check_names!(binds, all, |x| x.name());
                     if binds.len() != elts.len() {
                         bail!("expected a tuple of length {}", elts.len())
                     }
@@ -149,13 +156,18 @@ impl StructPatternNode {
                     let binds = elts
                         .iter()
                         .zip(binds.iter())
-                        .map(|(t, b)| ValPNode::compile(ctx, t, b, scope))
-                        .collect::<Result<Box<[ValPNode]>>>()?;
-                    StructPatternNode::Slice { all, binds }
+                        .map(|(t, b)| Self::compile_int(ctx, t, b, scope))
+                        .collect::<Result<Box<[Self]>>>()?;
+                    StructPatternNode::Slice { tuple: true, all, binds }
                 }
                 t => bail!("tuple patterns can't match {t}"),
             },
             StructurePattern::Struct { exhaustive, all, binds } => {
+                struct Ifo {
+                    index: usize,
+                    pattern: StructurePattern,
+                    typ: Type<NoRefs>,
+                }
                 match &type_predicate {
                     Type::Struct(elts) => {
                         let binds = binds
@@ -164,7 +176,11 @@ impl StructPatternNode {
                                 let r = elts.iter().enumerate().find_map(
                                     |(i, (name, typ))| {
                                         if field == name {
-                                            Some((i, pat.clone(), typ.clone()))
+                                            Some(Ifo {
+                                                index: i,
+                                                pattern: pat.clone(),
+                                                typ: typ.clone(),
+                                            })
                                         } else {
                                             None
                                         }
@@ -172,8 +188,7 @@ impl StructPatternNode {
                                 );
                                 r.ok_or_else(|| anyhow!("no such struct field {field}"))
                             })
-                            .collect::<Result<SmallVec<[(usize, ValPat, Type<NoRefs>); 8]>>>()?;
-                        check_names!(binds, all, |(_, p, _)| p.name());
+                            .collect::<Result<SmallVec<[Ifo; 8]>>>()?;
                         if *exhaustive && binds.len() < elts.len() {
                             bail!("missing bindings for struct fields")
                         }
@@ -182,10 +197,18 @@ impl StructPatternNode {
                         });
                         let binds = binds
                             .iter()
-                            .map(|(i, p, t)| {
-                                Ok((*i, ValPNode::compile(ctx, t, p, scope)?))
+                            .map(|ifo| {
+                                Ok((
+                                    ifo.index,
+                                    Self::compile_int(
+                                        ctx,
+                                        &ifo.typ,
+                                        &ifo.pattern,
+                                        scope,
+                                    )?,
+                                ))
                             })
-                            .collect::<Result<Box<[(usize, ValPNode)]>>>()?;
+                            .collect::<Result<Box<[(usize, Self)]>>>()?;
                         StructPatternNode::Struct { all, binds }
                     }
                     t => bail!("struct patterns can't match {t}"),
@@ -193,6 +216,187 @@ impl StructPatternNode {
             }
         };
         Ok(t)
+    }
+
+    pub fn bind<F: FnMut(BindId, Value)>(&self, v: &Value, mut f: F) {
+        match &self {
+            StructPatternNode::BindAll { name } => {
+                if let Some(id) = name.id() {
+                    f(id, v.clone())
+                }
+            }
+            StructPatternNode::Slice { tuple: _, all, binds } => match v {
+                Value::Array(a) if a.len() == binds.len() => {
+                    if let Some(id) = all {
+                        f(*id, v.clone());
+                    }
+                    for (j, n) in binds.iter().enumerate() {
+                        n.bind(&a[j], &mut f)
+                    }
+                }
+                _ => (),
+            },
+            StructPatternNode::SlicePrefix { all, prefix, tail } => match v {
+                Value::Array(a) if a.len() >= prefix.len() => {
+                    if let Some(id) = all {
+                        f(*id, v.clone())
+                    }
+                    for (j, n) in prefix.iter().enumerate() {
+                        n.bind(&a[j], &mut f)
+                    }
+                    if let Some(id) = tail {
+                        let ss = a.subslice(prefix.len()..).unwrap();
+                        f(*id, Value::Array(ss))
+                    }
+                }
+                _ => (),
+            },
+            StructPatternNode::SliceSuffix { all, head, suffix } => match v {
+                Value::Array(a) if a.len() >= suffix.len() => {
+                    if let Some(id) = all {
+                        f(*id, v.clone())
+                    }
+                    if let Some(id) = head {
+                        let ss = a.subslice(..suffix.len()).unwrap();
+                        f(*id, Value::Array(ss))
+                    }
+                    let tail = a.subslice(suffix.len()..).unwrap();
+                    for (j, n) in suffix.iter().enumerate() {
+                        n.bind(&tail[j], &mut f)
+                    }
+                }
+                _ => (),
+            },
+            StructPatternNode::Struct { all, binds } => match v {
+                Value::Array(a) if a.len() >= binds.len() => {
+                    if let Some(id) = all {
+                        f(*id, v.clone())
+                    }
+                    for (i, n) in binds.iter() {
+                        if let Some(v) = a.get(*i) {
+                            match v {
+                                Value::Array(a) if a.len() == 2 => n.bind(&a[1], &mut f),
+                                _ => (),
+                            }
+                        }
+                    }
+                }
+                _ => (),
+            },
+        }
+    }
+
+    pub fn unbind<F: FnMut(BindId)>(&self, mut f: F) {
+        match &self {
+            StructPatternNode::BindAll { name } => {
+                if let Some(id) = name.id() {
+                    f(id)
+                }
+            }
+            StructPatternNode::Slice { tuple: _, all, binds } => {
+                if let Some(id) = all {
+                    f(*id)
+                }
+                for n in binds.iter() {
+                    n.unbind(&mut f)
+                }
+            }
+            StructPatternNode::SlicePrefix { all, prefix, tail } => {
+                if let Some(id) = all {
+                    f(*id)
+                }
+                if let Some(id) = tail {
+                    f(*id)
+                }
+                for n in prefix.iter() {
+                    n.unbind(&mut f)
+                }
+            }
+            StructPatternNode::SliceSuffix { all, head, suffix } => {
+                if let Some(id) = all {
+                    f(*id)
+                }
+                if let Some(id) = head {
+                    f(*id)
+                }
+                for n in suffix.iter() {
+                    n.unbind(&mut f)
+                }
+            }
+            StructPatternNode::Struct { all, binds } => {
+                if let Some(id) = all {
+                    f(*id)
+                }
+                for (_, n) in binds.iter() {
+                    n.unbind(&mut f)
+                }
+            }
+        }
+    }
+
+    pub fn is_match(&self, v: &Value) -> bool {
+        match &self {
+            StructPatternNode::BindAll { name } => name.is_match(v),
+            StructPatternNode::Slice { tuple: _, all: _, binds } => match v {
+                Value::Array(a) => {
+                    a.len() == binds.len()
+                        && binds.iter().zip(a.iter()).all(|(b, v)| b.is_match(v))
+                }
+                _ => false,
+            },
+            StructPatternNode::SlicePrefix { all: _, prefix, tail: _ } => match v {
+                Value::Array(a) => {
+                    a.len() >= prefix.len()
+                        && prefix.iter().zip(a.iter()).all(|(b, v)| b.is_match(v))
+                }
+                _ => false,
+            },
+            StructPatternNode::SliceSuffix { all: _, head: _, suffix } => match v {
+                Value::Array(a) => {
+                    a.len() >= suffix.len()
+                        && suffix
+                            .iter()
+                            .zip(a.iter().skip(a.len() - suffix.len()))
+                            .all(|(b, v)| b.is_match(v))
+                }
+                _ => false,
+            },
+            StructPatternNode::Struct { all: _, binds } => match v {
+                Value::Array(a) => {
+                    a.len() >= binds.len()
+                        && binds.iter().all(|(i, p)| match a.get(*i) {
+                            Some(Value::Array(a)) if a.len() == 2 => p.is_match(&a[1]),
+                            _ => false,
+                        })
+                }
+                _ => false,
+            },
+        }
+    }
+
+    pub fn is_refutable(&self) -> bool {
+        match &self {
+            Self::BindAll { name: ValPNode::Bind(_) | ValPNode::Ignore } => false,
+            Self::BindAll { name: ValPNode::Literal(_) } => true,
+            Self::Slice { tuple: true, all: _, binds } => {
+                binds.iter().any(|p| p.is_refutable())
+            }
+            Self::Struct { all: _, binds } => binds.iter().any(|(_, p)| p.is_refutable()),
+            Self::Slice { tuple: false, .. }
+            | Self::SlicePrefix { .. }
+            | Self::SliceSuffix { .. } => true,
+        }
+    }
+
+    pub fn lambda_ok(&self) -> Option<BindId> {
+        match self {
+            Self::BindAll { name: ValPNode::Bind(id) } => Some(*id),
+            Self::BindAll { name: ValPNode::Literal(_) | ValPNode::Ignore }
+            | Self::Slice { .. }
+            | Self::SlicePrefix { .. }
+            | Self::SliceSuffix { .. }
+            | Self::Struct { .. } => None,
+        }
     }
 }
 
@@ -202,18 +406,6 @@ pub struct PatternNode<C: Ctx, E: UserEvent> {
     pub guard: Option<Cached<C, E>>,
 }
 
-fn uniq<'a, T: Hash + Eq + 'a, I: IntoIterator<Item = &'a T> + 'a>(iter: I) -> bool {
-    let mut set = FxHashSet::default();
-    let mut uniq = true;
-    for e in iter {
-        uniq &= set.insert(e);
-        if !uniq {
-            break;
-        }
-    }
-    uniq
-}
-
 impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
     pub(super) fn compile(
         ctx: &mut ExecCtx<C, E>,
@@ -221,7 +413,10 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         scope: &ModPath,
         top_id: ExprId,
     ) -> Result<Self> {
-        let type_predicate = spec.type_predicate.resolve_typrefs(scope, &ctx.env)?;
+        let type_predicate = match &spec.type_predicate {
+            Some(t) => t.resolve_typrefs(scope, &ctx.env)?,
+            None => spec.structure_predicate.infer_type_predicate(),
+        };
         match &type_predicate {
             Type::Fn(_) => bail!("can't match on Fn type"),
             Type::Bottom(_)
@@ -246,6 +441,18 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         Ok(PatternNode { type_predicate, structure_predicate, guard })
     }
 
+    pub(super) fn bind_event(&self, event: &mut Event<E>, v: &Value) {
+        self.structure_predicate.bind(v, |id, v| {
+            event.variables.insert(id, v);
+        })
+    }
+
+    pub(super) fn unbind_event(&self, event: &mut Event<E>) {
+        self.structure_predicate.unbind(|id| {
+            event.variables.remove(&id);
+        })
+    }
+
     pub(super) fn extract_err(&self) -> Option<ArcStr> {
         self.guard.as_ref().and_then(|n| n.node.extract_err())
     }
@@ -261,132 +468,6 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         }
     }
 
-    pub(super) fn bind_event(&self, event: &mut Event<E>, v: &Value) {
-        match &self.structure_predicate {
-            StructPatternNode::BindAll { name } => {
-                if let Some(id) = name.id() {
-                    event.variables.insert(id, v.clone());
-                }
-            }
-            StructPatternNode::Slice { all, binds } => match v {
-                Value::Array(a) if a.len() == binds.len() => {
-                    if let Some(id) = all {
-                        event.variables.insert(*id, v.clone());
-                    }
-                    for (j, n) in binds.iter().enumerate() {
-                        if let Some(id) = n.id() {
-                            event.variables.insert(id, a[j].clone());
-                        }
-                    }
-                }
-                _ => (),
-            },
-            StructPatternNode::SlicePrefix { all, prefix, tail } => match v {
-                Value::Array(a) if a.len() >= prefix.len() => {
-                    if let Some(id) = all {
-                        event.variables.insert(*id, v.clone());
-                    }
-                    for (j, n) in prefix.iter().enumerate() {
-                        if let Some(id) = n.id() {
-                            event.variables.insert(id, a[j].clone());
-                        }
-                    }
-                    if let Some(id) = tail {
-                        let ss = a.subslice(prefix.len()..).unwrap();
-                        event.variables.insert(*id, Value::Array(ss));
-                    }
-                }
-                _ => (),
-            },
-            StructPatternNode::SliceSuffix { all, head, suffix } => match v {
-                Value::Array(a) if a.len() >= suffix.len() => {
-                    if let Some(id) = all {
-                        event.variables.insert(*id, v.clone());
-                    }
-                    if let Some(id) = head {
-                        let ss = a.subslice(..suffix.len()).unwrap();
-                        event.variables.insert(*id, Value::Array(ss));
-                    }
-                    let tail = a.subslice(suffix.len()..).unwrap();
-                    for (j, n) in suffix.iter().enumerate() {
-                        if let Some(id) = n.id() {
-                            event.variables.insert(id, tail[j].clone());
-                        }
-                    }
-                }
-                _ => (),
-            },
-            StructPatternNode::Struct { all, binds } => match v {
-                Value::Array(a) if a.len() >= binds.len() => {
-                    if let Some(id) = all {
-                        event.variables.insert(*id, v.clone());
-                    }
-                    for (i, id) in binds.iter() {
-                        if let Some(id) = id.id() {
-                            if let Some(v) = a.get(*i) {
-                                match v {
-                                    Value::Array(a) if a.len() == 2 => {
-                                        event.variables.insert(id, a[1].clone());
-                                    }
-                                    _ => (),
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => (),
-            },
-        }
-    }
-
-    pub(super) fn unbind_event(&self, event: &mut Event<E>) {
-        match &self.structure_predicate {
-            StructPatternNode::BindAll { name } => {
-                if let Some(id) = name.id() {
-                    event.variables.remove(&id);
-                }
-            }
-            StructPatternNode::Slice { all, binds } => {
-                if let Some(id) = all {
-                    event.variables.remove(id);
-                }
-                for id in binds.iter().filter_map(|b| b.id()) {
-                    event.variables.remove(&id);
-                }
-            }
-            StructPatternNode::SlicePrefix { all, prefix, tail } => {
-                if let Some(id) = all {
-                    event.variables.remove(id);
-                }
-                if let Some(id) = tail {
-                    event.variables.remove(id);
-                }
-                for id in prefix.iter().filter_map(|n| n.id()) {
-                    event.variables.remove(&id);
-                }
-            }
-            StructPatternNode::SliceSuffix { all, head, suffix } => {
-                if let Some(id) = all {
-                    event.variables.remove(id);
-                }
-                if let Some(id) = head {
-                    event.variables.remove(id);
-                }
-                for id in suffix.iter().filter_map(|p| p.id()) {
-                    event.variables.remove(&id);
-                }
-            }
-            StructPatternNode::Struct { all, binds } => {
-                if let Some(id) = all {
-                    event.variables.remove(id);
-                }
-                for id in binds.iter().filter_map(|(_, p)| p.id()) {
-                    event.variables.remove(&id);
-                }
-            }
-        }
-    }
-
     pub(super) fn is_match(&self, typ: Typ, v: &Value) -> bool {
         let tmatch = match (&self.type_predicate, typ) {
             (Type::Array(_), Typ::Array)
@@ -394,53 +475,15 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
             | (Type::Struct(_), Typ::Array) => true,
             _ => self.type_predicate.contains(&Type::Primitive(typ.into())),
         };
-        tmatch && {
-            let smatch = match &self.structure_predicate {
-                StructPatternNode::BindAll { name } => name.is_match(v),
-                StructPatternNode::Slice { all: _, binds } => match v {
-                    Value::Array(a) => {
-                        a.len() == binds.len()
-                            && binds.iter().zip(a.iter()).all(|(b, v)| b.is_match(v))
-                    }
-                    _ => false,
-                },
-                StructPatternNode::SlicePrefix { all: _, prefix, tail: _ } => match v {
-                    Value::Array(a) => {
-                        a.len() >= prefix.len()
-                            && prefix.iter().zip(a.iter()).all(|(b, v)| b.is_match(v))
-                    }
-                    _ => false,
-                },
-                StructPatternNode::SliceSuffix { all: _, head: _, suffix } => match v {
-                    Value::Array(a) => {
-                        a.len() >= suffix.len()
-                            && suffix
-                                .iter()
-                                .zip(a.iter().skip(a.len() - suffix.len()))
-                                .all(|(b, v)| b.is_match(v))
-                    }
-                    _ => false,
-                },
-                StructPatternNode::Struct { all: _, binds } => match v {
-                    Value::Array(a) => {
-                        a.len() >= binds.len()
-                            && binds.iter().all(|(i, p)| match a.get(*i) {
-                                Some(v) => p.is_match(v),
-                                None => false,
-                            })
-                    }
-                    _ => false,
-                },
-            };
-            smatch
-                && match &self.guard {
-                    None => true,
-                    Some(g) => g
-                        .cached
-                        .as_ref()
-                        .and_then(|v| v.clone().get_as::<bool>())
-                        .unwrap_or(false),
-                }
-        }
+        tmatch
+            && self.structure_predicate.is_match(v)
+            && match &self.guard {
+                None => true,
+                Some(g) => g
+                    .cached
+                    .as_ref()
+                    .and_then(|v| v.clone().get_as::<bool>())
+                    .unwrap_or(false),
+            }
     }
 }

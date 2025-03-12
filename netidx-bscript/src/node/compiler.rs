@@ -1,7 +1,11 @@
 use crate::{
     env::{Bind, LambdaBind},
     expr::{Expr, ExprId, ExprKind, ModPath},
-    node::{lambda, pattern::PatternNode, Cached, Node, NodeKind},
+    node::{
+        lambda,
+        pattern::{PatternNode, StructPatternNode},
+        Cached, Node, NodeKind,
+    },
     typ::Type,
     Ctx, ExecCtx, UserEvent,
 };
@@ -293,30 +297,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             let (args, f) = (args.clone(), f.clone());
             compile_apply(ctx, spec, scope, top_id, args, f)
         }
-        Expr { kind: ExprKind::Bind { name, typ, export: _, value }, id: _ } => {
-            let node = compile(ctx, (**value).clone(), &scope, top_id);
-            if node.is_err() {
-                return error!("", vec![node]);
-            }
-            let typ = match typ {
-                None => node.typ.clone(),
-                Some(typ) => match typ.resolve_typrefs(scope, &ctx.env) {
-                    Ok(typ) => typ.clone(),
-                    Err(e) => return error!("{e}", vec![node]),
-                },
-            };
-            let id = name.as_ref().map(|name| {
-                let bind = ctx.env.bind_variable(scope, &**name, typ.clone());
-                bind.fun = node.find_lambda();
-                bind.id
-            });
-            let kind = NodeKind::Bind(id, Box::new(node));
-            Node { spec: Box::new(spec), typ, kind }
-        }
-        Expr { kind: ExprKind::BindTuple { export: _, names, typ, value }, id: _ } => {
-            if names.len() < 2 {
-                return error!("BindTuple expected a tuple", vec![]);
-            }
+        Expr { kind: ExprKind::Bind { pattern, typ, export: _, value }, id: _ } => {
             let node = compile(ctx, (**value).clone(), &scope, top_id);
             if node.is_err() {
                 return error!("", vec![node]);
@@ -326,48 +307,29 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                     Ok(typ) => typ.clone(),
                     Err(e) => return error!("{e}", vec![node]),
                 },
-                None => Type::Tuple(Arc::from_iter(
-                    (0..names.len()).map(|_| Type::empty_tvar()),
-                )),
+                None => {
+                    let pt = pattern.infer_type_predicate();
+                    let nt = &node.typ;
+                    if !pt.contains(nt) {
+                        return error!("pattern type {pt} vs {nt}", vec![node]);
+                    }
+                    pt
+                }
             };
-            let (tlen, typs) = match &typ {
-                Type::Tuple(inner) => (inner.len(), inner.iter()),
-                _ => return error!("BindTuple expected a tuple type", vec![node]),
+            let pn = match StructPatternNode::compile(ctx, &typ, pattern, scope) {
+                Ok(p) => p,
+                Err(e) => return error!("{e:?}", vec![node]),
             };
-            if tlen != names.len() {
-                return error!("expected tuple of length {}", vec![node], names.len());
+            if pn.is_refutable() {
+                return error!("refutable patterns are not allowed in let", vec![node]);
             }
-            let ids = names.iter().zip(typs.into_iter()).map(|(n, t)| {
-                n.as_ref().map(|n| ctx.env.bind_variable(scope, &n, t.clone()).id)
-            });
-            let kind = NodeKind::BindTuple(Box::from_iter(ids), Box::new(node));
-            Node { spec: Box::new(spec), typ, kind }
-        }
-        Expr { kind: ExprKind::BindStruct { export: _, names, typ, value }, id: _ } => {
-            let node = compile(ctx, (**value).clone(), &scope, top_id);
-            if node.is_err() {
-                return error!("", vec![node]);
-            }
-            let typ = match typ {
-                Some(typ) => match typ.resolve_typrefs(scope, &ctx.env) {
-                    Ok(typ) => typ.clone(),
-                    Err(e) => return error!("{e}", vec![node]),
-                },
-                None => Type::Struct(Arc::from_iter(
-                    names.iter().map(|(name, _)| (name.clone(), Type::empty_tvar())),
-                )),
+            if let Some(l) = node.find_lambda() {
+                match pn.lambda_ok() {
+                    Some(id) => ctx.env.by_id[&id].fun = Some(l),
+                    None => return error!("can't bind lambda to {pattern}", vec![node]),
+                }
             };
-            let (tlen, typs) = match &typ {
-                Type::Struct(inner) => (inner.len(), inner.iter()),
-                _ => return error!("BindStruct expected a struct type", vec![node]),
-            };
-            if tlen != names.len() {
-                return error!("expected struct of length {}", vec![node], names.len());
-            }
-            let ids = names.iter().zip(typs.into_iter()).map(|((_, n), (_, t))| {
-                n.as_ref().map(|n| ctx.env.bind_variable(scope, &n, t.clone()).id)
-            });
-            let kind = NodeKind::BindStruct(Box::from_iter(ids), Box::new(node));
+            let kind = NodeKind::Bind(Box::new(pn), Box::new(node));
             Node { spec: Box::new(spec), typ, kind }
         }
         Expr { kind: ExprKind::Qop(e), id: _ } => {

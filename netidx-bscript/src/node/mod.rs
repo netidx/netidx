@@ -9,6 +9,7 @@ use arcstr::{literal, ArcStr};
 use compact_str::{format_compact, CompactString};
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
+use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
 use std::{fmt, marker::PhantomData};
 use triomphe::Arc;
@@ -65,9 +66,7 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
     Constant(Value),
     Module(Box<[Node<C, E>]>),
     Do(Box<[Node<C, E>]>),
-    Bind(Option<BindId>, Box<Node<C, E>>),
-    BindTuple(Box<[Option<BindId>]>, Box<Node<C, E>>),
-    BindStruct(Box<[Option<BindId>]>, Box<Node<C, E>>),
+    Bind(Box<StructPatternNode>, Box<Node<C, E>>),
     Ref(BindId),
     StructRef(BindId, usize),
     TupleRef(BindId, usize),
@@ -447,54 +446,16 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
             }
             NodeKind::Apply { args, function } => function.update(ctx, args, event),
-            NodeKind::BindTuple(binds, rhs) => {
+            NodeKind::Bind(pattern, rhs) => {
                 if let Some(v) = rhs.update(ctx, event) {
-                    if ctx.dbg_ctx.trace {
-                        ctx.dbg_ctx.add_event(eid, Some(event.clone()), v.clone())
-                    }
-                    if let Value::Array(a) = v {
-                        if binds.len() == a.len() {
-                            for (id, v) in binds.iter().zip(a.iter()) {
-                                if let Some(id) = id {
-                                    ctx.user.set_var(*id, v.clone());
-                                }
-                            }
-                        }
-                    }
+                    pattern.bind(&v, |id, v| ctx.user.set_var(id, v))
                 }
                 None
             }
-            NodeKind::BindStruct(binds, rhs) => {
+            NodeKind::Connect(id, rhs) => {
                 if let Some(v) = rhs.update(ctx, event) {
-                    if ctx.dbg_ctx.trace {
-                        ctx.dbg_ctx.add_event(eid, Some(event.clone()), v.clone())
-                    }
-                    if let Value::Array(a) = v {
-                        if binds.len() == a.len() {
-                            for (id, v) in binds.iter().zip(a.iter()) {
-                                match (id, v) {
-                                    (Some(id), Value::Array(a)) if a.len() == 2 => {
-                                        ctx.user.set_var(*id, a[1].clone());
-                                    }
-                                    _ => (),
-                                }
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            NodeKind::Connect(id, rhs) | NodeKind::Bind(Some(id), rhs) => {
-                if let Some(v) = rhs.update(ctx, event) {
-                    if ctx.dbg_ctx.trace {
-                        ctx.dbg_ctx.add_event(eid, Some(event.clone()), v.clone())
-                    }
                     ctx.user.set_var(*id, v)
                 }
-                None
-            }
-            NodeKind::Bind(None, rhs) => {
-                rhs.update(ctx, event);
                 None
             }
             NodeKind::Ref(bid) => event.variables.get(bid).map(|v| v.clone()),

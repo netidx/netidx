@@ -1,8 +1,9 @@
-use crate::typ::{Refs, TVar, Type};
+use crate::typ::{NoRefs, Refs, TVar, Type};
 use arcstr::ArcStr;
 use compact_str::{format_compact, CompactString};
 use netidx::{
     path::Path,
+    publisher::Typ,
     subscriber::Value,
     utils::{self, Either},
 };
@@ -11,10 +12,12 @@ use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
 };
+use smallvec::{smallvec, SmallVec};
 use std::{
     borrow::Borrow,
     cmp::{Ordering, PartialEq, PartialOrd},
     fmt::{self, Display, Write},
+    marker::PhantomData,
     ops::Deref,
     result,
     str::FromStr,
@@ -161,12 +164,132 @@ impl ValPat {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StructurePattern {
-    BindAll { name: ValPat },
-    Slice { all: Option<ArcStr>, binds: Arc<[ValPat]> },
-    SlicePrefix { all: Option<ArcStr>, prefix: Arc<[ValPat]>, tail: Option<ArcStr> },
-    SliceSuffix { all: Option<ArcStr>, head: Option<ArcStr>, suffix: Arc<[ValPat]> },
-    Tuple { all: Option<ArcStr>, binds: Arc<[ValPat]> },
-    Struct { exhaustive: bool, all: Option<ArcStr>, binds: Arc<[(ArcStr, ValPat)]> },
+    BindAll {
+        name: ValPat,
+    },
+    Slice {
+        all: Option<ArcStr>,
+        binds: Arc<[StructurePattern]>,
+    },
+    SlicePrefix {
+        all: Option<ArcStr>,
+        prefix: Arc<[StructurePattern]>,
+        tail: Option<ArcStr>,
+    },
+    SliceSuffix {
+        all: Option<ArcStr>,
+        head: Option<ArcStr>,
+        suffix: Arc<[StructurePattern]>,
+    },
+    Tuple {
+        all: Option<ArcStr>,
+        binds: Arc<[StructurePattern]>,
+    },
+    Struct {
+        exhaustive: bool,
+        all: Option<ArcStr>,
+        binds: Arc<[(ArcStr, StructurePattern)]>,
+    },
+}
+
+impl StructurePattern {
+    fn with_names<'a>(&'a self, mut f: impl FnMut(&'a ArcStr)) {
+        match self {
+            Self::BindAll { name: ValPat::Bind(n) } => f(n),
+            Self::BindAll { name: ValPat::Ignore | ValPat::Literal(_) } => (),
+            Self::Slice { all, binds } => {
+                if let Some(n) = all {
+                    f(n)
+                }
+                for t in binds.iter() {
+                    t.with_names(&mut f)
+                }
+            }
+            Self::SlicePrefix { all, prefix, tail } => {
+                if let Some(n) = all {
+                    f(n)
+                }
+                if let Some(n) = tail {
+                    f(n)
+                }
+                for t in prefix.iter() {
+                    t.with_names(&mut f)
+                }
+            }
+            Self::SliceSuffix { all, head, suffix } => {
+                if let Some(n) = all {
+                    f(n)
+                }
+                if let Some(n) = head {
+                    f(n)
+                }
+                for t in suffix.iter() {
+                    t.with_names(&mut f)
+                }
+            }
+            Self::Tuple { all, binds } => {
+                if let Some(n) = all {
+                    f(n)
+                }
+                for t in binds.iter() {
+                    t.with_names(&mut f)
+                }
+            }
+            Self::Struct { exhaustive: _, all, binds } => {
+                if let Some(n) = all {
+                    f(n)
+                }
+                for (_, t) in binds.iter() {
+                    t.with_names(&mut f)
+                }
+            }
+        }
+    }
+
+    pub fn binds_uniq(&self) -> bool {
+        let mut names: SmallVec<[&ArcStr; 16]> = smallvec![];
+        self.with_names(|s| names.push(s));
+        names.sort();
+        let len = names.len();
+        names.dedup();
+        names.len() == len
+    }
+
+    pub fn infer_type_predicate(&self) -> Type<NoRefs> {
+        const M: &str =
+            "refutable patterns are not allowed in let bindings and function args";
+        match &self {
+            Self::BindAll { name: ValPat::Bind(_) | ValPat::Ignore } => {
+                Type::empty_tvar()
+            }
+            Self::BindAll { name: ValPat::Literal(v) } => {
+                Type::Primitive(Typ::get(v).into())
+            }
+            Self::Tuple { all: _, binds } => {
+                let mut typs: SmallVec<[Type<NoRefs>; 8]> = smallvec![];
+                for p in binds.iter() {
+                    typs.push(p.infer_type_predicate());
+                }
+                Type::Tuple(Arc::from_iter(typs.into_iter()))
+            }
+            Self::Slice { all: _, binds }
+            | Self::SlicePrefix { all: _, prefix: binds, tail: _ }
+            | Self::SliceSuffix { all: _, head: _, suffix: binds } => {
+                let mut t = Type::Bottom(PhantomData);
+                for p in binds.iter() {
+                    t = t.union(&p.infer_type_predicate());
+                }
+                Type::Array(Arc::new(t))
+            }
+            Self::Struct { all: _, exhaustive: _, binds } => {
+                let mut typs: SmallVec<[(ArcStr, Type<NoRefs>); 8]> = smallvec![];
+                for (n, p) in binds.iter() {
+                    typs.push((n.clone(), p.infer_type_predicate()));
+                }
+                Type::Struct(Arc::from_iter(typs.into_iter()))
+            }
+        }
+    }
 }
 
 impl fmt::Display for StructurePattern {
@@ -246,7 +369,7 @@ impl fmt::Display for StructurePattern {
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Pattern {
-    pub type_predicate: Type<Refs>,
+    pub type_predicate: Option<Type<Refs>>,
     pub structure_predicate: StructurePattern,
     pub guard: Option<Expr>,
 }
@@ -273,19 +396,7 @@ pub enum ExprKind {
         name: ModPath,
     },
     Bind {
-        name: Option<ArcStr>,
-        typ: Option<Type<Refs>>,
-        export: bool,
-        value: Arc<Expr>,
-    },
-    BindTuple {
-        names: Arc<[Option<ArcStr>]>,
-        typ: Option<Type<Refs>>,
-        export: bool,
-        value: Arc<Expr>,
-    },
-    BindStruct {
-        names: Arc<[(ArcStr, Option<ArcStr>)]>,
+        pattern: StructurePattern,
         typ: Option<Type<Refs>>,
         export: bool,
         value: Arc<Expr>,
@@ -511,45 +622,9 @@ impl ExprKind {
                 }
                 writeln!(buf, "{self}")
             }
-            ExprKind::Bind { name, typ, export, value } => {
+            ExprKind::Bind { pattern, typ, export, value } => {
                 try_single_line!(true);
-                match name {
-                    None => writeln!(buf, "{}let _{} = ", exp(*export), typ!(typ))?,
-                    Some(name) => {
-                        writeln!(buf, "{}let {name}{} = ", exp(*export), typ!(typ))?
-                    }
-                }
-                value.kind.pretty_print(indent + 2, limit, false, buf)
-            }
-            ExprKind::BindTuple { export, names, typ, value } => {
-                try_single_line!(true);
-                write!(buf, "{}let (", exp(*export))?;
-                for (i, n) in names.iter().enumerate() {
-                    match n {
-                        None => write!(buf, "_")?,
-                        Some(n) => write!(buf, "{n}")?,
-                    }
-                    if i < names.len() - 1 {
-                        write!(buf, ", ")?
-                    }
-                }
-                writeln!(buf, "){} = ", typ!(typ))?;
-                value.kind.pretty_print(indent + 2, limit, false, buf)
-            }
-            ExprKind::BindStruct { names, typ, export, value } => {
-                try_single_line!(true);
-                write!(buf, "{}let {{", exp(*export))?;
-                for (i, (name, n)) in names.iter().enumerate() {
-                    match n {
-                        None => write!(buf, "{name}: _")?,
-                        Some(n) if n == name => write!(buf, "{n}")?,
-                        Some(n) => write!(buf, "{name}: {n}")?,
-                    }
-                    if i < names.len() - 1 {
-                        write!(buf, ", ")?
-                    }
-                }
-                writeln!(buf, "}}{} = ", typ!(typ))?;
+                writeln!(buf, "{}let {pattern}{} = ", exp(*export), typ!(typ))?;
                 value.kind.pretty_print(indent + 2, limit, false, buf)
             }
             ExprKind::StructWith { name, replace } => {
@@ -737,11 +812,10 @@ impl ExprKind {
                 kill_newline!(buf);
                 writeln!(buf, " {{")?;
                 for (i, (pat, expr)) in arms.iter().enumerate() {
-                    write!(
-                        buf,
-                        "{} as {} ",
-                        pat.type_predicate, pat.structure_predicate
-                    )?;
+                    if let Some(tp) = &pat.type_predicate {
+                        write!(buf, "{tp} as ")?;
+                    }
+                    write!(buf, "{} ", pat.structure_predicate)?;
                     if let Some(guard) = &pat.guard {
                         write!(buf, "if ")?;
                         guard.kind.pretty_print(indent + 2, limit, false, buf)?;
@@ -819,38 +893,8 @@ impl fmt::Display for ExprKind {
         let exp = |export| if export { "pub " } else { "" };
         match self {
             ExprKind::Constant(v) => v.fmt_ext(f, &parser::BSCRIPT_ESC, true),
-            ExprKind::Bind { name: Some(name), typ, export, value } => {
-                write!(f, "{}let {name}{} = {value}", exp(*export), typ!(typ))
-            }
-            ExprKind::Bind { name: None, typ, export, value } => {
-                write!(f, "{}let _{} = {value}", exp(*export), typ!(typ))
-            }
-            ExprKind::BindTuple { export, names, typ, value } => {
-                write!(f, "{}let (", exp(*export))?;
-                for (i, n) in names.iter().enumerate() {
-                    match n {
-                        None => write!(f, "_")?,
-                        Some(n) => write!(f, "{n}")?,
-                    }
-                    if i < names.len() - 1 {
-                        write!(f, ", ")?
-                    }
-                }
-                write!(f, "){} = {value}", typ!(typ))
-            }
-            ExprKind::BindStruct { export, names, typ, value } => {
-                write!(f, "{}let {{", exp(*export))?;
-                for (i, (name, n)) in names.iter().enumerate() {
-                    match n {
-                        None => write!(f, "{name}: _")?,
-                        Some(n) if n == name => write!(f, "{n}")?,
-                        Some(n) => write!(f, "{name}: {n}")?,
-                    }
-                    if i < names.len() - 1 {
-                        write!(f, ", ")?
-                    }
-                }
-                write!(f, "}}{} = {value}", typ!(typ))
+            ExprKind::Bind { pattern, typ, export, value } => {
+                write!(f, "{}let {pattern}{} = {value}", exp(*export), typ!(typ))
             }
             ExprKind::StructWith { name, replace } => {
                 write!(f, "{{ {name} with ")?;
@@ -996,7 +1040,10 @@ impl fmt::Display for ExprKind {
             ExprKind::Select { arg, arms } => {
                 write!(f, "select {arg} {{")?;
                 for (i, (pat, rhs)) in arms.iter().enumerate() {
-                    write!(f, "{} as {} ", pat.type_predicate, pat.structure_predicate)?;
+                    if let Some(tp) = &pat.type_predicate {
+                        write!(f, "{tp} as ")?;
+                    }
+                    write!(f, "{} ", pat.structure_predicate)?;
                     if let Some(guard) = &pat.guard {
                         write!(f, "if {guard} ")?;
                     }
