@@ -8,7 +8,6 @@ use netidx_netproto::pbuf::PBytes;
 use parser::{parse, RESERVED};
 use prop::option;
 use proptest::{collection, prelude::*};
-use rand::{thread_rng, Rng};
 use smallvec::SmallVec;
 use std::{marker::PhantomData, time::Duration};
 
@@ -251,66 +250,66 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
     })
 }
 
-fn val_pat() -> impl Strategy<Value = ValPat> {
-    prop_oneof![
-        value().prop_map(|v| ValPat::Literal(v)),
-        option::of(random_fname()).prop_map(|name| match name {
-            None => ValPat::Ignore,
-            Some(name) => ValPat::Bind(name),
-        }),
-    ]
-}
-
 fn structure_pattern() -> impl Strategy<Value = StructurePattern> {
-    prop_oneof![
-        val_pat().prop_map(|name| StructurePattern::BindAll { name }),
-        (option::of(random_fname()), collection::vec(val_pat(), (0, 10))).prop_map(
-            |(all, b)| {
-                StructurePattern::Slice { all, binds: Arc::from_iter(b.into_iter()) }
-            }
-        ),
-        (option::of(random_fname()), collection::vec(val_pat(), (2, 10))).prop_map(
-            |(all, b)| {
-                StructurePattern::Tuple { all, binds: Arc::from_iter(b.into_iter()) }
-            }
-        ),
-        (
-            option::of(random_fname()),
-            collection::vec((random_fname(), val_pat()), (1, 10)),
-            any::<bool>()
-        )
-            .prop_map(|(all, mut b, exhaustive)| {
-                b.sort_by_key(|(f, _)| f.clone());
-                b.dedup_by_key(|(f, _)| f.clone());
-                StructurePattern::Struct { all, exhaustive, binds: Arc::from_iter(b) }
-            }),
-        (
-            option::of(random_fname()),
-            collection::vec(val_pat(), (1, 10)),
-            option::of(random_fname())
-        )
-            .prop_map(|(all, p, tail)| StructurePattern::SlicePrefix {
-                all,
-                prefix: Arc::from_iter(p.into_iter()),
-                tail
-            }),
-        (
-            option::of(random_fname()),
-            option::of(random_fname()),
-            collection::vec(val_pat(), (1, 10))
-        )
-            .prop_map(|(all, head, s)| StructurePattern::SliceSuffix {
-                all,
-                head,
-                suffix: Arc::from_iter(s.into_iter())
-            }),
-    ]
+    let leaf = prop_oneof![
+        value().prop_map(|v| StructurePattern::Literal(v)),
+        option::of(random_fname()).prop_map(|name| match name {
+            None => StructurePattern::Ignore,
+            Some(name) => StructurePattern::Bind(name),
+        }),
+    ];
+    leaf.prop_recursive(5, 25, 5, |inner| {
+        prop_oneof![
+            (option::of(random_fname()), collection::vec(inner.clone(), (0, 10)))
+                .prop_map(|(all, b)| {
+                    StructurePattern::Slice { all, binds: Arc::from_iter(b.into_iter()) }
+                }),
+            (option::of(random_fname()), collection::vec(inner.clone(), (2, 10)))
+                .prop_map(|(all, b)| {
+                    StructurePattern::Tuple { all, binds: Arc::from_iter(b.into_iter()) }
+                }),
+            (
+                option::of(random_fname()),
+                collection::vec((random_fname(), inner.clone()), (1, 10)),
+                any::<bool>()
+            )
+                .prop_map(|(all, mut b, exhaustive)| {
+                    b.sort_by_key(|(f, _)| f.clone());
+                    b.dedup_by_key(|(f, _)| f.clone());
+                    StructurePattern::Struct { all, exhaustive, binds: Arc::from_iter(b) }
+                }),
+            (
+                option::of(random_fname()),
+                collection::vec(inner.clone(), (1, 10)),
+                option::of(random_fname())
+            )
+                .prop_map(|(all, p, tail)| StructurePattern::SlicePrefix {
+                    all,
+                    prefix: Arc::from_iter(p.into_iter()),
+                    tail
+                }),
+            (
+                option::of(random_fname()),
+                option::of(random_fname()),
+                collection::vec(inner.clone(), (1, 10))
+            )
+                .prop_map(|(all, head, s)| StructurePattern::SliceSuffix {
+                    all,
+                    head,
+                    suffix: Arc::from_iter(s.into_iter())
+                }),
+        ]
+    })
 }
 
 fn pattern() -> impl Strategy<Value = Pattern> {
-    (typexp(), structure_pattern()).prop_map(|(type_predicate, structure_predicate)| {
-        Pattern { type_predicate, structure_predicate, guard: None }
-    })
+    (option::of(typexp()), structure_pattern()).prop_map(
+        |(type_predicate, structure_predicate)| Pattern {
+            type_predicate,
+            structure_predicate,
+            guard: None,
+        },
+    )
 }
 
 fn build_pattern(arg: Expr, arms: Vec<(Option<Expr>, Pattern, Expr)>) -> Expr {
@@ -341,64 +340,14 @@ fn tupleref() -> impl Strategy<Value = Expr> {
         .prop_map(|(name, field)| ExprKind::TupleRef { name, field }.to_expr())
 }
 
-macro_rules! bind_struct {
-    ($inner:expr) => {
-        (
-            $inner,
-            collection::vec((random_fname(), option::of(random_fname())), (1, 10)),
-            any::<bool>(),
-            option::of(typexp()),
-        )
-            .prop_map(|(e, mut n, exp, typ)| {
-                for (field, name) in n.iter_mut() {
-                    match name {
-                        Some(_) => (),
-                        None => {
-                            if thread_rng().gen_bool(0.5) {
-                                *name = Some(field.clone())
-                            }
-                        }
-                    }
-                }
-                n.sort_by_key(|(n, _)| n.clone());
-                n.dedup_by_key(|(n, _)| n.clone());
-                ExprKind::BindStruct {
-                    names: Arc::from_iter(n),
-                    typ,
-                    export: exp,
-                    value: Arc::new(e),
-                }
-                .to_expr()
-            })
-    };
-}
-
-macro_rules! bind_tuple {
-    ($inner:expr) => {
-        (
-            $inner,
-            collection::vec(option::of(random_fname()), (2, 10)),
-            any::<bool>(),
-            option::of(typexp()),
-        )
-            .prop_map(|(e, n, exp, typ)| {
-                ExprKind::BindTuple {
-                    export: exp,
-                    names: Arc::from_iter(n),
-                    value: Arc::new(e),
-                    typ,
-                }
-                .to_expr()
-            })
-    };
-}
-
 macro_rules! bind {
     ($inner:expr) => {
-        ($inner, option::of(random_fname()), any::<bool>(), option::of(typexp()))
-            .prop_map(|(e, n, exp, typ)| {
-                ExprKind::Bind { export: exp, name: n, value: Arc::new(e), typ }.to_expr()
-            })
+        ($inner, structure_pattern(), any::<bool>(), option::of(typexp())).prop_map(
+            |(e, p, exp, typ)| {
+                ExprKind::Bind { export: exp, pattern: p, value: Arc::new(e), typ }
+                    .to_expr()
+            },
+        )
     };
 }
 
@@ -654,8 +603,6 @@ fn expr() -> impl Strategy<Value = Expr> {
             lambda!(inner.clone()),
             builtin!(inner.clone()),
             bind!(inner.clone()),
-            bind_tuple!(inner.clone()),
-            bind_struct!(inner.clone()),
             connect!(inner.clone()),
             select!(inner.clone()),
             array!(inner.clone()),
@@ -673,7 +620,6 @@ fn modexpr() -> impl Strategy<Value = Expr> {
         usestmt(),
         typedef(),
         bind!(expr()),
-        bind_tuple!(expr()),
         connect!(expr()),
     ];
     leaf.prop_recursive(10, 100, 10, |inner| {
@@ -732,31 +678,98 @@ fn check_type_opt(t0: &Option<Type<Refs>>, t1: &Option<Type<Refs>>) -> bool {
     }
 }
 
-fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
-    dbg!(check_type(&pat0.type_predicate, &pat1.type_predicate))
-        && match (&pat0.structure_predicate, &pat1.structure_predicate) {
-            (
-                StructurePattern::BindAll { name: ValPat::Literal(Value::Array(a)) },
-                StructurePattern::Slice { all: None, binds },
-            )
-            | (
-                StructurePattern::Slice { all: None, binds },
-                StructurePattern::BindAll { name: ValPat::Literal(Value::Array(a)) },
-            ) => {
-                binds.iter().all(|n| n.lit()) && {
-                    let binds = binds
-                        .iter()
-                        .filter_map(|n| match n {
-                            ValPat::Literal(l) => Some(l),
-                            _ => None,
-                        })
-                        .collect::<SmallVec<[&Value; 16]>>();
-                    binds.len() == a.len()
-                        && binds.iter().zip(a.iter()).all(|(v0, v1)| *v0 == v1)
-                }
+fn check_structure_pattern(pat0: &StructurePattern, pat1: &StructurePattern) -> bool {
+    match (pat0, pat1) {
+        (
+            StructurePattern::Literal(Value::Array(a)),
+            StructurePattern::Slice { all: None, binds },
+        )
+        | (
+            StructurePattern::Slice { all: None, binds },
+            StructurePattern::Literal(Value::Array(a)),
+        ) => {
+            binds.iter().all(|n| match n {
+                StructurePattern::Literal(_) => true,
+                _ => false,
+            }) && {
+                let binds = binds
+                    .iter()
+                    .filter_map(|n| match n {
+                        StructurePattern::Literal(l) => Some(l),
+                        _ => None,
+                    })
+                    .collect::<SmallVec<[&Value; 16]>>();
+                binds.len() == a.len()
+                    && binds.iter().zip(a.iter()).all(|(v0, v1)| *v0 == v1)
             }
-            (p0, p1) => p0 == p1,
         }
+        (StructurePattern::Bind(n0), StructurePattern::Bind(n1)) => n0 == n1,
+        (StructurePattern::Ignore, StructurePattern::Ignore) => true,
+        (StructurePattern::Literal(v0), StructurePattern::Literal(v1)) => v0 == v1,
+        (
+            StructurePattern::Slice { all: a0, binds: p0 },
+            StructurePattern::Slice { all: a1, binds: p1 },
+        ) => {
+            a0 == a1
+                && p0.len() == p1.len()
+                && p0
+                    .iter()
+                    .zip(p1.iter())
+                    .all(|(p0, p1)| check_structure_pattern(p0, p1))
+        }
+        (
+            StructurePattern::SlicePrefix { all: a0, prefix: p0, tail: t0 },
+            StructurePattern::SlicePrefix { all: a1, prefix: p1, tail: t1 },
+        ) => {
+            a0 == a1
+                && t0 == t1
+                && p0.len() == p1.len()
+                && p0
+                    .iter()
+                    .zip(p1.iter())
+                    .all(|(p0, p1)| check_structure_pattern(p0, p1))
+        }
+        (
+            StructurePattern::SliceSuffix { all: a0, head: h0, suffix: p0 },
+            StructurePattern::SliceSuffix { all: a1, head: h1, suffix: p1 },
+        ) => {
+            a0 == a1
+                && h0 == h1
+                && p0.len() == p1.len()
+                && p0
+                    .iter()
+                    .zip(p1.iter())
+                    .all(|(p0, p1)| check_structure_pattern(p0, p1))
+        }
+        (
+            StructurePattern::Tuple { all: a0, binds: p0 },
+            StructurePattern::Tuple { all: a1, binds: p1 },
+        ) => {
+            a0 == a1
+                && p0.len() == p1.len()
+                && p0
+                    .iter()
+                    .zip(p1.iter())
+                    .all(|(p0, p1)| check_structure_pattern(p0, p1))
+        }
+        (
+            StructurePattern::Struct { exhaustive: e0, all: a0, binds: p0 },
+            StructurePattern::Struct { exhaustive: e1, all: a1, binds: p1 },
+        ) => {
+            e0 == e1
+                && a0 == a1
+                && p0.len() == p1.len()
+                && p0.iter().zip(p1.iter()).all(|((f0, p0), (f1, p1))| {
+                    f0 == f1 && check_structure_pattern(p0, p1)
+                })
+        }
+        (_, _) => false,
+    }
+}
+
+fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
+    dbg!(check_type_opt(&pat0.type_predicate, &pat1.type_predicate))
+        && check_structure_pattern(&pat0.structure_predicate, &pat1.structure_predicate)
         && dbg!(match (&pat0.guard, &pat1.guard) {
             (Some(g0), Some(g1)) => check(g0, g1),
             (None, None) => true,
@@ -927,48 +940,10 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             dbg!(name0 == name1)
         }
         (
-            ExprKind::Bind { name: name0, export: export0, value: value0, typ: typ0 },
-            ExprKind::Bind { name: name1, export: export1, value: value1, typ: typ1 },
+            ExprKind::Bind { pattern: p0, export: export0, value: value0, typ: typ0 },
+            ExprKind::Bind { pattern: p1, export: export1, value: value1, typ: typ1 },
         ) => dbg!(
-            dbg!(name0 == name1)
-                && dbg!(export0 == export1)
-                && dbg!(check_type_opt(typ0, typ1))
-                && dbg!(check(value0, value1))
-        ),
-        (
-            ExprKind::BindTuple {
-                names: name0,
-                export: export0,
-                value: value0,
-                typ: typ0,
-            },
-            ExprKind::BindTuple {
-                names: name1,
-                export: export1,
-                value: value1,
-                typ: typ1,
-            },
-        ) => dbg!(
-            dbg!(name0 == name1)
-                && dbg!(export0 == export1)
-                && dbg!(check_type_opt(typ0, typ1))
-                && dbg!(check(value0, value1))
-        ),
-        (
-            ExprKind::BindStruct {
-                names: name0,
-                export: export0,
-                value: value0,
-                typ: typ0,
-            },
-            ExprKind::BindStruct {
-                names: name1,
-                export: export1,
-                value: value1,
-                typ: typ1,
-            },
-        ) => dbg!(
-            dbg!(name0 == name1)
+            dbg!(check_structure_pattern(p0, p1))
                 && dbg!(export0 == export1)
                 && dbg!(check_type_opt(typ0, typ1))
                 && dbg!(check(value0, value1))

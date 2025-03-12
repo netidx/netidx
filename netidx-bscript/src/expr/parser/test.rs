@@ -182,7 +182,7 @@ fn letbind() {
         ExprKind::Bind {
             export: false,
             typ: None,
-            pattern: StructurePattern::Prim(ValPat::Bind(literal!("foo"))),
+            pattern: StructurePattern::Bind(literal!("foo")),
             value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
         }
         .to_expr(),
@@ -196,7 +196,7 @@ fn typed_letbind() {
         ExprKind::Bind {
             export: false,
             typ: Some(Type::Primitive(Typ::I64.into())),
-            pattern: StructurePattern::BindAll { name: ValPat::Bind(literal!("foo")) },
+            pattern: StructurePattern::Bind(literal!("foo")),
             value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
         }
         .to_expr(),
@@ -430,9 +430,7 @@ fn select0() {
         (
             Pattern {
                 type_predicate: Some(Type::Primitive(Typ::I64.into())),
-                structure_predicate: StructurePattern::BindAll {
-                    name: ValPat::Bind(literal!("a")),
-                },
+                structure_predicate: StructurePattern::Bind(literal!("a")),
                 guard: Some(
                     ExprKind::Lt {
                         lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr()),
@@ -450,9 +448,7 @@ fn select0() {
         (
             Pattern {
                 type_predicate: None,
-                structure_predicate: StructurePattern::BindAll {
-                    name: ValPat::Bind(literal!("a")),
-                },
+                structure_predicate: StructurePattern::Bind(literal!("a")),
                 guard: None,
             },
             ExprKind::Ref { name: ModPath::from(["a"]) }.to_expr(),
@@ -484,9 +480,9 @@ fn select1() {
                 structure_predicate: StructurePattern::Slice {
                     all: None,
                     binds: Arc::from_iter([
-                        StructurePattern::BindAll { name: ValPat::Bind(literal!("a")) },
-                        StructurePattern::BindAll { name: ValPat::Ignore },
-                        StructurePattern::BindAll { name: ValPat::Bind(literal!("b")) },
+                        StructurePattern::Bind(literal!("a")),
+                        StructurePattern::Ignore,
+                        StructurePattern::Bind(literal!("b")),
                     ]),
                 },
                 guard: Some(
@@ -510,9 +506,7 @@ fn select1() {
                 )))),
                 structure_predicate: StructurePattern::SlicePrefix {
                     all: None,
-                    prefix: Arc::from_iter([StructurePattern::BindAll {
-                        name: ValPat::Bind(literal!("a")),
-                    }]),
+                    prefix: Arc::from_iter([StructurePattern::Bind(literal!("a"))]),
                     tail: Some(literal!("b")),
                 },
                 guard: None,
@@ -526,9 +520,7 @@ fn select1() {
                 )))),
                 structure_predicate: StructurePattern::SliceSuffix {
                     all: None,
-                    suffix: Arc::from_iter([StructurePattern::BindAll {
-                        name: ValPat::Bind(literal!("b")),
-                    }]),
+                    suffix: Arc::from_iter([StructurePattern::Bind(literal!("b"))]),
                     head: Some(literal!("a")),
                 },
                 guard: None,
@@ -543,10 +535,10 @@ fn select1() {
                 structure_predicate: StructurePattern::Slice {
                     all: None,
                     binds: Arc::from_iter([
-                        ValPat::Literal(Value::I64(1)),
-                        ValPat::Literal(Value::I64(2)),
-                        ValPat::Literal(Value::I64(42)),
-                        ValPat::Bind(literal!("a")),
+                        StructurePattern::Literal(Value::I64(1)),
+                        StructurePattern::Literal(Value::I64(2)),
+                        StructurePattern::Literal(Value::I64(42)),
+                        StructurePattern::Bind(literal!("a")),
                     ]),
                 },
                 guard: None,
@@ -560,10 +552,10 @@ fn select1() {
                     all: None,
                     exhaustive: false,
                     binds: Arc::from_iter([
-                        (literal!("bar"), ValPat::Ignore),
-                        (literal!("baz"), ValPat::Bind(literal!("baz"))),
-                        (literal!("foo"), ValPat::Literal(Value::I64(42))),
-                        (literal!("foobar"), ValPat::Bind(literal!("a"))),
+                        (literal!("bar"), StructurePattern::Ignore),
+                        (literal!("baz"), StructurePattern::Bind(literal!("baz"))),
+                        (literal!("foo"), StructurePattern::Literal(Value::I64(42))),
+                        (literal!("foobar"), StructurePattern::Bind(literal!("a"))),
                     ]),
                 },
                 guard: None,
@@ -573,9 +565,7 @@ fn select1() {
         (
             Pattern {
                 type_predicate: None,
-                structure_predicate: StructurePattern::BindAll {
-                    name: ValPat::Bind(literal!("a")),
-                },
+                structure_predicate: StructurePattern::Bind(literal!("a")),
                 guard: None,
             },
             ExprKind::Ref { name: ModPath::from(["a"]) }.to_expr(),
@@ -642,14 +632,14 @@ fn inline_module() {
             ExprKind::Bind {
                 typ: None,
                 export: true,
-                name: Some(literal!("z")),
+                pattern: StructurePattern::Bind(literal!("z")),
                 value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr()),
             }
             .to_expr(),
             ExprKind::Bind {
                 typ: None,
                 export: false,
-                name: Some(literal!("m")),
+                pattern: StructurePattern::Bind(literal!("m")),
                 value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr()),
             }
             .to_expr(),
@@ -713,7 +703,7 @@ fn doexpr() {
             ExprKind::Bind {
                 typ: None,
                 export: false,
-                name: Some(literal!("baz")),
+                pattern: StructurePattern::Bind(literal!("baz")),
                 value: Arc::new(ExprKind::Constant(Value::from(42)).to_expr()),
             }
             .to_expr(),
@@ -891,7 +881,7 @@ fn typed_array() {
     let e = ExprKind::Do {
         exprs: Arc::from_iter([ExprKind::Bind {
             export: false,
-            name: Some(literal!("f")),
+            pattern: StructurePattern::Bind(literal!("f")),
             typ: None,
             value: Arc::new(
                 ExprKind::Lambda {
@@ -925,7 +915,7 @@ fn labeled_argument_lambda() {
     let e = ExprKind::Do {
         exprs: Arc::from_iter([ExprKind::Bind {
             export: false,
-            name: Some(literal!("a")),
+            pattern: StructurePattern::Bind(literal!("a")),
             typ: Some(Type::Fn(Arc::new(FnType {
                 args: Arc::from_iter([
                     FnArgType {
@@ -1126,9 +1116,16 @@ fn tuple0() {
 
 #[test]
 fn tuple1() {
-    let e = ExprKind::BindTuple {
+    let e = ExprKind::Bind {
         export: false,
-        names: Arc::from_iter([None, Some(literal!("x")), Some(literal!("y"))]),
+        pattern: StructurePattern::Tuple {
+            all: None,
+            binds: Arc::from_iter([
+                StructurePattern::Ignore,
+                StructurePattern::Bind(literal!("x")),
+                StructurePattern::Bind(literal!("y")),
+            ]),
+        },
         typ: None,
         value: Arc::new(
             ExprKind::Tuple {
@@ -1158,7 +1155,7 @@ fn tuple1() {
 fn struct0() {
     let e = ExprKind::Bind {
         export: false,
-        name: Some(literal!("a")),
+        pattern: StructurePattern::Bind(literal!("a")),
         typ: None,
         value: Arc::new(
             ExprKind::Struct {
@@ -1189,13 +1186,17 @@ fn struct0() {
 
 #[test]
 fn bindstruct() {
-    let e = ExprKind::BindStruct {
+    let e = ExprKind::Bind {
         export: false,
-        names: Arc::from_iter([
-            (literal!("bar"), None),
-            (literal!("baz"), Some(literal!("zam"))),
-            (literal!("foo"), Some(literal!("foo"))),
-        ]),
+        pattern: StructurePattern::Struct {
+            all: None,
+            exhaustive: true,
+            binds: Arc::from_iter([
+                (literal!("bar"), StructurePattern::Ignore),
+                (literal!("baz"), StructurePattern::Bind(literal!("zam"))),
+                (literal!("foo"), StructurePattern::Bind(literal!("foo"))),
+            ]),
+        },
         typ: None,
         value: Arc::new(
             ExprKind::Struct {
