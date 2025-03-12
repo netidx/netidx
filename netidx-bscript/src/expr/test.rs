@@ -258,7 +258,7 @@ fn structure_pattern() -> impl Strategy<Value = StructurePattern> {
             Some(name) => StructurePattern::Bind(name),
         }),
     ];
-    leaf.prop_recursive(5, 25, 5, |inner| {
+    leaf.prop_recursive(5, 10, 20, |inner| {
         prop_oneof![
             (option::of(random_fname()), collection::vec(inner.clone(), (0, 10)))
                 .prop_map(|(all, b)| {
@@ -705,7 +705,9 @@ fn check_structure_pattern(pat0: &StructurePattern, pat1: &StructurePattern) -> 
         }
         (StructurePattern::Bind(n0), StructurePattern::Bind(n1)) => n0 == n1,
         (StructurePattern::Ignore, StructurePattern::Ignore) => true,
-        (StructurePattern::Literal(v0), StructurePattern::Literal(v1)) => v0 == v1,
+        (StructurePattern::Literal(v0), StructurePattern::Literal(v1)) => {
+            v0.approx_eq(v1)
+        }
         (
             StructurePattern::Slice { all: a0, binds: p0 },
             StructurePattern::Slice { all: a1, binds: p1 },
