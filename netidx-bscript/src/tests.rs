@@ -913,3 +913,32 @@ run!(structwith1, STRUCTWITH1, |v: Result<&Value>| match v {
     Ok(Value::F64(85.0)) => true,
     _ => false,
 });
+
+const NESTEDMATCH0: &str = r#"
+{
+  type T = { foo: (string, i64, f64), bar: i64, baz: f64 };
+  let x = { foo: ("bar", 42, 5.0), bar: 42, baz: 84.0 };
+  let { foo: (_, x, y), .. }: T = x;
+  x + y
+}
+"#;
+
+run!(nestedmatch0, NESTEDMATCH0, |v: Result<&Value>| match v {
+    Ok(Value::F64(47.0)) => true,
+    _ => false,
+});
+
+const NESTEDMATCH1: &str = r#"
+{
+  type T = { foo: {x: string, y: i64, z: f64}, bar: i64, baz: f64 };
+  let x = { foo: { x: "bar", y: 42, z: 5.0 }, bar: 42, baz: 84.0 };
+  select x {
+    T as { foo: { y, z, .. }, .. } => y + z
+  }
+}
+"#;
+
+run!(nestedmatch1, NESTEDMATCH1, |v: Result<&Value>| match v {
+    Ok(Value::F64(47.0)) => true,
+    _ => false,
+});

@@ -218,6 +218,7 @@ impl StructurePattern {
             }
             Self::Struct { all: _, exhaustive: _, binds } => {
                 let mut typs: SmallVec<[(ArcStr, Type<NoRefs>); 8]> = smallvec![];
+                typs.sort_by_key(|(n, _)| n.clone());
                 for (n, p) in binds.iter() {
                     typs.push((n.clone(), p.infer_type_predicate()));
                 }

@@ -303,18 +303,11 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 return error!("", vec![node]);
             }
             let typ = match typ {
+                None => pattern.infer_type_predicate(),
                 Some(typ) => match typ.resolve_typrefs(scope, &ctx.env) {
                     Ok(typ) => typ.clone(),
                     Err(e) => return error!("{e}", vec![node]),
                 },
-                None => {
-                    let pt = pattern.infer_type_predicate();
-                    let nt = &node.typ;
-                    if !pt.contains(nt) {
-                        return error!("pattern type {pt} vs {nt}", vec![node]);
-                    }
-                    pt
-                }
             };
             let pn = match StructPatternNode::compile(ctx, &typ, pattern, scope) {
                 Ok(p) => p,
