@@ -179,7 +179,7 @@ impl StructPatternNode {
         Ok(t)
     }
 
-    pub fn bind<F: FnMut(BindId, Value)>(&self, v: &Value, mut f: F) {
+    pub fn bind<F: FnMut(BindId, Value)>(&self, v: &Value, f: &mut F) {
         match &self {
             Self::Ignore | Self::Literal(_) => (),
             Self::Bind(id) => f(*id, v.clone()),
@@ -189,7 +189,7 @@ impl StructPatternNode {
                         f(*id, v.clone());
                     }
                     for (j, n) in binds.iter().enumerate() {
-                        n.bind(&a[j], &mut f)
+                        n.bind(&a[j], f)
                     }
                 }
                 _ => (),
@@ -200,7 +200,7 @@ impl StructPatternNode {
                         f(*id, v.clone())
                     }
                     for (j, n) in prefix.iter().enumerate() {
-                        n.bind(&a[j], &mut f)
+                        n.bind(&a[j], f)
                     }
                     if let Some(id) = tail {
                         let ss = a.subslice(prefix.len()..).unwrap();
@@ -220,7 +220,7 @@ impl StructPatternNode {
                     }
                     let tail = a.subslice(suffix.len()..).unwrap();
                     for (j, n) in suffix.iter().enumerate() {
-                        n.bind(&tail[j], &mut f)
+                        n.bind(&tail[j], f)
                     }
                 }
                 _ => (),
@@ -233,7 +233,7 @@ impl StructPatternNode {
                     for (i, n) in binds.iter() {
                         if let Some(v) = a.get(*i) {
                             match v {
-                                Value::Array(a) if a.len() == 2 => n.bind(&a[1], &mut f),
+                                Value::Array(a) if a.len() == 2 => n.bind(&a[1], f),
                                 _ => (),
                             }
                         }
@@ -244,7 +244,7 @@ impl StructPatternNode {
         }
     }
 
-    pub fn unbind<F: FnMut(BindId)>(&self, mut f: F) {
+    pub fn unbind<F: FnMut(BindId)>(&self, f: &mut F) {
         match &self {
             Self::Ignore | Self::Literal(_) => (),
             Self::Bind(id) => f(*id),
@@ -253,7 +253,7 @@ impl StructPatternNode {
                     f(*id)
                 }
                 for n in binds.iter() {
-                    n.unbind(&mut f)
+                    n.unbind(f)
                 }
             }
             Self::SlicePrefix { all, prefix, tail } => {
@@ -264,7 +264,7 @@ impl StructPatternNode {
                     f(*id)
                 }
                 for n in prefix.iter() {
-                    n.unbind(&mut f)
+                    n.unbind(f)
                 }
             }
             Self::SliceSuffix { all, head, suffix } => {
@@ -275,7 +275,7 @@ impl StructPatternNode {
                     f(*id)
                 }
                 for n in suffix.iter() {
-                    n.unbind(&mut f)
+                    n.unbind(f)
                 }
             }
             Self::Struct { all, binds } => {
@@ -283,7 +283,7 @@ impl StructPatternNode {
                     f(*id)
                 }
                 for (_, n) in binds.iter() {
-                    n.unbind(&mut f)
+                    n.unbind(f)
                 }
             }
         }
@@ -399,13 +399,13 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
     }
 
     pub(super) fn bind_event(&self, event: &mut Event<E>, v: &Value) {
-        self.structure_predicate.bind(v, |id, v| {
+        self.structure_predicate.bind(v, &mut |id, v| {
             event.variables.insert(id, v);
         })
     }
 
     pub(super) fn unbind_event(&self, event: &mut Event<E>) {
-        self.structure_predicate.unbind(|id| {
+        self.structure_predicate.unbind(&mut |id| {
             event.variables.remove(&id);
         })
     }

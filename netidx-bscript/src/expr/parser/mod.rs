@@ -970,6 +970,8 @@ where
             sep_by(
                 choice((
                     attempt(spstring("..")).map(|_| Either::Right(None)),
+                    attempt(spfname().skip(spstring("..")))
+                        .map(|n| Either::Right(Some(n))),
                     structure_pattern().map(|p| Either::Left(p)),
                 )),
                 csep(),

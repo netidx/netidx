@@ -134,7 +134,7 @@ pub enum StructurePattern {
 }
 
 impl StructurePattern {
-    fn with_names<'a>(&'a self, mut f: impl FnMut(&'a ArcStr)) {
+    fn with_names<'a>(&'a self, f: &mut impl FnMut(&'a ArcStr)) {
         match self {
             Self::Bind(n) => f(n),
             Self::Ignore | Self::Literal(_) => (),
@@ -143,7 +143,7 @@ impl StructurePattern {
                     f(n)
                 }
                 for t in binds.iter() {
-                    t.with_names(&mut f)
+                    t.with_names(f)
                 }
             }
             Self::SlicePrefix { all, prefix, tail } => {
@@ -154,7 +154,7 @@ impl StructurePattern {
                     f(n)
                 }
                 for t in prefix.iter() {
-                    t.with_names(&mut f)
+                    t.with_names(f)
                 }
             }
             Self::SliceSuffix { all, head, suffix } => {
@@ -165,7 +165,7 @@ impl StructurePattern {
                     f(n)
                 }
                 for t in suffix.iter() {
-                    t.with_names(&mut f)
+                    t.with_names(f)
                 }
             }
             Self::Tuple { all, binds } => {
@@ -173,7 +173,7 @@ impl StructurePattern {
                     f(n)
                 }
                 for t in binds.iter() {
-                    t.with_names(&mut f)
+                    t.with_names(f)
                 }
             }
             Self::Struct { exhaustive: _, all, binds } => {
@@ -181,7 +181,7 @@ impl StructurePattern {
                     f(n)
                 }
                 for (_, t) in binds.iter() {
-                    t.with_names(&mut f)
+                    t.with_names(f)
                 }
             }
         }
@@ -189,7 +189,7 @@ impl StructurePattern {
 
     pub fn binds_uniq(&self) -> bool {
         let mut names: SmallVec<[&ArcStr; 16]> = smallvec![];
-        self.with_names(|s| names.push(s));
+        self.with_names(&mut |s| names.push(s));
         names.sort();
         let len = names.len();
         names.dedup();

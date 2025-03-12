@@ -448,7 +448,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             NodeKind::Apply { args, function } => function.update(ctx, args, event),
             NodeKind::Bind(pattern, rhs) => {
                 if let Some(v) = rhs.update(ctx, event) {
-                    pattern.bind(&v, |id, v| ctx.user.set_var(id, v))
+                    pattern.bind(&v, &mut |id, v| ctx.user.set_var(id, v))
                 }
                 None
             }
