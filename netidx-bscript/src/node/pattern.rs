@@ -6,11 +6,9 @@ use crate::{
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
-use fxhash::FxHashSet;
 use netidx::{publisher::Typ, subscriber::Value};
-use smallvec::{smallvec, SmallVec};
-use std::{fmt::Debug, hash::Hash};
-use triomphe::Arc;
+use smallvec::SmallVec;
+use std::fmt::Debug;
 
 #[derive(Debug)]
 pub enum ValPNode {

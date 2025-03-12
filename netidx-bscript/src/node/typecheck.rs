@@ -72,9 +72,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
                 Ok(())
             }
-            NodeKind::Bind(_, node)
-            | NodeKind::BindTuple(_, node)
-            | NodeKind::BindStruct(_, node) => {
+            NodeKind::Bind(_, node) => {
                 wrap!(node.typecheck(ctx))?;
                 wrap!(self.typ.check_contains(&node.typ))?;
                 Ok(())

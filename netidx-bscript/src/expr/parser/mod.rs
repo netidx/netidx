@@ -26,7 +26,7 @@ use netidx::{
 use netidx_netproto::value_parser::{
     escaped_string, int, value as netidx_value, VAL_ESC,
 };
-use smallvec::{smallvec, SmallVec};
+use smallvec::SmallVec;
 use std::{marker::PhantomData, sync::LazyLock};
 use triomphe::Arc;
 

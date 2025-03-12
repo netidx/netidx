@@ -256,9 +256,7 @@ impl StructurePattern {
     }
 
     pub fn infer_type_predicate(&self) -> Type<NoRefs> {
-        const M: &str =
-            "refutable patterns are not allowed in let bindings and function args";
-        match &self {
+        match self {
             Self::BindAll { name: ValPat::Bind(_) | ValPat::Ignore } => {
                 Type::empty_tvar()
             }

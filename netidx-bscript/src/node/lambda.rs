@@ -207,8 +207,6 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             NodeKind::Constant(_)
             | NodeKind::Use
             | NodeKind::Bind(_, _)
-            | NodeKind::BindTuple(_, _)
-            | NodeKind::BindStruct(_, _)
             | NodeKind::Ref(_)
             | NodeKind::StructRef(_, _)
             | NodeKind::TupleRef(_, _)
