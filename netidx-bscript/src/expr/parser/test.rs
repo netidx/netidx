@@ -182,7 +182,7 @@ fn letbind() {
         ExprKind::Bind {
             export: false,
             typ: None,
-            name: Some(literal!("foo")),
+            pattern: StructurePattern::BindAll { name: ValPat::Bind(literal!("foo")) },
             value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
         }
         .to_expr(),
@@ -196,7 +196,7 @@ fn typed_letbind() {
         ExprKind::Bind {
             export: false,
             typ: Some(Type::Primitive(Typ::I64.into())),
-            name: Some(literal!("foo")),
+            pattern: StructurePattern::BindAll { name: ValPat::Bind(literal!("foo")) },
             value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr())
         }
         .to_expr(),
@@ -429,7 +429,7 @@ fn select0() {
     let arms = Arc::from_iter([
         (
             Pattern {
-                type_predicate: Type::Primitive(Typ::I64.into()),
+                type_predicate: Some(Type::Primitive(Typ::I64.into())),
                 structure_predicate: StructurePattern::BindAll {
                     name: ValPat::Bind(literal!("a")),
                 },
@@ -449,7 +449,7 @@ fn select0() {
         ),
         (
             Pattern {
-                type_predicate: Type::Bottom(PhantomData),
+                type_predicate: None,
                 structure_predicate: StructurePattern::BindAll {
                     name: ValPat::Bind(literal!("a")),
                 },
@@ -469,7 +469,7 @@ fn select0() {
         .to_expr(),
     );
     let exp = ExprKind::Select { arg, arms }.to_expr();
-    let s = r#"select foo(b) { i64 as a if a < 10 => a * 2, _ as a => a }"#;
+    let s = r#"select foo(b) { i64 as a if a < 10 => a * 2, a => a }"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }
 
@@ -478,13 +478,15 @@ fn select1() {
     let arms = Arc::from_iter([
         (
             Pattern {
-                type_predicate: Type::Array(Arc::new(Type::Primitive(Typ::I64.into()))),
+                type_predicate: Some(Type::Array(Arc::new(Type::Primitive(
+                    Typ::I64.into(),
+                )))),
                 structure_predicate: StructurePattern::Slice {
                     all: None,
                     binds: Arc::from_iter([
-                        ValPat::Bind(literal!("a")),
-                        ValPat::Ignore,
-                        ValPat::Bind(literal!("b")),
+                        StructurePattern::BindAll { name: ValPat::Bind(literal!("a")) },
+                        StructurePattern::BindAll { name: ValPat::Ignore },
+                        StructurePattern::BindAll { name: ValPat::Bind(literal!("b")) },
                     ]),
                 },
                 guard: Some(
@@ -503,10 +505,14 @@ fn select1() {
         ),
         (
             Pattern {
-                type_predicate: Type::Array(Arc::new(Type::Primitive(Typ::I64.into()))),
+                type_predicate: Some(Type::Array(Arc::new(Type::Primitive(
+                    Typ::I64.into(),
+                )))),
                 structure_predicate: StructurePattern::SlicePrefix {
                     all: None,
-                    prefix: Arc::from_iter([ValPat::Bind(literal!("a"))]),
+                    prefix: Arc::from_iter([StructurePattern::BindAll {
+                        name: ValPat::Bind(literal!("a")),
+                    }]),
                     tail: Some(literal!("b")),
                 },
                 guard: None,
@@ -515,10 +521,14 @@ fn select1() {
         ),
         (
             Pattern {
-                type_predicate: Type::Array(Arc::new(Type::Primitive(Typ::I64.into()))),
+                type_predicate: Some(Type::Array(Arc::new(Type::Primitive(
+                    Typ::I64.into(),
+                )))),
                 structure_predicate: StructurePattern::SliceSuffix {
                     all: None,
-                    suffix: Arc::from_iter([ValPat::Bind(literal!("b"))]),
+                    suffix: Arc::from_iter([StructurePattern::BindAll {
+                        name: ValPat::Bind(literal!("b")),
+                    }]),
                     head: Some(literal!("a")),
                 },
                 guard: None,
@@ -527,7 +537,9 @@ fn select1() {
         ),
         (
             Pattern {
-                type_predicate: Type::Array(Arc::new(Type::Primitive(Typ::I64.into()))),
+                type_predicate: Some(Type::Array(Arc::new(Type::Primitive(
+                    Typ::I64.into(),
+                )))),
                 structure_predicate: StructurePattern::Slice {
                     all: None,
                     binds: Arc::from_iter([
@@ -543,7 +555,7 @@ fn select1() {
         ),
         (
             Pattern {
-                type_predicate: Type::Ref(["Foo"].into()),
+                type_predicate: Some(Type::Ref(["Foo"].into())),
                 structure_predicate: StructurePattern::Struct {
                     all: None,
                     exhaustive: false,
@@ -560,7 +572,7 @@ fn select1() {
         ),
         (
             Pattern {
-                type_predicate: Type::Bottom(PhantomData),
+                type_predicate: None,
                 structure_predicate: StructurePattern::BindAll {
                     name: ValPat::Bind(literal!("a")),
                 },
@@ -587,7 +599,7 @@ select foo(b) {
     Array<i64> as [a.., b] => a,
     Array<i64> as [1, 2, 42, a] => a,
     Foo as { foo: 42, bar: _, baz, foobar: a, .. } => a,
-    _ as a => a
+    a => a
 }"#;
     assert_eq!(exp, parse_expr(s).unwrap());
 }

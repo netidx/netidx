@@ -966,7 +966,7 @@ where
                     Either::Left(s) => s,
                     Either::Right(_) => {
                         err = true;
-                        StructurePattern::BindAll { name: ValPat::Ignore }
+                        StructurePattern::Prim(ValPat::Ignore)
                     }
                 }));
             if err {
@@ -1071,16 +1071,11 @@ where
                     attempt((spfname().skip(sptoken(':')), structure_pattern()))
                         .map(|(s, p)| (s, p, true)),
                     attempt(spfname()).map(|s| {
-                        let p =
-                            StructurePattern::BindAll { name: ValPat::Bind(s.clone()) };
+                        let p = StructurePattern::Prim(ValPat::Bind(s.clone()));
                         (s, p, true)
                     }),
                     spstring("..").map(|_| {
-                        (
-                            literal!(""),
-                            StructurePattern::BindAll { name: ValPat::Ignore },
-                            false,
-                        )
+                        (literal!(""), StructurePattern::Prim(ValPat::Ignore), false)
                     }),
                 )),
                 csep(),
@@ -1119,7 +1114,7 @@ where
         attempt(slice_pattern()),
         attempt(tuple_pattern()),
         attempt(struct_pattern()),
-        val_pat().map(|name| StructurePattern::BindAll { name }),
+        val_pat().map(|pat| StructurePattern::Prim(pat)),
     ))
 }
 

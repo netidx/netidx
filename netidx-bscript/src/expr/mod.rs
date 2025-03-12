@@ -164,9 +164,7 @@ impl ValPat {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StructurePattern {
-    BindAll {
-        name: ValPat,
-    },
+    Prim(ValPat),
     Slice {
         all: Option<ArcStr>,
         binds: Arc<[StructurePattern]>,
@@ -195,8 +193,8 @@ pub enum StructurePattern {
 impl StructurePattern {
     fn with_names<'a>(&'a self, mut f: impl FnMut(&'a ArcStr)) {
         match self {
-            Self::BindAll { name: ValPat::Bind(n) } => f(n),
-            Self::BindAll { name: ValPat::Ignore | ValPat::Literal(_) } => (),
+            Self::Prim(ValPat::Bind(n)) => f(n),
+            Self::Prim(ValPat::Ignore | ValPat::Literal(_)) => (),
             Self::Slice { all, binds } => {
                 if let Some(n) = all {
                     f(n)
@@ -257,12 +255,8 @@ impl StructurePattern {
 
     pub fn infer_type_predicate(&self) -> Type<NoRefs> {
         match self {
-            Self::BindAll { name: ValPat::Bind(_) | ValPat::Ignore } => {
-                Type::empty_tvar()
-            }
-            Self::BindAll { name: ValPat::Literal(v) } => {
-                Type::Primitive(Typ::get(v).into())
-            }
+            Self::Prim(ValPat::Bind(_) | ValPat::Ignore) => Type::empty_tvar(),
+            Self::Prim(ValPat::Literal(v)) => Type::Primitive(Typ::get(v).into()),
             Self::Tuple { all: _, binds } => {
                 let mut typs: SmallVec<[Type<NoRefs>; 8]> = smallvec![];
                 for p in binds.iter() {
@@ -303,7 +297,7 @@ impl fmt::Display for StructurePattern {
             };
         }
         match self {
-            StructurePattern::BindAll { name } => write!(f, "{name}"),
+            StructurePattern::Prim(pat) => write!(f, "{pat}"),
             StructurePattern::Slice { all, binds } => {
                 if let Some(all) = all {
                     write!(f, "{all}@ ")?
