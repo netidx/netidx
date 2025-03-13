@@ -238,22 +238,30 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 wrap!(arg.node.typecheck(ctx))?;
                 let mut rtype = Type::Bottom(PhantomData);
                 let mut mtype = Type::Bottom(PhantomData);
-                for (pat, n) in arms {
+                for (pat, n) in arms.iter_mut() {
                     match &mut pat.guard {
                         Some(guard) => wrap!(guard.node.typecheck(ctx))?,
                         None => mtype = mtype.union(&pat.type_predicate),
                     }
                     wrap!(n.node.typecheck(ctx))?;
-                    wrap!(arg
-                        .node
-                        .typ
-                        .check_contains(&pat.type_predicate)
-                        .map_err(|e| anyhow!("pattern will never match {e}")))?;
                     rtype = rtype.union(&n.node.typ);
                 }
                 wrap!(mtype
                     .check_contains(&arg.node.typ)
                     .map_err(|e| anyhow!("missing match cases {e}")))?;
+                let mut atype = arg.node.typ.clone();
+                for (pat, _) in arms.iter() {
+                    let can_match = atype.contains(&pat.type_predicate)
+                        || pat.type_predicate.contains(&atype);
+                    if !can_match {
+                        bail!(
+                            "pattern {} will never match {}, unused match cases",
+                            pat.type_predicate,
+                            arg.node.typ
+                        )
+                    }
+                    atype = atype.diff(&pat.type_predicate)?;
+                }
                 self.typ.check_contains(&rtype)
             }
             NodeKind::Constant(_)
