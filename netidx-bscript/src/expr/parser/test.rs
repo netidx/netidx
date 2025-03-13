@@ -1286,6 +1286,5 @@ fn tupleref() {
 #[test]
 fn prop0() {
     let s = "mod a{mod a{a <- select u32:0 {u32:0 => |a@ []| u32:0}}}";
-    let s = "{|a@ []| u32:0}";
     dbg!(parse(s).unwrap());
 }
