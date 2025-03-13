@@ -697,11 +697,9 @@ where
     sep_by(
         (
             choice((
-                attempt(
-                    spaces().with((optional(token('#')).map(|o| o.is_some()), fname())),
-                )
-                .map(|(l, b)| (l, StructurePattern::Bind(b))),
                 attempt(spaces().with(structure_pattern())).map(|p| (false, p)),
+                attempt(spaces().with(token('#').with(fname())))
+                    .map(|b| (true, StructurePattern::Bind(b))),
                 attempt(spstring("@args"))
                     .map(|s| (false, StructurePattern::Bind(ArcStr::from(s)))),
             )),
