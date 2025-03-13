@@ -1,24 +1,22 @@
 use crate::{
     env::LambdaBind,
     expr::{Arg, Expr, ExprId, ModPath},
-    node::{compiler, Node, NodeKind},
+    node::{compiler, pattern::StructPatternNode, Node, NodeKind},
     typ::{FnType, NoRefs, Refs, TVar, Type},
-    Apply, ApplyTyped, BindId, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars, UserEvent,
+    Apply, ApplyTyped, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use compact_str::format_compact;
-use immutable_chunkmap::set::SetS as Set;
 use netidx::{subscriber::Value, utils::Either};
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::{fmt::Debug, hash::Hash, marker::PhantomData, mem, sync::Arc as SArc};
 use triomphe::Arc;
 
 atomic_id!(LambdaId);
 
 pub(super) struct Lambda<C: Ctx, E: UserEvent> {
-    eid: ExprId,
-    argids: Vec<BindId>,
+    args: Box<[StructPatternNode]>,
     spec: LambdaTVars,
     body: Node<C, E>,
 }
@@ -30,21 +28,11 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Lambda<C, E> {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        for (arg, id) in from.iter_mut().zip(&self.argids) {
-            match arg {
-                Node { kind: NodeKind::Ref(_), .. } => (), // the bind is forwarded into the body
-                arg => {
-                    if let Some(v) = arg.update(ctx, event) {
-                        if ctx.dbg_ctx.trace {
-                            ctx.dbg_ctx.add_event(
-                                self.eid,
-                                Some(event.clone()),
-                                v.clone(),
-                            )
-                        }
-                        ctx.user.set_var(*id, v)
-                    }
-                }
+        for (arg, pat) in from.iter_mut().zip(&self.args) {
+            if let Some(v) = arg.update(ctx, event) {
+                pat.bind(&v, &mut |id, v| {
+                    event.variables.insert(id, v);
+                })
             }
         }
         self.body.update(ctx, event)
@@ -66,9 +54,10 @@ impl<C: Ctx, E: UserEvent> ApplyTyped<C, E> for Lambda<C, E> {
             };
         }
         let spec = &mut self.spec;
-        for (arg, (_, typ)) in args.iter_mut().zip(spec.argspec.iter()) {
+        for (arg, (aspec, typ)) in args.iter_mut().zip(spec.argspec.iter()) {
             wrap!(arg, arg.typecheck(ctx))?;
             wrap!(arg, typ.check_contains(&arg.typ))?;
+            wrap!(arg, aspec.ptyp.check_contains(&arg.typ))?;
         }
         wrap!(self.body, self.body.typecheck(ctx))?;
         wrap!(self.body, spec.rtype.check_contains(&self.body.typ))?;
@@ -92,7 +81,6 @@ impl<C: Ctx, E: UserEvent> Lambda<C, E> {
         spec: LambdaTVars,
         args: &[Node<C, E>],
         scope: &ModPath,
-        eid: ExprId,
         tid: ExprId,
         body: Expr,
     ) -> Result<Self> {
@@ -102,23 +90,20 @@ impl<C: Ctx, E: UserEvent> Lambda<C, E> {
         let id = LambdaId::new();
         let mut argids = vec![];
         let scope = ModPath(scope.0.append(&format_compact!("fn{}", id.0)));
-        for ((a, typ), node) in spec.argspec.iter().zip(args.iter()) {
-            let bind = ctx.env.bind_variable(&scope, &*a.name, typ.clone());
-            match &node.kind {
-                NodeKind::Ref(id) => {
-                    argids.push(*id);
-                    let old_id = bind.id;
-                    ctx.env.alias(old_id, *id)
-                }
-                _ => {
-                    argids.push(bind.id);
-                    bind.fun = node.find_lambda();
+        for ((a, _), node) in spec.argspec.iter().zip(args.iter()) {
+            let pattern = StructPatternNode::compile(ctx, &a.ptyp, &a.pattern, &scope)?;
+            if let Some(l) = node.find_lambda() {
+                if let Some(id) = pattern.lambda_ok() {
+                    ctx.env.by_id[&id].fun = Some(l)
+                } else {
+                    bail!("cannot pass a lambda to this argument pattern")
                 }
             }
+            argids.push(pattern);
         }
         let body = compiler::compile(ctx, body, &scope, tid);
         match body.extract_err() {
-            None => Ok(Self { argids, spec, eid, body }),
+            None => Ok(Self { args: Box::from(argids), spec, body }),
             Some(e) => bail!("{e}"),
         }
     }
@@ -206,7 +191,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             NodeKind::Do(children) => children.last().and_then(|t| t.find_lambda()),
             NodeKind::Constant(_)
             | NodeKind::Use
-            | NodeKind::Bind(_, _)
+            | NodeKind::Bind { .. }
             | NodeKind::Ref(_)
             | NodeKind::StructRef(_, _)
             | NodeKind::TupleRef(_, _)
@@ -248,7 +233,6 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
     constraints: Arc<[(TVar<Refs>, Type<Refs>)]>,
     scope: &ModPath,
     body: Either<Arc<Expr>, ArcStr>,
-    eid: ExprId,
 ) -> Node<C, E> {
     macro_rules! error {
         ($msg:expr, $($arg:expr),*) => {{
@@ -262,9 +246,16 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             };
         }};
     }
-    if argspec.len() != argspec.iter().map(|a| a.name.as_str()).collect::<Set<_>>().len()
     {
-        error!("arguments must have unique names",);
+        let mut s: SmallVec<[ArcStr; 16]> = smallvec![];
+        for a in argspec.iter() {
+            a.pattern.with_names(&mut |n| s.push(n.clone()));
+        }
+        s.sort();
+        s.dedup();
+        if argspec.len() != s.len() {
+            error!("arguments must have unique names",);
+        }
     }
     let scope = scope.clone();
     let _scope = scope.clone();
@@ -350,8 +341,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 }
             },
             Either::Left(body) => {
-                let apply =
-                    Lambda::new(ctx, spec, args, &_scope, eid, tid, (*body).clone());
+                let apply = Lambda::new(ctx, spec, args, &_scope, tid, (*body).clone());
                 apply.map(|a| {
                     let f: Box<dyn ApplyTyped<C, E> + Send + Sync + 'static> =
                         Box::new(a);

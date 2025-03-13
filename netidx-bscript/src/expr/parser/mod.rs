@@ -699,22 +699,31 @@ where
             choice((
                 attempt(
                     spaces().with((optional(token('#')).map(|o| o.is_some()), fname())),
-                ),
-                attempt(spstring("@args")).map(|s| (false, ArcStr::from(s))),
+                )
+                .map(|(l, b)| (l, StructurePattern::Bind(b))),
+                attempt(spaces().with(structure_pattern())).map(|p| (false, p)),
+                attempt(spstring("@args"))
+                    .map(|s| (false, StructurePattern::Bind(ArcStr::from(s)))),
             )),
             optional(attempt(sptoken(':').with(typexp()))),
             optional(attempt(sptoken('=').with(expr()))),
         ),
         csep(),
     )
-    .then(|v: Vec<((bool, ArcStr), Option<Type<Refs>>, Option<Expr>)>| {
+    .then(|v: Vec<((bool, StructurePattern), Option<Type<Refs>>, Option<Expr>)>| {
         let args = v
             .into_iter()
-            .map(|((labeled, name), constraint, default)| {
+            .map(|((labeled, pattern), constraint, default)| {
                 if !labeled && default.is_some() {
                     bail!("labeled")
                 } else {
-                    Ok(Arg { labeled: labeled.then_some(default), name, constraint })
+                    let ptyp = pattern.infer_type_predicate();
+                    Ok(Arg {
+                        labeled: labeled.then_some(default),
+                        pattern,
+                        ptyp,
+                        constraint,
+                    })
                 }
             })
             .collect::<Result<Vec<_>>>();
@@ -727,7 +736,10 @@ where
     })
     // @args must be last
     .then(|mut v: Vec<Arg>| {
-        match v.iter().enumerate().find(|(_, a)| &*a.name == "@args") {
+        match v.iter().enumerate().find(|(_, a)| match &a.pattern {
+            StructurePattern::Bind(n) if n == "@args" => true,
+            _ => false,
+        }) {
             None => value((v, None)).left(),
             Some((i, _)) => {
                 if i == v.len() - 1 {

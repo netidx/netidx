@@ -72,9 +72,10 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
                 Ok(())
             }
-            NodeKind::Bind(_, node) => {
+            NodeKind::Bind { pattern: _, ptyp, node } => {
                 wrap!(node.typecheck(ctx))?;
                 wrap!(self.typ.check_contains(&node.typ))?;
+                wrap!(ptyp.check_contains(&node.typ))?;
                 Ok(())
             }
             NodeKind::Qop(id, n) => {
@@ -237,21 +238,19 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 wrap!(arg.node.typecheck(ctx))?;
                 let mut rtype = Type::Bottom(PhantomData);
                 let mut mtype = Type::Bottom(PhantomData);
-                let mut mcases = Type::Bottom(PhantomData);
                 for (pat, n) in arms {
-                    mcases = mcases.union(&pat.type_predicate);
                     match &mut pat.guard {
                         Some(guard) => wrap!(guard.node.typecheck(ctx))?,
                         None => mtype = mtype.union(&pat.type_predicate),
                     }
                     wrap!(n.node.typecheck(ctx))?;
+                    wrap!(arg
+                        .node
+                        .typ
+                        .check_contains(&pat.type_predicate)
+                        .map_err(|e| anyhow!("pattern will never match {e}")))?;
                     rtype = rtype.union(&n.node.typ);
                 }
-                wrap!(arg
-                    .node
-                    .typ
-                    .check_contains(&mcases)
-                    .map_err(|e| anyhow!("pattern will never match {e}")))?;
                 wrap!(mtype
                     .check_contains(&arg.node.typ)
                     .map_err(|e| anyhow!("missing match cases {e}")))?;

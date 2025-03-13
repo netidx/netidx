@@ -189,18 +189,6 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         })
     }
 
-    // alias orig_id -> new_id. orig_id will be removed, and it's in
-    // scope entry will point to new_id
-    pub(super) fn alias(&mut self, orig_id: BindId, new_id: BindId) {
-        if let Some(bind) = self.by_id.remove_cow(&orig_id) {
-            if let Some(binds) = self.binds.get_mut_cow(&bind.scope) {
-                if let Some(id) = binds.get_mut_cow(bind.name.as_str()) {
-                    *id = new_id
-                }
-            }
-        }
-    }
-
     pub fn deftype(
         &mut self,
         scope: &ModPath,

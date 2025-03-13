@@ -134,7 +134,20 @@ pub enum StructurePattern {
 }
 
 impl StructurePattern {
-    fn with_names<'a>(&'a self, f: &mut impl FnMut(&'a ArcStr)) {
+    pub fn single_bind(&self) -> Option<&ArcStr> {
+        match self {
+            Self::Bind(s) => Some(s),
+            Self::Ignore
+            | Self::Literal(_)
+            | Self::Slice { .. }
+            | Self::SlicePrefix { .. }
+            | Self::SliceSuffix { .. }
+            | Self::Tuple { .. }
+            | Self::Struct { .. } => None,
+        }
+    }
+
+    pub fn with_names<'a>(&'a self, f: &mut impl FnMut(&'a ArcStr)) {
         match self {
             Self::Bind(n) => f(n),
             Self::Ignore | Self::Literal(_) => (),
@@ -315,7 +328,8 @@ pub struct Pattern {
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Arg {
     pub labeled: Option<Option<Expr>>,
-    pub name: ArcStr,
+    pub pattern: StructurePattern,
+    pub ptyp: Type<NoRefs>,
     pub constraint: Option<Type<Refs>>,
 }
 
@@ -683,11 +697,11 @@ impl ExprKind {
                 for (i, a) in args.iter().enumerate() {
                     match &a.labeled {
                         None => {
-                            write!(buf, "{}", a.name)?;
+                            write!(buf, "{}", a.pattern)?;
                             buf.push_str(typ!(&a.constraint));
                         }
                         Some(def) => {
-                            write!(buf, "#{}", a.name)?;
+                            write!(buf, "#{}", a.pattern)?;
                             buf.push_str(typ!(&a.constraint));
                             if let Some(def) = def {
                                 write!(buf, " = {def}")?;
@@ -878,11 +892,11 @@ impl fmt::Display for ExprKind {
                 for (i, a) in args.iter().enumerate() {
                     match &a.labeled {
                         None => {
-                            write!(f, "{}", a.name)?;
+                            write!(f, "{}", a.pattern)?;
                             write!(f, "{}", typ!(&a.constraint))?;
                         }
                         Some(def) => {
-                            write!(f, "#{}", a.name)?;
+                            write!(f, "#{}", a.pattern)?;
                             write!(f, "{}", typ!(&a.constraint))?;
                             if let Some(def) = def {
                                 write!(f, " = {def}")?;

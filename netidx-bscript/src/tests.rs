@@ -942,3 +942,35 @@ run!(nestedmatch1, NESTEDMATCH1, |v: Result<&Value>| match v {
     Ok(Value::F64(47.0)) => true,
     _ => false,
 });
+
+const NESTEDMATCH2: &str = r#"
+{
+  type T = { foo: Array<f64>, bar: i64, baz: f64 };
+  let x = { foo: [ 1.0, 2.0, 4.3, 55.23 ], bar: 42, baz: 84.0 };
+  let { foo: [x, y, ..], ..}: T = x;
+  x + y
+}
+"#;
+
+run!(nestedmatch2, NESTEDMATCH2, |v: Result<&Value>| match v {
+    Err(e) => {
+        dbg!(e);
+        true
+    }
+    _ => false,
+});
+
+const NESTEDMATCH3: &str = r#"
+{
+  type T = { foo: Array<f64>, bar: i64, baz: f64 };
+  let x = { foo: [ 1.0, 2.0, 4.3, 55.23 ], bar: 42, baz: 84.0 };
+  select x {
+    T as { foo: [x, y, ..], bar: _, baz: _ } => x + y
+  }
+}
+"#;
+
+run!(nestedmatch3, NESTEDMATCH3, |v: Result<&Value>| match v {
+    Ok(Value::F64(3.0)) => true,
+    _ => false,
+});

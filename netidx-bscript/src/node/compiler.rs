@@ -40,7 +40,7 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
     for a in lb.argspec.iter() {
         match &a.labeled {
             None => break,
-            Some(def) => match named.remove(&a.name) {
+            Some(def) => match a.pattern.single_bind().and_then(|n| named.remove(n)) {
                 Some(e) => {
                     let n = compile(ctx, e, scope, top_id);
                     if let Some(e) = n.extract_err() {
@@ -49,7 +49,9 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
                     nodes.push(n)
                 }
                 None => match def {
-                    None => bail!("missing required argument {}", a.name),
+                    None => {
+                        bail!("missing required argument {}", a.pattern)
+                    }
                     Some(e) => {
                         let orig_env = ctx.env.restore_lexical_env(&lb.env);
                         let n = compile(ctx, e.clone(), &lb.scope, top_id);
@@ -83,7 +85,7 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
         }
     }
     if nodes.len() < lb.argspec.len() {
-        bail!("missing required argument {}", lb.argspec[nodes.len()].name)
+        bail!("missing required argument {}", lb.argspec[nodes.len()].pattern)
     }
     Ok(Box::from_iter(nodes))
 }
@@ -282,16 +284,18 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             let typ = Type::Bottom(PhantomData);
             Node { spec: Box::new(spec), typ, kind }
         }
-        Expr { kind: ExprKind::Lambda { args, vargs, rtype, constraints, body }, id } => {
-            let (args, vargs, rtype, constraints, body, id) = (
+        Expr {
+            kind: ExprKind::Lambda { args, vargs, rtype, constraints, body },
+            id: _,
+        } => {
+            let (args, vargs, rtype, constraints, body) = (
                 args.clone(),
                 vargs.clone(),
                 rtype.clone(),
                 constraints.clone(),
                 (*body).clone(),
-                *id,
             );
-            lambda::compile(ctx, spec, args, vargs, rtype, constraints, scope, body, id)
+            lambda::compile(ctx, spec, args, vargs, rtype, constraints, scope, body)
         }
         Expr { kind: ExprKind::Apply { args, function: f }, id: _ } => {
             let (args, f) = (args.clone(), f.clone());
@@ -303,13 +307,14 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 return error!("", vec![node]);
             }
             let typ = match typ {
-                None => pattern.infer_type_predicate(),
+                None => node.typ.clone(),
                 Some(typ) => match typ.resolve_typrefs(scope, &ctx.env) {
                     Ok(typ) => typ.clone(),
                     Err(e) => return error!("{e}", vec![node]),
                 },
             };
-            let pn = match StructPatternNode::compile(ctx, &typ, pattern, scope) {
+            let ptyp = pattern.infer_type_predicate();
+            let pn = match StructPatternNode::compile(ctx, &ptyp, pattern, scope) {
                 Ok(p) => p,
                 Err(e) => return error!("{e:?}", vec![node]),
             };
@@ -322,7 +327,8 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                     None => return error!("can't bind lambda to {pattern}", vec![node]),
                 }
             };
-            let kind = NodeKind::Bind(Box::new(pn), Box::new(node));
+            let kind =
+                NodeKind::Bind { pattern: Box::new(pn), ptyp, node: Box::new(node) };
             Node { spec: Box::new(spec), typ, kind }
         }
         Expr { kind: ExprKind::Qop(e), id: _ } => {
