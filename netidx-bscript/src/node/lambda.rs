@@ -92,6 +92,12 @@ impl<C: Ctx, E: UserEvent> Lambda<C, E> {
         let scope = ModPath(scope.0.append(&format_compact!("fn{}", id.0)));
         for ((a, _), node) in spec.argspec.iter().zip(args.iter()) {
             let pattern = StructPatternNode::compile(ctx, &a.ptyp, &a.pattern, &scope)?;
+            if pattern.is_refutable() {
+                bail!(
+                    "refutable patterns are not allowed in lambda arguments {}",
+                    a.pattern
+                )
+            }
             if let Some(l) = node.find_lambda() {
                 if let Some(id) = pattern.lambda_ok() {
                     ctx.env.by_id[&id].fun = Some(l)

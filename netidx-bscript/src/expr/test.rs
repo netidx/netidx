@@ -419,22 +419,36 @@ macro_rules! lambda {
     ($inner:expr) => {
         (
             collection::vec(
-                (any::<bool>(), random_fname(), option::of(typexp()), option::of($inner)),
+                (
+                    any::<bool>(),
+                    random_fname(),
+                    structure_pattern(),
+                    option::of(typexp()),
+                    option::of($inner),
+                ),
                 (0, 10),
             ),
             option::of(option::of(typexp())),
             option::of(typexp()),
             collection::vec((random_fname(), typexp()), (0, 4)),
+            option::of(random_fname()),
             $inner,
         )
-            .prop_map(|(mut args, vargs, rtype, constraints, body)| {
-                args.sort_unstable_by(|(k0, _, _, _), (k1, _, _, _)| k1.cmp(k0));
-                let args =
-                    args.into_iter().map(|(labeled, name, constraint, default)| Arg {
-                        labeled: labeled.then_some(default),
-                        name,
-                        constraint,
-                    });
+            .prop_map(|(mut args, vargs, rtype, constraints, builtin, body)| {
+                args.sort_unstable_by(|(k0, _, _, _, _), (k1, _, _, _, _)| k1.cmp(k0));
+                let args = args.into_iter().map(
+                    |(labeled, name, pattern, constraint, default)| {
+                        let pattern =
+                            if labeled { StructurePattern::Bind(name) } else { pattern };
+                        let ptyp = pattern.infer_type_predicate();
+                        Arg {
+                            labeled: labeled.then_some(default),
+                            pattern,
+                            ptyp,
+                            constraint,
+                        }
+                    },
+                );
                 let constraints = Arc::from_iter(
                     constraints.into_iter().map(|(a, t)| (TVar::empty_named(a), t)),
                 );
@@ -443,42 +457,10 @@ macro_rules! lambda {
                     vargs,
                     rtype,
                     constraints,
-                    body: Either::Left(Arc::new(body)),
-                }
-                .to_expr()
-            })
-    };
-}
-
-macro_rules! builtin {
-    ($inner:expr) => {
-        (
-            collection::vec(
-                (any::<bool>(), random_fname(), option::of(typexp()), option::of($inner)),
-                (0, 10),
-            ),
-            option::of(option::of(typexp())),
-            option::of(typexp()),
-            collection::vec((random_fname(), typexp()), (0, 4)),
-            random_fname(),
-        )
-            .prop_map(|(mut args, vargs, rtype, constraints, body)| {
-                args.sort_unstable_by_key(|(k, _, _, _)| !*k);
-                let args =
-                    args.into_iter().map(|(labeled, name, constraint, default)| Arg {
-                        labeled: labeled.then_some(default),
-                        name,
-                        constraint,
-                    });
-                let constraints = Arc::from_iter(
-                    constraints.into_iter().map(|(a, t)| (TVar::empty_named(a), t)),
-                );
-                ExprKind::Lambda {
-                    args: Arc::from_iter(args),
-                    vargs,
-                    rtype,
-                    constraints,
-                    body: Either::Right(body),
+                    body: match builtin {
+                        None => Either::Left(Arc::new(body)),
+                        Some(name) => Either::Right(name),
+                    },
                 }
                 .to_expr()
             })
@@ -601,7 +583,6 @@ fn expr() -> impl Strategy<Value = Expr> {
             typecast!(inner.clone()),
             do_block!(inner.clone()),
             lambda!(inner.clone()),
-            builtin!(inner.clone()),
             bind!(inner.clone()),
             connect!(inner.clone()),
             select!(inner.clone()),
@@ -781,7 +762,7 @@ fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
 
 fn check_args(args0: &[Arg], args1: &[Arg]) -> bool {
     args0.iter().zip(args1.iter()).fold(true, |r, (a0, a1)| {
-        r && dbg!(a0.name == a1.name)
+        r && dbg!(check_structure_pattern(&a0.pattern, &a1.pattern))
             && dbg!(check_type_opt(&a0.constraint, &a1.constraint))
             && dbg!(match (&a0.labeled, &a1.labeled) {
                 (None, None) | (Some(None), Some(None)) => true,

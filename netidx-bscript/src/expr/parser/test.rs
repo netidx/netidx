@@ -719,8 +719,18 @@ fn doexpr() {
 fn lambda() {
     let exp = ExprKind::Lambda {
         args: Arc::from_iter([
-            Arg { labeled: None, name: "foo".into(), constraint: None },
-            Arg { labeled: None, name: "bar".into(), constraint: None },
+            Arg {
+                labeled: None,
+                pattern: StructurePattern::Bind("foo".into()),
+                ptyp: Type::empty_tvar(),
+                constraint: None,
+            },
+            Arg {
+                labeled: None,
+                pattern: StructurePattern::Bind("bar".into()),
+                ptyp: Type::empty_tvar(),
+                constraint: None,
+            },
         ]),
         rtype: None,
         vargs: None,
@@ -788,7 +798,8 @@ fn apply_lambda() {
             ExprKind::Lambda {
                 args: Arc::from_iter([Arg {
                     labeled: None,
-                    name: "a".into(),
+                    pattern: StructurePattern::Bind("a".into()),
+                    ptyp: Type::empty_tvar(),
                     constraint: None,
                 }]),
                 vargs: Some(None),
@@ -813,10 +824,16 @@ fn apply_typed_lambda() {
             None,
             ExprKind::Lambda {
                 args: Arc::from_iter([
-                    Arg { labeled: None, name: "a".into(), constraint: None },
                     Arg {
                         labeled: None,
-                        name: "b".into(),
+                        pattern: StructurePattern::Bind("a".into()),
+                        ptyp: Type::empty_tvar(),
+                        constraint: None,
+                    },
+                    Arg {
+                        labeled: None,
+                        pattern: StructurePattern::Bind("b".into()),
+                        ptyp: Type::empty_tvar(),
                         constraint: Some(Type::Set(Arc::from_iter([
                             Type::Primitive(Typ::Null.into()),
                             Type::Ref(["Number"].into()),
@@ -887,7 +904,8 @@ fn typed_array() {
                 ExprKind::Lambda {
                     args: Arc::from_iter([Arg {
                         labeled: None,
-                        name: "a".into(),
+                        pattern: StructurePattern::Bind("a".into()),
+                        ptyp: Type::empty_tvar(),
                         constraint: Some(Type::Array(Arc::new(Type::TVar(
                             TVar::empty_named("a".into()),
                         )))),
@@ -940,19 +958,31 @@ fn labeled_argument_lambda() {
                 ExprKind::Lambda {
                     args: Arc::from_iter([
                         Arg {
-                            name: "foo".into(),
+                            pattern: StructurePattern::Bind("foo".into()),
+                            ptyp: Type::empty_tvar(),
                             labeled: Some(Some(ExprKind::Constant(3.into()).to_expr())),
                             constraint: Some(Type::Ref(["Number"].into())),
                         },
                         Arg {
-                            name: "bar".into(),
+                            pattern: StructurePattern::Bind("bar".into()),
+                            ptyp: Type::empty_tvar(),
                             labeled: Some(Some(
                                 ExprKind::Constant("hello".into()).to_expr(),
                             )),
                             constraint: None,
                         },
-                        Arg { name: "a".into(), labeled: Some(None), constraint: None },
-                        Arg { name: "baz".into(), labeled: None, constraint: None },
+                        Arg {
+                            pattern: StructurePattern::Bind("a".into()),
+                            ptyp: Type::empty_tvar(),
+                            labeled: Some(None),
+                            constraint: None,
+                        },
+                        Arg {
+                            pattern: StructurePattern::Bind("baz".into()),
+                            ptyp: Type::empty_tvar(),
+                            labeled: None,
+                            constraint: None,
+                        },
                     ]),
                     vargs: None,
                     rtype: None,
