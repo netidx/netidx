@@ -19,7 +19,7 @@ use crate::{
     node::Node,
     typ::{FnType, NoRefs, Refs, TVar, Type},
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use fxhash::FxHashMap;
 use netidx::{
@@ -27,7 +27,7 @@ use netidx::{
     subscriber::{self, Dval, SubId, UpdatesFlags, Value},
 };
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
     fmt::Debug,
     sync::{self, LazyLock},
     time::Duration,
@@ -286,8 +286,14 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         t
     }
 
-    pub fn register_builtin<T: BuiltIn<C, E>>(&mut self) {
+    pub fn register_builtin<T: BuiltIn<C, E>>(&mut self) -> Result<()> {
         let f = T::init(self);
-        self.builtins.insert(T::NAME, (T::TYP.clone(), f));
+        match self.builtins.entry(T::NAME) {
+            Entry::Vacant(e) => {
+                e.insert((T::TYP.clone(), f));
+            }
+            Entry::Occupied(_) => bail!("builtin {} is already registered", T::NAME),
+        }
+        Ok(())
     }
 }

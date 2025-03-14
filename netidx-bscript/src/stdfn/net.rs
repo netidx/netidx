@@ -275,8 +275,8 @@ pub mod net {
 "#;
 
 pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<Write>();
-    ctx.register_builtin::<Subscribe>();
-    ctx.register_builtin::<RpcCall>();
+    ctx.register_builtin::<Write>().unwrap();
+    ctx.register_builtin::<Subscribe>().unwrap();
+    ctx.register_builtin::<RpcCall>().unwrap();
     MOD.parse().unwrap()
 }

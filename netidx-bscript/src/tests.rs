@@ -323,7 +323,7 @@ const SELECT: &str = r#"
     _ as v if v == 2 => "second [v]",
     _ as v => "third [v]"
   };
-  group(s, |n, x| n == 3)
+  array::group(s, |n, x| n == 3)
 }
 "#;
 
@@ -653,10 +653,10 @@ run!(array_indexing4, ARRAY_INDEXING4, |v: Result<&Value>| match v {
 const ARRAY_INDEXING5: &str = r#"
 {
   let a = [0, 1, 2, 3, 4, 5, 6];
-  let out = select ungroup(a) {
+  let out = select array::iter(a) {
     i64 as i => a[i] + 1
   };
-  group(out, |i, x| i == 6)
+  array::group(out, |i, x| i == 6)
 }
 "#;
 
@@ -668,10 +668,10 @@ run!(array_indexing5, ARRAY_INDEXING5, |v: Result<&Value>| match v {
 const ARRAY_INDEXING6: &str = r#"
 {
   let a = [0, 1, 2, 3, 4, 5, 6];
-  let out = select ungroup(a) {
+  let out = select array::iter(a) {
     i64 as i => a[i]? + 1
   };
-  group(out, |i, x| i == 7)
+  array::group(out, |i, x| i == 7)
 }
 "#;
 
@@ -714,7 +714,7 @@ const ARRAY_MATCH1: &str = r#"
       [x, y]
     }
   };
-  group(out, |i, x| i == 4)
+  array::group(out, |i, x| i == 4)
 }
 "#;
 
@@ -974,7 +974,7 @@ const ANY0: &str = r#"
   let x = 1;
   let y = x + 1;
   let z = y + 1;
-  group(any(x, y, z), |n, _| n == 3)
+  array::group(any(x, y, z), |n, _| n == 3)
 }
 "#;
 
@@ -994,7 +994,7 @@ const ANY1: &str = r#"
   let y = "[x] + 1";
   let z = [y, y];
   let r: [i64, string, Array<string>] = any(x, y, z);
-  group(r, |n, _| n == 3)
+  array::group(r, |n, _| n == 3)
 }
 "#;
 

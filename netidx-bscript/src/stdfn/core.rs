@@ -87,7 +87,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for FilterErr {
 const FILTER_ERR: &str = r#"
 {
   let a = [42, 43, 44, error("foo")];
-  filter_err(ungroup(a))
+  filter_err(array::iter(a))
 }
 "#;
 
@@ -173,7 +173,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Once {
 const ONCE: &str = r#"
 {
   let x = [1, 2, 3, 4, 5, 6];
-  once(ungroup(x))
+  once(array::iter(x))
 }
 "#;
 
@@ -597,6 +597,25 @@ impl EvalCached for SliceEv {
 
 type Slice = CachedArgs<SliceEv>;
 
+#[cfg(test)]
+const SLICE: &str = r#"
+{
+  let a = [1, 2, 3, 4, 5, 6, 7, 8];
+  [sum(a[2..4]?), sum(a[6..]?), sum(a[..2]?)]
+}
+"#;
+
+#[cfg(test)]
+run!(slice, SLICE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::I64(7), Value::I64(15), Value::I64(3)] => true,
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
 struct Filter<C: Ctx, E: UserEvent> {
     pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
     x: BindId,
@@ -643,6 +662,98 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
     }
 }
 
+#[cfg(test)]
+const FILTER: &str = r#"
+{
+  let a = [1, 2, 3, 4, 5, 6, 7, 8];
+  filter(array::iter(a), |x| x > 7)
+}
+"#;
+
+#[cfg(test)]
+run!(filter, FILTER, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(8)) => true,
+        _ => false,
+    }
+});
+
+struct ArrayFilter<C: Ctx, E: UserEvent> {
+    pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
+    x: BindId,
+    from: [Node<C, E>; 1],
+}
+
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for ArrayFilter<C, E> {
+    const NAME: &str = "array_filter";
+    deftype!("fn(Array<'a>, fn('a) -> bool) -> Array<'a>");
+
+    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+        Arc::new(|ctx, scope, from, top_id| match from {
+            [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
+                let x = ctx.env.bind_variable(scope, "x", from[0].typ.clone()).id;
+                ctx.user.ref_var(x, top_id);
+                let mut from = [Node {
+                    spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
+                    typ: from[0].typ.clone(),
+                    kind: NodeKind::Ref(x),
+                }];
+                let pred = (lb.init)(ctx, &mut from, top_id)?;
+                Ok(Box::new(Self { pred, x, from }))
+            }
+            _ => bail!("expected a function"),
+        })
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Apply<C, E> for ArrayFilter<C, E> {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        self.pred.update(ctx, &mut self.from, event);
+        from[0].update(ctx, event).and_then(|v| match v {
+            Value::Array(a) => {
+                let mut res: SmallVec<[&Value; 16]> = smallvec![];
+                for v in a.iter() {
+                    event.variables.insert(self.x, v.clone());
+                    match self.pred.update(ctx, &mut self.from, event) {
+                        Some(Value::Bool(true)) => res.push(v),
+                        _ => (),
+                    }
+                }
+                Some(Value::Array(ValArray::from_iter(
+                    res.into_iter().map(|v| v.clone()),
+                )))
+            }
+            _ => None,
+        })
+    }
+}
+
+#[cfg(test)]
+const ARRAY_FILTER: &str = r#"
+{
+  let a = [1, 2, 3, 4, 5, 6, 7, 8];
+  array::filter(a, |x| x > 3)
+}
+"#;
+
+#[cfg(test)]
+run!(array_filter, ARRAY_FILTER, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::I64(4), Value::I64(5), Value::I64(6), Value::I64(7), Value::I64(8)] => {
+                true
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
 struct Count {
     count: u64,
 }
@@ -671,6 +782,25 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Count {
         }
     }
 }
+
+#[cfg(test)]
+const COUNT: &str = r#"
+{
+  let a = [0, 1, 2, 3];
+  array::group(count(array::iter(a)), |n, _| n == 4)
+}
+"#;
+
+#[cfg(test)]
+run!(count, COUNT, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::U64(1), Value::U64(2), Value::U64(3), Value::U64(4)] => true,
+            _ => false,
+        },
+        _ => false,
+    }
+});
 
 struct Sample {
     last: Option<Value>,
@@ -703,6 +833,28 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Sample {
         }
     }
 }
+
+#[cfg(test)]
+const SAMPLE: &str = r#"
+{
+  let a = [0, 1, 2, 3];
+  let x = "tweeeenywon!";
+  array::group(sample(array::iter(a), x), |n, _| n == 4)
+}
+"#;
+
+#[cfg(test)]
+run!(sample, SAMPLE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::String(s0), Value::String(s1), Value::String(s2), Value::String(s3)] => {
+                s0 == s1 && s1 == s2 && s2 == s3 && &**s3 == "tweeeenywon!"
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+});
 
 struct MeanEv;
 
@@ -737,6 +889,22 @@ impl EvalCached for MeanEv {
 
 type Mean = CachedArgs<MeanEv>;
 
+#[cfg(test)]
+const MEAN: &str = r#"
+{
+  let a = [0, 1, 2, 3];
+  mean(a)
+}
+"#;
+
+#[cfg(test)]
+run!(mean, MEAN, |v: Result<&Value>| {
+    match v {
+        Ok(Value::F64(1.5)) => true,
+        _ => false,
+    }
+});
+
 struct Uniq(Option<Value>);
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Uniq {
@@ -769,6 +937,22 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Uniq {
     }
 }
 
+#[cfg(test)]
+const UNIQ: &str = r#"
+{
+  let a = [1, 1, 1, 1, 1, 1, 1];
+  uniq(array::iter(a))
+}
+"#;
+
+#[cfg(test)]
+run!(uniq, UNIQ, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(1)) => true,
+        _ => false,
+    }
+});
+
 struct Never;
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Never {
@@ -793,6 +977,22 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Never {
         None
     }
 }
+
+#[cfg(test)]
+const NEVER: &str = r#"
+{
+   let x = never(100);
+   any(x, 0)
+}
+"#;
+
+#[cfg(test)]
+run!(never, NEVER, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(0)) => true,
+        _ => false,
+    }
+});
 
 struct Group<C: Ctx, E: UserEvent> {
     buf: SmallVec<[Value; 16]>,
@@ -855,18 +1055,39 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
     }
 }
 
-struct Ungroup(BindId);
+#[cfg(test)]
+const GROUP: &str = r#"
+{
+   let x = 1;
+   let y = x + 1;
+   let z = y + 1;
+   array::group(any(x, y, z), |_, v| v == 3)
+}
+"#;
 
-impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Ungroup {
-    const NAME: &str = "ungroup";
+#[cfg(test)]
+run!(group, GROUP, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::I64(1), Value::I64(2), Value::I64(3)] => true,
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+struct Iter(BindId);
+
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Iter {
+    const NAME: &str = "iter";
     deftype!("fn(Array<'a>) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Ungroup(BindId::new()))))
+        Arc::new(|_, _, _, _| Ok(Box::new(Iter(BindId::new()))))
     }
 }
 
-impl<C: Ctx, E: UserEvent> Apply<C, E> for Ungroup {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Iter {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -881,6 +1102,21 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Ungroup {
         event.variables.get(&self.0).map(|v| v.clone())
     }
 }
+
+#[cfg(test)]
+const ITER: &str = r#"
+{
+   filter(array::iter([1, 2, 3, 4]), |x| x == 4)
+}
+"#;
+
+#[cfg(test)]
+run!(iter, ITER, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(4)) => true,
+        _ => false,
+    }
+});
 
 const MOD: &str = r#"
 pub mod core {
@@ -907,17 +1143,28 @@ pub mod core {
         let slice = |a, i, j| 'slice
     }
 
+    pub mod array {
+        pub let filter = |a, f| 'array_filter
+        pub let map = |a, f| 'array_map
+        pub let fold = |a, init, f| 'array_fold
+        pub let group = |v, f| 'group
+        pub let iter = |a| 'iter
+        pub let len = |a| 'array_len
+        pub let concat = |x, @args| 'array_concat
+        pub let find = |a, f| 'array_find
+        pub let find_map = |a, f| 'array_find_map
+    }
+
     pub let all = |@args| 'all
     pub let and = |@args| 'and
-    pub let count = |@args| 'count
+    pub let count = |x| 'count
     pub let divide = |@args| 'divide
     pub let filter_err = |e| 'filter_err
     pub let filter = |v, f| 'filter
-    pub let group = |v, f| 'group
     pub let is_err = |e| 'is_err
     pub let error = |e| 'error
     pub let max = |@args| 'max
-    pub let mean = |@args| 'mean
+    pub let mean = |v, @args| 'mean
     pub let min = |@args| 'min
     pub let never = |@args| 'never
     pub let once = |v| 'once
@@ -925,7 +1172,6 @@ pub mod core {
     pub let product = |@args| 'product
     pub let sample = |trigger, v| 'sample
     pub let sum = |@args| 'sum
-    pub let ungroup = |a| 'ungroup
     pub let uniq = |v| 'uniq
 
     pub let errors: error = never()
@@ -933,27 +1179,28 @@ pub mod core {
 "#;
 
 pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<All>();
-    ctx.register_builtin::<And>();
-    ctx.register_builtin::<Count>();
-    ctx.register_builtin::<Divide>();
-    ctx.register_builtin::<Filter<C, E>>();
-    ctx.register_builtin::<FilterErr>();
-    ctx.register_builtin::<Group<C, E>>();
-    ctx.register_builtin::<Index>();
-    ctx.register_builtin::<Slice>();
-    ctx.register_builtin::<IsErr>();
-    ctx.register_builtin::<Max>();
-    ctx.register_builtin::<Mean>();
-    ctx.register_builtin::<Min>();
-    ctx.register_builtin::<Never>();
-    ctx.register_builtin::<Once>();
-    ctx.register_builtin::<Or>();
-    ctx.register_builtin::<Product>();
-    ctx.register_builtin::<Sample>();
-    ctx.register_builtin::<Sum>();
-    ctx.register_builtin::<Uniq>();
-    ctx.register_builtin::<Ungroup>();
-    ctx.register_builtin::<ToError>();
+    ctx.register_builtin::<All>().unwrap();
+    ctx.register_builtin::<And>().unwrap();
+    ctx.register_builtin::<Count>().unwrap();
+    ctx.register_builtin::<Divide>().unwrap();
+    ctx.register_builtin::<Filter<C, E>>().unwrap();
+    ctx.register_builtin::<ArrayFilter<C, E>>().unwrap();
+    ctx.register_builtin::<FilterErr>().unwrap();
+    ctx.register_builtin::<Group<C, E>>().unwrap();
+    ctx.register_builtin::<Index>().unwrap();
+    ctx.register_builtin::<Slice>().unwrap();
+    ctx.register_builtin::<IsErr>().unwrap();
+    ctx.register_builtin::<Max>().unwrap();
+    ctx.register_builtin::<Mean>().unwrap();
+    ctx.register_builtin::<Min>().unwrap();
+    ctx.register_builtin::<Never>().unwrap();
+    ctx.register_builtin::<Once>().unwrap();
+    ctx.register_builtin::<Or>().unwrap();
+    ctx.register_builtin::<Product>().unwrap();
+    ctx.register_builtin::<Sample>().unwrap();
+    ctx.register_builtin::<Sum>().unwrap();
+    ctx.register_builtin::<Uniq>().unwrap();
+    ctx.register_builtin::<Iter>().unwrap();
+    ctx.register_builtin::<ToError>().unwrap();
     MOD.parse().unwrap()
 }

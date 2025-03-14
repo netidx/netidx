@@ -210,7 +210,7 @@ pub mod time {
 "#;
 
 pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<AfterIdle>();
-    ctx.register_builtin::<Timer>();
+    ctx.register_builtin::<AfterIdle>().unwrap();
+    ctx.register_builtin::<Timer>().unwrap();
     MOD.parse().unwrap()
 }

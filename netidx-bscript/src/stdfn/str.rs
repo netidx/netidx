@@ -338,18 +338,18 @@ pub mod str {
 "#;
 
 pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<StartsWith>();
-    ctx.register_builtin::<EndsWith>();
-    ctx.register_builtin::<Contains>();
-    ctx.register_builtin::<StripPrefix>();
-    ctx.register_builtin::<StripSuffix>();
-    ctx.register_builtin::<Trim>();
-    ctx.register_builtin::<TrimStart>();
-    ctx.register_builtin::<TrimEnd>();
-    ctx.register_builtin::<Replace>();
-    ctx.register_builtin::<Dirname>();
-    ctx.register_builtin::<Basename>();
-    ctx.register_builtin::<StringJoin>();
-    ctx.register_builtin::<StringConcat>();
+    ctx.register_builtin::<StartsWith>().unwrap();
+    ctx.register_builtin::<EndsWith>().unwrap();
+    ctx.register_builtin::<Contains>().unwrap();
+    ctx.register_builtin::<StripPrefix>().unwrap();
+    ctx.register_builtin::<StripSuffix>().unwrap();
+    ctx.register_builtin::<Trim>().unwrap();
+    ctx.register_builtin::<TrimStart>().unwrap();
+    ctx.register_builtin::<TrimEnd>().unwrap();
+    ctx.register_builtin::<Replace>().unwrap();
+    ctx.register_builtin::<Dirname>().unwrap();
+    ctx.register_builtin::<Basename>().unwrap();
+    ctx.register_builtin::<StringJoin>().unwrap();
+    ctx.register_builtin::<StringConcat>().unwrap();
     MOD.parse().unwrap()
 }
