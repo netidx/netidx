@@ -967,3 +967,22 @@ run!(lambdamatch0, LAMBDAMATCH0, |v: Result<&Value>| match v {
     Ok(Value::F64(3.0)) => true,
     _ => false,
 });
+
+#[cfg(test)]
+const ANY: &str = r#"
+{
+  let x = 1;
+  let y = x + 1;
+  let z = y + 1;
+  group(any(x, y, z), |n, _| n == 3)
+}
+"#;
+
+#[cfg(test)]
+run!(any, ANY, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::I64(1), Value::I64(2), Value::I64(3)] => true,
+        _ => false,
+    },
+    _ => false,
+});

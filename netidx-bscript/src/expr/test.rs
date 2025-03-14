@@ -408,6 +408,13 @@ macro_rules! apply {
     };
 }
 
+macro_rules! any {
+    ($inner:expr) => {
+        collection::vec($inner, (0, 10))
+            .prop_map(|args| ExprKind::Any { args: Arc::from(args) }.to_expr())
+    };
+}
+
 macro_rules! do_block {
     ($inner:expr) => {
         collection::vec(prop_oneof![typedef(), usestmt(), $inner], (1, 10))
@@ -547,7 +554,10 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
         prop_oneof![
             select!(inner.clone()),
             do_block!(inner.clone()),
+            any!(inner.clone()),
             apply!(inner.clone(), false),
+            typecast!(inner.clone()),
+            arrayidx!(inner.clone()),
             binop!(inner.clone(), Eq),
             binop!(inner.clone(), Ne),
             binop!(inner.clone(), Lt),
@@ -573,6 +583,7 @@ fn expr() -> impl Strategy<Value = Expr> {
             qop!(inner.clone()),
             slice!(inner.clone()),
             arithexpr(),
+            any!(inner.clone()),
             apply!(inner.clone(), false),
             typecast!(inner.clone()),
             do_block!(inner.clone()),
@@ -590,6 +601,7 @@ fn expr() -> impl Strategy<Value = Expr> {
 
 fn modexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![
+        any!(expr()),
         apply!(expr(), true),
         do_block!(expr()),
         usestmt(),

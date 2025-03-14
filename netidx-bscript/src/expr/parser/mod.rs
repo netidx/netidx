@@ -39,7 +39,7 @@ pub const RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
         "true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn",
         "cast", "if", "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32",
         "f64", "decimal", "datetime", "duration", "bool", "string", "bytes", "result",
-        "null", "_", "?", "fn", "array", "Array",
+        "null", "_", "?", "fn", "array", "Array", "any",
     ])
 });
 
@@ -269,6 +269,7 @@ where
                     (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::StructWith { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Array { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Any { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::StructRef { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::TupleRef { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Tuple { .. }, .. }), _)
@@ -501,6 +502,17 @@ where
         .map(|(function, args): (ModPath, Vec<(Option<ArcStr>, Expr)>)| {
             ExprKind::Apply { function, args: Arc::from(args) }.to_expr()
         })
+}
+
+fn any<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    string("any")
+        .with(between(sptoken('('), sptoken(')'), sep_by(expr(), csep())))
+        .map(|args: Vec<Expr>| ExprKind::Any { args: Arc::from(args) }.to_expr())
 }
 
 fn typeprim<I>() -> impl Parser<I, Output = Typ>
@@ -849,6 +861,8 @@ where
     choice((
         attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(qop(select()))),
+        attempt(spaces().with(qop(cast()))),
+        attempt(spaces().with(qop(any()))),
         attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
@@ -1265,6 +1279,7 @@ where
         attempt(spaces().with(connect())),
         attempt(spaces().with(qop(select()))),
         attempt(spaces().with(qop(cast()))),
+        attempt(spaces().with(qop(any()))),
         attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
@@ -1296,6 +1311,7 @@ where
         attempt(spaces().with(typedef())),
         attempt(spaces().with(letbind())),
         attempt(spaces().with(connect())),
+        attempt(spaces().with(qop(any()))),
         attempt(spaces().with(qop(apply()))),
     ))
 }

@@ -80,6 +80,9 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
         target: Type<NoRefs>,
         n: Box<Node<C, E>>,
     },
+    Any {
+        args: Box<[Node<C, E>]>,
+    },
     Array {
         args: Box<[Cached<C, E>]>,
     },
@@ -390,6 +393,10 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     None
                 }
             }
+            NodeKind::Any { args } => args
+                .iter_mut()
+                .filter_map(|s| s.update(ctx, event))
+                .fold(None, |r, v| r.or(Some(v))),
             NodeKind::Struct { names, args } => {
                 let mut updated = false;
                 let mut determined = true;

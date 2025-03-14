@@ -18,53 +18,10 @@ use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::sync::Arc;
 
-struct Any;
-
-impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Any {
-    const NAME: &str = "any";
-    deftype!("fn(@args: Any) -> Any");
-
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Any)))
-    }
-}
-
-impl<C: Ctx, E: UserEvent> Apply<C, E> for Any {
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
-        event: &mut Event<E>,
-    ) -> Option<Value> {
-        from.iter_mut()
-            .filter_map(|s| s.update(ctx, event))
-            .fold(None, |r, v| r.or(Some(v)))
-    }
-}
-
-#[cfg(test)]
-const ANY: &str = r#"
-{
-  let x = 1;
-  let y = x + 1;
-  let z = y + 1;
-  group(any(x, y, z), |n, _| n == 3)
-}
-"#;
-
-#[cfg(test)]
-run!(any, ANY, |v: Result<&Value>| match v {
-    Ok(Value::Array(a)) => match &a[..] {
-        [Value::I64(1), Value::I64(2), Value::I64(3)] => true,
-        _ => false,
-    },
-    _ => false,
-});
-
 struct IsErr;
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for IsErr {
-    const NAME: &str = "is_error";
+    const NAME: &str = "is_err";
     deftype!("fn(Any) -> bool");
 
     fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
@@ -85,6 +42,21 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for IsErr {
         })
     }
 }
+
+#[cfg(test)]
+const IS_ERR: &str = r#"
+{
+  let a = [42, 43, 44];
+  let y = a[0]? + a[3]?;
+  is_err(errors)
+}
+"#;
+
+#[cfg(test)]
+run!(is_err, IS_ERR, |v: Result<&Value>| match v {
+    Ok(Value::Bool(b)) => *b,
+    _ => false,
+});
 
 struct FilterErr;
 
@@ -111,6 +83,20 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for FilterErr {
     }
 }
 
+#[cfg(test)]
+const FILTER_ERR: &str = r#"
+{
+  let a = [42, 43, 44, error("foo")];
+  filter_err(ungroup(a))
+}
+"#;
+
+#[cfg(test)]
+run!(filter_err, FILTER_ERR, |v: Result<&Value>| match v {
+    Ok(Value::Error(_)) => true,
+    _ => false,
+});
+
 struct ToError;
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for ToError {
@@ -135,6 +121,19 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for ToError {
         })
     }
 }
+
+#[cfg(test)]
+const ERROR: &str = r#"
+{
+  error("foo")
+}
+"#;
+
+#[cfg(test)]
+run!(error, ERROR, |v: Result<&Value>| match v {
+    Ok(Value::Error(_)) => true,
+    _ => false,
+});
 
 struct Once {
     val: bool,
@@ -169,6 +168,20 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Once {
         }
     }
 }
+
+#[cfg(test)]
+const ONCE: &str = r#"
+{
+  let x = [1, 2, 3, 4, 5, 6];
+  once(ungroup(x))
+}
+"#;
+
+#[cfg(test)]
+run!(once, ONCE, |v: Result<&Value>| match v {
+    Ok(Value::I64(1)) => true,
+    _ => false,
+});
 
 struct AllEv;
 
@@ -223,7 +236,7 @@ struct SumEv;
 
 impl EvalCached for SumEv {
     const NAME: &str = "sum";
-    deftype!("fn(@args: Number) -> Number");
+    deftype!("fn(@args: [Number, Array<[Number, Array<Number>]>]) -> Number");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
@@ -234,6 +247,20 @@ impl EvalCached for SumEv {
 }
 
 type Sum = CachedArgs<SumEv>;
+
+#[cfg(test)]
+const SUM: &str = r#"
+{
+  let tweeeeenywon = [1, 2, 3, 4, 5, 6];
+  sum(tweeeeenywon)
+}
+"#;
+
+#[cfg(test)]
+run!(sum, SUM, |v: Result<&Value>| match v {
+    Ok(Value::I64(21)) => true,
+    _ => false,
+});
 
 struct ProductEv;
 
@@ -247,7 +274,7 @@ fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 
 impl EvalCached for ProductEv {
     const NAME: &str = "product";
-    deftype!("fn(@args: Number) -> Number");
+    deftype!("fn(@args: [Number, Array<[Number, Array<Number>]>]) -> Number");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
@@ -258,6 +285,20 @@ impl EvalCached for ProductEv {
 }
 
 type Product = CachedArgs<ProductEv>;
+
+#[cfg(test)]
+const PRODUCT: &str = r#"
+{
+  let tweeeeenywon = [5, 2, 2, 1.05];
+  product(tweeeeenywon)
+}
+"#;
+
+#[cfg(test)]
+run!(product, PRODUCT, |v: Result<&Value>| match v {
+    Ok(Value::F64(21.0)) => true,
+    _ => false,
+});
 
 struct DivideEv;
 
@@ -271,7 +312,7 @@ fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
 
 impl EvalCached for DivideEv {
     const NAME: &str = "divide";
-    deftype!("fn(@args: Number) -> Number");
+    deftype!("fn(@args: [Number, Array<[Number, Array<Number>]>]) -> Number");
 
     fn eval(from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
@@ -282,6 +323,20 @@ impl EvalCached for DivideEv {
 }
 
 type Divide = CachedArgs<DivideEv>;
+
+#[cfg(test)]
+const DIVIDE: &str = r#"
+{
+  let tweeeeenywon = [84, 2, 2];
+  divide(tweeeeenywon)
+}
+"#;
+
+#[cfg(test)]
+run!(divide, DIVIDE, |v: Result<&Value>| match v {
+    Ok(Value::I64(21)) => true,
+    _ => false,
+});
 
 struct MinEv;
 
@@ -308,6 +363,19 @@ impl EvalCached for MinEv {
 
 type Min = CachedArgs<MinEv>;
 
+#[cfg(test)]
+const MIN: &str = r#"
+{
+   min(1, 2, 3, 4, 5, 6, 0)
+}
+"#;
+
+#[cfg(test)]
+run!(min, MIN, |v: Result<&Value>| match v {
+    Ok(Value::I64(0)) => true,
+    _ => false,
+});
+
 struct MaxEv;
 
 impl EvalCached for MaxEv {
@@ -332,6 +400,19 @@ impl EvalCached for MaxEv {
 }
 
 type Max = CachedArgs<MaxEv>;
+
+#[cfg(test)]
+const MAX: &str = r#"
+{
+   max(1, 2, 3, 4, 5, 6, 0)
+}
+"#;
+
+#[cfg(test)]
+run!(max, MAX, |v: Result<&Value>| match v {
+    Ok(Value::I64(6)) => true,
+    _ => false,
+});
 
 struct AndEv;
 
@@ -395,6 +476,19 @@ impl EvalCached for OrEv {
 
 type Or = CachedArgs<OrEv>;
 
+#[cfg(test)]
+const OR: &str = r#"
+{
+  or(false, false, true)
+}
+"#;
+
+#[cfg(test)]
+run!(or, OR, |v: Result<&Value>| match v {
+    Ok(Value::Bool(true)) => true,
+    _ => false,
+});
+
 struct IndexEv;
 
 impl EvalCached for IndexEv {
@@ -435,6 +529,20 @@ impl EvalCached for IndexEv {
 }
 
 type Index = CachedArgs<IndexEv>;
+
+#[cfg(test)]
+const INDEX: &str = r#"
+{
+  let a = ["foo", "bar", 1, 2, 3];
+  cast<i64>(a[2]?)? + cast<i64>(a[3]?)?
+}
+"#;
+
+#[cfg(test)]
+run!(index, INDEX, |v: Result<&Value>| match v {
+    Ok(Value::I64(3)) => true,
+    _ => false,
+});
 
 struct SliceEv;
 
@@ -801,13 +909,12 @@ pub mod core {
 
     pub let all = |@args| 'all
     pub let and = |@args| 'and
-    pub let any = |@args| 'any
     pub let count = |@args| 'count
     pub let divide = |@args| 'divide
     pub let filter_err = |e| 'filter_err
     pub let filter = |v, f| 'filter
     pub let group = |v, f| 'group
-    pub let is_err = |e| 'is_error
+    pub let is_err = |e| 'is_err
     pub let error = |e| 'error
     pub let max = |@args| 'max
     pub let mean = |@args| 'mean
@@ -828,7 +935,6 @@ pub mod core {
 pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<All>();
     ctx.register_builtin::<And>();
-    ctx.register_builtin::<Any>();
     ctx.register_builtin::<Count>();
     ctx.register_builtin::<Divide>();
     ctx.register_builtin::<Filter<C, E>>();

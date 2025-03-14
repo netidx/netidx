@@ -144,7 +144,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
 ) -> Node<C, E> {
     macro_rules! subexprs {
         ($scope:expr, $exprs:expr) => {
-            $exprs.iter().fold((false, vec![]), |(e, mut nodes), spec| {
+            $exprs.into_iter().fold((false, vec![]), |(e, mut nodes), spec| {
                 let n = compile(ctx, spec.clone(), &$scope, top_id);
                 let e = e || n.is_err();
                 nodes.push(n);
@@ -220,20 +220,18 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             }
         }
         Expr { kind: ExprKind::Struct { args }, id: _ } => {
-            let mut error = false;
             let mut names = Vec::with_capacity(args.len());
-            let mut nodes = Vec::with_capacity(args.len());
-            for (name, spec) in args.iter() {
-                let n = compile(ctx, spec.clone(), &scope, top_id);
-                error |= n.is_err();
-                names.push(name.clone());
-                nodes.push(Cached::new(n));
-            }
+            let args = args.iter().map(|(n, s)| {
+                names.push(n.clone());
+                s
+            });
+            let (error, nodes) = subexprs!(scope, args);
             if error {
-                return error!("", nodes.into_iter().map(|c| c.node).collect::<Vec<_>>());
+                return error!("", nodes);
             }
             let names: Box<[ArcStr]> = Box::from(names);
-            let args: Box<[Cached<C, E>]> = Box::from(nodes);
+            let args: Box<[Cached<C, E>]> =
+                Box::from_iter(nodes.into_iter().map(|n| Cached::new(n)));
             let typs = names
                 .iter()
                 .zip(args.iter())
@@ -296,6 +294,15 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 (*body).clone(),
             );
             lambda::compile(ctx, spec, args, vargs, rtype, constraints, scope, body)
+        }
+        Expr { kind: ExprKind::Any { args }, id: _ } => {
+            let (error, children) = subexprs!(scope, args);
+            if error {
+                error!("", children)
+            } else {
+                let kind = NodeKind::Any { args: Box::from(children) };
+                Node { spec: Box::new(spec), typ: Type::empty_tvar(), kind }
+            }
         }
         Expr { kind: ExprKind::Apply { args, function: f }, id: _ } => {
             let (args, f) = (args.clone(), f.clone());

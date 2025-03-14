@@ -195,6 +195,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             NodeKind::Lambda(l) => Some(l.clone()),
             NodeKind::Do(children) => children.last().and_then(|t| t.find_lambda()),
             NodeKind::Constant(_)
+            | NodeKind::Any { .. }
             | NodeKind::Use
             | NodeKind::Bind { .. }
             | NodeKind::Ref(_)

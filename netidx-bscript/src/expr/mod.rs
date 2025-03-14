@@ -390,6 +390,9 @@ pub enum ExprKind {
         args: Arc<[(Option<ArcStr>, Expr)]>,
         function: ModPath,
     },
+    Any {
+        args: Arc<[Expr]>,
+    },
     Array {
         args: Arc<[Expr]>,
     },
@@ -616,6 +619,11 @@ impl ExprKind {
             ExprKind::Array { args } => {
                 try_single_line!(true);
                 pretty_print_exprs(indent, limit, buf, args, "[", "]", ",")
+            }
+            ExprKind::Any { args } => {
+                try_single_line!(true);
+                write!(buf, "any")?;
+                pretty_print_exprs(indent, limit, buf, args, "(", ")", ",")
             }
             ExprKind::Tuple { args } => {
                 try_single_line!(true);
@@ -919,6 +927,10 @@ impl fmt::Display for ExprKind {
                 }
             }
             ExprKind::Array { args } => print_exprs(f, args, "[", "]", ", "),
+            ExprKind::Any { args } => {
+                write!(f, "any")?;
+                print_exprs(f, args, "(", ")", ", ")
+            }
             ExprKind::Tuple { args } => print_exprs(f, args, "(", ")", ", "),
             ExprKind::Struct { args } => {
                 write!(f, "{{ ")?;

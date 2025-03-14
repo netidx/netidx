@@ -103,12 +103,18 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 for n in args.iter_mut() {
                     wrap!(n.node, n.node.typecheck(ctx))?
                 }
-                let rtype =
-                    args.iter().fold(Type::Primitive(BitFlags::empty()), |rtype, n| {
-                        n.node.typ.union(&rtype)
-                    });
+                let rtype = Type::Primitive(BitFlags::empty());
+                let rtype = args.iter().fold(rtype, |rtype, n| n.node.typ.union(&rtype));
                 let rtype = Type::Array(Arc::new(rtype));
                 Ok(self.typ.check_contains(&rtype)?)
+            }
+            NodeKind::Any { args } => {
+                for n in args.iter_mut() {
+                    wrap!(n, n.typecheck(ctx))?
+                }
+                let rtyp = Type::Primitive(BitFlags::empty());
+                let rtyp = args.iter().fold(rtyp, |rtype, n| n.typ.union(&rtype));
+                Ok(self.typ.check_contains(&rtyp)?)
             }
             NodeKind::Tuple { args } => {
                 for n in args.iter_mut() {
