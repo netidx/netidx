@@ -440,13 +440,7 @@ macro_rules! lambda {
                     |(labeled, name, pattern, constraint, default)| {
                         let pattern =
                             if labeled { StructurePattern::Bind(name) } else { pattern };
-                        let ptyp = pattern.infer_type_predicate();
-                        Arg {
-                            labeled: labeled.then_some(default),
-                            pattern,
-                            ptyp,
-                            constraint,
-                        }
+                        Arg { labeled: labeled.then_some(default), pattern, constraint }
                     },
                 );
                 let constraints = Arc::from_iter(

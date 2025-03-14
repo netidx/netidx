@@ -329,7 +329,6 @@ pub struct Pattern {
 pub struct Arg {
     pub labeled: Option<Option<Expr>>,
     pub pattern: StructurePattern,
-    pub ptyp: Type<NoRefs>,
     pub constraint: Option<Type<Refs>>,
 }
 

@@ -976,3 +976,17 @@ run!(nestedmatch3, NESTEDMATCH3, |v: Result<&Value>| match v {
     Ok(Value::F64(3.0)) => true,
     _ => false,
 });
+
+const LAMBDAMATCH0: &str = r#"
+{
+  type T = { foo: Array<f64>, bar: i64, baz: f64 };
+  let x = { foo: [ 1.0, 2.0, 4.3, 55.23 ], bar: 42, baz: 84.0 };
+  let f = |{foo, ..}: T| foo[0]? + foo[1]?;
+  f(x)
+}
+"#;
+
+run!(lambdamatch0, LAMBDAMATCH0, |v: Result<&Value>| match v {
+    Ok(Value::F64(3.0)) => true,
+    _ => false,
+});

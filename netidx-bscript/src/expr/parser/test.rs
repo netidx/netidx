@@ -722,13 +722,11 @@ fn lambda() {
             Arg {
                 labeled: None,
                 pattern: StructurePattern::Bind("foo".into()),
-                ptyp: Type::empty_tvar(),
                 constraint: None,
             },
             Arg {
                 labeled: None,
                 pattern: StructurePattern::Bind("bar".into()),
-                ptyp: Type::empty_tvar(),
                 constraint: None,
             },
         ]),
@@ -799,7 +797,6 @@ fn apply_lambda() {
                 args: Arc::from_iter([Arg {
                     labeled: None,
                     pattern: StructurePattern::Bind("a".into()),
-                    ptyp: Type::empty_tvar(),
                     constraint: None,
                 }]),
                 vargs: Some(None),
@@ -827,13 +824,11 @@ fn apply_typed_lambda() {
                     Arg {
                         labeled: None,
                         pattern: StructurePattern::Bind("a".into()),
-                        ptyp: Type::empty_tvar(),
                         constraint: None,
                     },
                     Arg {
                         labeled: None,
                         pattern: StructurePattern::Bind("b".into()),
-                        ptyp: Type::empty_tvar(),
                         constraint: Some(Type::Set(Arc::from_iter([
                             Type::Primitive(Typ::Null.into()),
                             Type::Ref(["Number"].into()),
@@ -905,7 +900,6 @@ fn typed_array() {
                     args: Arc::from_iter([Arg {
                         labeled: None,
                         pattern: StructurePattern::Bind("a".into()),
-                        ptyp: Type::empty_tvar(),
                         constraint: Some(Type::Array(Arc::new(Type::TVar(
                             TVar::empty_named("a".into()),
                         )))),
@@ -959,13 +953,11 @@ fn labeled_argument_lambda() {
                     args: Arc::from_iter([
                         Arg {
                             pattern: StructurePattern::Bind("foo".into()),
-                            ptyp: Type::empty_tvar(),
                             labeled: Some(Some(ExprKind::Constant(3.into()).to_expr())),
                             constraint: Some(Type::Ref(["Number"].into())),
                         },
                         Arg {
                             pattern: StructurePattern::Bind("bar".into()),
-                            ptyp: Type::empty_tvar(),
                             labeled: Some(Some(
                                 ExprKind::Constant("hello".into()).to_expr(),
                             )),
@@ -973,13 +965,11 @@ fn labeled_argument_lambda() {
                         },
                         Arg {
                             pattern: StructurePattern::Bind("a".into()),
-                            ptyp: Type::empty_tvar(),
                             labeled: Some(None),
                             constraint: None,
                         },
                         Arg {
                             pattern: StructurePattern::Bind("baz".into()),
-                            ptyp: Type::empty_tvar(),
                             labeled: None,
                             constraint: None,
                         },

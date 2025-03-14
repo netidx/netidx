@@ -715,13 +715,7 @@ where
                 if !labeled && default.is_some() {
                     bail!("labeled")
                 } else {
-                    let ptyp = pattern.infer_type_predicate();
-                    Ok(Arg {
-                        labeled: labeled.then_some(default),
-                        pattern,
-                        ptyp,
-                        constraint,
-                    })
+                    Ok(Arg { labeled: labeled.then_some(default), pattern, constraint })
                 }
             })
             .collect::<Result<Vec<_>>>();

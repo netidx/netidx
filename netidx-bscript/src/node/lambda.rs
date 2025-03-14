@@ -54,10 +54,9 @@ impl<C: Ctx, E: UserEvent> ApplyTyped<C, E> for Lambda<C, E> {
             };
         }
         let spec = &mut self.spec;
-        for (arg, (aspec, typ)) in args.iter_mut().zip(spec.argspec.iter()) {
+        for (arg, (_, typ)) in args.iter_mut().zip(spec.argspec.iter()) {
             wrap!(arg, arg.typecheck(ctx))?;
             wrap!(arg, typ.check_contains(&arg.typ))?;
-            wrap!(arg, aspec.ptyp.check_contains(&arg.typ))?;
         }
         wrap!(self.body, self.body.typecheck(ctx))?;
         wrap!(self.body, spec.rtype.check_contains(&self.body.typ))?;
@@ -90,8 +89,8 @@ impl<C: Ctx, E: UserEvent> Lambda<C, E> {
         let id = LambdaId::new();
         let mut argids = vec![];
         let scope = ModPath(scope.0.append(&format_compact!("fn{}", id.0)));
-        for ((a, _), node) in spec.argspec.iter().zip(args.iter()) {
-            let pattern = StructPatternNode::compile(ctx, &a.ptyp, &a.pattern, &scope)?;
+        for ((a, typ), node) in spec.argspec.iter().zip(args.iter()) {
+            let pattern = StructPatternNode::compile(ctx, &typ, &a.pattern, &scope)?;
             if pattern.is_refutable() {
                 bail!(
                     "refutable patterns are not allowed in lambda arguments {}",
