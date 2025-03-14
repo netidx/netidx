@@ -969,7 +969,7 @@ run!(lambdamatch0, LAMBDAMATCH0, |v: Result<&Value>| match v {
 });
 
 #[cfg(test)]
-const ANY: &str = r#"
+const ANY0: &str = r#"
 {
   let x = 1;
   let y = x + 1;
@@ -979,9 +979,37 @@ const ANY: &str = r#"
 "#;
 
 #[cfg(test)]
-run!(any, ANY, |v: Result<&Value>| match v {
+run!(any0, ANY0, |v: Result<&Value>| match v {
     Ok(Value::Array(a)) => match &a[..] {
         [Value::I64(1), Value::I64(2), Value::I64(3)] => true,
+        _ => false,
+    },
+    _ => false,
+});
+
+#[cfg(test)]
+const ANY1: &str = r#"
+{
+  let x = 1;
+  let y = "[x] + 1";
+  let z = [y, y];
+  let r: [i64, string, Array<string>] = any(x, y, z);
+  group(r, |n, _| n == 3)
+}
+"#;
+
+#[cfg(test)]
+run!(any1, ANY1, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::I64(1), Value::String(s), Value::Array(a)] => {
+            &**s == "i64:1 + 1"
+                && match &a[..] {
+                    [Value::String(s0), Value::String(s1)] => {
+                        (&**s0 == &**s1) && &**s0 == "i64:1 + 1"
+                    }
+                    _ => false,
+                }
+        }
         _ => false,
     },
     _ => false,

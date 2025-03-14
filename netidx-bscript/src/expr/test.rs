@@ -89,7 +89,6 @@ fn typart() -> impl Strategy<Value = String> {
 
 fn valid_fname() -> impl Strategy<Value = ArcStr> {
     prop_oneof![
-        Just(ArcStr::from("any")),
         Just(ArcStr::from("all")),
         Just(ArcStr::from("sum")),
         Just(ArcStr::from("product")),
@@ -132,7 +131,6 @@ fn typath() -> impl Strategy<Value = ModPath> {
 
 fn valid_modpath() -> impl Strategy<Value = ModPath> {
     prop_oneof![
-        Just(ModPath::from_iter(["any"])),
         Just(ModPath::from_iter(["all"])),
         Just(ModPath::from_iter(["sum"])),
         Just(ModPath::from_iter(["product"])),
@@ -1026,6 +1024,9 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::TypeCast { expr: expr0, typ: typ0 },
             ExprKind::TypeCast { expr: expr1, typ: typ1 },
         ) => dbg!(check(expr0, expr1)) && dbg!(check_type(&typ0, &typ1)),
+        (ExprKind::Any { args: a0 }, ExprKind::Any { args: a1 }) => {
+            a0.len() == a1.len() && a0.iter().zip(a1.iter()).all(|(a0, a1)| check(a0, a1))
+        }
         (_, _) => false,
     }
 }

@@ -76,9 +76,7 @@ impl<T: TypeMark + 'static> fmt::Display for TVar<T> {
 
 impl<T: TypeMark + 'static> Default for TVar<T> {
     fn default() -> Self {
-        Self::empty_named(ArcStr::from(
-            format_compact!("default{}", TVarId::new().0).as_str(),
-        ))
+        Self::empty_named(ArcStr::from(format_compact!("_{}", TVarId::new().0).as_str()))
     }
 }
 
