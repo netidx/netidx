@@ -72,10 +72,9 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
                 Ok(())
             }
-            NodeKind::Bind { pattern: _, ptyp, node } => {
+            NodeKind::Bind { pattern: _, node } => {
                 wrap!(node.typecheck(ctx))?;
                 wrap!(self.typ.check_contains(&node.typ))?;
-                wrap!(ptyp.check_contains(&node.typ))?;
                 Ok(())
             }
             NodeKind::Qop(id, n) => {
@@ -257,10 +256,12 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                         bail!(
                             "pattern {} will never match {}, unused match cases",
                             pat.type_predicate,
-                            arg.node.typ
+                            atype
                         )
                     }
-                    atype = atype.diff(&pat.type_predicate)?;
+                    if !pat.structure_predicate.is_refutable() && pat.guard.is_none() {
+                        atype = atype.diff(&pat.type_predicate)?;
+                    }
                 }
                 self.typ.check_contains(&rtype)
             }

@@ -272,23 +272,12 @@ impl Type<NoRefs> {
                     && t0.iter().zip(t1.iter()).all(|(t0, t1)| t0.contains(t1))
             }
             (Self::Struct(t0), Self::Struct(t1)) => {
-                let mut t1i = t1.iter();
-                for (n0, t0) in t0.iter() {
-                    loop {
-                        match t1i.next() {
-                            None => return false,
-                            Some((n1, t1)) if n0 == n1 => {
-                                if t0.contains(t1) {
-                                    break;
-                                } else {
-                                    return false;
-                                }
-                            }
-                            Some(_) => (),
-                        }
-                    }
+                t0.len() == t1.len() && {
+                    // struct types are always sorted by field name
+                    t0.iter()
+                        .zip(t1.iter())
+                        .all(|((n0, t0), (n1, t1))| n0 == n1 && t0.contains(t1))
                 }
-                true
             }
             (Self::Tuple(_), Self::Array(_))
             | (Self::Tuple(_), Self::Primitive(_))

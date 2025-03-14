@@ -168,12 +168,14 @@ macro_rules! run {
                 bail!("compilation failed {e}")
             }
             dbg!("compilation succeeded");
-            state.event.init = true;
-            assert_eq!(n.update(&mut state.ctx, &mut state.event), None);
-            state.event.clear();
             let mut fin = false;
-            while state.ctx.user.var_updates.len() > 0 {
+            let mut init = true;
+            while init || state.ctx.user.var_updates.len() > 0 {
                 state.event.clear();
+                if init {
+                    state.event.init = true;
+                    init = false;
+                }
                 for _ in 0..state.ctx.user.var_updates.len() {
                     if let Some((id, v)) = state.ctx.user.var_updates.pop_front() {
                         match state.event.variables.entry(id) {

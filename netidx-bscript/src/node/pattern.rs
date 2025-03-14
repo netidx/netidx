@@ -32,7 +32,7 @@ pub enum StructPatternNode {
     },
     Struct {
         all: Option<BindId>,
-        binds: Box<[(usize, StructPatternNode)]>,
+        binds: Box<[(ArcStr, usize, StructPatternNode)]>,
     },
 }
 
@@ -125,6 +125,7 @@ impl StructPatternNode {
             },
             StructurePattern::Struct { exhaustive, all, binds } => {
                 struct Ifo {
+                    name: ArcStr,
                     index: usize,
                     pattern: StructurePattern,
                     typ: Type<NoRefs>,
@@ -138,6 +139,7 @@ impl StructPatternNode {
                                     |(i, (name, typ))| {
                                         if field == name {
                                             Some(Ifo {
+                                                name: name.clone(),
                                                 index: i,
                                                 pattern: pat.clone(),
                                                 typ: typ.clone(),
@@ -157,9 +159,10 @@ impl StructPatternNode {
                             ctx.env.bind_variable(scope, n, type_predicate.clone()).id
                         });
                         let binds = binds
-                            .iter()
+                            .into_iter()
                             .map(|ifo| {
                                 Ok((
+                                    ifo.name,
                                     ifo.index,
                                     Self::compile_int(
                                         ctx,
@@ -169,7 +172,7 @@ impl StructPatternNode {
                                     )?,
                                 ))
                             })
-                            .collect::<Result<Box<[(usize, Self)]>>>()?;
+                            .collect::<Result<Box<[(ArcStr, usize, Self)]>>>()?;
                         Self::Struct { all, binds }
                     }
                     t => bail!("struct patterns can't match {t}"),
@@ -230,7 +233,7 @@ impl StructPatternNode {
                     if let Some(id) = all {
                         f(*id, v.clone())
                     }
-                    for (i, n) in binds.iter() {
+                    for (_, i, n) in binds.iter() {
                         if let Some(v) = a.get(*i) {
                             match v {
                                 Value::Array(a) if a.len() == 2 => n.bind(&a[1], f),
@@ -282,7 +285,7 @@ impl StructPatternNode {
                 if let Some(id) = all {
                     f(*id)
                 }
-                for (_, n) in binds.iter() {
+                for (_, _, n) in binds.iter() {
                     n.unbind(f)
                 }
             }
@@ -320,7 +323,7 @@ impl StructPatternNode {
             Self::Struct { all: _, binds } => match v {
                 Value::Array(a) => {
                     a.len() >= binds.len()
-                        && binds.iter().all(|(i, p)| match a.get(*i) {
+                        && binds.iter().all(|(_, i, p)| match a.get(*i) {
                             Some(Value::Array(a)) if a.len() == 2 => p.is_match(&a[1]),
                             _ => false,
                         })
@@ -337,7 +340,9 @@ impl StructPatternNode {
             Self::Slice { tuple: true, all: _, binds } => {
                 binds.iter().any(|p| p.is_refutable())
             }
-            Self::Struct { all: _, binds } => binds.iter().any(|(_, p)| p.is_refutable()),
+            Self::Struct { all: _, binds } => {
+                binds.iter().any(|(_, _, p)| p.is_refutable())
+            }
             Self::Slice { tuple: false, .. }
             | Self::SlicePrefix { .. }
             | Self::SliceSuffix { .. } => true,

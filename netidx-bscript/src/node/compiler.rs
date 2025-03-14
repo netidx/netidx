@@ -307,14 +307,23 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 return error!("", vec![node]);
             }
             let typ = match typ {
-                None => node.typ.clone(),
                 Some(typ) => match typ.resolve_typrefs(scope, &ctx.env) {
                     Ok(typ) => typ.clone(),
                     Err(e) => return error!("{e}", vec![node]),
                 },
+                None => {
+                    let typ = node.typ.clone();
+                    let ptyp = pattern.infer_type_predicate();
+                    if !ptyp.contains(&typ) {
+                        return error!(
+                            "match error {typ} can't be matched by {ptyp}",
+                            vec![node]
+                        );
+                    }
+                    typ
+                }
             };
-            let ptyp = pattern.infer_type_predicate();
-            let pn = match StructPatternNode::compile(ctx, &ptyp, pattern, scope) {
+            let pn = match StructPatternNode::compile(ctx, &typ, pattern, scope) {
                 Ok(p) => p,
                 Err(e) => return error!("{e:?}", vec![node]),
             };
@@ -327,8 +336,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                     None => return error!("can't bind lambda to {pattern}", vec![node]),
                 }
             };
-            let kind =
-                NodeKind::Bind { pattern: Box::new(pn), ptyp, node: Box::new(node) };
+            let kind = NodeKind::Bind { pattern: Box::new(pn), node: Box::new(node) };
             Node { spec: Box::new(spec), typ, kind }
         }
         Expr { kind: ExprKind::Qop(e), id: _ } => {

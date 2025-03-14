@@ -68,7 +68,6 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
     Do(Box<[Node<C, E>]>),
     Bind {
         pattern: Box<StructPatternNode>,
-        ptyp: Type<NoRefs>,
         node: Box<Node<C, E>>,
     },
     Ref(BindId),
@@ -450,7 +449,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
             }
             NodeKind::Apply { args, function } => function.update(ctx, args, event),
-            NodeKind::Bind { pattern, ptyp: _, node } => {
+            NodeKind::Bind { pattern, node } => {
                 if let Some(v) = node.update(ctx, event) {
                     pattern.bind(&v, &mut |id, v| ctx.user.set_var(id, v))
                 }
