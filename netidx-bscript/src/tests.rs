@@ -3,7 +3,7 @@ use crate::{
     node::Node,
     BindId, Ctx, Event, ExecCtx, NoUserEvent,
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use fxhash::FxHashMap;
 use netidx::{
@@ -12,18 +12,18 @@ use netidx::{
     subscriber::{Subscriber, SubscriberBuilder},
 };
 use smallvec::SmallVec;
-use std::collections::{hash_map::Entry, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
-struct TestCtx {
-    by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
-    var_updates: VecDeque<(BindId, Value)>,
-    _resolver: resolver_server::Server,
-    _publisher: Publisher,
-    _subscriber: Subscriber,
+pub struct TestCtx {
+    pub by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
+    pub var_updates: VecDeque<(BindId, Value)>,
+    pub _resolver: resolver_server::Server,
+    pub _publisher: Publisher,
+    pub _subscriber: Subscriber,
 }
 
 impl TestCtx {
-    async fn new() -> Result<Self> {
+    pub async fn new() -> Result<Self> {
         let resolver = {
             use resolver_server::config::{self, file};
             let cfg = file::ConfigBuilder::default()
@@ -112,13 +112,13 @@ impl Ctx for TestCtx {
     }
 }
 
-struct TestState {
-    ctx: ExecCtx<TestCtx, NoUserEvent>,
-    event: Event<NoUserEvent>,
+pub struct TestState {
+    pub ctx: ExecCtx<TestCtx, NoUserEvent>,
+    pub event: Event<NoUserEvent>,
 }
 
 impl TestState {
-    async fn new() -> Result<Self> {
+    pub async fn new() -> Result<Self> {
         Ok(Self {
             ctx: ExecCtx::new(TestCtx::new().await?),
             event: Event::new(NoUserEvent),
@@ -154,15 +154,20 @@ async fn bind_ref_arith() -> Result<()> {
     Ok(())
 }
 
+#[macro_export]
 macro_rules! run {
     ($name:ident, $code:expr, $pred:expr) => {
         #[tokio::test(flavor = "current_thread")]
-        async fn $name() -> Result<()> {
-            let mut state = TestState::new().await?;
+        async fn $name() -> ::anyhow::Result<()> {
+            let mut state = $crate::tests::TestState::new().await?;
             state.ctx.dbg_ctx.trace = false;
-            let mut n = Node::compile(&mut state.ctx, &ModPath::root(), $code.parse()?);
+            let mut n = $crate::node::Node::compile(
+                &mut state.ctx,
+                &$crate::expr::ModPath::root(),
+                $code.parse()?,
+            );
             if let Some(e) = n.extract_err() {
-                if $pred(Err(anyhow!("compilation failed {e}"))) {
+                if $pred(Err(::anyhow::anyhow!("compilation failed {e}"))) {
                     return Ok(());
                 }
                 bail!("compilation failed {e}")
@@ -179,10 +184,10 @@ macro_rules! run {
                 for _ in 0..state.ctx.user.var_updates.len() {
                     if let Some((id, v)) = state.ctx.user.var_updates.pop_front() {
                         match state.event.variables.entry(id) {
-                            Entry::Vacant(e) => {
+                            ::std::collections::hash_map::Entry::Vacant(e) => {
                                 e.insert(v);
                             }
-                            Entry::Occupied(_) => {
+                            ::std::collections::hash_map::Entry::Occupied(_) => {
                                 state.ctx.user.var_updates.push_back((id, v));
                             }
                         }
@@ -331,34 +336,6 @@ run!(select, SELECT, |v: Result<&Value>| match v {
             true,
         _ => false,
     },
-    _ => false,
-});
-
-const LIB_CORE_ALL: &str = r#"
-{
-  let x = 1;
-  let y = x;
-  let z = y;
-  all(x, y, z)
-}
-"#;
-
-run!(lib_core_all, LIB_CORE_ALL, |v: Result<&Value>| match v {
-    Ok(Value::I64(1)) => true,
-    _ => false,
-});
-
-const LIB_CORE_AND: &str = r#"
-{
-  let x = 1;
-  let y = x + 1;
-  let z = y + 1;
-  and(x < y, y < z, x > 0, z < 10)
-}
-"#;
-
-run!(lib_core_and, LIB_CORE_AND, |v: Result<&Value>| match v {
-    Ok(Value::Bool(true)) => true,
     _ => false,
 });
 

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::run;
 use crate::{
     deftype, err, errf,
     expr::{Expr, ExprKind},
@@ -7,6 +9,8 @@ use crate::{
     Apply, ApplyTyped, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, UserEvent,
 };
 use anyhow::bail;
+#[cfg(test)]
+use anyhow::Result;
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use netidx::{publisher::Typ, subscriber::Value};
@@ -37,6 +41,25 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Any {
             .fold(None, |r, v| r.or(Some(v)))
     }
 }
+
+#[cfg(test)]
+const ANY: &str = r#"
+{
+  let x = 1;
+  let y = x + 1;
+  let z = y + 1;
+  group(any(x, y, z), |n, _| n == 3)
+}
+"#;
+
+#[cfg(test)]
+run!(any, ANY, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::I64(1), Value::I64(2), Value::I64(3)] => true,
+        _ => false,
+    },
+    _ => false,
+});
 
 struct IsErr;
 
@@ -171,6 +194,22 @@ impl EvalCached for AllEv {
 }
 
 type All = CachedArgs<AllEv>;
+
+#[cfg(test)]
+const ALL: &str = r#"
+{
+  let x = 1;
+  let y = x;
+  let z = y;
+  all(x, y, z)
+}
+"#;
+
+#[cfg(test)]
+run!(all, ALL, |v: Result<&Value>| match v {
+    Ok(Value::I64(1)) => true,
+    _ => false,
+});
 
 fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     match (lhs, rhs) {
@@ -316,6 +355,22 @@ impl EvalCached for AndEv {
 }
 
 type And = CachedArgs<AndEv>;
+
+#[cfg(test)]
+const AND: &str = r#"
+{
+  let x = 1;
+  let y = x + 1;
+  let z = y + 1;
+  and(x < y, y < z, x > 0, z < 10)
+}
+"#;
+
+#[cfg(test)]
+run!(and, AND, |v: Result<&Value>| match v {
+    Ok(Value::Bool(true)) => true,
+    _ => false,
+});
 
 struct OrEv;
 

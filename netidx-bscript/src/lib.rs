@@ -35,6 +35,7 @@ use std::{
 use triomphe::Arc;
 
 #[cfg(test)]
+#[macro_use]
 mod tests;
 
 atomic_id!(BindId);

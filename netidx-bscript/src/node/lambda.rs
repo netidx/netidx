@@ -252,13 +252,14 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         }};
     }
     {
-        let mut s: SmallVec<[ArcStr; 16]> = smallvec![];
+        let mut s: SmallVec<[&ArcStr; 16]> = smallvec![];
         for a in argspec.iter() {
-            a.pattern.with_names(&mut |n| s.push(n.clone()));
+            a.pattern.with_names(&mut |n| s.push(n));
         }
+        let len = s.len();
         s.sort();
         s.dedup();
-        if argspec.len() != s.len() {
+        if len != s.len() {
             error!("arguments must have unique names",);
         }
     }
