@@ -3,7 +3,7 @@ use crate::{
     expr::{Expr, ModPath},
     node::pattern::PatternNode,
     typ::{NoRefs, Type},
-    ApplyTyped, BindId, Ctx, Event, ExecCtx, UserEvent,
+    Apply, BindId, Ctx, Event, ExecCtx, UserEvent,
 };
 use arcstr::{literal, ArcStr};
 use compact_str::{format_compact, CompactString};
@@ -100,7 +100,7 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
     },
     Apply {
         args: Box<[Node<C, E>]>,
-        function: Box<dyn ApplyTyped<C, E> + Send + Sync>,
+        function: Box<dyn Apply<C, E> + Send + Sync>,
     },
     Select {
         selected: Option<usize>,

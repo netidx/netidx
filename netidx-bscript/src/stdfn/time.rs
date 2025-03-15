@@ -3,7 +3,7 @@ use crate::{
     expr::{Expr, ExprId},
     node::Node,
     stdfn::CachedVals,
-    Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, UserEvent,
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
 };
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
@@ -21,8 +21,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for AfterIdle {
     const NAME: &str = "after_idle";
     deftype!("fn([duration, Number], 'a) -> 'a");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, from, eid| {
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, from, eid| {
             Ok(Box::new(AfterIdle { args: CachedVals::new(from), id: None, eid }))
         })
     }
@@ -119,8 +119,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Timer {
     const NAME: &str = "timer";
     deftype!("fn([duration, Number], [bool, Number]) -> datetime");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, from, eid| {
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, from, eid| {
             Ok(Box::new(Self {
                 args: CachedVals::new(from),
                 timeout: None,

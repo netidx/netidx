@@ -29,6 +29,7 @@ use netidx::{
 use std::{
     collections::{hash_map::Entry, HashMap},
     fmt::Debug,
+    marker::PhantomData,
     sync::{self, LazyLock},
     time::Duration,
 };
@@ -83,9 +84,10 @@ impl<E: UserEvent> Event<E> {
     }
 }
 
-pub type InitFn<C, E> = sync::Arc<
+pub type BuiltInInitFn<C, E> = sync::Arc<
     dyn for<'a, 'b, 'c> Fn(
             &'a mut ExecCtx<C, E>,
+            &'a FnType<NoRefs>,
             &'b ModPath,
             &'c [Node<C, E>],
             ExprId,
@@ -120,30 +122,15 @@ impl LambdaTVars {
     }
 }
 
-pub type InitFnTyped<C, E> = sync::Arc<
+pub type InitFn<C, E> = sync::Arc<
     dyn for<'a, 'b> Fn(
             &'a mut ExecCtx<C, E>,
             &'b [Node<C, E>],
             ExprId,
-        ) -> Result<Box<dyn ApplyTyped<C, E> + Send + Sync>>
+        ) -> Result<Box<dyn Apply<C, E> + Send + Sync>>
         + Send
         + Sync,
 >;
-
-pub trait BuiltIn<C: Ctx, E: UserEvent> {
-    const NAME: &str;
-    const TYP: LazyLock<FnType<Refs>>;
-
-    fn init(ctx: &mut ExecCtx<C, E>) -> InitFn<C, E>;
-
-    fn typecheck(
-        &mut self,
-        _ctx: &mut ExecCtx<C, E>,
-        _from: &mut [Node<C, E>],
-    ) -> Result<()> {
-        Ok(())
-    }
-}
 
 pub trait Apply<C: Ctx, E: UserEvent> {
     fn update(
@@ -152,16 +139,25 @@ pub trait Apply<C: Ctx, E: UserEvent> {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value>;
-}
 
-pub trait ApplyTyped<C: Ctx, E: UserEvent>: Apply<C, E> {
     fn typecheck(
         &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
-    ) -> Result<()>;
+        _ctx: &mut ExecCtx<C, E>,
+        _from: &mut [Node<C, E>],
+    ) -> Result<()> {
+        Ok(())
+    }
 
-    fn rtype(&self) -> &Type<NoRefs>;
+    fn rtype(&self) -> &Type<NoRefs> {
+        &Type::Bottom(PhantomData)
+    }
+}
+
+pub trait BuiltIn<C: Ctx, E: UserEvent> {
+    const NAME: &str;
+    const TYP: LazyLock<FnType<Refs>>;
+
+    fn init(ctx: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E>;
 }
 
 pub trait Ctx: 'static {
@@ -227,7 +223,7 @@ pub trait Ctx: 'static {
 
 pub struct ExecCtx<C: Ctx, E: UserEvent> {
     pub env: Env<C, E>,
-    builtins: FxHashMap<&'static str, (FnType<Refs>, InitFn<C, E>)>,
+    builtins: FxHashMap<&'static str, (FnType<Refs>, BuiltInInitFn<C, E>)>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }

@@ -1,7 +1,7 @@
 use crate::{
     node::Node,
     typ::{FnType, Refs},
-    Apply, BuiltIn, Ctx, Event, ExecCtx, InitFn, UserEvent,
+    Apply, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
 };
 use netidx::subscriber::Value;
 use netidx_core::utils::Either;
@@ -148,8 +148,8 @@ impl<C: Ctx, E: UserEvent, T: EvalCached> BuiltIn<C, E> for CachedArgs<T> {
     const NAME: &str = T::NAME;
     const TYP: LazyLock<FnType<Refs>> = T::TYP;
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, from, _| {
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, from, _| {
             let t = CachedArgs::<T> { cached: CachedVals::new(from), t: PhantomData };
             Ok(Box::new(t))
         })

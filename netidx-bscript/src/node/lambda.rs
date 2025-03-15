@@ -3,7 +3,7 @@ use crate::{
     expr::{Arg, Expr, ExprId, ModPath},
     node::{compiler, pattern::StructPatternNode, Node, NodeKind},
     typ::{FnType, NoRefs, Refs, TVar, Type},
-    Apply, ApplyTyped, Ctx, Event, ExecCtx, InitFnTyped, LambdaTVars, UserEvent,
+    Apply, Ctx, Event, ExecCtx, InitFn, LambdaTVars, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
@@ -37,9 +37,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Lambda<C, E> {
         }
         self.body.update(ctx, event)
     }
-}
 
-impl<C: Ctx, E: UserEvent> ApplyTyped<C, E> for Lambda<C, E> {
     fn typecheck(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -130,9 +128,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltIn<C, E> {
     ) -> Option<Value> {
         self.apply.update(ctx, from, event)
     }
-}
 
-impl<C: Ctx, E: UserEvent> ApplyTyped<C, E> for BuiltIn<C, E> {
     fn typecheck(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -181,6 +177,7 @@ impl<C: Ctx, E: UserEvent> ApplyTyped<C, E> for BuiltIn<C, E> {
         for (tv, tc) in spec.constraints.iter() {
             tc.check_contains(&Type::TVar(tv.clone()))?
         }
+        self.apply.typecheck(ctx, args)?;
         Ok(())
     }
 
@@ -309,7 +306,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         Ok(c) => c,
         Err(e) => error!("{e}",),
     };
-    let init: InitFnTyped<C, E> = SArc::new(move |ctx, args, tid| {
+    let init: InitFn<C, E> = SArc::new(move |ctx, args, tid| {
         // restore the lexical environment to the state it was in
         // when the closure was created
         let snap = ctx.env.restore_lexical_env(&_env);
@@ -339,8 +336,8 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                     let name = *name;
                     let init = SArc::clone(init);
                     typ.resolve_typerefs(&_scope, &ctx.env).and_then(|typ| {
-                        init(ctx, &_scope, args, tid).map(|apply| {
-                            let f: Box<dyn ApplyTyped<C, E> + Send + Sync + 'static> =
+                        init(ctx, &typ, &_scope, args, tid).map(|apply| {
+                            let f: Box<dyn Apply<C, E> + Send + Sync + 'static> =
                                 Box::new(BuiltIn { name, typ, spec, apply });
                             f
                         })
@@ -350,8 +347,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             Either::Left(body) => {
                 let apply = Lambda::new(ctx, spec, args, &_scope, tid, (*body).clone());
                 apply.map(|a| {
-                    let f: Box<dyn ApplyTyped<C, E> + Send + Sync + 'static> =
-                        Box::new(a);
+                    let f: Box<dyn Apply<C, E> + Send + Sync + 'static> = Box::new(a);
                     f
                 })
             }
@@ -360,5 +356,5 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         res
     });
     let kind = NodeKind::Lambda(Arc::new(LambdaBind { env, argspec, init, scope }));
-    Node { spec: Box::new(spec), typ: Type::empty_tvar(), kind }
+    Node { spec: Box::new(spec), typ: Type::Bottom(PhantomData), kind }
 }

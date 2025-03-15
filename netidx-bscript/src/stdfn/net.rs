@@ -3,7 +3,7 @@ use crate::{
     expr::{Expr, ExprId},
     node::Node,
     stdfn::CachedVals,
-    Apply, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, UserEvent,
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
@@ -39,8 +39,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Write {
     const NAME: &str = "write";
     deftype!("fn(string, Any) -> _");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, from, top_id| {
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, from, top_id| {
             Ok(Box::new(Write {
                 args: CachedVals::new(from),
                 dv: Either::Right(vec![]),
@@ -129,8 +129,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Subscribe {
     const NAME: &str = "subscribe";
     deftype!("fn(string) -> Any");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, from, top_id| {
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, from, top_id| {
             Ok(Box::new(Subscribe { args: CachedVals::new(from), cur: None, top_id }))
         })
     }
@@ -193,8 +193,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for RpcCall {
     const NAME: &str = "call";
     deftype!("fn(string, Array<Array<Any>>) -> Any");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, from, top_id| {
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, from, top_id| {
             Ok(Box::new(RpcCall {
                 args: CachedVals::new(from),
                 top_id,

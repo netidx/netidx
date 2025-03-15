@@ -1,7 +1,7 @@
 use crate::{
     expr::{Arg, ModPath},
     typ::{NoRefs, Type},
-    BindId, Ctx, InitFnTyped, UserEvent,
+    BindId, Ctx, InitFn, UserEvent,
 };
 use anyhow::{bail, Result};
 use compact_str::CompactString;
@@ -14,7 +14,7 @@ pub struct LambdaBind<C: Ctx, E: UserEvent> {
     pub env: Env<C, E>,
     pub scope: ModPath,
     pub argspec: Arc<[Arg]>,
-    pub init: InitFnTyped<C, E>,
+    pub init: InitFn<C, E>,
 }
 
 pub struct Bind<C: Ctx, E: UserEvent> {

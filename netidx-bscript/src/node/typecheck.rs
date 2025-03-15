@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use triomphe::Arc;
 
 impl<C: Ctx, E: UserEvent> Node<C, E> {
-    pub(super) fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+    pub fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         macro_rules! wrap {
             ($e:expr) => {
                 wrap!(self.spec, $e)

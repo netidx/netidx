@@ -5,8 +5,8 @@ use crate::{
     expr::{Expr, ExprKind},
     node::{Node, NodeKind},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    typ::Type,
-    Apply, ApplyTyped, BindId, BuiltIn, Ctx, Event, ExecCtx, InitFn, UserEvent,
+    typ::{FnArgType, FnType, NoRefs, Type},
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
 };
 use anyhow::bail;
 #[cfg(test)]
@@ -24,8 +24,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for IsErr {
     const NAME: &str = "is_err";
     deftype!("fn(Any) -> bool");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(IsErr)))
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, _, _| Ok(Box::new(IsErr)))
     }
 }
 
@@ -64,8 +64,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for FilterErr {
     const NAME: &str = "filter_err";
     deftype!("fn(Any) -> error");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(FilterErr)))
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, _, _| Ok(Box::new(FilterErr)))
     }
 }
 
@@ -103,8 +103,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for ToError {
     const NAME: &str = "error";
     deftype!("fn(Any) -> error");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(ToError)))
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, _, _| Ok(Box::new(ToError)))
     }
 }
 
@@ -143,8 +143,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Once {
     const NAME: &str = "once";
     deftype!("fn('a) -> 'a");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Once { val: false })))
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, _, _| Ok(Box::new(Once { val: false })))
     }
 }
 
@@ -617,7 +617,8 @@ run!(slice, SLICE, |v: Result<&Value>| {
 });
 
 struct Filter<C: Ctx, E: UserEvent> {
-    pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
+    pred: Box<dyn Apply<C, E> + Send + Sync>,
+    typ: FnType<NoRefs>,
     x: BindId,
     from: [Node<C, E>; 1],
 }
@@ -626,8 +627,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
     const NAME: &str = "filter";
     deftype!("fn('a, fn('a) -> bool) -> 'a");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|ctx, scope, from, top_id| match from {
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|ctx, typ, scope, from, top_id| match from {
             [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
                 let x = ctx.env.bind_variable(scope, "x", from[0].typ.clone()).id;
                 ctx.user.ref_var(x, top_id);
@@ -637,7 +638,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
                     kind: NodeKind::Ref(x),
                 }];
                 let pred = (lb.init)(ctx, &mut from, top_id)?;
-                Ok(Box::new(Self { pred, x, from }))
+                Ok(Box::new(Self { pred, typ: typ.clone(), x, from }))
             }
             _ => bail!("expected a function"),
         })
@@ -681,8 +682,9 @@ run!(filter, FILTER, |v: Result<&Value>| {
 macro_rules! mapfn {
     ($name:ident, $bname:literal, $typ:literal) => {
         struct $name<C: Ctx, E: UserEvent> {
-            pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
+            pred: Box<dyn Apply<C, E> + Send + Sync>,
             x: BindId,
+            typ: FnType<NoRefs>,
             from: [Node<C, E>; 1],
             queue: SmallVec<[usize; 4]>,
             buf: SmallVec<[Value; 32]>,
@@ -692,8 +694,8 @@ macro_rules! mapfn {
             const NAME: &str = $bname;
             deftype!($typ);
 
-            fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-                Arc::new(|ctx, scope, from, top_id| match from {
+            fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+                Arc::new(|ctx, typ, scope, from, top_id| match from {
                     [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
                         let x = ctx.env.bind_variable(scope, "x", from[0].typ.clone()).id;
                         ctx.user.ref_var(x, top_id);
@@ -701,7 +703,7 @@ macro_rules! mapfn {
                             spec: Box::new(
                                 ExprKind::Ref { name: ["x"].into() }.to_expr(),
                             ),
-                            typ: from[0].typ.clone(),
+                            typ: Type::empty_tvar(),
                             kind: NodeKind::Ref(x),
                         }];
                         let pred = (lb.init)(ctx, &mut from, top_id)?;
@@ -709,6 +711,7 @@ macro_rules! mapfn {
                             pred,
                             x,
                             from,
+                            typ: typ.clone(),
                             queue: smallvec![],
                             buf: smallvec![],
                         }))
@@ -741,6 +744,29 @@ macro_rules! mapfn {
                     }
                 }
                 None
+            }
+
+            fn typecheck(
+                &mut self,
+                ctx: &mut ExecCtx<C, E>,
+                from: &mut [Node<C, E>],
+            ) -> anyhow::Result<()> {
+                for n in from.iter_mut() {
+                    n.typecheck(ctx)?;
+                }
+                let et = self.from[0].typ.clone();
+                Type::Array(triomphe::Arc::new(et)).check_contains(&from[0].typ)?;
+                for n in self.from.iter_mut() {
+                    n.typecheck(ctx)?;
+                }
+                self.pred.typecheck(ctx, &mut self.from[..])?;
+                match self.typ.args.get(1) {
+                    Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
+                        ft.rtype.check_contains(self.pred.rtype())?
+                    }
+                    _ => bail!("expected function as 2nd arg"),
+                }
+                Ok(())
             }
         }
     };
@@ -931,7 +957,7 @@ const ARRAY_FIND_MAP: &str = r#"
 {
   type T = (string, i64);
   let a: Array<T> = [("foo", 1), ("bar", 2), ("baz", 3)];
-  array::find(a, |(k, v): T| select k == "bar" {
+  array::find_map(a, |(k, v): T| select k == "bar" {
     true => v,
     false => sample(v, null)
   })
@@ -954,8 +980,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Count {
     const NAME: &str = "count";
     deftype!("fn(Any) -> u64");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Count { count: 0 })))
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, _, _| Ok(Box::new(Count { count: 0 })))
     }
 }
 
@@ -1002,8 +1028,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Sample {
     const NAME: &str = "sample";
     deftype!("fn(Any, 'a) -> 'a");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Sample { last: None })))
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, _, _| Ok(Box::new(Sample { last: None })))
     }
 }
 
@@ -1103,8 +1129,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Uniq {
     const NAME: &str = "uniq";
     deftype!("fn('a) -> 'a");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Uniq(None))))
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, _, _| Ok(Box::new(Uniq(None))))
     }
 }
 
@@ -1151,8 +1177,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Never {
     const NAME: &str = "never";
     deftype!("fn(@args: Any) -> _");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Never)))
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, _, _| Ok(Box::new(Never)))
     }
 }
 
@@ -1188,7 +1214,8 @@ run!(never, NEVER, |v: Result<&Value>| {
 
 struct Group<C: Ctx, E: UserEvent> {
     buf: SmallVec<[Value; 16]>,
-    pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
+    pred: Box<dyn Apply<C, E> + Send + Sync>,
+    typ: FnType<NoRefs>,
     n: BindId,
     x: BindId,
     from: [Node<C, E>; 2],
@@ -1198,8 +1225,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
     const NAME: &str = "group";
     deftype!("fn('a, fn(u64, 'a) -> bool) -> Array<'a>");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|ctx, scope, from, top_id| match from {
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|ctx, typ, scope, from, top_id| match from {
             [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
                 let n_typ = Type::Primitive(Typ::U64.into());
                 let n = ctx.env.bind_variable(scope, "n", n_typ.clone()).id;
@@ -1219,7 +1246,14 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
                     },
                 ];
                 let pred = (lb.init)(ctx, &mut from, top_id)?;
-                Ok(Box::new(Self { buf: smallvec![], pred, n, x, from }))
+                Ok(Box::new(Self {
+                    buf: smallvec![],
+                    typ: typ.clone(),
+                    pred,
+                    n,
+                    x,
+                    from,
+                }))
             }
             _ => bail!("expected a function"),
         })
@@ -1274,8 +1308,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Iter {
     const NAME: &str = "iter";
     deftype!("fn(Array<'a>) -> 'a");
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|_, _, _, _| Ok(Box::new(Iter(BindId::new()))))
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, _, _| Ok(Box::new(Iter(BindId::new()))))
     }
 }
 
@@ -1380,6 +1414,7 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Filter<C, E>>().unwrap();
     ctx.register_builtin::<ArrayFilter<C, E>>().unwrap();
     ctx.register_builtin::<ArrayFind<C, E>>().unwrap();
+    ctx.register_builtin::<ArrayFindMap<C, E>>().unwrap();
     ctx.register_builtin::<ArrayMap<C, E>>().unwrap();
     ctx.register_builtin::<ArrayFilterMap<C, E>>().unwrap();
     ctx.register_builtin::<FilterErr>().unwrap();
