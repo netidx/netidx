@@ -678,58 +678,89 @@ run!(filter, FILTER, |v: Result<&Value>| {
     }
 });
 
-struct ArrayFilter<C: Ctx, E: UserEvent> {
-    pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
-    x: BindId,
-    from: [Node<C, E>; 1],
-}
+macro_rules! mapfn {
+    ($name:ident, $bname:literal, $typ:literal) => {
+        struct $name<C: Ctx, E: UserEvent> {
+            pred: Box<dyn ApplyTyped<C, E> + Send + Sync>,
+            x: BindId,
+            from: [Node<C, E>; 1],
+            queue: SmallVec<[usize; 4]>,
+            buf: SmallVec<[Value; 32]>,
+        }
 
-impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for ArrayFilter<C, E> {
-    const NAME: &str = "array_filter";
-    deftype!("fn(Array<'a>, fn('a) -> bool) -> Array<'a>");
+        impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for $name<C, E> {
+            const NAME: &str = $bname;
+            deftype!($typ);
 
-    fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
-        Arc::new(|ctx, scope, from, top_id| match from {
-            [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
-                let x = ctx.env.bind_variable(scope, "x", from[0].typ.clone()).id;
-                ctx.user.ref_var(x, top_id);
-                let mut from = [Node {
-                    spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
-                    typ: from[0].typ.clone(),
-                    kind: NodeKind::Ref(x),
-                }];
-                let pred = (lb.init)(ctx, &mut from, top_id)?;
-                Ok(Box::new(Self { pred, x, from }))
+            fn init(_: &mut ExecCtx<C, E>) -> InitFn<C, E> {
+                Arc::new(|ctx, scope, from, top_id| match from {
+                    [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
+                        let x = ctx.env.bind_variable(scope, "x", from[0].typ.clone()).id;
+                        ctx.user.ref_var(x, top_id);
+                        let mut from = [Node {
+                            spec: Box::new(
+                                ExprKind::Ref { name: ["x"].into() }.to_expr(),
+                            ),
+                            typ: from[0].typ.clone(),
+                            kind: NodeKind::Ref(x),
+                        }];
+                        let pred = (lb.init)(ctx, &mut from, top_id)?;
+                        Ok(Box::new(Self {
+                            pred,
+                            x,
+                            from,
+                            queue: smallvec![],
+                            buf: smallvec![],
+                        }))
+                    }
+                    _ => bail!("expected a function"),
+                })
             }
-            _ => bail!("expected a function"),
-        })
-    }
-}
+        }
 
-impl<C: Ctx, E: UserEvent> Apply<C, E> for ArrayFilter<C, E> {
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
-        event: &mut Event<E>,
-    ) -> Option<Value> {
-        self.pred.update(ctx, &mut self.from, event);
-        from[0].update(ctx, event).and_then(|v| match v {
-            Value::Array(a) => {
-                let mut res: SmallVec<[&Value; 16]> = smallvec![];
-                for v in a.iter() {
-                    event.variables.insert(self.x, v.clone());
-                    match self.pred.update(ctx, &mut self.from, event) {
-                        Some(Value::Bool(true)) => res.push(v),
-                        _ => (),
+        impl<C: Ctx, E: UserEvent> Apply<C, E> for $name<C, E> {
+            fn update(
+                &mut self,
+                ctx: &mut ExecCtx<C, E>,
+                from: &mut [Node<C, E>],
+                event: &mut Event<E>,
+            ) -> Option<Value> {
+                if let Some(Value::Array(a)) = from[0].update(ctx, event) {
+                    self.queue.push(a.len());
+                    for v in a.iter() {
+                        ctx.user.set_var(self.x, v.clone());
                     }
                 }
-                Some(Value::Array(ValArray::from_iter(
-                    res.into_iter().map(|v| v.clone()),
-                )))
+                let set = event.variables.contains_key(&self.x);
+                self.predicate(ctx, set, event);
+                if set && !self.queue.is_empty() {
+                    self.queue[0] -= 1;
+                    if self.queue[0] == 0 {
+                        self.queue.remove(0);
+                        return self.finish();
+                    }
+                }
+                None
             }
-            _ => None,
-        })
+        }
+    };
+}
+
+mapfn!(ArrayFilter, "array_filter", "fn(Array<'a>, fn('a) -> bool) -> Array<'a>");
+
+impl<C: Ctx, E: UserEvent> ArrayFilter<C, E> {
+    fn predicate(&mut self, ctx: &mut ExecCtx<C, E>, set: bool, event: &mut Event<E>) {
+        match self.pred.update(ctx, &mut self.from, event) {
+            Some(Value::Bool(true)) if set => {
+                self.buf.push(event.variables[&self.x].clone())
+            }
+            _ => (),
+        }
+    }
+
+    fn finish(&mut self) -> Option<Value> {
+        let a = ValArray::from_iter(self.buf.drain(..));
+        Some(Value::Array(a))
     }
 }
 
@@ -750,6 +781,167 @@ run!(array_filter, ARRAY_FILTER, |v: Result<&Value>| {
             }
             _ => false,
         },
+        _ => false,
+    }
+});
+
+mapfn!(ArrayMap, "array_map", "fn(Array<'a>, fn('a) -> 'b) -> Array<'b>");
+
+impl<C: Ctx, E: UserEvent> ArrayMap<C, E> {
+    fn predicate(&mut self, ctx: &mut ExecCtx<C, E>, set: bool, event: &mut Event<E>) {
+        match self.pred.update(ctx, &mut self.from, event) {
+            Some(v) if set => self.buf.push(v),
+            _ => (),
+        }
+    }
+
+    fn finish(&mut self) -> Option<Value> {
+        let a = ValArray::from_iter(self.buf.drain(..));
+        Some(Value::Array(a))
+    }
+}
+
+#[cfg(test)]
+const ARRAY_MAP: &str = r#"
+{
+  let a = [1, 2, 3, 4];
+  array::map(a, |x| x > 3)
+}
+"#;
+
+#[cfg(test)]
+run!(array_map, ARRAY_MAP, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::Bool(false), Value::Bool(false), Value::Bool(false), Value::Bool(true)] => {
+                true
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+mapfn!(
+    ArrayFilterMap,
+    "array_filter_map",
+    "fn(Array<'a>, fn('a) -> ['b, null]) -> Array<'b>"
+);
+
+impl<C: Ctx, E: UserEvent> ArrayFilterMap<C, E> {
+    fn predicate(&mut self, ctx: &mut ExecCtx<C, E>, set: bool, event: &mut Event<E>) {
+        match self.pred.update(ctx, &mut self.from, event) {
+            Some(Value::Null) => (),
+            Some(v) if set => self.buf.push(v),
+            _ => (),
+        }
+    }
+
+    fn finish(&mut self) -> Option<Value> {
+        let a = ValArray::from_iter(self.buf.drain(..));
+        Some(Value::Array(a))
+    }
+}
+
+#[cfg(test)]
+const ARRAY_FILTER_MAP: &str = r#"
+{
+  let a = [1, 2, 3, 4, 5, 6, 7, 8];
+  array::filter_map(a, |x| select x > 5 {
+    true => x + 1,
+    false => sample(x, null)
+  })
+}
+"#;
+
+#[cfg(test)]
+run!(array_filter_map, ARRAY_FILTER_MAP, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::I64(7), Value::I64(8), Value::I64(9)] => true,
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+mapfn!(ArrayFind, "array_find", "fn(Array<'a>, fn('a) -> bool) -> ['a, null]");
+
+impl<C: Ctx, E: UserEvent> ArrayFind<C, E> {
+    fn predicate(&mut self, ctx: &mut ExecCtx<C, E>, set: bool, event: &mut Event<E>) {
+        if self.buf.is_empty() {
+            match self.pred.update(ctx, &mut self.from, event) {
+                Some(Value::Bool(true)) if set => {
+                    self.buf.push(event.variables[&self.x].clone())
+                }
+                _ => (),
+            }
+        }
+    }
+
+    fn finish(&mut self) -> Option<Value> {
+        Some(self.buf.pop().unwrap_or(Value::Null))
+    }
+}
+
+#[cfg(test)]
+const ARRAY_FIND: &str = r#"
+{
+  type T = (string, i64);
+  let a: Array<T> = [("foo", 1), ("bar", 2), ("baz", 3)];
+  array::find(a, |(k, _): T| k == "bar")
+}
+"#;
+
+#[cfg(test)]
+run!(array_find, ARRAY_FIND, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::String(s), Value::I64(2)] => &**s == "bar",
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+mapfn!(
+    ArrayFindMap,
+    "array_find_map",
+    "fn(Array<'a>, fn('a) -> ['b, null]) -> ['b, null]"
+);
+
+impl<C: Ctx, E: UserEvent> ArrayFindMap<C, E> {
+    fn predicate(&mut self, ctx: &mut ExecCtx<C, E>, set: bool, event: &mut Event<E>) {
+        if self.buf.is_empty() {
+            match self.pred.update(ctx, &mut self.from, event) {
+                Some(Value::Null) => (),
+                Some(v) if set => self.buf.push(v),
+                _ => (),
+            }
+        }
+    }
+
+    fn finish(&mut self) -> Option<Value> {
+        Some(self.buf.pop().unwrap_or(Value::Null))
+    }
+}
+
+#[cfg(test)]
+const ARRAY_FIND_MAP: &str = r#"
+{
+  type T = (string, i64);
+  let a: Array<T> = [("foo", 1), ("bar", 2), ("baz", 3)];
+  array::find(a, |(k, v): T| select k == "bar" {
+    true => v,
+    false => sample(v, null)
+  })
+}
+"#;
+
+#[cfg(test)]
+run!(array_find_map, ARRAY_FIND_MAP, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(2)) => true,
         _ => false,
     }
 });
@@ -1145,12 +1337,14 @@ pub mod core {
 
     pub mod array {
         pub let filter = |a, f| 'array_filter
+        pub let filter_map = |a, f| 'array_filter_map
         pub let map = |a, f| 'array_map
         pub let fold = |a, init, f| 'array_fold
         pub let group = |v, f| 'group
         pub let iter = |a| 'iter
         pub let len = |a| 'array_len
         pub let concat = |x, @args| 'array_concat
+        pub let flatten = |a| 'array_flatten
         pub let find = |a, f| 'array_find
         pub let find_map = |a, f| 'array_find_map
     }
@@ -1185,6 +1379,9 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Divide>().unwrap();
     ctx.register_builtin::<Filter<C, E>>().unwrap();
     ctx.register_builtin::<ArrayFilter<C, E>>().unwrap();
+    ctx.register_builtin::<ArrayFind<C, E>>().unwrap();
+    ctx.register_builtin::<ArrayMap<C, E>>().unwrap();
+    ctx.register_builtin::<ArrayFilterMap<C, E>>().unwrap();
     ctx.register_builtin::<FilterErr>().unwrap();
     ctx.register_builtin::<Group<C, E>>().unwrap();
     ctx.register_builtin::<Index>().unwrap();
