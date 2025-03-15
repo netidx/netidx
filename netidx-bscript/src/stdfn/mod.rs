@@ -8,7 +8,6 @@ use netidx_core::utils::Either;
 use smallvec::SmallVec;
 use std::{
     iter,
-    marker::PhantomData,
     sync::{Arc, LazyLock},
 };
 
@@ -132,16 +131,16 @@ impl CachedVals {
     }
 }
 
-pub trait EvalCached: Send + Sync + 'static {
+pub trait EvalCached: Default + Send + Sync + 'static {
     const NAME: &str;
     const TYP: LazyLock<FnType<Refs>>;
 
-    fn eval(from: &CachedVals) -> Option<Value>;
+    fn eval(&mut self, from: &CachedVals) -> Option<Value>;
 }
 
 pub struct CachedArgs<T: EvalCached> {
     cached: CachedVals,
-    t: PhantomData<T>,
+    t: T,
 }
 
 impl<C: Ctx, E: UserEvent, T: EvalCached> BuiltIn<C, E> for CachedArgs<T> {
@@ -150,7 +149,7 @@ impl<C: Ctx, E: UserEvent, T: EvalCached> BuiltIn<C, E> for CachedArgs<T> {
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, from, _| {
-            let t = CachedArgs::<T> { cached: CachedVals::new(from), t: PhantomData };
+            let t = CachedArgs::<T> { cached: CachedVals::new(from), t: T::default() };
             Ok(Box::new(t))
         })
     }
@@ -164,7 +163,7 @@ impl<C: Ctx, E: UserEvent, T: EvalCached> Apply<C, E> for CachedArgs<T> {
         event: &mut Event<E>,
     ) -> Option<Value> {
         if self.cached.update(ctx, from, event) {
-            T::eval(&self.cached)
+            self.t.eval(&self.cached)
         } else {
             None
         }

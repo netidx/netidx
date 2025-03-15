@@ -184,13 +184,14 @@ run!(once, ONCE, |v: Result<&Value>| match v {
     _ => false,
 });
 
+#[derive(Default)]
 struct AllEv;
 
 impl EvalCached for AllEv {
     const NAME: &str = "all";
     deftype!("fn(@args: Any) -> Any");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match &*from.0 {
             [] => None,
             [hd, tl @ ..] => match hd {
@@ -233,13 +234,14 @@ fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     }
 }
 
+#[derive(Default)]
 struct SumEv;
 
 impl EvalCached for SumEv {
     const NAME: &str = "sum";
     deftype!("fn(@args: [Number, Array<[Number, Array<Number>]>]) -> Number");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
             res => add_vals(res, v.clone()),
@@ -263,6 +265,7 @@ run!(sum, SUM, |v: Result<&Value>| match v {
     _ => false,
 });
 
+#[derive(Default)]
 struct ProductEv;
 
 fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
@@ -277,7 +280,7 @@ impl EvalCached for ProductEv {
     const NAME: &str = "product";
     deftype!("fn(@args: [Number, Array<[Number, Array<Number>]>]) -> Number");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
             res => prod_vals(res, v.clone()),
@@ -301,6 +304,7 @@ run!(product, PRODUCT, |v: Result<&Value>| match v {
     _ => false,
 });
 
+#[derive(Default)]
 struct DivideEv;
 
 fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
@@ -315,7 +319,7 @@ impl EvalCached for DivideEv {
     const NAME: &str = "divide";
     deftype!("fn(@args: [Number, Array<[Number, Array<Number>]>]) -> Number");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         from.flat_iter().fold(None, |res, v| match res {
             res @ Some(Value::Error(_)) => res,
             res => div_vals(res, v.clone()),
@@ -339,13 +343,14 @@ run!(divide, DIVIDE, |v: Result<&Value>| match v {
     _ => false,
 });
 
+#[derive(Default)]
 struct MinEv;
 
 impl EvalCached for MinEv {
     const NAME: &str = "min";
     deftype!("fn(@args: Any) -> Any");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut res = None;
         for v in from.flat_iter() {
             match (res, v) {
@@ -377,13 +382,14 @@ run!(min, MIN, |v: Result<&Value>| match v {
     _ => false,
 });
 
+#[derive(Default)]
 struct MaxEv;
 
 impl EvalCached for MaxEv {
     const NAME: &str = "max";
     deftype!("fn(@args: Any) -> Any");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut res = None;
         for v in from.flat_iter() {
             match (res, v) {
@@ -415,13 +421,14 @@ run!(max, MAX, |v: Result<&Value>| match v {
     _ => false,
 });
 
+#[derive(Default)]
 struct AndEv;
 
 impl EvalCached for AndEv {
     const NAME: &str = "and";
     deftype!("fn(@args: bool) -> bool");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut res = Some(Value::Bool(true));
         for v in from.flat_iter() {
             match v {
@@ -454,13 +461,14 @@ run!(and, AND, |v: Result<&Value>| match v {
     _ => false,
 });
 
+#[derive(Default)]
 struct OrEv;
 
 impl EvalCached for OrEv {
     const NAME: &str = "or";
     deftype!("fn(@args: bool) -> bool");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut res = Some(Value::Bool(false));
         for v in from.flat_iter() {
             match v {
@@ -490,13 +498,14 @@ run!(or, OR, |v: Result<&Value>| match v {
     _ => false,
 });
 
+#[derive(Default)]
 struct IndexEv;
 
 impl EvalCached for IndexEv {
     const NAME: &str = "index";
     deftype!("fn(Array<'a>, Int) -> ['a, error]");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let i = match &from.0[1] {
             Some(Value::I64(i)) => *i,
             Some(v) => match v.clone().cast_to::<i64>() {
@@ -545,13 +554,14 @@ run!(index, INDEX, |v: Result<&Value>| match v {
     _ => false,
 });
 
+#[derive(Default)]
 struct SliceEv;
 
 impl EvalCached for SliceEv {
     const NAME: &str = "slice";
     deftype!("fn(Array<'a>, [Int, null], [Int, null]) -> [Array<'a>, error]");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         macro_rules! number {
             ($e:expr) => {
                 match $e.clone().cast_to::<usize>() {
@@ -653,14 +663,38 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        self.pred.update(ctx, &mut self.from, event);
-        from[0].update(ctx, event).and_then(|v| {
-            event.variables.insert(self.x, v.clone());
-            match self.pred.update(ctx, &mut self.from, event) {
-                Some(Value::Bool(true)) => Some(v),
-                _ => None,
+        match from[0].update(ctx, event) {
+            None => {
+                self.pred.update(ctx, &mut self.from, event);
+                None
             }
-        })
+            Some(v) => {
+                event.variables.insert(self.x, v.clone());
+                match self.pred.update(ctx, &mut self.from, event) {
+                    Some(Value::Bool(true)) => Some(v),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    fn typecheck(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+    ) -> anyhow::Result<()> {
+        for n in from.iter_mut() {
+            n.typecheck(ctx)?;
+        }
+        self.from[0].typ.check_contains(&from[0].typ)?;
+        self.pred.typecheck(ctx, from)?;
+        match self.typ.args.get(1) {
+            Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
+                ft.rtype.check_contains(self.pred.rtype())?
+            }
+            _ => bail!("expected function as 2nd arg"),
+        }
+        Ok(())
     }
 }
 
@@ -847,6 +881,47 @@ run!(array_map, ARRAY_MAP, |v: Result<&Value>| {
             [Value::Bool(false), Value::Bool(false), Value::Bool(false), Value::Bool(true)] => {
                 true
             }
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+mapfn!(
+    ArrayFlatMap,
+    "array_flat_map",
+    "fn(Array<'a>, fn('a) -> Array<'b>) -> Array<'b>",
+    32
+);
+
+impl<C: Ctx, E: UserEvent> ArrayFlatMap<C, E> {
+    fn predicate(&mut self, ctx: &mut ExecCtx<C, E>, set: bool, event: &mut Event<E>) {
+        match self.pred.update(ctx, &mut self.from, event) {
+            Some(Value::Array(a)) if set => self.buf.extend(a.iter().map(|v| v.clone())),
+            Some(v) if set => self.buf.push(v),
+            _ => (),
+        }
+    }
+
+    fn finish(&mut self) -> Option<Value> {
+        let a = ValArray::from_iter(self.buf.drain(..));
+        Some(Value::Array(a))
+    }
+}
+
+#[cfg(test)]
+const ARRAY_FLAT_MAP: &str = r#"
+{
+  let a = [1, 2];
+  array::flat_map(a, |x| [x, x + 1])
+}
+"#;
+
+#[cfg(test)]
+run!(array_flat_map, ARRAY_FLAT_MAP, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::I64(1), Value::I64(2), Value::I64(2), Value::I64(3)] => true,
             _ => false,
         },
         _ => false,
@@ -1084,7 +1159,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for ArrayFold<C, E> {
             Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
                 ft.rtype.check_contains(self.pred.rtype())?
             }
-            _ => bail!("expected function as 2nd arg"),
+            _ => bail!("expected function as 3rd arg"),
         }
         Ok(())
     }
@@ -1102,6 +1177,136 @@ const ARRAY_FOLD: &str = r#"
 run!(array_fold, ARRAY_FOLD, |v: Result<&Value>| {
     match v {
         Ok(Value::I64(55)) => true,
+        _ => false,
+    }
+});
+
+#[derive(Default)]
+struct ArrayConcatEv(SmallVec<[Value; 32]>);
+
+impl EvalCached for ArrayConcatEv {
+    const NAME: &str = "array_concat";
+    deftype!("fn(Array<'a>, @args: Array<'a>) -> Array<'a>");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        let mut present = true;
+        for v in from.0.iter() {
+            match v {
+                Some(Value::Array(a)) => {
+                    for v in a.iter() {
+                        self.0.push(v.clone())
+                    }
+                }
+                Some(v) => self.0.push(v.clone()),
+                None => present = false,
+            }
+        }
+        if present {
+            let a = ValArray::from_iter_exact(self.0.drain(..));
+            Some(Value::Array(a))
+        } else {
+            None
+        }
+    }
+}
+
+type ArrayConcat = CachedArgs<ArrayConcatEv>;
+
+#[cfg(test)]
+const ARRAY_CONCAT: &str = r#"
+{
+  array::concat([1, 2, 3], [4, 5], [6])
+}
+"#;
+
+#[cfg(test)]
+run!(array_concat, ARRAY_CONCAT, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::I64(1), Value::I64(2), Value::I64(3), Value::I64(4), Value::I64(5), Value::I64(6)] => {
+                true
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[derive(Default)]
+struct ArrayLenEv;
+
+impl EvalCached for ArrayLenEv {
+    const NAME: &str = "array_len";
+    deftype!("fn(Array<'a>) -> u64");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        match &from.0[0] {
+            Some(Value::Array(a)) => Some(Value::U64(a.len() as u64)),
+            Some(_) | None => None,
+        }
+    }
+}
+
+type ArrayLen = CachedArgs<ArrayLenEv>;
+
+#[cfg(test)]
+const ARRAY_LEN: &str = r#"
+{
+  use core::array;
+  len(concat([1, 2, 3], [4, 5], [6]))
+}
+"#;
+
+#[cfg(test)]
+run!(array_len, ARRAY_LEN, |v: Result<&Value>| {
+    match v {
+        Ok(Value::U64(6)) => true,
+        _ => false,
+    }
+});
+
+#[derive(Default)]
+struct ArrayFlattenEv(SmallVec<[Value; 32]>);
+
+impl EvalCached for ArrayFlattenEv {
+    const NAME: &str = "array_flatten";
+    deftype!("fn(Array<Array<'a>>) -> Array<'a>");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        match &from.0[0] {
+            Some(Value::Array(a)) => {
+                for v in a.iter() {
+                    match v {
+                        Value::Array(a) => self.0.extend(a.iter().map(|v| v.clone())),
+                        v => self.0.push(v.clone()),
+                    }
+                }
+                let a = ValArray::from_iter_exact(self.0.drain(..));
+                Some(Value::Array(a))
+            }
+            Some(_) | None => None,
+        }
+    }
+}
+
+type ArrayFlatten = CachedArgs<ArrayFlattenEv>;
+
+#[cfg(test)]
+const ARRAY_FLATTEN: &str = r#"
+{
+  array::flatten([[1, 2, 3], [4, 5], [6]])
+}
+"#;
+
+#[cfg(test)]
+run!(array_flatten, ARRAY_FLATTEN, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::I64(1), Value::I64(2), Value::I64(3), Value::I64(4), Value::I64(5), Value::I64(6)] => {
+                true
+            }
+            _ => false,
+        },
         _ => false,
     }
 });
@@ -1208,13 +1413,14 @@ run!(sample, SAMPLE, |v: Result<&Value>| {
     }
 });
 
+#[derive(Default)]
 struct MeanEv;
 
 impl EvalCached for MeanEv {
     const NAME: &str = "mean";
     deftype!("fn([Number, Array<Number>], @args: [Number, Array<Number>]) -> f64");
 
-    fn eval(from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut total = 0.;
         let mut samples = 0;
         let mut error = None;
@@ -1413,6 +1619,29 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
             _ => None,
         }
     }
+
+    fn typecheck(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+    ) -> anyhow::Result<()> {
+        for n in from.iter_mut() {
+            n.typecheck(ctx)?
+        }
+        self.from[0].typ.check_contains(&Type::Primitive(Typ::U64.into()))?;
+        self.from[1].typ.check_contains(&from[0].typ)?;
+        for n in self.from.iter_mut() {
+            n.typecheck(ctx)?
+        }
+        self.pred.typecheck(ctx, &mut self.from[..])?;
+        match self.typ.args.get(1) {
+            Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
+                ft.rtype.check_contains(self.pred.rtype())?
+            }
+            _ => bail!("expected function as 2nd arg"),
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1507,6 +1736,7 @@ pub mod core {
         pub let filter = |a, f| 'array_filter
         pub let filter_map = |a, f| 'array_filter_map
         pub let map = |a, f| 'array_map
+        pub let flat_map = |a, f| 'array_flat_map
         pub let fold = |a, init, f| 'array_fold
         pub let group = |v, f| 'group
         pub let iter = |a| 'iter
@@ -1545,8 +1775,12 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<And>().unwrap();
     ctx.register_builtin::<Count>().unwrap();
     ctx.register_builtin::<Divide>().unwrap();
+    ctx.register_builtin::<ArrayConcat>().unwrap();
+    ctx.register_builtin::<ArrayLen>().unwrap();
+    ctx.register_builtin::<ArrayFlatten>().unwrap();
     ctx.register_builtin::<Filter<C, E>>().unwrap();
     ctx.register_builtin::<ArrayFilter<C, E>>().unwrap();
+    ctx.register_builtin::<ArrayFlatMap<C, E>>().unwrap();
     ctx.register_builtin::<ArrayFind<C, E>>().unwrap();
     ctx.register_builtin::<ArrayFindMap<C, E>>().unwrap();
     ctx.register_builtin::<ArrayMap<C, E>>().unwrap();
