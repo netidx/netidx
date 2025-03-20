@@ -17,6 +17,14 @@ fn parse_typexpr(s: &str) -> anyhow::Result<Type<Refs>> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
+#[allow(unused)]
+fn parse_structure_pattern(s: &str) -> anyhow::Result<StructurePattern> {
+    structure_pattern()
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
+}
+
 #[test]
 fn escaped_string() {
     let p = Value::String(literal!(r#"/foo bar baz/"zam"/)_ xyz+ "#));
@@ -1275,6 +1283,6 @@ fn tupleref() {
 
 #[test]
 fn prop0() {
-    let s = "mod a{mod a{a <- select u32:0 {u32:0 => |a@ []| u32:0}}}";
-    dbg!(parse(s).unwrap());
+    let s = "`A";
+    dbg!(parse_structure_pattern(s).unwrap());
 }

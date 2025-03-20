@@ -70,7 +70,7 @@ fn random_modpart() -> impl Strategy<Value = String> {
         .prop_filter("Filter reserved words", |s| !RESERVED.contains(s.as_str()))
 }
 
-fn typart() -> impl Strategy<Value = String> {
+fn typart() -> impl Strategy<Value = ArcStr> {
     collection::vec(prop_oneof![Just(b'_'), b'a'..=b'z', b'0'..=b'9'], 1..=SLEN - 1)
         .prop_map(|mut v| unsafe {
             if v[0] == b'_' {
@@ -82,7 +82,7 @@ fn typart() -> impl Strategy<Value = String> {
             if v[0] >= 97 {
                 v[0] -= 32;
             }
-            String::from_utf8_unchecked(v)
+            ArcStr::from(String::from_utf8_unchecked(v))
         })
         .prop_filter("Filter reserved words", |s| !RESERVED.contains(s.as_str()))
 }
@@ -209,6 +209,8 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
             collection::vec(inner.clone(), (2, 20)).prop_map(|t| Type::Set(Arc::from(t))),
             collection::vec(inner.clone(), (2, 20))
                 .prop_map(|t| Type::Tuple(Arc::from(t))),
+            (typart(), collection::vec(inner.clone(), (0, 20)))
+                .prop_map(|(tag, typs)| Type::Variant(tag, Arc::from_iter(typs))),
             collection::vec((random_fname(), inner.clone()), (1, 20)).prop_map(
                 |mut t| {
                     t.sort_by_key(|(n, _)| n.clone());
@@ -260,11 +262,19 @@ fn structure_pattern() -> impl Strategy<Value = StructurePattern> {
         prop_oneof![
             (option::of(random_fname()), collection::vec(inner.clone(), (0, 10)))
                 .prop_map(|(all, b)| {
-                    StructurePattern::Slice { all, binds: Arc::from_iter(b.into_iter()) }
+                    StructurePattern::Slice { all, binds: Arc::from_iter(b) }
                 }),
             (option::of(random_fname()), collection::vec(inner.clone(), (2, 10)))
                 .prop_map(|(all, b)| {
-                    StructurePattern::Tuple { all, binds: Arc::from_iter(b.into_iter()) }
+                    StructurePattern::Tuple { all, binds: Arc::from_iter(b) }
+                }),
+            (
+                option::of(random_fname()),
+                typart(),
+                collection::vec(inner.clone(), (0, 10))
+            )
+                .prop_map(|(all, tag, b)| {
+                    StructurePattern::Variant { all, tag, binds: Arc::from_iter(b) }
                 }),
             (
                 option::of(random_fname()),
@@ -283,7 +293,7 @@ fn structure_pattern() -> impl Strategy<Value = StructurePattern> {
             )
                 .prop_map(|(all, p, tail)| StructurePattern::SlicePrefix {
                     all,
-                    prefix: Arc::from_iter(p.into_iter()),
+                    prefix: Arc::from_iter(p),
                     tail
                 }),
             (
@@ -294,7 +304,7 @@ fn structure_pattern() -> impl Strategy<Value = StructurePattern> {
                 .prop_map(|(all, head, s)| StructurePattern::SliceSuffix {
                     all,
                     head,
-                    suffix: Arc::from_iter(s.into_iter())
+                    suffix: Arc::from_iter(s)
                 }),
         ]
     })
@@ -323,9 +333,7 @@ fn usestmt() -> impl Strategy<Value = Expr> {
 }
 
 fn typedef() -> impl Strategy<Value = Expr> {
-    (typart(), typexp()).prop_map(|(name, typ)| {
-        ExprKind::TypeDef { name: ArcStr::from(name), typ }.to_expr()
-    })
+    (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef { name, typ }.to_expr())
 }
 
 fn structref() -> impl Strategy<Value = Expr> {
@@ -483,6 +491,14 @@ macro_rules! structure {
     };
 }
 
+macro_rules! variant {
+    ($inner:expr) => {
+        (typart(), collection::vec($inner, (0, 10))).prop_map(|(tag, a)| {
+            ExprKind::Variant { tag, args: Arc::from_iter(a) }.to_expr()
+        })
+    };
+}
+
 macro_rules! connect {
     ($inner:expr) => {
         ($inner, modpath()).prop_map(|(e, n)| {
@@ -591,6 +607,7 @@ fn expr() -> impl Strategy<Value = Expr> {
             select!(inner.clone()),
             array!(inner.clone()),
             tuple!(inner.clone()),
+            variant!(inner.clone()),
             structure!(inner.clone()),
             structwith!(inner.clone()),
         ]
@@ -740,6 +757,18 @@ fn check_structure_pattern(pat0: &StructurePattern, pat1: &StructurePattern) -> 
                     .all(|(p0, p1)| check_structure_pattern(p0, p1))
         }
         (
+            StructurePattern::Variant { all: a0, tag: t0, binds: p0 },
+            StructurePattern::Variant { all: a1, tag: t1, binds: p1 },
+        ) => {
+            a0 == a1
+                && t0 == t1
+                && p0.len() == p1.len()
+                && p0
+                    .iter()
+                    .zip(p1.iter())
+                    .all(|(p0, p1)| check_structure_pattern(p0, p1))
+        }
+        (
             StructurePattern::Struct { exhaustive: e0, all: a0, binds: p0 },
             StructurePattern::Struct { exhaustive: e1, all: a1, binds: p1 },
         ) => {
@@ -794,6 +823,14 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (ExprKind::Array { args: a0 }, ExprKind::Array { args: a1 })
         | (ExprKind::Tuple { args: a0 }, ExprKind::Tuple { args: a1 }) => {
             a0.len() == a1.len() && a0.iter().zip(a1.iter()).all(|(e0, e1)| check(e0, e1))
+        }
+        (
+            ExprKind::Variant { tag: t0, args: a0 },
+            ExprKind::Variant { tag: t1, args: a1 },
+        ) => {
+            t0 == t1
+                && a0.len() == a1.len()
+                && a0.iter().zip(a1.iter()).all(|(e0, e1)| check(e0, e1))
         }
         (ExprKind::Struct { args: a0 }, ExprKind::Struct { args: a1 }) => {
             a0.len() == a1.len()

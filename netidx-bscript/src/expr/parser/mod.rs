@@ -1091,14 +1091,22 @@ where
     (
         optional(attempt(spfname().skip(sptoken('@')))),
         sptoken('`').with(typname()),
-        between(sptoken('('), sptoken(')'), sep_by1(structure_pattern(), csep())),
+        optional(attempt(between(
+            sptoken('('),
+            sptoken(')'),
+            sep_by1(structure_pattern(), csep()),
+        ))),
     )
         .map(
             |(all, tag, binds): (
                 Option<ArcStr>,
                 ArcStr,
-                SmallVec<[StructurePattern; 8]>,
+                Option<SmallVec<[StructurePattern; 8]>>,
             )| {
+                let binds = match binds {
+                    None => smallvec![],
+                    Some(a) => a,
+                };
                 StructurePattern::Variant { all, tag, binds: Arc::from_iter(binds) }
             },
         )
