@@ -133,6 +133,26 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
                 Ok(())
             }
+            NodeKind::Variant { tag, args } => {
+                for n in args.iter_mut() {
+                    wrap!(n.node, n.node.typecheck(ctx))?
+                }
+                match &self.typ {
+                    Type::Variant(ttag, typs) => {
+                        if ttag != tag {
+                            bail!("expected {ttag} not {tag}")
+                        }
+                        if args.len() != typs.len() {
+                            bail!("arity mismatch {} vs {}", args.len(), typs.len())
+                        }
+                        for (t, n) in typs.iter().zip(args.iter()) {
+                            t.check_contains(&n.node.typ)?
+                        }
+                    }
+                    _ => bail!("BUG: unexpected variant rtype"),
+                }
+                Ok(())
+            }
             NodeKind::Struct { names: _, args } => {
                 for n in args.iter_mut() {
                     wrap!(n.node, n.node.typecheck(ctx))?

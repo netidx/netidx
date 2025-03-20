@@ -11,7 +11,7 @@ use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
-use std::{fmt, marker::PhantomData};
+use std::{fmt, iter, marker::PhantomData};
 use triomphe::Arc;
 
 mod compiler;
@@ -87,6 +87,10 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
         args: Box<[Cached<C, E>]>,
     },
     Tuple {
+        args: Box<[Cached<C, E>]>,
+    },
+    Variant {
+        tag: ArcStr,
         args: Box<[Cached<C, E>]>,
     },
     Struct {
@@ -369,6 +373,17 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
             }}
         }
+        macro_rules! update_args {
+            ($args:expr) => {{
+                let mut updated = false;
+                let mut determined = true;
+                for n in $args.iter_mut() {
+                    updated |= n.update(ctx, event);
+                    determined &= n.cached.is_some();
+                }
+                (updated, determined)
+            }};
+        }
         let eid = self.spec.id;
         let res = match &mut self.kind {
             NodeKind::Error { .. } => None,
@@ -380,15 +395,21 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
             }
             NodeKind::Array { args } | NodeKind::Tuple { args } => {
-                let mut updated = false;
-                let mut determined = true;
-                for n in args.iter_mut() {
-                    updated |= n.update(ctx, event);
-                    determined &= n.cached.is_some();
-                }
+                let (updated, determined) = update_args!(args);
                 if updated && determined {
                     let iter = args.iter().map(|n| n.cached.clone().unwrap());
                     Some(Value::Array(ValArray::from_iter_exact(iter)))
+                } else {
+                    None
+                }
+            }
+            NodeKind::Variant { tag, args } => {
+                let (updated, determined) = update_args!(args);
+                if updated && determined {
+                    let a = iter::once(Value::String(tag.clone()))
+                        .chain(args.iter().map(|n| n.cached.clone().unwrap()))
+                        .collect::<SmallVec<[_; 8]>>();
+                    Some(Value::Array(ValArray::from_iter_exact(a.into_iter())))
                 } else {
                     None
                 }

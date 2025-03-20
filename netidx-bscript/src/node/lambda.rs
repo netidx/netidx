@@ -201,6 +201,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
             | NodeKind::Tuple { .. }
+            | NodeKind::Variant { .. }
             | NodeKind::Struct { .. }
             | NodeKind::StructWith { .. }
             | NodeKind::Apply { .. }

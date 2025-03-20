@@ -126,6 +126,11 @@ pub enum StructurePattern {
         all: Option<ArcStr>,
         binds: Arc<[StructurePattern]>,
     },
+    Variant {
+        all: Option<ArcStr>,
+        tag: ArcStr,
+        binds: Arc<[StructurePattern]>,
+    },
     Struct {
         exhaustive: bool,
         all: Option<ArcStr>,
@@ -143,7 +148,8 @@ impl StructurePattern {
             | Self::SlicePrefix { .. }
             | Self::SliceSuffix { .. }
             | Self::Tuple { .. }
-            | Self::Struct { .. } => None,
+            | Self::Struct { .. }
+            | Self::Variant { .. } => None,
         }
     }
 
@@ -189,6 +195,14 @@ impl StructurePattern {
                     t.with_names(f)
                 }
             }
+            Self::Variant { all, tag: _, binds } => {
+                if let Some(n) = all {
+                    f(n)
+                }
+                for t in binds.iter() {
+                    t.with_names(f)
+                }
+            }
             Self::Struct { exhaustive: _, all, binds } => {
                 if let Some(n) = all {
                     f(n)
@@ -214,27 +228,27 @@ impl StructurePattern {
             Self::Bind(_) | Self::Ignore => Type::empty_tvar(),
             Self::Literal(v) => Type::Primitive(Typ::get(v).into()),
             Self::Tuple { all: _, binds } => {
-                let mut typs: SmallVec<[Type<NoRefs>; 8]> = smallvec![];
-                for p in binds.iter() {
-                    typs.push(p.infer_type_predicate());
-                }
-                Type::Tuple(Arc::from_iter(typs.into_iter()))
+                let a = binds.iter().map(|p| p.infer_type_predicate());
+                Type::Tuple(Arc::from_iter(a))
+            }
+            Self::Variant { all: _, tag, binds } => {
+                let a = binds.iter().map(|p| p.infer_type_predicate());
+                Type::Variant(tag.clone(), Arc::from_iter(a))
             }
             Self::Slice { all: _, binds }
             | Self::SlicePrefix { all: _, prefix: binds, tail: _ }
             | Self::SliceSuffix { all: _, head: _, suffix: binds } => {
-                let mut t = Type::Bottom(PhantomData);
-                for p in binds.iter() {
-                    t = t.union(&p.infer_type_predicate());
-                }
+                let t = binds.iter().fold(Type::Bottom(PhantomData), |t, p| {
+                    t.union(&p.infer_type_predicate())
+                });
                 Type::Array(Arc::new(t))
             }
             Self::Struct { all: _, exhaustive: _, binds } => {
-                let mut typs: SmallVec<[(ArcStr, Type<NoRefs>); 8]> = smallvec![];
+                let mut typs = binds
+                    .iter()
+                    .map(|(n, p)| (n.clone(), p.infer_type_predicate()))
+                    .collect::<SmallVec<[(ArcStr, Type<NoRefs>); 8]>>();
                 typs.sort_by_key(|(n, _)| n.clone());
-                for (n, p) in binds.iter() {
-                    typs.push((n.clone(), p.infer_type_predicate()));
-                }
                 Type::Struct(Arc::from_iter(typs.into_iter()))
             }
         }
@@ -295,6 +309,20 @@ impl fmt::Display for StructurePattern {
                     write!(f, "{all}@ ")?
                 }
                 write!(f, "(")?;
+                with_sep!(binds);
+                write!(f, ")")
+            }
+            StructurePattern::Variant { all, tag, binds } if binds.len() == 0 => {
+                if let Some(all) = all {
+                    write!(f, "{all}@")?
+                }
+                write!(f, "`{tag}")
+            }
+            StructurePattern::Variant { all, tag, binds } => {
+                if let Some(all) = all {
+                    write!(f, "{all}@")?
+                }
+                write!(f, "`{tag}(")?;
                 with_sep!(binds);
                 write!(f, ")")
             }
@@ -397,6 +425,10 @@ pub enum ExprKind {
         args: Arc<[Expr]>,
     },
     Tuple {
+        args: Arc<[Expr]>,
+    },
+    Variant {
+        tag: ArcStr,
         args: Arc<[Expr]>,
     },
     Struct {
@@ -627,6 +659,17 @@ impl ExprKind {
             }
             ExprKind::Tuple { args } => {
                 try_single_line!(true);
+                pretty_print_exprs(indent, limit, buf, args, "(", ")", ",")
+            }
+            ExprKind::Variant { tag: _, args } if args.len() == 0 => {
+                if newline {
+                    push_indent(indent, buf)
+                }
+                write!(buf, "{self}")
+            }
+            ExprKind::Variant { tag, args } => {
+                try_single_line!(true);
+                write!(buf, "`{tag}")?;
                 pretty_print_exprs(indent, limit, buf, args, "(", ")", ",")
             }
             ExprKind::Struct { args } => {
@@ -932,6 +975,13 @@ impl fmt::Display for ExprKind {
                 print_exprs(f, args, "(", ")", ", ")
             }
             ExprKind::Tuple { args } => print_exprs(f, args, "(", ")", ", "),
+            ExprKind::Variant { tag, args } if args.len() == 0 => {
+                write!(f, "`{tag}")
+            }
+            ExprKind::Variant { tag, args } => {
+                write!(f, "`{tag}")?;
+                print_exprs(f, args, "(", ")", ", ")
+            }
             ExprKind::Struct { args } => {
                 write!(f, "{{ ")?;
                 for (i, (n, e)) in args.iter().enumerate() {

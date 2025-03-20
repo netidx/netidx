@@ -120,6 +120,7 @@ impl TVar<NoRefs> {
                 Type::TVar(t) => Arc::as_ptr(&*t.read()).addr() == addr,
                 Type::Array(a) => would_cycle(addr, &**a),
                 Type::Tuple(ts) => ts.iter().any(|t| would_cycle(addr, t)),
+                Type::Variant(_, ts) => ts.iter().any(|t| would_cycle(addr, t)),
                 Type::Struct(ts) => ts.iter().any(|(_, t)| would_cycle(addr, t)),
                 Type::Set(s) => s.iter().any(|t| would_cycle(addr, t)),
                 Type::Fn(f) => {
@@ -202,6 +203,7 @@ pub enum Type<T: TypeMark + 'static> {
     Array(Arc<Type<T>>),
     Tuple(Arc<[Type<T>]>),
     Struct(Arc<[(ArcStr, Type<T>)]>),
+    Variant(ArcStr, Arc<[Type<T>]>),
 }
 
 impl Type<NoRefs> {
@@ -226,7 +228,8 @@ impl Type<NoRefs> {
             | Self::Set(_)
             | Self::Array(_)
             | Self::Tuple(_)
-            | Self::Struct(_) => true,
+            | Self::Struct(_)
+            | Self::Variant(_, _) => true,
             Self::TVar(tv) => tv.read().read().is_some(),
             Self::Ref(_) => unreachable!(),
         }
@@ -240,7 +243,8 @@ impl Type<NoRefs> {
             | Self::Set(_)
             | Self::Array(_)
             | Self::Tuple(_)
-            | Self::Struct(_) => f(Some(self)),
+            | Self::Struct(_)
+            | Self::Variant(_, _) => f(Some(self)),
             Self::TVar(tv) => f(tv.read().read().as_ref()),
             Self::Ref(_) => unreachable!(),
         }
@@ -258,9 +262,10 @@ impl Type<NoRefs> {
         match (self, t) {
             (Self::Bottom(_), _) | (_, Self::Bottom(_)) => true,
             (Self::Primitive(p0), Self::Primitive(p1)) => p0.contains(*p1),
-            (Self::Primitive(p), Self::Array(_) | Self::Tuple(_) | Self::Struct(_)) => {
-                p.contains(Typ::Array)
-            }
+            (
+                Self::Primitive(p),
+                Self::Array(_) | Self::Tuple(_) | Self::Struct(_) | Self::Variant(_, _),
+            ) => p.contains(Typ::Array),
             (Self::Array(t0), Self::Array(t1)) => t0.contains(t1),
             (Self::Array(t0), Self::Primitive(p)) if *p == BitFlags::from(Typ::Array) => {
                 t0.contains(&Type::Primitive(BitFlags::all()))
@@ -277,15 +282,27 @@ impl Type<NoRefs> {
                         .all(|((n0, t0), (n1, t1))| n0 == n1 && t0.contains(t1))
                 }
             }
+            (Self::Variant(tg0, t0), Self::Variant(tg1, t1)) => {
+                tg0 == tg1
+                    && t0.len() == t1.len()
+                    && t0.iter().zip(t1.iter()).all(|(t0, t1)| t0.contains(t1))
+            }
             (Self::Tuple(_), Self::Array(_))
             | (Self::Tuple(_), Self::Primitive(_))
             | (Self::Tuple(_), Self::Struct(_))
+            | (Self::Tuple(_), Self::Variant(_, _))
             | (Self::Array(_), Self::Primitive(_))
             | (Self::Array(_), Self::Tuple(_))
             | (Self::Array(_), Self::Struct(_))
+            | (Self::Array(_), Self::Variant(_, _))
             | (Self::Struct(_), Self::Primitive(_))
             | (Self::Struct(_), Self::Array(_))
-            | (Self::Struct(_), Self::Tuple(_)) => false,
+            | (Self::Struct(_), Self::Tuple(_))
+            | (Self::Struct(_), Self::Variant(_, _))
+            | (Self::Variant(_, _), Self::Array(_))
+            | (Self::Variant(_, _), Self::Struct(_))
+            | (Self::Variant(_, _), Self::Primitive(_))
+            | (Self::Variant(_, _), Self::Tuple(_)) => false,
             (Self::TVar(t0), Self::TVar(t1)) => {
                 let alias = {
                     let t0 = t0.read();
@@ -364,16 +381,17 @@ impl Type<NoRefs> {
                 s.insert(*s1);
                 Type::Primitive(s)
             }
+            (
+                Type::Primitive(p),
+                Type::Array(_) | Type::Struct(_) | Type::Tuple(_) | Type::Variant(_, _),
+            )
+            | (
+                Type::Array(_) | Type::Struct(_) | Type::Tuple(_) | Type::Variant(_, _),
+                Type::Primitive(p),
+            ) if p.contains(Typ::Array) => Type::Primitive(*p),
             (Type::Primitive(p), Type::Array(t))
             | (Type::Array(t), Type::Primitive(p)) => {
-                if p.contains(Typ::Array) {
-                    Type::Primitive(*p)
-                } else {
-                    Type::Set(Arc::from_iter([
-                        Type::Primitive(*p),
-                        Type::Array(t.clone()),
-                    ]))
-                }
+                Type::Set(Arc::from_iter([Type::Primitive(*p), Type::Array(t.clone())]))
             }
             (Type::Array(t0), Type::Array(t1)) => {
                 if t0 == t1 {
@@ -406,6 +424,17 @@ impl Type<NoRefs> {
                 }
             }
             (Type::Tuple(_), t) | (t, Type::Tuple(_)) => {
+                Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+            }
+            (Type::Variant(tg0, t0), Type::Variant(tg1, t1)) => {
+                if tg0 == tg1 && t0.len() == t1.len() {
+                    let typs = t0.iter().zip(t1.iter()).map(|(t0, t1)| t0.union_int(t1));
+                    Type::Variant(tg0.clone(), Arc::from_iter(typs))
+                } else {
+                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+                }
+            }
+            (Type::Variant(_, _), t) | (t, Type::Variant(_, _)) => {
                 Type::Set(Arc::from_iter([self.clone(), t.clone()]))
             }
             (Type::Fn(f0), Type::Fn(f1)) => {
@@ -447,16 +476,23 @@ impl Type<NoRefs> {
                 s.remove(*s1);
                 Ok(Type::Primitive(s))
             }
-            (Type::Primitive(p), Type::Array(_)) => {
+            (
+                Type::Primitive(p),
+                Type::Array(_) | Type::Struct(_) | Type::Tuple(_) | Type::Variant(_, _),
+            ) => {
+                // CR estokes: is this correct? It's a bit odd.
                 let mut s = *p;
                 s.remove(Typ::Array);
                 Ok(Type::Primitive(s))
             }
-            (Type::Array(t), Type::Primitive(p)) => {
+            (
+                Type::Array(_) | Type::Struct(_) | Type::Tuple(_) | Type::Variant(_, _),
+                Type::Primitive(p),
+            ) => {
                 if p.contains(Typ::Array) {
                     Ok(Type::Primitive(BitFlags::empty()))
                 } else {
-                    Ok(Type::Array(t.clone()))
+                    Ok(self.clone())
                 }
             }
             (Type::Array(t0), Type::Array(t1)) => Ok(Type::Array(Arc::new(t0.diff(t1)?))),
@@ -499,6 +535,14 @@ impl Type<NoRefs> {
                 }
             }
             (Type::Struct(_), _) | (_, Type::Struct(_)) => Ok(self.clone()),
+            (Type::Variant(tg0, t0), Type::Variant(tg1, t1)) => {
+                if tg0 == tg1 && t0.len() == t1.len() && t0 == t1 {
+                    Ok(Type::Primitive(BitFlags::empty()))
+                } else {
+                    Ok(self.clone())
+                }
+            }
+            (Type::Variant(_, _), _) | (_, Type::Variant(_, _)) => Ok(self.clone()),
             (Type::Fn(f0), Type::Fn(f1)) => {
                 if f0 == f1 {
                     Ok(Type::Primitive(BitFlags::empty()))
@@ -566,6 +610,11 @@ impl Type<NoRefs> {
                     t.alias_unbound(known)
                 }
             }
+            Type::Variant(_, ts) => {
+                for t in ts.iter() {
+                    t.alias_unbound(known)
+                }
+            }
             Type::TVar(tv) => match known.entry(tv.name.clone()) {
                 Entry::Vacant(e) => {
                     e.insert(tv.clone());
@@ -615,6 +664,10 @@ impl Type<NoRefs> {
             Type::Struct(ts) => Type::Struct(Arc::from_iter(
                 ts.iter().map(|(n, t)| (n.clone(), t.reset_tvars())),
             )),
+            Type::Variant(tag, ts) => Type::Variant(
+                tag.clone(),
+                Arc::from_iter(ts.iter().map(|t| t.reset_tvars())),
+            ),
             Type::TVar(tv) => Type::TVar(TVar::empty_named(tv.name.clone())),
             Type::Set(s) => Type::Set(Arc::from_iter(s.iter().map(|t| t.reset_tvars()))),
             Type::Fn(fntyp) => {
@@ -642,7 +695,9 @@ impl Type<NoRefs> {
             Type::Set(s) => s.iter().find_map(|t| t.first_prim()),
             Type::TVar(tv) => tv.read().read().as_ref().and_then(|t| t.first_prim()),
             // array, tuple, and struct casting are handled directly
-            Type::Array(_) | Type::Tuple(_) | Type::Struct(_) => None,
+            Type::Array(_) | Type::Tuple(_) | Type::Struct(_) | Type::Variant(_, _) => {
+                None
+            }
         }
     }
 
@@ -664,6 +719,9 @@ impl Type<NoRefs> {
                 t.check_cast()?
             }),
             Type::Struct(ts) => Ok(for (_, t) in ts.iter() {
+                t.check_cast()?
+            }),
+            Type::Variant(_, ts) => Ok(for t in ts.iter() {
                 t.check_cast()?
             }),
         }
@@ -786,6 +844,47 @@ impl Type<NoRefs> {
                 }
                 v => bail!("can't cast {v} to {self}"),
             },
+            Type::Variant(tag, ts) if ts.len() == 0 => match &v {
+                Value::String(s) if s == tag => Ok(v),
+                _ => bail!("variant tag mismatch expected {tag} got {v}"),
+            },
+            Type::Variant(tag, ts) => match &v {
+                Value::Array(elts) => {
+                    if ts.len() + 1 == elts.len() {
+                        match &elts[0] {
+                            Value::String(s) if s == tag => (),
+                            v => bail!("variant tag mismatch expected {tag} got {v}"),
+                        }
+                        let ok = iter::once(&Type::Primitive(Typ::String.into()))
+                            .chain(ts.iter())
+                            .zip(elts.iter())
+                            .fold(true, |ok, (t, v)| {
+                                ok && t.contains(&Type::Primitive(Typ::get(v).into()))
+                            });
+                        if ok {
+                            Ok(v)
+                        } else {
+                            let a = iter::once(&Type::Primitive(Typ::String.into()))
+                                .chain(ts.iter())
+                                .zip(elts.iter())
+                                .map(|(t, v)| t.cast_value_int(v.clone()))
+                                .collect::<Result<SmallVec<[Value; 8]>>>()?;
+                            Ok(Value::Array(ValArray::from_iter_exact(a.into_iter())))
+                        }
+                    } else if ts.len() == elts.len() {
+                        let mut a = ts
+                            .iter()
+                            .zip(elts.iter())
+                            .map(|(t, v)| t.cast_value_int(v.clone()))
+                            .collect::<Result<SmallVec<[Value; 8]>>>()?;
+                        a.insert(0, Value::String(tag.clone()));
+                        Ok(Value::Array(ValArray::from_iter_exact(a.into_iter())))
+                    } else {
+                        bail!("variant length mismatch")
+                    }
+                }
+                v => bail!("can't cast {v} to {self}"),
+            },
             t => match t.first_prim() {
                 None => bail!("empty or non primitive cast"),
                 Some(t) => Ok(v
@@ -815,6 +914,7 @@ impl<T: TypeMark + Clone + 'static> Type<T> {
             | Type::Array(_)
             | Type::Tuple(_)
             | Type::Struct(_)
+            | Type::Variant(_, _)
             | Type::Set(_) => false,
         }
     }
@@ -872,6 +972,10 @@ impl<T: TypeMark + Clone + 'static> Type<T> {
             Type::Struct(t) => Type::Struct(Arc::from_iter(
                 t.iter().map(|(n, t)| (n.clone(), t.normalize())),
             )),
+            Type::Variant(tag, t) => Type::Variant(
+                tag.clone(),
+                Arc::from_iter(t.iter().map(|t| t.normalize())),
+            ),
             Type::Fn(ft) => Type::Fn(Arc::new(ft.normalize())),
         }
     }
@@ -941,6 +1045,18 @@ impl<T: TypeMark + Clone + 'static> Type<T> {
                     None
                 }
             }
+            (Type::Variant(tag0, t0), Type::Variant(tag1, t1)) => {
+                if tag0 == tag1 && t0.len() == t1.len() {
+                    let t = t0
+                        .iter()
+                        .zip(t1.iter())
+                        .map(|(t0, t1)| t0.merge(t1))
+                        .collect::<Option<SmallVec<[Type<T>; 8]>>>()?;
+                    Some(Type::Variant(tag0.clone(), Arc::from_iter(t)))
+                } else {
+                    None
+                }
+            }
             (Type::Struct(t0), Type::Struct(t1)) => {
                 if t0.len() == t1.len() {
                     let t = t0
@@ -963,6 +1079,8 @@ impl<T: TypeMark + Clone + 'static> Type<T> {
             | (_, Type::Tuple(_))
             | (Type::Struct(_), _)
             | (_, Type::Struct(_))
+            | (Type::Variant(_, _), _)
+            | (_, Type::Variant(_, _))
             | (_, Type::TVar(_))
             | (Type::TVar(_), _)
             | (_, Type::Fn(_))
@@ -986,6 +1104,14 @@ impl<T: TypeMark + Clone + 'static> Type<T> {
                     .collect::<Result<SmallVec<[Type<NoRefs>; 8]>>>()?
                     .into_iter();
                 Ok(Type::Tuple(Arc::from_iter(i)))
+            }
+            Type::Variant(tag, ts) => {
+                let i = ts
+                    .iter()
+                    .map(|t| t.resolve_typrefs(scope, env))
+                    .collect::<Result<SmallVec<[Type<NoRefs>; 8]>>>()?
+                    .into_iter();
+                Ok(Type::Variant(tag.clone(), Arc::from_iter(i)))
             }
             Type::Struct(ts) => {
                 let i = ts
@@ -1060,6 +1186,19 @@ impl<T: TypeMark + 'static> fmt::Display for Type<T> {
                     write!(f, "{t}")?;
                     if i < ts.len() - 1 {
                         write!(f, ", ")?;
+                    }
+                }
+                write!(f, ")")
+            }
+            Self::Variant(tag, ts) if ts.len() == 0 => {
+                write!(f, "`{tag}")
+            }
+            Self::Variant(tag, ts) => {
+                write!(f, "`{tag}(")?;
+                for (i, t) in ts.iter().enumerate() {
+                    write!(f, "{t}")?;
+                    if i < ts.len() - 1 {
+                        write!(f, ", ")?
                     }
                 }
                 write!(f, ")")

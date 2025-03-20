@@ -219,6 +219,18 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 Node { kind: NodeKind::Tuple { args }, spec: Box::new(spec), typ }
             }
         }
+        Expr { kind: ExprKind::Variant { tag, args }, id: _ } => {
+            let (error, args) = subexprs!(scope, args);
+            if error {
+                error!("", args)
+            } else {
+                let typs = Arc::from_iter(args.iter().map(|n| n.typ.clone()));
+                let typ = Type::Variant(tag.clone(), typs);
+                let args = Box::from_iter(args.into_iter().map(|n| Cached::new(n)));
+                let tag = tag.clone();
+                Node { kind: NodeKind::Variant { tag, args }, spec: Box::new(spec), typ }
+            }
+        }
         Expr { kind: ExprKind::Struct { args }, id: _ } => {
             let mut names = Vec::with_capacity(args.len());
             let args = args.iter().map(|(n, s)| {

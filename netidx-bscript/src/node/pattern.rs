@@ -34,6 +34,11 @@ pub enum StructPatternNode {
         all: Option<BindId>,
         binds: Box<[(ArcStr, usize, StructPatternNode)]>,
     },
+    Variant {
+        tag: ArcStr,
+        all: Option<BindId>,
+        binds: Box<[StructPatternNode]>,
+    },
 }
 
 impl StructPatternNode {
@@ -123,6 +128,26 @@ impl StructPatternNode {
                 }
                 t => bail!("tuple patterns can't match {t}"),
             },
+            StructurePattern::Variant { all, tag, binds } => match &type_predicate {
+                Type::Variant(ttag, elts) => {
+                    if ttag != tag {
+                        bail!("pattern cannot match type, tag mismatch {ttag} vs {tag}")
+                    }
+                    if binds.len() != elts.len() {
+                        bail!("expected a variant with {} args", elts.len())
+                    }
+                    let all = all.as_ref().map(|n| {
+                        ctx.env.bind_variable(scope, n, type_predicate.clone()).id
+                    });
+                    let binds = elts
+                        .iter()
+                        .zip(binds.iter())
+                        .map(|(t, b)| Self::compile_int(ctx, t, b, scope))
+                        .collect::<Result<Box<[Self]>>>()?;
+                    Self::Variant { tag: tag.clone(), all, binds }
+                }
+                t => bail!("variant patterns can't match {t}"),
+            },
             StructurePattern::Struct { exhaustive, all, binds } => {
                 struct Ifo {
                     name: ArcStr,
@@ -197,6 +222,17 @@ impl StructPatternNode {
                 }
                 _ => (),
             },
+            Self::Variant { tag: _, all, binds } => match v {
+                Value::Array(a) if a.len() == binds.len() + 1 => {
+                    if let Some(id) = all {
+                        f(*id, v.clone())
+                    }
+                    for (j, n) in binds.iter().enumerate() {
+                        n.bind(&a[j + 1], f)
+                    }
+                }
+                _ => (),
+            },
             Self::SlicePrefix { all, prefix, tail } => match v {
                 Value::Array(a) if a.len() >= prefix.len() => {
                     if let Some(id) = all {
@@ -251,7 +287,8 @@ impl StructPatternNode {
         match &self {
             Self::Ignore | Self::Literal(_) => (),
             Self::Bind(id) => f(*id),
-            Self::Slice { tuple: _, all, binds } => {
+            Self::Slice { tuple: _, all, binds }
+            | Self::Variant { tag: _, all, binds } => {
                 if let Some(id) = all {
                     f(*id)
                 }
@@ -303,6 +340,17 @@ impl StructPatternNode {
                 }
                 _ => false,
             },
+            Self::Variant { tag, all: _, binds } => match v {
+                Value::Array(a) => {
+                    a.len() == binds.len() + 1
+                        && match &a[0] {
+                            Value::String(s) => s == tag,
+                            _ => false,
+                        }
+                        && binds.iter().zip(a[1..].iter()).all(|(b, v)| b.is_match(v))
+                }
+                _ => false,
+            },
             Self::SlicePrefix { all: _, prefix, tail: _ } => match v {
                 Value::Array(a) => {
                     a.len() >= prefix.len()
@@ -343,7 +391,8 @@ impl StructPatternNode {
             Self::Struct { all: _, binds } => {
                 binds.iter().any(|(_, _, p)| p.is_refutable())
             }
-            Self::Slice { tuple: false, .. }
+            Self::Variant { .. }
+            | Self::Slice { tuple: false, .. }
             | Self::SlicePrefix { .. }
             | Self::SliceSuffix { .. } => true,
         }
@@ -355,6 +404,7 @@ impl StructPatternNode {
             Self::Literal(_)
             | Self::Ignore
             | Self::Slice { .. }
+            | Self::Variant { .. }
             | Self::SlicePrefix { .. }
             | Self::SliceSuffix { .. }
             | Self::Struct { .. } => None,
@@ -387,6 +437,7 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
             | Type::TVar(_)
             | Type::Array(_)
             | Type::Tuple(_)
+            | Type::Variant(_, _)
             | Type::Struct(_) => (),
             Type::Ref(_) => unreachable!(),
         }

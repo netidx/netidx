@@ -26,7 +26,7 @@ use netidx::{
 use netidx_netproto::value_parser::{
     escaped_string, int, value as netidx_value, VAL_ESC,
 };
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::{marker::PhantomData, sync::LazyLock};
 use triomphe::Arc;
 
@@ -273,6 +273,7 @@ where
                     | (Some(Expr { kind: ExprKind::StructRef { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::TupleRef { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Tuple { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Variant { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Struct { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Qop(_), .. }), _)
                     | (Some(Expr { kind: ExprKind::Do { .. }, .. }), _)
@@ -684,6 +685,25 @@ where
                 value(Type::Struct(Arc::from_iter(exps))).right()
             }),
         ),
+        attempt(
+            (
+                sptoken('`').with(typname()),
+                optional(attempt(between(
+                    sptoken('('),
+                    sptoken(')'),
+                    sep_by1(typexp(), csep()),
+                ))),
+            )
+                .map(
+                    |(tag, typs): (ArcStr, Option<SmallVec<[Type<Refs>; 5]>>)| {
+                        let t = match typs {
+                            None => smallvec![],
+                            Some(v) => v,
+                        };
+                        Type::Variant(tag.clone(), Arc::from_iter(t))
+                    },
+                ),
+        ),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(spstring("Array").with(between(sptoken('<'), sptoken('>'), typexp())))
             .map(|t| Type::Array(Arc::new(t))),
@@ -1062,6 +1082,28 @@ where
         })
 }
 
+fn variant_pattern<I>() -> impl Parser<I, Output = StructurePattern>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        optional(attempt(spfname().skip(sptoken('@')))),
+        sptoken('`').with(typname()),
+        between(sptoken('('), sptoken(')'), sep_by1(structure_pattern(), csep())),
+    )
+        .map(
+            |(all, tag, binds): (
+                Option<ArcStr>,
+                ArcStr,
+                SmallVec<[StructurePattern; 8]>,
+            )| {
+                StructurePattern::Variant { all, tag, binds: Arc::from_iter(binds) }
+            },
+        )
+}
+
 fn struct_pattern<I>() -> impl Parser<I, Output = StructurePattern>
 where
     I: RangeStream<Token = char>,
@@ -1120,6 +1162,7 @@ where
         attempt(slice_pattern()),
         attempt(tuple_pattern()),
         attempt(struct_pattern()),
+        attempt(variant_pattern()),
         attempt(netidx_value(&VAL_ESC)).map(|v| StructurePattern::Literal(v)),
         attempt(sptoken('_')).map(|_| StructurePattern::Ignore),
         spfname().map(|name| StructurePattern::Bind(name)),
@@ -1236,6 +1279,25 @@ where
     })
 }
 
+fn variant<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        token('`').with(typname()),
+        optional(attempt(between(token('('), sptoken(')'), sep_by1(expr(), csep())))),
+    )
+        .map(|(tag, args): (ArcStr, Option<SmallVec<[Expr; 5]>>)| {
+            let args = match args {
+                None => smallvec![],
+                Some(a) => a,
+            };
+            ExprKind::Variant { tag, args: Arc::from_iter(args.into_iter()) }.to_expr()
+        })
+}
+
 fn structwith<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
@@ -1272,6 +1334,7 @@ where
         attempt(spaces().with(arith())),
         attempt(spaces().with(tuple())),
         attempt(spaces().with(structure())),
+        attempt(spaces().with(variant())),
         attempt(spaces().with(structwith())),
         attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(lambda())),
