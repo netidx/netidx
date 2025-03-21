@@ -25,7 +25,10 @@ use triomphe::Arc;
 
 atomic_id!(TVarId);
 
-pub trait TypeMark: Clone + Copy + PartialOrd + Ord + PartialEq + Eq + Hash {}
+pub trait TypeMark:
+    Debug + Clone + Copy + PartialOrd + Ord + PartialEq + Eq + Hash + 'static
+{
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Refs;
@@ -38,13 +41,13 @@ pub struct NoRefs;
 impl TypeMark for NoRefs {}
 
 #[derive(Debug)]
-pub struct TVarInner<T: TypeMark + 'static> {
+pub struct TVarInner<T: TypeMark> {
     pub name: ArcStr,
     typ: RwLock<Arc<RwLock<Option<Type<T>>>>>,
 }
 
 #[derive(Debug, Clone)]
-pub struct TVar<T: TypeMark + 'static>(Arc<TVarInner<T>>);
+pub struct TVar<T: TypeMark>(Arc<TVarInner<T>>);
 
 thread_local! {
     static TVAR_DEREF: Cell<bool> = Cell::new(false);
@@ -60,7 +63,7 @@ pub fn format_with_deref<R, F: FnOnce() -> R>(f: F) -> R {
     res
 }
 
-impl<T: TypeMark + 'static> fmt::Display for TVar<T> {
+impl<T: TypeMark> fmt::Display for TVar<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !TVAR_DEREF.get() {
             write!(f, "'{}", self.name)
@@ -74,13 +77,13 @@ impl<T: TypeMark + 'static> fmt::Display for TVar<T> {
     }
 }
 
-impl<T: TypeMark + 'static> Default for TVar<T> {
+impl<T: TypeMark> Default for TVar<T> {
     fn default() -> Self {
         Self::empty_named(ArcStr::from(format_compact!("_{}", TVarId::new().0).as_str()))
     }
 }
 
-impl<T: TypeMark + 'static> TVar<T> {
+impl<T: TypeMark> TVar<T> {
     pub fn empty_named(name: ArcStr) -> Self {
         Self(Arc::new(TVarInner { name, typ: RwLock::new(Arc::new(RwLock::new(None))) }))
     }
@@ -142,7 +145,7 @@ impl TVar<NoRefs> {
     }
 }
 
-impl<T: TypeMark + 'static> Deref for TVar<T> {
+impl<T: TypeMark> Deref for TVar<T> {
     type Target = TVarInner<T>;
 
     fn deref(&self) -> &Self::Target {
@@ -150,7 +153,7 @@ impl<T: TypeMark + 'static> Deref for TVar<T> {
     }
 }
 
-impl<T: TypeMark + 'static> PartialEq for TVar<T> {
+impl<T: TypeMark> PartialEq for TVar<T> {
     fn eq(&self, other: &Self) -> bool {
         let t0 = self.read();
         let t1 = other.read();
@@ -162,9 +165,9 @@ impl<T: TypeMark + 'static> PartialEq for TVar<T> {
     }
 }
 
-impl<T: TypeMark + 'static> Eq for TVar<T> {}
+impl<T: TypeMark> Eq for TVar<T> {}
 
-impl<T: TypeMark + 'static> PartialOrd for TVar<T> {
+impl<T: TypeMark> PartialOrd for TVar<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         let t0 = self.read();
         let t1 = other.read();
@@ -178,7 +181,7 @@ impl<T: TypeMark + 'static> PartialOrd for TVar<T> {
     }
 }
 
-impl<T: TypeMark + 'static> Ord for TVar<T> {
+impl<T: TypeMark> Ord for TVar<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         let t0 = self.read();
         let t1 = other.read();
@@ -193,7 +196,7 @@ impl<T: TypeMark + 'static> Ord for TVar<T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Type<T: TypeMark + 'static> {
+pub enum Type<T: TypeMark> {
     Bottom(PhantomData<T>),
     Primitive(BitFlags<Typ>),
     Ref(ModPath),
@@ -231,21 +234,6 @@ impl Type<NoRefs> {
             | Self::Struct(_)
             | Self::Variant(_, _) => true,
             Self::TVar(tv) => tv.read().read().is_some(),
-            Self::Ref(_) => unreachable!(),
-        }
-    }
-
-    pub fn with_deref<R, F: FnOnce(Option<&Self>) -> R>(&self, f: F) -> R {
-        match self {
-            Self::Bottom(_)
-            | Self::Primitive(_)
-            | Self::Fn(_)
-            | Self::Set(_)
-            | Self::Array(_)
-            | Self::Tuple(_)
-            | Self::Struct(_)
-            | Self::Variant(_, _) => f(Some(self)),
-            Self::TVar(tv) => f(tv.read().read().as_ref()),
             Self::Ref(_) => unreachable!(),
         }
     }
@@ -328,23 +316,19 @@ impl Type<NoRefs> {
                 }
                 true
             }
-            (Self::TVar(t0), t1) => {
+            (Self::TVar(t0), t1) if !t0.would_cycle(t1) => {
                 if let Some(t0) = t0.read().read().as_ref() {
                     return t0.contains(t1);
                 }
-                !t0.would_cycle(t1) && {
-                    *t0.read().write() = Some(t1.clone());
-                    true
-                }
+                *t0.read().write() = Some(t1.clone());
+                true
             }
-            (t0, Self::TVar(t1)) => {
+            (t0, Self::TVar(t1)) if !t1.would_cycle(t0) => {
                 if let Some(t1) = t1.read().read().as_ref() {
                     return t0.contains(t1);
                 }
-                !t1.would_cycle(t0) && {
-                    *t1.read().write() = Some(t0.clone());
-                    true
-                }
+                *t1.read().write() = Some(t0.clone());
+                true
             }
             (t0, Self::Set(s)) => {
                 let mut ok = true;
@@ -354,18 +338,17 @@ impl Type<NoRefs> {
                 ok
             }
             (Self::Set(s), t) => {
-                let mut ok = true;
-                for t1 in t.iter_prims() {
-                    let mut c = false;
-                    for t0 in s.iter() {
-                        c |= t0.contains(&t1);
-                    }
-                    ok &= c
-                }
-                ok
+                s.iter().fold(false, |acc, t0| acc || t0.contains(t))
+                    || t.iter_prims().fold(true, |acc, t1| {
+                        acc && s.iter().fold(false, |acc, t0| acc || t0.contains(&t1))
+                    })
             }
+
             (Self::Fn(f0), Self::Fn(f1)) => f0.contains(f1),
-            (Self::Fn(_), _) | (_, Self::Fn(_)) => false,
+            (_, Self::TVar(_))
+            | (Self::TVar(_), _)
+            | (Self::Fn(_), _)
+            | (_, Self::Fn(_)) => false,
             (Self::Ref(_), _) | (_, Self::Ref(_)) => unreachable!(),
         }
     }
@@ -468,13 +451,13 @@ impl Type<NoRefs> {
         self.union_int(t).normalize()
     }
 
-    fn diff_int(&self, t: &Self) -> Result<Self> {
+    fn diff_int(&self, t: &Self) -> Self {
         match (self, t) {
-            (Type::Bottom(_), t) | (t, Type::Bottom(_)) => Ok(t.clone()),
+            (Type::Bottom(_), t) | (t, Type::Bottom(_)) => t.clone(),
             (Type::Primitive(s0), Type::Primitive(s1)) => {
                 let mut s = *s0;
                 s.remove(*s1);
-                Ok(Type::Primitive(s))
+                Type::Primitive(s)
             }
             (
                 Type::Primitive(p),
@@ -483,95 +466,93 @@ impl Type<NoRefs> {
                 // CR estokes: is this correct? It's a bit odd.
                 let mut s = *p;
                 s.remove(Typ::Array);
-                Ok(Type::Primitive(s))
+                Type::Primitive(s)
             }
             (
                 Type::Array(_) | Type::Struct(_) | Type::Tuple(_) | Type::Variant(_, _),
                 Type::Primitive(p),
             ) => {
                 if p.contains(Typ::Array) {
-                    Ok(Type::Primitive(BitFlags::empty()))
+                    Type::Primitive(BitFlags::empty())
                 } else {
-                    Ok(self.clone())
+                    self.clone()
                 }
             }
-            (Type::Array(t0), Type::Array(t1)) => Ok(Type::Array(Arc::new(t0.diff(t1)?))),
+            (Type::Array(t0), Type::Array(t1)) => Type::Array(Arc::new(t0.diff_int(t1))),
             (Type::Set(s0), Type::Set(s1)) => {
                 let mut s: SmallVec<[Type<NoRefs>; 4]> = smallvec![];
                 for i in 0..s0.len() {
                     s.push(s0[i].clone());
                     for j in 0..s1.len() {
-                        s[i] = s[i].diff(&s1[j])?
+                        s[i] = s[i].diff_int(&s1[j])
                     }
                 }
-                Ok(Self::flatten_set(s.into_iter()))
+                Self::flatten_set(s.into_iter())
             }
-            (Type::Set(s), t) => Ok(Self::flatten_set(
-                s.iter()
-                    .map(|s| s.diff(t))
-                    .collect::<Result<SmallVec<[Type<NoRefs>; 4]>>>()?
-                    .into_iter(),
-            )),
+            (Type::Set(s), t) => Self::flatten_set(s.iter().map(|s| s.diff_int(t))),
             (t, Type::Set(s)) => {
                 let mut t = t.clone();
                 for st in s.iter() {
-                    t = t.diff(st)?;
+                    t = t.diff_int(st);
                 }
-                Ok(t)
+                t
             }
             (Type::Tuple(t0), Type::Tuple(t1)) => {
                 if t0 == t1 {
-                    Ok(Type::Primitive(BitFlags::empty()))
+                    Type::Primitive(BitFlags::empty())
                 } else {
-                    Ok(self.clone())
+                    self.clone()
                 }
             }
-            (Type::Tuple(_), _) | (_, Type::Tuple(_)) => Ok(self.clone()),
+            (Type::Tuple(_), _) | (_, Type::Tuple(_)) => self.clone(),
             (Type::Struct(t0), Type::Struct(t1)) => {
                 if t0.len() == t1.len() && t0 == t1 {
-                    Ok(Type::Primitive(BitFlags::empty()))
+                    Type::Primitive(BitFlags::empty())
                 } else {
-                    Ok(self.clone())
+                    self.clone()
                 }
             }
-            (Type::Struct(_), _) | (_, Type::Struct(_)) => Ok(self.clone()),
+            (Type::Struct(_), _) | (_, Type::Struct(_)) => self.clone(),
             (Type::Variant(tg0, t0), Type::Variant(tg1, t1)) => {
                 if tg0 == tg1 && t0.len() == t1.len() && t0 == t1 {
-                    Ok(Type::Primitive(BitFlags::empty()))
+                    Type::Primitive(BitFlags::empty())
                 } else {
-                    Ok(self.clone())
+                    self.clone()
                 }
             }
-            (Type::Variant(_, _), _) | (_, Type::Variant(_, _)) => Ok(self.clone()),
+            (Type::Variant(_, _), _) | (_, Type::Variant(_, _)) => self.clone(),
             (Type::Fn(f0), Type::Fn(f1)) => {
                 if f0 == f1 {
-                    Ok(Type::Primitive(BitFlags::empty()))
+                    Type::Primitive(BitFlags::empty())
                 } else {
-                    Ok(Type::Fn(f0.clone()))
+                    Type::Fn(f0.clone())
                 }
             }
-            (f @ Type::Fn(_), _) => Ok(f.clone()),
-            (t, Type::Fn(_)) => Ok(t.clone()),
+            (f @ Type::Fn(_), _) => f.clone(),
+            (t, Type::Fn(_)) => t.clone(),
             (Type::TVar(tv0), Type::TVar(tv1)) => {
+                if tv0.read().as_ptr() == tv1.read().as_ptr() {
+                    return Type::Primitive(BitFlags::empty());
+                }
                 match (&*tv0.read().read(), &*tv1.read().read()) {
-                    (None, _) | (_, None) => bail!("type must be known at this point"),
-                    (Some(t0), Some(t1)) => t0.diff(t1),
+                    (None, _) | (_, None) => Type::TVar(tv0.clone()),
+                    (Some(t0), Some(t1)) => t0.diff_int(t1),
                 }
             }
             (Type::TVar(tv), t1) => match &*tv.read().read() {
-                None => bail!("type must be known at this point"),
-                Some(t0) => t0.diff(t1),
+                None => Type::TVar(tv.clone()),
+                Some(t0) => t0.diff_int(t1),
             },
-            (t0, Type::TVar(tv)) => match &*tv.read().read() {
-                None => bail!("type must be known at this point"),
-                Some(t1) => t0.diff(t1),
+            (t0, Type::TVar(tv)) => match dbg!(&*tv.read().read()) {
+                None => t0.clone(),
+                Some(t1) => t0.diff_int(t1),
             },
             (Type::Ref(_), _) | (_, Type::Ref(_)) => unreachable!(),
         }
     }
 
-    pub fn diff(&self, t: &Self) -> Result<Self> {
-        Ok(self.diff_int(t)?.normalize())
+    pub fn diff(&self, t: &Self) -> Self {
+        self.diff_int(t).normalize()
     }
 
     pub fn any() -> Self {
@@ -903,7 +884,7 @@ impl Type<NoRefs> {
     }
 }
 
-impl<T: TypeMark + Clone + 'static> Type<T> {
+impl<T: TypeMark> Type<T> {
     pub fn is_bot(&self) -> bool {
         match self {
             Type::Bottom(_) => true,
@@ -916,6 +897,21 @@ impl<T: TypeMark + Clone + 'static> Type<T> {
             | Type::Struct(_)
             | Type::Variant(_, _)
             | Type::Set(_) => false,
+        }
+    }
+
+    pub fn with_deref<R, F: FnOnce(Option<&Self>) -> R>(&self, f: F) -> R {
+        match self {
+            Self::Bottom(_)
+            | Self::Primitive(_)
+            | Self::Fn(_)
+            | Self::Set(_)
+            | Self::Array(_)
+            | Self::Tuple(_)
+            | Self::Struct(_)
+            | Self::Variant(_, _)
+            | Self::Ref(_) => f(Some(self)),
+            Self::TVar(tv) => f(tv.read().read().as_ref()),
         }
     }
 
@@ -961,8 +957,15 @@ impl<T: TypeMark + Clone + 'static> Type<T> {
 
     pub(crate) fn normalize(&self) -> Self {
         match self {
-            Type::Ref(_) | Type::Bottom(_) | Type::Primitive(_) | Type::TVar(_) => {
-                self.clone()
+            Type::Ref(_) | Type::Bottom(_) | Type::Primitive(_) => self.clone(),
+            Type::TVar(tv) => {
+                match tv.read().write().as_mut() {
+                    None => (),
+                    Some(t) => {
+                        *t = t.normalize();
+                    }
+                }
+                Type::TVar(tv.clone())
             }
             Type::Set(s) => Self::flatten_set(s.iter().map(|t| t.normalize())),
             Type::Array(t) => Type::Array(Arc::new(t.normalize())),
@@ -1075,14 +1078,17 @@ impl<T: TypeMark + Clone + 'static> Type<T> {
                     None
                 }
             }
+            (Type::TVar(tv0), Type::TVar(tv1)) if tv0.name == tv1.name && tv0 == tv1 => {
+                Some(Type::TVar(tv0.clone()))
+            }
+            (Type::TVar(tv), t) => tv.read().read().as_ref().and_then(|tv| tv.merge(t)),
+            (t, Type::TVar(tv)) => tv.read().read().as_ref().and_then(|tv| t.merge(tv)),
             (Type::Tuple(_), _)
             | (_, Type::Tuple(_))
             | (Type::Struct(_), _)
             | (_, Type::Struct(_))
             | (Type::Variant(_, _), _)
             | (_, Type::Variant(_, _))
-            | (_, Type::TVar(_))
-            | (Type::TVar(_), _)
             | (_, Type::Fn(_))
             | (Type::Fn(_), _) => None,
         }
@@ -1172,7 +1178,7 @@ impl<T: TypeMark + Clone + 'static> Type<T> {
     }
 }
 
-impl<T: TypeMark + 'static> fmt::Display for Type<T> {
+impl<T: TypeMark> fmt::Display for Type<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bottom(_) => write!(f, "_"),
@@ -1244,20 +1250,20 @@ impl<T: TypeMark + 'static> fmt::Display for Type<T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FnArgType<T: TypeMark + 'static> {
+pub struct FnArgType<T: TypeMark> {
     pub label: Option<(ArcStr, bool)>,
     pub typ: Type<T>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FnType<T: TypeMark + 'static> {
+pub struct FnType<T: TypeMark> {
     pub args: Arc<[FnArgType<T>]>,
     pub vargs: Option<Type<T>>,
     pub rtype: Type<T>,
     pub constraints: Arc<[(TVar<T>, Type<T>)]>,
 }
 
-impl<T: TypeMark + Clone + 'static> FnType<T> {
+impl<T: TypeMark> FnType<T> {
     pub fn resolve_typerefs<'a, C: Ctx, E: UserEvent>(
         &self,
         scope: &ModPath,
@@ -1352,7 +1358,7 @@ impl FnType<NoRefs> {
     }
 }
 
-impl<T: TypeMark + 'static> fmt::Display for FnType<T> {
+impl<T: TypeMark> fmt::Display for FnType<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.constraints.len() == 0 {
             write!(f, "fn(")?;

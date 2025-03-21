@@ -1018,9 +1018,7 @@ run!(any1, ANY1, |v: Result<&Value>| match v {
 #[cfg(test)]
 const VARIANTS0: &str = r#"
 {
-  type T = [`Foo, `Bar(string)];
-  let a: T = array::iter([`Foo, `Bar("hello world")]);
-  let a = select a {
+  let a = select array::iter([`Foo, `Bar("hello world")]) {
     `Foo => 0,
     `Bar(s) if s == "hello world" => 1,
      _ => 2

@@ -87,7 +87,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 if !n.typ.contains(&err) {
                     bail!("cannot use the ? operator on a non error type")
                 }
-                let rtyp = wrap!(n.typ.diff(&err))?;
+                let rtyp = n.typ.diff(&err);
                 wrap!(self.typ.check_contains(&rtyp))?;
                 Ok(())
             }
@@ -263,17 +263,23 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 wrap!(arg.node.typecheck(ctx))?;
                 let mut rtype = Type::Bottom(PhantomData);
                 let mut mtype = Type::Bottom(PhantomData);
+                let mut itype = Type::Bottom(PhantomData);
                 for (pat, n) in arms.iter_mut() {
                     match &mut pat.guard {
                         Some(guard) => wrap!(guard.node.typecheck(ctx))?,
                         None => mtype = mtype.union(&pat.type_predicate),
                     }
+                    itype = itype.union(&pat.type_predicate);
                     wrap!(n.node.typecheck(ctx))?;
                     rtype = rtype.union(&n.node.typ);
                 }
+                wrap!(itype
+                    .check_contains(&arg.node.typ)
+                    .map_err(|e| anyhow!("missing match cases {e}")))?;
                 wrap!(mtype
                     .check_contains(&arg.node.typ)
                     .map_err(|e| anyhow!("missing match cases {e}")))?;
+                arg.node.typ = arg.node.typ.normalize();
                 let mut atype = arg.node.typ.clone();
                 for (pat, _) in arms.iter() {
                     let can_match = atype.contains(&pat.type_predicate)
@@ -286,7 +292,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                         )
                     }
                     if !pat.structure_predicate.is_refutable() && pat.guard.is_none() {
-                        atype = atype.diff(&pat.type_predicate)?;
+                        atype = atype.diff(&pat.type_predicate);
                     }
                 }
                 self.typ.check_contains(&rtype)
