@@ -222,17 +222,19 @@ impl StructPatternNode {
                 }
                 _ => (),
             },
-            Self::Variant { tag: _, all, binds } => match v {
-                Value::Array(a) if a.len() == binds.len() + 1 => {
-                    if let Some(id) = all {
-                        f(*id, v.clone())
-                    }
-                    for (j, n) in binds.iter().enumerate() {
-                        n.bind(&a[j + 1], f)
-                    }
+            Self::Variant { tag: _, all, binds } => {
+                if let Some(id) = all {
+                    f(*id, v.clone())
                 }
-                _ => (),
-            },
+                match v {
+                    Value::Array(a) if a.len() == binds.len() + 1 => {
+                        for (j, n) in binds.iter().enumerate() {
+                            n.bind(&a[j + 1], f)
+                        }
+                    }
+                    _ => (),
+                }
+            }
             Self::SlicePrefix { all, prefix, tail } => match v {
                 Value::Array(a) if a.len() >= prefix.len() => {
                     if let Some(id) = all {
@@ -338,6 +340,10 @@ impl StructPatternNode {
                     a.len() == binds.len()
                         && binds.iter().zip(a.iter()).all(|(b, v)| b.is_match(v))
                 }
+                _ => false,
+            },
+            Self::Variant { tag, all: _, binds } if binds.len() == 0 => match v {
+                Value::String(s) => tag == s,
                 _ => false,
             },
             Self::Variant { tag, all: _, binds } => match v {
@@ -485,7 +491,8 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         let tmatch = match (&self.type_predicate, typ) {
             (Type::Array(_), Typ::Array)
             | (Type::Tuple(_), Typ::Array)
-            | (Type::Struct(_), Typ::Array) => true,
+            | (Type::Struct(_), Typ::Array)
+            | (Type::Variant(_, _), Typ::Array | Typ::String) => true,
             _ => self.type_predicate.contains(&Type::Primitive(typ.into())),
         };
         tmatch

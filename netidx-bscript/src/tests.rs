@@ -1014,3 +1014,26 @@ run!(any1, ANY1, |v: Result<&Value>| match v {
     },
     _ => false,
 });
+
+#[cfg(test)]
+const VARIANTS0: &str = r#"
+{
+  type T = [`Foo, `Bar(string)];
+  let a: T = array::iter([`Foo, `Bar("hello world")]);
+  let a = select a {
+    `Foo => 0,
+    `Bar(s) if s == "hello world" => 1,
+     _ => 2
+  };
+  array::group(a, |n, _| n == 2)
+}
+"#;
+
+#[cfg(test)]
+run!(variants0, VARIANTS0, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::I64(0), Value::I64(1)] => true,
+        _ => false,
+    },
+    _ => false,
+});

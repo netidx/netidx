@@ -307,6 +307,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     bind!(i);
                     update!();
                     *selected = Some(i);
+                    val_up[i] = true;
                     val!(i)
                 }
                 (None, Some(_)) => {
@@ -399,6 +400,13 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 if updated && determined {
                     let iter = args.iter().map(|n| n.cached.clone().unwrap());
                     Some(Value::Array(ValArray::from_iter_exact(iter)))
+                } else {
+                    None
+                }
+            }
+            NodeKind::Variant { tag, args } if args.len() == 0 => {
+                if event.init {
+                    Some(Value::String(tag.clone()))
                 } else {
                     None
                 }
