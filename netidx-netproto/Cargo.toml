@@ -27,7 +27,6 @@ arcstr = { workspace = true }
 smallvec = { workspace = true }
 enumflags2 = { workspace = true }
 indexmap = { workspace = true }
-rust_decimal = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]

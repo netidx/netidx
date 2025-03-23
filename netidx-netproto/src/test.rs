@@ -9,7 +9,6 @@ use netidx_core::{
     utils::pack,
 };
 use proptest::{collection, prelude::*, string::string_regex};
-use rust_decimal::Decimal;
 use std::{fmt::Debug, net::SocketAddr, sync::Arc};
 
 fn check<T: Pack + Debug + PartialEq>(t: T) {
@@ -454,7 +453,6 @@ mod publisher {
             any::<i64>().prop_map(Value::Z64),
             any::<f32>().prop_map(Value::F32),
             any::<f64>().prop_map(Value::F64),
-            any::<[u8; 16]>().prop_map(|a| Value::Decimal(Decimal::deserialize(a))),
             datetime().prop_map(Value::DateTime),
             duration().prop_map(Value::Duration),
             chars().prop_map(Value::String),

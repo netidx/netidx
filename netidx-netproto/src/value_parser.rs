@@ -1,5 +1,5 @@
 use crate::value::Value;
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::Bytes;
 use combine::{
     attempt, between, choice, from_str, many1, none_of, not_followed_by, one_of,
@@ -87,20 +87,6 @@ where
     ))
 }
 
-fn dcml<I>() -> impl Parser<I, Output = String>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    recognize((
-        optional(token('-')),
-        take_while1(|c: char| c.is_digit(10)),
-        optional(token('.')),
-        take_while(|c: char| c.is_digit(10)),
-    ))
-}
-
 struct Base64Encoded(Vec<u8>);
 
 impl FromStr for Base64Encoded {
@@ -158,7 +144,6 @@ where
         attempt(string("true").skip(close_expr()).map(|_| Value::True)),
         attempt(string("false").skip(close_expr()).map(|_| Value::False)),
         attempt(string("null").skip(close_expr()).map(|_| Value::Null)),
-        attempt(constant("decimal").with(from_str(dcml())).map(|v| Value::Decimal(v))),
         attempt(constant("u32").with(from_str(uint())).map(|v| Value::U32(v))),
         attempt(constant("v32").with(from_str(uint())).map(|v| Value::V32(v))),
         attempt(constant("i32").with(from_str(int())).map(|v| Value::I32(v))),

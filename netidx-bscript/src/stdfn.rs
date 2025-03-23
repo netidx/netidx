@@ -962,8 +962,6 @@ impl CachedCurEval for IsaEv {
             (Typ::F32, Some(_)) => Some(Value::False),
             (Typ::F64, Some(Value::F64(_))) => Some(Value::True),
             (Typ::F64, Some(_)) => Some(Value::False),
-            (Typ::Decimal, Some(Value::Decimal(_))) => Some(Value::True),
-            (Typ::Decimal, Some(_)) => Some(Value::False),
             (Typ::Bool, Some(Value::True)) => Some(Value::True),
             (Typ::Bool, Some(Value::False)) => Some(Value::True),
             (Typ::Bool, Some(_)) => Some(Value::False),
@@ -1679,7 +1677,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Load {
                 [path] => {
                     let path = path.current(ctx);
                     t.subscribe(ctx, path)
-                },
+                }
                 _ => t.invalid = true,
             }
             Box::new(t)
@@ -1796,7 +1794,7 @@ impl<C: Ctx, E: Clone> Register<C, E> for Get {
                 [name] => {
                     let name = name.current(ctx);
                     t.subscribe(ctx, name)
-                },
+                }
                 _ => t.invalid = true,
             }
             Box::new(t)

@@ -12,7 +12,6 @@ use netidx_core::{
     pool::{Pool, Pooled},
     utils,
 };
-use rust_decimal::Decimal;
 use smallvec::SmallVec;
 use std::{
     any::{Any, TypeId},
@@ -47,7 +46,6 @@ pub enum Typ {
     Z64,
     F32,
     F64,
-    Decimal,
     DateTime,
     Duration,
     Bool,
@@ -58,7 +56,7 @@ pub enum Typ {
     Null,
 }
 
-static TYPES: [Typ; 19] = [
+static TYPES: [Typ; 18] = [
     Typ::U32,
     Typ::V32,
     Typ::I32,
@@ -69,7 +67,6 @@ static TYPES: [Typ; 19] = [
     Typ::Z64,
     Typ::F32,
     Typ::F64,
-    Typ::Decimal,
     Typ::DateTime,
     Typ::Duration,
     Typ::Bool,
@@ -93,7 +90,6 @@ impl Typ {
             Typ::Z64 => Ok(Value::Z64(s.parse::<i64>()?)),
             Typ::F32 => Ok(Value::F32(s.parse::<f32>()?)),
             Typ::F64 => Ok(Value::F64(s.parse::<f64>()?)),
-            Typ::Decimal => Ok(Value::Decimal(s.parse::<Decimal>()?)),
             Typ::DateTime => Ok(Value::DateTime(DateTime::from_str(s)?)),
             Typ::Duration => {
                 let mut tmp = String::from("duration:");
@@ -134,7 +130,6 @@ impl Typ {
             Typ::Z64 => "z64",
             Typ::F32 => "f32",
             Typ::F64 => "f64",
-            Typ::Decimal => "decimal",
             Typ::DateTime => "datetime",
             Typ::Duration => "duration",
             Typ::Bool => "bool",
@@ -158,7 +153,6 @@ impl Typ {
             Value::Z64(_) => Typ::Z64,
             Value::F32(_) => Typ::F32,
             Value::F64(_) => Typ::F64,
-            Value::Decimal(_) => Typ::Decimal,
             Value::DateTime(_) => Typ::DateTime,
             Value::Duration(_) => Typ::Duration,
             Value::String(_) => Typ::String,
@@ -185,8 +179,7 @@ impl Typ {
             | Typ::I64
             | Typ::Z64
             | Typ::F32
-            | Typ::F64
-            | Typ::Decimal => true,
+            | Typ::F64 => true,
             Typ::DateTime
             | Typ::Duration
             | Typ::Bool
@@ -210,7 +203,6 @@ impl Typ {
             | Typ::Z64 => true,
             Typ::F32
             | Typ::F64
-            | Typ::Decimal
             | Typ::DateTime
             | Typ::Duration
             | Typ::Bool
@@ -231,7 +223,6 @@ impl Typ {
             | Typ::V64
             | Typ::F32
             | Typ::F64
-            | Typ::Decimal
             | Typ::DateTime
             | Typ::Duration
             | Typ::Bool
@@ -252,7 +243,6 @@ impl Typ {
             | Typ::Z64
             | Typ::F32
             | Typ::F64
-            | Typ::Decimal
             | Typ::DateTime
             | Typ::Duration
             | Typ::Bool
@@ -266,7 +256,7 @@ impl Typ {
 
     pub fn float(&self) -> bool {
         match self {
-            Typ::F32 | Typ::F64 | Typ::Decimal => true,
+            Typ::F32 | Typ::F64 => true,
             Typ::U32
             | Typ::V32
             | Typ::U64
@@ -302,7 +292,6 @@ impl FromStr for Typ {
             "z64" => Ok(Typ::Z64),
             "f32" => Ok(Typ::F32),
             "f64" => Ok(Typ::F64),
-            "decimal" => Ok(Typ::Decimal),
             "datetime" => Ok(Typ::DateTime),
             "duration" => Ok(Typ::Duration),
             "bool" => Ok(Typ::Bool),
@@ -368,8 +357,6 @@ pub enum Value {
     Error(Chars),
     /// An array of values
     Array(Arc<[Value]>),
-    /// fixed point decimal type
-    Decimal(Decimal),
 }
 
 impl Hash for Value {
@@ -454,10 +441,6 @@ impl Hash for Value {
                     v.hash(state)
                 }
             }
-            Value::Decimal(d) => {
-                20u8.hash(state);
-                d.hash(state);
-            }
         }
     }
 }
@@ -480,7 +463,6 @@ impl PartialEq for Value {
                 (Zero, Zero) => true,
                 (_, _) => l == r,
             },
-            (Value::Decimal(l), Value::Decimal(r)) => l == r,
             (Value::DateTime(l), Value::DateTime(r)) => l == r,
             (Value::Duration(l), Value::Duration(r)) => l == r,
             (Value::String(l), Value::String(r)) => l == r,
@@ -539,7 +521,6 @@ impl PartialOrd for Value {
                 (_, Nan) => Some(Ordering::Greater),
                 (_, _) => l.partial_cmp(r),
             },
-            (Value::Decimal(l), Value::Decimal(r)) => l.partial_cmp(r),
             (Value::DateTime(l), Value::DateTime(r)) => l.partial_cmp(r),
             (Value::Duration(l), Value::Duration(r)) => l.partial_cmp(r),
             (Value::String(l), Value::String(r)) => l.partial_cmp(r),
@@ -611,7 +592,6 @@ macro_rules! apply_op {
             }
             (Value::F32(l), Value::F32(r)) => Value::F32(l $op r),
             (Value::F64(l), Value::F64(r)) => Value::F64(l $op r),
-            (Value::Decimal(l), Value::Decimal(r)) => Value::Decimal(l $op r),
             (Value::U32(l) | Value::V32(l), Value::U64(r) | Value::V64(r)) => {
                 Value::U64((Wrapping(l as u64) $op Wrapping(r)).0)
             }
@@ -666,50 +646,6 @@ macro_rules! apply_op {
             (Value::F64(l), Value::I64(r) | Value::Z64(r)) => Value::F64(l $op r as f64),
             (Value::I64(l) | Value::Z64(l), Value::F64(r)) => Value::F64(l as f64 $op r),
             (Value::F64(l), Value::F32(r)) => Value::F64(l $op r as f64),
-            (Value::Decimal(l), Value::U32(r) | Value::V32(r)) =>
-                Value::Decimal(l $op Decimal::from(r)),
-            (Value::U32(l) | Value::V32(l), Value::Decimal(r)) =>
-                Value::Decimal(Decimal::from(l) $op r),
-            (Value::Decimal(l), Value::U64(r) | Value::V64(r)) =>
-                Value::Decimal(l $op Decimal::from(r)),
-            (Value::U64(l) | Value::V64(l), Value::Decimal(r)) =>
-                Value::Decimal(Decimal::from(l) $op r),
-            (Value::Decimal(l), Value::I32(r) | Value::Z32(r)) =>
-                Value::Decimal(l $op Decimal::from(r)),
-            (Value::I32(l) | Value::Z32(l), Value::Decimal(r)) =>
-                Value::Decimal(Decimal::from(l) $op r),
-            (Value::Decimal(l), Value::I64(r) | Value::Z64(r)) =>
-                Value::Decimal(l $op Decimal::from(r)),
-            (Value::I64(l) | Value::Z64(l), Value::Decimal(r)) =>
-                Value::Decimal(Decimal::from(l) $op r),
-            (Value::Decimal(l), Value::F32(r)) => match Decimal::try_from(r) {
-                Ok(r) => Value::Decimal(l $op r),
-                Err(_) => {
-                    let e = format!("can't parse {} as a decimal", r);
-                    Value::Error(Chars::from(e))
-                },
-            },
-            (Value::F32(l), Value::Decimal(r)) => match Decimal::try_from(l) {
-                Ok(l) => Value::Decimal(l $op r),
-                Err(_) => {
-                    let e = format!("can't parse {} as a decimal", l);
-                    Value::Error(Chars::from(e))
-                },
-            },
-            (Value::Decimal(l), Value::F64(r)) => match Decimal::try_from(r) {
-                Ok(r) => Value::Decimal(l $op r),
-                Err(_) => {
-                    let e = format!("can't parse {} as a decimal", r);
-                    Value::Error(Chars::from(e))
-                },
-            },
-            (Value::F64(l), Value::Decimal(r)) => match Decimal::try_from(l) {
-                Ok(l) => Value::Decimal(l $op r),
-                Err(_) => {
-                    let e = format!("can't parse {} as a decimal", l);
-                    Value::Error(Chars::from(e))
-                },
-            },
             (Value::String(s), n) => match s.parse::<Value>() {
                 Err(e) => Value::Error(Chars::from(format!("{}", e))),
                 Ok(s) => s $op n,
@@ -883,9 +819,6 @@ impl Not for Value {
             Value::F64(v) => {
                 Value::Error(Chars::from(format!("can't apply not to F64({})", v)))
             }
-            Value::Decimal(v) => {
-                Value::Error(Chars::from(format!("can't apply not to Decimal({})", v)))
-            }
             Value::DateTime(v) => {
                 Value::Error(Chars::from(format!("can't apply not to DateTime({})", v)))
             }
@@ -937,7 +870,6 @@ impl Pack for Value {
                 pack::varint_len(elts.len() as u64)
                     + elts.iter().fold(0, |sum, v| sum + Pack::encoded_len(v))
             }
-            Value::Decimal(d) => <Decimal as Pack>::encoded_len(d),
         }
     }
 
@@ -1017,10 +949,6 @@ impl Pack for Value {
                 }
                 Ok(())
             }
-            Value::Decimal(d) => {
-                buf.put_u8(20);
-                <Decimal as Pack>::encode(d, buf)
-            }
         }
     }
 
@@ -1053,7 +981,6 @@ impl Pack for Value {
                 }
                 Ok(Value::Array(Arc::from(elts)))
             }
-            20 => Ok(Value::Decimal(<Decimal as Pack>::decode(buf)?)),
             _ => Err(PackError::UnknownTag),
         }
     }
@@ -1094,7 +1021,6 @@ impl Value {
             Value::I64(v) | Value::Z64(v) => write!(f, "{}", v),
             Value::F32(v) => write!(f, "{}", v),
             Value::F64(v) => write!(f, "{}", v),
-            Value::Decimal(v) => write!(f, "{}", v),
             Value::DateTime(v) => write!(f, "{}", v),
             Value::Duration(v) => {
                 let v = v.as_secs_f64();
@@ -1198,13 +1124,6 @@ impl Value {
                     write!(f, "{}{}", pfx, v)
                 }
             }
-            Value::Decimal(v) => {
-                if types {
-                    write!(f, "decimal:{}", v)
-                } else {
-                    write!(f, "{}", v)
-                }
-            }
             Value::DateTime(v) => {
                 if types {
                     write!(f, r#"datetime:"{}""#, v)
@@ -1265,10 +1184,6 @@ impl Value {
                     Typ::Z64 => Some(Value::Z64($v as i64)),
                     Typ::F32 => Some(Value::F32($v as f32)),
                     Typ::F64 => Some(Value::F64($v as f64)),
-                    Typ::Decimal => match Decimal::try_from($v) {
-                        Ok(d) => Some(Value::Decimal(d)),
-                        Err(_) => None,
-                    },
                     Typ::DateTime => {
                         Some(Value::DateTime(DateTime::from_timestamp($v as i64, 0)?))
                     }
@@ -1304,27 +1219,6 @@ impl Value {
             Value::I64(v) | Value::Z64(v) => cast_number!(v, typ),
             Value::F32(v) => cast_number!(v, typ),
             Value::F64(v) => cast_number!(v, typ),
-            Value::Decimal(v) => match typ {
-                Typ::Decimal => Some(Value::Decimal(v)),
-                Typ::U32 => v.try_into().ok().map(Value::U32),
-                Typ::V32 => v.try_into().ok().map(Value::V32),
-                Typ::I32 => v.try_into().ok().map(Value::I32),
-                Typ::Z32 => v.try_into().ok().map(Value::Z32),
-                Typ::U64 => v.try_into().ok().map(Value::U64),
-                Typ::V64 => v.try_into().ok().map(Value::V64),
-                Typ::I64 => v.try_into().ok().map(Value::I64),
-                Typ::Z64 => v.try_into().ok().map(Value::Z64),
-                Typ::F32 => v.try_into().ok().map(Value::F32),
-                Typ::F64 => v.try_into().ok().map(Value::F64),
-                Typ::String => Some(Value::String(Chars::from(format!("{}", v)))),
-                Typ::Bool
-                | Typ::Array
-                | Typ::Bytes
-                | Typ::DateTime
-                | Typ::Duration
-                | Typ::Null
-                | Typ::Result => None,
-            },
             Value::DateTime(v) => match typ {
                 Typ::U32 | Typ::V32 => {
                     let ts = v.timestamp();
@@ -1377,7 +1271,6 @@ impl Value {
                     }
                 }
                 Typ::DateTime => Some(Value::DateTime(v)),
-                Typ::Decimal => None,
                 Typ::Duration => None,
                 Typ::Bool => None,
                 Typ::Bytes => None,
@@ -1397,7 +1290,6 @@ impl Value {
                 Typ::Z64 => Some(Value::Z64(d.as_secs() as i64)),
                 Typ::F32 => Some(Value::F32(d.as_secs_f32())),
                 Typ::F64 => Some(Value::F64(d.as_secs_f64())),
-                Typ::Decimal => None,
                 Typ::DateTime => None,
                 Typ::Duration => Some(Value::Duration(d)),
                 Typ::Bool => None,
@@ -1420,7 +1312,6 @@ impl Value {
                     Typ::Z64 => Some(Value::Z64(b as i64)),
                     Typ::F32 => Some(Value::F32(b as u32 as f32)),
                     Typ::F64 => Some(Value::F64(b as u64 as f64)),
-                    Typ::Decimal => None,
                     Typ::DateTime => None,
                     Typ::Duration => None,
                     Typ::Bool => Some(self),
@@ -1466,8 +1357,7 @@ impl Value {
             | Value::I64(_)
             | Value::Z64(_)
             | Value::F32(_)
-            | Value::F64(_)
-            | Value::Decimal(_) => true,
+            | Value::F64(_) => true,
             Value::DateTime(_)
             | Value::Duration(_)
             | Value::String(_)
@@ -1810,28 +1700,6 @@ impl FromValue for f64 {
 impl convert::From<f64> for Value {
     fn from(v: f64) -> Value {
         Value::F64(v)
-    }
-}
-
-impl FromValue for Decimal {
-    fn from_value(v: Value) -> Res<Self> {
-        v.cast(Typ::Decimal).ok_or_else(|| anyhow!("can't cast")).and_then(|v| match v {
-            Value::Decimal(v) => Ok(v),
-            _ => bail!("can't cast"),
-        })
-    }
-
-    fn get(v: Value) -> Option<Self> {
-        match v {
-            Value::Decimal(v) => Some(v),
-            _ => None,
-        }
-    }
-}
-
-impl convert::From<Decimal> for Value {
-    fn from(value: Decimal) -> Self {
-        Value::Decimal(value)
     }
 }
 

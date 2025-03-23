@@ -29,7 +29,6 @@ once_cell = { workspace = true }
 parking_lot = { workspace = true }
 pin-utils = { workspace = true }
 rand = { workspace = true }
-rust_decimal = { workspace = true }
 serde_derive = { workspace = true }
 serde = { workspace = true }
 sha3 = { workspace = true }
