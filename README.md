@@ -9,6 +9,7 @@
 [mit-badge]: https://img.shields.io/badge/license-MIT-lightgray.svg?style=flat-square
 [mit-url]: https://github.com/netidx/netidx/blob/master/LICENSE
 [Follow me on X](https://x.com/eestokesOSS)
+
 [Join us on Discord](https://discord.gg/bQv4gNR8WK)
 
 # What is Netidx
