@@ -41,9 +41,15 @@ pub struct NoRefs;
 impl TypeMark for NoRefs {}
 
 #[derive(Debug)]
+pub struct TVarInnerInner<T: TypeMark> {
+    id: TVarId,
+    typ: Arc<RwLock<Option<Type<T>>>>,
+}
+
+#[derive(Debug)]
 pub struct TVarInner<T: TypeMark> {
     pub name: ArcStr,
-    typ: RwLock<Arc<RwLock<Option<Type<T>>>>>,
+    typ: RwLock<TVarInnerInner<T>>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +75,7 @@ impl<T: TypeMark> fmt::Display for TVar<T> {
             write!(f, "'{}", self.name)
         } else {
             write!(f, "'{}: ", self.name)?;
-            match &*self.read().read() {
+            match &*self.read().typ.read() {
                 Some(t) => write!(f, "{t}"),
                 None => write!(f, "undefined"),
             }
@@ -98,22 +104,60 @@ impl TVar<Refs> {
 
 impl<T: TypeMark> TVar<T> {
     pub fn empty_named(name: ArcStr) -> Self {
-        Self(Arc::new(TVarInner { name, typ: RwLock::new(Arc::new(RwLock::new(None))) }))
+        Self(Arc::new(TVarInner {
+            name,
+            typ: RwLock::new(TVarInnerInner {
+                id: TVarId::new(),
+                typ: Arc::new(RwLock::new(None)),
+            }),
+        }))
     }
 
     pub fn named(name: ArcStr, typ: Type<T>) -> Self {
         Self(Arc::new(TVarInner {
             name,
-            typ: RwLock::new(Arc::new(RwLock::new(Some(typ)))),
+            typ: RwLock::new(TVarInnerInner {
+                id: TVarId::new(),
+                typ: Arc::new(RwLock::new(Some(typ))),
+            }),
         }))
     }
 
-    pub fn read(&self) -> RwLockReadGuard<Arc<RwLock<Option<Type<T>>>>> {
+    pub fn read(&self) -> RwLockReadGuard<TVarInnerInner<T>> {
         self.typ.read()
     }
 
-    pub fn write(&self) -> RwLockWriteGuard<Arc<RwLock<Option<Type<T>>>>> {
+    pub fn write(&self) -> RwLockWriteGuard<TVarInnerInner<T>> {
         self.typ.write()
+    }
+
+    /// make self an alias for other
+    pub fn alias(&self, other: &Self) {
+        let mut s = self.write();
+        let o = other.read();
+        s.id = o.id;
+        s.typ = Arc::clone(&o.typ);
+    }
+
+    pub fn normalize(&self) -> Self {
+        match self.read().typ.write().as_mut() {
+            None => (),
+            Some(t) => {
+                *t = t.normalize();
+            }
+        }
+        self.clone()
+    }
+}
+
+impl TVar<NoRefs> {
+    pub fn unbind(&self) {
+        let tv = self.read();
+        let mut typ = tv.typ.write();
+        if let Some(t) = &mut *typ {
+            t.unbind_tvars();
+        }
+        *typ = None
     }
 }
 
@@ -122,7 +166,7 @@ impl TVar<NoRefs> {
         fn would_cycle(addr: usize, t: &Type<NoRefs>) -> bool {
             match t {
                 Type::Primitive(_) | Type::Bottom(_) | Type::Ref(_) => false,
-                Type::TVar(t) => Arc::as_ptr(&*t.read()).addr() == addr,
+                Type::TVar(t) => Arc::as_ptr(&t.read().typ).addr() == addr,
                 Type::Array(a) => would_cycle(addr, &**a),
                 Type::Tuple(ts) => ts.iter().any(|t| would_cycle(addr, t)),
                 Type::Variant(_, ts) => ts.iter().any(|t| would_cycle(addr, t)),
@@ -136,13 +180,13 @@ impl TVar<NoRefs> {
                             Some(t) => would_cycle(addr, t),
                         } && would_cycle(addr, &rtype)
                             && constraints.iter().any(|a| {
-                                Arc::as_ptr(&*a.0.read()).addr() == addr
+                                Arc::as_ptr(&a.0.read().typ).addr() == addr
                                     || would_cycle(addr, &a.1)
                             })
                 }
             }
         }
-        let addr = Arc::as_ptr(&*self.read()).addr();
+        let addr = Arc::as_ptr(&self.read().typ).addr();
         would_cycle(addr, t)
     }
 }
@@ -159,9 +203,9 @@ impl<T: TypeMark> PartialEq for TVar<T> {
     fn eq(&self, other: &Self) -> bool {
         let t0 = self.read();
         let t1 = other.read();
-        t0.as_ptr().addr() == t1.as_ptr().addr() || {
-            let t0 = t0.read();
-            let t1 = t1.read();
+        t0.typ.as_ptr().addr() == t1.typ.as_ptr().addr() || {
+            let t0 = t0.typ.read();
+            let t1 = t1.typ.read();
             *t0 == *t1
         }
     }
@@ -173,11 +217,11 @@ impl<T: TypeMark> PartialOrd for TVar<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         let t0 = self.read();
         let t1 = other.read();
-        if t0.as_ptr().addr() == t1.as_ptr().addr() {
+        if t0.typ.as_ptr().addr() == t1.typ.as_ptr().addr() {
             Some(std::cmp::Ordering::Equal)
         } else {
-            let t0 = t0.read();
-            let t1 = t1.read();
+            let t0 = t0.typ.read();
+            let t1 = t1.typ.read();
             t0.partial_cmp(&*t1)
         }
     }
@@ -187,11 +231,11 @@ impl<T: TypeMark> Ord for TVar<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         let t0 = self.read();
         let t1 = other.read();
-        if t0.as_ptr().addr() == t1.as_ptr().addr() {
+        if t0.typ.as_ptr().addr() == t1.typ.as_ptr().addr() {
             std::cmp::Ordering::Equal
         } else {
-            let t0 = t0.read();
-            let t1 = t1.read();
+            let t0 = t0.typ.read();
+            let t1 = t1.typ.read();
             t0.cmp(&*t1)
         }
     }
@@ -235,7 +279,7 @@ impl Type<NoRefs> {
             | Self::Tuple(_)
             | Self::Struct(_)
             | Self::Variant(_, _) => true,
-            Self::TVar(tv) => tv.read().read().is_some(),
+            Self::TVar(tv) => tv.read().typ.read().is_some(),
             Self::Ref(_) => unreachable!(),
         }
     }
@@ -297,11 +341,11 @@ impl Type<NoRefs> {
                 let alias = {
                     let t0 = t0.read();
                     let t1 = t1.read();
-                    if t0.as_ptr().addr() == t1.as_ptr().addr() {
+                    if t0.typ.as_ptr().addr() == t1.typ.as_ptr().addr() {
                         return true;
                     }
-                    let t0i = t0.read();
-                    let t1i = t1.read();
+                    let t0i = t0.typ.read();
+                    let t1i = t1.typ.read();
                     match (&*t0i, &*t1i) {
                         (Some(t0), Some(t1)) => return t0.contains(&*t1),
                         (None, None) | (Some(_), None) => Either::Right(()),
@@ -309,27 +353,23 @@ impl Type<NoRefs> {
                     }
                 };
                 match alias {
-                    Either::Right(()) => {
-                        *t1.write() = Arc::clone(&*t0.read());
-                    }
-                    Either::Left(()) => {
-                        *t0.write() = Arc::clone(&*t1.read());
-                    }
+                    Either::Right(()) => t1.alias(t0),
+                    Either::Left(()) => t0.alias(t1),
                 }
                 true
             }
             (Self::TVar(t0), t1) if !t0.would_cycle(t1) => {
-                if let Some(t0) = t0.read().read().as_ref() {
+                if let Some(t0) = t0.read().typ.read().as_ref() {
                     return t0.contains(t1);
                 }
-                *t0.read().write() = Some(t1.clone());
+                *t0.read().typ.write() = Some(t1.clone());
                 true
             }
             (t0, Self::TVar(t1)) if !t1.would_cycle(t0) => {
-                if let Some(t1) = t1.read().read().as_ref() {
+                if let Some(t1) = t1.read().typ.read().as_ref() {
                     return t0.contains(t1);
                 }
-                *t1.read().write() = Some(t0.clone());
+                *t1.read().typ.write() = Some(t0.clone());
                 true
             }
             (t0, Self::Set(s)) => {
@@ -345,8 +385,7 @@ impl Type<NoRefs> {
                         acc && s.iter().fold(false, |acc, t0| acc || t0.contains(&t1))
                     })
             }
-
-            (Self::Fn(f0), Self::Fn(f1)) => f0.contains(f1),
+            (Self::Fn(f0), Self::Fn(f1)) => f0.as_ptr() == f1.as_ptr() || f0.contains(f1),
             (_, Self::TVar(_))
             | (Self::TVar(_), _)
             | (Self::Fn(_), _)
@@ -533,19 +572,19 @@ impl Type<NoRefs> {
             (f @ Type::Fn(_), _) => f.clone(),
             (t, Type::Fn(_)) => t.clone(),
             (Type::TVar(tv0), Type::TVar(tv1)) => {
-                if tv0.read().as_ptr() == tv1.read().as_ptr() {
+                if tv0.read().typ.as_ptr() == tv1.read().typ.as_ptr() {
                     return Type::Primitive(BitFlags::empty());
                 }
-                match (&*tv0.read().read(), &*tv1.read().read()) {
+                match (&*tv0.read().typ.read(), &*tv1.read().typ.read()) {
                     (None, _) | (_, None) => Type::TVar(tv0.clone()),
                     (Some(t0), Some(t1)) => t0.diff_int(t1),
                 }
             }
-            (Type::TVar(tv), t1) => match &*tv.read().read() {
+            (Type::TVar(tv), t1) => match &*tv.read().typ.read() {
                 None => Type::TVar(tv.clone()),
                 Some(t0) => t0.diff_int(t1),
             },
-            (t0, Type::TVar(tv)) => match dbg!(&*tv.read().read()) {
+            (t0, Type::TVar(tv)) => match &*tv.read().typ.read() {
                 None => t0.clone(),
                 Some(t1) => t0.diff_int(t1),
             },
@@ -577,57 +616,38 @@ impl Type<NoRefs> {
         Self::Primitive(Typ::unsigned_integer())
     }
 
-    /// alias unbound type variables with the same name to each other
-    pub fn alias_unbound(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
+    /// alias type variables with the same name to each other
+    pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
         match self {
             Type::Bottom(_) | Type::Primitive(_) => (),
             Type::Ref(_) => unreachable!(),
-            Type::Array(t) => t.alias_unbound(known),
+            Type::Array(t) => t.alias_tvars(known),
             Type::Tuple(ts) => {
                 for t in ts.iter() {
-                    t.alias_unbound(known)
+                    t.alias_tvars(known)
                 }
             }
             Type::Struct(ts) => {
                 for (_, t) in ts.iter() {
-                    t.alias_unbound(known)
+                    t.alias_tvars(known)
                 }
             }
             Type::Variant(_, ts) => {
                 for t in ts.iter() {
-                    t.alias_unbound(known)
+                    t.alias_tvars(known)
                 }
             }
             Type::TVar(tv) => match known.entry(tv.name.clone()) {
+                Entry::Occupied(e) => tv.alias(e.get()),
                 Entry::Vacant(e) => {
                     e.insert(tv.clone());
                     ()
                 }
-                Entry::Occupied(e) => {
-                    match (&*e.get().read().read(), &*tv.read().read()) {
-                        (None, None) | (Some(_), None) => (),
-                        (None, Some(_)) | (Some(_), Some(_)) => return (),
-                    }
-                    *tv.write() = Arc::clone(&*e.get().read())
-                }
             },
-            Type::Fn(fntyp) => {
-                let FnType { args, vargs, rtype, constraints } = &**fntyp;
-                for arg in args.iter() {
-                    arg.typ.alias_unbound(known)
-                }
-                if let Some(vargs) = vargs {
-                    vargs.alias_unbound(known)
-                }
-                rtype.alias_unbound(known);
-                for (tv, tc) in constraints.iter() {
-                    Type::TVar(tv.clone()).alias_unbound(known);
-                    tc.alias_unbound(known);
-                }
-            }
+            Type::Fn(ft) => ft.alias_tvars(known),
             Type::Set(s) => {
                 for typ in s.iter() {
-                    typ.alias_unbound(known)
+                    typ.alias_tvars(known)
                 }
             }
         }
@@ -672,7 +692,7 @@ impl Type<NoRefs> {
                     t.unbind_tvars()
                 }
             }
-            Type::TVar(tv) => *tv.read().write() = None,
+            Type::TVar(tv) => tv.unbind(),
             Type::Fn(fntyp) => fntyp.unbind_tvars(),
             Type::Ref(_) => unreachable!(),
         }
@@ -685,7 +705,7 @@ impl Type<NoRefs> {
             Type::Ref(_) => unreachable!(),
             Type::Fn(_) => None,
             Type::Set(s) => s.iter().find_map(|t| t.first_prim()),
-            Type::TVar(tv) => tv.read().read().as_ref().and_then(|t| t.first_prim()),
+            Type::TVar(tv) => tv.read().typ.read().as_ref().and_then(|t| t.first_prim()),
             // array, tuple, and struct casting are handled directly
             Type::Array(_) | Type::Tuple(_) | Type::Struct(_) | Type::Variant(_, _) => {
                 None
@@ -702,7 +722,7 @@ impl Type<NoRefs> {
             Type::Set(s) => Ok(for t in s.iter() {
                 t.check_cast()?
             }),
-            Type::TVar(tv) => match tv.read().read().as_ref() {
+            Type::TVar(tv) => match tv.read().typ.read().as_ref() {
                 Some(t) => t.check_cast(),
                 None => bail!("can't cast a value to a free type variable"),
             },
@@ -922,7 +942,7 @@ impl<T: TypeMark> Type<T> {
             | Self::Struct(_)
             | Self::Variant(_, _)
             | Self::Ref(_) => f(Some(self)),
-            Self::TVar(tv) => f(tv.read().read().as_ref()),
+            Self::TVar(tv) => f(tv.read().typ.read().as_ref()),
         }
     }
 
@@ -969,15 +989,7 @@ impl<T: TypeMark> Type<T> {
     pub(crate) fn normalize(&self) -> Self {
         match self {
             Type::Ref(_) | Type::Bottom(_) | Type::Primitive(_) => self.clone(),
-            Type::TVar(tv) => {
-                match tv.read().write().as_mut() {
-                    None => (),
-                    Some(t) => {
-                        *t = t.normalize();
-                    }
-                }
-                Type::TVar(tv.clone())
-            }
+            Type::TVar(tv) => Type::TVar(tv.normalize()),
             Type::Set(s) => Self::flatten_set(s.iter().map(|t| t.normalize())),
             Type::Array(t) => Type::Array(Arc::new(t.normalize())),
             Type::Tuple(t) => {
@@ -1092,8 +1104,12 @@ impl<T: TypeMark> Type<T> {
             (Type::TVar(tv0), Type::TVar(tv1)) if tv0.name == tv1.name && tv0 == tv1 => {
                 Some(Type::TVar(tv0.clone()))
             }
-            (Type::TVar(tv), t) => tv.read().read().as_ref().and_then(|tv| tv.merge(t)),
-            (t, Type::TVar(tv)) => tv.read().read().as_ref().and_then(|tv| t.merge(tv)),
+            (Type::TVar(tv), t) => {
+                tv.read().typ.read().as_ref().and_then(|tv| tv.merge(t))
+            }
+            (t, Type::TVar(tv)) => {
+                tv.read().typ.read().as_ref().and_then(|tv| t.merge(tv))
+            }
             (Type::Tuple(_), _)
             | (_, Type::Tuple(_))
             | (Type::Struct(_), _)
@@ -1142,7 +1158,7 @@ impl Type<Refs> {
                     .into_iter();
                 Ok(Type::Struct(Arc::from_iter(i)))
             }
-            Type::TVar(tv) => match &*tv.read().read() {
+            Type::TVar(tv) => match &*tv.read().typ.read() {
                 None => Ok(Type::TVar(TVar::empty_named(tv.name.clone()))),
                 Some(typ) => {
                     let typ = typ.resolve_typerefs(scope, env)?;
@@ -1318,7 +1334,7 @@ impl FnType<NoRefs> {
         }
         rtype.unbind_tvars();
         for (tv, tc) in constraints.iter() {
-            *tv.read().write() = None;
+            tv.unbind();
             tc.unbind_tvars()
         }
     }
@@ -1339,19 +1355,18 @@ impl FnType<NoRefs> {
         FnType { args, vargs, rtype, constraints }
     }
 
-    pub fn setup_aliases(&self) {
-        let Self { args, vargs, rtype, constraints } = self;
-        let mut known = FxHashMap::default();
+    pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
+        let FnType { args, vargs, rtype, constraints } = self;
         for arg in args.iter() {
-            arg.typ.alias_unbound(&mut known)
+            arg.typ.alias_tvars(known)
         }
-        if let Some(typ) = vargs {
-            typ.alias_unbound(&mut known)
+        if let Some(vargs) = vargs {
+            vargs.alias_tvars(known)
         }
-        rtype.alias_unbound(&mut known);
+        rtype.alias_tvars(known);
         for (tv, tc) in constraints.iter() {
-            Type::TVar(tv.clone()).alias_unbound(&mut known);
-            tc.alias_unbound(&mut known);
+            Type::TVar(tv.clone()).alias_tvars(known);
+            tc.alias_tvars(known);
         }
     }
 
@@ -1359,31 +1374,29 @@ impl FnType<NoRefs> {
         let mut sul = 0;
         let mut tul = 0;
         for (i, a) in self.args.iter().enumerate() {
+            sul = i;
             match &a.label {
                 None => {
-                    sul = i;
                     break;
                 }
-                Some((l, _)) => {
-                    match t
-                        .args
-                        .iter()
-                        .find(|a| a.label.as_ref().map(|a| &a.0) == Some(l))
-                    {
-                        None => return false,
-                        Some(o) => {
-                            if !o.typ.contains(&a.typ) {
-                                return false;
-                            }
+                Some((l, _)) => match t
+                    .args
+                    .iter()
+                    .find(|a| a.label.as_ref().map(|a| &a.0) == Some(l))
+                {
+                    None => return dbg!(false),
+                    Some(o) => {
+                        if !o.typ.contains(&a.typ) {
+                            return dbg!(false);
                         }
                     }
-                }
+                },
             }
         }
         for (i, a) in t.args.iter().enumerate() {
+            tul = i;
             match &a.label {
                 None => {
-                    tul = i;
                     break;
                 }
                 Some((l, opt)) => match self
@@ -1394,7 +1407,7 @@ impl FnType<NoRefs> {
                     Some(_) => (),
                     None => {
                         if !opt {
-                            return false;
+                            return dbg!(false);
                         }
                     }
                 },

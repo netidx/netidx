@@ -8,9 +8,12 @@ use crate::{
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use compact_str::format_compact;
+use fxhash::FxHashMap;
 use netidx::{subscriber::Value, utils::Either};
 use smallvec::{smallvec, SmallVec};
-use std::{marker::PhantomData, mem, sync::Arc as SArc};
+use std::{
+    cell::RefCell, collections::HashMap, marker::PhantomData, mem, sync::Arc as SArc,
+};
 use triomphe::Arc;
 
 pub(super) struct LambdaCallSite<C: Ctx, E: UserEvent> {
@@ -305,7 +308,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
     let typ = {
         let args = Arc::from_iter(argspec.iter().map(|a| FnArgType {
             label: a.labeled.as_ref().and_then(|dv| {
-                a.pattern.single_bind().map(|n| (n.clone(), dv.is_none()))
+                a.pattern.single_bind().map(|n| (n.clone(), dv.is_some()))
             }),
             typ: match a.constraint.as_ref() {
                 Some(t) => t.clone(),
@@ -320,7 +323,13 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         let rtype = rtype.clone().unwrap_or_else(|| Type::empty_tvar());
         Arc::new(FnType { constraints, args, vargs, rtype })
     };
-    typ.setup_aliases();
+    thread_local! {
+        static KNOWN: RefCell<FxHashMap<ArcStr, TVar<NoRefs>>> = RefCell::new(HashMap::default());
+    }
+    KNOWN.with_borrow_mut(|known| {
+        known.clear();
+        typ.alias_tvars(known);
+    });
     let _typ = typ.clone();
     let _argspec = argspec.clone();
     let init: InitFn<C, E> = SArc::new(move |ctx, args, tid| {
