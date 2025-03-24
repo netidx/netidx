@@ -432,7 +432,7 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         top_id: ExprId,
     ) -> Result<Self> {
         let type_predicate = match &spec.type_predicate {
-            Some(t) => t.resolve_typrefs(scope, &ctx.env)?,
+            Some(t) => t.resolve_typerefs(scope, &ctx.env)?,
             None => spec.structure_predicate.infer_type_predicate(),
         };
         match &type_predicate {

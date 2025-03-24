@@ -1,4 +1,4 @@
-use crate::typ::{NoRefs, Refs, TVar, Type};
+use crate::typ::{NoRefs, Refs, TVar, Type, TypeMark};
 use arcstr::ArcStr;
 use compact_str::{format_compact, CompactString};
 use netidx::{
@@ -354,10 +354,10 @@ pub struct Pattern {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
-pub struct Arg {
+pub struct Arg<T: TypeMark> {
     pub labeled: Option<Option<Expr>>,
     pub pattern: StructurePattern,
-    pub constraint: Option<Type<Refs>>,
+    pub constraint: Option<Type<T>>,
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
@@ -400,7 +400,7 @@ pub enum ExprKind {
         value: Arc<Expr>,
     },
     Lambda {
-        args: Arc<[Arg]>,
+        args: Arc<[Arg<Refs>]>,
         vargs: Option<Option<Type<Refs>>>,
         rtype: Option<Type<Refs>>,
         constraints: Arc<[(TVar<Refs>, Type<Refs>)]>,

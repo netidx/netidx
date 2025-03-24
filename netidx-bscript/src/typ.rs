@@ -83,6 +83,19 @@ impl<T: TypeMark> Default for TVar<T> {
     }
 }
 
+impl TVar<Refs> {
+    pub fn resolve_typerefs<'a, C: Ctx, E: UserEvent>(
+        &self,
+        scope: &ModPath,
+        env: &Env<C, E>,
+    ) -> Result<TVar<NoRefs>> {
+        match Type::TVar(self.clone()).resolve_typerefs(scope, env)? {
+            Type::TVar(tv) => Ok(tv),
+            _ => bail!("unexpected result from resolve_typerefs"),
+        }
+    }
+}
+
 impl<T: TypeMark> TVar<T> {
     pub fn empty_named(name: ArcStr) -> Self {
         Self(Arc::new(TVarInner { name, typ: RwLock::new(Arc::new(RwLock::new(None))) }))
@@ -101,17 +114,6 @@ impl<T: TypeMark> TVar<T> {
 
     pub fn write(&self) -> RwLockWriteGuard<Arc<RwLock<Option<Type<T>>>>> {
         self.typ.write()
-    }
-
-    pub fn resolve_typrefs<'a, C: Ctx, E: UserEvent>(
-        &self,
-        scope: &ModPath,
-        env: &Env<C, E>,
-    ) -> Result<TVar<NoRefs>> {
-        match Type::TVar(self.clone()).resolve_typrefs(scope, env)? {
-            Type::TVar(tv) => Ok(tv),
-            _ => bail!("unexpected result from resolve_typerefs"),
-        }
     }
 }
 
@@ -651,19 +653,28 @@ impl Type<NoRefs> {
             ),
             Type::TVar(tv) => Type::TVar(TVar::empty_named(tv.name.clone())),
             Type::Set(s) => Type::Set(Arc::from_iter(s.iter().map(|t| t.reset_tvars()))),
-            Type::Fn(fntyp) => {
-                let FnType { args, vargs, rtype, constraints } = &**fntyp;
-                let args = Arc::from_iter(args.iter().map(|a| FnArgType {
-                    label: a.label.clone(),
-                    typ: a.typ.reset_tvars(),
-                }));
-                let vargs = vargs.as_ref().map(|t| t.reset_tvars());
-                let rtype = rtype.reset_tvars();
-                let constraints = Arc::from_iter(constraints.iter().map(|(tv, tc)| {
-                    (TVar::empty_named(tv.name.clone()), tc.reset_tvars())
-                }));
-                Type::Fn(Arc::new(FnType { args, vargs, rtype, constraints }))
+            Type::Fn(fntyp) => Type::Fn(Arc::new(fntyp.reset_tvars())),
+        }
+    }
+
+    /// Unbind any bound tvars, but do not unalias them.
+    fn unbind_tvars(&self) {
+        match self {
+            Type::Bottom(_) | Type::Primitive(_) => (),
+            Type::Array(t0) => t0.unbind_tvars(),
+            Type::Tuple(ts) | Type::Variant(_, ts) | Type::Set(ts) => {
+                for t in ts.iter() {
+                    t.unbind_tvars()
+                }
             }
+            Type::Struct(ts) => {
+                for (_, t) in ts.iter() {
+                    t.unbind_tvars()
+                }
+            }
+            Type::TVar(tv) => *tv.read().write() = None,
+            Type::Fn(fntyp) => fntyp.unbind_tvars(),
+            Type::Ref(_) => unreachable!(),
         }
     }
 
@@ -1093,8 +1104,10 @@ impl<T: TypeMark> Type<T> {
             | (Type::Fn(_), _) => None,
         }
     }
+}
 
-    pub fn resolve_typrefs<'a, C: Ctx, E: UserEvent>(
+impl Type<Refs> {
+    pub fn resolve_typerefs<'a, C: Ctx, E: UserEvent>(
         &self,
         scope: &ModPath,
         env: &Env<C, E>,
@@ -1102,11 +1115,13 @@ impl<T: TypeMark> Type<T> {
         match self {
             Type::Bottom(_) => Ok(Type::Bottom(PhantomData)),
             Type::Primitive(s) => Ok(Type::Primitive(*s)),
-            Type::Array(t0) => Ok(Type::Array(Arc::new(t0.resolve_typrefs(scope, env)?))),
+            Type::Array(t0) => {
+                Ok(Type::Array(Arc::new(t0.resolve_typerefs(scope, env)?)))
+            }
             Type::Tuple(ts) => {
                 let i = ts
                     .iter()
-                    .map(|t| t.resolve_typrefs(scope, env))
+                    .map(|t| t.resolve_typerefs(scope, env))
                     .collect::<Result<SmallVec<[Type<NoRefs>; 8]>>>()?
                     .into_iter();
                 Ok(Type::Tuple(Arc::from_iter(i)))
@@ -1114,7 +1129,7 @@ impl<T: TypeMark> Type<T> {
             Type::Variant(tag, ts) => {
                 let i = ts
                     .iter()
-                    .map(|t| t.resolve_typrefs(scope, env))
+                    .map(|t| t.resolve_typerefs(scope, env))
                     .collect::<Result<SmallVec<[Type<NoRefs>; 8]>>>()?
                     .into_iter();
                 Ok(Type::Variant(tag.clone(), Arc::from_iter(i)))
@@ -1122,7 +1137,7 @@ impl<T: TypeMark> Type<T> {
             Type::Struct(ts) => {
                 let i = ts
                     .iter()
-                    .map(|(n, t)| Ok((n.clone(), t.resolve_typrefs(scope, env)?)))
+                    .map(|(n, t)| Ok((n.clone(), t.resolve_typerefs(scope, env)?)))
                     .collect::<Result<SmallVec<[(ArcStr, Type<NoRefs>); 8]>>>()?
                     .into_iter();
                 Ok(Type::Struct(Arc::from_iter(i)))
@@ -1130,7 +1145,7 @@ impl<T: TypeMark> Type<T> {
             Type::TVar(tv) => match &*tv.read().read() {
                 None => Ok(Type::TVar(TVar::empty_named(tv.name.clone()))),
                 Some(typ) => {
-                    let typ = typ.resolve_typrefs(scope, env)?;
+                    let typ = typ.resolve_typerefs(scope, env)?;
                     Ok(Type::TVar(TVar::named(tv.name.clone(), typ)))
                 }
             },
@@ -1144,7 +1159,7 @@ impl<T: TypeMark> Type<T> {
             Type::Set(ts) => {
                 let mut res: SmallVec<[Type<NoRefs>; 8]> = smallvec![];
                 for t in ts.iter() {
-                    res.push(t.resolve_typrefs(scope, env)?)
+                    res.push(t.resolve_typerefs(scope, env)?)
                 }
                 Ok(Type::flatten_set(res))
             }
@@ -1152,19 +1167,19 @@ impl<T: TypeMark> Type<T> {
                 let vargs = f
                     .vargs
                     .as_ref()
-                    .map(|t| t.resolve_typrefs(scope, env))
+                    .map(|t| t.resolve_typerefs(scope, env))
                     .transpose()?;
-                let rtype = f.rtype.resolve_typrefs(scope, env)?;
+                let rtype = f.rtype.resolve_typerefs(scope, env)?;
                 let mut res: SmallVec<[FnArgType<NoRefs>; 8]> = smallvec![];
                 for a in f.args.iter() {
-                    let typ = a.typ.resolve_typrefs(scope, env)?;
+                    let typ = a.typ.resolve_typerefs(scope, env)?;
                     let a = FnArgType { label: a.label.clone(), typ };
                     res.push(a);
                 }
                 let mut cres: SmallVec<[(TVar<NoRefs>, Type<NoRefs>); 4]> = smallvec![];
                 for (tv, tc) in f.constraints.iter() {
-                    let tv = tv.resolve_typrefs(scope, env)?;
-                    let tc = tc.resolve_typrefs(scope, env)?;
+                    let tv = tv.resolve_typerefs(scope, env)?;
+                    let tc = tc.resolve_typerefs(scope, env)?;
                     cres.push((tv, tc));
                 }
                 Ok(Type::Fn(Arc::new(FnType {
@@ -1263,19 +1278,21 @@ pub struct FnType<T: TypeMark> {
     pub constraints: Arc<[(TVar<T>, Type<T>)]>,
 }
 
-impl<T: TypeMark> FnType<T> {
+impl FnType<Refs> {
     pub fn resolve_typerefs<'a, C: Ctx, E: UserEvent>(
         &self,
         scope: &ModPath,
         env: &Env<C, E>,
     ) -> Result<FnType<NoRefs>> {
         let typ = Type::Fn(Arc::new(self.clone()));
-        match typ.resolve_typrefs(scope, env)? {
+        match typ.resolve_typerefs(scope, env)? {
             Type::Fn(f) => Ok((*f).clone()),
             _ => bail!("unexpected fn resolution"),
         }
     }
+}
 
+impl<T: TypeMark> FnType<T> {
     fn normalize(&self) -> Self {
         let Self { args, vargs, rtype, constraints } = self;
         let args = Arc::from_iter(
@@ -1291,6 +1308,53 @@ impl<T: TypeMark> FnType<T> {
 }
 
 impl FnType<NoRefs> {
+    pub fn unbind_tvars(&self) {
+        let FnType { args, vargs, rtype, constraints } = self;
+        for arg in args.iter() {
+            arg.typ.unbind_tvars()
+        }
+        if let Some(t) = vargs {
+            t.unbind_tvars()
+        }
+        rtype.unbind_tvars();
+        for (tv, tc) in constraints.iter() {
+            *tv.read().write() = None;
+            tc.unbind_tvars()
+        }
+    }
+
+    pub fn reset_tvars(&self) -> Self {
+        let FnType { args, vargs, rtype, constraints } = self;
+        let args = Arc::from_iter(
+            args.iter()
+                .map(|a| FnArgType { label: a.label.clone(), typ: a.typ.reset_tvars() }),
+        );
+        let vargs = vargs.as_ref().map(|t| t.reset_tvars());
+        let rtype = rtype.reset_tvars();
+        let constraints = Arc::from_iter(
+            constraints
+                .iter()
+                .map(|(tv, tc)| (TVar::empty_named(tv.name.clone()), tc.reset_tvars())),
+        );
+        FnType { args, vargs, rtype, constraints }
+    }
+
+    pub fn setup_aliases(&self) {
+        let Self { args, vargs, rtype, constraints } = self;
+        let mut known = FxHashMap::default();
+        for arg in args.iter() {
+            arg.typ.alias_unbound(&mut known)
+        }
+        if let Some(typ) = vargs {
+            typ.alias_unbound(&mut known)
+        }
+        rtype.alias_unbound(&mut known);
+        for (tv, tc) in constraints.iter() {
+            Type::TVar(tv.clone()).alias_unbound(&mut known);
+            tc.alias_unbound(&mut known);
+        }
+    }
+
     pub fn contains(&self, t: &Self) -> bool {
         let mut sul = 0;
         let mut tul = 0;
@@ -1355,6 +1419,45 @@ impl FnType<NoRefs> {
                 .iter()
                 .zip(t.constraints.iter())
                 .all(|((_, tc0), (_, tc1))| tc0.contains(tc1))
+    }
+
+    pub fn check_contains(&self, other: &Self) -> Result<()> {
+        if !self.contains(other) {
+            bail!("Fn type mismatch {self} does not contain {other}")
+        }
+        Ok(())
+    }
+
+    /// Return true if function signatures match. This is contains,
+    /// but does not allow labeled argument subtyping.
+    pub fn sigmatch(&self, other: &Self) -> bool {
+        let Self { args: args0, vargs: vargs0, rtype: rtype0, constraints: constraints0 } =
+            self;
+        let Self { args: args1, vargs: vargs1, rtype: rtype1, constraints: constraints1 } =
+            other;
+        args0.len() == args1.len()
+            && args0
+                .iter()
+                .zip(args1.iter())
+                .all(|(a0, a1)| a0.label == a1.label && a0.typ.contains(&a1.typ))
+            && match (vargs0, vargs1) {
+                (None, None) => true,
+                (None, _) | (_, None) => false,
+                (Some(t0), Some(t1)) => t0.contains(t1),
+            }
+            && rtype0.contains(rtype1)
+            && constraints0.len() == constraints1.len()
+            && constraints0
+                .iter()
+                .zip(constraints1.iter())
+                .all(|((tv0, t0), (tv1, t1))| tv0.name == tv1.name && t0.contains(t1))
+    }
+
+    pub fn check_sigmatch(&self, other: &Self) -> Result<()> {
+        if !self.sigmatch(other) {
+            bail!("Fn signatures do not match {self} does not match {other}")
+        }
+        Ok(())
     }
 }
 

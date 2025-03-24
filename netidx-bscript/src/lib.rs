@@ -15,9 +15,9 @@ pub mod typ;
 use crate::{
     dbg::DbgCtx,
     env::Env,
-    expr::{Arg, ExprId, ExprKind, ModPath},
+    expr::{ExprId, ExprKind, ModPath},
     node::Node,
-    typ::{FnType, NoRefs, Refs, TVar, Type},
+    typ::{FnType, NoRefs, Refs, Type},
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
@@ -40,6 +40,7 @@ use triomphe::Arc;
 mod tests;
 
 atomic_id!(BindId);
+atomic_id!(LambdaId);
 
 pub trait UserEvent: Clone + Debug + 'static {
     fn clear(&mut self);
@@ -96,32 +97,6 @@ pub type BuiltInInitFn<C, E> = sync::Arc<
         + Sync,
 >;
 
-#[derive(Debug, Clone)]
-pub struct LambdaTVars {
-    pub argspec: Arc<[(Arg, Type<NoRefs>)]>,
-    pub vargs: Option<Type<NoRefs>>,
-    pub rtype: Type<NoRefs>,
-    pub constraints: Arc<[(TVar<NoRefs>, Type<NoRefs>)]>,
-}
-
-impl LambdaTVars {
-    fn setup_aliases(&self) {
-        let Self { argspec, vargs, rtype, constraints } = self;
-        let mut known = FxHashMap::default();
-        for (_, typ) in argspec.iter() {
-            typ.alias_unbound(&mut known)
-        }
-        if let Some(typ) = vargs {
-            typ.alias_unbound(&mut known)
-        }
-        rtype.alias_unbound(&mut known);
-        for (tv, tc) in constraints.iter() {
-            Type::TVar(tv.clone()).alias_unbound(&mut known);
-            tc.alias_unbound(&mut known);
-        }
-    }
-}
-
 pub type InitFn<C, E> = sync::Arc<
     dyn for<'a, 'b> Fn(
             &'a mut ExecCtx<C, E>,
@@ -148,8 +123,16 @@ pub trait Apply<C: Ctx, E: UserEvent> {
         Ok(())
     }
 
-    fn rtype(&self) -> &Type<NoRefs> {
-        &Type::Bottom(PhantomData)
+    fn typ(&self) -> Arc<FnType<NoRefs>> {
+        const EMPTY: LazyLock<Arc<FnType<NoRefs>>> = LazyLock::new(|| {
+            Arc::new(FnType {
+                args: Arc::from_iter([]),
+                constraints: Arc::from_iter([]),
+                rtype: Type::Bottom(PhantomData),
+                vargs: None,
+            })
+        });
+        Arc::clone(&*EMPTY)
     }
 }
 

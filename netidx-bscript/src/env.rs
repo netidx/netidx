@@ -1,19 +1,21 @@
 use crate::{
     expr::{Arg, ModPath},
-    typ::{NoRefs, Type},
-    BindId, Ctx, InitFn, UserEvent,
+    typ::{FnType, NoRefs, Type},
+    BindId, Ctx, InitFn, LambdaId, UserEvent,
 };
 use anyhow::{bail, Result};
 use compact_str::CompactString;
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::path::Path;
-use std::{fmt, iter};
+use std::{fmt, iter, sync::Weak};
 use triomphe::Arc;
 
 pub struct LambdaBind<C: Ctx, E: UserEvent> {
+    pub id: LambdaId,
     pub env: Env<C, E>,
     pub scope: ModPath,
-    pub argspec: Arc<[Arg]>,
+    pub argspec: Arc<[Arg<NoRefs>]>,
+    pub typ: Arc<FnType<NoRefs>>,
     pub init: InitFn<C, E>,
 }
 
@@ -21,7 +23,7 @@ pub struct Bind<C: Ctx, E: UserEvent> {
     pub id: BindId,
     pub export: bool,
     pub typ: Type<NoRefs>,
-    pub fun: Option<Arc<LambdaBind<C, E>>>,
+    pub fun: Option<Weak<LambdaBind<C, E>>>,
     scope: ModPath,
     name: CompactString,
 }
@@ -46,13 +48,14 @@ impl<C: Ctx, E: UserEvent> Clone for Bind<C, E> {
             name: self.name.clone(),
             export: self.export,
             typ: self.typ.clone(),
-            fun: self.fun.as_ref().map(Arc::clone),
+            fun: self.fun.as_ref().map(Weak::clone),
         }
     }
 }
 
 pub struct Env<C: Ctx, E: UserEvent> {
     pub by_id: Map<BindId, Bind<C, E>>,
+    pub lambdas: Map<LambdaId, Weak<LambdaBind<C, E>>>,
     pub binds: Map<ModPath, Map<CompactString, BindId>>,
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
     pub modules: Set<ModPath>,
@@ -67,6 +70,7 @@ impl<C: Ctx, E: UserEvent> Clone for Env<C, E> {
             used: self.used.clone(),
             modules: self.modules.clone(),
             typedefs: self.typedefs.clone(),
+            lambdas: self.lambdas.clone(),
         }
     }
 }
@@ -79,16 +83,18 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
             used: Map::new(),
             modules: Set::new(),
             typedefs: Map::new(),
+            lambdas: Map::new(),
         }
     }
 
     pub(super) fn clear(&mut self) {
-        let Self { by_id, binds, used, modules, typedefs } = self;
+        let Self { by_id, binds, used, modules, typedefs, lambdas } = self;
         *by_id = Map::new();
         *binds = Map::new();
         *used = Map::new();
         *modules = Set::new();
         *typedefs = Map::new();
+        *lambdas = Map::new();
     }
 
     // restore the lexical environment to the state it was in at the
@@ -101,6 +107,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
             modules: other.modules.clone(),
             typedefs: other.typedefs.clone(),
             by_id: self.by_id.clone(),
+            lambdas: self.lambdas.clone(),
         }
     }
 
@@ -108,7 +115,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
     // taking prescidence in case of conflicts. The type and binding
     // environment is not altered
     pub(super) fn merge_lexical(&self, orig: &Self) -> Self {
-        let Self { by_id: _, binds, used, modules, typedefs } = self;
+        let Self { by_id: _, lambdas: _, binds, used, modules, typedefs } = self;
         let binds = binds.update_many(
             orig.binds.into_iter().map(|(s, m)| (s.clone(), m)),
             |k, v, kv| match kv {
@@ -140,7 +147,14 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
                 }
             },
         );
-        Self { binds, used, modules, typedefs, by_id: self.by_id.clone() }
+        Self {
+            binds,
+            used,
+            modules,
+            typedefs,
+            by_id: self.by_id.clone(),
+            lambdas: self.lambdas.clone(),
+        }
     }
 
     pub fn find_visible<R, F: FnMut(&str, &str) -> Option<R>>(

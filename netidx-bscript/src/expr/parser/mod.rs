@@ -720,7 +720,8 @@ parser! {
     }
 }
 
-fn lambda_args<I>() -> impl Parser<I, Output = (Vec<Arg>, Option<Option<Type<Refs>>>)>
+fn lambda_args<I>(
+) -> impl Parser<I, Output = (Vec<Arg<Refs>>, Option<Option<Type<Refs>>>)>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -759,7 +760,7 @@ where
         }
     })
     // @args must be last
-    .then(|mut v: Vec<Arg>| {
+    .then(|mut v: Vec<Arg<Refs>>| {
         match v.iter().enumerate().find(|(_, a)| match &a.pattern {
             StructurePattern::Bind(n) if n == "@args" => true,
             _ => false,
@@ -776,7 +777,7 @@ where
         }
     })
     // labeled before anonymous args
-    .then(|(v, vargs): (Vec<Arg>, Option<Option<Type<Refs>>>)| {
+    .then(|(v, vargs): (Vec<Arg<Refs>>, Option<Option<Type<Refs>>>)| {
         let mut anon = false;
         for a in &v {
             if a.labeled.is_some() && anon {

@@ -15,7 +15,7 @@ use compact_str::{format_compact, CompactString};
 use fxhash::FxHashMap;
 use netidx::publisher::Typ;
 use smallvec::{smallvec, SmallVec};
-use std::{fmt::Debug, hash::Hash, marker::PhantomData};
+use std::{fmt::Debug, hash::Hash, marker::PhantomData, sync::Arc as SArc};
 use triomphe::Arc;
 
 atomic_id!(SelectId);
@@ -118,7 +118,10 @@ fn compile_apply<C: Ctx, E: UserEvent>(
         }
         Some((_, Bind { fun: Some(lb), id, .. })) => {
             let varid = *id;
-            let lb = lb.clone();
+            let lb = match lb.upgrade() {
+                Some(l) => l,
+                None => return error!("{f} is no longer callable"),
+            };
             let args = match compile_apply_args(ctx, scope, top_id, args, &lb) {
                 Err(e) => return error!("{e}"),
                 Ok(a) => a,
@@ -127,7 +130,7 @@ fn compile_apply<C: Ctx, E: UserEvent>(
                 Err(e) => error!("error in function {f} {e:?}"),
                 Ok(function) => {
                     ctx.user.ref_var(varid, top_id);
-                    let typ = function.rtype().clone();
+                    let typ = function.typ().rtype.clone();
                     let kind = NodeKind::Apply { args, function };
                     Node { spec: Box::new(spec), typ, kind }
                 }
@@ -326,7 +329,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 return error!("", vec![node]);
             }
             let typ = match typ {
-                Some(typ) => match typ.resolve_typrefs(scope, &ctx.env) {
+                Some(typ) => match typ.resolve_typerefs(scope, &ctx.env) {
                     Ok(typ) => typ.clone(),
                     Err(e) => return error!("{e}", vec![node]),
                 },
@@ -351,7 +354,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             }
             if let Some(l) = node.find_lambda() {
                 match pn.lambda_ok() {
-                    Some(id) => ctx.env.by_id[&id].fun = Some(l),
+                    Some(id) => ctx.env.by_id[&id].fun = Some(SArc::downgrade(&l)),
                     None => return error!("can't bind lambda to {pattern}", vec![node]),
                 }
             };
@@ -378,10 +381,20 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 Some((_, bind)) => {
                     ctx.user.ref_var(bind.id, top_id);
                     let typ = bind.typ.clone();
-                    let spec = Box::new(spec);
                     match &bind.fun {
-                        None => Node { spec, typ, kind: NodeKind::Ref(bind.id) },
-                        Some(i) => Node { spec, typ, kind: NodeKind::Lambda(i.clone()) },
+                        None => Node {
+                            spec: Box::new(spec),
+                            typ,
+                            kind: NodeKind::Ref(bind.id),
+                        },
+                        Some(i) => match i.upgrade() {
+                            Some(i) => Node {
+                                spec: Box::new(spec),
+                                typ,
+                                kind: NodeKind::Lambda(i),
+                            },
+                            None => error!("{name} is not a callable function"),
+                        },
                     }
                 }
             }
@@ -493,7 +506,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             if n.is_err() {
                 return error!("", vec![n]);
             }
-            let typ = match typ.resolve_typrefs(scope, &ctx.env) {
+            let typ = match typ.resolve_typerefs(scope, &ctx.env) {
                 Err(e) => return error!("{e}", vec![n]),
                 Ok(typ) => typ,
             };
@@ -505,7 +518,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             Node { spec: Box::new(spec), typ: rtyp, kind }
         }
         Expr { kind: ExprKind::TypeDef { name, typ }, id: _ } => {
-            match typ.resolve_typrefs(scope, &ctx.env) {
+            match typ.resolve_typerefs(scope, &ctx.env) {
                 Err(e) => error!("{e}"),
                 Ok(typ) => match ctx.env.deftype(scope, name, typ) {
                     Err(e) => error!("{e}"),

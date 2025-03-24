@@ -11,8 +11,7 @@ use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
-use std::{fmt, iter, marker::PhantomData};
-use triomphe::Arc;
+use std::{fmt, iter, marker::PhantomData, sync::Arc};
 
 mod compiler;
 mod lambda;

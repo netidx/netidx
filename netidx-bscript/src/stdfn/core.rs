@@ -690,7 +690,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         self.pred.typecheck(ctx, from)?;
         match self.typ.args.get(1) {
             Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
-                ft.rtype.check_contains(self.pred.rtype())?
+                ft.check_contains(&self.pred.typ())?
             }
             _ => bail!("expected function as 2nd arg"),
         }
@@ -801,7 +801,7 @@ macro_rules! mapfn {
                 self.pred.typecheck(ctx, &mut self.from[..])?;
                 match self.typ.args.get(1) {
                     Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
-                        ft.rtype.check_contains(self.pred.rtype())?
+                        ft.check_contains(&self.pred.typ())?
                     }
                     _ => bail!("expected function as 2nd arg"),
                 }
@@ -1157,7 +1157,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for ArrayFold<C, E> {
         self.pred.typecheck(ctx, &mut self.from[..])?;
         match self.typ.args.get(2) {
             Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
-                ft.rtype.check_contains(self.pred.rtype())?
+                ft.check_contains(&self.pred.typ())?
             }
             _ => bail!("expected function as 3rd arg"),
         }
@@ -1636,7 +1636,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
         self.pred.typecheck(ctx, &mut self.from[..])?;
         match self.typ.args.get(1) {
             Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
-                ft.rtype.check_contains(self.pred.rtype())?
+                ft.check_contains(&self.pred.typ())?
             }
             _ => bail!("expected function as 2nd arg"),
         }
