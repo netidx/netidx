@@ -207,6 +207,7 @@ pub trait Ctx: 'static {
 pub struct ExecCtx<C: Ctx, E: UserEvent> {
     pub env: Env<C, E>,
     builtins: FxHashMap<&'static str, (FnType<Refs>, BuiltInInitFn<C, E>)>,
+    std: Vec<Node<C, E>>,
     pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }
@@ -223,6 +224,7 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         let mut t = ExecCtx {
             env: Env::new(),
             builtins: FxHashMap::default(),
+            std: vec![],
             dbg_ctx: DbgCtx::new(),
             user,
         };
@@ -232,6 +234,7 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         if let Some(e) = node.extract_err() {
             panic!("error compiling core {e}")
         }
+        t.std.push(node);
         let node = Node::compile(
             &mut t,
             &root,
@@ -240,6 +243,7 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         if let Some(e) = node.extract_err() {
             panic!("error using core {e}")
         }
+        t.std.push(node);
         t
     }
 
@@ -252,16 +256,19 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         if let Some(e) = node.extract_err() {
             panic!("failed to compile the net module {e}")
         }
+        t.std.push(node);
         let str = stdfn::str::register(&mut t);
         let node = Node::compile(&mut t, &root, str);
         if let Some(e) = node.extract_err() {
             panic!("failed to compile the str module {e}")
         }
+        t.std.push(node);
         let time = stdfn::time::register(&mut t);
         let node = Node::compile(&mut t, &root, time);
         if let Some(e) = node.extract_err() {
             panic!("failed to compile the time module {e}")
         }
+        t.std.push(node);
         t
     }
 

@@ -793,7 +793,7 @@ fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
         })
 }
 
-fn check_args(args0: &[Arg], args1: &[Arg]) -> bool {
+fn check_args(args0: &[Arg<Refs>], args1: &[Arg<Refs>]) -> bool {
     args0.iter().zip(args1.iter()).fold(true, |r, (a0, a1)| {
         r && dbg!(check_structure_pattern(&a0.pattern, &a1.pattern))
             && dbg!(check_type_opt(&a0.constraint, &a1.constraint))
