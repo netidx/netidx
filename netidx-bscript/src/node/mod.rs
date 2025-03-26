@@ -13,7 +13,7 @@ use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
-use std::{fmt, iter, marker::PhantomData, sync::Arc};
+use std::{fmt, iter, marker::PhantomData, mem, sync::Arc};
 use triomphe::Arc as TArc;
 
 mod compiler;
@@ -413,8 +413,8 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 return Some(Value::Error(m.as_str().into()));
             }};
         }
-        match late.fnode.update(ctx, event) {
-            None => (),
+        let init = match late.fnode.update(ctx, event) {
+            None => false,
             Some(Value::U64(id)) => match ctx.env.lambdas.get(&LambdaId(id)) {
                 None => error!("no such function {id}"),
                 Some(lb) => match lb.upgrade() {
@@ -423,14 +423,21 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                         if let Err(e) = Self::init_late_bound_lambda(ctx, late, lb, eid) {
                             error!("failed to init lambda {e}")
                         }
+                        true
                     }
                 },
             },
             Some(v) => error!("invalid function {v}"),
         };
         match &mut late.function {
-            Some(f) => f.update(ctx, &mut late.args, event),
             None => None,
+            Some(f) if !init => f.update(ctx, &mut late.args, event),
+            Some(f) => {
+                let init = mem::replace(&mut event.init, true);
+                let res = f.update(ctx, &mut late.args, event);
+                event.init = init;
+                res
+            }
         }
     }
 

@@ -376,6 +376,6 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         res
     });
     let l = SArc::new(LambdaBind { id, typ: typ.clone(), env, argspec, init, scope });
-    ctx.env.lambdas.insert(id, SArc::downgrade(&l));
+    ctx.env.lambdas.insert_cow(id, SArc::downgrade(&l));
     Node { spec: Box::new(spec), typ: Type::Fn(typ), kind: NodeKind::Lambda(l) }
 }
