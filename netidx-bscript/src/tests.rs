@@ -1035,3 +1035,19 @@ run!(variants0, VARIANTS0, |v: Result<&Value>| match v {
     },
     _ => false,
 });
+
+#[cfg(test)]
+const LATE_BINDING0: &str = r#"
+{
+  type T = { foo: string, bar: i64, f: fn(#x: i64, #y: i64) -> i64 };
+  let t: T = { foo: "hello world", bar: 3, f: |#x, #y| x - y };
+  let f = t.f;
+  f(#y: 3, #x: 4)
+}
+"#;
+
+#[cfg(test)]
+run!(late_binding0, LATE_BINDING0, |v: Result<&Value>| match v {
+    Ok(Value::I64(1)) => true,
+    _ => false,
+});

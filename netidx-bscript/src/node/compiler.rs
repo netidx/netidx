@@ -211,8 +211,8 @@ fn compile_apply<C: Ctx, E: UserEvent>(
                 }
             }
         }
-        Some((_, Bind { fun: None, .. })) => {
-            error!("{f} is not a function")
+        Some((_, Bind { fun: None, typ, .. })) => {
+            error!("{f} of typ {typ} is not a function")
         }
         Some((_, Bind { fun: Some(lb), id, .. })) => {
             let varid = *id;
@@ -512,19 +512,24 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 },
             }
         }
-        Expr { kind: ExprKind::StructRef { name, field: _ }, id: _ } => {
+        Expr { kind: ExprKind::StructRef { name, field }, id: _ } => {
             match ctx.env.lookup_bind(scope, name) {
                 None => error!("{name} not defined"),
-                Some((_, bind)) => match &bind.fun {
-                    Some(_) => error!("can't deref a function"),
-                    None => {
-                        ctx.user.ref_var(bind.id, top_id);
-                        let typ = Type::empty_tvar();
-                        let spec = Box::new(spec);
-                        // typcheck will resolve the field index
-                        Node { spec, typ, kind: NodeKind::StructRef(bind.id, 0) }
-                    }
-                },
+                Some((_, bind)) => {
+                    ctx.user.ref_var(bind.id, top_id);
+                    let typ = match &bind.typ {
+                        Type::Struct(flds) => flds
+                            .iter()
+                            .find_map(
+                                |(n, t)| if field == n { Some(t.clone()) } else { None },
+                            )
+                            .unwrap_or_else(|| Type::empty_tvar()),
+                        _ => Type::empty_tvar(),
+                    };
+                    let spec = Box::new(spec);
+                    // typcheck will resolve the field index
+                    Node { spec, typ, kind: NodeKind::StructRef(bind.id, 0) }
+                }
             }
         }
         Expr { kind: ExprKind::StructWith { name, replace }, id: _ } => {
