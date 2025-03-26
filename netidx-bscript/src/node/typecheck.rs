@@ -1,7 +1,7 @@
 use crate::{
     expr::ExprKind,
     node::{Node, NodeKind},
-    typ::Type,
+    typ::{FnArgType, Type},
     Ctx, ExecCtx, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
@@ -257,6 +257,19 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     wrap!(n, n.typecheck(ctx))?
                 }
                 wrap!(function.typecheck(ctx, args))?;
+                Ok(())
+            }
+            NodeKind::ApplyLate(late) => {
+                for n in late.args.iter_mut() {
+                    wrap!(n, n.typecheck(ctx))?
+                }
+                late.ftype.unbind_tvars();
+                for (arg, FnArgType { typ, .. }) in
+                    late.args.iter_mut().zip(late.ftype.args.iter())
+                {
+                    wrap!(arg, arg.typecheck(ctx))?;
+                    wrap!(arg, typ.check_contains(&arg.typ))?;
+                }
                 Ok(())
             }
             NodeKind::Select { selected: _, arg, arms } => {

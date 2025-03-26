@@ -1384,10 +1384,10 @@ impl FnType<NoRefs> {
                     .iter()
                     .find(|a| a.label.as_ref().map(|a| &a.0) == Some(l))
                 {
-                    None => return dbg!(false),
+                    None => return false,
                     Some(o) => {
                         if !o.typ.contains(&a.typ) {
-                            return dbg!(false);
+                            return false;
                         }
                     }
                 },
@@ -1407,7 +1407,7 @@ impl FnType<NoRefs> {
                     Some(_) => (),
                     None => {
                         if !opt {
-                            return dbg!(false);
+                            return false;
                         }
                     }
                 },
@@ -1471,6 +1471,27 @@ impl FnType<NoRefs> {
             bail!("Fn signatures do not match {self} does not match {other}")
         }
         Ok(())
+    }
+
+    pub fn map_argpos(
+        &self,
+        other: &Self,
+    ) -> FxHashMap<ArcStr, (Option<usize>, Option<usize>)> {
+        let mut tbl: FxHashMap<ArcStr, (Option<usize>, Option<usize>)> =
+            FxHashMap::default();
+        for (i, a) in self.args.iter().enumerate() {
+            match &a.label {
+                None => break,
+                Some((n, _)) => tbl.entry(n.clone()).or_default().0 = Some(i),
+            }
+        }
+        for (i, a) in other.args.iter().enumerate() {
+            match &a.label {
+                None => break,
+                Some((n, _)) => tbl.entry(n.clone()).or_default().1 = Some(i),
+            }
+        }
+        tbl
     }
 }
 

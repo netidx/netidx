@@ -1,17 +1,20 @@
 use crate::{
     env::LambdaBind,
-    expr::{Expr, ModPath},
+    expr::{Expr, ExprId, ModPath},
     node::pattern::PatternNode,
-    typ::{NoRefs, Type},
-    Apply, BindId, Ctx, Event, ExecCtx, UserEvent,
+    typ::{FnType, NoRefs, Type},
+    Apply, BindId, Ctx, Event, ExecCtx, LambdaId, UserEvent,
 };
+use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::{format_compact, CompactString};
+use fxhash::FxHashMap;
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
 use std::{fmt, iter, marker::PhantomData, sync::Arc};
+use triomphe::Arc as TArc;
 
 mod compiler;
 mod lambda;
@@ -57,6 +60,15 @@ impl<C: Ctx, E: UserEvent> Cached<C, E> {
             Some(_) | None => false,
         }
     }
+}
+
+pub struct ApplyLate<C: Ctx, E: UserEvent> {
+    ftype: TArc<FnType<NoRefs>>,
+    fnode: Node<C, E>,
+    args: Vec<Node<C, E>>,
+    arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
+    function: Option<Box<dyn Apply<C, E> + Send + Sync>>,
+    top_id: ExprId,
 }
 
 pub enum NodeKind<C: Ctx, E: UserEvent> {
@@ -105,6 +117,7 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
         args: Box<[Node<C, E>]>,
         function: Box<dyn Apply<C, E> + Send + Sync>,
     },
+    ApplyLate(Box<ApplyLate<C, E>>),
     Select {
         selected: Option<usize>,
         arg: Box<Cached<C, E>>,
@@ -322,6 +335,105 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
         }
     }
 
+    fn init_late_bound_lambda(
+        ctx: &mut ExecCtx<C, E>,
+        late: &mut ApplyLate<C, E>,
+        lb: Arc<LambdaBind<C, E>>,
+        eid: ExprId,
+    ) -> Result<()> {
+        macro_rules! compile_default {
+            ($i:expr, $lb:expr) => {{
+                match &$lb.argspec[$i].labeled {
+                    None | Some(None) => bail!("expected default value"),
+                    Some(Some(expr)) => {
+                        let orig_env = ctx.env.restore_lexical_env(&$lb.env);
+                        let n =
+                            compiler::compile(ctx, expr.clone(), &$lb.scope, late.top_id);
+                        ctx.env = ctx.env.merge_lexical(&orig_env);
+                        if let Some(e) = n.extract_err() {
+                            bail!("default arg compile error {e}")
+                        }
+                        n
+                    }
+                }
+            }};
+        }
+        for (name, map) in late.ftype.map_argpos(&lb.typ) {
+            let is_default = *late.arg_spec.get(&name).unwrap_or(&false);
+            match map {
+                (Some(si), Some(oi)) if si == oi => {
+                    if is_default {
+                        late.args[si] = compile_default!(si, lb);
+                    }
+                }
+                (Some(si), Some(oi)) if si < oi => {
+                    let mut i = si;
+                    while i < oi {
+                        late.args.swap(i, i + 1);
+                        i += 1;
+                    }
+                    if is_default {
+                        late.args[i] = compile_default!(si, lb);
+                    }
+                }
+                (Some(si), Some(oi)) if oi < si => {
+                    let mut i = si;
+                    while i > oi {
+                        late.args.swap(i, i - 1);
+                        i -= 1
+                    }
+                    if is_default {
+                        late.args[i] = compile_default!(i, lb);
+                    }
+                }
+                (Some(_), Some(_)) => unreachable!(),
+                (Some(i), None) => {
+                    late.args.remove(i);
+                }
+                (None, Some(i)) => late.args.insert(i, compile_default!(i, lb)),
+                (None, None) => bail!("unexpected args"),
+            }
+        }
+        let mut f = (lb.init)(ctx, &late.args, eid)?;
+        f.typecheck(ctx, &mut late.args)?;
+        late.ftype = lb.typ.clone();
+        late.function = Some(f);
+        Ok(())
+    }
+
+    fn update_apply_late(
+        ctx: &mut ExecCtx<C, E>,
+        late: &mut ApplyLate<C, E>,
+        eid: ExprId,
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        macro_rules! error {
+            ($m:literal) => {{
+                let m = format_compact!($m);
+                return Some(Value::Error(m.as_str().into()));
+            }};
+        }
+        match late.fnode.update(ctx, event) {
+            None => (),
+            Some(Value::U64(id)) => match ctx.env.lambdas.get(&LambdaId(id)) {
+                None => error!("no such function {id}"),
+                Some(lb) => match lb.upgrade() {
+                    None => error!("function {id} is no longer callable"),
+                    Some(lb) => {
+                        if let Err(e) = Self::init_late_bound_lambda(ctx, late, lb, eid) {
+                            error!("failed to init lambda {e}")
+                        }
+                    }
+                },
+            },
+            Some(v) => error!("invalid function {v}"),
+        };
+        match &mut late.function {
+            Some(f) => f.update(ctx, &mut late.args, event),
+            None => None,
+        }
+    }
+
     pub fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -484,6 +596,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
             }
             NodeKind::Apply { args, function } => function.update(ctx, args, event),
+            NodeKind::ApplyLate(late) => Node::update_apply_late(ctx, late, eid, event),
             NodeKind::Bind { pattern, node } => {
                 if let Some(v) = node.update(ctx, event) {
                     pattern.bind(&v, &mut |id, v| ctx.user.set_var(id, v))
@@ -550,6 +663,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             NodeKind::Select { selected, arg, arms } => {
                 Node::update_select(ctx, selected, arg, arms, event)
             }
+            NodeKind::Lambda(lb) if event.init => Some(Value::U64(lb.id.0)),
             NodeKind::Use | NodeKind::Lambda(_) | NodeKind::TypeDef => None,
         };
         if ctx.dbg_ctx.trace {

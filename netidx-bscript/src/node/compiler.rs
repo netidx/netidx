@@ -4,67 +4,45 @@ use crate::{
     node::{
         lambda,
         pattern::{PatternNode, StructPatternNode},
-        Cached, Node, NodeKind,
+        ApplyLate, Cached, Node, NodeKind,
     },
-    typ::Type,
+    typ::{FnType, NoRefs, Type},
     Ctx, ExecCtx, UserEvent,
 };
 use anyhow::{bail, Result};
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 use compact_str::{format_compact, CompactString};
 use fxhash::FxHashMap;
-use netidx::publisher::Typ;
+use netidx::publisher::{Typ, Value};
 use smallvec::{smallvec, SmallVec};
-use std::{fmt::Debug, hash::Hash, marker::PhantomData, sync::Arc as SArc};
+use std::{
+    cell::RefCell,
+    collections::{hash_map::Entry, HashMap},
+    fmt::Debug,
+    hash::Hash,
+    marker::PhantomData,
+    sync::Arc as SArc,
+};
 use triomphe::Arc;
 
 atomic_id!(SelectId);
 
-fn compile_apply_args<C: Ctx, E: UserEvent>(
-    ctx: &mut ExecCtx<C, E>,
-    scope: &ModPath,
-    top_id: ExprId,
-    args: Arc<[(Option<ArcStr>, Expr)]>,
-    lb: &LambdaBind<C, E>,
-) -> Result<Box<[Node<C, E>]>> {
-    let mut nodes: SmallVec<[Node<C, E>; 16]> = smallvec![];
-    let mut named = FxHashMap::default();
+fn check_named_args(
+    named: &mut FxHashMap<ArcStr, Expr>,
+    args: &[(Option<ArcStr>, Expr)],
+) -> Result<()> {
     for (name, e) in args.iter() {
         if let Some(name) = name {
-            if named.contains_key(name) {
-                bail!("duplicate labeled argument {name}")
-            }
-            named.insert(name.clone(), e.clone());
+            match named.entry(name.clone()) {
+                Entry::Occupied(e) => bail!("duplicate labeled argument {}", e.key()),
+                Entry::Vacant(en) => en.insert(e.clone()),
+            };
         }
     }
-    for a in lb.argspec.iter() {
-        match &a.labeled {
-            None => break,
-            Some(def) => match a.pattern.single_bind().and_then(|n| named.remove(n)) {
-                Some(e) => {
-                    let n = compile(ctx, e, scope, top_id);
-                    if let Some(e) = n.extract_err() {
-                        bail!(e);
-                    }
-                    nodes.push(n)
-                }
-                None => match def {
-                    None => {
-                        bail!("missing required argument {}", a.pattern)
-                    }
-                    Some(e) => {
-                        let orig_env = ctx.env.restore_lexical_env(&lb.env);
-                        let n = compile(ctx, e.clone(), &lb.scope, top_id);
-                        ctx.env = ctx.env.merge_lexical(&orig_env);
-                        if let Some(e) = n.extract_err() {
-                            bail!(e)
-                        }
-                        nodes.push(n);
-                    }
-                },
-            },
-        }
-    }
+    Ok(())
+}
+
+fn check_extra_named(named: &FxHashMap<ArcStr, Expr>) -> Result<()> {
     if named.len() != 0 {
         let s = named.keys().fold(CompactString::new(""), |mut s, n| {
             if s != "" {
@@ -75,19 +53,129 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
         });
         bail!("unknown labeled arguments passed, {s}")
     }
-    for (name, e) in args.iter() {
-        if name.is_none() {
-            let n = compile(ctx, e.clone(), scope, top_id);
+    Ok(())
+}
+
+thread_local! {
+    static NAMED: RefCell<FxHashMap<ArcStr, Expr>> = RefCell::new(HashMap::default());
+}
+
+fn compile_late_apply_args<C: Ctx, E: UserEvent>(
+    ctx: &mut ExecCtx<C, E>,
+    scope: &ModPath,
+    top_id: ExprId,
+    typ: &FnType<NoRefs>,
+    args: &Arc<[(Option<ArcStr>, Expr)]>,
+) -> Result<(Vec<Node<C, E>>, FxHashMap<ArcStr, bool>)> {
+    macro_rules! compile {
+        ($e:expr) => {{
+            let n = compile(ctx, $e, scope, top_id);
             if let Some(e) = n.extract_err() {
                 bail!(e)
             }
-            nodes.push(n);
+            n
+        }};
+    }
+    NAMED.with_borrow_mut(|named| {
+        let mut nodes: Vec<Node<C, E>> = vec![];
+        let mut arg_spec: FxHashMap<ArcStr, bool> = FxHashMap::default();
+        named.clear();
+        check_named_args(named, args)?;
+        for a in typ.args.iter() {
+            match &a.label {
+                None => break,
+                Some((n, required)) => match named.remove(n) {
+                    Some(e) => {
+                        nodes.push(compile!(e));
+                        arg_spec.insert(n.clone(), false);
+                    }
+                    None if *required => bail!("missing required argument {n}"),
+                    None => {
+                        let node = Node {
+                            spec: Box::new(
+                                ExprKind::Constant(Value::String(literal!("nop")))
+                                    .to_expr(),
+                            ),
+                            kind: NodeKind::Error {
+                                error: None,
+                                children: Box::from_iter([]),
+                            },
+                            typ: a.typ.clone(),
+                        };
+                        nodes.push(node);
+                        arg_spec.insert(n.clone(), true);
+                    }
+                },
+            }
         }
+        check_extra_named(named)?;
+        for (name, e) in args.iter() {
+            if name.is_none() {
+                nodes.push(compile!(e.clone()));
+            }
+        }
+        if nodes.len() < typ.args.len() {
+            bail!("missing required argument")
+        }
+        Ok((nodes, arg_spec))
+    })
+}
+
+fn compile_apply_args<C: Ctx, E: UserEvent>(
+    ctx: &mut ExecCtx<C, E>,
+    scope: &ModPath,
+    top_id: ExprId,
+    args: Arc<[(Option<ArcStr>, Expr)]>,
+    lb: &LambdaBind<C, E>,
+) -> Result<Box<[Node<C, E>]>> {
+    macro_rules! compile {
+        ($e:expr) => {{
+            let n = compile(ctx, $e, scope, top_id);
+            if let Some(e) = n.extract_err() {
+                bail!(e)
+            }
+            n
+        }};
     }
-    if nodes.len() < lb.argspec.len() {
-        bail!("missing required argument {}", lb.argspec[nodes.len()].pattern)
-    }
-    Ok(Box::from_iter(nodes))
+    NAMED.with_borrow_mut(|named| {
+        let mut nodes: SmallVec<[Node<C, E>; 16]> = smallvec![];
+        named.clear();
+        check_named_args(named, &args)?;
+        for a in lb.argspec.iter() {
+            match &a.labeled {
+                None => break,
+                Some(def) => {
+                    match a.pattern.single_bind().and_then(|n| named.remove(n)) {
+                        Some(e) => nodes.push(compile!(e)),
+                        None => match def {
+                            None => {
+                                bail!("missing required argument {}", a.pattern)
+                            }
+                            Some(e) => {
+                                let orig_env = ctx.env.restore_lexical_env(&lb.env);
+                                let n = compile(ctx, e.clone(), &lb.scope, top_id);
+                                ctx.env = ctx.env.merge_lexical(&orig_env);
+                                if let Some(e) = n.extract_err() {
+                                    bail!(e)
+                                }
+                                nodes.push(n);
+                            }
+                        },
+                    }
+                }
+            }
+        }
+        check_extra_named(named)?;
+        for (name, e) in args.iter() {
+            if name.is_none() {
+                nodes.push(compile!(e.clone()))
+            }
+        }
+        if nodes.len() < lb.argspec.len() {
+            bail!("missing required argument {}", lb.argspec[nodes.len()].pattern)
+        }
+        Ok(Box::from_iter(nodes))
+    })
 }
 
 fn compile_apply<C: Ctx, E: UserEvent>(
@@ -113,6 +201,29 @@ fn compile_apply<C: Ctx, E: UserEvent>(
     }
     match ctx.env.lookup_bind(scope, &f) {
         None => error!("{f} is undefined"),
+        Some((_, Bind { fun: None, typ: Type::Fn(ft), id, .. })) => {
+            let id = *id;
+            let ftype = ft.clone();
+            match compile_late_apply_args(ctx, scope, top_id, &ftype, &args) {
+                Err(e) => error!("{e}"),
+                Ok((args, arg_spec)) => {
+                    ctx.user.ref_var(id, top_id);
+                    let typ = Type::Fn(ftype.clone());
+                    let s = Box::new(ExprKind::Ref { name: f.clone() }.to_expr());
+                    let kind = NodeKind::Ref(id);
+                    let fnode = Node { spec: s, typ: typ.clone(), kind };
+                    let late = Box::new(ApplyLate {
+                        ftype,
+                        args,
+                        arg_spec,
+                        fnode,
+                        function: None,
+                        top_id,
+                    });
+                    Node { spec: Box::new(spec), typ, kind: NodeKind::ApplyLate(late) }
+                }
+            }
+        }
         Some((_, Bind { fun: None, .. })) => {
             error!("{f} is not a function")
         }

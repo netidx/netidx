@@ -194,6 +194,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::Struct { .. }
             | NodeKind::StructWith { .. }
             | NodeKind::Apply { .. }
+            | NodeKind::ApplyLate { .. }
             | NodeKind::Error { .. }
             | NodeKind::Qop(_, _)
             | NodeKind::Module(_)
