@@ -16,11 +16,7 @@ use fxhash::FxHashMap;
 use netidx::publisher::{Typ, Value};
 use smallvec::{smallvec, SmallVec};
 use std::{
-    cell::RefCell,
-    collections::{hash_map::Entry, HashMap},
-    fmt::Debug,
-    hash::Hash,
-    marker::PhantomData,
+    collections::hash_map::Entry, fmt::Debug, hash::Hash, marker::PhantomData,
     sync::Arc as SArc,
 };
 use triomphe::Arc;
@@ -56,10 +52,6 @@ fn check_extra_named(named: &FxHashMap<ArcStr, Expr>) -> Result<()> {
     Ok(())
 }
 
-thread_local! {
-    static NAMED: RefCell<FxHashMap<ArcStr, Expr>> = RefCell::new(HashMap::default());
-}
-
 fn compile_late_apply_args<C: Ctx, E: UserEvent>(
     ctx: &mut ExecCtx<C, E>,
     scope: &ModPath,
@@ -76,49 +68,47 @@ fn compile_late_apply_args<C: Ctx, E: UserEvent>(
             n
         }};
     }
-    NAMED.with_borrow_mut(|named| {
-        let mut nodes: Vec<Node<C, E>> = vec![];
-        let mut arg_spec: FxHashMap<ArcStr, bool> = FxHashMap::default();
-        named.clear();
-        check_named_args(named, args)?;
-        for a in typ.args.iter() {
-            match &a.label {
-                None => break,
-                Some((n, required)) => match named.remove(n) {
-                    Some(e) => {
-                        nodes.push(compile!(e));
-                        arg_spec.insert(n.clone(), false);
-                    }
-                    None if *required => bail!("missing required argument {n}"),
-                    None => {
-                        let node = Node {
-                            spec: Box::new(
-                                ExprKind::Constant(Value::String(literal!("nop")))
-                                    .to_expr(),
-                            ),
-                            kind: NodeKind::Error {
-                                error: None,
-                                children: Box::from_iter([]),
-                            },
-                            typ: a.typ.clone(),
-                        };
-                        nodes.push(node);
-                        arg_spec.insert(n.clone(), true);
-                    }
-                },
-            }
+    let mut named = FxHashMap::default();
+    let mut nodes: Vec<Node<C, E>> = vec![];
+    let mut arg_spec: FxHashMap<ArcStr, bool> = FxHashMap::default();
+    named.clear();
+    check_named_args(&mut named, args)?;
+    for a in typ.args.iter() {
+        match &a.label {
+            None => break,
+            Some((n, required)) => match named.remove(n) {
+                Some(e) => {
+                    nodes.push(compile!(e));
+                    arg_spec.insert(n.clone(), false);
+                }
+                None if *required => bail!("missing required argument {n}"),
+                None => {
+                    let node = Node {
+                        spec: Box::new(
+                            ExprKind::Constant(Value::String(literal!("nop"))).to_expr(),
+                        ),
+                        kind: NodeKind::Error {
+                            error: None,
+                            children: Box::from_iter([]),
+                        },
+                        typ: a.typ.clone(),
+                    };
+                    nodes.push(node);
+                    arg_spec.insert(n.clone(), true);
+                }
+            },
         }
-        check_extra_named(named)?;
-        for (name, e) in args.iter() {
-            if name.is_none() {
-                nodes.push(compile!(e.clone()));
-            }
+    }
+    check_extra_named(&named)?;
+    for (name, e) in args.iter() {
+        if name.is_none() {
+            nodes.push(compile!(e.clone()));
         }
-        if nodes.len() < typ.args.len() {
-            bail!("missing required argument")
-        }
-        Ok((nodes, arg_spec))
-    })
+    }
+    if nodes.len() < typ.args.len() {
+        bail!("missing required argument")
+    }
+    Ok((nodes, arg_spec))
 }
 
 fn compile_apply_args<C: Ctx, E: UserEvent>(
@@ -137,45 +127,42 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
             n
         }};
     }
-    NAMED.with_borrow_mut(|named| {
-        let mut nodes: SmallVec<[Node<C, E>; 16]> = smallvec![];
-        named.clear();
-        check_named_args(named, &args)?;
-        for a in lb.argspec.iter() {
-            match &a.labeled {
-                None => break,
-                Some(def) => {
-                    match a.pattern.single_bind().and_then(|n| named.remove(n)) {
-                        Some(e) => nodes.push(compile!(e)),
-                        None => match def {
-                            None => {
-                                bail!("missing required argument {}", a.pattern)
-                            }
-                            Some(e) => {
-                                let orig_env = ctx.env.restore_lexical_env(&lb.env);
-                                let n = compile(ctx, e.clone(), &lb.scope, top_id);
-                                ctx.env = ctx.env.merge_lexical(&orig_env);
-                                if let Some(e) = n.extract_err() {
-                                    bail!(e)
-                                }
-                                nodes.push(n);
-                            }
-                        },
+    let mut named = FxHashMap::default();
+    let mut nodes: SmallVec<[Node<C, E>; 16]> = smallvec![];
+    named.clear();
+    check_named_args(&mut named, &args)?;
+    for a in lb.argspec.iter() {
+        match &a.labeled {
+            None => break,
+            Some(def) => match a.pattern.single_bind().and_then(|n| named.remove(n)) {
+                Some(e) => nodes.push(compile!(e)),
+                None => match def {
+                    None => {
+                        bail!("missing required argument {}", a.pattern)
                     }
-                }
-            }
+                    Some(e) => {
+                        let orig_env = ctx.env.restore_lexical_env(&lb.env);
+                        let n = compile(ctx, e.clone(), &lb.scope, top_id);
+                        ctx.env = ctx.env.merge_lexical(&orig_env);
+                        if let Some(e) = n.extract_err() {
+                            bail!(e)
+                        }
+                        nodes.push(n);
+                    }
+                },
+            },
         }
-        check_extra_named(named)?;
-        for (name, e) in args.iter() {
-            if name.is_none() {
-                nodes.push(compile!(e.clone()))
-            }
+    }
+    check_extra_named(&named)?;
+    for (name, e) in args.iter() {
+        if name.is_none() {
+            nodes.push(compile!(e.clone()))
         }
-        if nodes.len() < lb.argspec.len() {
-            bail!("missing required argument {}", lb.argspec[nodes.len()].pattern)
-        }
-        Ok(Box::from_iter(nodes))
-    })
+    }
+    if nodes.len() < lb.argspec.len() {
+        bail!("missing required argument {}", lb.argspec[nodes.len()].pattern)
+    }
+    Ok(Box::from_iter(nodes))
 }
 
 fn compile_apply<C: Ctx, E: UserEvent>(
