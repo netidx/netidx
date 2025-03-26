@@ -270,6 +270,13 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     wrap!(arg, arg.typecheck(ctx))?;
                     wrap!(arg, typ.check_contains(&arg.typ))?;
                 }
+                if late.ftype.has_unbound() {
+                    let e = anyhow!(
+                        "type annotations needed {} has unbound type variables",
+                        late.ftype
+                    );
+                    wrap!(self, Err(e))?
+                }
                 Ok(())
             }
             NodeKind::Select { selected: _, arg, arms } => {

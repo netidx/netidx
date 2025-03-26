@@ -653,6 +653,20 @@ impl Type<NoRefs> {
         }
     }
 
+    pub fn has_unbound(&self) -> bool {
+        match self {
+            Type::Bottom(_) | Type::Primitive(_) => false,
+            Type::Ref(_) => unreachable!(),
+            Type::Array(t0) => t0.has_unbound(),
+            Type::Tuple(ts) => ts.iter().any(|t| t.has_unbound()),
+            Type::Struct(ts) => ts.iter().any(|(_, t)| t.has_unbound()),
+            Type::Variant(_, ts) => ts.iter().any(|t| t.has_unbound()),
+            Type::TVar(tv) => tv.read().typ.read().is_none(),
+            Type::Set(s) => s.iter().any(|t| t.has_unbound()),
+            Type::Fn(ft) => ft.has_unbound(),
+        }
+    }
+
     /// return a copy of self with all type variables unbound and
     /// unaliased. self will not be modified
     pub fn reset_tvars(&self) -> Type<NoRefs> {
@@ -1353,6 +1367,16 @@ impl FnType<NoRefs> {
                 .map(|(tv, tc)| (TVar::empty_named(tv.name.clone()), tc.reset_tvars())),
         );
         FnType { args, vargs, rtype, constraints }
+    }
+
+    pub fn has_unbound(&self) -> bool {
+        let FnType { args, vargs, rtype, constraints } = self;
+        args.iter().any(|a| a.typ.has_unbound())
+            || vargs.as_ref().map(|t| t.has_unbound()).unwrap_or(false)
+            || rtype.has_unbound()
+            || constraints
+                .iter()
+                .any(|(tv, tc)| tv.read().typ.read().is_none() || tc.has_unbound())
     }
 
     pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
