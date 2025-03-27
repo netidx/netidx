@@ -67,7 +67,7 @@ pub struct ApplyLate<C: Ctx, E: UserEvent> {
     fnode: Node<C, E>,
     args: Vec<Node<C, E>>,
     arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
-    function: Option<Box<dyn Apply<C, E> + Send + Sync>>,
+    function: Option<(LambdaId, Box<dyn Apply<C, E> + Send + Sync>)>,
     top_id: ExprId,
 }
 
@@ -397,7 +397,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
         let mut f = (lb.init)(ctx, &late.args, eid)?;
         f.typecheck(ctx, &mut late.args)?;
         late.ftype = lb.typ.clone();
-        late.function = Some(f);
+        late.function = Some((lb.id, f));
         Ok(())
     }
 
@@ -413,12 +413,13 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 return Some(Value::Error(m.as_str().into()));
             }};
         }
-        let init = match late.fnode.update(ctx, event) {
-            None => false,
-            Some(Value::U64(id)) => match ctx.env.lambdas.get(&LambdaId(id)) {
-                None => error!("no such function {id}"),
+        let init = match (&late.function, late.fnode.update(ctx, event)) {
+            (_, None) => false,
+            (Some((cid, _)), Some(Value::U64(id))) if cid.0 == id => false,
+            (_, Some(Value::U64(id))) => match ctx.env.lambdas.get(&LambdaId(id)) {
+                None => error!("no such function {id:?}"),
                 Some(lb) => match lb.upgrade() {
-                    None => error!("function {id} is no longer callable"),
+                    None => error!("function {id:?} is no longer callable"),
                     Some(lb) => {
                         if let Err(e) = Self::init_late_bound_lambda(ctx, late, lb, eid) {
                             error!("failed to init lambda {e}")
@@ -427,12 +428,12 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     }
                 },
             },
-            Some(v) => error!("invalid function {v}"),
+            (_, Some(v)) => error!("invalid function {v}"),
         };
         match &mut late.function {
             None => None,
-            Some(f) if !init => f.update(ctx, &mut late.args, event),
-            Some(f) => {
+            Some((_, f)) if !init => f.update(ctx, &mut late.args, event),
+            Some((_, f)) => {
                 let init = mem::replace(&mut event.init, true);
                 let res = f.update(ctx, &mut late.args, event);
                 event.init = init;
