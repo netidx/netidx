@@ -364,15 +364,15 @@ macro_rules! qop {
             | ExprKind::Select { .. }
             | ExprKind::TypeCast { .. }
             | ExprKind::Ref { .. } => ExprKind::Apply {
-                function: ["op", "question"].into(),
+                function: ApplyKind::Ref { name: ["op", "question"].into() },
                 args: Arc::from_iter([(None, e)]),
             }
             .to_expr(),
-            ExprKind::Apply { function, .. }
-                if function != &["op", "question"] && function != &["str", "concat"] =>
+            ExprKind::Apply { function: ApplyKind::Ref { name }, .. }
+                if name != &["op", "question"] && name != &["str", "concat"] =>
             {
                 ExprKind::Apply {
-                    function: ["op", "question"].into(),
+                    function: ApplyKind::Ref { name: ["op", "question"].into() },
                     args: Arc::from_iter([(None, e)]),
                 }
                 .to_expr()
@@ -390,7 +390,7 @@ macro_rules! slice {
                 let start = start.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
                 let end = end.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
                 ExprKind::Apply {
-                    function: ["op", "slice"].into(),
+                    function: ApplyKind::Ref { name: ["op", "slice"].into() },
                     args: Arc::from_iter([(None, a), (None, start), (None, end)]),
                 }
                 .to_expr()
@@ -401,12 +401,20 @@ macro_rules! slice {
 
 macro_rules! apply {
     ($inner:expr, $concat:literal) => {
-        (collection::vec((option::of(random_fname()), $inner), (0, 10)), modpath())
-            .prop_map(|(mut s, f)| {
+        (collection::vec((option::of(random_fname()), $inner), (0, 10)),
+         modpath(),
+         option::of(random_fname()),
+         option::of(any::<usize>()))
+            .prop_map(|(mut s, f, fld_s, fld_t)| {
                 let f = if $concat && f == ModPath::from(["str", "concat"]) {
                     ["str", "concat1"].into() // str::concat is illegal at the module level
                 } else {
                     f
+                };
+                let f = match (fld_s, fld_t) {
+                    (Some(fld), _) => ApplyKind::StructRef { name: f, field: fld },
+                    (_, Some(fld)) => ApplyKind::TupleRef { name: f, field: fld },
+                    (None, None) => ApplyKind::Ref { name: f }
                 };
                 s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
                 ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
@@ -512,7 +520,7 @@ macro_rules! arrayidx {
         (modpath(), $inner).prop_map(|(name, e)| {
             let a = ExprKind::Ref { name }.to_expr();
             ExprKind::Apply {
-                function: ["op", "index"].into(),
+                function: ApplyKind::Ref { name: ["op", "index"].into() },
                 args: Arc::from_iter([(None, a), (None, e)]),
             }
             .to_expr()
@@ -859,7 +867,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::StructRef { name: n1, field: f1 },
         ) => n0 == n1 && f0 == f1,
         (
-            ExprKind::Apply { args: srs0, function: fn0 },
+            ExprKind::Apply { args: srs0, function: ApplyKind::Ref { name: fn0 } },
             ExprKind::Constant(Value::String(c1)),
         ) if fn0 == &["str", "concat"] => match &acc_strings(srs0.iter().map(|(_, e)| e))
             [..]
@@ -868,8 +876,8 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             _ => false,
         },
         (
-            ExprKind::Apply { args: srs0, function: fn0 },
-            ExprKind::Apply { args: srs1, function: fn1 },
+            ExprKind::Apply { args: srs0, function: ApplyKind::Ref { name: fn0 } },
+            ExprKind::Apply { args: srs1, function: ApplyKind::Ref { name: fn1 } },
         ) if fn0 == fn1 && fn0 == &["str", "concat"] => {
             let srs0 = acc_strings(srs0.iter().map(|a| &a.1));
             let srs1 = acc_strings(srs1.iter().map(|a| &a.1));

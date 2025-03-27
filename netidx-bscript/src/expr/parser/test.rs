@@ -31,7 +31,7 @@ fn escaped_string() {
     let s = r#"load("/foo bar baz/\"zam\"/)_ xyz+ ")"#;
     assert_eq!(
         ExprKind::Apply {
-            function: ["load"].into(),
+            function: ApplyKind::Ref { name: ["load"].into() },
             args: Arc::from_iter([(None, ExprKind::Constant(p).to_expr())])
         }
         .to_expr(),
@@ -42,7 +42,7 @@ fn escaped_string() {
 #[test]
 fn interpolated0() {
     let p = ExprKind::Apply {
-        function: ["load"].into(),
+        function: ApplyKind::Ref { name: ["load"].into() },
         args: Arc::from_iter([(
             None,
             ExprKind::Apply {
@@ -51,7 +51,7 @@ fn interpolated0() {
                     (
                         None,
                         ExprKind::Apply {
-                            function: ["get"].into(),
+                            function: ApplyKind::Ref { name: ["get"].into() },
                             args: Arc::from_iter([(
                                 None,
                                 ExprKind::Apply {
@@ -67,7 +67,9 @@ fn interpolated0() {
                                                 .to_expr(),
                                         ),
                                     ]),
-                                    function: ["str", "concat"].into(),
+                                    function: ApplyKind::Ref {
+                                        name: ["str", "concat"].into(),
+                                    },
                                 }
                                 .to_expr(),
                             )]),
@@ -76,7 +78,7 @@ fn interpolated0() {
                     ),
                     (None, ExprKind::Constant(Value::from("/baz")).to_expr()),
                 ]),
-                function: ["str", "concat"].into(),
+                function: ApplyKind::Ref { name: ["str", "concat"].into() },
             }
             .to_expr(),
         )]),
@@ -95,7 +97,7 @@ fn interpolated1() {
                 None,
                 ExprKind::Constant(Value::Bool(true)).to_expr(),
             )]),
-            function: ["str", "concat"].into(),
+            function: ApplyKind::Ref { name: ["str", "concat"].into() },
         }
         .to_expr()]),
     }
@@ -124,23 +126,25 @@ fn interpolated2() {
                                             ExprKind::Constant(Value::Bool(true))
                                                 .to_expr(),
                                         )]),
-                                        function: ["str", "concat"].into(),
+                                        function: ApplyKind::Ref {
+                                            name: ["str", "concat"].into(),
+                                        },
                                     }
                                     .to_expr(),
                                 )]),
-                                function: ["get"].into(),
+                                function: ApplyKind::Ref { name: ["get"].into() },
                             }
                             .to_expr(),
                         )]),
-                        function: ["a"].into(),
+                        function: ApplyKind::Ref { name: ["a"].into() },
                     }
                     .to_expr(),
                 )]),
-                function: ["a"].into(),
+                function: ApplyKind::Ref { name: ["a"].into() },
             }
             .to_expr(),
         )]),
-        function: ["a"].into(),
+        function: ApplyKind::Ref { name: ["a"].into() },
     }
     .to_expr();
     assert_eq!(p, parse(s).unwrap());
@@ -165,11 +169,11 @@ fn apply_path() {
                         ),
                         (None, ExprKind::Ref { name: ["baz"].into() }.to_expr())
                     ]),
-                    function: ["path", "concat"].into(),
+                    function: ApplyKind::Ref { name: ["path", "concat"].into() },
                 }
                 .to_expr()
             )]),
-            function: ["load"].into(),
+            function: ApplyKind::Ref { name: ["load"].into() },
         }
         .to_expr(),
         parse(s).unwrap()
@@ -225,7 +229,7 @@ fn nested_apply() {
                         ExprKind::Constant(Value::String(literal!("/foo/bar",)))
                             .to_expr(),
                     )]),
-                    function: ["load"].into(),
+                    function: ApplyKind::Ref { name: ["load"].into() },
                 }
                 .to_expr(),
             ),
@@ -244,22 +248,25 @@ fn nested_apply() {
                                     )))
                                     .to_expr(),
                                 )]),
-                                function: ["load"].into(),
+                                function: ApplyKind::Ref { name: ["load"].into() },
                             }
                             .to_expr(),
                         ),
                     ]),
-                    function: ["max"].into(),
+                    function: ApplyKind::Ref { name: ["max"].into() },
                 }
                 .to_expr(),
             ),
             (
                 None,
-                ExprKind::Apply { args: Arc::from_iter([]), function: ["rand"].into() }
-                    .to_expr(),
+                ExprKind::Apply {
+                    args: Arc::from_iter([]),
+                    function: ApplyKind::Ref { name: ["rand"].into() },
+                }
+                .to_expr(),
             ),
         ]),
-        function: ["sum"].into(),
+        function: ApplyKind::Ref { name: ["sum"].into() },
     }
     .to_expr();
     let s = r#"sum(f32:1., load("/foo/bar"), max(f32:675.6, load("/foo/baz")), rand())"#;
@@ -468,7 +475,7 @@ fn select0() {
                 None,
                 ExprKind::Ref { name: ["b"].into() }.to_expr(),
             )]),
-            function: ["foo"].into(),
+            function: ApplyKind::Ref { name: ["foo"].into() },
         }
         .to_expr(),
     );
@@ -585,7 +592,7 @@ fn select1() {
                 None,
                 ExprKind::Ref { name: ["b"].into() }.to_expr(),
             )]),
-            function: ["foo"].into(),
+            function: ApplyKind::Ref { name: ["foo"].into() },
         }
         .to_expr(),
     );
@@ -814,7 +821,7 @@ fn apply_lambda() {
             }
             .to_expr(),
         )]),
-        function: ["a"].into(),
+        function: ApplyKind::Ref { name: ["a"].into() },
     }
     .to_expr();
     let s = "a(|a, @args| 'a)";
@@ -850,7 +857,7 @@ fn apply_typed_lambda() {
             }
             .to_expr(),
         )]),
-        function: ["a"].into(),
+        function: ApplyKind::Ref { name: ["a"].into() },
     }
     .to_expr();
     let s = "a(|a, b: [null, Number], @args: string| -> _ 'a)";
@@ -865,7 +872,7 @@ fn mod_interpolate() {
         export: false,
         value: Some(Arc::from_iter([ExprKind::Do {
             exprs: Arc::from_iter([ExprKind::Apply {
-                function: ["str", "concat"].into(),
+                function: ApplyKind::Ref { name: ["str", "concat"].into() },
                 args: Arc::from_iter([
                     (None, ExprKind::Constant(Value::from("foo_")).to_expr()),
                     (None, ExprKind::Constant(Value::I64(42)).to_expr()),
@@ -1005,7 +1012,7 @@ let a: fn(?#foo: Number, ?#bar: string, #a: Any, Any) -> string =
 fn arrayref0() {
     let e = ExprKind::Do {
         exprs: Arc::from_iter([ExprKind::Apply {
-            function: ["op", "index"].into(),
+            function: ApplyKind::Ref { name: ["op", "index"].into() },
             args: (Arc::from_iter([
                 (None, ExprKind::Ref { name: ["foo"].into() }.to_expr()),
                 (None, ExprKind::Constant(Value::I64(3)).to_expr()),
@@ -1023,7 +1030,7 @@ fn arrayref0() {
 fn arrayref1() {
     let e = ExprKind::Do {
         exprs: Arc::from_iter([ExprKind::Apply {
-            function: ["op", "slice"].into(),
+            function: ApplyKind::Ref { name: ["op", "slice"].into() },
             args: (Arc::from_iter([
                 (None, ExprKind::Ref { name: ["foo"].into() }.to_expr()),
                 (None, ExprKind::Constant(Value::Null).to_expr()),
@@ -1042,7 +1049,7 @@ fn arrayref1() {
 fn arrayref2() {
     let e = ExprKind::Do {
         exprs: Arc::from_iter([ExprKind::Apply {
-            function: ["op", "slice"].into(),
+            function: ApplyKind::Ref { name: ["op", "slice"].into() },
             args: (Arc::from_iter([
                 (None, ExprKind::Ref { name: ["foo"].into() }.to_expr()),
                 (None, ExprKind::Constant(Value::U64(1)).to_expr()),
@@ -1061,7 +1068,7 @@ fn arrayref2() {
 fn arrayref3() {
     let e = ExprKind::Do {
         exprs: Arc::from_iter([ExprKind::Apply {
-            function: ["op", "slice"].into(),
+            function: ApplyKind::Ref { name: ["op", "slice"].into() },
             args: (Arc::from_iter([
                 (None, ExprKind::Ref { name: ["foo"].into() }.to_expr()),
                 (None, ExprKind::Constant(Value::Null).to_expr()),
@@ -1080,7 +1087,7 @@ fn arrayref3() {
 fn arrayref4() {
     let e = ExprKind::Do {
         exprs: Arc::from_iter([ExprKind::Apply {
-            function: ["op", "slice"].into(),
+            function: ApplyKind::Ref { name: ["op", "slice"].into() },
             args: (Arc::from_iter([
                 (None, ExprKind::Ref { name: ["foo"].into() }.to_expr()),
                 (None, ExprKind::Constant(Value::U64(1)).to_expr()),
@@ -1100,7 +1107,7 @@ fn qop() {
     let e = ExprKind::Do {
         exprs: Arc::from_iter([ExprKind::Qop(Arc::new(
             ExprKind::Apply {
-                function: ["op", "slice"].into(),
+                function: ApplyKind::Ref { name: ["op", "slice"].into() },
                 args: (Arc::from_iter([
                     (None, ExprKind::Ref { name: ["foo"].into() }.to_expr()),
                     (None, ExprKind::Constant(Value::U64(1)).to_expr()),
@@ -1125,7 +1132,7 @@ fn tuple0() {
                 ExprKind::Constant(Value::I64(42)).to_expr(),
                 ExprKind::Ref { name: ["a"].into() }.to_expr(),
                 ExprKind::Apply {
-                    function: ["f"].into(),
+                    function: ApplyKind::Ref { name: ["f"].into() },
                     args: Arc::from_iter([(
                         None,
                         ExprKind::Ref { name: ["b"].into() }.to_expr(),
@@ -1161,7 +1168,7 @@ fn tuple1() {
                     ExprKind::Constant(Value::I64(42)).to_expr(),
                     ExprKind::Ref { name: ["a"].into() }.to_expr(),
                     ExprKind::Apply {
-                        function: ["f"].into(),
+                        function: ApplyKind::Ref { name: ["f"].into() },
                         args: Arc::from_iter([(
                             None,
                             ExprKind::Ref { name: ["b"].into() }.to_expr(),
@@ -1192,7 +1199,7 @@ fn struct0() {
                     (
                         "baz".into(),
                         ExprKind::Apply {
-                            function: ["f"].into(),
+                            function: ApplyKind::Ref { name: ["f"].into() },
                             args: Arc::from_iter([(
                                 None,
                                 ExprKind::Ref { name: ["b"].into() }.to_expr(),
@@ -1233,7 +1240,7 @@ fn bindstruct() {
                     (
                         "baz".into(),
                         ExprKind::Apply {
-                            function: ["f"].into(),
+                            function: ApplyKind::Ref { name: ["f"].into() },
                             args: Arc::from_iter([(
                                 None,
                                 ExprKind::Ref { name: ["b"].into() }.to_expr(),

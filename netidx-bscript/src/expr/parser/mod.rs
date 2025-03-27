@@ -476,7 +476,7 @@ where
     choice((
         attempt((modpath().skip(sptoken('.')), spfname()))
             .map(|(name, field)| ApplyKind::StructRef { name, field }),
-        (modpath().skip(sptoken('.')), int::<_, usize>())
+        attempt((modpath().skip(sptoken('.')), int::<_, usize>()))
             .map(|(name, field)| ApplyKind::TupleRef { name, field }),
         modpath().skip(not_followed_by(token('['))).map(|name| ApplyKind::Ref { name }),
     ))

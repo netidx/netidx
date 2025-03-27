@@ -199,17 +199,18 @@ fn compile_apply<C: Ctx, E: UserEvent>(
     if fnode.is_err() {
         return error!("", [fnode]);
     }
-    let (id, typ, fun) = match &fnode.kind {
+    let (typ, fun) = match &fnode.kind {
+        NodeKind::Lambda(lb) => (Type::Fn(lb.typ.clone()), Some(lb.clone())),
         NodeKind::Ref(id) => match ctx.env.by_id.get(id) {
             None => return error!("unknown function {f}"),
-            Some(b) => (*id, b.typ.clone(), b.fun.as_ref().and_then(|f| f.upgrade())),
+            Some(b) => (b.typ.clone(), b.fun.as_ref().and_then(|f| f.upgrade())),
         },
         NodeKind::StructRef(id, fid) => match ctx.env.by_id.get(id) {
             None => return error!("unknown function {f}"),
             Some(b) => match &b.typ {
                 Type::Struct(flds) => match flds.get(*fid) {
                     None => not_a_function!(&b.typ),
-                    Some((_, typ)) => (*id, typ.clone(), None),
+                    Some((_, typ)) => (typ.clone(), None),
                 },
                 _ => not_a_function!(&b.typ),
             },
@@ -219,19 +220,20 @@ fn compile_apply<C: Ctx, E: UserEvent>(
             Some(b) => match &b.typ {
                 Type::Tuple(flds) => match flds.get(*fid) {
                     None => not_a_function!(&b.typ),
-                    Some(typ) => (*id, typ.clone(), None),
+                    Some(typ) => (typ.clone(), None),
                 },
                 _ => not_a_function!(&b.typ),
             },
         },
-        _ => not_a_function!(&fnode.typ),
+        _ => {
+            not_a_function!(&fnode.typ)
+        }
     };
-    match (id, typ, fun) {
-        (id, Type::Fn(ftype), None) => {
+    match (typ, fun) {
+        (Type::Fn(ftype), None) => {
             match compile_late_apply_args(ctx, scope, top_id, &ftype, &args) {
                 Err(e) => error!("{e}"),
                 Ok((args, arg_spec)) => {
-                    ctx.user.ref_var(id, top_id);
                     let late = Box::new(ApplyLate {
                         ftype: ftype.clone(),
                         args,
@@ -245,8 +247,8 @@ fn compile_apply<C: Ctx, E: UserEvent>(
                 }
             }
         }
-        (_, typ, None) => not_a_function!(typ),
-        (id, _, Some(lb)) => {
+        (typ, None) => not_a_function!(typ),
+        (_, Some(lb)) => {
             let args = match compile_apply_args(ctx, scope, top_id, args, &lb) {
                 Err(e) => return error!("{e}"),
                 Ok(a) => a,
@@ -254,7 +256,6 @@ fn compile_apply<C: Ctx, E: UserEvent>(
             match (lb.init)(ctx, &args, top_id) {
                 Err(e) => error!("error in function {f} {e:?}"),
                 Ok(function) => {
-                    ctx.user.ref_var(id, top_id);
                     let typ = function.typ().rtype.clone();
                     let kind = NodeKind::Apply { args, function };
                     Node { spec: Box::new(spec), typ, kind }
