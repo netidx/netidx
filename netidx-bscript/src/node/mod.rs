@@ -88,9 +88,20 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
         pattern: Box<StructPatternNode>,
         node: Box<Node<C, E>>,
     },
-    Ref(BindId),
-    StructRef(BindId, usize),
-    TupleRef(BindId, usize),
+    Ref {
+        id: BindId,
+        top_id: ExprId,
+    },
+    StructRef {
+        id: BindId,
+        field: usize,
+        top_id: ExprId,
+    },
+    TupleRef {
+        id: BindId,
+        field: usize,
+        top_id: ExprId,
+    },
     Connect(BindId, Box<Node<C, E>>),
     Lambda(Arc<LambdaBind<C, E>>),
     Qop(BindId, Box<Node<C, E>>),
@@ -264,11 +275,12 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
     pub fn delete(self, ctx: &mut ExecCtx<C, E>) {
         let mut ids: SmallVec<[BindId; 8]> = smallvec![];
         match self.kind {
-            NodeKind::Constant(_)
-            | NodeKind::Nop
-            | NodeKind::Ref(_)
-            | NodeKind::StructRef(_, _)
-            | NodeKind::TupleRef(_, _) => (),
+            NodeKind::Constant(_) | NodeKind::Nop => (),
+            NodeKind::Ref { id, top_id }
+            | NodeKind::StructRef { id, field: _, top_id }
+            | NodeKind::TupleRef { id, field: _, top_id } => {
+                ctx.user.unref_var(id, top_id)
+            }
             NodeKind::Add { mut lhs, mut rhs }
             | NodeKind::Sub { mut lhs, mut rhs }
             | NodeKind::Mul { mut lhs, mut rhs }
@@ -734,14 +746,14 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
                 None
             }
-            NodeKind::Ref(bid) => event.variables.get(bid).map(|v| v.clone()),
-            NodeKind::TupleRef(bid, i) => {
+            NodeKind::Ref { id: bid, .. } => event.variables.get(bid).map(|v| v.clone()),
+            NodeKind::TupleRef { id: bid, field: i, .. } => {
                 event.variables.get(bid).and_then(|v| match v {
                     Value::Array(a) => a.get(*i).map(|v| v.clone()),
                     _ => None,
                 })
             }
-            NodeKind::StructRef(bid, i) => event
+            NodeKind::StructRef { id: bid, field: i, .. } => event
                 .variables
                 .get(bid)
                 .and_then(|v| match v {

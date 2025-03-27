@@ -201,11 +201,11 @@ fn compile_apply<C: Ctx, E: UserEvent>(
     }
     let (typ, fun) = match &fnode.kind {
         NodeKind::Lambda(lb) => (Type::Fn(lb.typ.clone()), Some(lb.clone())),
-        NodeKind::Ref(id) => match ctx.env.by_id.get(id) {
+        NodeKind::Ref { id, .. } => match ctx.env.by_id.get(id) {
             None => return error!("unknown function {f}"),
             Some(b) => (b.typ.clone(), b.fun.as_ref().and_then(|f| f.upgrade())),
         },
-        NodeKind::StructRef(id, fid) => match ctx.env.by_id.get(id) {
+        NodeKind::StructRef { id, field: fid, .. } => match ctx.env.by_id.get(id) {
             None => return error!("unknown function {f}"),
             Some(b) => match &b.typ {
                 Type::Struct(flds) => match flds.get(*fid) {
@@ -215,7 +215,7 @@ fn compile_apply<C: Ctx, E: UserEvent>(
                 _ => not_a_function!(&b.typ),
             },
         },
-        NodeKind::TupleRef(id, fid) => match ctx.env.by_id.get(&id) {
+        NodeKind::TupleRef { id, field: fid, .. } => match ctx.env.by_id.get(&id) {
             None => return error!("unknown function {f}"),
             Some(b) => match &b.typ {
                 Type::Tuple(flds) => match flds.get(*fid) {
@@ -507,20 +507,10 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 Some((_, bind)) => {
                     ctx.user.ref_var(bind.id, top_id);
                     let typ = bind.typ.clone();
-                    match &bind.fun {
-                        None => Node {
-                            spec: Box::new(spec),
-                            typ,
-                            kind: NodeKind::Ref(bind.id),
-                        },
-                        Some(i) => match i.upgrade() {
-                            Some(i) => Node {
-                                spec: Box::new(spec),
-                                typ,
-                                kind: NodeKind::Lambda(i),
-                            },
-                            None => error!("{name} is not a callable function"),
-                        },
+                    Node {
+                        spec: Box::new(spec),
+                        typ,
+                        kind: NodeKind::Ref { id: bind.id, top_id },
                     }
                 }
             }
@@ -539,7 +529,8 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                         _ => Type::empty_tvar(),
                     };
                     let spec = Box::new(spec);
-                    Node { spec, typ, kind: NodeKind::TupleRef(bind.id, field) }
+                    let kind = NodeKind::TupleRef { id: bind.id, field, top_id };
+                    Node { spec, typ, kind }
                 }
             }
         }
@@ -564,7 +555,8 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                     };
                     let spec = Box::new(spec);
                     // typcheck will resolve the field index if we didn't find it already
-                    Node { spec, typ, kind: NodeKind::StructRef(bind.id, fid) }
+                    let kind = NodeKind::StructRef { id: bind.id, field: fid, top_id };
+                    Node { spec, typ, kind }
                 }
             }
         }
