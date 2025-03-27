@@ -1041,6 +1041,7 @@ const LATE_BINDING0: &str = r#"
 {
   type T = { foo: string, bar: i64, f: fn(#x: i64, #y: i64) -> i64 };
   let t: T = { foo: "hello world", bar: 3, f: |#x, #y| x - y };
+  let u: T = { foo: "hello foo", bar: 42, f: |#c = 1, #y, #x| x - y + c };
   let f = t.f;
   f(#y: 3, #x: 4)
 }
@@ -1049,5 +1050,30 @@ const LATE_BINDING0: &str = r#"
 #[cfg(test)]
 run!(late_binding0, LATE_BINDING0, |v: Result<&Value>| match v {
     Ok(Value::I64(1)) => true,
+    _ => false,
+});
+
+#[cfg(test)]
+const LATE_BINDING1: &str = r#"
+{
+  type F = fn(#x: i64, #y: i64) -> i64;
+  type T = { foo: string, bar: i64, f: F };
+  let t: T = { foo: "hello world", bar: 3, f: |#x, #y| x - y };
+  let u: T = { foo: "hello foo", bar: 42, f: |#c = 1, #y, #x| (x - y) + c };
+  let f: F = select array::iter([0, 1]) {
+    0 => t.f,
+    1 => u.f,
+    _ => never()
+  };
+  array::group(f(#y: 3, #x: 4), |n, _| n == 2)
+}
+"#;
+
+#[cfg(test)]
+run!(late_binding1, LATE_BINDING1, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::I64(1), Value::I64(2)] => true,
+        _ => false,
+    },
     _ => false,
 });

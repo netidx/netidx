@@ -361,6 +361,37 @@ pub struct Arg<T: TypeMark> {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub enum ApplyKind {
+    Ref { name: ModPath },
+    StructRef { name: ModPath, field: ArcStr },
+    TupleRef { name: ModPath, field: usize },
+}
+
+impl ApplyKind {
+    pub fn to_expr(&self) -> Expr {
+        match self.clone() {
+            Self::Ref { name } => ExprKind::Ref { name }.to_expr(),
+            Self::StructRef { name, field } => {
+                ExprKind::StructRef { name, field }.to_expr()
+            }
+            Self::TupleRef { name, field } => {
+                ExprKind::TupleRef { name, field }.to_expr()
+            }
+        }
+    }
+}
+
+impl fmt::Display for ApplyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ref { name } => write!(f, "{name}"),
+            Self::StructRef { name, field } => write!(f, "{name}.{field}"),
+            Self::TupleRef { name, field } => write!(f, "{name}.{field}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum ExprKind {
     Constant(Value),
     Module {
@@ -416,7 +447,7 @@ pub enum ExprKind {
     },
     Apply {
         args: Arc<[(Option<ArcStr>, Expr)]>,
-        function: ModPath,
+        function: ApplyKind,
     },
     Any {
         args: Arc<[Expr]>,
@@ -693,10 +724,10 @@ impl ExprKind {
                 kill_newline!(buf);
                 writeln!(buf, "?")
             }
-            ExprKind::Apply { function, args: _ }
-                if function == &["str", "concat"]
-                    || function == &["op", "index"]
-                    || function == &["op", "slice"] =>
+            ExprKind::Apply { function: ApplyKind::Ref { name }, args: _ }
+                if name == &["str", "concat"]
+                    || name == &["op", "index"]
+                    || name == &["op", "slice"] =>
             {
                 try_single_line!(false);
                 Ok(())
@@ -992,8 +1023,8 @@ impl fmt::Display for ExprKind {
                 }
                 write!(f, " }}")
             }
-            ExprKind::Apply { args, function }
-                if function == &["str", "concat"] && args.len() > 0 =>
+            ExprKind::Apply { args, function: ApplyKind::Ref { name } }
+                if name == &["str", "concat"] && args.len() > 0 =>
             {
                 write!(f, "\"")?;
                 for s in args.iter() {
@@ -1009,13 +1040,13 @@ impl fmt::Display for ExprKind {
                 }
                 write!(f, "\"")
             }
-            ExprKind::Apply { args, function }
-                if function == &["op", "index"] && args.len() == 2 =>
+            ExprKind::Apply { args, function: ApplyKind::Ref { name } }
+                if name == &["op", "index"] && args.len() == 2 =>
             {
                 write!(f, "{}[{}]", &args[0].1, &args[1].1)
             }
-            ExprKind::Apply { args, function }
-                if function == &["op", "slice"] && args.len() == 3 =>
+            ExprKind::Apply { args, function: ApplyKind::Ref { name } }
+                if name == &["op", "slice"] && args.len() == 3 =>
             {
                 let s = match &args[1].1.kind {
                     ExprKind::Constant(Value::Null) => "",

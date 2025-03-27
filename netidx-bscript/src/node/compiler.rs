@@ -1,6 +1,6 @@
 use crate::{
     env::{Bind, LambdaBind},
-    expr::{Expr, ExprId, ExprKind, ModPath},
+    expr::{ApplyKind, Expr, ExprId, ExprKind, ModPath},
     node::{
         lambda,
         pattern::{PatternNode, StructPatternNode},
@@ -171,12 +171,12 @@ fn compile_apply<C: Ctx, E: UserEvent>(
     scope: &ModPath,
     top_id: ExprId,
     args: Arc<[(Option<ArcStr>, Expr)]>,
-    f: ModPath,
+    f: ApplyKind,
 ) -> Node<C, E> {
     macro_rules! error {
         ("", $children:expr) => {{
             let kind = NodeKind::Error { error: None, children: Box::from_iter($children) };
-            Node { spec: Box::new(spec), kind, typ: ctx.env.bottom() }
+            Node { spec: Box::new(spec), kind, typ: Type::Bottom(PhantomData) }
         }};
         ($fmt:expr, $children:expr, $($arg:expr),*) => {{
             let e = ArcStr::from(format_compact!($fmt, $($arg),*).as_str());
@@ -186,40 +186,67 @@ fn compile_apply<C: Ctx, E: UserEvent>(
         ($fmt:expr) => { error!($fmt, [],) };
         ($fmt:expr, $children:expr) => { error!($fmt, $children,) };
     }
-    match ctx.env.lookup_bind(scope, &f) {
-        None => error!("{f} is undefined"),
-        Some((_, Bind { fun: None, typ: Type::Fn(ft), id, .. })) => {
-            let id = *id;
-            let ftype = ft.clone();
+    macro_rules! not_a_function {
+        ($typ:expr) => {
+            return error!(
+                "{f} of type {} is not known to be a function, type annotations needed?",
+                vec![],
+                $typ
+            )
+        };
+    }
+    let fnode = compile(ctx, f.to_expr(), scope, top_id);
+    if fnode.is_err() {
+        return error!("", [fnode]);
+    }
+    let (id, typ, fun) = match &fnode.kind {
+        NodeKind::Ref(id) => match ctx.env.by_id.get(id) {
+            None => return error!("unknown function {f}"),
+            Some(b) => (*id, b.typ.clone(), b.fun.as_ref().and_then(|f| f.upgrade())),
+        },
+        NodeKind::StructRef(id, fid) => match ctx.env.by_id.get(id) {
+            None => return error!("unknown function {f}"),
+            Some(b) => match &b.typ {
+                Type::Struct(flds) => match flds.get(*fid) {
+                    None => not_a_function!(&b.typ),
+                    Some((_, typ)) => (*id, typ.clone(), None),
+                },
+                _ => not_a_function!(&b.typ),
+            },
+        },
+        NodeKind::TupleRef(id, fid) => match ctx.env.by_id.get(&id) {
+            None => return error!("unknown function {f}"),
+            Some(b) => match &b.typ {
+                Type::Tuple(flds) => match flds.get(*fid) {
+                    None => not_a_function!(&b.typ),
+                    Some(typ) => (*id, typ.clone(), None),
+                },
+                _ => not_a_function!(&b.typ),
+            },
+        },
+        _ => not_a_function!(&fnode.typ),
+    };
+    match (id, typ, fun) {
+        (id, Type::Fn(ftype), None) => {
             match compile_late_apply_args(ctx, scope, top_id, &ftype, &args) {
                 Err(e) => error!("{e}"),
                 Ok((args, arg_spec)) => {
                     ctx.user.ref_var(id, top_id);
-                    let typ = Type::Fn(ftype.clone());
-                    let s = Box::new(ExprKind::Ref { name: f.clone() }.to_expr());
-                    let kind = NodeKind::Ref(id);
-                    let fnode = Node { spec: s, typ: typ.clone(), kind };
                     let late = Box::new(ApplyLate {
-                        ftype,
+                        ftype: ftype.clone(),
                         args,
                         arg_spec,
                         fnode,
                         function: None,
                         top_id,
                     });
+                    let typ = Type::Fn(ftype);
                     Node { spec: Box::new(spec), typ, kind: NodeKind::ApplyLate(late) }
                 }
             }
         }
-        Some((_, Bind { fun: None, typ, .. })) => {
-            error!("{f} of typ {typ} is not a function")
-        }
-        Some((_, Bind { fun: Some(lb), id, .. })) => {
-            let varid = *id;
-            let lb = match lb.upgrade() {
-                Some(l) => l,
-                None => return error!("{f} is no longer callable"),
-            };
+        (_, typ, None) => not_a_function!(typ),
+        (id, _, Some(lb)) => {
             let args = match compile_apply_args(ctx, scope, top_id, args, &lb) {
                 Err(e) => return error!("{e}"),
                 Ok(a) => a,
@@ -227,7 +254,7 @@ fn compile_apply<C: Ctx, E: UserEvent>(
             match (lb.init)(ctx, &args, top_id) {
                 Err(e) => error!("error in function {f} {e:?}"),
                 Ok(function) => {
-                    ctx.user.ref_var(varid, top_id);
+                    ctx.user.ref_var(id, top_id);
                     let typ = function.typ().rtype.clone();
                     let kind = NodeKind::Apply { args, function };
                     Node { spec: Box::new(spec), typ, kind }
@@ -500,16 +527,19 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         Expr { kind: ExprKind::TupleRef { name, field }, id: _ } => {
             match ctx.env.lookup_bind(scope, name) {
                 None => error!("{name} not defined"),
-                Some((_, bind)) => match &bind.fun {
-                    Some(_) => error!("can't deref a function"),
-                    None => {
-                        ctx.user.ref_var(bind.id, top_id);
-                        let field = *field;
-                        let typ = Type::empty_tvar();
-                        let spec = Box::new(spec);
-                        Node { spec, typ, kind: NodeKind::TupleRef(bind.id, field) }
-                    }
-                },
+                Some((_, bind)) => {
+                    ctx.user.ref_var(bind.id, top_id);
+                    let field = *field;
+                    let typ = match &bind.typ {
+                        Type::Tuple(ts) => ts
+                            .get(field)
+                            .map(|t| t.clone())
+                            .unwrap_or_else(Type::empty_tvar),
+                        _ => Type::empty_tvar(),
+                    };
+                    let spec = Box::new(spec);
+                    Node { spec, typ, kind: NodeKind::TupleRef(bind.id, field) }
+                }
             }
         }
         Expr { kind: ExprKind::StructRef { name, field }, id: _ } => {
@@ -517,18 +547,23 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 None => error!("{name} not defined"),
                 Some((_, bind)) => {
                     ctx.user.ref_var(bind.id, top_id);
-                    let typ = match &bind.typ {
+                    let (typ, fid) = match &bind.typ {
                         Type::Struct(flds) => flds
                             .iter()
-                            .find_map(
-                                |(n, t)| if field == n { Some(t.clone()) } else { None },
-                            )
-                            .unwrap_or_else(|| Type::empty_tvar()),
-                        _ => Type::empty_tvar(),
+                            .enumerate()
+                            .find_map(|(i, (n, t))| {
+                                if field == n {
+                                    Some((t.clone(), i))
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| (Type::empty_tvar(), 0)),
+                        _ => (Type::empty_tvar(), 0),
                     };
                     let spec = Box::new(spec);
-                    // typcheck will resolve the field index
-                    Node { spec, typ, kind: NodeKind::StructRef(bind.id, 0) }
+                    // typcheck will resolve the field index if we didn't find it already
+                    Node { spec, typ, kind: NodeKind::StructRef(bind.id, fid) }
                 }
             }
         }

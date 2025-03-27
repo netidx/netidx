@@ -30,6 +30,8 @@ use smallvec::{smallvec, SmallVec};
 use std::{marker::PhantomData, sync::LazyLock};
 use triomphe::Arc;
 
+use super::ApplyKind;
+
 #[cfg(test)]
 mod test;
 
@@ -232,7 +234,9 @@ where
                                 args: Arc::from_iter(
                                     argvec.clone().into_iter().map(|a| (None, a)),
                                 ),
-                                function: ["str", "concat"].into(),
+                                function: ApplyKind::Ref {
+                                    name: ["str", "concat"].into(),
+                                },
                             }
                             .to_expr(),
                         )
@@ -244,7 +248,9 @@ where
                                 args: Arc::from_iter(
                                     argvec.clone().into_iter().map(|a| (None, a)),
                                 ),
-                                function: ["str", "concat"].into(),
+                                function: ApplyKind::Ref {
+                                    name: ["str", "concat"].into(),
+                                },
                             }
                             .to_expr(),
                         )
@@ -448,17 +454,32 @@ where
             let a = ExprKind::Ref { name }.to_expr();
             match args {
                 Either::Left((start, end)) => ExprKind::Apply {
-                    function: ["op", "slice"].into(),
+                    function: ApplyKind::Ref { name: ["op", "slice"].into() },
                     args: Arc::from_iter([(None, a), (None, start), (None, end)]),
                 }
                 .to_expr(),
                 Either::Right(e) => ExprKind::Apply {
-                    function: ["op", "index"].into(),
+                    function: ApplyKind::Ref { name: ["op", "index"].into() },
                     args: Arc::from_iter([(None, a), (None, e)]),
                 }
                 .to_expr(),
             }
         })
+}
+
+fn applykind<I>() -> impl Parser<I, Output = ApplyKind>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        attempt((modpath().skip(sptoken('.')), spfname()))
+            .map(|(name, field)| ApplyKind::StructRef { name, field }),
+        (modpath().skip(sptoken('.')), int::<_, usize>())
+            .map(|(name, field)| ApplyKind::TupleRef { name, field }),
+        modpath().skip(not_followed_by(token('['))).map(|name| ApplyKind::Ref { name }),
+    ))
 }
 
 fn apply<I>() -> impl Parser<I, Output = Expr>
@@ -468,7 +489,7 @@ where
     I::Range: Range,
 {
     (
-        modpath(),
+        applykind(),
         between(
             sptoken('('),
             sptoken(')'),
@@ -487,7 +508,7 @@ where
             ),
         ),
     )
-        .then(|(function, args): (ModPath, Vec<(Option<ArcStr>, Expr)>)| {
+        .then(|(function, args): (ApplyKind, Vec<(Option<ArcStr>, Expr)>)| {
             let mut anon = false;
             for (a, _) in &args {
                 if a.is_some() && anon {
@@ -500,7 +521,7 @@ where
             }
             value((function, args)).left()
         })
-        .map(|(function, args): (ModPath, Vec<(Option<ArcStr>, Expr)>)| {
+        .map(|(function, args): (ApplyKind, Vec<(Option<ArcStr>, Expr)>)| {
             ExprKind::Apply { function, args: Arc::from(args) }.to_expr()
         })
 }
