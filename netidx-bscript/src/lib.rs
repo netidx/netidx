@@ -115,6 +115,10 @@ pub trait Apply<C: Ctx, E: UserEvent> {
         event: &mut Event<E>,
     ) -> Option<Value>;
 
+    fn delete(&mut self, _ctx: &mut ExecCtx<C, E>) {
+        ()
+    }
+
     fn typecheck(
         &mut self,
         _ctx: &mut ExecCtx<C, E>,

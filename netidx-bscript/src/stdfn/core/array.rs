@@ -17,6 +17,92 @@ use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{mem, sync::Arc};
 
+struct App<C: Ctx, E: UserEvent> {
+    x: BindId,
+    node: Node<C, E>
+}
+
+pub(super) struct MapQ<C: Ctx, E: UserEvent> {
+    scope: ModPath,
+    pred: LambdaBind,
+    typ: FnType<NoRefs>,
+    map: Vec<App<C, E>>,
+}
+
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for MapQ<C, E> {
+    const NAME: &str = "array_mapq";
+    deftype!("fn(Array<'a>, fn('a) -> 'b) -> Array<'b>");
+
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|ctx, typ, scope, from, top_id| match from {
+            [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
+                Ok(Box::new(Self {
+                    scope: scope.clone(),
+                    pred: lb.clone(),
+                    typ: typ.clone(),
+                    map: vec![]
+                }))
+            }
+            _ => bail!("expected a function"),
+        })
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Apply<C, E> for $name<C, E> {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        match from[0].update(ctx, event) {
+            Some(Value::Array(a)) if a.len() == 0 => {
+                self.predicate(ctx, false, event);
+                self.finish()
+            }
+            Some(Value::Array(a)) => {
+                let mut variables = FxHashMap::default();
+                for (i, v) in a.iter().enumerate() {
+                    event.variables.insert(self.x, v.clone());
+                    self.predicate(ctx, true, event);
+                    if i == 0 {
+                        variables = mem::take(&mut event.variables);
+                    }
+                }
+                event.variables = variables;
+                self.finish()
+            }
+            Some(_) | None => {
+                self.predicate(ctx, false, event);
+                None
+            }
+        }
+    }
+
+    fn typecheck(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+    ) -> anyhow::Result<()> {
+        for n in from.iter_mut() {
+            n.typecheck(ctx)?;
+        }
+        let et = self.from[0].typ.clone();
+        Type::Array(triomphe::Arc::new(et)).check_contains(&from[0].typ)?;
+        for n in self.from.iter_mut() {
+            n.typecheck(ctx)?;
+        }
+        self.pred.typecheck(ctx, &mut self.from[..])?;
+        match self.typ.args.get(1) {
+            Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
+                ft.check_contains(&self.pred.typ())?
+            }
+            _ => bail!("expected function as 2nd arg"),
+        }
+        Ok(())
+    }
+}
+
 macro_rules! mapfn {
     ($name:ident, $bname:literal, $typ:literal, $buf:literal) => {
         pub(super) struct $name<C: Ctx, E: UserEvent> {

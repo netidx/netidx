@@ -1,6 +1,6 @@
 use crate::{
     env::LambdaBind,
-    expr::{Expr, ExprId, ModPath},
+    expr::{Expr, ExprId, ExprKind, ModPath},
     node::pattern::PatternNode,
     typ::{FnType, NoRefs, Type},
     Apply, BindId, Ctx, Event, ExecCtx, LambdaId, UserEvent,
@@ -72,8 +72,15 @@ pub struct ApplyLate<C: Ctx, E: UserEvent> {
 }
 
 pub enum NodeKind<C: Ctx, E: UserEvent> {
-    Use,
-    TypeDef,
+    Nop,
+    Use {
+        scope: ModPath,
+        name: ModPath,
+    },
+    TypeDef {
+        scope: ModPath,
+        name: ArcStr,
+    },
     Constant(Value),
     Module(Box<[Node<C, E>]>),
     Do(Box<[Node<C, E>]>),
@@ -244,6 +251,116 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             ctx.env = env;
         }
         node
+    }
+
+    pub fn nop() -> Self {
+        Node {
+            spec: Box::new(ExprKind::Constant(Value::I64(42)).to_expr()),
+            typ: Type::Bottom(PhantomData),
+            kind: NodeKind::Nop,
+        }
+    }
+
+    pub fn delete(self, ctx: &mut ExecCtx<C, E>) {
+        let mut ids: SmallVec<[BindId; 8]> = smallvec![];
+        match self.kind {
+            NodeKind::Constant(_)
+            | NodeKind::Nop
+            | NodeKind::Ref(_)
+            | NodeKind::StructRef(_, _)
+            | NodeKind::TupleRef(_, _) => (),
+            NodeKind::Add { mut lhs, mut rhs }
+            | NodeKind::Sub { mut lhs, mut rhs }
+            | NodeKind::Mul { mut lhs, mut rhs }
+            | NodeKind::Div { mut lhs, mut rhs }
+            | NodeKind::Eq { mut lhs, mut rhs }
+            | NodeKind::Ne { mut lhs, mut rhs }
+            | NodeKind::Lte { mut lhs, mut rhs }
+            | NodeKind::Lt { mut lhs, mut rhs }
+            | NodeKind::Gt { mut lhs, mut rhs }
+            | NodeKind::Gte { mut lhs, mut rhs }
+            | NodeKind::And { mut lhs, mut rhs }
+            | NodeKind::Or { mut lhs, mut rhs } => {
+                mem::replace(&mut lhs.node, Self::nop()).delete(ctx);
+                mem::replace(&mut rhs.node, Self::nop()).delete(ctx);
+            }
+            NodeKind::Use { scope, name } => {
+                if let Some(used) = ctx.env.used.get_mut_cow(&scope) {
+                    TArc::make_mut(used).retain(|n| n != &name);
+                    if used.is_empty() {
+                        ctx.env.used.remove_cow(&scope);
+                    }
+                }
+            }
+            NodeKind::TypeDef { scope, name } => ctx.env.undeftype(&scope, &name),
+            NodeKind::Module(nodes)
+            | NodeKind::Do(nodes)
+            | NodeKind::Any { args: nodes }
+            | NodeKind::Error { error: _, children: nodes } => {
+                for n in nodes {
+                    n.delete(ctx)
+                }
+            }
+            NodeKind::Connect(_, mut n)
+            | NodeKind::TypeCast { target: _, mut n }
+            | NodeKind::Qop(_, mut n)
+            | NodeKind::Not { node: mut n } => {
+                mem::replace(&mut *n, Self::nop()).delete(ctx)
+            }
+            NodeKind::Variant { tag: _, args }
+            | NodeKind::Array { args }
+            | NodeKind::Tuple { args }
+            | NodeKind::Struct { names: _, args } => {
+                for n in args {
+                    n.node.delete(ctx)
+                }
+            }
+            NodeKind::StructWith { name: _, current: _, replace } => {
+                for (_, n) in replace {
+                    n.node.delete(ctx)
+                }
+            }
+            NodeKind::Bind { pattern, node } => {
+                pattern.ids(&mut |id| ids.push(id));
+                node.delete(ctx);
+                for id in ids.drain(..) {
+                    ctx.env.unbind_variable(id)
+                }
+            }
+            NodeKind::Select { selected: _, mut arg, arms } => {
+                mem::replace(&mut arg.node, Self::nop()).delete(ctx);
+                for (pat, arg) in arms {
+                    arg.node.delete(ctx);
+                    pat.structure_predicate.ids(&mut |id| ids.push(id));
+                    if let Some(n) = pat.guard {
+                        n.node.delete(ctx);
+                    }
+                    for id in ids.drain(..) {
+                        ctx.env.unbind_variable(id);
+                    }
+                }
+            }
+            NodeKind::Lambda(lb) => {
+                ctx.env.lambdas.remove_cow(&lb.id);
+            }
+            NodeKind::Apply { args, mut function } => {
+                function.delete(ctx);
+                for n in args {
+                    n.delete(ctx)
+                }
+            }
+            NodeKind::ApplyLate(late) => {
+                let ApplyLate { ftype: _, fnode, args, arg_spec: _, function, top_id: _ } =
+                    *late;
+                if let Some((_, mut f)) = function {
+                    f.delete(ctx)
+                }
+                fnode.delete(ctx);
+                for n in args {
+                    n.delete(ctx)
+                }
+            }
+        }
     }
 
     fn update_select(

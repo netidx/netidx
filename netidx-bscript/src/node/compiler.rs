@@ -403,7 +403,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             } else {
                 let used = ctx.env.used.get_or_default_cow(scope.clone());
                 Arc::make_mut(used).push(name.clone());
-                let kind = NodeKind::Use;
+                let kind = NodeKind::Use { scope: scope.clone(), name: name.clone() };
                 Node { spec: Box::new(spec), typ: Type::Bottom(PhantomData), kind }
             }
         }
@@ -662,9 +662,14 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 Ok(typ) => match ctx.env.deftype(scope, name, typ) {
                     Err(e) => error!("{e}"),
                     Ok(()) => {
+                        let name = name.clone();
                         let spec = Box::new(spec);
                         let typ = Type::Bottom(PhantomData);
-                        Node { spec, typ, kind: NodeKind::TypeDef }
+                        Node {
+                            spec,
+                            typ,
+                            kind: NodeKind::TypeDef { scope: scope.clone(), name },
+                        }
                     }
                 },
             }

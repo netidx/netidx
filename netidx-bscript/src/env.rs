@@ -218,6 +218,15 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         }
     }
 
+    pub fn undeftype(&mut self, scope: &ModPath, name: &str) {
+        if let Some(defs) = self.typedefs.get_mut_cow(scope) {
+            defs.remove_cow(&CompactString::from(name));
+            if defs.len() == 0 {
+                self.typedefs.remove_cow(scope);
+            }
+        }
+    }
+
     // create a new binding. If an existing bind exists in the same
     // scope shadow it.
     pub fn bind_variable(
@@ -243,5 +252,16 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
             typ,
             fun: None,
         })
+    }
+
+    pub fn unbind_variable(&mut self, id: BindId) {
+        if let Some(b) = self.by_id.remove_cow(&id) {
+            if let Some(binds) = self.binds.get_mut_cow(&b.scope) {
+                binds.remove_cow(&b.name);
+                if binds.len() == 0 {
+                    self.binds.remove_cow(&b.scope);
+                }
+            }
+        }
     }
 }

@@ -207,6 +207,59 @@ impl StructPatternNode {
         Ok(t)
     }
 
+    pub fn ids<F: FnMut(BindId)>(&self, f: &mut F) {
+        match &self {
+            Self::Ignore | Self::Literal(_) => (),
+            Self::Bind(id) => f(*id),
+            Self::Slice { tuple: _, all, binds } => {
+                if let Some(id) = all {
+                    f(*id);
+                }
+                for n in binds.iter() {
+                    n.ids(f)
+                }
+            }
+            Self::Variant { tag: _, all, binds } => {
+                if let Some(id) = all {
+                    f(*id)
+                }
+                for n in binds.iter() {
+                    n.ids(f)
+                }
+            }
+            Self::SlicePrefix { all, prefix, tail } => {
+                if let Some(id) = all {
+                    f(*id)
+                }
+                for n in prefix.iter() {
+                    n.ids(f)
+                }
+                if let Some(id) = tail {
+                    f(*id)
+                }
+            }
+            Self::SliceSuffix { all, head, suffix } => {
+                if let Some(id) = all {
+                    f(*id)
+                }
+                if let Some(id) = head {
+                    f(*id)
+                }
+                for n in suffix.iter() {
+                    n.ids(f)
+                }
+            }
+            Self::Struct { all, binds } => {
+                if let Some(id) = all {
+                    f(*id)
+                }
+                for (_, _, n) in binds.iter() {
+                    n.ids(f)
+                }
+            }
+        }
+    }
+
     pub fn bind<F: FnMut(BindId, Value)>(&self, v: &Value, f: &mut F) {
         match &self {
             Self::Ignore | Self::Literal(_) => (),
