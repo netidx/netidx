@@ -367,6 +367,94 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
         }
     }
 
+    /// call f with the id of every variable referenced by self
+    pub fn refs<'a>(&self, mut f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        match &self.kind {
+            NodeKind::Constant(_)
+            | NodeKind::Nop
+            | NodeKind::Use { .. }
+            | NodeKind::TypeDef { .. }
+            | NodeKind::Lambda(_) => (),
+            NodeKind::Ref { id, top_id: _ }
+            | NodeKind::StructRef { id, field: _, top_id: _ }
+            | NodeKind::TupleRef { id, field: _, top_id: _ } => {
+                f(*id);
+            }
+            NodeKind::Add { lhs, rhs }
+            | NodeKind::Sub { lhs, rhs }
+            | NodeKind::Mul { lhs, rhs }
+            | NodeKind::Div { lhs, rhs }
+            | NodeKind::Eq { lhs, rhs }
+            | NodeKind::Ne { lhs, rhs }
+            | NodeKind::Lte { lhs, rhs }
+            | NodeKind::Lt { lhs, rhs }
+            | NodeKind::Gt { lhs, rhs }
+            | NodeKind::Gte { lhs, rhs }
+            | NodeKind::And { lhs, rhs }
+            | NodeKind::Or { lhs, rhs } => {
+                lhs.node.refs(f);
+                rhs.node.refs(f);
+            }
+            NodeKind::Module(nodes)
+            | NodeKind::Do(nodes)
+            | NodeKind::Any { args: nodes }
+            | NodeKind::Error { error: _, children: nodes } => {
+                for n in nodes {
+                    n.refs(f)
+                }
+            }
+            NodeKind::Connect(_, n)
+            | NodeKind::TypeCast { target: _, n }
+            | NodeKind::Qop(_, n)
+            | NodeKind::Not { node: n } => n.refs(f),
+            NodeKind::Variant { tag: _, args }
+            | NodeKind::Array { args }
+            | NodeKind::Tuple { args }
+            | NodeKind::Struct { names: _, args } => {
+                for n in args {
+                    n.node.refs(f)
+                }
+            }
+            NodeKind::StructWith { name, current: _, replace } => {
+                f(*name);
+                for (_, n) in replace {
+                    n.node.refs(f)
+                }
+            }
+            NodeKind::Bind { pattern, node } => {
+                pattern.ids(&mut f);
+                node.refs(f);
+            }
+            NodeKind::Select { selected: _, arg, arms } => {
+                arg.node.refs(f);
+                for (pat, arg) in arms {
+                    arg.node.refs(f);
+                    pat.structure_predicate.ids(&mut f);
+                    if let Some(n) = &pat.guard {
+                        n.node.refs(f);
+                    }
+                }
+            }
+            NodeKind::Apply { args, function } => {
+                function.refs(f);
+                for n in args {
+                    n.refs(f)
+                }
+            }
+            NodeKind::ApplyLate(late) => {
+                let ApplyLate { ftype: _, fnode, args, arg_spec: _, function, top_id: _ } =
+                    &**late;
+                if let Some((_, fun)) = function {
+                    fun.refs(f)
+                }
+                fnode.refs(f);
+                for n in args {
+                    n.refs(f)
+                }
+            }
+        }
+    }
+
     fn update_select(
         ctx: &mut ExecCtx<C, E>,
         selected: &mut Option<usize>,

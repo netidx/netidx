@@ -9,14 +9,14 @@ use crate::{
     typ::{FnArgType, FnType, NoRefs, Type},
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
 };
-use anyhow::bail;
 #[cfg(test)]
 use anyhow::Result;
+use anyhow::{anyhow, bail};
 use fxhash::FxHashMap;
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
-use std::{marker::PhantomData, mem, sync::Arc};
+use std::{collections::hash_map::Entry, marker::PhantomData, mem, sync::Arc};
 use triomphe::Arc as TArc;
 
 pub(super) struct MapQ<C: Ctx, E: UserEvent> {
@@ -25,10 +25,11 @@ pub(super) struct MapQ<C: Ctx, E: UserEvent> {
     top_id: ExprId,
     ftyp: TArc<FnType<NoRefs>>,
     btyp: Type<NoRefs>,
-    args: Vec<Node<C, E>>,
-    binds: Vec<BindId>,
     refs: FxHashMap<BindId, Option<Value>>,
-    out: SmallVec<[Value; 16]>,
+    args: SmallVec<[Node<C, E>; 16]>,
+    binds: SmallVec<[BindId; 16]>,
+    added: SmallVec<[BindId; 16]>,
+    out: SmallVec<[Option<Value>; 16]>,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for MapQ<C, E> {
@@ -44,9 +45,10 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for MapQ<C, E> {
                     top_id,
                     ftyp: TArc::new(typ.clone()),
                     btyp: Type::Bottom(PhantomData),
-                    args: vec![],
-                    binds: vec![],
                     refs: FxHashMap::default(),
+                    args: smallvec![],
+                    binds: smallvec![],
+                    added: smallvec![],
                     out: smallvec![],
                 }))
             }
@@ -67,49 +69,73 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for MapQ<C, E> {
                 *val = Some(v.clone());
             }
         }
+        let alen = self.args.len();
         let up = match from[0].update(ctx, event) {
             Some(Value::Array(a)) if a.len() == self.args.len() => Some(a),
             Some(Value::Array(a)) if a.len() < self.args.len() => {
                 while self.args.len() > a.len() {
                     self.args.pop().unwrap().delete(ctx);
+                    self.out.pop();
                     ctx.env.unbind_variable(self.binds.pop().unwrap());
                 }
                 Some(a)
             }
             Some(Value::Array(a)) => {
-                let vars = mem::take(&mut event.variables);
-                for (id, v) in &self.refs {
-                    if let Some(v) = v {
-                        event.variables.insert(*id, v.clone());
-                    }
-                }
                 while self.args.len() < a.len() {
                     let (id, node) =
                         gen::bind(ctx, &self.scope, "x", self.btyp.clone(), self.top_id);
                     let fargs = Box::from_iter([node]);
-                    let mut node = gen::apply(
+                    let node = gen::apply(
                         ctx,
                         &self.pred,
                         fargs,
                         Type::Fn(self.ftyp.clone()),
                         self.top_id,
                     );
-                    let _ = node.update(ctx, event);
                     self.args.push(node);
                     self.binds.push(id);
+                    self.out.push(None);
                 }
-                event.variables = vars;
                 Some(a)
             }
             Some(_) | None => None,
         };
-        up.map(|a| {
+        if let Some(a) = up {
             for (id, v) in self.binds.iter().zip(a.iter()) {
                 event.variables.insert(*id, v.clone());
             }
-            self.out.extend(self.args.iter_mut().filter_map(|n| n.update(ctx, event)));
-            Value::Array(ValArray::from_iter_exact(self.out.drain(..)))
-        })
+        }
+        let init = event.init;
+        let mut up = false;
+        for (i, n) in self.args.iter_mut().enumerate() {
+            if i == alen {
+                // new nodes were added starting here
+                event.init = true;
+                for (id, v) in &self.refs {
+                    if let Some(v) = v {
+                        if let Entry::Vacant(e) = event.variables.entry(*id) {
+                            e.insert(v.clone());
+                            self.added.push(*id);
+                        }
+                    }
+                }
+            }
+            if let Some(v) = n.update(ctx, event) {
+                self.out[i] = Some(v);
+                up = true;
+            }
+        }
+        event.init = init;
+        for id in self.added.drain(..) {
+            event.variables.remove(&id);
+        }
+        if up && self.out.iter().all(|v| v.is_some()) {
+            Some(Value::Array(ValArray::from_iter_exact(
+                self.out.iter().map(|v| v.as_ref().unwrap().clone()),
+            )))
+        } else {
+            None
+        }
     }
 
     fn typecheck(
@@ -120,15 +146,36 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for MapQ<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        let et = self.from[0].typ.clone();
-        Type::Array(triomphe::Arc::new(et)).check_contains(&from[0].typ)?;
-        for n in self.from.iter_mut() {
-            n.typecheck(ctx)?;
-        }
-        self.pred.typecheck(ctx, &mut self.from[..])?;
-        match self.typ.args.get(1) {
+        let at = self
+            .ftyp
+            .args
+            .get(0)
+            .map(|a| a.typ.clone())
+            .ok_or_else(|| anyhow!("expected 2 arguments"))?;
+        let lt = self
+            .ftyp
+            .args
+            .get(1)
+            .map(|a| a.typ.clone())
+            .ok_or_else(|| anyhow!("expected 2 arguments"))?;
+        at.check_contains(&from[0].typ)?;
+        let et = match at {
+            Type::Array(et) => (*et).clone(),
+            _ => bail!("expected array got {at}"),
+        };
+        self.btyp = et;
+        let (_, node) = gen::bind(ctx, &self.scope, "x", self.btyp.clone(), self.top_id);
+        let fargs = Box::from_iter([node]);
+        let mut node = gen::apply(ctx, &self.pred, fargs, lt.clone(), self.top_id);
+        let r = node.typecheck(ctx);
+        node.refs(&mut |id| {
+            self.refs.insert(id, None);
+        });
+        node.delete(ctx);
+        r?;
+        match self.ftyp.args.get(1) {
             Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
-                ft.check_contains(&self.pred.typ())?
+                ft.check_contains(&self.ftyp)?
             }
             _ => bail!("expected function as 2nd arg"),
         }

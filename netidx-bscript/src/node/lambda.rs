@@ -3,7 +3,7 @@ use crate::{
     expr::{Arg, Expr, ExprId, ModPath},
     node::{compiler, pattern::StructPatternNode, Node, NodeKind},
     typ::{FnArgType, FnType, NoRefs, Refs, TVar, Type},
-    Apply, Ctx, Event, ExecCtx, InitFn, LambdaId, UserEvent,
+    Apply, BindId, Ctx, Event, ExecCtx, InitFn, LambdaId, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
@@ -67,6 +67,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for LambdaCallSite<C, E> {
 
     fn typ(&self) -> Arc<FnType<NoRefs>> {
         Arc::clone(&self.typ)
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.body.refs(f)
     }
 }
 
@@ -172,6 +176,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInCallSite<C, E> {
 
     fn typ(&self) -> Arc<FnType<NoRefs>> {
         Arc::clone(&self.specified_type)
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.apply.refs(f)
     }
 }
 

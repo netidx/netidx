@@ -115,10 +115,14 @@ pub trait Apply<C: Ctx, E: UserEvent> {
         event: &mut Event<E>,
     ) -> Option<Value>;
 
+    /// delete any internally generated nodes, only needed for
+    /// builtins that dynamically generate code at runtime
     fn delete(&mut self, _ctx: &mut ExecCtx<C, E>) {
         ()
     }
 
+    /// apply custom typechecking to the lambda, only needed for
+    /// builtins that take lambdas as arguments
     fn typecheck(
         &mut self,
         _ctx: &mut ExecCtx<C, E>,
@@ -127,6 +131,8 @@ pub trait Apply<C: Ctx, E: UserEvent> {
         Ok(())
     }
 
+    /// return the lambdas type, builtins do not need to implement
+    /// this, it is implemented by the BuiltIn wrapper
     fn typ(&self) -> Arc<FnType<NoRefs>> {
         const EMPTY: LazyLock<Arc<FnType<NoRefs>>> = LazyLock::new(|| {
             Arc::new(FnType {
@@ -137,6 +143,14 @@ pub trait Apply<C: Ctx, E: UserEvent> {
             })
         });
         Arc::clone(&*EMPTY)
+    }
+
+    /// push a list of variables the lambda references in addition to
+    /// it's arguments. Builtins only need to implement this if they
+    /// lookup and reference variables from the environment that were
+    /// not explicitly passed in.
+    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        ()
     }
 }
 
