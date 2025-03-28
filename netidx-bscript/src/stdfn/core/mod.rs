@@ -982,6 +982,7 @@ pub mod core {
     pub mod array {
         pub let filter = |a, f| 'array_filter
         pub let filter_map = |a, f| 'array_filter_map
+        pub let mapq = |a, f| 'array_mapq
         pub let map = |a, f| 'array_map
         pub let flat_map = |a, f| 'array_flat_map
         pub let fold = |a, init, f| 'array_fold
@@ -1033,6 +1034,7 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<array::Map<C, E>>().unwrap();
     ctx.register_builtin::<array::Fold<C, E>>().unwrap();
     ctx.register_builtin::<array::FilterMap<C, E>>().unwrap();
+    ctx.register_builtin::<array::MapQ<C, E>>().unwrap();
     ctx.register_builtin::<FilterErr>().unwrap();
     ctx.register_builtin::<array::Group<C, E>>().unwrap();
     ctx.register_builtin::<Index>().unwrap();

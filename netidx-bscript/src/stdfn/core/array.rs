@@ -181,6 +181,12 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for MapQ<C, E> {
         }
         Ok(())
     }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        for id in self.refs.keys() {
+            f(*id)
+        }
+    }
 }
 
 macro_rules! mapfn {
