@@ -174,9 +174,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for MapQ<C, E> {
         node.delete(ctx);
         r?;
         match self.ftyp.args.get(1) {
-            Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
-                ft.check_contains(&self.ftyp)?
-            }
+            Some(FnArgType { label: _, typ }) => typ.check_contains(&lt)?,
             _ => bail!("expected function as 2nd arg"),
         }
         Ok(())
@@ -188,6 +186,27 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for MapQ<C, E> {
         }
     }
 }
+
+#[cfg(test)]
+const ARRAY_MAPQ: &str = r#"
+{
+  let a = [1, 2, 3, 4];
+  array::mapq(a, |x| x > 3)
+}
+"#;
+
+#[cfg(test)]
+run!(array_mapq, ARRAY_MAPQ, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::Bool(false), Value::Bool(false), Value::Bool(false), Value::Bool(true)] => {
+                true
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+});
 
 macro_rules! mapfn {
     ($name:ident, $bname:literal, $typ:literal, $buf:literal) => {

@@ -104,7 +104,7 @@ impl Ctx for TestCtx {
     }
 
     fn unref_var(&mut self, _id: BindId, _ref_by: ExprId) {
-        unimplemented!()
+        ()
     }
 
     fn set_var(&mut self, id: BindId, value: Value) {
