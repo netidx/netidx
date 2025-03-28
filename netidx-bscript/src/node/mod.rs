@@ -801,7 +801,10 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 Node::update_select(ctx, selected, arg, arms, event)
             }
             NodeKind::Lambda(lb) if event.init => Some(Value::U64(lb.id.0)),
-            NodeKind::Use | NodeKind::Lambda(_) | NodeKind::TypeDef => None,
+            NodeKind::Use { .. }
+            | NodeKind::Lambda(_)
+            | NodeKind::TypeDef { .. }
+            | NodeKind::Nop => None,
         };
         if ctx.dbg_ctx.trace {
             if let Some(v) = &res {

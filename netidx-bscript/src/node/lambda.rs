@@ -182,11 +182,11 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             NodeKind::Do(children) => children.last().and_then(|t| t.find_lambda()),
             NodeKind::Constant(_)
             | NodeKind::Any { .. }
-            | NodeKind::Use
+            | NodeKind::Use { .. }
             | NodeKind::Bind { .. }
-            | NodeKind::Ref(_)
-            | NodeKind::StructRef(_, _)
-            | NodeKind::TupleRef(_, _)
+            | NodeKind::Ref { .. }
+            | NodeKind::StructRef { .. }
+            | NodeKind::TupleRef { .. }
             | NodeKind::Connect(_, _)
             | NodeKind::Array { .. }
             | NodeKind::Tuple { .. }
@@ -212,8 +212,9 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::Mul { .. }
             | NodeKind::Div { .. }
             | NodeKind::TypeCast { .. }
-            | NodeKind::TypeDef
-            | NodeKind::Select { .. } => None,
+            | NodeKind::TypeDef { .. }
+            | NodeKind::Select { .. }
+            | NodeKind::Nop => None,
         }
     }
 }

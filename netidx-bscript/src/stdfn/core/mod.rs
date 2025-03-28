@@ -645,7 +645,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
                 let mut from = [Node {
                     spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
                     typ: from[0].typ.clone(),
-                    kind: NodeKind::Ref(x),
+                    kind: NodeKind::Ref { id: x, top_id },
                 }];
                 let pred = (lb.init)(ctx, &mut from, top_id)?;
                 Ok(Box::new(Self { pred, typ: typ.clone(), x, from }))

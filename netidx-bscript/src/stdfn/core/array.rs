@@ -17,9 +17,14 @@ use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{mem, sync::Arc};
 
+/*
 struct App<C: Ctx, E: UserEvent> {
     x: BindId,
-    node: Node<C, E>
+    node: Node<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> App<C, E> {
+    fn delete(&self, ctx: &mut ExecCtx<C, E>) {}
 }
 
 pub(super) struct MapQ<C: Ctx, E: UserEvent> {
@@ -40,7 +45,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for MapQ<C, E> {
                     scope: scope.clone(),
                     pred: lb.clone(),
                     typ: typ.clone(),
-                    map: vec![]
+                    map: vec![],
                 }))
             }
             _ => bail!("expected a function"),
@@ -48,7 +53,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for MapQ<C, E> {
     }
 }
 
-impl<C: Ctx, E: UserEvent> Apply<C, E> for $name<C, E> {
+impl<C: Ctx, E: UserEvent> Apply<C, E> for MapQ<C, E> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -102,6 +107,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for $name<C, E> {
         Ok(())
     }
 }
+*/
 
 macro_rules! mapfn {
     ($name:ident, $bname:literal, $typ:literal, $buf:literal) => {
@@ -127,7 +133,7 @@ macro_rules! mapfn {
                                 ExprKind::Ref { name: ["x"].into() }.to_expr(),
                             ),
                             typ: Type::empty_tvar(),
-                            kind: NodeKind::Ref(x),
+                            kind: NodeKind::Ref { id: x, top_id },
                         }];
                         let pred = (lb.init)(ctx, &mut from, top_id)?;
                         Ok(Box::new(Self {
@@ -454,12 +460,12 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Fold<C, E> {
                     Node {
                         spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
                         typ: Type::empty_tvar(),
-                        kind: NodeKind::Ref(x),
+                        kind: NodeKind::Ref { id: x, top_id },
                     },
                     Node {
                         spec: Box::new(ExprKind::Ref { name: ["y"].into() }.to_expr()),
                         typ: Type::empty_tvar(),
-                        kind: NodeKind::Ref(y),
+                        kind: NodeKind::Ref { id: y, top_id },
                     },
                 ];
                 let pred = (lb.init)(ctx, &mut from, top_id)?;
@@ -715,12 +721,12 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
                     Node {
                         spec: Box::new(ExprKind::Ref { name: ["n"].into() }.to_expr()),
                         typ: n_typ,
-                        kind: NodeKind::Ref(n),
+                        kind: NodeKind::Ref { id: n, top_id },
                     },
                     Node {
                         spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
                         typ: from[0].typ.clone(),
-                        kind: NodeKind::Ref(x),
+                        kind: NodeKind::Ref { id: x, top_id },
                     },
                 ];
                 let pred = (lb.init)(ctx, &mut from, top_id)?;

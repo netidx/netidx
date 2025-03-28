@@ -174,7 +174,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
                 Ok(())
             }
-            NodeKind::TupleRef(id, i) => {
+            NodeKind::TupleRef { id, field: i, top_id: _ } => {
                 let bind =
                     ctx.env.by_id.get(id).ok_or_else(|| anyhow!("BUG: missing bind"))?;
                 let etyp = bind.typ.with_deref(|typ| match typ {
@@ -185,7 +185,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 let etyp = wrap!(etyp)?;
                 wrap!(self.typ.check_contains(&etyp))
             }
-            NodeKind::StructRef(id, i) => {
+            NodeKind::StructRef { id, field: i, top_id: _ } => {
                 let bind =
                     ctx.env.by_id.get(id).ok_or_else(|| anyhow!("BUG: missing bind"))?;
                 let field = match &self.spec.kind {
@@ -318,12 +318,13 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 self.typ.check_contains(&rtype)
             }
             NodeKind::Constant(_)
-            | NodeKind::Use
-            | NodeKind::TypeDef
+            | NodeKind::Use { .. }
+            | NodeKind::TypeDef { .. }
             | NodeKind::Module(_)
-            | NodeKind::Ref(_)
+            | NodeKind::Ref { .. }
             | NodeKind::Error { .. }
-            | NodeKind::Lambda(_) => Ok(()),
+            | NodeKind::Lambda(_)
+            | NodeKind::Nop => Ok(()),
         }
     }
 }
