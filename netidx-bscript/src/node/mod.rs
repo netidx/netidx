@@ -264,14 +264,6 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
         node
     }
 
-    pub fn nop() -> Self {
-        Node {
-            spec: Box::new(ExprKind::Constant(Value::I64(42)).to_expr()),
-            typ: Type::Bottom(PhantomData),
-            kind: NodeKind::Nop,
-        }
-    }
-
     pub fn delete(self, ctx: &mut ExecCtx<C, E>) {
         let mut ids: SmallVec<[BindId; 8]> = smallvec![];
         match self.kind {
@@ -293,8 +285,8 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::Gte { mut lhs, mut rhs }
             | NodeKind::And { mut lhs, mut rhs }
             | NodeKind::Or { mut lhs, mut rhs } => {
-                mem::replace(&mut lhs.node, Self::nop()).delete(ctx);
-                mem::replace(&mut rhs.node, Self::nop()).delete(ctx);
+                mem::replace(&mut lhs.node, gen::nop()).delete(ctx);
+                mem::replace(&mut rhs.node, gen::nop()).delete(ctx);
             }
             NodeKind::Use { scope, name } => {
                 if let Some(used) = ctx.env.used.get_mut_cow(&scope) {
@@ -317,7 +309,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::TypeCast { target: _, mut n }
             | NodeKind::Qop(_, mut n)
             | NodeKind::Not { node: mut n } => {
-                mem::replace(&mut *n, Self::nop()).delete(ctx)
+                mem::replace(&mut *n, gen::nop()).delete(ctx)
             }
             NodeKind::Variant { tag: _, args }
             | NodeKind::Array { args }
@@ -340,7 +332,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
             }
             NodeKind::Select { selected: _, mut arg, arms } => {
-                mem::replace(&mut arg.node, Self::nop()).delete(ctx);
+                mem::replace(&mut arg.node, gen::nop()).delete(ctx);
                 for (pat, arg) in arms {
                     arg.node.delete(ctx);
                     pat.structure_predicate.ids(&mut |id| ids.push(id));
@@ -635,7 +627,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
         }
         let eid = self.spec.id;
         let res = match &mut self.kind {
-            NodeKind::Error { .. } => None,
+            NodeKind::Error { .. } => self.extract_err().map(|e| Value::Error(e)),
             NodeKind::Constant(v) => {
                 if event.init {
                     Some(v.clone())
@@ -812,5 +804,67 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             }
         }
         res
+    }
+}
+
+/// helpers for dynamically generating code in built-in functions. Not used by the compiler
+pub mod gen {
+    use super::*;
+
+    /// return a no op node
+    pub fn nop<C: Ctx, E: UserEvent>() -> Node<C, E> {
+        Node {
+            spec: Box::new(ExprKind::Constant(Value::String(literal!("nop"))).to_expr()),
+            typ: Type::Bottom(PhantomData),
+            kind: NodeKind::Nop,
+        }
+    }
+
+    /// bind a variable and return a node referencing it
+    pub fn bind<C: Ctx, E: UserEvent>(
+        ctx: &mut ExecCtx<C, E>,
+        scope: &ModPath,
+        name: &str,
+        typ: Type<NoRefs>,
+        top_id: ExprId,
+    ) -> (BindId, Node<C, E>) {
+        let id = ctx.env.bind_variable(scope, name, typ.clone()).id;
+        ctx.user.ref_var(id, top_id);
+        let spec =
+            Box::new(ExprKind::Ref { name: ModPath(scope.0.append(name)) }.to_expr());
+        let kind = NodeKind::Ref { id, top_id };
+        (id, Node { spec, kind, typ })
+    }
+
+    /// generate and return an error node
+    pub fn error<C: Ctx, E: UserEvent>(spec: Box<Expr>, msg: &str) -> Node<C, E> {
+        Node {
+            spec,
+            kind: NodeKind::Error {
+                error: Some(msg.into()),
+                children: Box::from_iter([]),
+            },
+            typ: Type::Bottom(PhantomData),
+        }
+    }
+
+    /// generate and return an apply node for the given lambda
+    pub fn apply<C: Ctx, E: UserEvent>(
+        ctx: &mut ExecCtx<C, E>,
+        lb: &LambdaBind<C, E>,
+        args: Box<[Node<C, E>]>,
+        typ: Type<NoRefs>,
+        top_id: ExprId,
+    ) -> Node<C, E> {
+        let spec = Box::new(
+            ExprKind::Constant(Value::String(literal!("'generated_lambda"))).to_expr(),
+        );
+        match (lb.init)(ctx, &args, top_id) {
+            Err(e) => error(spec, format_compact!("{e:?}").as_str()),
+            Ok(function) => {
+                let kind = NodeKind::Apply { args, function };
+                Node { spec, kind, typ }
+            }
+        }
     }
 }

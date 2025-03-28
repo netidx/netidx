@@ -195,25 +195,25 @@ impl Borrow<[Value]> for ValArray {
 
 impl From<Vec<Value>> for ValArray {
     fn from(v: Vec<Value>) -> Self {
-        Self::from_iter(v.into_iter())
+        Self::from_iter_exact(v.into_iter())
     }
 }
 
 impl<const S: usize> From<SmallVec<[Value; S]>> for ValArray {
     fn from(v: SmallVec<[Value; S]>) -> Self {
-        Self::from_iter(v.into_iter())
+        Self::from_iter_exact(v.into_iter())
     }
 }
 
 impl<const S: usize> From<[Value; S]> for ValArray {
     fn from(v: [Value; S]) -> Self {
-        Self::from_iter(v.into_iter())
+        Self::from_iter_exact(v.into_iter())
     }
 }
 
 impl From<&[Value]> for ValArray {
     fn from(v: &[Value]) -> Self {
-        Self::from_iter(v.into_iter().map(|v| v.clone()))
+        Self::from_iter_exact(v.into_iter().map(|v| v.clone()))
     }
 }
 

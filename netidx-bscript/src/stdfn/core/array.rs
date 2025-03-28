@@ -2,8 +2,9 @@
 use crate::run;
 use crate::{
     deftype,
-    expr::ExprKind,
-    node::{Node, NodeKind},
+    env::LambdaBind,
+    expr::{ExprId, ExprKind, ModPath},
+    node::{gen, Node, NodeKind},
     stdfn::{CachedArgs, CachedVals, EvalCached},
     typ::{FnArgType, FnType, NoRefs, Type},
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
@@ -15,23 +16,19 @@ use fxhash::FxHashMap;
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
-use std::{mem, sync::Arc};
-
-/*
-struct App<C: Ctx, E: UserEvent> {
-    x: BindId,
-    node: Node<C, E>,
-}
-
-impl<C: Ctx, E: UserEvent> App<C, E> {
-    fn delete(&self, ctx: &mut ExecCtx<C, E>) {}
-}
+use std::{marker::PhantomData, mem, sync::Arc};
+use triomphe::Arc as TArc;
 
 pub(super) struct MapQ<C: Ctx, E: UserEvent> {
     scope: ModPath,
-    pred: LambdaBind,
-    typ: FnType<NoRefs>,
-    map: Vec<App<C, E>>,
+    pred: Arc<LambdaBind<C, E>>,
+    top_id: ExprId,
+    ftyp: TArc<FnType<NoRefs>>,
+    btyp: Type<NoRefs>,
+    args: Vec<Node<C, E>>,
+    binds: Vec<BindId>,
+    refs: FxHashMap<BindId, Option<Value>>,
+    out: SmallVec<[Value; 16]>,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for MapQ<C, E> {
@@ -39,13 +36,18 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for MapQ<C, E> {
     deftype!("fn(Array<'a>, fn('a) -> 'b) -> Array<'b>");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|ctx, typ, scope, from, top_id| match from {
+        Arc::new(|_ctx, typ, scope, from, top_id| match from {
             [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
                 Ok(Box::new(Self {
                     scope: scope.clone(),
                     pred: lb.clone(),
-                    typ: typ.clone(),
-                    map: vec![],
+                    top_id,
+                    ftyp: TArc::new(typ.clone()),
+                    btyp: Type::Bottom(PhantomData),
+                    args: vec![],
+                    binds: vec![],
+                    refs: FxHashMap::default(),
+                    out: smallvec![],
                 }))
             }
             _ => bail!("expected a function"),
@@ -60,28 +62,54 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for MapQ<C, E> {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        match from[0].update(ctx, event) {
-            Some(Value::Array(a)) if a.len() == 0 => {
-                self.predicate(ctx, false, event);
-                self.finish()
-            }
-            Some(Value::Array(a)) => {
-                let mut variables = FxHashMap::default();
-                for (i, v) in a.iter().enumerate() {
-                    event.variables.insert(self.x, v.clone());
-                    self.predicate(ctx, true, event);
-                    if i == 0 {
-                        variables = mem::take(&mut event.variables);
-                    }
-                }
-                event.variables = variables;
-                self.finish()
-            }
-            Some(_) | None => {
-                self.predicate(ctx, false, event);
-                None
+        for (id, val) in self.refs.iter_mut() {
+            if let Some(v) = event.variables.get(id) {
+                *val = Some(v.clone());
             }
         }
+        let up = match from[0].update(ctx, event) {
+            Some(Value::Array(a)) if a.len() == self.args.len() => Some(a),
+            Some(Value::Array(a)) if a.len() < self.args.len() => {
+                while self.args.len() > a.len() {
+                    self.args.pop().unwrap().delete(ctx);
+                    ctx.env.unbind_variable(self.binds.pop().unwrap());
+                }
+                Some(a)
+            }
+            Some(Value::Array(a)) => {
+                let vars = mem::take(&mut event.variables);
+                for (id, v) in &self.refs {
+                    if let Some(v) = v {
+                        event.variables.insert(*id, v.clone());
+                    }
+                }
+                while self.args.len() < a.len() {
+                    let (id, node) =
+                        gen::bind(ctx, &self.scope, "x", self.btyp.clone(), self.top_id);
+                    let fargs = Box::from_iter([node]);
+                    let mut node = gen::apply(
+                        ctx,
+                        &self.pred,
+                        fargs,
+                        Type::Fn(self.ftyp.clone()),
+                        self.top_id,
+                    );
+                    let _ = node.update(ctx, event);
+                    self.args.push(node);
+                    self.binds.push(id);
+                }
+                event.variables = vars;
+                Some(a)
+            }
+            Some(_) | None => None,
+        };
+        up.map(|a| {
+            for (id, v) in self.binds.iter().zip(a.iter()) {
+                event.variables.insert(*id, v.clone());
+            }
+            self.out.extend(self.args.iter_mut().filter_map(|n| n.update(ctx, event)));
+            Value::Array(ValArray::from_iter_exact(self.out.drain(..)))
+        })
     }
 
     fn typecheck(
@@ -107,7 +135,6 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for MapQ<C, E> {
         Ok(())
     }
 }
-*/
 
 macro_rules! mapfn {
     ($name:ident, $bname:literal, $typ:literal, $buf:literal) => {
