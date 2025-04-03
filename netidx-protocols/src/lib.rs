@@ -7,8 +7,7 @@ extern crate anyhow;
 #[macro_use]
 extern crate netidx_core;
 
-pub mod cluster;
-pub mod rpc;
-pub mod view;
 pub mod channel;
+pub mod cluster;
 pub mod pack_channel;
+pub mod rpc;
