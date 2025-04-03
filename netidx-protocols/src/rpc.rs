@@ -1,5 +1,5 @@
 use anyhow::Result;
-use arcstr::{ArcStr, literal};
+use arcstr::{literal, ArcStr};
 use futures::{
     channel::{mpsc, oneshot},
     future,
@@ -273,7 +273,7 @@ pub mod server {
         # Example
         ```no_run
         #[macro_use] extern crate netidx_protocols;
-        use netidx::{path::Path, subscriber::Value, chars::Chars};
+        use netidx::{path::Path, subscriber::Value};
         use netidx_protocols::rpc::server::{Proc, ArgSpec, RpcCall};
         use arcstr::ArcStr;
         # use anyhow::Result;

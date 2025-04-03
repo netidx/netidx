@@ -17,7 +17,6 @@ krb5_iov = ["netidx/krb5_iov"]
 [dependencies]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
-base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 combine = { workspace = true }
@@ -28,7 +27,6 @@ immutable-chunkmap = { workspace = true }
 netidx-core = { path = "../netidx-core", version = "0.26.0" }
 netidx-netproto = { path = "../netidx-netproto", version = "0.27.2" }
 netidx = { path = "../netidx", version = "0.27.0", default-features = false }
-rand = { workspace = true }
 regex = { workspace = true }
 serde_derive = { workspace = true }
 serde = { workspace = true }
