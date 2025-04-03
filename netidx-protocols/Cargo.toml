@@ -17,7 +17,6 @@ krb5_iov = ["netidx/krb5_iov"]
 [dependencies]
 netidx = { path = "../netidx", version = "0.27.0", default-features = false }
 netidx-core = {path = "../netidx-core", version = "0.26.0", default-features = false }
-netidx-bscript = { path = "../netidx-bscript", version = "0.27.0", default-features = false }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

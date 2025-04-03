@@ -31,7 +31,6 @@ enumflags2 = "0.7"
 env_logger = "0.11"
 fs3 = "0.5"
 futures = "0.3"
-futures-util = "0.3"
 fxhash = "0.2"
 globset = "0.4"
 hdrhistogram = "7"
@@ -49,7 +48,6 @@ packed_struct_codegen = "0.10"
 parking_lot = "0.12.1"
 pin-utils = "0.1"
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
-radix_trie = "0.2"
 rand = "0.8.5"
 rayon = "1"
 regex = "1"
@@ -70,7 +68,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"
 triomphe = { version = "0.1" }
 uuid = { version = "1", features = ["v4", "serde"] }
 warp = { version = "0.3", features = ["tls"] }
-webpki = "0.22"
 x509-parser = "0.16"
 zstd = { version = "0.13", features = ["zstdmt"] }
 
