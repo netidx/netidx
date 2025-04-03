@@ -20,7 +20,7 @@ krb5_iov = ["netidx/krb5_iov"]
 netidx-core = { path = "../netidx-core", version = "0.26.0" }
 netidx = { path = "../netidx", version = "0.27.0", default-features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.27.0", default-features = false }
-netidx-bscript = { path = "../netidx-bscript", version = "0.27.0", default-features = false }
+triomphe = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }
@@ -36,7 +36,6 @@ serde_json = { workspace = true }
 sled = { workspace = true }
 structopt = { workspace = true }
 uuid = { workspace = true }
-lazy_static = { workspace = true }
 arcstr = { workspace = true }
 rayon = { workspace = true }
 dirs = { workspace = true }

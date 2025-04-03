@@ -29,11 +29,12 @@ use std::{
     str,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        LazyLock,
     },
     time::Duration,
 };
 use tokio::task;
+use triomphe::Arc;
 
 pub enum Sendable {
     Packed(Arc<Mutex<Value>>),
@@ -66,25 +67,23 @@ impl Sendable {
 pub type Reply = Option<Sendable>;
 type Txns = Vec<(TxnOp, Reply)>;
 
-lazy_static! {
-    static ref BUF: Pool<Vec<u8>> = Pool::new(8, 16384);
-    static ref PDPAIR: Pool<Vec<(Path, UpdateKind)>> = Pool::new(256, 8124);
-    static ref PATHS: Pool<Vec<Path>> = Pool::new(256, 65534);
-    static ref TXNS: Pool<Txns> = Pool::new(16, 65534);
-    static ref STXNS: Pool<Txns> = Pool::new(65534, 32);
-    static ref BYPATH: Pool<HashMap<Path, Pooled<Txns>>> = Pool::new(16, 65534);
-}
+static BUF: LazyLock<Pool<Vec<u8>>> = LazyLock::new(|| Pool::new(8, 16384));
+static PDPAIR: LazyLock<Pool<Vec<(Path, UpdateKind)>>> =
+    LazyLock::new(|| Pool::new(256, 8124));
+static PATHS: LazyLock<Pool<Vec<Path>>> = LazyLock::new(|| Pool::new(256, 65534));
+static TXNS: LazyLock<Pool<Txns>> = LazyLock::new(|| Pool::new(16, 65534));
+static STXNS: LazyLock<Pool<Txns>> = LazyLock::new(|| Pool::new(65534, 32));
+static BYPATH: LazyLock<Pool<HashMap<Path, Pooled<Txns>>>> =
+    LazyLock::new(|| Pool::new(16, 65534));
 
 pub(super) enum UpdateKind {
     Deleted,
-    Inserted(Value),
+    Inserted,
     Updated(Value),
 }
 
 pub(super) struct Update {
     pub(super) data: Pooled<Vec<(Path, UpdateKind)>>,
-    pub(super) formula: Pooled<Vec<(Path, UpdateKind)>>,
-    pub(super) on_write: Pooled<Vec<(Path, UpdateKind)>>,
     pub(super) locked: Pooled<Vec<Path>>,
     pub(super) unlocked: Pooled<Vec<Path>>,
     pub(super) added_roots: Pooled<Vec<Path>>,
@@ -95,8 +94,6 @@ impl Update {
     fn new() -> Update {
         Update {
             data: PDPAIR.take(),
-            formula: PDPAIR.take(),
-            on_write: PDPAIR.take(),
             locked: PATHS.take(),
             unlocked: PATHS.take(),
             added_roots: PATHS.take(),
@@ -106,8 +103,6 @@ impl Update {
 
     fn merge_from(&mut self, mut other: Update) {
         self.data.extend(other.data.drain(..));
-        self.formula.extend(other.formula.drain(..));
-        self.on_write.extend(other.on_write.drain(..));
         self.locked.extend(other.locked.drain(..));
         self.unlocked.extend(other.unlocked.drain(..));
         self.added_roots.extend(other.added_roots.drain(..));
@@ -201,8 +196,6 @@ fn iter_paths(tree: &sled::Tree) -> impl Iterator<Item = Result<Path>> + 'static
 enum TxnOp {
     Remove(Path),
     SetData(bool, Path, Value),
-    SetFormula(Path, Value),
-    SetOnWrite(Path, Value),
     CreateSheet {
         base: Path,
         rows: usize,
@@ -263,8 +256,6 @@ impl TxnOp {
         match self {
             Remove(p) => p.clone(),
             SetData(_, p, _) => p.clone(),
-            SetFormula(p, _) => p.clone(),
-            SetOnWrite(p, _) => p.clone(),
             CreateSheet { base, .. } => base.clone(),
             AddSheetColumns { base, .. } => base.clone(),
             AddSheetRows { base, .. } => base.clone(),
@@ -302,14 +293,6 @@ impl Txn {
 
     pub fn set_data(&mut self, update: bool, path: Path, value: Value, reply: Reply) {
         self.0.push((TxnOp::SetData(update, path, value), reply))
-    }
-
-    pub fn set_formula(&mut self, path: Path, value: Value, reply: Reply) {
-        self.0.push((TxnOp::SetFormula(path, value), reply))
-    }
-
-    pub fn set_on_write(&mut self, path: Path, value: Value, reply: Reply) {
-        self.0.push((TxnOp::SetOnWrite(path, value), reply))
     }
 
     pub fn create_sheet(
@@ -398,10 +381,8 @@ fn remove(data: &sled::Tree, pending: &mut Update, path: Path) -> Result<()> {
     Datum::Deleted.encode(&mut *val)?;
     if let Some(data) = data.insert(key, &**val)? {
         match DatumKind::decode(&mut &*data) {
-            DatumKind::Data => pending.data.push((path, UpdateKind::Deleted)),
-            DatumKind::Formula => {
-                pending.formula.push((path.clone(), UpdateKind::Deleted));
-                pending.on_write.push((path, UpdateKind::Deleted));
+            DatumKind::Data | DatumKind::Formula => {
+                pending.data.push((path, UpdateKind::Deleted))
             }
             DatumKind::Deleted | DatumKind::Invalid => (),
         }
@@ -421,85 +402,17 @@ fn set_data(
     let datum = Datum::Data(value.clone());
     datum.encode(&mut *val)?;
     let up = match data.insert(key, &**val)? {
-        None => UpdateKind::Inserted(value),
+        None => UpdateKind::Inserted,
         Some(data) => match DatumKind::decode(&mut &*data) {
             DatumKind::Data => UpdateKind::Updated(value),
             DatumKind::Formula | DatumKind::Deleted | DatumKind::Invalid => {
-                UpdateKind::Inserted(value)
+                UpdateKind::Inserted
             }
         },
     };
     if update {
         pending.data.push((path, up));
     }
-    Ok(())
-}
-
-fn set_formula(
-    data: &sled::Tree,
-    pending: &mut Update,
-    path: Path,
-    value: Value,
-) -> Result<()> {
-    let key = path.as_bytes();
-    let mut val = BUF.take();
-    let up = match data.get(key)? {
-        None => {
-            Datum::Formula(value.clone(), Value::Null).encode(&mut *val)?;
-            UpdateKind::Inserted(value)
-        }
-        Some(data) => match DatumKind::decode(&mut &*data) {
-            DatumKind::Data | DatumKind::Deleted | DatumKind::Invalid => {
-                Datum::Formula(value.clone(), Value::Null).encode(&mut *val)?;
-                UpdateKind::Inserted(value)
-            }
-            DatumKind::Formula => {
-                match Datum::decode(&mut &*data)? {
-                    Datum::Deleted | Datum::Data(_) => unreachable!(),
-                    Datum::Formula(_, w) => {
-                        Datum::Formula(value.clone(), w).encode(&mut *val)?
-                    }
-                }
-                UpdateKind::Updated(value)
-            }
-        },
-    };
-    data.insert(key, &**val)?;
-    pending.formula.push((path, up));
-    Ok(())
-}
-
-fn set_on_write(
-    data: &sled::Tree,
-    pending: &mut Update,
-    path: Path,
-    value: Value,
-) -> Result<()> {
-    let key = path.as_bytes();
-    let mut val = BUF.take();
-    let up = match data.get(key)? {
-        None => {
-            Datum::Formula(Value::Null, value.clone()).encode(&mut *val)?;
-            UpdateKind::Inserted(value)
-        }
-        Some(data) => match DatumKind::decode(&mut &*data) {
-            DatumKind::Data | DatumKind::Deleted | DatumKind::Invalid => {
-                Datum::Formula(Value::Null, value.clone()).encode(&mut *val)?;
-                UpdateKind::Inserted(value)
-            }
-            DatumKind::Formula => {
-                match Datum::decode(&mut &*data)? {
-                    Datum::Deleted | Datum::Data(_) => unreachable!(),
-                    Datum::Formula(f, _) => {
-                        Datum::Formula(f, value.clone()).encode(&mut *val)?
-                    }
-                }
-                UpdateKind::Updated(value)
-            }
-        },
-    };
-    data.insert(key, &**val)?;
-    pending.on_write.push((path.clone(), up));
     Ok(())
 }
 
@@ -1213,12 +1126,6 @@ fn commit_complex(
             TxnOp::SetData(update, path, value) => {
                 set_data(&data, &mut pending, update, path, value)
             }
-            TxnOp::SetFormula(path, value) => {
-                set_formula(&data, &mut pending, path, value)
-            }
-            TxnOp::SetOnWrite(path, value) => {
-                set_on_write(&data, &mut pending, path, value)
-            }
             TxnOp::SetLocked(path) => set_locked(&locked, &mut pending, path),
             TxnOp::SetUnlocked(path) => set_unlocked(&locked, &mut pending, path),
             TxnOp::AddRoot(path) => add_root(&roots, &mut pending, path),
@@ -1252,12 +1159,6 @@ fn commit_simple(data: &sled::Tree, locked: &sled::Tree, mut txn: Txn) -> Update
                             set_data(data, &mut pending, update, path, value)
                         }
                         TxnOp::Remove(path) => remove(data, &mut pending, path),
-                        TxnOp::SetFormula(path, value) => {
-                            set_formula(data, &mut pending, path, value)
-                        }
-                        TxnOp::SetOnWrite(path, value) => {
-                            set_on_write(data, &mut pending, path, value)
-                        }
                         TxnOp::SetLocked(path) => set_locked(locked, &mut pending, path),
                         TxnOp::SetUnlocked(path) => {
                             set_unlocked(locked, &mut pending, path)
@@ -1428,8 +1329,6 @@ async fn commit_txns_task(
                         | TxnOp::DelRoot(_) => (false, true),
                         TxnOp::Remove(_) => (simple, true),
                         TxnOp::SetData(_, _, _)
-                        | TxnOp::SetFormula(_, _)
-                        | TxnOp::SetOnWrite(_, _)
                         | TxnOp::SetLocked(_)
                         | TxnOp::SetUnlocked(_) => (simple, delete),
                     });

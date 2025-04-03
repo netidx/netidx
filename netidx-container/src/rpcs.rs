@@ -13,11 +13,6 @@ pub(super) enum RpcRequestKind {
         path: Path,
         value: Value,
     },
-    SetFormula {
-        path: Path,
-        formula: Option<ArcStr>,
-        on_write: Option<ArcStr>,
-    },
     CreateSheet {
         path: Path,
         rows: usize,
@@ -56,7 +51,6 @@ pub(super) struct RpcApi {
     _lock_subtree_rpc: Proc,
     _unlock_subtree_rpc: Proc,
     _set_data_rpc: Proc,
-    _set_formula_rpc: Proc,
     _create_sheet_rpc: Proc,
     _add_sheet_rows: Proc,
     _add_sheet_cols: Proc,
@@ -83,7 +77,6 @@ impl RpcApi {
         let _unlock_subtree_rpc =
             start_unlock_subtree_rpc(&publisher, &base_path, tx.clone())?;
         let _set_data_rpc = start_set_data_rpc(&publisher, &base_path, tx.clone())?;
-        let _set_formula_rpc = start_set_formula_rpc(&publisher, &base_path, tx.clone())?;
         let _create_sheet_rpc =
             start_create_sheet_rpc(&publisher, &base_path, tx.clone())?;
         let _add_sheet_rows =
@@ -112,7 +105,6 @@ impl RpcApi {
             _lock_subtree_rpc,
             _unlock_subtree_rpc,
             _set_data_rpc,
-            _set_formula_rpc,
             _create_sheet_rpc,
             _add_sheet_rows,
             _add_sheet_cols,
@@ -284,47 +276,6 @@ pub(super) fn start_set_data_rpc(
         Some(tx),
         path: Vec<Path> = Vec::<Path>::new(); "the paths to set",
         value: Value = Value::Null; "The value to set"
-    )
-}
-
-pub(super) fn start_set_formula_rpc(
-    publisher: &Publisher,
-    base_path: &Path,
-    tx: mpsc::Sender<RpcRequest>,
-) -> Result<Proc> {
-    fn map(
-        mut c: RpcCall,
-        mut path: Vec<Path>,
-        formula: Option<ArcStr>,
-        on_write: Option<ArcStr>,
-    ) -> Option<RpcRequest> {
-        if path.len() == 0 {
-            rpc_err!(c.reply, "expected at least 1 path")
-        } else if path.len() == 1 {
-            let path = path.pop().unwrap();
-            let kind = RpcRequestKind::SetFormula { path, formula, on_write };
-            Some(RpcRequest { reply: c.reply, kind })
-        } else {
-            let reqs = path
-                .into_iter()
-                .map(|path| RpcRequestKind::SetFormula {
-                    path,
-                    formula: formula.clone(),
-                    on_write: on_write.clone(),
-                })
-                .collect();
-            Some(RpcRequest { reply: c.reply, kind: RpcRequestKind::Packed(reqs) })
-        }
-    }
-    define_rpc!(
-        publisher,
-        base_path.append("set-formula"),
-        "make the specified paths calculated and set their formula",
-        map,
-        Some(tx),
-        path: Vec<Path> = Vec::<Path>::new(); "the paths to set",
-        formula: Option<ArcStr> = None::<ArcStr>; "the formula",
-        on_write: Option<ArcStr> = None::<ArcStr>; "the on write formula"
     )
 }
 
