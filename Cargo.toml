@@ -33,12 +33,7 @@ fs3 = "0.5"
 futures = "0.3"
 futures-util = "0.3"
 fxhash = "0.2"
-gdk = "0.18"
-gdk-pixbuf = "0.18"
-gio = "0.18"
-glib = "0.18"
 globset = "0.4"
-gtk = { version = "0.18", features = ["v3_24"] }
 hdrhistogram = "7"
 if-addrs = "0.13"
 immutable-chunkmap = "2"
@@ -51,12 +46,9 @@ num_cpus = "1"
 once_cell = "1.17.2"
 packed_struct = "0.10"
 packed_struct_codegen = "0.10"
-pango = "0.18"
 parking_lot = "0.12.1"
 pin-utils = "0.1"
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
-plotters-backend = "0.3"
-plotters = { version = "0.3", default-features = false, features = ["datetime", "line_series", "ttf"] }
 radix_trie = "0.2"
 rand = "0.8.5"
 rayon = "1"
@@ -72,7 +64,6 @@ serde = { version = "1", features = ["rc"] }
 sha3 = "0.10"
 sled = { version = "0.34" }
 smallvec = { version = "1", features = ["const_generics", "union"] }
-sourceview4 = "0.5"
 structopt = "0.3"
 tokio-rustls = "0.26"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "fs", "sync", "process", "macros", "signal", "io-std"] }
@@ -94,7 +85,6 @@ members = [
     "netidx-protocols",
     "netidx-tools",
     "netidx-tools-core",
-    "netidx-browser",
     "netidx-container",
     "netidx-derive",
     "netidx-wsproxy"
