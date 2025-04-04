@@ -23,6 +23,7 @@ combine = "4"
 compact_str = { version = "0.8", features = ["serde"] }
 crossbeam = "0.8"
 cross-krb5 = { version = "0.4", default-features = false }
+crossterm = "0.28"
 derive_builder = "0.20"
 digest = "0.10"
 diligent-date-parser = "0.1.4"
@@ -50,6 +51,7 @@ pin-utils = "0.1"
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
 rand = "0.8.5"
 rayon = "1"
+reedline = "0.39"
 regex = "1"
 rust_decimal = { version = "1",  features = ["serde-with-float", "serde-with-str", "serde-with-arbitrary-precision"] }
 rustls = "0.23"

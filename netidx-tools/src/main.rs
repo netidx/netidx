@@ -2,6 +2,7 @@
 mod publisher;
 mod record_client;
 mod resolver;
+mod shell;
 mod stress_channel_publisher;
 mod stress_channel_subscriber;
 mod stress_publisher;
@@ -83,6 +84,13 @@ enum Opt {
         #[structopt(flatten)]
         params: subscriber::Params,
     },
+    #[structopt(name = "shell", about = "bscript repl and script executor")]
+    Shell {
+        #[structopt(flatten)]
+        common: ClientParams,
+        #[structopt(flatten)]
+        params: shell::Params,
+    },
     #[structopt(name = "container", about = "a hierarchical database in netidx")]
     Container {
         #[structopt(flatten)]
@@ -152,6 +160,10 @@ async fn tokio_main() -> Result<()> {
         Opt::Subscriber { common, params } => {
             let (cfg, auth) = common.load();
             subscriber::run(cfg, auth, params).await
+        }
+        Opt::Shell { common, params } => {
+            let (cfg, auth) = common.load();
+            shell::run(cfg, auth, params).await
         }
         Opt::Container { common, params } => {
             let (cfg, auth) = common.load();

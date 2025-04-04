@@ -743,18 +743,22 @@ pub struct DurableStats {
 }
 
 pub struct SubscriberBuilder {
-    cfg: Config,
+    cfg: Option<Config>,
     desired_auth: Option<DesiredAuth>,
 }
 
 impl SubscriberBuilder {
     pub fn new(cfg: Config) -> Self {
-        Self { cfg, desired_auth: None }
+        Self { cfg: Some(cfg), desired_auth: None }
     }
 
-    pub fn build(mut self) -> Result<Subscriber> {
-        let desired_auth = self.desired_auth.take().unwrap_or_else(|| self.cfg.default_auth());
-        Subscriber::new(self.cfg, desired_auth)
+    pub fn build(&mut self) -> Result<Subscriber> {
+        let cfg = self
+            .cfg
+            .take()
+            .ok_or_else(|| anyhow!("config is required, did you reuse the builder?"))?;
+        let desired_auth = self.desired_auth.take().unwrap_or_else(|| cfg.default_auth());
+        Subscriber::new(cfg, desired_auth)
     }
 
     pub fn desired_auth(&mut self, auth: DesiredAuth) -> &mut Self {
@@ -958,9 +962,12 @@ impl Subscriber {
                                 }
                                 if let DvState::Dead(d) = &mut dv.sub {
                                     for (v, resp) in d.queued_writes.drain(..) {
-                                        sub.0
-                                            .connection
-                                            .send(ToCon::Write(sub.0.id, v, WriteId::new(), resp));
+                                        sub.0.connection.send(ToCon::Write(
+                                            sub.0.id,
+                                            v,
+                                            WriteId::new(),
+                                            resp,
+                                        ));
                                     }
                                 }
                                 dv.sub = DvState::Subscribed(sub);
