@@ -167,7 +167,7 @@ impl InputReader {
         task::spawn(async move {
             let mut line_editor = Reedline::create();
             let prompt = DefaultPrompt {
-                left_prompt: DefaultPromptSegment::Basic("> ".into()),
+                left_prompt: DefaultPromptSegment::Basic("".into()),
                 right_prompt: DefaultPromptSegment::Empty,
             };
             loop {
@@ -305,13 +305,13 @@ impl Repl {
                     Some(e) => eprintln!("compile error: {e}"),
                     None => {
                         *output = match &n.kind {
-                            NodeKind::Apply { .. }
-                            | NodeKind::ApplyLate(_)
-                            | NodeKind::Ref { .. }
-                            | NodeKind::TupleRef { .. }
-                            | NodeKind::StructRef { .. }
-                            | NodeKind::StructWith { .. } => true,
-                            _ => false,
+                            NodeKind::Bind { .. }
+                            | NodeKind::Lambda(_)
+                            | NodeKind::Use { .. }
+                            | NodeKind::Connect(_, _)
+                            | NodeKind::Module(_)
+                            | NodeKind::TypeDef { .. } => false,
+                            _ => true,
                         };
                         *init = Some(top_id);
                         self.nodes.insert(top_id, n);
