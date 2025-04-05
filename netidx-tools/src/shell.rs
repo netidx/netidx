@@ -58,6 +58,7 @@ struct ReplCtx {
     var_updates: VecDeque<(BindId, Value)>,
     net_updates: VecDeque<(SubId, subscriber::Event)>,
     subscribed: FxHashMap<SubId, SmallVec<[ExprId; 3]>>,
+    cached: FxHashMap<BindId, Value>,
     publisher: Publisher,
     subscriber: Subscriber,
     updates_tx: mpsc::Sender<UpdateBatch>,
@@ -76,6 +77,7 @@ impl ReplCtx {
             var_updates: VecDeque::new(),
             net_updates: VecDeque::new(),
             subscribed: HashMap::default(),
+            cached: HashMap::default(),
             publisher,
             subscriber,
             updates,
@@ -147,7 +149,8 @@ impl Ctx for ReplCtx {
     }
 
     fn set_var(&mut self, id: BindId, value: Value) {
-        self.var_updates.push_back((id, value));
+        self.var_updates.push_back((id, value.clone()));
+        self.cached.insert(id, value);
     }
 }
 
@@ -264,6 +267,13 @@ impl Repl {
             if self.updated.contains(id) {
                 if Some(*id) == init {
                     self.event.init = true;
+                    n.refs(&mut |id| {
+                        if let Some(v) = self.ctx.user.cached.get(&id) {
+                            if let Entry::Vacant(e) = self.event.variables.entry(id) {
+                                e.insert(v.clone());
+                            }
+                        }
+                    });
                 } else {
                     self.event.init = false;
                 }
