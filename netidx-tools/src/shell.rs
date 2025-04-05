@@ -15,7 +15,7 @@ use netidx_bscript::{
     node::{self, Node, NodeKind},
     BindId, Ctx, Event, ExecCtx, NoUserEvent,
 };
-use reedline::{DefaultPrompt, Reedline, Signal};
+use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use smallvec::SmallVec;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
@@ -166,7 +166,10 @@ impl InputReader {
         let (tx, rx) = mpsc::unbounded();
         task::spawn(async move {
             let mut line_editor = Reedline::create();
-            let prompt = DefaultPrompt::default();
+            let prompt = DefaultPrompt {
+                left_prompt: DefaultPromptSegment::Basic("> ".into()),
+                right_prompt: DefaultPromptSegment::Empty,
+            };
             loop {
                 let _ = c_rx.await;
                 let r = task::block_in_place(|| {
