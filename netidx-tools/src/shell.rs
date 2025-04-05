@@ -1,6 +1,6 @@
 use anyhow::{Error, Result};
 use arcstr::ArcStr;
-use futures::channel::mpsc;
+use futures::{channel::mpsc, StreamExt};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
 use netidx::{
@@ -11,17 +11,21 @@ use netidx::{
     subscriber::{self, Dval, SubId, Subscriber, SubscriberBuilder, UpdatesFlags},
 };
 use netidx_bscript::{
-    expr::ExprId, node::Node, BindId, Ctx, Event, ExecCtx, NoUserEvent,
+    expr::{self, ExprId, ModPath},
+    node::{self, Node, NodeKind},
+    BindId, Ctx, Event, ExecCtx, NoUserEvent,
 };
 use reedline::{DefaultPrompt, Reedline, Signal};
 use smallvec::SmallVec;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
+    future,
+    ops::Deref,
     path::PathBuf,
     time::Duration,
 };
 use structopt::StructOpt;
-use tokio::{sync::oneshot, task};
+use tokio::{select, sync::oneshot, task};
 
 #[derive(StructOpt, Debug)]
 pub(crate) struct Params {
@@ -147,23 +151,57 @@ impl Ctx for ReplCtx {
     }
 }
 
-async fn read_input() -> mpsc::UnboundedReceiver<(oneshot::Sender<()>, Result<Signal>)> {
-    let (tx, rx) = mpsc::unbounded();
-    task::spawn(async move {
-        let mut line_editor = Reedline::create();
-        let prompt = DefaultPrompt::default();
-        loop {
-            let r = task::block_in_place(|| {
-                line_editor.read_line(&prompt).map_err(Error::from)
-            });
-            let (c_tx, c_rx) = oneshot::channel();
-            if let Err(_) = tx.unbounded_send((c_tx, r)) {
-                break;
+struct InputReader {
+    go: Option<oneshot::Sender<()>>,
+    recv: mpsc::UnboundedReceiver<(oneshot::Sender<()>, Result<Signal>)>,
+}
+
+impl InputReader {
+    fn run(
+        mut c_rx: oneshot::Receiver<()>,
+    ) -> mpsc::UnboundedReceiver<(oneshot::Sender<()>, Result<Signal>)> {
+        let (tx, rx) = mpsc::unbounded();
+        task::spawn(async move {
+            let mut line_editor = Reedline::create();
+            let prompt = DefaultPrompt::default();
+            loop {
+                let _ = c_rx.await;
+                let r = task::block_in_place(|| {
+                    line_editor.read_line(&prompt).map_err(Error::from)
+                });
+                let (o_tx, o_rx) = oneshot::channel();
+                c_rx = o_rx;
+                if let Err(_) = tx.unbounded_send((o_tx, r)) {
+                    break;
+                }
             }
-            let _ = c_rx.await;
+        });
+        rx
+    }
+
+    fn new() -> Self {
+        let (tx_go, rx_go) = oneshot::channel();
+        let recv = Self::run(rx_go);
+        Self { go: Some(tx_go), recv }
+    }
+
+    async fn read_line(&mut self, output: bool) -> Result<Signal> {
+        if output {
+            tokio::signal::ctrl_c().await?;
+            Ok(Signal::CtrlC)
+        } else {
+            if let Some(tx) = self.go.take() {
+                let _ = tx.send(());
+            }
+            match self.recv.next().await {
+                None => bail!("input stream ended"),
+                Some((go, sig)) => {
+                    self.go = Some(go);
+                    sig
+                }
+            }
         }
-    });
-    rx
+    }
 }
 
 struct Repl {
@@ -171,6 +209,7 @@ struct Repl {
     event: Event<NoUserEvent>,
     updated: FxHashSet<ExprId>,
     nodes: IndexMap<ExprId, Node<ReplCtx, NoUserEvent>, FxBuildHasher>,
+    input: InputReader,
 }
 
 impl Repl {
@@ -180,6 +219,7 @@ impl Repl {
             event: Event::new(NoUserEvent),
             updated: HashSet::default(),
             nodes: IndexMap::default(),
+            input: InputReader::new(),
         })
     }
 
@@ -236,10 +276,98 @@ impl Repl {
         self.updated.clear();
         res
     }
+
+    fn cycle_ready(&self) -> bool {
+        self.ctx.user.var_updates.len() > 0 || self.ctx.user.net_updates.len() > 0
+    }
+
+    fn compile(&mut self, line: &str, init: &mut Option<ExprId>, output: &mut bool) {
+        let scope = ModPath::root();
+        match expr::parser::parse_expr(&line) {
+            Err(e) => eprintln!("parse error: {e:?}"),
+            Ok(spec) => {
+                let top_id = spec.id;
+                let n = Node::compile(&mut self.ctx, &scope, spec);
+                match n.extract_err() {
+                    Some(e) => eprintln!("compile error: {e}"),
+                    None => {
+                        *output = match &n.kind {
+                            NodeKind::Apply { .. }
+                            | NodeKind::ApplyLate(_)
+                            | NodeKind::Ref { .. }
+                            | NodeKind::TupleRef { .. }
+                            | NodeKind::StructRef { .. }
+                            | NodeKind::StructWith { .. } => true,
+                            _ => false,
+                        };
+                        *init = Some(top_id);
+                        self.nodes.insert(top_id, n);
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn or_never(b: bool) {
+    if !b {
+        future::pending().await
+    }
 }
 
 pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()> {
     let publisher = PublisherBuilder::new(cfg.clone()).bind_cfg(p.bind).build().await?;
     let subscriber = SubscriberBuilder::new(cfg).desired_auth(auth).build()?;
-    Ok(())
+    let mut repl = Repl::new(publisher, subscriber)?;
+    let mut output = false;
+    loop {
+        let ready = repl.cycle_ready();
+        let mut updates = None;
+        let mut writes = None;
+        let mut input = None;
+        let mut init = None;
+        select! {
+            wr = repl.ctx.user.writes.select_next_some() => {
+                writes = Some(wr);
+                if let Ok(Some(up)) = repl.ctx.user.updates.try_next() {
+                    updates = Some(up);
+                }
+            },
+            up = repl.ctx.user.updates.select_next_some() => {
+                updates = Some(up);
+                if let Ok(Some(wr)) = repl.ctx.user.writes.try_next() {
+                    writes = Some(wr);
+                }
+            },
+            i = repl.input.read_line(output) => match i {
+                Ok(i) => {
+                    input = Some(i);
+                },
+                Err(e) => {
+                    eprintln!("error reading line {e:?}");
+                }
+            },
+            _ = or_never(ready) => {
+                if let Ok(Some(up)) = repl.ctx.user.updates.try_next() {
+                    updates = Some(up);
+                }
+                if let Ok(Some(wr)) = repl.ctx.user.writes.try_next() {
+                    writes = Some(wr);
+                }
+            }
+        }
+        match input {
+            None => (),
+            Some(Signal::CtrlC) => {
+                output = false;
+            }
+            Some(Signal::CtrlD) => break Ok(()),
+            Some(Signal::Success(line)) => repl.compile(&line, &mut init, &mut output),
+        }
+        if let Some(v) = repl.do_cycle(init, updates, writes) {
+            if output {
+                println!("{v}")
+            }
+        }
+    }
 }
