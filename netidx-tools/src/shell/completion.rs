@@ -1,9 +1,13 @@
 use super::ReplCtx;
 use anyhow::Result;
+use arcstr::ArcStr;
+use log::debug;
+use netidx::path::Path;
 use netidx_bscript::{env::Env, expr::ModPath, typ::Type, NoUserEvent};
 use reedline::{Completer, Span, Suggestion};
 use std::marker::PhantomData;
 
+#[derive(Debug)]
 enum CompletionContext<'a> {
     Bind(Span, &'a str),
     ArgLbl { span: Span, function: &'a str, arg: &'a str },
@@ -48,24 +52,42 @@ pub(super) struct BComplete(pub Env<ReplCtx, NoUserEvent>);
 
 impl Completer for BComplete {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        dbg!((line, pos));
+        debug!("{line}: {pos}");
         let mut res = vec![];
-        if let Some(s) = line.get(0..=pos) {
-            if let Ok(cc) = CompletionContext::from_str(s) {
+        let s = line.get(0..pos);
+        debug!("{s:?}");
+        if let Some(s) = s {
+            let cc = CompletionContext::from_str(s);
+            debug!("{cc:?}");
+            if let Ok(cc) = cc {
                 match cc {
                     CompletionContext::Bind(span, s) => {
                         let part = ModPath::from_iter(s.split("::"));
                         for (value, id) in self.0.lookup_matching(&ModPath::root(), &part)
                         {
-                            let typ = match self.0.by_id.get(&id) {
-                                None => &Type::Bottom(PhantomData),
-                                Some(b) => &b.typ,
+                            let description = match self.0.by_id.get(&id) {
+                                None => format!("_"),
+                                Some(b) => match b.fun.as_ref().and_then(|f| f.upgrade())
+                                {
+                                    None => format!("{}", b.typ),
+                                    Some(lb) => match &lb.builtin {
+                                        Some(t) => format!("{t}"),
+                                        None => format!("{}", b.typ),
+                                    },
+                                },
                             };
-                            let description = Some(format!("{typ}"));
+                            let value = match Path::dirname(&part.0) {
+                                None => String::from(value.as_str()),
+                                Some(dir) => {
+                                    let path =
+                                        Path::from(ArcStr::from(dir)).append(&*value);
+                                    format!("{}", ModPath(path))
+                                }
+                            };
                             res.push(Suggestion {
                                 span,
-                                value: value.into(),
-                                description,
+                                value,
+                                description: Some(description),
                                 style: None,
                                 extra: None,
                                 append_whitespace: false,

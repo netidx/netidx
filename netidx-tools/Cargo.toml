@@ -40,9 +40,11 @@ combine = { workspace = true }
 crossterm = { workspace = true }
 dirs = { workspace = true }
 env_logger = { workspace = true }
+flexi_logger = { workspace = true }
 futures = { workspace = true }
 fxhash = { workspace = true }
 hdrhistogram = { workspace = true }
+indexmap = { workspace = true }
 log = { workspace = true }
 netidx-archive = { path = "../netidx-archive", version = "0.27.0", default-features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "0.27.0", default-features = false }
@@ -59,4 +61,3 @@ serde = { workspace = true }
 smallvec = { workspace = true }
 structopt = { workspace = true }
 tokio = { workspace = true }
-indexmap = { workspace = true }

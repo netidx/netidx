@@ -342,6 +342,13 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
     });
     let _typ = typ.clone();
     let _argspec = argspec.clone();
+    let builtin = match &body {
+        Either::Left(_) => None,
+        Either::Right(builtin) => match ctx.builtins.get(builtin.as_str()) {
+            Some((styp, _)) => Some(Type::Fn(Arc::new(styp.clone()))),
+            None => None,
+        },
+    };
     let init: InitFn<C, E> = SArc::new(move |ctx, args, tid| {
         // restore the lexical environment to the state it was in
         // when the closure was created
@@ -384,7 +391,15 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         ctx.env = ctx.env.merge_lexical(&orig_env);
         res
     });
-    let l = SArc::new(LambdaBind { id, typ: typ.clone(), env, argspec, init, scope });
+    let l = SArc::new(LambdaBind {
+        id,
+        typ: typ.clone(),
+        builtin,
+        env,
+        argspec,
+        init,
+        scope,
+    });
     ctx.env.lambdas.insert_cow(id, SArc::downgrade(&l));
     Node { spec: Box::new(spec), typ: Type::Fn(typ), kind: NodeKind::Lambda(l) }
 }

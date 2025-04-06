@@ -1,6 +1,6 @@
 use crate::{
     expr::{Arg, ModPath},
-    typ::{FnType, NoRefs, Type},
+    typ::{FnType, NoRefs, Refs, Type},
     BindId, Ctx, InitFn, LambdaId, UserEvent,
 };
 use anyhow::{bail, Result};
@@ -16,6 +16,7 @@ pub struct LambdaBind<C: Ctx, E: UserEvent> {
     pub scope: ModPath,
     pub argspec: Arc<[Arg<NoRefs>]>,
     pub typ: Arc<FnType<NoRefs>>,
+    pub builtin: Option<Type<Refs>>,
     pub init: InitFn<C, E>,
 }
 

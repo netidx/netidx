@@ -1,9 +1,11 @@
 use anyhow::{Error, Result};
 use arcstr::ArcStr;
 use completion::BComplete;
+use flexi_logger::{FileSpec, Logger};
 use futures::{channel::mpsc, StreamExt};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
+use log::info;
 use netidx::{
     config::Config,
     path::Path,
@@ -18,8 +20,8 @@ use netidx_bscript::{
     BindId, Ctx, Event, ExecCtx, NoUserEvent,
 };
 use reedline::{
-    default_emacs_keybindings, DefaultPrompt, DefaultPromptSegment, IdeMenu, KeyCode,
-    KeyModifiers, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
+    default_emacs_keybindings, DefaultPrompt, DefaultPromptSegment, Emacs, IdeMenu,
+    KeyCode, KeyModifiers, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
 };
 use smallvec::SmallVec;
 use std::{
@@ -51,6 +53,8 @@ pub(crate) struct Params {
         help = "cancel subscription unless it succeeds within timeout"
     )]
     subscribe_timeout: Option<u64>,
+    #[structopt(long = "log-dir", help = "log messages to the specified directory")]
+    log_dir: Option<PathBuf>,
     #[structopt(name = "file", help = "script file to execute")]
     file: Option<PathBuf>,
 }
@@ -180,10 +184,10 @@ impl InputReader {
                     ReedlineEvent::MenuNext,
                 ]),
             );
-            let mut line_editor =
-                Reedline::create().with_menu(ReedlineMenu::EngineCompleter(Box::new(
-                    IdeMenu::default().with_name("completion"),
-                )));
+            let menu = IdeMenu::default().with_name("completion");
+            let mut line_editor = Reedline::create()
+                .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu)))
+                .with_edit_mode(Box::new(Emacs::new(keybinds)));
             let prompt = DefaultPrompt {
                 left_prompt: DefaultPromptSegment::Basic("".into()),
                 right_prompt: DefaultPromptSegment::Empty,
@@ -353,11 +357,22 @@ async fn or_never(b: bool) {
 }
 
 pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()> {
+    if let Some(dir) = p.log_dir {
+        let _ = Logger::try_with_env()?
+            .log_to_file(
+                FileSpec::default()
+                    .directory(dir)
+                    .basename("netidx-shell")
+                    .use_timestamp(true),
+            )
+            .start()?;
+    }
+    info!("netidx shell starting");
     let publisher = PublisherBuilder::new(cfg.clone()).bind_cfg(p.bind).build().await?;
     let subscriber = SubscriberBuilder::new(cfg).desired_auth(auth).build()?;
     let mut repl = Repl::new(publisher, subscriber)?;
     let mut output = false;
-    let mut newenv = None;
+    let mut newenv = Some(repl.ctx.env.clone());
     loop {
         let ready = repl.cycle_ready();
         let mut updates = None;

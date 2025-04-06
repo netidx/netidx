@@ -201,7 +201,6 @@ async fn tokio_main() -> Result<()> {
 // as early as possible, before the async runtime is initialized. This means we can't
 // use the tokio_main macro on main, so we short-circuit ResolverServer handling here.
 fn main() -> Result<()> {
-    env_logger::init();
     let opt = Opt::from_args();
     match opt {
         Opt::ResolverServer(p) => resolver_server::run(p),
