@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 use compact_str::CompactString;
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::path::Path;
-use std::{fmt, iter, sync::Weak};
+use std::{fmt, iter, ops::Bound, sync::Weak};
 use triomphe::Arc;
 
 pub struct LambdaBind<C: Ctx, E: UserEvent> {
@@ -190,7 +190,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         None
     }
 
-    pub(super) fn lookup_bind(
+    pub fn lookup_bind(
         &self,
         scope: &ModPath,
         name: &ModPath,
@@ -201,6 +201,29 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
                     .and_then(|bid| self.by_id.get(bid).map(|bind| (scope, bind)))
             })
         })
+    }
+
+    /// lookup binds in scope that match the specified partial
+    /// name. This is intended to be used for IDEs and interactive
+    /// shells, and is not used by the compiler.
+    pub fn lookup_matching(
+        &self,
+        scope: &ModPath,
+        part: &ModPath,
+    ) -> Vec<(CompactString, BindId)> {
+        let mut res = vec![];
+        self.find_visible(scope, part, |scope, part| {
+            if let Some(vars) = self.binds.get(scope) {
+                let r = vars.range::<str, _>((Bound::Included(part), Bound::Unbounded));
+                for (name, bind) in r {
+                    if name.starts_with(part) {
+                        res.push((name.clone(), *bind));
+                    }
+                }
+            }
+            None::<()>
+        });
+        res
     }
 
     pub fn deftype(

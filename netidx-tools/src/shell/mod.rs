@@ -1,5 +1,6 @@
 use anyhow::{Error, Result};
 use arcstr::ArcStr;
+use completion::BComplete;
 use futures::{channel::mpsc, StreamExt};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
@@ -11,11 +12,15 @@ use netidx::{
     subscriber::{self, Dval, SubId, Subscriber, SubscriberBuilder, UpdatesFlags},
 };
 use netidx_bscript::{
+    env::Env,
     expr::{self, ExprId, ModPath},
     node::{self, Node, NodeKind},
     BindId, Ctx, Event, ExecCtx, NoUserEvent,
 };
-use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
+use reedline::{
+    default_emacs_keybindings, DefaultPrompt, DefaultPromptSegment, IdeMenu, KeyCode,
+    KeyModifiers, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
+};
 use smallvec::SmallVec;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
@@ -26,6 +31,7 @@ use std::{
 };
 use structopt::StructOpt;
 use tokio::{select, sync::oneshot, task};
+mod completion;
 
 #[derive(StructOpt, Debug)]
 pub(crate) struct Params {
@@ -54,7 +60,6 @@ type WriteBatch = Pooled<Vec<WriteRequest>>;
 
 struct ReplCtx {
     by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
-    refed: FxHashMap<ExprId, usize>,
     var_updates: VecDeque<(BindId, Value)>,
     net_updates: VecDeque<(SubId, subscriber::Event)>,
     subscribed: FxHashMap<SubId, SmallVec<[ExprId; 3]>>,
@@ -73,7 +78,6 @@ impl ReplCtx {
         let (writes_tx, writes) = mpsc::channel(3);
         Self {
             by_ref: HashMap::default(),
-            refed: HashMap::default(),
             var_updates: VecDeque::new(),
             net_updates: VecDeque::new(),
             subscribed: HashMap::default(),
@@ -154,24 +158,40 @@ impl Ctx for ReplCtx {
     }
 }
 
+type MaybeEnv = Option<Env<ReplCtx, NoUserEvent>>;
+
 struct InputReader {
-    go: Option<oneshot::Sender<()>>,
-    recv: mpsc::UnboundedReceiver<(oneshot::Sender<()>, Result<Signal>)>,
+    go: Option<oneshot::Sender<MaybeEnv>>,
+    recv: mpsc::UnboundedReceiver<(oneshot::Sender<MaybeEnv>, Result<Signal>)>,
 }
 
 impl InputReader {
     fn run(
-        mut c_rx: oneshot::Receiver<()>,
-    ) -> mpsc::UnboundedReceiver<(oneshot::Sender<()>, Result<Signal>)> {
+        mut c_rx: oneshot::Receiver<MaybeEnv>,
+    ) -> mpsc::UnboundedReceiver<(oneshot::Sender<MaybeEnv>, Result<Signal>)> {
         let (tx, rx) = mpsc::unbounded();
         task::spawn(async move {
-            let mut line_editor = Reedline::create();
+            let mut keybinds = default_emacs_keybindings();
+            keybinds.add_binding(
+                KeyModifiers::NONE,
+                KeyCode::Tab,
+                ReedlineEvent::UntilFound(vec![
+                    ReedlineEvent::Menu("completion".into()),
+                    ReedlineEvent::MenuNext,
+                ]),
+            );
+            let mut line_editor =
+                Reedline::create().with_menu(ReedlineMenu::EngineCompleter(Box::new(
+                    IdeMenu::default().with_name("completion"),
+                )));
             let prompt = DefaultPrompt {
                 left_prompt: DefaultPromptSegment::Basic("".into()),
                 right_prompt: DefaultPromptSegment::Empty,
             };
             loop {
-                let _ = c_rx.await;
+                if let Ok(Some(env)) = c_rx.await {
+                    line_editor = line_editor.with_completer(Box::new(BComplete(env)));
+                }
                 let r = task::block_in_place(|| {
                     line_editor.read_line(&prompt).map_err(Error::from)
                 });
@@ -191,13 +211,13 @@ impl InputReader {
         Self { go: Some(tx_go), recv }
     }
 
-    async fn read_line(&mut self, output: bool) -> Result<Signal> {
+    async fn read_line(&mut self, output: bool, env: MaybeEnv) -> Result<Signal> {
         if output {
             tokio::signal::ctrl_c().await?;
             Ok(Signal::CtrlC)
         } else {
             if let Some(tx) = self.go.take() {
-                let _ = tx.send(());
+                let _ = tx.send(env);
             }
             match self.recv.next().await {
                 None => bail!("input stream ended"),
@@ -207,6 +227,18 @@ impl InputReader {
                 }
             }
         }
+    }
+}
+
+fn is_output(n: &Node<ReplCtx, NoUserEvent>) -> bool {
+    match &n.kind {
+        NodeKind::Bind { .. }
+        | NodeKind::Lambda(_)
+        | NodeKind::Use { .. }
+        | NodeKind::Connect(_, _)
+        | NodeKind::Module(_)
+        | NodeKind::TypeDef { .. } => false,
+        _ => true,
     }
 }
 
@@ -304,15 +336,7 @@ impl Repl {
                 match n.extract_err() {
                     Some(e) => eprintln!("compile error: {e}"),
                     None => {
-                        *output = match &n.kind {
-                            NodeKind::Bind { .. }
-                            | NodeKind::Lambda(_)
-                            | NodeKind::Use { .. }
-                            | NodeKind::Connect(_, _)
-                            | NodeKind::Module(_)
-                            | NodeKind::TypeDef { .. } => false,
-                            _ => true,
-                        };
+                        *output = is_output(&n);
                         *init = Some(top_id);
                         self.nodes.insert(top_id, n);
                     }
@@ -333,6 +357,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     let subscriber = SubscriberBuilder::new(cfg).desired_auth(auth).build()?;
     let mut repl = Repl::new(publisher, subscriber)?;
     let mut output = false;
+    let mut newenv = None;
     loop {
         let ready = repl.cycle_ready();
         let mut updates = None;
@@ -352,7 +377,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                     writes = Some(wr);
                 }
             },
-            i = repl.input.read_line(output) => match i {
+            i = repl.input.read_line(output, newenv.take()) => match i {
                 Ok(i) => {
                     input = Some(i);
                 },
@@ -373,9 +398,18 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
             None => (),
             Some(Signal::CtrlC) => {
                 output = false;
+                if let Some((_, n)) = repl.nodes.last() {
+                    if is_output(n) {
+                        let (_, n) = repl.nodes.pop().unwrap();
+                        n.delete(&mut repl.ctx)
+                    }
+                }
             }
             Some(Signal::CtrlD) => break Ok(()),
-            Some(Signal::Success(line)) => repl.compile(&line, &mut init, &mut output),
+            Some(Signal::Success(line)) => {
+                repl.compile(&line, &mut init, &mut output);
+                newenv = Some(repl.ctx.env.clone());
+            }
         }
         if let Some(v) = repl.do_cycle(init, updates, writes) {
             if output {
