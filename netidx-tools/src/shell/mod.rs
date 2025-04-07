@@ -32,7 +32,7 @@ use std::{
     time::Duration,
 };
 use structopt::StructOpt;
-use tokio::{select, sync::oneshot, task};
+use tokio::{fs, select, sync::oneshot, task};
 mod completion;
 
 #[derive(StructOpt, Debug)]
@@ -246,6 +246,13 @@ fn is_output(n: &Node<ReplCtx, NoUserEvent>) -> bool {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Init {
+    None,
+    One(ExprId),
+    All,
+}
+
 struct Repl {
     ctx: ExecCtx<ReplCtx, NoUserEvent>,
     event: Event<NoUserEvent>,
@@ -267,7 +274,7 @@ impl Repl {
 
     fn do_cycle(
         &mut self,
-        init: Option<ExprId>,
+        init: Init,
         updates: Option<UpdateBatch>,
         _writes: Option<WriteBatch>,
     ) -> Option<Value> {
@@ -286,8 +293,16 @@ impl Repl {
                 }
             };
         }
-        if let Some(id) = init {
-            self.updated.insert(id);
+        match init {
+            Init::None => (),
+            Init::One(id) => {
+                self.updated.insert(id);
+            }
+            Init::All => {
+                for id in self.nodes.keys() {
+                    self.updated.insert(*id);
+                }
+            }
         }
         for _ in 0..self.ctx.user.var_updates.len() {
             let (id, v) = self.ctx.user.var_updates.pop_front().unwrap();
@@ -304,17 +319,24 @@ impl Repl {
         }
         let res = self.nodes.iter_mut().fold(None, |_, (id, n)| {
             if self.updated.contains(id) {
-                if Some(*id) == init {
-                    self.event.init = true;
-                    n.refs(&mut |id| {
-                        if let Some(v) = self.ctx.user.cached.get(&id) {
-                            if let Entry::Vacant(e) = self.event.variables.entry(id) {
-                                e.insert(v.clone());
+                macro_rules! do_init {
+                    () => {{
+                        self.event.init = true;
+                        n.refs(&mut |id| {
+                            if let Some(v) = self.ctx.user.cached.get(&id) {
+                                if let Entry::Vacant(e) = self.event.variables.entry(id) {
+                                    e.insert(v.clone());
+                                }
                             }
-                        }
-                    });
-                } else {
-                    self.event.init = false;
+                        });
+                    }};
+                }
+                match init {
+                    Init::All => do_init!(),
+                    Init::One(i) if i == *id => do_init!(),
+                    Init::One(_) | Init::None => {
+                        self.event.init = false;
+                    }
                 }
                 n.update(&mut self.ctx, &mut self.event)
             } else {
@@ -330,7 +352,7 @@ impl Repl {
         self.ctx.user.var_updates.len() > 0 || self.ctx.user.net_updates.len() > 0
     }
 
-    fn compile(&mut self, line: &str, init: &mut Option<ExprId>, output: &mut bool) {
+    fn compile(&mut self, line: &str, init: &mut Init, output: &mut bool) {
         let scope = ModPath::root();
         match expr::parser::parse_expr(&line) {
             Err(e) => eprintln!("parse error: {e:?}"),
@@ -341,12 +363,30 @@ impl Repl {
                     Some(e) => eprintln!("compile error: {e}"),
                     None => {
                         *output = is_output(&n);
-                        *init = Some(top_id);
+                        *init = Init::One(top_id);
                         self.nodes.insert(top_id, n);
                     }
                 }
             }
         }
+    }
+
+    async fn load(&mut self, file: &PathBuf) -> Result<()> {
+        let scope = ModPath::root();
+        let s = fs::read_to_string(file).await?;
+        let exprs = expr::parser::parse_many_modexpr(&s)?;
+        for expr in exprs {
+            let top_id = expr.id;
+            let n = Node::compile(&mut self.ctx, &scope, expr);
+            if let Some(e) = n.extract_err() {
+                bail!("{e:?}")
+            }
+            self.nodes.insert(top_id, n);
+        }
+        if let Some(v) = self.do_cycle(Init::All, None, None) {
+            println!("{v}")
+        }
+        Ok(())
     }
 }
 
@@ -371,14 +411,18 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     let publisher = PublisherBuilder::new(cfg.clone()).bind_cfg(p.bind).build().await?;
     let subscriber = SubscriberBuilder::new(cfg).desired_auth(auth).build()?;
     let mut repl = Repl::new(publisher, subscriber)?;
-    let mut output = false;
+    let script = p.file.is_some();
+    let mut output = script;
     let mut newenv = Some(repl.ctx.env.clone());
+    if let Some(file) = p.file.as_ref() {
+        repl.load(file).await?
+    }
     loop {
         let ready = repl.cycle_ready();
         let mut updates = None;
         let mut writes = None;
         let mut input = None;
-        let mut init = None;
+        let mut init = Init::None;
         select! {
             wr = repl.ctx.user.writes.select_next_some() => {
                 writes = Some(wr);
@@ -411,6 +455,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
         }
         match input {
             None => (),
+            Some(Signal::CtrlC) if script => break Ok(()),
             Some(Signal::CtrlC) => {
                 output = false;
                 if let Some((_, n)) = repl.nodes.last() {
