@@ -383,7 +383,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         Expr { kind: ExprKind::Module { name, export: _, value }, id: _ } => {
             let scope = ModPath(scope.append(&name));
             match value {
-                None => error!("module loading is not implemented"),
+                None => error!("you must deref external modules"),
                 Some(exprs) => {
                     let (error, children) = subexprs!(scope, exprs);
                     if error {

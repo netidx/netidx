@@ -413,7 +413,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     let mut repl = Repl::new(publisher, subscriber)?;
     let script = p.file.is_some();
     let mut output = script;
-    let mut newenv = Some(repl.ctx.env.clone());
+    let mut newenv = (!script).then_some(repl.ctx.env.clone());
     if let Some(file) = p.file.as_ref() {
         repl.load(file).await?
     }

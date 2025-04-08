@@ -1,10 +1,11 @@
 use crate::typ::{NoRefs, Refs, TVar, Type, TypeMark};
+use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use compact_str::{format_compact, CompactString};
 use netidx::{
     path::Path,
     publisher::Typ,
-    subscriber::Value,
+    subscriber::{Event, Subscriber, Value},
     utils::{self, Either},
 };
 use regex::Regex;
@@ -17,11 +18,15 @@ use std::{
     borrow::Borrow,
     cmp::{Ordering, PartialEq, PartialOrd},
     fmt::{self, Display, Write},
+    future::Future,
     marker::PhantomData,
     ops::Deref,
+    path::PathBuf,
+    pin::Pin,
     result,
     str::FromStr,
     sync::LazyLock,
+    time::Duration,
 };
 use triomphe::Arc;
 
@@ -101,6 +106,11 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
         Path::levels(&self.0) == L
             && Path::parts(&self.0).zip(other.iter()).all(|(s0, s1)| s0 == *s1)
     }
+}
+
+pub enum ModuleResolver {
+    Files(PathBuf),
+    Netidx { subscriber: Subscriber, base: Path, timeout: Option<Duration> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1200,6 +1210,309 @@ impl Expr {
 
     pub fn to_string_pretty(&self, col_limit: usize) -> String {
         self.kind.to_string_pretty(col_limit)
+    }
+
+    /// fold over self and all of self's sub expressions
+    pub fn fold<T, F: FnMut(T, &Self) -> T>(&self, init: T, f: &mut F) -> T {
+        let init = f(init, self);
+        match &self.kind {
+            ExprKind::Constant(_)
+            | ExprKind::Use { .. }
+            | ExprKind::Ref { .. }
+            | ExprKind::StructRef { .. }
+            | ExprKind::TupleRef { .. }
+            | ExprKind::TypeDef { .. } => init,
+            ExprKind::Module { value: Some(e), .. } => {
+                e.iter().fold(init, |init, e| e.fold(init, f))
+            }
+            ExprKind::Module { value: None, .. } => init,
+            ExprKind::Do { exprs } => exprs.iter().fold(init, |init, e| e.fold(init, f)),
+            ExprKind::Bind { value, .. } => value.fold(init, f),
+            ExprKind::StructWith { replace, .. } => {
+                replace.iter().fold(init, |init, (_, e)| e.fold(init, f))
+            }
+            ExprKind::Connect { value, .. } => value.fold(init, f),
+            ExprKind::Lambda { body, .. } => match body {
+                Either::Left(e) => e.fold(init, f),
+                Either::Right(_) => init,
+            },
+            ExprKind::TypeCast { expr, .. } => expr.fold(init, f),
+            ExprKind::Apply { args, function: _ } => {
+                args.iter().fold(init, |init, (_, e)| e.fold(init, f))
+            }
+            ExprKind::Any { args }
+            | ExprKind::Array { args }
+            | ExprKind::Tuple { args }
+            | ExprKind::Variant { args, .. } => {
+                args.iter().fold(init, |init, e| e.fold(init, f))
+            }
+            ExprKind::Struct { args } => {
+                args.iter().fold(init, |init, (_, e)| e.fold(init, f))
+            }
+            ExprKind::Select { arg, arms } => {
+                let init = arg.fold(init, f);
+                arms.iter().fold(init, |init, (p, e)| {
+                    let init = match p.guard.as_ref() {
+                        None => init,
+                        Some(g) => g.fold(init, f),
+                    };
+                    e.fold(init, f)
+                })
+            }
+            ExprKind::Qop(e) | ExprKind::Not { expr: e } => e.fold(init, f),
+            ExprKind::Add { lhs, rhs }
+            | ExprKind::Sub { lhs, rhs }
+            | ExprKind::Mul { lhs, rhs }
+            | ExprKind::Div { lhs, rhs }
+            | ExprKind::And { lhs, rhs }
+            | ExprKind::Or { lhs, rhs }
+            | ExprKind::Eq { lhs, rhs }
+            | ExprKind::Ne { lhs, rhs }
+            | ExprKind::Gt { lhs, rhs }
+            | ExprKind::Lt { lhs, rhs }
+            | ExprKind::Gte { lhs, rhs }
+            | ExprKind::Lte { lhs, rhs } => {
+                let init = lhs.fold(init, f);
+                rhs.fold(init, f)
+            }
+        }
+    }
+
+    pub fn has_unresolved_modules(&self) -> bool {
+        self.fold(false, &mut |acc, e| {
+            acc || match &e.kind {
+                ExprKind::Module { value, .. } => value.is_none(),
+                _ => false,
+            }
+        })
+    }
+
+    /// Resolve external modules referenced in the expression using
+    /// the resolvers list. Each resolver will be tried in order,
+    /// until one succeeds.
+    pub fn resolve_modules<'a>(
+        &'a self,
+        scope: &'a ModPath,
+        resolvers: &'a [ModuleResolver],
+    ) -> Pin<Box<dyn Future<Output = Result<Expr>> + 'a>> {
+        macro_rules! subexprs {
+            ($args:expr) => {{
+                let mut tmp = vec![];
+                for e in $args.iter() {
+                    tmp.push(e.resolve_modules(scope, resolvers).await?);
+                }
+                tmp
+            }};
+        }
+        macro_rules! subtuples {
+            ($args:expr) => {{
+                let mut tmp = vec![];
+                for (k, e) in $args.iter() {
+                    let e = e.resolve_modules(scope, resolvers).await?;
+                    tmp.push((k.clone(), e));
+                }
+                tmp
+            }};
+        }
+        macro_rules! only_args {
+            ($kind:ident, $args:expr) => {
+                Box::pin(async move {
+                    let args = Arc::from(subexprs!($args));
+                    Ok(Expr { id: self.id, kind: ExprKind::$kind { args } })
+                })
+            };
+        }
+        macro_rules! bin_op {
+            ($kind:ident, $lhs:expr, $rhs:expr) => {
+                Box::pin(async move {
+                    let lhs = Arc::from($lhs.resolve_modules(scope, resolvers).await?);
+                    let rhs = Arc::from($rhs.resolve_modules(scope, resolvers).await?);
+                    Ok(Expr { id: self.id, kind: ExprKind::$kind { lhs, rhs } })
+                })
+            };
+        }
+        if !self.has_unresolved_modules() {
+            return Box::pin(async { Ok(self.clone()) });
+        }
+        match self.kind.clone() {
+            ExprKind::Module { value: None, export, name } => Box::pin(async move {
+                let full_name = scope.append(&name);
+                let full_name = full_name.trim_start_matches(Path::SEP);
+                let mut errors = vec![];
+                for r in resolvers {
+                    let s = match r {
+                        ModuleResolver::Files(base) => {
+                            let full_path = base.join(full_name).with_extension("bs");
+                            match tokio::fs::read_to_string(&full_path).await {
+                                Ok(s) => ArcStr::from(s),
+                                Err(e) => {
+                                    errors.push(anyhow::Error::from(e));
+                                    continue;
+                                }
+                            }
+                        }
+                        ModuleResolver::Netidx { subscriber, base, timeout } => {
+                            let full_path = base.append(full_name);
+                            let sub = subscriber
+                                .subscribe_nondurable_one(full_path, *timeout)
+                                .await;
+                            match sub {
+                                Err(e) => {
+                                    errors.push(e);
+                                    continue;
+                                }
+                                Ok(v) => match v.last() {
+                                    Event::Update(Value::String(s)) => s,
+                                    Event::Unsubscribed | Event::Update(_) => {
+                                        errors.push(anyhow!("expected string"));
+                                        continue;
+                                    }
+                                },
+                            }
+                        }
+                    };
+                    let exprs = parser::parse_many_modexpr(&s)?;
+                    let value = Some(Arc::from(exprs));
+                    return Ok(Expr {
+                        id: self.id,
+                        kind: ExprKind::Module { name, export, value },
+                    });
+                }
+                bail!("module {name} could not be found {errors:?}")
+            }),
+            ExprKind::Constant(_)
+            | ExprKind::Use { .. }
+            | ExprKind::Ref { .. }
+            | ExprKind::StructRef { .. }
+            | ExprKind::TupleRef { .. }
+            | ExprKind::TypeDef { .. } => Box::pin(async move { Ok(self.clone()) }),
+            ExprKind::Module { value: Some(exprs), export, name } => {
+                Box::pin(async move {
+                    let scope = ModPath(scope.append(&name));
+                    let mut tmp = vec![];
+                    for e in exprs.iter() {
+                        tmp.push(e.resolve_modules(&scope, resolvers).await?);
+                    }
+                    Ok(Expr {
+                        id: self.id,
+                        kind: ExprKind::Module {
+                            value: Some(Arc::from(tmp)),
+                            name,
+                            export,
+                        },
+                    })
+                })
+            }
+            ExprKind::Do { exprs } => Box::pin(async move {
+                let exprs = Arc::from(subexprs!(exprs));
+                Ok(Expr { id: self.id, kind: ExprKind::Do { exprs } })
+            }),
+            ExprKind::Bind { pattern, typ, export, value } => Box::pin(async move {
+                let value = value.resolve_modules(scope, resolvers).await?;
+                Ok(Expr {
+                    id: self.id,
+                    kind: ExprKind::Bind { pattern, typ, export, value: Arc::new(value) },
+                })
+            }),
+            ExprKind::StructWith { name, replace } => Box::pin(async move {
+                Ok(Expr {
+                    id: self.id,
+                    kind: ExprKind::StructWith {
+                        name,
+                        replace: Arc::from(subtuples!(replace)),
+                    },
+                })
+            }),
+            ExprKind::Connect { name, value } => Box::pin(async move {
+                let value = value.resolve_modules(scope, resolvers).await?;
+                Ok(Expr {
+                    id: self.id,
+                    kind: ExprKind::Connect { name, value: Arc::new(value) },
+                })
+            }),
+            ExprKind::Lambda { args, vargs, rtype, constraints, body } => {
+                Box::pin(async move {
+                    let body = match body {
+                        Either::Left(e) => {
+                            let e = e.resolve_modules(scope, resolvers).await?;
+                            Either::Left(Arc::new(e))
+                        }
+                        Either::Right(s) => Either::Right(s.clone()),
+                    };
+                    Ok(Expr {
+                        id: self.id,
+                        kind: ExprKind::Lambda { args, vargs, rtype, constraints, body },
+                    })
+                })
+            }
+            ExprKind::TypeCast { expr, typ } => Box::pin(async move {
+                let expr = expr.resolve_modules(scope, resolvers).await?;
+                Ok(Expr {
+                    id: self.id,
+                    kind: ExprKind::TypeCast { expr: Arc::new(expr), typ },
+                })
+            }),
+            ExprKind::Apply { args, function } => Box::pin(async move {
+                Ok(Expr {
+                    id: self.id,
+                    kind: ExprKind::Apply { args: Arc::from(subtuples!(args)), function },
+                })
+            }),
+            ExprKind::Any { args } => only_args!(Any, args),
+            ExprKind::Array { args } => only_args!(Array, args),
+            ExprKind::Tuple { args } => only_args!(Tuple, args),
+            ExprKind::Struct { args } => Box::pin(async move {
+                let args = Arc::from(subtuples!(args));
+                Ok(Expr { id: self.id, kind: ExprKind::Struct { args } })
+            }),
+            ExprKind::Variant { tag, args } => Box::pin(async move {
+                let args = Arc::from(subexprs!(args));
+                Ok(Expr { id: self.id, kind: ExprKind::Variant { tag, args } })
+            }),
+            ExprKind::Select { arg, arms } => Box::pin(async move {
+                let arg = Arc::new(arg.resolve_modules(scope, resolvers).await?);
+                let mut tmp = vec![];
+                for (p, e) in arms.iter() {
+                    let p = match &p.guard {
+                        None => p.clone(),
+                        Some(e) => {
+                            let e = e.resolve_modules(scope, resolvers).await?;
+                            Pattern {
+                                guard: Some(e),
+                                type_predicate: p.type_predicate.clone(),
+                                structure_predicate: p.structure_predicate.clone(),
+                            }
+                        }
+                    };
+                    let e = e.resolve_modules(scope, resolvers).await?;
+                    tmp.push((p, e));
+                }
+                Ok(Expr {
+                    id: self.id,
+                    kind: ExprKind::Select { arg, arms: Arc::from(tmp) },
+                })
+            }),
+            ExprKind::Qop(e) => Box::pin(async move {
+                let e = e.resolve_modules(scope, resolvers).await?;
+                Ok(Expr { id: self.id, kind: ExprKind::Qop(Arc::new(e)) })
+            }),
+            ExprKind::Not { expr: e } => Box::pin(async move {
+                let e = e.resolve_modules(scope, resolvers).await?;
+                Ok(Expr { id: self.id, kind: ExprKind::Not { expr: Arc::new(e) } })
+            }),
+            ExprKind::Add { lhs, rhs } => bin_op!(Add, lhs, rhs),
+            ExprKind::Sub { lhs, rhs } => bin_op!(Sub, lhs, rhs),
+            ExprKind::Mul { lhs, rhs } => bin_op!(Mul, lhs, rhs),
+            ExprKind::Div { lhs, rhs } => bin_op!(Div, lhs, rhs),
+            ExprKind::And { lhs, rhs } => bin_op!(And, lhs, rhs),
+            ExprKind::Or { lhs, rhs } => bin_op!(Or, lhs, rhs),
+            ExprKind::Eq { lhs, rhs } => bin_op!(Eq, lhs, rhs),
+            ExprKind::Ne { lhs, rhs } => bin_op!(Ne, lhs, rhs),
+            ExprKind::Gt { lhs, rhs } => bin_op!(Gt, lhs, rhs),
+            ExprKind::Lt { lhs, rhs } => bin_op!(Lt, lhs, rhs),
+            ExprKind::Gte { lhs, rhs } => bin_op!(Gte, lhs, rhs),
+            ExprKind::Lte { lhs, rhs } => bin_op!(Lte, lhs, rhs),
+        }
     }
 }
 
