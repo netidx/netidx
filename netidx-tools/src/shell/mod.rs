@@ -509,8 +509,13 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     if let Some(file) = p.file.as_ref() {
         repl.load(file).await?
     } else if !p.no_init {
-        match repl.compile("mod init", &mut Init::None, &mut false).await {
+        match repl.compile("mod init;", &mut Init::None, &mut false).await {
             Ok(()) => {
+                if let Err(e) =
+                    repl.compile("use init", &mut Init::None, &mut false).await
+                {
+                    eprintln!("error in init module: {e:?}");
+                }
                 let _ = repl.do_cycle(Init::All, None, None);
             }
             Err(e) if e.is::<CouldNotResolve>() => (),
