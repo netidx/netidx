@@ -186,6 +186,10 @@ pub trait Ctx: 'static {
     /// change
     fn list_table(&mut self, id: BindId, path: Path);
 
+    /// List will no longer be called on this BindId, and related
+    /// resources can be cleaned up.
+    fn stop_list(&mut self, id: BindId);
+
     /// Publish the specified value, returning it's Id, which must be
     /// used to update the value and unpublish it. If the path is
     /// already published, return an error.

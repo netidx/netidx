@@ -319,6 +319,10 @@ macro_rules! list {
                 }
                 event.variables.get(&self.id).map(|v| v.clone())
             }
+
+            fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+                ctx.user.stop_list(self.id);
+            }
         }
     };
 }
@@ -432,6 +436,15 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
             },
         }
         Ok(())
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Some((_, id)) = self.current.take() {
+            ctx.user.unpublish(id);
+        }
+        if let Some(mut app) = self.on_write.take() {
+            app.delete(ctx);
+        }
     }
 }
 
