@@ -11,7 +11,9 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    publisher::{BindCfg, DesiredAuth, Publisher, PublisherBuilder, Value, WriteRequest},
+    publisher::{
+        BindCfg, DesiredAuth, Id, Publisher, PublisherBuilder, Value, WriteRequest,
+    },
     subscriber::{self, Dval, SubId, Subscriber, SubscriberBuilder, UpdatesFlags},
 };
 use netidx_bscript::{
@@ -129,12 +131,7 @@ impl Ctx for ReplCtx {
         self.var_updates.clear();
     }
 
-    fn durable_subscribe(
-        &mut self,
-        flags: UpdatesFlags,
-        path: Path,
-        ref_by: ExprId,
-    ) -> Dval {
+    fn subscribe(&mut self, flags: UpdatesFlags, path: Path, ref_by: ExprId) -> Dval {
         let dval =
             self.subscriber.subscribe_updates(path, [(flags, self.updates_tx.clone())]);
         let exprs = self.subscribed.entry(dval.id()).or_default();
@@ -153,8 +150,28 @@ impl Ctx for ReplCtx {
         }
     }
 
+    fn list(&mut self, id: BindId, path: Path) {
+        todo!()
+    }
+
+    fn list_table(&mut self, id: BindId, path: Path) {
+        todo!()
+    }
+
+    fn publish(&mut self, path: Path, value: Value, ref_by: ExprId) -> Result<Id> {
+        todo!()
+    }
+
+    fn update(&mut self, id: Id, value: Value) {
+        todo!()
+    }
+
+    fn unpublish(&mut self, id: Id) {
+        todo!()
+    }
+
     fn set_timer(&mut self, _id: BindId, _timeout: Duration, _ref_by: ExprId) {
-        unimplemented!()
+        todo!()
     }
 
     fn ref_var(&mut self, id: BindId, ref_by: ExprId) {
@@ -515,6 +532,10 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
         repl.load(file).await?
     } else if !p.no_init {
         match repl.compile("mod init;", &mut Init::None, &mut false).await {
+            Err(e) if e.is::<CouldNotResolve>() => (),
+            Err(e) => {
+                eprintln!("error in init module: {e:?}")
+            }
             Ok(()) => {
                 if let Err(e) =
                     repl.compile("use init", &mut Init::None, &mut false).await
@@ -522,10 +543,6 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                     eprintln!("error in init module: {e:?}");
                 }
                 let _ = repl.do_cycle(Init::All, None, None);
-            }
-            Err(e) if e.is::<CouldNotResolve>() => (),
-            Err(e) => {
-                eprintln!("error in init module: {e:?}")
             }
         }
     }

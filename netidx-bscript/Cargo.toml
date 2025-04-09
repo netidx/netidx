@@ -27,13 +27,13 @@ immutable-chunkmap = { workspace = true }
 netidx-core = { path = "../netidx-core", version = "0.26.0" }
 netidx-netproto = { path = "../netidx-netproto", version = "0.27.2" }
 netidx = { path = "../netidx", version = "0.27.0", default-features = false }
+parking_lot = { workspace = true }
 regex = { workspace = true }
 serde_derive = { workspace = true }
 serde = { workspace = true }
 smallvec = { workspace = true }
 tokio = { workspace = true }
 triomphe = { workspace = true }
-parking_lot = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

@@ -1,8 +1,9 @@
 use crate::{
     arity1, arity2, deftype, errf,
-    expr::{Expr, ExprId},
-    node::Node,
+    expr::{Expr, ExprId, ExprKind},
+    node::{Node, NodeKind},
     stdfn::CachedVals,
+    typ::{FnArgType, FnType, NoRefs, Type},
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
@@ -11,6 +12,7 @@ use compact_str::format_compact;
 use fxhash::FxHashSet;
 use netidx::{
     path::Path,
+    publisher::{Id, Typ},
     subscriber::{self, Dval, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
@@ -86,7 +88,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Write {
                     return errf!("write(path, val): invalid path {path:?}");
                 }
                 Some(path) => {
-                    let dv = ctx.user.durable_subscribe(
+                    let dv = ctx.user.subscribe(
                         UpdatesFlags::empty(),
                         path.clone(),
                         self.top_id,
@@ -164,7 +166,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
                     Some(path) => {
                         self.cur = Some((
                             path.clone(),
-                            ctx.user.durable_subscribe(
+                            ctx.user.subscribe(
                                 UpdatesFlags::BEGIN_WITH_LAST,
                                 path,
                                 self.top_id,
@@ -266,11 +268,183 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for RpcCall {
     }
 }
 
+macro_rules! list {
+    ($name:ident, $builtin:literal, $fun:ident, $typ:literal) => {
+        struct $name {
+            args: CachedVals,
+            current: Option<Path>,
+            id: BindId,
+        }
+
+        impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for $name {
+            const NAME: &str = $builtin;
+            deftype!($typ);
+
+            fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+                Arc::new(|_, _, _, from, _| {
+                    Ok(Box::new(List {
+                        args: CachedVals::new(from),
+                        current: None,
+                        id: BindId::new(),
+                    }))
+                })
+            }
+        }
+
+        impl<C: Ctx, E: UserEvent> Apply<C, E> for $name {
+            fn update(
+                &mut self,
+                ctx: &mut ExecCtx<C, E>,
+                from: &mut [Node<C, E>],
+                event: &mut Event<E>,
+            ) -> Option<Value> {
+                let up = self.args.update_diff(ctx, from, event);
+                let ((_, path), (trigger_up, path_up)) = arity2!(self.args.0, up);
+                match (path, path_up, trigger_up) {
+                    (Some(Value::String(path)), true, _)
+                        if self
+                            .current
+                            .as_ref()
+                            .map(|p| &**p != &**path)
+                            .unwrap_or(true) =>
+                    {
+                        let path = Path::from(path);
+                        self.current = Some(path.clone());
+                        ctx.user.list(self.id, path);
+                    }
+                    (Some(Value::String(path)), _, true) => {
+                        ctx.user.$fun(self.id, Path::from(path));
+                    }
+                    _ => (),
+                }
+                event.variables.get(&self.id).map(|v| v.clone())
+            }
+        }
+    };
+}
+
+list!(List, "list", list, "fn(?#update:Any, string) -> Array<String>");
+list!(ListTable, "list_table", list_table, "fn(?#update:Any, string) -> Table");
+
+struct Publish<C: Ctx, E: UserEvent> {
+    args: CachedVals,
+    current: Option<(Path, Id)>,
+    top_id: ExprId,
+    typ: FnType<NoRefs>,
+    x: BindId,
+    on_write: Option<Box<dyn Apply<C, E> + Send + Sync>>,
+    from: [Node<C, E>; 1],
+}
+
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Publish<C, E> {
+    const NAME: &str = "publish";
+    deftype!("fn(?#update:[null, fn(Any) -> Any], string, Any) -> error");
+
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|ctx, typ, _, from, top_id| match from {
+            [Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }, _, _] => {
+                let x = BindId::new();
+                let mut args = [Node {
+                    spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
+                    typ: from[0].typ.clone(),
+                    kind: NodeKind::Ref { id: x, top_id },
+                }];
+                let on_write = (lb.init)(ctx, &mut args, top_id)?;
+                Ok(Box::new(Publish {
+                    args: CachedVals::new(from),
+                    current: None,
+                    typ: typ.clone(),
+                    top_id,
+                    x,
+                    on_write: Some(on_write),
+                    from: args,
+                }))
+            }
+            _ => bail!("expected function"),
+        })
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        let up = self.args.update_diff(ctx, from, event);
+        match (&up[1..], &self.args.0[1..]) {
+            ([true, _], [Some(Value::String(path)), Some(v)])
+                if self.current.as_ref().map(|(p, _)| &**p != path).unwrap_or(true) =>
+            {
+                if let Some((_, id)) = self.current.take() {
+                    ctx.user.unpublish(id);
+                }
+                let path = Path::from(path.clone());
+                match ctx.user.publish(path.clone(), v.clone(), self.top_id) {
+                    Err(e) => return Some(Value::Error(format!("{e:?}").into())),
+                    Ok(id) => {
+                        self.current = Some((path, id));
+                    }
+                }
+            }
+            ([_, true], [_, Some(v)]) => {
+                if let Some((_, id)) = &self.current {
+                    ctx.user.update(*id, v.clone())
+                }
+            }
+            _ => (),
+        }
+        if let Some((_, id)) = &self.current {
+            if let Some(v) = event.writes.get(id) {
+                event.variables.insert(self.x, v.clone());
+            }
+        }
+        if let Some(on_write) = &mut self.on_write {
+            let _ = on_write.update(ctx, &mut self.from, event);
+        }
+        None
+    }
+
+    fn typecheck(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+    ) -> anyhow::Result<()> {
+        for n in from.iter_mut() {
+            n.typecheck(ctx)?;
+        }
+        from[1].typ.check_contains(&Type::Primitive(Typ::String.into()))?;
+        from[2].typ.check_contains(&Type::Primitive(Typ::any()))?;
+        match &mut self.on_write {
+            None => Type::Primitive(Typ::Null.into()).check_contains(&from[0].typ)?,
+            Some(app) => match self.typ.args.get(0) {
+                Some(FnArgType { label: _, typ: Type::Set(s) }) if s.len() == 2 => {
+                    match &s[1] {
+                        Type::Fn(ft) => {
+                            ft.check_contains(&app.typ())?;
+                            app.typecheck(ctx, &mut self.from)?
+                        }
+                        _ => bail!("expected function as 1st arg"),
+                    }
+                }
+                _ => bail!("expected function as 1st arg"),
+            },
+        }
+        Ok(())
+    }
+}
+
 const MOD: &str = r#"
 pub mod net {
+    type Table = { rows: Array<string>, columns: Array<string> }
+
     pub let write = |path, value| 'write
     pub let subscribe = |path| 'subscribe
     pub let call = |path, args| 'call
+    pub let list = |#update = time::timer(1, true), path| 'list
+    pub let list_table = |#update = time::timer(1, true), path| 'list_table
+    pub let publish = |#on_write = null, string, Any| 'publish
 }
 "#;
 
@@ -278,5 +452,8 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Write>().unwrap();
     ctx.register_builtin::<Subscribe>().unwrap();
     ctx.register_builtin::<RpcCall>().unwrap();
+    ctx.register_builtin::<List>().unwrap();
+    ctx.register_builtin::<ListTable>().unwrap();
+    ctx.register_builtin::<Publish<C, E>>().unwrap();
     MOD.parse().unwrap()
 }

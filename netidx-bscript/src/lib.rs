@@ -24,6 +24,7 @@ use arcstr::ArcStr;
 use fxhash::FxHashMap;
 use netidx::{
     path::Path,
+    publisher::Id,
     subscriber::{self, Dval, SubId, UpdatesFlags, Value},
 };
 use std::{
@@ -63,6 +64,7 @@ pub struct Event<E: UserEvent> {
     pub init: bool,
     pub variables: FxHashMap<BindId, Value>,
     pub netidx: FxHashMap<SubId, subscriber::Event>,
+    pub writes: FxHashMap<Id, Value>,
     pub user: E,
 }
 
@@ -72,15 +74,17 @@ impl<E: UserEvent> Event<E> {
             init: false,
             variables: HashMap::default(),
             netidx: HashMap::default(),
+            writes: HashMap::default(),
             user,
         }
     }
 
     pub fn clear(&mut self) {
-        let Self { init, variables, netidx, user } = self;
+        let Self { init, variables, netidx, writes, user } = self;
         *init = false;
         variables.clear();
         netidx.clear();
+        writes.clear();
         user.clear();
     }
 }
@@ -167,15 +171,31 @@ pub trait Ctx: 'static {
     /// Subscribe to the specified netidx path. When the subscription
     /// updates you are expected to deliver Netidx events to the
     /// expression specified by ref_by.
-    fn durable_subscribe(
-        &mut self,
-        flags: UpdatesFlags,
-        path: Path,
-        ref_by: ExprId,
-    ) -> Dval;
+    fn subscribe(&mut self, flags: UpdatesFlags, path: Path, ref_by: ExprId) -> Dval;
 
     /// Called when a subscription is no longer needed
     fn unsubscribe(&mut self, path: Path, dv: Dval, ref_by: ExprId);
+
+    /// List the netidx path, return Value::Null if the path did not
+    /// change. When the path did update you should send the output
+    /// back as a properly formatted struct with two fields, rows and
+    /// columns both containing string arrays.
+    fn list(&mut self, id: BindId, path: Path);
+
+    /// List the table at path, return Value::Null if the path did not
+    /// change
+    fn list_table(&mut self, id: BindId, path: Path);
+
+    /// Publish the specified value, returning it's Id, which must be
+    /// used to update the value and unpublish it. If the path is
+    /// already published, return an error.
+    fn publish(&mut self, path: Path, value: Value, ref_by: ExprId) -> Result<Id>;
+
+    /// Update the specified value
+    fn update(&mut self, id: Id, value: Value);
+
+    /// Stop publishing the specified id
+    fn unpublish(&mut self, id: Id);
 
     /// This will be called by the compiler whenever a bound variable
     /// is referenced. The ref_by is the toplevel expression that
