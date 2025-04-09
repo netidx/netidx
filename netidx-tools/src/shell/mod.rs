@@ -1,11 +1,12 @@
-use anyhow::{Error, Result};
+use anyhow::{Context, Error, Result};
 use arcstr::ArcStr;
 use completion::BComplete;
+use core::fmt;
 use flexi_logger::{FileSpec, Logger};
 use futures::{channel::mpsc, StreamExt};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
-use log::info;
+use log::{error, info};
 use netidx::{
     config::Config,
     path::Path,
@@ -15,8 +16,8 @@ use netidx::{
 };
 use netidx_bscript::{
     env::Env,
-    expr::{self, ExprId, ModPath},
-    node::{self, Node, NodeKind},
+    expr::{self, Expr, ExprId, ExprKind, ModPath, ModuleResolver},
+    node::{Node, NodeKind},
     BindId, Ctx, Event, ExecCtx, NoUserEvent,
 };
 use reedline::{
@@ -27,8 +28,8 @@ use smallvec::SmallVec;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     future,
-    ops::Deref,
-    path::PathBuf,
+    os::unix::ffi::OsStrExt,
+    path::{Component, PathBuf},
     time::Duration,
 };
 use structopt::StructOpt;
@@ -37,6 +38,11 @@ mod completion;
 
 #[derive(StructOpt, Debug)]
 pub(crate) struct Params {
+    #[structopt(
+        long = "no-init",
+        help = "do not attempt to load the init module in repl mode"
+    )]
+    no_init: bool,
     #[structopt(
         short = "b",
         long = "bind",
@@ -55,12 +61,21 @@ pub(crate) struct Params {
     subscribe_timeout: Option<u64>,
     #[structopt(long = "log-dir", help = "log messages to the specified directory")]
     log_dir: Option<PathBuf>,
-    #[structopt(name = "file", help = "script file to execute")]
+    #[structopt(name = "file", help = "script file or module to execute")]
     file: Option<PathBuf>,
 }
 
 type UpdateBatch = Pooled<Vec<(SubId, subscriber::Event)>>;
 type WriteBatch = Pooled<Vec<WriteRequest>>;
+
+#[derive(Debug)]
+struct CouldNotResolve;
+
+impl fmt::Display for CouldNotResolve {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "could not resolve module")
+    }
+}
 
 struct ReplCtx {
     by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
@@ -68,6 +83,7 @@ struct ReplCtx {
     net_updates: VecDeque<(SubId, subscriber::Event)>,
     subscribed: FxHashMap<SubId, SmallVec<[ExprId; 3]>>,
     cached: FxHashMap<BindId, Value>,
+    script: bool,
     publisher: Publisher,
     subscriber: Subscriber,
     updates_tx: mpsc::Sender<UpdateBatch>,
@@ -77,7 +93,7 @@ struct ReplCtx {
 }
 
 impl ReplCtx {
-    fn new(publisher: Publisher, subscriber: Subscriber) -> Self {
+    fn new(publisher: Publisher, subscriber: Subscriber, script: bool) -> Self {
         let (updates_tx, updates) = mpsc::channel(3);
         let (writes_tx, writes) = mpsc::channel(3);
         Self {
@@ -86,6 +102,7 @@ impl ReplCtx {
             net_updates: VecDeque::new(),
             subscribed: HashMap::default(),
             cached: HashMap::default(),
+            script,
             publisher,
             subscriber,
             updates,
@@ -158,7 +175,9 @@ impl Ctx for ReplCtx {
 
     fn set_var(&mut self, id: BindId, value: Value) {
         self.var_updates.push_back((id, value.clone()));
-        self.cached.insert(id, value);
+        if !self.script {
+            self.cached.insert(id, value);
+        }
     }
 }
 
@@ -259,16 +278,44 @@ struct Repl {
     updated: FxHashSet<ExprId>,
     nodes: IndexMap<ExprId, Node<ReplCtx, NoUserEvent>, FxBuildHasher>,
     input: InputReader,
+    resolvers: Vec<ModuleResolver>,
 }
 
 impl Repl {
-    fn new(publisher: Publisher, subscriber: Subscriber) -> Result<Self> {
+    fn new(
+        publisher: Publisher,
+        subscriber: Subscriber,
+        script: bool,
+        subscribe_timeout: Option<Duration>,
+    ) -> Result<Self> {
+        let resolvers_default = || match dirs::data_dir() {
+            None => vec![ModuleResolver::Files("".into())],
+            Some(dd) => vec![
+                ModuleResolver::Files("".into()),
+                ModuleResolver::Files(dd.join("bscript")),
+            ],
+        };
+        let resolvers = match std::env::var("BSCRIPT_MODPATH") {
+            Err(_) => resolvers_default(),
+            Ok(mp) => match ModuleResolver::parse_env(
+                subscriber.clone(),
+                subscribe_timeout,
+                &mp,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("failed to parse BSCRIPT_MODPATH, using default {e:?}");
+                    resolvers_default()
+                }
+            },
+        };
         Ok(Self {
-            ctx: ExecCtx::new(ReplCtx::new(publisher, subscriber)),
+            ctx: ExecCtx::new(ReplCtx::new(publisher, subscriber, script)),
             event: Event::new(NoUserEvent),
             updated: HashSet::default(),
             nodes: IndexMap::default(),
             input: InputReader::new(),
+            resolvers,
         })
     }
 
@@ -352,30 +399,71 @@ impl Repl {
         self.ctx.user.var_updates.len() > 0 || self.ctx.user.net_updates.len() > 0
     }
 
-    fn compile(&mut self, line: &str, init: &mut Init, output: &mut bool) {
+    async fn compile(
+        &mut self,
+        line: &str,
+        init: &mut Init,
+        output: &mut bool,
+    ) -> Result<()> {
         let scope = ModPath::root();
-        match expr::parser::parse_expr(&line) {
-            Err(e) => eprintln!("parse error: {e:?}"),
-            Ok(spec) => {
-                let top_id = spec.id;
-                let n = Node::compile(&mut self.ctx, &scope, spec);
-                match n.extract_err() {
-                    Some(e) => eprintln!("compile error: {e}"),
-                    None => {
-                        *output = is_output(&n);
-                        *init = Init::One(top_id);
-                        self.nodes.insert(top_id, n);
-                    }
-                }
+        let spec = match line.parse::<Expr>() {
+            Ok(spec) => spec,
+            Err(_) => expr::parser::parse_expr(&line)?,
+        };
+        let spec = spec
+            .resolve_modules(&scope, &self.resolvers)
+            .await
+            .context(CouldNotResolve)?;
+        let top_id = spec.id;
+        let n = Node::compile(&mut self.ctx, &scope, spec);
+        match n.extract_err() {
+            Some(e) => bail!("compile error: {e}"),
+            None => {
+                *output = is_output(&n);
+                *init = Init::One(top_id);
+                self.nodes.insert(top_id, n);
             }
         }
+        Ok(())
     }
 
     async fn load(&mut self, file: &PathBuf) -> Result<()> {
         let scope = ModPath::root();
-        let s = fs::read_to_string(file).await?;
-        let exprs = expr::parser::parse_many_modexpr(&s)?;
+        let (scope, exprs) = match file.extension() {
+            Some(e) if e.as_bytes() == b"bs" => {
+                let s = fs::read_to_string(file).await?;
+                (scope, expr::parser::parse_many_modexpr(&s)?)
+            }
+            Some(e) => bail!("invalid file extension {e:?}"),
+            None => {
+                let name = file
+                    .components()
+                    .map(|c| match c {
+                        Component::RootDir
+                        | Component::CurDir
+                        | Component::ParentDir
+                        | Component::Prefix(_) => bail!("invalid module name {file:?}"),
+                        Component::Normal(s) => Ok(s),
+                    })
+                    .collect::<Result<Box<[_]>>>()?;
+                if name.len() != 1 {
+                    bail!("invalid module name {file:?}")
+                }
+                let name = String::from_utf8_lossy(name[0].as_bytes());
+                let name = name
+                    .parse::<ModPath>()
+                    .with_context(|| "parsing module name {file:?}")?;
+                let scope =
+                    ModPath(Path::from_str(Path::dirname(&*name).unwrap_or(&*scope)));
+                let name = Path::basename(&*name)
+                    .ok_or_else(|| anyhow!("invalid module name {file:?}"))?;
+                let name = ArcStr::from(name);
+                let e = ExprKind::Module { export: true, name, value: None }.to_expr();
+                (scope, vec![e])
+            }
+        };
         for expr in exprs {
+            let expr = expr.resolve_modules(&scope, &self.resolvers).await?;
             let top_id = expr.id;
             let n = Node::compile(&mut self.ctx, &scope, expr);
             if let Some(e) = n.extract_err() {
@@ -410,13 +498,28 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     info!("netidx shell starting");
     let publisher = PublisherBuilder::new(cfg.clone()).bind_cfg(p.bind).build().await?;
     let subscriber = SubscriberBuilder::new(cfg).desired_auth(auth).build()?;
-    let mut repl = Repl::new(publisher, subscriber)?;
     let script = p.file.is_some();
+    let mut repl = Repl::new(
+        publisher,
+        subscriber,
+        script,
+        p.subscribe_timeout.map(|t| Duration::from_secs(t)),
+    )?;
     let mut output = script;
-    let mut newenv = (!script).then_some(repl.ctx.env.clone());
     if let Some(file) = p.file.as_ref() {
         repl.load(file).await?
+    } else if !p.no_init {
+        match repl.compile("mod init", &mut Init::None, &mut false).await {
+            Ok(()) => {
+                let _ = repl.do_cycle(Init::All, None, None);
+            }
+            Err(e) if e.is::<CouldNotResolve>() => (),
+            Err(e) => {
+                eprintln!("error in init module: {e:?}")
+            }
+        }
     }
+    let mut newenv = (!script).then_some(repl.ctx.env.clone());
     loop {
         let ready = repl.cycle_ready();
         let mut updates = None;
@@ -467,8 +570,12 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
             }
             Some(Signal::CtrlD) => break Ok(()),
             Some(Signal::Success(line)) => {
-                repl.compile(&line, &mut init, &mut output);
-                newenv = Some(repl.ctx.env.clone());
+                match repl.compile(&line, &mut init, &mut output).await {
+                    Err(e) => eprintln!("error: {e:?}"),
+                    Ok(()) => {
+                        newenv = Some(repl.ctx.env.clone());
+                    }
+                };
             }
         }
         if let Some(v) = repl.do_cycle(init, updates, writes) {

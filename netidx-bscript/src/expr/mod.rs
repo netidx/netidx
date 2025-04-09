@@ -1,6 +1,7 @@
 use crate::typ::{NoRefs, Refs, TVar, Type, TypeMark};
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
+use combine::EasyParser;
 use compact_str::{format_compact, CompactString};
 use netidx::{
     path::Path,
@@ -41,6 +42,17 @@ atomic_id!(ExprId);
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct ModPath(pub Path);
+
+impl FromStr for ModPath {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
+        parser::modpath()
+            .easy_parse(combine::stream::position::Stream::new(s))
+            .map(|(r, _)| r)
+            .map_err(|e| anyhow::anyhow!(format!("{e:?}")))
+    }
+}
 
 impl ModPath {
     pub fn root() -> ModPath {
@@ -108,9 +120,41 @@ impl<const L: usize> PartialEq<[&str; L]> for ModPath {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum ModuleResolver {
     Files(PathBuf),
     Netidx { subscriber: Subscriber, base: Path, timeout: Option<Duration> },
+}
+
+impl ModuleResolver {
+    /// Parse a comma separated list of module resolvers. Netidx
+    /// resolvers are of the form, netidx:/path/in/netidx, and
+    /// filesystem resolvers are of the form file:/path/in/fs
+    ///
+    /// This format is intended to be used in an environment variable,
+    /// for example.
+    pub fn parse_env(
+        subscriber: Subscriber,
+        timeout: Option<Duration>,
+        s: &str,
+    ) -> Result<Vec<ModuleResolver>> {
+        let mut res = vec![];
+        for l in utils::split_escaped(s, '\\', ',') {
+            let l = l.trim();
+            if let Some(s) = l.strip_prefix("netidx:") {
+                let base = Path::from_str(s);
+                let r = Self::Netidx { subscriber: subscriber.clone(), timeout, base };
+                res.push(r);
+            } else if let Some(s) = l.strip_prefix("file:") {
+                let base = PathBuf::from_str(s)?;
+                let r = Self::Files(base);
+                res.push(r);
+            } else {
+                bail!("expected netidx: or file:")
+            }
+        }
+        Ok(res)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1289,8 +1333,21 @@ impl Expr {
 
     /// Resolve external modules referenced in the expression using
     /// the resolvers list. Each resolver will be tried in order,
-    /// until one succeeds.
-    pub fn resolve_modules<'a>(
+    /// until one succeeds. If no resolver succeeds then an error will
+    /// be returned.
+    pub async fn resolve_modules<'a>(
+        &'a self,
+        scope: &'a ModPath,
+        resolvers: &'a [ModuleResolver],
+    ) -> Result<Expr> {
+        if self.has_unresolved_modules() {
+            self.resolve_modules_inner(scope, resolvers).await
+        } else {
+            Ok(self.clone())
+        }
+    }
+
+    fn resolve_modules_inner<'a>(
         &'a self,
         scope: &'a ModPath,
         resolvers: &'a [ModuleResolver],

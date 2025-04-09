@@ -115,7 +115,7 @@ where
     spaces().with(typname())
 }
 
-fn modpath<I>() -> impl Parser<I, Output = ModPath>
+pub(crate) fn modpath<I>() -> impl Parser<I, Output = ModPath>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
