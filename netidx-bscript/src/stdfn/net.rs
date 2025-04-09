@@ -457,7 +457,7 @@ pub mod net {
     pub let call = |path, args| 'call
     pub let list = |#update = time::timer(1, true), path| 'list
     pub let list_table = |#update = time::timer(1, true), path| 'list_table
-    pub let publish = |#on_write = null, string, Any| 'publish
+    pub let publish = |#on_write = null, path, v| 'publish
 }
 "#;
 

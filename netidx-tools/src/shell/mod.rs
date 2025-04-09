@@ -3,7 +3,7 @@ use arcstr::ArcStr;
 use completion::BComplete;
 use core::fmt;
 use flexi_logger::{FileSpec, Logger};
-use futures::{channel::mpsc, StreamExt};
+use futures::{channel::mpsc, stream, FutureExt, Stream, StreamExt};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
 use log::{error, info};
@@ -12,8 +12,10 @@ use netidx::{
     path::Path,
     pool::Pooled,
     publisher::{
-        BindCfg, DesiredAuth, Id, Publisher, PublisherBuilder, Value, WriteRequest,
+        self, BindCfg, DesiredAuth, Id, PublishFlags, Publisher, PublisherBuilder, Val,
+        Value, WriteRequest,
     },
+    resolver_client::ChangeTracker,
     subscriber::{self, Dval, SubId, Subscriber, SubscriberBuilder, UpdatesFlags},
 };
 use netidx_bscript::{
@@ -32,10 +34,16 @@ use std::{
     future,
     os::unix::ffi::OsStrExt,
     path::{Component, PathBuf},
+    pin::Pin,
     time::Duration,
 };
 use structopt::StructOpt;
-use tokio::{fs, select, sync::oneshot, task};
+use tokio::{
+    fs, select,
+    sync::oneshot,
+    task,
+    time::{self, Sleep},
+};
 mod completion;
 
 #[derive(StructOpt, Debug)]
@@ -84,7 +92,12 @@ struct ReplCtx {
     var_updates: VecDeque<(BindId, Value)>,
     net_updates: VecDeque<(SubId, subscriber::Event)>,
     subscribed: FxHashMap<SubId, SmallVec<[ExprId; 3]>>,
+    published: FxHashMap<Id, Val>,
+    change_trackers: FxHashMap<BindId, ChangeTracker>,
+    list_queue: VecDeque<(BindId, Path, bool)>,
     cached: FxHashMap<BindId, Value>,
+    batch: publisher::UpdateBatch,
+    timers: stream::SelectAll<Pin<Box<dyn Stream<Item = BindId> + Send + Sync>>>,
     script: bool,
     publisher: Publisher,
     subscriber: Subscriber,
@@ -98,12 +111,18 @@ impl ReplCtx {
     fn new(publisher: Publisher, subscriber: Subscriber, script: bool) -> Self {
         let (updates_tx, updates) = mpsc::channel(3);
         let (writes_tx, writes) = mpsc::channel(3);
+        let batch = publisher.start_batch();
         Self {
             by_ref: HashMap::default(),
             var_updates: VecDeque::new(),
             net_updates: VecDeque::new(),
             subscribed: HashMap::default(),
+            published: HashMap::default(),
+            list_queue: VecDeque::new(),
+            change_trackers: HashMap::default(),
             cached: HashMap::default(),
+            timers: stream::SelectAll::new(),
+            batch,
             script,
             publisher,
             subscriber,
@@ -123,7 +142,7 @@ impl Ctx for ReplCtx {
         _ref_by: ExprId,
         _id: BindId,
     ) {
-        unimplemented!()
+        todo!()
     }
 
     fn clear(&mut self) {
@@ -151,27 +170,44 @@ impl Ctx for ReplCtx {
     }
 
     fn list(&mut self, id: BindId, path: Path) {
-        todo!()
+        self.list_queue.push_back((id, path, false));
     }
 
     fn list_table(&mut self, id: BindId, path: Path) {
-        todo!()
+        self.list_queue.push_back((id, path, true));
     }
 
-    fn publish(&mut self, path: Path, value: Value, ref_by: ExprId) -> Result<Id> {
-        todo!()
+    fn stop_list(&mut self, id: BindId) {
+        self.change_trackers.remove(&id);
+        self.list_queue.retain(|(i, _, _)| *i != id);
+    }
+
+    fn publish(&mut self, path: Path, value: Value, _ref_by: ExprId) -> Result<Id> {
+        let val = self.publisher.publish_with_flags_and_writes(
+            PublishFlags::empty(),
+            path,
+            value,
+            Some(self.writes_tx.clone()),
+        )?;
+        let id = val.id();
+        self.published.insert(id, val);
+        Ok(id)
     }
 
     fn update(&mut self, id: Id, value: Value) {
-        todo!()
+        if let Some(val) = self.published.get(&id) {
+            val.update(&mut self.batch, value);
+        }
     }
 
     fn unpublish(&mut self, id: Id) {
-        todo!()
+        self.published.remove(&id);
     }
 
-    fn set_timer(&mut self, _id: BindId, _timeout: Duration, _ref_by: ExprId) {
-        todo!()
+    fn set_timer(&mut self, id: BindId, timeout: Duration, _ref_by: ExprId) {
+        let done: Pin<Box<dyn Stream<Item = BindId> + Send + Sync>> =
+            Box::pin(time::sleep(timeout).into_stream().map(move |()| id));
+        self.timers.push(done);
     }
 
     fn ref_var(&mut self, id: BindId, ref_by: ExprId) {
