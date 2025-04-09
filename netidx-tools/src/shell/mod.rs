@@ -212,8 +212,13 @@ impl InputReader {
                 right_prompt: DefaultPromptSegment::Empty,
             };
             loop {
-                if let Ok(Some(env)) = c_rx.await {
-                    line_editor = line_editor.with_completer(Box::new(BComplete(env)));
+                match c_rx.await {
+                    Err(_) => break, // shutting down
+                    Ok(None) => (),
+                    Ok(Some(env)) => {
+                        line_editor =
+                            line_editor.with_completer(Box::new(BComplete(env)));
+                    }
                 }
                 let r = task::block_in_place(|| {
                     line_editor.read_line(&prompt).map_err(Error::from)
