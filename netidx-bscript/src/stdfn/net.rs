@@ -12,7 +12,7 @@ use compact_str::format_compact;
 use fxhash::FxHashSet;
 use netidx::{
     path::Path,
-    publisher::{Id, Typ},
+    publisher::{Id, Typ, Val},
     subscriber::{self, Dval, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
@@ -281,12 +281,10 @@ macro_rules! list {
             deftype!($typ);
 
             fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-                Arc::new(|_, _, _, from, _| {
-                    Ok(Box::new(List {
-                        args: CachedVals::new(from),
-                        current: None,
-                        id: BindId::new(),
-                    }))
+                Arc::new(|ctx, _, _, from, top_id| {
+                    let id = BindId::new();
+                    ctx.user.ref_var(id, top_id);
+                    Ok(Box::new(List { args: CachedVals::new(from), current: None, id }))
                 })
             }
         }
@@ -328,11 +326,11 @@ macro_rules! list {
 }
 
 list!(List, "list", list, "fn(?#update:Any, string) -> Array<String>");
-list!(ListTable, "list_table", list_table, "fn(?#update:Any, string) -> Table");
+list!(ListTable, "list_table", table, "fn(?#update:Any, string) -> Table");
 
 struct Publish<C: Ctx, E: UserEvent> {
     args: CachedVals,
-    current: Option<(Path, Id)>,
+    current: Option<(Path, Val)>,
     top_id: ExprId,
     typ: FnType<NoRefs>,
     x: BindId,
@@ -393,19 +391,25 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
                 }
             }
             ([_, true], [_, Some(v)]) => {
-                if let Some((_, id)) = &self.current {
-                    ctx.user.update(*id, v.clone())
+                if let Some((_, val)) = &self.current {
+                    ctx.user.update(val, v.clone())
                 }
             }
             _ => (),
         }
-        if let Some((_, id)) = &self.current {
-            if let Some(v) = event.writes.get(id) {
-                event.variables.insert(self.x, v.clone());
+        let mut reply = None;
+        if let Some((_, val)) = &self.current {
+            if let Some(req) = event.writes.remove(&val.id()) {
+                event.variables.insert(self.x, req.value);
+                reply = req.send_result;
             }
         }
         if let Some(on_write) = &mut self.on_write {
-            let _ = on_write.update(ctx, &mut self.from, event);
+            if let Some(v) = on_write.update(ctx, &mut self.from, event) {
+                if let Some(reply) = reply {
+                    reply.send(v)
+                }
+            }
         }
         None
     }
@@ -439,8 +443,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        if let Some((_, id)) = self.current.take() {
-            ctx.user.unpublish(id);
+        if let Some((_, val)) = self.current.take() {
+            ctx.user.unpublish(val);
         }
         if let Some(mut app) = self.on_write.take() {
             app.delete(ctx);

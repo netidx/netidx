@@ -1,5 +1,7 @@
 use anyhow::{Context, Error, Result};
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
+use chrono::prelude::*;
+use compact_str::format_compact;
 use completion::BComplete;
 use core::fmt;
 use flexi_logger::{FileSpec, Logger};
@@ -11,6 +13,7 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
+    protocol::valarray::ValArray,
     publisher::{
         self, BindCfg, DesiredAuth, Id, PublishFlags, Publisher, PublisherBuilder, Val,
         Value, WriteRequest,
@@ -28,7 +31,7 @@ use reedline::{
     default_emacs_keybindings, DefaultPrompt, DefaultPromptSegment, Emacs, IdeMenu,
     KeyCode, KeyModifiers, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
 };
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     future,
@@ -40,10 +43,10 @@ use std::{
 use structopt::StructOpt;
 use tokio::{
     fs, select,
-    sync::oneshot,
-    task,
-    time::{self, Sleep},
+    sync::{oneshot, Mutex},
+    task, time,
 };
+use triomphe::Arc;
 mod completion;
 
 #[derive(StructOpt, Debug)]
@@ -91,13 +94,13 @@ struct ReplCtx {
     by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
     var_updates: VecDeque<(BindId, Value)>,
     net_updates: VecDeque<(SubId, subscriber::Event)>,
+    net_writes: VecDeque<(Id, WriteRequest)>,
     subscribed: FxHashMap<SubId, SmallVec<[ExprId; 3]>>,
-    published: FxHashMap<Id, Val>,
-    change_trackers: FxHashMap<BindId, ChangeTracker>,
-    list_queue: VecDeque<(BindId, Path, bool)>,
+    published: FxHashMap<Id, SmallVec<[ExprId; 1]>>,
+    change_trackers: FxHashMap<BindId, Arc<Mutex<ChangeTracker>>>,
+    tasks: stream::SelectAll<Pin<Box<dyn Stream<Item = (BindId, Value)> + Send + Sync>>>,
     cached: FxHashMap<BindId, Value>,
     batch: publisher::UpdateBatch,
-    timers: stream::SelectAll<Pin<Box<dyn Stream<Item = BindId> + Send + Sync>>>,
     script: bool,
     publisher: Publisher,
     subscriber: Subscriber,
@@ -112,16 +115,18 @@ impl ReplCtx {
         let (updates_tx, updates) = mpsc::channel(3);
         let (writes_tx, writes) = mpsc::channel(3);
         let batch = publisher.start_batch();
+        let never: Pin<Box<dyn Stream<Item = (BindId, Value)> + Send + Sync>> =
+            Box::pin(async { future::pending().await }.into_stream());
         Self {
             by_ref: HashMap::default(),
             var_updates: VecDeque::new(),
             net_updates: VecDeque::new(),
+            net_writes: VecDeque::new(),
             subscribed: HashMap::default(),
             published: HashMap::default(),
-            list_queue: VecDeque::new(),
             change_trackers: HashMap::default(),
             cached: HashMap::default(),
-            timers: stream::SelectAll::new(),
+            tasks: stream::select_all([never]),
             batch,
             script,
             publisher,
@@ -132,6 +137,31 @@ impl ReplCtx {
             writes_tx,
         }
     }
+}
+
+macro_rules! or_err {
+    ($bindid:expr, $e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => {
+                let e = ArcStr::from(format_compact!("{e:?}").as_str());
+                let e = Value::Error(e);
+                return ($bindid, e);
+            }
+        }
+    };
+}
+
+macro_rules! check_changed {
+    ($id:expr, $resolver:expr, $path:expr, $ct:expr) => {
+        let mut ct = $ct.lock().await;
+        if ct.path() != &$path {
+            *ct = ChangeTracker::new($path.clone());
+        }
+        if !or_err!($id, $resolver.check_changed(&mut *ct).await) {
+            return ($id, Value::Null);
+        }
+    };
 }
 
 impl Ctx for ReplCtx {
@@ -146,8 +176,42 @@ impl Ctx for ReplCtx {
     }
 
     fn clear(&mut self) {
-        self.by_ref.clear();
-        self.var_updates.clear();
+        let Self {
+            by_ref,
+            var_updates,
+            net_updates,
+            net_writes,
+            subscribed,
+            published,
+            change_trackers,
+            tasks,
+            cached,
+            batch,
+            script,
+            publisher,
+            subscriber: _,
+            updates_tx,
+            updates,
+            writes_tx,
+            writes,
+        } = self;
+        by_ref.clear();
+        var_updates.clear();
+        net_updates.clear();
+        net_writes.clear();
+        subscribed.clear();
+        published.clear();
+        change_trackers.clear();
+        tasks.clear();
+        cached.clear();
+        *batch = publisher.start_batch();
+        *script = false;
+        let (tx, rx) = mpsc::channel(3);
+        *updates_tx = tx;
+        *updates = rx;
+        let (tx, rx) = mpsc::channel(3);
+        *writes_tx = tx;
+        *writes = rx;
     }
 
     fn subscribe(&mut self, flags: UpdatesFlags, path: Path, ref_by: ExprId) -> Dval {
@@ -170,19 +234,56 @@ impl Ctx for ReplCtx {
     }
 
     fn list(&mut self, id: BindId, path: Path) {
-        self.list_queue.push_back((id, path, false));
+        let ct = self
+            .change_trackers
+            .entry(id)
+            .or_insert_with(|| Arc::new(Mutex::new(ChangeTracker::new(path.clone()))));
+        let ct = Arc::clone(ct);
+        let resolver = self.subscriber.resolver();
+        let task = async move {
+            check_changed!(id, resolver, path, ct);
+            let mut paths = or_err!(id, resolver.list(path).await);
+            let paths = paths.drain(..).map(|p| Value::String(p.into()));
+            (id, Value::Array(ValArray::from_iter_exact(paths)))
+        }
+        .into_stream();
+        self.tasks.push(Box::pin(task))
     }
 
-    fn list_table(&mut self, id: BindId, path: Path) {
-        self.list_queue.push_back((id, path, true));
+    fn table(&mut self, id: BindId, path: Path) {
+        let ct = self
+            .change_trackers
+            .entry(id)
+            .or_insert_with(|| Arc::new(Mutex::new(ChangeTracker::new(path.clone()))));
+        let ct = Arc::clone(ct);
+        let resolver = self.subscriber.resolver();
+        let task = async move {
+            check_changed!(id, resolver, path, ct);
+            let mut tbl = or_err!(id, resolver.table(path).await);
+            let cols = tbl.cols.drain(..).map(|(name, count)| {
+                Value::Array(ValArray::from([
+                    Value::String(name.into()),
+                    Value::V64(count.0),
+                ]))
+            });
+            let cols = Value::Array(ValArray::from_iter_exact(cols));
+            let rows = tbl.rows.drain(..).map(|name| Value::String(name.into()));
+            let rows = Value::Array(ValArray::from_iter_exact(rows));
+            let tbl = Value::Array(ValArray::from([
+                Value::Array(ValArray::from([Value::String(literal!("columns")), cols])),
+                Value::Array(ValArray::from([Value::String(literal!("rows")), rows])),
+            ]));
+            (id, tbl)
+        }
+        .into_stream();
+        self.tasks.push(Box::pin(task))
     }
 
     fn stop_list(&mut self, id: BindId) {
         self.change_trackers.remove(&id);
-        self.list_queue.retain(|(i, _, _)| *i != id);
     }
 
-    fn publish(&mut self, path: Path, value: Value, _ref_by: ExprId) -> Result<Id> {
+    fn publish(&mut self, path: Path, value: Value, ref_by: ExprId) -> Result<Val> {
         let val = self.publisher.publish_with_flags_and_writes(
             PublishFlags::empty(),
             path,
@@ -190,24 +291,25 @@ impl Ctx for ReplCtx {
             Some(self.writes_tx.clone()),
         )?;
         let id = val.id();
-        self.published.insert(id, val);
-        Ok(id)
+        self.published.insert(id, smallvec![ref_by]);
+        Ok(val)
     }
 
-    fn update(&mut self, id: Id, value: Value) {
-        if let Some(val) = self.published.get(&id) {
-            val.update(&mut self.batch, value);
-        }
+    fn update(&mut self, val: &Val, value: Value) {
+        val.update(&mut self.batch, value);
     }
 
-    fn unpublish(&mut self, id: Id) {
-        self.published.remove(&id);
+    fn unpublish(&mut self, val: Val) {
+        self.published.remove(&val.id());
     }
 
     fn set_timer(&mut self, id: BindId, timeout: Duration, _ref_by: ExprId) {
-        let done: Pin<Box<dyn Stream<Item = BindId> + Send + Sync>> =
-            Box::pin(time::sleep(timeout).into_stream().map(move |()| id));
-        self.timers.push(done);
+        let task = Box::pin(
+            time::sleep(timeout)
+                .into_stream()
+                .map(move |()| (id, Value::DateTime(Utc::now()))),
+        );
+        self.tasks.push(task);
     }
 
     fn ref_var(&mut self, id: BindId, ref_by: ExprId) {
@@ -381,7 +483,8 @@ impl Repl {
         &mut self,
         init: Init,
         updates: Option<UpdateBatch>,
-        _writes: Option<WriteBatch>,
+        writes: Option<WriteBatch>,
+        tasks: Option<&mut Vec<(BindId, Value)>>,
     ) -> Option<Value> {
         macro_rules! push_event {
             ($id:expr, $v:expr, $event:ident, $refed:ident, $overflow:ident) => {
@@ -389,7 +492,7 @@ impl Repl {
                     Entry::Vacant(e) => {
                         e.insert($v);
                         if let Some(exps) = self.ctx.user.$refed.get(&$id) {
-                            self.updated.extend(exps.iter().copied())
+                            self.updated.extend(exps)
                         }
                     }
                     Entry::Occupied(_) => {
@@ -422,8 +525,24 @@ impl Repl {
                 push_event!(id, v, netidx, subscribed, net_updates)
             }
         }
+        for _ in 0..self.ctx.user.net_writes.len() {
+            let (id, v) = self.ctx.user.net_writes.pop_front().unwrap();
+            push_event!(id, v, writes, published, net_writes)
+        }
+        if let Some(mut writes) = writes {
+            for wr in writes.drain(..) {
+                let id = wr.id;
+                push_event!(id, wr, writes, published, net_writes)
+            }
+        }
+        if let Some(tasks) = tasks {
+            for (id, v) in tasks.drain(..) {
+                push_event!(id, v, variables, by_ref, var_updates)
+            }
+        }
         let res = self.nodes.iter_mut().fold(None, |_, (id, n)| {
             if self.updated.contains(id) {
+                let mut clear: SmallVec<[BindId; 16]> = smallvec![];
                 macro_rules! do_init {
                     () => {{
                         self.event.init = true;
@@ -431,6 +550,7 @@ impl Repl {
                             if let Some(v) = self.ctx.user.cached.get(&id) {
                                 if let Entry::Vacant(e) = self.event.variables.entry(id) {
                                     e.insert(v.clone());
+                                    clear.push(id);
                                 }
                             }
                         });
@@ -443,7 +563,11 @@ impl Repl {
                         self.event.init = false;
                     }
                 }
-                n.update(&mut self.ctx, &mut self.event)
+                let res = n.update(&mut self.ctx, &mut self.event);
+                for id in clear {
+                    self.event.variables.remove(&id);
+                }
+                res
             } else {
                 None
             }
@@ -454,7 +578,9 @@ impl Repl {
     }
 
     fn cycle_ready(&self) -> bool {
-        self.ctx.user.var_updates.len() > 0 || self.ctx.user.net_updates.len() > 0
+        self.ctx.user.var_updates.len() > 0
+            || self.ctx.user.net_updates.len() > 0
+            || self.ctx.user.net_writes.len() > 0
     }
 
     async fn compile(
@@ -529,7 +655,7 @@ impl Repl {
             }
             self.nodes.insert(top_id, n);
         }
-        if let Some(v) = self.do_cycle(Init::All, None, None) {
+        if let Some(v) = self.do_cycle(Init::All, None, None, None) {
             println!("{v}")
         }
         Ok(())
@@ -578,11 +704,12 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                 {
                     eprintln!("error in init module: {e:?}");
                 }
-                let _ = repl.do_cycle(Init::All, None, None);
+                let _ = repl.do_cycle(Init::All, None, None, None);
             }
         }
     }
     let mut newenv = (!script).then_some(repl.ctx.env.clone());
+    let mut tasks = vec![];
     loop {
         let ready = repl.cycle_ready();
         let mut updates = None;
@@ -601,6 +728,9 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                 if let Ok(Some(wr)) = repl.ctx.user.writes.try_next() {
                     writes = Some(wr);
                 }
+            },
+            up = repl.ctx.user.tasks.select_next_some() => {
+                todo!()
             },
             i = repl.input.read_line(output, newenv.take()) => match i {
                 Ok(i) => {

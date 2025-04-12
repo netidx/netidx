@@ -714,7 +714,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             }};
         }
         let eid = self.spec.id;
-        let res = match &mut self.kind {
+        match &mut self.kind {
             NodeKind::Error { .. } => self.extract_err().map(|e| Value::Error(e)),
             NodeKind::Constant(v) => {
                 if event.init {
@@ -885,13 +885,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::Lambda(_)
             | NodeKind::TypeDef { .. }
             | NodeKind::Nop => None,
-        };
-        if ctx.dbg_ctx.trace {
-            if let Some(v) = &res {
-                ctx.dbg_ctx.add_event(eid, Some(event.clone()), v.clone())
-            }
         }
-        res
     }
 }
 

@@ -5,7 +5,6 @@ extern crate combine;
 #[macro_use]
 extern crate serde_derive;
 
-pub mod dbg;
 pub mod env;
 pub mod expr;
 pub mod node;
@@ -13,7 +12,6 @@ pub mod stdfn;
 pub mod typ;
 
 use crate::{
-    dbg::DbgCtx,
     env::Env,
     expr::{ExprId, ExprKind, ModPath},
     node::Node,
@@ -24,7 +22,7 @@ use arcstr::ArcStr;
 use fxhash::FxHashMap;
 use netidx::{
     path::Path,
-    publisher::Id,
+    publisher::{Id, Val, WriteRequest},
     subscriber::{self, Dval, SubId, UpdatesFlags, Value},
 };
 use std::{
@@ -59,12 +57,12 @@ impl UserEvent for NoUserEvent {
 /// variable and netidx subscription in a given cycle, if more updates
 /// happen simultaneously they must be queued and deferred to later
 /// cycles.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Event<E: UserEvent> {
     pub init: bool,
     pub variables: FxHashMap<BindId, Value>,
     pub netidx: FxHashMap<SubId, subscriber::Event>,
-    pub writes: FxHashMap<Id, Value>,
+    pub writes: FxHashMap<Id, WriteRequest>,
     pub user: E,
 }
 
@@ -184,22 +182,22 @@ pub trait Ctx: 'static {
 
     /// List the table at path, return Value::Null if the path did not
     /// change
-    fn list_table(&mut self, id: BindId, path: Path);
+    fn table(&mut self, id: BindId, path: Path);
 
-    /// List will no longer be called on this BindId, and related
-    /// resources can be cleaned up.
+    /// list or table will no longer be called on this BindId, and
+    /// related resources can be cleaned up.
     fn stop_list(&mut self, id: BindId);
 
     /// Publish the specified value, returning it's Id, which must be
     /// used to update the value and unpublish it. If the path is
     /// already published, return an error.
-    fn publish(&mut self, path: Path, value: Value, ref_by: ExprId) -> Result<Id>;
+    fn publish(&mut self, path: Path, value: Value, ref_by: ExprId) -> Result<Val>;
 
     /// Update the specified value
-    fn update(&mut self, id: Id, value: Value);
+    fn update(&mut self, id: &Val, value: Value);
 
     /// Stop publishing the specified id
-    fn unpublish(&mut self, id: Id);
+    fn unpublish(&mut self, id: Val);
 
     /// This will be called by the compiler whenever a bound variable
     /// is referenced. The ref_by is the toplevel expression that
@@ -250,14 +248,12 @@ pub struct ExecCtx<C: Ctx, E: UserEvent> {
     pub env: Env<C, E>,
     builtins: FxHashMap<&'static str, (FnType<Refs>, BuiltInInitFn<C, E>)>,
     std: Vec<Node<C, E>>,
-    pub dbg_ctx: DbgCtx<E>,
     pub user: C,
 }
 
 impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
     pub fn clear(&mut self) {
         self.env.clear();
-        self.dbg_ctx.clear();
         self.user.clear();
     }
 
@@ -267,7 +263,6 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
             env: Env::new(),
             builtins: FxHashMap::default(),
             std: vec![],
-            dbg_ctx: DbgCtx::new(),
             user,
         };
         let core = stdfn::core::register(&mut t);

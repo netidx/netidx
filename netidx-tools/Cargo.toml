@@ -37,6 +37,7 @@ async-stream = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 combine = { workspace = true }
+compact_str = { workspace = true }
 crossterm = { workspace = true }
 dirs = { workspace = true }
 env_logger = { workspace = true }
@@ -61,3 +62,4 @@ serde = { workspace = true }
 smallvec = { workspace = true }
 structopt = { workspace = true }
 tokio = { workspace = true }
+triomphe = { workspace = true }
