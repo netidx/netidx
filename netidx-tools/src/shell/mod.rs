@@ -5,7 +5,7 @@ use compact_str::format_compact;
 use completion::BComplete;
 use core::fmt;
 use flexi_logger::{FileSpec, Logger};
-use futures::{channel::mpsc, stream, FutureExt, Stream, StreamExt};
+use futures::{channel::mpsc, FutureExt, StreamExt};
 use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
 use log::{error, info};
@@ -37,14 +37,14 @@ use std::{
     future,
     os::unix::ffi::OsStrExt,
     path::{Component, PathBuf},
-    pin::Pin,
     time::Duration,
 };
 use structopt::StructOpt;
 use tokio::{
     fs, select,
     sync::{oneshot, Mutex},
-    task, time,
+    task::{self, JoinSet},
+    time,
 };
 use triomphe::Arc;
 mod completion;
@@ -98,7 +98,7 @@ struct ReplCtx {
     subscribed: FxHashMap<SubId, SmallVec<[ExprId; 3]>>,
     published: FxHashMap<Id, SmallVec<[ExprId; 1]>>,
     change_trackers: FxHashMap<BindId, Arc<Mutex<ChangeTracker>>>,
-    tasks: stream::SelectAll<Pin<Box<dyn Stream<Item = (BindId, Value)> + Send + Sync>>>,
+    tasks: JoinSet<(BindId, Value)>,
     cached: FxHashMap<BindId, Value>,
     batch: publisher::UpdateBatch,
     script: bool,
@@ -115,8 +115,8 @@ impl ReplCtx {
         let (updates_tx, updates) = mpsc::channel(3);
         let (writes_tx, writes) = mpsc::channel(3);
         let batch = publisher.start_batch();
-        let never: Pin<Box<dyn Stream<Item = (BindId, Value)> + Send + Sync>> =
-            Box::pin(async { future::pending().await }.into_stream());
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { future::pending().await });
         Self {
             by_ref: HashMap::default(),
             var_updates: VecDeque::new(),
@@ -126,7 +126,7 @@ impl ReplCtx {
             published: HashMap::default(),
             change_trackers: HashMap::default(),
             cached: HashMap::default(),
-            tasks: stream::select_all([never]),
+            tasks,
             batch,
             script,
             publisher,
@@ -202,7 +202,8 @@ impl Ctx for ReplCtx {
         subscribed.clear();
         published.clear();
         change_trackers.clear();
-        tasks.clear();
+        *tasks = JoinSet::new();
+        tasks.spawn(async { future::pending().await });
         cached.clear();
         *batch = publisher.start_batch();
         *script = false;
@@ -240,24 +241,22 @@ impl Ctx for ReplCtx {
             .or_insert_with(|| Arc::new(Mutex::new(ChangeTracker::new(path.clone()))));
         let ct = Arc::clone(ct);
         let resolver = self.subscriber.resolver();
-        let task = async move {
+        self.tasks.spawn(async move {
             check_changed!(id, resolver, path, ct);
             let mut paths = or_err!(id, resolver.list(path).await);
             let paths = paths.drain(..).map(|p| Value::String(p.into()));
             (id, Value::Array(ValArray::from_iter_exact(paths)))
-        }
-        .into_stream();
-        self.tasks.push(Box::pin(task))
+        });
     }
 
-    fn table(&mut self, id: BindId, path: Path) {
+    fn list_table(&mut self, id: BindId, path: Path) {
         let ct = self
             .change_trackers
             .entry(id)
             .or_insert_with(|| Arc::new(Mutex::new(ChangeTracker::new(path.clone()))));
         let ct = Arc::clone(ct);
         let resolver = self.subscriber.resolver();
-        let task = async move {
+        self.tasks.spawn(async move {
             check_changed!(id, resolver, path, ct);
             let mut tbl = or_err!(id, resolver.table(path).await);
             let cols = tbl.cols.drain(..).map(|(name, count)| {
@@ -274,9 +273,7 @@ impl Ctx for ReplCtx {
                 Value::Array(ValArray::from([Value::String(literal!("rows")), rows])),
             ]));
             (id, tbl)
-        }
-        .into_stream();
-        self.tasks.push(Box::pin(task))
+        });
     }
 
     fn stop_list(&mut self, id: BindId) {
@@ -304,12 +301,8 @@ impl Ctx for ReplCtx {
     }
 
     fn set_timer(&mut self, id: BindId, timeout: Duration, _ref_by: ExprId) {
-        let task = Box::pin(
-            time::sleep(timeout)
-                .into_stream()
-                .map(move |()| (id, Value::DateTime(Utc::now()))),
-        );
-        self.tasks.push(task);
+        self.tasks
+            .spawn(time::sleep(timeout).map(move |()| (id, Value::DateTime(Utc::now()))));
     }
 
     fn ref_var(&mut self, id: BindId, ref_by: ExprId) {
@@ -484,7 +477,7 @@ impl Repl {
         init: Init,
         updates: Option<UpdateBatch>,
         writes: Option<WriteBatch>,
-        tasks: Option<&mut Vec<(BindId, Value)>>,
+        tasks: &mut Vec<(BindId, Value)>,
     ) -> Option<Value> {
         macro_rules! push_event {
             ($id:expr, $v:expr, $event:ident, $refed:ident, $overflow:ident) => {
@@ -516,6 +509,9 @@ impl Repl {
             let (id, v) = self.ctx.user.var_updates.pop_front().unwrap();
             push_event!(id, v, variables, by_ref, var_updates)
         }
+        for (id, v) in tasks.drain(..) {
+            push_event!(id, v, variables, by_ref, var_updates)
+        }
         for _ in 0..self.ctx.user.net_updates.len() {
             let (id, v) = self.ctx.user.net_updates.pop_front().unwrap();
             push_event!(id, v, netidx, subscribed, net_updates)
@@ -533,11 +529,6 @@ impl Repl {
             for wr in writes.drain(..) {
                 let id = wr.id;
                 push_event!(id, wr, writes, published, net_writes)
-            }
-        }
-        if let Some(tasks) = tasks {
-            for (id, v) in tasks.drain(..) {
-                push_event!(id, v, variables, by_ref, var_updates)
             }
         }
         let res = self.nodes.iter_mut().fold(None, |_, (id, n)| {
@@ -655,7 +646,7 @@ impl Repl {
             }
             self.nodes.insert(top_id, n);
         }
-        if let Some(v) = self.do_cycle(Init::All, None, None, None) {
+        if let Some(v) = self.do_cycle(Init::All, None, None, &mut vec![]) {
             println!("{v}")
         }
         Ok(())
@@ -704,7 +695,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                 {
                     eprintln!("error in init module: {e:?}");
                 }
-                let _ = repl.do_cycle(Init::All, None, None, None);
+                let _ = repl.do_cycle(Init::All, None, None, &mut vec![]);
             }
         }
     }
@@ -722,15 +713,32 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                 if let Ok(Some(up)) = repl.ctx.user.updates.try_next() {
                     updates = Some(up);
                 }
+                while let Some(Ok(up)) = repl.ctx.user.tasks.try_join_next() {
+                    tasks.push(up);
+                }
             },
             up = repl.ctx.user.updates.select_next_some() => {
                 updates = Some(up);
                 if let Ok(Some(wr)) = repl.ctx.user.writes.try_next() {
                     writes = Some(wr);
                 }
+                while let Some(Ok(up)) = repl.ctx.user.tasks.try_join_next() {
+                    tasks.push(up);
+                }
             },
-            up = repl.ctx.user.tasks.select_next_some() => {
-                todo!()
+            up = repl.ctx.user.tasks.join_next() => {
+                if let Some(Ok(up)) = up {
+                    tasks.push(up);
+                }
+                while let Some(Ok(up)) = repl.ctx.user.tasks.try_join_next() {
+                    tasks.push(up);
+                }
+                if let Ok(Some(up)) = repl.ctx.user.updates.try_next() {
+                    updates = Some(up);
+                }
+                if let Ok(Some(wr)) = repl.ctx.user.writes.try_next() {
+                    writes = Some(wr);
+                }
             },
             i = repl.input.read_line(output, newenv.take()) => match i {
                 Ok(i) => {
@@ -771,7 +779,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                 };
             }
         }
-        if let Some(v) = repl.do_cycle(init, updates, writes) {
+        if let Some(v) = repl.do_cycle(init, updates, writes, &mut tasks) {
             if output {
                 println!("{v}")
             }

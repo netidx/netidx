@@ -5,7 +5,6 @@ use log::debug;
 use netidx::path::Path;
 use netidx_bscript::{env::Env, expr::ModPath, typ::Type, NoUserEvent};
 use reedline::{Completer, Span, Suggestion};
-use std::marker::PhantomData;
 
 #[derive(Debug)]
 enum CompletionContext<'a> {

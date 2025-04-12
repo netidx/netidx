@@ -12,7 +12,7 @@ use compact_str::format_compact;
 use fxhash::FxHashSet;
 use netidx::{
     path::Path,
-    publisher::{Id, Typ, Val},
+    publisher::{Typ, Val},
     subscriber::{self, Dval, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
@@ -269,11 +269,12 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for RpcCall {
 }
 
 macro_rules! list {
-    ($name:ident, $builtin:literal, $fun:ident, $typ:literal) => {
+    ($name:ident, $builtin:literal, $method:ident, $typ:literal) => {
         struct $name {
             args: CachedVals,
             current: Option<Path>,
             id: BindId,
+            top_id: ExprId,
         }
 
         impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for $name {
@@ -284,7 +285,12 @@ macro_rules! list {
                 Arc::new(|ctx, _, _, from, top_id| {
                     let id = BindId::new();
                     ctx.user.ref_var(id, top_id);
-                    Ok(Box::new(List { args: CachedVals::new(from), current: None, id }))
+                    Ok(Box::new($name {
+                        args: CachedVals::new(from),
+                        current: None,
+                        id,
+                        top_id,
+                    }))
                 })
             }
         }
@@ -308,25 +314,29 @@ macro_rules! list {
                     {
                         let path = Path::from(path);
                         self.current = Some(path.clone());
-                        ctx.user.list(self.id, path);
+                        ctx.user.$method(self.id, path);
                     }
                     (Some(Value::String(path)), _, true) => {
-                        ctx.user.$fun(self.id, Path::from(path));
+                        ctx.user.$method(self.id, Path::from(path));
                     }
                     _ => (),
                 }
-                event.variables.get(&self.id).map(|v| v.clone())
+                event.variables.get(&self.id).and_then(|v| match v {
+                    Value::Null => None,
+                    v => Some(v.clone()),
+                })
             }
 
             fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+                ctx.user.unref_var(self.id, self.top_id);
                 ctx.user.stop_list(self.id);
             }
         }
     };
 }
 
-list!(List, "list", list, "fn(?#update:Any, string) -> Array<String>");
-list!(ListTable, "list_table", table, "fn(?#update:Any, string) -> Table");
+list!(List, "list", list, "fn(?#update:Any, string) -> Array<string>");
+list!(ListTable, "list_table", list_table, "fn(?#update:Any, string) -> Table");
 
 struct Publish<C: Ctx, E: UserEvent> {
     args: CachedVals,

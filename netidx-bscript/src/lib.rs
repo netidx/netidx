@@ -182,7 +182,7 @@ pub trait Ctx: 'static {
 
     /// List the table at path, return Value::Null if the path did not
     /// change
-    fn table(&mut self, id: BindId, path: Path);
+    fn list_table(&mut self, id: BindId, path: Path);
 
     /// list or table will no longer be called on this BindId, and
     /// related resources can be cleaned up.

@@ -151,6 +151,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
             ($dur:expr) => {{
                 let id = BindId::new();
                 self.id = Some(id);
+                ctx.user.ref_var(id, self.eid);
                 ctx.user.set_timer(id, $dur, self.eid);
             }};
         }
@@ -189,16 +190,19 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
             | ((None, _), (true, false))
             | ((_, None), (false, true)) => (),
         }
-        self.id.and_then(|id| event.variables.get(&id)).map(|now| {
-            self.id = None;
-            self.repeat -= 1;
-            if let Some(dur) = self.timeout {
-                if self.repeat.will_repeat() {
-                    schedule!(dur)
+        self.id.and_then(|id| event.variables.get(&id).map(|now| (id, now))).map(
+            |(id, now)| {
+                ctx.user.unref_var(id, self.eid);
+                self.id = None;
+                self.repeat -= 1;
+                if let Some(dur) = self.timeout {
+                    if self.repeat.will_repeat() {
+                        schedule!(dur)
+                    }
                 }
-            }
-            now.clone()
-        })
+                now.clone()
+            },
+        )
     }
 }
 
