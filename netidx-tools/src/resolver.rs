@@ -57,6 +57,7 @@ pub(super) async fn run(
     auth: DesiredAuth,
     cmd: ResolverCmd,
 ) -> Result<()> {
+    env_logger::init();
     match cmd {
         ResolverCmd::Resolve { path } => {
             let resolver = ResolverRead::new(config, auth);

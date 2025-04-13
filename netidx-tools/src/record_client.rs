@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
+use arcstr::literal;
 use bytes::BytesMut;
 use chrono::prelude::*;
-use arcstr::literal;
 use netidx::{
     path::Path,
     resolver_client::{Glob, GlobSet},
@@ -297,6 +297,7 @@ fn compressed(file: PathBuf) -> Result<()> {
 }
 
 pub(super) async fn run(cmd: Cmd) -> Result<()> {
+    env_logger::init();
     match cmd {
         Cmd::Oneshot { common, params } => {
             let (cfg, auth) = common.load();

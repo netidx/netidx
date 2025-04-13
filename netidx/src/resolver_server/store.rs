@@ -169,31 +169,31 @@ impl Store {
     }
 
     pub(crate) fn shrink_to_fit(&mut self) {
-	self.publishers_by_id.shrink_to_fit();
-	self.publishers_by_addr.shrink_to_fit();
-	self.published_by_path.shrink_to_fit();
-	self.flags_by_path.shrink_to_fit();
-	self.published_by_id.shrink_to_fit();
-	for v in self.published_by_id.values_mut() {
-	    v.shrink_to_fit()
-	}
-	self.published_by_level.shrink_to_fit();
-	self.columns.shrink_to_fit();
-	for v in self.columns.values_mut() {
-	    v.shrink_to_fit()
-	}
-	self.defaults_by_id.shrink_to_fit();
-	for v in self.defaults_by_id.values_mut() {
-	    v.shrink_to_fit();
-	}
-	self.sets.gc()
+        self.publishers_by_id.shrink_to_fit();
+        self.publishers_by_addr.shrink_to_fit();
+        self.published_by_path.shrink_to_fit();
+        self.flags_by_path.shrink_to_fit();
+        self.published_by_id.shrink_to_fit();
+        for v in self.published_by_id.values_mut() {
+            v.shrink_to_fit()
+        }
+        self.published_by_level.shrink_to_fit();
+        self.columns.shrink_to_fit();
+        for v in self.columns.values_mut() {
+            v.shrink_to_fit()
+        }
+        self.defaults_by_id.shrink_to_fit();
+        for v in self.defaults_by_id.values_mut() {
+            v.shrink_to_fit();
+        }
+        self.sets.gc()
     }
 
     fn remove_parents(&mut self, mut p: &str) {
         let mut save = false;
         loop {
             let n = Path::levels(p);
-            if !save {
+            if save {
                 save = p == "/"
                     || self.published_by_path.contains_key(p)
                     || self.defaults.contains_key(p)
@@ -219,9 +219,12 @@ impl Store {
                     **cn += 1;
                 }
             } else {
-                self.published_by_level.get_mut(&n).into_iter().for_each(|l| {
+                if let Some(l) = self.published_by_level.get_mut(&n) {
                     l.remove(p);
-                })
+                    if l.is_empty() {
+                        self.published_by_level.remove(&n);
+                    }
+                }
             }
             if p == "/" {
                 break;

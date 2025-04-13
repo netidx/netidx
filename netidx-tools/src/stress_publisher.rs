@@ -7,7 +7,7 @@ use netidx::{
 };
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
-use tokio::{signal, time, task};
+use tokio::{signal, task, time};
 
 #[derive(StructOpt, Debug)]
 pub(super) struct Params {
@@ -86,5 +86,6 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
 }
 
 pub(super) async fn run(config: Config, auth: DesiredAuth, params: Params) -> Result<()> {
+    env_logger::init();
     run_publisher(config, auth, params).await
 }

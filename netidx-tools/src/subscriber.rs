@@ -400,6 +400,7 @@ impl Ctx {
 }
 
 pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()> {
+    env_logger::init();
     let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
     let mut ctx = Ctx::new(subscriber, p);
     let mut tick = time::interval(Duration::from_secs(1));

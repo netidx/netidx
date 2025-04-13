@@ -8,6 +8,7 @@ use std::{
 use tokio::signal::ctrl_c;
 
 pub(crate) async fn run(config: Option<PathBuf>, example: bool) -> Result<()> {
+    env_logger::init();
     if example {
         println!("{}", Config::example());
         Ok(())

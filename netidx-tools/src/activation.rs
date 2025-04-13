@@ -487,6 +487,7 @@ async fn tokio_run(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()>
 }
 
 pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
+    env_logger::init();
     if !params.foreground {
         let mut d = Daemonize::new();
         if let Some(pid_file) = params.pid_file.as_ref() {

@@ -18,6 +18,7 @@ pub(super) struct Params {
 }
 
 pub(super) async fn run(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {
+    env_logger::init();
     let r = ResolverRead::new(config.clone(), auth.clone());
     let table = r.table(Path::from(p.base)).await.context("load table")?;
     let subscriber = Subscriber::new(config, auth).context("create subscriber")?;

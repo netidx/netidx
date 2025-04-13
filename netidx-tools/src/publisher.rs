@@ -79,6 +79,7 @@ async fn handle_writes_loop(
 }
 
 pub(super) async fn run(config: Config, auth: DesiredAuth, params: Params) -> Result<()> {
+    env_logger::init();
     let timeout = params.timeout.map(Duration::from_secs);
     let mut by_path: HashMap<Path, Arc<Val>> = HashMap::new();
     let by_id: ById =
