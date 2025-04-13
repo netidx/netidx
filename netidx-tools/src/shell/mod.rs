@@ -776,12 +776,15 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                 }
                 peek!(updates, writes, tasks)
             },
-            i = repl.input.read_line(output, newenv.take()) => match i {
-                Ok(i) => {
-                    input = Some(i);
-                },
-                Err(e) => {
-                    eprintln!("error reading line {e:?}");
+            i = repl.input.read_line(output, newenv.take()) => {
+                peek!(updates, writes, tasks);
+                match i {
+                    Ok(i) => {
+                        input = Some(i);
+                    },
+                    Err(e) => {
+                        eprintln!("error reading line {e:?}");
+                    }
                 }
             },
             _ = or_never(ready) => peek!(updates, writes, tasks),
