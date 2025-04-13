@@ -741,38 +741,40 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
         let mut writes = None;
         let mut input = None;
         let mut init = Init::None;
-        select! {
-            wr = repl.ctx.user.writes.select_next_some() => {
-                writes = Some(wr);
+        macro_rules! peek {
+            (updates) => {
                 if let Ok(Some(up)) = repl.ctx.user.updates.try_next() {
                     updates = Some(up);
                 }
-                while let Some(Ok(up)) = repl.ctx.user.tasks.try_join_next() {
-                    tasks.push(up);
-                }
-            },
-            up = repl.ctx.user.updates.select_next_some() => {
-                updates = Some(up);
+            };
+            (writes) => {
                 if let Ok(Some(wr)) = repl.ctx.user.writes.try_next() {
                     writes = Some(wr);
                 }
+            };
+            (tasks) => {
                 while let Some(Ok(up)) = repl.ctx.user.tasks.try_join_next() {
                     tasks.push(up);
                 }
+            };
+            ($($item:tt),+) => {{
+                $(peek!($item));+
+            }};
+        }
+        select! {
+            wr = repl.ctx.user.writes.select_next_some() => {
+                writes = Some(wr);
+                peek!(updates, tasks);
+            },
+            up = repl.ctx.user.updates.select_next_some() => {
+                updates = Some(up);
+                peek!(writes, tasks);
             },
             up = repl.ctx.user.tasks.join_next() => {
                 if let Some(Ok(up)) = up {
                     tasks.push(up);
                 }
-                while let Some(Ok(up)) = repl.ctx.user.tasks.try_join_next() {
-                    tasks.push(up);
-                }
-                if let Ok(Some(up)) = repl.ctx.user.updates.try_next() {
-                    updates = Some(up);
-                }
-                if let Ok(Some(wr)) = repl.ctx.user.writes.try_next() {
-                    writes = Some(wr);
-                }
+                peek!(updates, writes, tasks)
             },
             i = repl.input.read_line(output, newenv.take()) => match i {
                 Ok(i) => {
@@ -782,17 +784,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                     eprintln!("error reading line {e:?}");
                 }
             },
-            _ = or_never(ready) => {
-                if let Ok(Some(up)) = repl.ctx.user.updates.try_next() {
-                    updates = Some(up);
-                }
-                if let Ok(Some(wr)) = repl.ctx.user.writes.try_next() {
-                    writes = Some(wr);
-                }
-                while let Some(Ok(up)) = repl.ctx.user.tasks.try_join_next() {
-                    tasks.push(up);
-                }
-            }
+            _ = or_never(ready) => peek!(updates, writes, tasks),
             () = unsubscribe_ready(&repl.ctx.user.pending_unsubscribe) => {
                 while let Some((ts, _)) = repl.ctx.user.pending_unsubscribe.front() {
                     if ts.elapsed() >= Duration::from_secs(1) {
