@@ -30,6 +30,7 @@ pub(super) struct MapQ<C: Ctx, E: UserEvent> {
     binds: SmallVec<[BindId; 16]>,
     added: SmallVec<[BindId; 16]>,
     out: SmallVec<[Option<Value>; 16]>,
+    prev: Option<ValArray>,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for MapQ<C, E> {
@@ -50,6 +51,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for MapQ<C, E> {
                     binds: smallvec![],
                     added: smallvec![],
                     out: smallvec![],
+                    prev: None,
                 }))
             }
             _ => bail!("expected a function"),
@@ -101,8 +103,18 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for MapQ<C, E> {
             Some(_) | None => None,
         };
         if let Some(a) = up {
-            for (id, v) in self.binds.iter().zip(a.iter()) {
+            let init = self.prev.is_none();
+            let prev = self.prev.as_ref().map(|a| &a[..]).unwrap_or(&[]);
+            let plen = prev.len();
+            for (i, (id, v)) in self.binds.iter().zip(a.iter()).enumerate() {
                 event.variables.insert(*id, v.clone());
+                if i >= plen || prev[i] != a[i] {
+                    self.out[i] = None;
+                }
+            }
+            self.prev = Some(a.clone());
+            if a.len() == 0 && (init || plen > 0) {
+                return Some(Value::Array(a));
             }
         }
         let init = event.init;

@@ -197,7 +197,7 @@ pub trait Ctx: 'static {
     fn update(&mut self, id: &Val, value: Value);
 
     /// Stop publishing the specified id
-    fn unpublish(&mut self, id: Val);
+    fn unpublish(&mut self, id: Val, ref_by: ExprId);
 
     /// This will be called by the compiler whenever a bound variable
     /// is referenced. The ref_by is the toplevel expression that

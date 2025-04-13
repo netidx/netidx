@@ -155,26 +155,24 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
                 }
                 return None;
             }
-            (Some(path), true) => {
+            (Some(Value::String(path)), true)
+                if self.cur.as_ref().map(|(p, _)| &**p) != Some(&*path) =>
+            {
                 if let Some((path, dv)) = self.cur.take() {
                     ctx.user.unsubscribe(path, dv, self.top_id)
                 }
-                match as_path(path.clone()) {
-                    None => {
-                        return errf!("subscribe(path): invalid absolute path {path:?}")
-                    }
-                    Some(path) => {
-                        self.cur = Some((
-                            path.clone(),
-                            ctx.user.subscribe(
-                                UpdatesFlags::BEGIN_WITH_LAST,
-                                path,
-                                self.top_id,
-                            ),
-                        ));
-                    }
+                let path = Path::from(path);
+                if !Path::is_absolute(&path) {
+                    return errf!("expected absolute path");
                 }
+                let dval = ctx.user.subscribe(
+                    UpdatesFlags::BEGIN_WITH_LAST,
+                    path.clone(),
+                    self.top_id,
+                );
+                self.cur = Some((path, dval));
             }
+            (Some(v), true) => return errf!("invalid path {v}, expected string"),
         }
         self.cur.as_ref().and_then(|(_, dv)| {
             event.netidx.get(&dv.id()).map(|e| match e {
@@ -182,6 +180,12 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
                 subscriber::Event::Update(v) => v.clone(),
             })
         })
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Some((path, dv)) = self.cur.take() {
+            ctx.user.unsubscribe(path, dv, self.top_id)
+        }
     }
 }
 
@@ -402,7 +406,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
                 if self.current.as_ref().map(|(p, _)| &**p != path).unwrap_or(true) =>
             {
                 if let Some((_, id)) = self.current.take() {
-                    ctx.user.unpublish(id);
+                    ctx.user.unpublish(id, self.top_id);
                 }
                 let path = Path::from(path.clone());
                 match ctx.user.publish(path.clone(), v.clone(), self.top_id) {
@@ -466,7 +470,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         if let Some((_, val)) = self.current.take() {
-            ctx.user.unpublish(val);
+            ctx.user.unpublish(val, self.top_id);
         }
         if let Some(mut app) = self.on_write.take() {
             app.delete(ctx);

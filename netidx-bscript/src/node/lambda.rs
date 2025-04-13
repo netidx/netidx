@@ -16,6 +16,8 @@ use std::{
 };
 use triomphe::Arc;
 
+use super::gen;
+
 pub(super) struct LambdaCallSite<C: Ctx, E: UserEvent> {
     args: Box<[StructPatternNode]>,
     body: Node<C, E>,
@@ -71,6 +73,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for LambdaCallSite<C, E> {
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
         self.body.refs(f)
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        mem::replace(&mut self.body, gen::nop()).delete(ctx)
     }
 }
 
@@ -180,6 +186,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInCallSite<C, E> {
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
         self.apply.refs(f)
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.apply.delete(ctx)
     }
 }
 

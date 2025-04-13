@@ -44,7 +44,7 @@ use tokio::{
     fs, select,
     sync::{oneshot, Mutex},
     task::{self, JoinSet},
-    time,
+    time::{self, Instant},
 };
 use triomphe::Arc;
 mod completion;
@@ -91,12 +91,13 @@ impl fmt::Display for CouldNotResolve {
 }
 
 struct ReplCtx {
-    by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
+    by_ref: FxHashMap<BindId, FxHashMap<ExprId, usize>>,
+    subscribed: FxHashMap<SubId, FxHashMap<ExprId, usize>>,
+    published: FxHashMap<Id, FxHashMap<ExprId, usize>>,
     var_updates: VecDeque<(BindId, Value)>,
     net_updates: VecDeque<(SubId, subscriber::Event)>,
     net_writes: VecDeque<(Id, WriteRequest)>,
-    subscribed: FxHashMap<SubId, SmallVec<[ExprId; 3]>>,
-    published: FxHashMap<Id, SmallVec<[ExprId; 1]>>,
+    pending_unsubscribe: VecDeque<(Instant, Dval)>,
     change_trackers: FxHashMap<BindId, Arc<Mutex<ChangeTracker>>>,
     tasks: JoinSet<(BindId, Value)>,
     cached: FxHashMap<BindId, Value>,
@@ -123,6 +124,7 @@ impl ReplCtx {
             net_updates: VecDeque::new(),
             net_writes: VecDeque::new(),
             subscribed: HashMap::default(),
+            pending_unsubscribe: VecDeque::new(),
             published: HashMap::default(),
             change_trackers: HashMap::default(),
             cached: HashMap::default(),
@@ -183,6 +185,7 @@ impl Ctx for ReplCtx {
             net_writes,
             subscribed,
             published,
+            pending_unsubscribe,
             change_trackers,
             tasks,
             cached,
@@ -201,6 +204,7 @@ impl Ctx for ReplCtx {
         net_writes.clear();
         subscribed.clear();
         published.clear();
+        pending_unsubscribe.clear();
         change_trackers.clear();
         *tasks = JoinSet::new();
         tasks.spawn(async { future::pending().await });
@@ -218,20 +222,23 @@ impl Ctx for ReplCtx {
     fn subscribe(&mut self, flags: UpdatesFlags, path: Path, ref_by: ExprId) -> Dval {
         let dval =
             self.subscriber.subscribe_updates(path, [(flags, self.updates_tx.clone())]);
-        let exprs = self.subscribed.entry(dval.id()).or_default();
-        if !exprs.contains(&ref_by) {
-            exprs.push(ref_by);
-        }
+        *self.subscribed.entry(dval.id()).or_default().entry(ref_by).or_default() += 1;
         dval
     }
 
     fn unsubscribe(&mut self, _path: Path, dv: Dval, ref_by: ExprId) {
         if let Some(exprs) = self.subscribed.get_mut(&dv.id()) {
-            exprs.retain(|eid| eid != &ref_by);
+            if let Some(cn) = exprs.get_mut(&ref_by) {
+                *cn -= 1;
+                if *cn == 0 {
+                    exprs.remove(&ref_by);
+                }
+            }
             if exprs.is_empty() {
                 self.subscribed.remove(&dv.id());
             }
         }
+        self.pending_unsubscribe.push_back((Instant::now(), dv));
     }
 
     fn list(&mut self, id: BindId, path: Path) {
@@ -288,7 +295,7 @@ impl Ctx for ReplCtx {
             Some(self.writes_tx.clone()),
         )?;
         let id = val.id();
-        self.published.insert(id, smallvec![ref_by]);
+        *self.published.entry(id).or_default().entry(ref_by).or_default() += 1;
         Ok(val)
     }
 
@@ -296,8 +303,18 @@ impl Ctx for ReplCtx {
         val.update(&mut self.batch, value);
     }
 
-    fn unpublish(&mut self, val: Val) {
-        self.published.remove(&val.id());
+    fn unpublish(&mut self, val: Val, ref_by: ExprId) {
+        if let Some(refs) = self.published.get_mut(&val.id()) {
+            if let Some(cn) = refs.get_mut(&ref_by) {
+                *cn -= 1;
+                if *cn == 0 {
+                    refs.remove(&ref_by);
+                }
+            }
+            if refs.is_empty() {
+                self.published.remove(&val.id());
+            }
+        }
     }
 
     fn set_timer(&mut self, id: BindId, timeout: Duration, _ref_by: ExprId) {
@@ -306,15 +323,17 @@ impl Ctx for ReplCtx {
     }
 
     fn ref_var(&mut self, id: BindId, ref_by: ExprId) {
-        let refs = self.by_ref.entry(id).or_default();
-        if !refs.contains(&ref_by) {
-            refs.push(ref_by);
-        }
+        *self.by_ref.entry(id).or_default().entry(ref_by).or_default() += 1;
     }
 
     fn unref_var(&mut self, id: BindId, ref_by: ExprId) {
         if let Some(refs) = self.by_ref.get_mut(&id) {
-            refs.retain(|eid| eid != &ref_by);
+            if let Some(cn) = refs.get_mut(&ref_by) {
+                *cn -= 1;
+                if *cn == 0 {
+                    refs.remove(&ref_by);
+                }
+            }
             if refs.is_empty() {
                 self.by_ref.remove(&id);
             }
@@ -485,7 +504,9 @@ impl Repl {
                     Entry::Vacant(e) => {
                         e.insert($v);
                         if let Some(exps) = self.ctx.user.$refed.get(&$id) {
-                            self.updated.extend(exps)
+                            for id in exps.keys() {
+                                self.updated.insert(*id);
+                            }
                         }
                     }
                     Entry::Occupied(_) => {
@@ -659,6 +680,19 @@ async fn or_never(b: bool) {
     }
 }
 
+async fn unsubscribe_ready(pending: &VecDeque<(Instant, Dval)>) {
+    if pending.len() == 0 {
+        future::pending().await
+    } else {
+        let (ts, _) = pending.front().unwrap();
+        let one = Duration::from_secs(1);
+        let elapsed = ts.elapsed();
+        if elapsed < one {
+            time::sleep(one - elapsed).await
+        }
+    }
+}
+
 pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()> {
     if let Some(dir) = p.log_dir {
         let _ = Logger::try_with_env()?
@@ -701,7 +735,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     }
     let mut newenv = (!script).then_some(repl.ctx.env.clone());
     let mut tasks = vec![];
-    loop {
+    'main: loop {
         let ready = repl.cycle_ready();
         let mut updates = None;
         let mut writes = None;
@@ -755,6 +789,19 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                 if let Ok(Some(wr)) = repl.ctx.user.writes.try_next() {
                     writes = Some(wr);
                 }
+                while let Some(Ok(up)) = repl.ctx.user.tasks.try_join_next() {
+                    tasks.push(up);
+                }
+            }
+            () = unsubscribe_ready(&repl.ctx.user.pending_unsubscribe) => {
+                while let Some((ts, _)) = repl.ctx.user.pending_unsubscribe.front() {
+                    if ts.elapsed() >= Duration::from_secs(1) {
+                        repl.ctx.user.pending_unsubscribe.pop_front();
+                    } else {
+                        break
+                    }
+                }
+                continue 'main
             }
         }
         match input {
