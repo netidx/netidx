@@ -350,29 +350,41 @@ struct Publish<C: Ctx, E: UserEvent> {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Publish<C, E> {
     const NAME: &str = "publish";
-    deftype!("fn(?#update:[null, fn(Any) -> Any], string, Any) -> error");
+    deftype!("fn(?#on_write:[null, fn(Any) -> Any], string, Any) -> error");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|ctx, typ, _, from, top_id| match from {
-            [Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }, _, _] => {
-                let x = BindId::new();
-                let mut args = [Node {
-                    spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
-                    typ: from[0].typ.clone(),
-                    kind: NodeKind::Ref { id: x, top_id },
-                }];
-                let on_write = (lb.init)(ctx, &mut args, top_id)?;
-                Ok(Box::new(Publish {
-                    args: CachedVals::new(from),
-                    current: None,
-                    typ: typ.clone(),
-                    top_id,
-                    x,
-                    on_write: Some(on_write),
-                    from: args,
-                }))
+        Arc::new(|ctx, typ, _, from, top_id| {
+            let x = BindId::new();
+            let mut args = [Node {
+                spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
+                typ: from[0].typ.clone(),
+                kind: NodeKind::Ref { id: x, top_id },
+            }];
+            match from {
+                [Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }, _, _] => {
+                    Ok(Box::new(Publish {
+                        args: CachedVals::new(from),
+                        current: None,
+                        typ: typ.clone(),
+                        top_id,
+                        x,
+                        on_write: Some((lb.init)(ctx, &mut args, top_id)?),
+                        from: args,
+                    }))
+                }
+                [Node { spec: _, typ: _, kind: NodeKind::Constant(Value::Null) }, _, _] => {
+                    Ok(Box::new(Publish {
+                        args: CachedVals::new(from),
+                        current: None,
+                        typ: typ.clone(),
+                        top_id,
+                        x: BindId::new(),
+                        on_write: None,
+                        from: args,
+                    }))
+                }
+                _ => bail!("expected function"),
             }
-            _ => bail!("expected function"),
         })
     }
 }
@@ -432,8 +444,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        from[1].typ.check_contains(&Type::Primitive(Typ::String.into()))?;
-        from[2].typ.check_contains(&Type::Primitive(Typ::any()))?;
+        Type::Primitive(Typ::String.into()).check_contains(&from[1].typ)?;
+        Type::Primitive(Typ::any()).check_contains(&from[2].typ)?;
         match &mut self.on_write {
             None => Type::Primitive(Typ::Null.into()).check_contains(&from[0].typ)?,
             Some(app) => match self.typ.args.get(0) {
@@ -464,7 +476,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
 
 const MOD: &str = r#"
 pub mod net {
-    type Table = { rows: Array<string>, columns: Array<string> }
+    type Table = { rows: Array<string>, columns: Array<(string, v64)> }
 
     pub let write = |path, value| 'write
     pub let subscribe = |path| 'subscribe

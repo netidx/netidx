@@ -34,7 +34,7 @@ use reedline::{
 use smallvec::{smallvec, SmallVec};
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
-    future,
+    future, mem,
     os::unix::ffi::OsStrExt,
     path::{Component, PathBuf},
     time::Duration,
@@ -783,6 +783,14 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
             if output {
                 println!("{v}")
             }
+        }
+        if repl.ctx.user.batch.len() > 0 {
+            let batch = mem::replace(
+                &mut repl.ctx.user.batch,
+                repl.ctx.user.publisher.start_batch(),
+            );
+            let timeout = p.publish_timeout.map(|t| Duration::from_secs(t));
+            task::spawn(async move { batch.commit(timeout).await });
         }
     }
 }
