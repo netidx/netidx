@@ -1442,8 +1442,11 @@ pub fn parse_many_modexpr(s: &str) -> anyhow::Result<Vec<Expr>> {
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
+/// Parse a fntype
 pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType<Refs>> {
     fntype()
+        .skip(spaces())
+        .skip(eof())
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{e}")))
@@ -1452,6 +1455,8 @@ pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType<Refs>> {
 /// Parse an expression instead of a module expression
 pub fn parse_expr(s: &str) -> anyhow::Result<Expr> {
     expr()
+        .skip(spaces())
+        .skip(eof())
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{e}")))
