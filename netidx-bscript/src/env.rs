@@ -10,7 +10,7 @@ use netidx::path::Path;
 use std::{fmt, iter, ops::Bound, sync::Weak};
 use triomphe::Arc;
 
-pub struct LambdaBind<C: Ctx, E: UserEvent> {
+pub struct LambdaDef<C: Ctx, E: UserEvent> {
     pub id: LambdaId,
     pub env: Env<C, E>,
     pub scope: ModPath,
@@ -20,28 +20,21 @@ pub struct LambdaBind<C: Ctx, E: UserEvent> {
     pub init: InitFn<C, E>,
 }
 
-pub struct Bind<C: Ctx, E: UserEvent> {
+pub struct Bind {
     pub id: BindId,
     pub export: bool,
     pub typ: Type<NoRefs>,
-    pub fun: Option<Weak<LambdaBind<C, E>>>,
     scope: ModPath,
     name: CompactString,
 }
 
-impl<C: Ctx, E: UserEvent> fmt::Debug for Bind<C, E> {
+impl fmt::Debug for Bind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Bind {{ id: {:?}, export: {}, fun: {} }}",
-            self.id,
-            self.export,
-            self.fun.is_some()
-        )
+        write!(f, "Bind {{ id: {:?}, export: {} }}", self.id, self.export,)
     }
 }
 
-impl<C: Ctx, E: UserEvent> Clone for Bind<C, E> {
+impl Clone for Bind {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
@@ -49,14 +42,13 @@ impl<C: Ctx, E: UserEvent> Clone for Bind<C, E> {
             name: self.name.clone(),
             export: self.export,
             typ: self.typ.clone(),
-            fun: self.fun.as_ref().map(Weak::clone),
         }
     }
 }
 
 pub struct Env<C: Ctx, E: UserEvent> {
-    pub by_id: Map<BindId, Bind<C, E>>,
-    pub lambdas: Map<LambdaId, Weak<LambdaBind<C, E>>>,
+    pub by_id: Map<BindId, Bind>,
+    pub lambdas: Map<LambdaId, Weak<LambdaDef<C, E>>>,
     pub binds: Map<ModPath, Map<CompactString, BindId>>,
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
     pub modules: Set<ModPath>,
@@ -195,7 +187,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         &self,
         scope: &ModPath,
         name: &ModPath,
-    ) -> Option<(&ModPath, &Bind<C, E>)> {
+    ) -> Option<(&ModPath, &Bind)> {
         self.find_visible(scope, name, |scope, name| {
             self.binds.get_full(scope).and_then(|(scope, vars)| {
                 vars.get(name)
@@ -258,7 +250,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         scope: &ModPath,
         name: &str,
         typ: Type<NoRefs>,
-    ) -> &mut Bind<C, E> {
+    ) -> &mut Bind {
         let binds = self.binds.get_or_default_cow(scope.clone());
         let mut existing = true;
         let id = binds.get_or_insert_cow(CompactString::from(name), || {
@@ -274,7 +266,6 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
             scope: scope.clone(),
             name: CompactString::from(name),
             typ,
-            fun: None,
         })
     }
 

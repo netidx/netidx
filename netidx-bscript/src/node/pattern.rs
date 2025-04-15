@@ -207,7 +207,7 @@ impl StructPatternNode {
         Ok(t)
     }
 
-    pub fn ids<F: FnMut(BindId)>(&self, f: &mut F) {
+    pub fn ids<'a>(&'a self, f: &mut (dyn FnMut(BindId) + 'a)) {
         match &self {
             Self::Ignore | Self::Literal(_) => (),
             Self::Bind(id) => f(*id),
@@ -454,19 +454,6 @@ impl StructPatternNode {
             | Self::Slice { tuple: false, .. }
             | Self::SlicePrefix { .. }
             | Self::SliceSuffix { .. } => true,
-        }
-    }
-
-    pub fn lambda_ok(&self) -> Option<BindId> {
-        match self {
-            Self::Bind(id) => Some(*id),
-            Self::Literal(_)
-            | Self::Ignore
-            | Self::Slice { .. }
-            | Self::Variant { .. }
-            | Self::SlicePrefix { .. }
-            | Self::SliceSuffix { .. }
-            | Self::Struct { .. } => None,
         }
     }
 }

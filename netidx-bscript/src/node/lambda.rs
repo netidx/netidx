@@ -1,5 +1,5 @@
 use crate::{
-    env::LambdaBind,
+    env::LambdaDef,
     expr::{Arg, Expr, ExprId, ModPath},
     node::{compiler, pattern::StructPatternNode, Node, NodeKind},
     typ::{FnArgType, FnType, NoRefs, Refs, TVar, Type},
@@ -94,20 +94,13 @@ impl<C: Ctx, E: UserEvent> LambdaCallSite<C, E> {
             bail!("arity mismatch, expected {} arguments", argspec.len())
         }
         let mut argpats = vec![];
-        for ((a, atyp), node) in argspec.iter().zip(typ.args.iter()).zip(args.iter()) {
+        for (a, atyp) in argspec.iter().zip(typ.args.iter()) {
             let pattern = StructPatternNode::compile(ctx, &atyp.typ, &a.pattern, &scope)?;
             if pattern.is_refutable() {
                 bail!(
                     "refutable patterns are not allowed in lambda arguments {}",
                     a.pattern
                 )
-            }
-            if let Some(l) = node.find_lambda() {
-                if let Some(id) = pattern.lambda_ok() {
-                    ctx.env.by_id[&id].fun = Some(SArc::downgrade(&l))
-                } else {
-                    bail!("cannot pass a lambda to this argument pattern")
-                }
             }
             argpats.push(pattern);
         }
@@ -190,50 +183,6 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInCallSite<C, E> {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.apply.delete(ctx)
-    }
-}
-
-impl<C: Ctx, E: UserEvent> Node<C, E> {
-    pub(super) fn find_lambda(&self) -> Option<SArc<LambdaBind<C, E>>> {
-        match &self.kind {
-            NodeKind::Lambda(l) => Some(l.clone()),
-            NodeKind::Do(children) => children.last().and_then(|t| t.find_lambda()),
-            NodeKind::Constant(_)
-            | NodeKind::Any { .. }
-            | NodeKind::Use { .. }
-            | NodeKind::Bind { .. }
-            | NodeKind::Ref { .. }
-            | NodeKind::StructRef { .. }
-            | NodeKind::TupleRef { .. }
-            | NodeKind::Connect(_, _)
-            | NodeKind::Array { .. }
-            | NodeKind::Tuple { .. }
-            | NodeKind::Variant { .. }
-            | NodeKind::Struct { .. }
-            | NodeKind::StructWith { .. }
-            | NodeKind::Apply { .. }
-            | NodeKind::ApplyLate { .. }
-            | NodeKind::Error { .. }
-            | NodeKind::Qop(_, _)
-            | NodeKind::Module(_)
-            | NodeKind::Eq { .. }
-            | NodeKind::Ne { .. }
-            | NodeKind::Lt { .. }
-            | NodeKind::Gt { .. }
-            | NodeKind::Gte { .. }
-            | NodeKind::Lte { .. }
-            | NodeKind::And { .. }
-            | NodeKind::Or { .. }
-            | NodeKind::Not { .. }
-            | NodeKind::Add { .. }
-            | NodeKind::Sub { .. }
-            | NodeKind::Mul { .. }
-            | NodeKind::Div { .. }
-            | NodeKind::TypeCast { .. }
-            | NodeKind::TypeDef { .. }
-            | NodeKind::Select { .. }
-            | NodeKind::Nop => None,
-        }
     }
 }
 
@@ -401,15 +350,8 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         ctx.env = ctx.env.merge_lexical(&orig_env);
         res
     });
-    let l = SArc::new(LambdaBind {
-        id,
-        typ: typ.clone(),
-        builtin,
-        env,
-        argspec,
-        init,
-        scope,
-    });
+    let l =
+        SArc::new(LambdaDef { id, typ: typ.clone(), builtin, env, argspec, init, scope });
     ctx.env.lambdas.insert_cow(id, SArc::downgrade(&l));
     Node { spec: Box::new(spec), typ: Type::Fn(typ), kind: NodeKind::Lambda(l) }
 }

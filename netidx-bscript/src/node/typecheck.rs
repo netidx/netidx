@@ -1,6 +1,6 @@
 use crate::{
-    expr::ExprKind,
-    node::{Node, NodeKind},
+    expr::{ExprId, ExprKind},
+    node::{gen, Node, NodeKind},
     typ::{FnArgType, Type},
     Ctx, ExecCtx, UserEvent,
 };
@@ -174,10 +174,9 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
                 Ok(())
             }
-            NodeKind::TupleRef { id, field: i, top_id: _ } => {
-                let bind =
-                    ctx.env.by_id.get(id).ok_or_else(|| anyhow!("BUG: missing bind"))?;
-                let etyp = bind.typ.with_deref(|typ| match typ {
+            NodeKind::TupleRef { source, field: i, top_id: _ } => {
+                wrap!(source.typecheck(ctx))?;
+                let etyp = source.typ.with_deref(|typ| match typ {
                     Some(Type::Tuple(flds)) if flds.len() > *i => Ok(flds[*i].clone()),
                     None => bail!("type must be known, annotations needed"),
                     _ => bail!("expected tuple with at least {i} elements"),
@@ -185,14 +184,13 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 let etyp = wrap!(etyp)?;
                 wrap!(self.typ.check_contains(&etyp))
             }
-            NodeKind::StructRef { id, field: i, top_id: _ } => {
-                let bind =
-                    ctx.env.by_id.get(id).ok_or_else(|| anyhow!("BUG: missing bind"))?;
+            NodeKind::StructRef { source, field: i, top_id: _ } => {
+                wrap!(source.typecheck(ctx))?;
                 let field = match &self.spec.kind {
-                    ExprKind::StructRef { name: _, field } => field.clone(),
+                    ExprKind::StructRef { source: _, field } => field.clone(),
                     _ => bail!("BUG: miscompiled struct ref"),
                 };
-                let etyp = bind.typ.with_deref(|typ| match typ {
+                let etyp = source.typ.with_deref(|typ| match typ {
                     Some(Type::Struct(flds)) => {
                         let typ = flds.iter().enumerate().find_map(|(i, (n, t))| {
                             if &field == n {
@@ -213,20 +211,16 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 *i = idx;
                 wrap!(self.typ.check_contains(&typ))
             }
-            NodeKind::StructWith { name, current: _, replace } => {
-                let bind = ctx
-                    .env
-                    .by_id
-                    .get(name)
-                    .ok_or_else(|| anyhow!("BUG: missing bind"))?;
+            NodeKind::StructWith { source, current: _, replace } => {
+                wrap!(source.typecheck(ctx))?;
                 let fields = match &self.spec.kind {
-                    ExprKind::StructWith { name: _, replace } => replace
+                    ExprKind::StructWith { source: _, replace } => replace
                         .iter()
                         .map(|(n, _)| n.clone())
                         .collect::<SmallVec<[ArcStr; 8]>>(),
                     _ => bail!("BUG: miscompiled structwith"),
                 };
-                wrap!(bind.typ.with_deref(|typ| match typ {
+                wrap!(source.typ.with_deref(|typ| match typ {
                     Some(Type::Struct(flds)) => {
                         for ((i, c), n) in replace.iter_mut().zip(fields.iter()) {
                             let r =
@@ -250,72 +244,42 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     None => bail!("type must be known, annotations needed"),
                     _ => bail!("expected a struct"),
                 }))?;
-                wrap!(self.typ.check_contains(&bind.typ))
+                wrap!(self.typ.check_contains(&source.typ))
             }
-            NodeKind::Apply { args, function } => {
-                for n in args.iter_mut() {
+            NodeKind::Select(sn) => {
+                let rtype = wrap!(sn.typecheck(ctx))?;
+                wrap!(self.typ.check_contains(&rtype))
+            }
+            NodeKind::Apply(site) => {
+                for n in site.args.iter_mut() {
                     wrap!(n, n.typecheck(ctx))?
                 }
-                wrap!(function.typecheck(ctx, args))?;
-                Ok(())
-            }
-            NodeKind::ApplyLate(late) => {
-                for n in late.args.iter_mut() {
-                    wrap!(n, n.typecheck(ctx))?
-                }
-                late.ftype.unbind_tvars();
+                site.ftype.unbind_tvars();
                 for (arg, FnArgType { typ, .. }) in
-                    late.args.iter_mut().zip(late.ftype.args.iter())
+                    site.args.iter_mut().zip(site.ftype.args.iter())
                 {
                     wrap!(arg, arg.typecheck(ctx))?;
                     wrap!(arg, typ.check_contains(&arg.typ))?;
                 }
-                if late.ftype.has_unbound() {
+                if site.ftype.has_unbound() {
                     let e = anyhow!(
                         "type annotations needed {} has unbound type variables",
-                        late.ftype
+                        site.ftype
                     );
                     wrap!(self, Err(e))?
                 }
                 Ok(())
             }
-            NodeKind::Select { selected: _, arg, arms } => {
-                wrap!(arg.node.typecheck(ctx))?;
-                let mut rtype = Type::Bottom(PhantomData);
-                let mut mtype = Type::Bottom(PhantomData);
-                let mut itype = Type::Bottom(PhantomData);
-                for (pat, n) in arms.iter_mut() {
-                    match &mut pat.guard {
-                        Some(guard) => wrap!(guard.node.typecheck(ctx))?,
-                        None => mtype = mtype.union(&pat.type_predicate),
-                    }
-                    itype = itype.union(&pat.type_predicate);
-                    wrap!(n.node.typecheck(ctx))?;
-                    rtype = rtype.union(&n.node.typ);
-                }
-                wrap!(itype
-                    .check_contains(&arg.node.typ)
-                    .map_err(|e| anyhow!("missing match cases {e}")))?;
-                wrap!(mtype
-                    .check_contains(&arg.node.typ)
-                    .map_err(|e| anyhow!("missing match cases {e}")))?;
-                arg.node.typ = arg.node.typ.normalize();
-                let mut atype = arg.node.typ.clone();
-                for (pat, _) in arms.iter() {
-                    let can_match = atype.contains(&pat.type_predicate)
-                        || pat.type_predicate.contains(&atype);
-                    if !can_match {
-                        bail!(
-                            "pattern {} will never match {}, unused match cases",
-                            pat.type_predicate,
-                            atype
-                        )
-                    }
-                    if !pat.structure_predicate.is_refutable() && pat.guard.is_none() {
-                        atype = atype.diff(&pat.type_predicate);
-                    }
-                }
-                self.typ.check_contains(&rtype)
+            NodeKind::Lambda(lds) => {
+                let mut faux_args = Box::from_iter(lds.typ.args.iter().map(|a| {
+                    let mut n: Node<C, E> = gen::nop();
+                    n.typ = a.typ.clone();
+                    n
+                }));
+                let mut f = wrap!((lds.init)(ctx, &faux_args, ExprId::new()))?;
+                let res = wrap!(f.typecheck(ctx, &mut faux_args));
+                f.delete(ctx);
+                res
             }
             NodeKind::Constant(_)
             | NodeKind::Use { .. }
@@ -323,7 +287,6 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::Module(_)
             | NodeKind::Ref { .. }
             | NodeKind::Error { .. }
-            | NodeKind::Lambda(_)
             | NodeKind::Nop => Ok(()),
         }
     }

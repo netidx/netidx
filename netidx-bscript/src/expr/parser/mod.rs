@@ -30,8 +30,6 @@ use smallvec::{smallvec, SmallVec};
 use std::{marker::PhantomData, sync::LazyLock};
 use triomphe::Arc;
 
-use super::ApplyKind;
-
 #[cfg(test)]
 mod test;
 
@@ -234,9 +232,10 @@ where
                                 args: Arc::from_iter(
                                     argvec.clone().into_iter().map(|a| (None, a)),
                                 ),
-                                function: ApplyKind::Ref {
-                                    name: ["str", "concat"].into(),
-                                },
+                                function: Arc::new(
+                                    ExprKind::Ref { name: ["str", "concat"].into() }
+                                        .to_expr(),
+                                ),
                             }
                             .to_expr(),
                         )
@@ -248,9 +247,10 @@ where
                                 args: Arc::from_iter(
                                     argvec.clone().into_iter().map(|a| (None, a)),
                                 ),
-                                function: ApplyKind::Ref {
-                                    name: ["str", "concat"].into(),
-                                },
+                                function: Arc::new(
+                                    ExprKind::Ref { name: ["str", "concat"].into() }
+                                        .to_expr(),
+                                ),
                             }
                             .to_expr(),
                         )
@@ -390,8 +390,9 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (modpath().skip(sptoken('.')), spfname())
-        .map(|(name, field)| ExprKind::StructRef { name, field }.to_expr())
+    (expr().skip(sptoken('.')), spfname()).map(|(source, field)| {
+        ExprKind::StructRef { source: Arc::new(source), field }.to_expr()
+    })
 }
 
 fn tupleref<I>() -> impl Parser<I, Output = Expr>
@@ -400,8 +401,9 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (modpath().skip(sptoken('.')), int::<_, usize>())
-        .map(|(name, field)| ExprKind::TupleRef { name, field }.to_expr())
+    (expr().skip(sptoken('.')), int::<_, usize>()).map(|(source, field)| {
+        ExprKind::TupleRef { source: Arc::new(source), field }.to_expr()
+    })
 }
 
 fn arrayref<I>() -> impl Parser<I, Output = Expr>
@@ -411,7 +413,7 @@ where
     I::Range: Range,
 {
     (
-        modpath(),
+        expr(),
         between(
             token('['),
             sptoken(']'),
@@ -450,36 +452,22 @@ where
             )),
         ),
     )
-        .map(|(name, args)| {
-            let a = ExprKind::Ref { name }.to_expr();
-            match args {
-                Either::Left((start, end)) => ExprKind::Apply {
-                    function: ApplyKind::Ref { name: ["op", "slice"].into() },
-                    args: Arc::from_iter([(None, a), (None, start), (None, end)]),
-                }
-                .to_expr(),
-                Either::Right(e) => ExprKind::Apply {
-                    function: ApplyKind::Ref { name: ["op", "index"].into() },
-                    args: Arc::from_iter([(None, a), (None, e)]),
-                }
-                .to_expr(),
+        .map(|(a, args)| match args {
+            Either::Left((start, end)) => ExprKind::Apply {
+                function: Arc::new(
+                    ExprKind::Ref { name: ["op", "slice"].into() }.to_expr(),
+                ),
+                args: Arc::from_iter([(None, a), (None, start), (None, end)]),
             }
+            .to_expr(),
+            Either::Right(e) => ExprKind::Apply {
+                function: Arc::new(
+                    ExprKind::Ref { name: ["op", "index"].into() }.to_expr(),
+                ),
+                args: Arc::from_iter([(None, a), (None, e)]),
+            }
+            .to_expr(),
         })
-}
-
-fn applykind<I>() -> impl Parser<I, Output = ApplyKind>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    choice((
-        attempt((modpath().skip(sptoken('.')), spfname()))
-            .map(|(name, field)| ApplyKind::StructRef { name, field }),
-        attempt((modpath().skip(sptoken('.')), int::<_, usize>()))
-            .map(|(name, field)| ApplyKind::TupleRef { name, field }),
-        modpath().skip(not_followed_by(token('['))).map(|name| ApplyKind::Ref { name }),
-    ))
 }
 
 fn apply<I>() -> impl Parser<I, Output = Expr>
@@ -489,7 +477,7 @@ where
     I::Range: Range,
 {
     (
-        applykind(),
+        expr(),
         between(
             sptoken('('),
             sptoken(')'),
@@ -508,7 +496,7 @@ where
             ),
         ),
     )
-        .then(|(function, args): (ApplyKind, Vec<(Option<ArcStr>, Expr)>)| {
+        .then(|(function, args): (Expr, Vec<(Option<ArcStr>, Expr)>)| {
             let mut anon = false;
             for (a, _) in &args {
                 if a.is_some() && anon {
@@ -521,8 +509,9 @@ where
             }
             value((function, args)).left()
         })
-        .map(|(function, args): (ApplyKind, Vec<(Option<ArcStr>, Expr)>)| {
-            ExprKind::Apply { function, args: Arc::from(args) }.to_expr()
+        .map(|(function, args): (Expr, Vec<(Option<ArcStr>, Expr)>)| {
+            ExprKind::Apply { function: Arc::new(function), args: Arc::from(args) }
+                .to_expr()
         })
 }
 
@@ -1338,18 +1327,22 @@ where
         token('{'),
         sptoken('}'),
         (
-            spmodpath().skip(space()).skip(spstring("with")).skip(space()),
+            expr().skip(space()).skip(spstring("with")).skip(space()),
             sep_by1((spfname().skip(sptoken(':')), expr()), csep()),
         ),
     )
-    .then(|(name, mut exprs): (ModPath, SmallVec<[(ArcStr, Expr); 8]>)| {
+    .then(|(source, mut exprs): (Expr, SmallVec<[(ArcStr, Expr); 8]>)| {
         let s = exprs.iter().map(|(n, _)| n).collect::<FxHashSet<_>>();
         if s.len() < exprs.len() {
             return unexpected_any("struct fields must be unique").left();
         }
         exprs.sort_by_key(|(n, _)| n.clone());
-        value(ExprKind::StructWith { name, replace: Arc::from_iter(exprs) }.to_expr())
-            .right()
+        let e = ExprKind::StructWith {
+            source: Arc::new(source),
+            replace: Arc::from_iter(exprs),
+        }
+        .to_expr();
+        value(e).right()
     })
 }
 

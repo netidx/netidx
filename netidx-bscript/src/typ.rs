@@ -20,6 +20,7 @@ use std::{
     iter,
     marker::PhantomData,
     ops::Deref,
+    sync::LazyLock,
 };
 use triomphe::Arc;
 
@@ -253,6 +254,12 @@ pub enum Type<T: TypeMark> {
     Tuple(Arc<[Type<T>]>),
     Struct(Arc<[(ArcStr, Type<T>)]>),
     Variant(ArcStr, Arc<[Type<T>]>),
+}
+
+impl<T: TypeMark> Default for Type<T> {
+    fn default() -> Self {
+        Self::Bottom(PhantomData)
+    }
 }
 
 impl Type<NoRefs> {
@@ -1306,6 +1313,17 @@ pub struct FnType<T: TypeMark> {
     pub vargs: Option<Type<T>>,
     pub rtype: Type<T>,
     pub constraints: Arc<[(TVar<T>, Type<T>)]>,
+}
+
+impl<T: TypeMark> Default for FnType<T> {
+    fn default() -> Self {
+        Self {
+            args: Arc::from_iter([]),
+            vargs: None,
+            rtype: Default::default(),
+            constraints: Arc::from_iter([]),
+        }
+    }
 }
 
 impl FnType<Refs> {
