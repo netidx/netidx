@@ -2,10 +2,9 @@
 use crate::run;
 use crate::{
     deftype, err, errf,
-    expr::{Expr, ExprKind},
-    node::{Node, NodeKind},
+    expr::Expr,
+    node::{gen, Node},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    typ::{FnArgType, FnType, NoRefs, Type},
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
 };
 use anyhow::bail;
@@ -14,7 +13,8 @@ use anyhow::Result;
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use netidx::subscriber::Value;
-use std::sync::Arc;
+use std::{mem, sync::Arc};
+use triomphe::Arc as TArc;
 
 mod array;
 
@@ -627,10 +627,9 @@ run!(slice, SLICE, |v: Result<&Value>| {
 });
 
 struct Filter<C: Ctx, E: UserEvent> {
-    pred: Box<dyn Apply<C, E> + Send + Sync>,
-    typ: FnType<NoRefs>,
+    pred: Node<C, E>,
+    fid: BindId,
     x: BindId,
-    from: [Node<C, E>; 1],
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
@@ -639,18 +638,15 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
-            [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
-                let x = ctx.env.bind_variable(scope, "x", from[0].typ.clone()).id;
-                ctx.user.ref_var(x, top_id);
-                let mut from = [Node {
-                    spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
-                    typ: from[0].typ.clone(),
-                    kind: NodeKind::Ref { id: x, top_id },
-                }];
-                let pred = (lb.init)(ctx, &mut from, top_id)?;
-                Ok(Box::new(Self { pred, typ: typ.clone(), x, from }))
+            [arg, fnode] => {
+                let (x, xn) = gen::bind(ctx, scope, "x", arg.typ.clone(), top_id);
+                let fid = BindId::new();
+                let fnode = gen::reference(ctx, fid, fnode.typ.clone(), top_id);
+                let typ = TArc::new(typ.clone());
+                let pred = gen::apply(fnode, vec![xn], typ, top_id);
+                Ok(Box::new(Self { pred, fid, x }))
             }
-            _ => bail!("expected a function"),
+            _ => bail!("expected two arguments"),
         })
     }
 }
@@ -662,14 +658,17 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
+        if let Some(v) = from[1].update(ctx, event) {
+            event.variables.insert(self.fid, v);
+        }
         match from[0].update(ctx, event) {
             None => {
-                self.pred.update(ctx, &mut self.from, event);
+                self.pred.update(ctx, event);
                 None
             }
             Some(v) => {
                 event.variables.insert(self.x, v.clone());
-                match self.pred.update(ctx, &mut self.from, event) {
+                match self.pred.update(ctx, event) {
                     Some(Value::Bool(true)) => Some(v),
                     _ => None,
                 }
@@ -685,15 +684,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        self.from[0].typ.check_contains(&from[0].typ)?;
-        self.pred.typecheck(ctx, from)?;
-        match self.typ.args.get(1) {
-            Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
-                ft.check_contains(&self.pred.typ())?
-            }
-            _ => bail!("expected function as 2nd arg"),
-        }
-        Ok(())
+        self.pred.typecheck(ctx)
     }
 }
 

@@ -245,9 +245,10 @@ pub trait Ctx: 'static {
 }
 
 pub struct ExecCtx<C: Ctx, E: UserEvent> {
-    pub env: Env<C, E>,
     builtins: FxHashMap<&'static str, (FnType<Refs>, BuiltInInitFn<C, E>)>,
     std: Vec<Node<C, E>>,
+    pub env: Env<C, E>,
+    pub cached: FxHashMap<BindId, Value>,
     pub user: C,
 }
 
@@ -263,6 +264,7 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
             env: Env::new(),
             builtins: FxHashMap::default(),
             std: vec![],
+            cached: HashMap::default(),
             user,
         };
         let core = stdfn::core::register(&mut t);

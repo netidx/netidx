@@ -75,6 +75,7 @@ pub struct CallSite<C: Ctx, E: UserEvent> {
     arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
     function: Option<(LambdaId, Box<dyn Apply<C, E> + Send + Sync>)>,
     top_id: ExprId,
+    init: bool,
 }
 
 impl<C: Ctx, E: UserEvent> Default for CallSite<C, E> {
@@ -963,6 +964,19 @@ pub mod gen {
         (id, Node { spec, kind, typ })
     }
 
+    /// generate a reference to a bind id
+    pub fn reference<C: Ctx, E: UserEvent>(
+        ctx: &mut ExecCtx<C, E>,
+        id: BindId,
+        typ: Type<NoRefs>,
+        top_id: ExprId,
+    ) -> Node<C, E> {
+        ctx.user.ref_var(id, top_id);
+        let spec = Box::new(ExprKind::Ref { name: ModPath::from(["x"]) }.to_expr());
+        let kind = NodeKind::Ref { id, top_id };
+        Node { spec, kind, typ }
+    }
+
     /// generate and return an error node
     pub fn error<C: Ctx, E: UserEvent>(spec: Box<Expr>, msg: &str) -> Node<C, E> {
         Node {
@@ -975,25 +989,27 @@ pub mod gen {
         }
     }
 
-    /*
     /// generate and return an apply node for the given lambda
     pub fn apply<C: Ctx, E: UserEvent>(
-        ctx: &mut ExecCtx<C, E>,
-        lb: &LambdaBind<C, E>,
-        args: Box<[Node<C, E>]>,
-        typ: Type<NoRefs>,
+        fnode: Node<C, E>,
+        args: Vec<Node<C, E>>,
+        typ: TArc<FnType<NoRefs>>,
         top_id: ExprId,
     ) -> Node<C, E> {
-        let spec = Box::new(
-            ExprKind::Constant(Value::String(literal!("'generated_lambda"))).to_expr(),
-        );
-        match (lb.init)(ctx, &args, top_id) {
-            Err(e) => error(spec, format_compact!("{e:?}").as_str()),
-            Ok(function) => {
-                let kind = NodeKind::Apply { args, function };
-                Node { spec, kind, typ }
-            }
+        let spec = ExprKind::Apply {
+            args: TArc::from_iter(args.iter().map(|n| (None, (*n.spec).clone()))),
+            function: TArc::new((*fnode.spec).clone()),
         }
+        .to_expr();
+        let site = Box::new(CallSite {
+            ftype: typ.clone(),
+            args,
+            arg_spec: HashMap::default(),
+            fnode,
+            function: None,
+            top_id,
+        });
+        let typ = Type::Fn(typ);
+        Node { spec: Box::new(spec), typ, kind: NodeKind::Apply(site) }
     }
-    */
 }
