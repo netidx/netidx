@@ -439,7 +439,14 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
             .check_contains(&from[0].typ)?;
         self.ityp.check_contains(&from[1].typ)?;
         Type::Fn(self.mftype.clone()).check_contains(&from[2].typ)?;
-        Ok(())
+        let mut n = gen::reference(ctx, self.initid, self.ityp.clone(), self.top_id);
+        let x = gen::reference(ctx, BindId::new(), self.etyp.clone(), self.top_id);
+        let fnode =
+            gen::reference(ctx, self.fid, Type::Fn(self.mftype.clone()), self.top_id);
+        n = gen::apply(fnode, vec![n, x], self.mftype.clone(), self.top_id);
+        let r = n.typecheck(ctx);
+        n.delete(ctx);
+        r
     }
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
@@ -529,9 +536,11 @@ pub(super) struct Group<C: Ctx, E: UserEvent> {
     pred: Node<C, E>,
     typ: FnType<NoRefs>,
     mftyp: TArc<FnType<NoRefs>>,
-    etype: Type<NoRefs>,
-    n: BindId,
-    x: BindId,
+    etyp: Type<NoRefs>,
+    ready: bool,
+    pid: BindId,
+    nid: BindId,
+    xid: BindId,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
@@ -540,35 +549,32 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
-            [_, _] => {
+            [arg, _] => {
                 let scope = ModPath(
                     scope.0.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
                 );
                 let n_typ = Type::Primitive(Typ::U64.into());
-                //let (nid, n) = gen::bind(ctx, scope, "n", ;
-                let x = ctx.env.bind_variable(scope, "x", from[0].typ.clone()).id;
-                ctx.user.ref_var(n, top_id);
-                ctx.user.ref_var(x, top_id);
-                let mut from = [
-                    Node {
-                        spec: Box::new(ExprKind::Ref { name: ["n"].into() }.to_expr()),
-                        typ: n_typ,
-                        kind: NodeKind::Ref { id: n, top_id },
-                    },
-                    Node {
-                        spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
-                        typ: from[0].typ.clone(),
-                        kind: NodeKind::Ref { id: x, top_id },
-                    },
-                ];
-                let pred = (lb.init)(ctx, &mut from, top_id)?;
+                let etyp = arg.typ.clone();
+                let mftyp = match &typ.args[1].typ {
+                    Type::Fn(ft) => ft.clone(),
+                    t => bail!("expected function not {t}"),
+                };
+                let (nid, n) = gen::bind(ctx, &scope, "n", n_typ.clone(), top_id);
+                let (xid, x) = gen::bind(ctx, &scope, "x", etyp.clone(), top_id);
+                let pid = BindId::new();
+                let fnode = gen::reference(ctx, pid, Type::Fn(mftyp.clone()), top_id);
+                let pred = gen::apply(fnode, vec![n, x], mftyp.clone(), top_id);
                 Ok(Box::new(Self {
+                    queue: VecDeque::new(),
                     buf: smallvec![],
                     typ: typ.clone(),
+                    mftyp,
+                    etyp,
                     pred,
-                    n,
-                    x,
-                    from,
+                    ready: true,
+                    pid,
+                    nid,
+                    xid,
                 }))
             }
             _ => bail!("expected two arguments"),
@@ -583,16 +589,41 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        if let Some(val) = from[0].update(ctx, event) {
-            self.buf.push(val.clone());
-            event.variables.insert(self.n, self.buf.len().into());
-            event.variables.insert(self.x, val);
+        macro_rules! set {
+            ($v:expr) => {{
+                self.ready = false;
+                self.buf.push($v.clone());
+                event.variables.insert(self.nid, Value::U64(self.buf.len() as u64));
+                event.variables.insert(self.xid, $v);
+            }};
         }
-        match self.pred.update(ctx, &mut self.from, event) {
-            Some(Value::Bool(true)) => {
-                Some(Value::Array(ValArray::from_iter_exact(self.buf.drain(..))))
+        if let Some(v) = from[0].update(ctx, event) {
+            self.queue.push_back(v);
+        }
+        if let Some(v) = from[1].update(ctx, event) {
+            event.variables.insert(self.pid, v);
+        }
+        if self.ready && self.queue.len() > 0 {
+            set!(self.queue.pop_front().unwrap());
+        }
+        loop {
+            match self.pred.update(ctx, event) {
+                None => break None,
+                Some(v) => {
+                    self.ready = true;
+                    match v {
+                        Value::Bool(true) => {
+                            break Some(Value::Array(ValArray::from_iter_exact(
+                                self.buf.drain(..),
+                            )))
+                        }
+                        _ => match self.queue.pop_front() {
+                            None => break None,
+                            Some(v) => set!(v),
+                        },
+                    }
+                }
             }
-            _ => None,
         }
     }
 
@@ -604,18 +635,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?
         }
-        self.from[0].typ.check_contains(&Type::Primitive(Typ::U64.into()))?;
-        self.from[1].typ.check_contains(&from[0].typ)?;
-        for n in self.from.iter_mut() {
-            n.typecheck(ctx)?
-        }
-        self.pred.typecheck(ctx, &mut self.from[..])?;
-        match self.typ.args.get(1) {
-            Some(FnArgType { label: _, typ: Type::Fn(ft) }) => {
-                ft.check_contains(&self.pred.typ())?
-            }
-            _ => bail!("expected function as 2nd arg"),
-        }
+        self.etyp.check_contains(&from[0].typ)?;
+        Type::Fn(self.mftyp.clone()).check_contains(&from[1].typ)?;
+        self.pred.typecheck(ctx)?;
         Ok(())
     }
 }
