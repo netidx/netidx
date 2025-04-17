@@ -14,6 +14,8 @@ use std::{
 pub mod core;
 pub mod net;
 pub mod str;
+#[cfg(test)]
+mod test;
 pub mod time;
 
 #[macro_export]

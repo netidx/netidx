@@ -1,22 +1,19 @@
-#[cfg(test)]
-use crate::run;
 use crate::{
     deftype,
     expr::{ExprId, ExprKind, ModPath},
     node::{gen, Node, NodeKind},
     stdfn::{CachedArgs, CachedVals, EvalCached},
     typ::{FnArgType, FnType, NoRefs, Refs, Type},
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, UserEvent,
 };
-#[cfg(test)]
-use anyhow::Result;
 use anyhow::{anyhow, bail};
-use fxhash::FxHashMap;
+use compact_str::format_compact;
 use netidx::{publisher::Typ, subscriber::Value, utils::Either};
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{
-    iter, mem,
+    collections::VecDeque,
+    iter,
     sync::{Arc, LazyLock},
 };
 use triomphe::Arc as TArc;
@@ -33,10 +30,10 @@ pub trait MapFn<C: Ctx, E: UserEvent>: Default + Send + Sync + 'static {
     fn finish(&mut self, slots: &[Slot<C, E>], a: &ValArray) -> Option<Value>;
 }
 
-struct Slot<C: Ctx, E: UserEvent> {
+pub struct Slot<C: Ctx, E: UserEvent> {
     id: BindId,
     pred: Node<C, E>,
-    cur: Option<Value>,
+    pub cur: Option<Value>,
 }
 
 pub struct MapQ<C: Ctx, E: UserEvent, T: MapFn<C, E>> {
@@ -58,7 +55,9 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> BuiltIn<C, E> for MapQ<C, E, T> {
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_ctx, typ, scope, from, top_id| match from {
             [_, _] => Ok(Box::new(Self {
-                scope: scope.clone(),
+                scope: ModPath(
+                    scope.0.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
+                ),
                 predid: BindId::new(),
                 top_id,
                 ftyp: TArc::new(typ.clone()),
@@ -89,6 +88,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
     ) -> Option<Value> {
         let slen = self.slots.len();
         if let Some(v) = from[1].update(ctx, event) {
+            ctx.cached.insert(self.predid, v.clone());
             event.variables.insert(self.predid, v);
         }
         let up = match from[0].update(ctx, event) {
@@ -316,7 +316,7 @@ pub(super) struct Fold<C: Ctx, E: UserEvent> {
     etyp: Type<NoRefs>,
     ityp: Type<NoRefs>,
     cur: ValArray,
-    init: None,
+    init: Option<Value>,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Fold<C, E> {
@@ -326,7 +326,9 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Fold<C, E> {
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_ctx, typ, scope, from, top_id| match from {
             [_, _, _] => Ok(Box::new(Self {
-                scope: scope.clone(),
+                scope: ModPath(
+                    scope.0.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
+                ),
                 top_id,
                 binds: vec![],
                 head: None,
@@ -357,12 +359,13 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        match from[0].update(ctx, event) {
-            None => (),
+        let init = match from[0].update(ctx, event) {
+            None => false,
             Some(Value::Array(a)) if a.len() == self.binds.len() => {
                 for (id, v) in self.binds.iter().zip(a.iter()) {
                     event.variables.insert(*id, v.clone());
                 }
+                false
             }
             Some(Value::Array(a)) => {
                 if let Some(n) = self.head.take() {
@@ -393,17 +396,35 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
                     n = gen::apply(fnode, vec![n, x], self.mftype.clone(), self.top_id);
                 }
                 self.head = Some(n);
+                true
             }
-            _ => (),
-        }
+            _ => false,
+        };
         if let Some(v) = from[1].update(ctx, event) {
             event.variables.insert(self.initid, v.clone());
             self.init = Some(v);
         }
         if let Some(v) = from[2].update(ctx, event) {
+            ctx.cached.insert(self.fid, v.clone());
             event.variables.insert(self.fid, v);
         }
-        self.head.as_mut().and_then(|n| n.update(ctx, event))
+        let old_init = event.init;
+        if init {
+            event.init = true;
+            if let Some(v) = ctx.cached.get(&self.fid) {
+                if !event.variables.contains_key(&self.fid) {
+                    event.variables.insert(self.fid, v.clone());
+                }
+            }
+            if let Some(v) = self.init.as_ref() {
+                if !event.variables.contains_key(&self.initid) {
+                    event.variables.insert(self.initid, v.clone());
+                }
+            }
+        }
+        let r = self.head.as_mut().and_then(|n| n.update(ctx, event));
+        event.init = old_init;
+        r
     }
 
     fn typecheck(
@@ -420,23 +441,13 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
         Type::Fn(self.mftype.clone()).check_contains(&from[2].typ)?;
         Ok(())
     }
-}
 
-#[cfg(test)]
-const ARRAY_FOLD: &str = r#"
-{
-  let a = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-  array::fold(a, 0, |acc, x| x + acc)
-}
-"#;
-
-#[cfg(test)]
-run!(array_fold, ARRAY_FOLD, |v: Result<&Value>| {
-    match v {
-        Ok(Value::I64(55)) => true,
-        _ => false,
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        if let Some(n) = self.head.as_ref() {
+            n.refs(f)
+        }
     }
-});
+}
 
 #[derive(Default)]
 pub(super) struct ConcatEv(SmallVec<[Value; 32]>);
@@ -469,26 +480,6 @@ impl EvalCached for ConcatEv {
 
 pub(super) type Concat = CachedArgs<ConcatEv>;
 
-#[cfg(test)]
-const ARRAY_CONCAT: &str = r#"
-{
-  array::concat([1, 2, 3], [4, 5], [6])
-}
-"#;
-
-#[cfg(test)]
-run!(array_concat, ARRAY_CONCAT, |v: Result<&Value>| {
-    match v {
-        Ok(Value::Array(a)) => match &a[..] {
-            [Value::I64(1), Value::I64(2), Value::I64(3), Value::I64(4), Value::I64(5), Value::I64(6)] => {
-                true
-            }
-            _ => false,
-        },
-        _ => false,
-    }
-});
-
 #[derive(Default)]
 pub(super) struct LenEv;
 
@@ -505,22 +496,6 @@ impl EvalCached for LenEv {
 }
 
 pub(super) type Len = CachedArgs<LenEv>;
-
-#[cfg(test)]
-const ARRAY_LEN: &str = r#"
-{
-  use core::array;
-  len(concat([1, 2, 3], [4, 5], [6]))
-}
-"#;
-
-#[cfg(test)]
-run!(array_len, ARRAY_LEN, |v: Result<&Value>| {
-    match v {
-        Ok(Value::U64(6)) => true,
-        _ => false,
-    }
-});
 
 #[derive(Default)]
 pub(super) struct FlattenEv(SmallVec<[Value; 32]>);
@@ -548,33 +523,15 @@ impl EvalCached for FlattenEv {
 
 pub(super) type Flatten = CachedArgs<FlattenEv>;
 
-#[cfg(test)]
-const ARRAY_FLATTEN: &str = r#"
-{
-  array::flatten([[1, 2, 3], [4, 5], [6]])
-}
-"#;
-
-#[cfg(test)]
-run!(array_flatten, ARRAY_FLATTEN, |v: Result<&Value>| {
-    match v {
-        Ok(Value::Array(a)) => match &a[..] {
-            [Value::I64(1), Value::I64(2), Value::I64(3), Value::I64(4), Value::I64(5), Value::I64(6)] => {
-                true
-            }
-            _ => false,
-        },
-        _ => false,
-    }
-});
-
 pub(super) struct Group<C: Ctx, E: UserEvent> {
+    queue: VecDeque<Value>,
     buf: SmallVec<[Value; 16]>,
-    pred: Box<dyn Apply<C, E> + Send + Sync>,
+    pred: Node<C, E>,
     typ: FnType<NoRefs>,
+    mftyp: TArc<FnType<NoRefs>>,
+    etype: Type<NoRefs>,
     n: BindId,
     x: BindId,
-    from: [Node<C, E>; 2],
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
@@ -583,9 +540,12 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
-            [_, Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }] => {
+            [_, _] => {
+                let scope = ModPath(
+                    scope.0.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
+                );
                 let n_typ = Type::Primitive(Typ::U64.into());
-                let n = ctx.env.bind_variable(scope, "n", n_typ.clone()).id;
+                //let (nid, n) = gen::bind(ctx, scope, "n", ;
                 let x = ctx.env.bind_variable(scope, "x", from[0].typ.clone()).id;
                 ctx.user.ref_var(n, top_id);
                 ctx.user.ref_var(x, top_id);
@@ -611,7 +571,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
                     from,
                 }))
             }
-            _ => bail!("expected a function"),
+            _ => bail!("expected two arguments"),
         })
     }
 }
@@ -659,27 +619,6 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
         Ok(())
     }
 }
-
-#[cfg(test)]
-const GROUP: &str = r#"
-{
-   let x = 1;
-   let y = x + 1;
-   let z = y + 1;
-   array::group(any(x, y, z), |_, v| v == 3)
-}
-"#;
-
-#[cfg(test)]
-run!(group, GROUP, |v: Result<&Value>| {
-    match v {
-        Ok(Value::Array(a)) => match &a[..] {
-            [Value::I64(1), Value::I64(2), Value::I64(3)] => true,
-            _ => false,
-        },
-        _ => false,
-    }
-});
 
 pub(super) struct Iter(BindId);
 
