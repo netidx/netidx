@@ -15,6 +15,7 @@ use std::{
     mem::ManuallyDrop,
     ops::{Bound, Deref, RangeBounds},
     ptr,
+    slice::Iter,
     sync::LazyLock,
 };
 use triomphe::{Arc, ThinArc};
@@ -244,6 +245,39 @@ impl<const S: usize> Into<SmallVec<[Value; S]>> for ValArray {
             tmp.push(v.clone())
         }
         tmp
+    }
+}
+
+pub struct OwnedValArrayIter {
+    pos: usize,
+    a: ValArray,
+}
+
+impl Iterator for OwnedValArrayIter {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let res = self.a.get(self.pos).map(|v| v.clone());
+        self.pos += 1;
+        res
+    }
+}
+
+impl IntoIterator for ValArray {
+    type IntoIter = OwnedValArrayIter;
+    type Item = Value;
+
+    fn into_iter(self) -> Self::IntoIter {
+        OwnedValArrayIter { pos: 0, a: self }
+    }
+}
+
+impl<'a> IntoIterator for &'a ValArray {
+    type IntoIter = Iter<'a, Value>;
+    type Item = &'a Value;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
