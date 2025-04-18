@@ -1,9 +1,9 @@
 use crate::{
     deftype,
-    expr::{ExprId, ExprKind, ModPath},
-    node::{gen, Node, NodeKind},
+    expr::{ExprId, ModPath},
+    node::{gen, Node},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    typ::{FnArgType, FnType, NoRefs, Refs, Type},
+    typ::{FnType, NoRefs, Refs, Type},
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, UserEvent,
 };
 use anyhow::{anyhow, bail};
@@ -201,7 +201,7 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for MapImpl {
     }
 }
 
-pub(super) type Map<C: Ctx, E: UserEvent> = MapQ<C, E, MapImpl>;
+pub(super) type Map<C, E> = MapQ<C, E, MapImpl>;
 
 #[derive(Default)]
 pub(super) struct FilterImpl;
@@ -239,7 +239,7 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FlatMapImpl {
     }
 }
 
-pub(super) type FlatMap<C: Ctx, E: UserEvent> = MapQ<C, E, FlatMapImpl>;
+pub(super) type FlatMap<C, E> = MapQ<C, E, FlatMapImpl>;
 
 #[derive(Default)]
 pub(super) struct FilterMapImpl;
@@ -258,7 +258,7 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FilterMapImpl {
     }
 }
 
-pub(super) type FilterMap<C: Ctx, E: UserEvent> = MapQ<C, E, FilterMapImpl>;
+pub(super) type FilterMap<C, E> = MapQ<C, E, FilterMapImpl>;
 
 #[derive(Default)]
 pub(super) struct FindImpl;
@@ -281,7 +281,7 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindImpl {
     }
 }
 
-pub(super) type Find<C: Ctx, E: UserEvent> = MapQ<C, E, FindImpl>;
+pub(super) type Find<C, E> = MapQ<C, E, FindImpl>;
 
 #[derive(Default)]
 pub(super) struct FindMapImpl;
@@ -302,20 +302,17 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindMapImpl {
     }
 }
 
-pub(super) type FindMap<C: Ctx, E: UserEvent> = MapQ<C, E, FindMapImpl>;
+pub(super) type FindMap<C, E> = MapQ<C, E, FindMapImpl>;
 
 pub(super) struct Fold<C: Ctx, E: UserEvent> {
-    scope: ModPath,
     top_id: ExprId,
     fid: BindId,
     initid: BindId,
     binds: Vec<BindId>,
     head: Option<Node<C, E>>,
-    ftyp: TArc<FnType<NoRefs>>,
     mftype: TArc<FnType<NoRefs>>,
     etyp: Type<NoRefs>,
     ityp: Type<NoRefs>,
-    cur: ValArray,
     init: Option<Value>,
 }
 
@@ -324,17 +321,13 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Fold<C, E> {
     deftype!("fn(Array<'a>, 'b, fn('b, 'a) -> 'b) -> 'b");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|_ctx, typ, scope, from, top_id| match from {
+        Arc::new(|_ctx, typ, _, from, top_id| match from {
             [_, _, _] => Ok(Box::new(Self {
-                scope: ModPath(
-                    scope.0.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
-                ),
                 top_id,
                 binds: vec![],
                 head: None,
                 fid: BindId::new(),
                 initid: BindId::new(),
-                ftyp: TArc::new(typ.clone()),
                 etyp: match &typ.args[0].typ {
                     Type::Array(et) => (**et).clone(),
                     t => bail!("expected array not {t}"),
@@ -344,7 +337,6 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Fold<C, E> {
                     Type::Fn(ft) => ft.clone(),
                     t => bail!("expected a function not {t}"),
                 },
-                cur: ValArray::from([]),
                 init: None,
             })),
             _ => bail!("expected three arguments"),
@@ -393,6 +385,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
                         Type::Fn(self.mftype.clone()),
                         self.top_id,
                     );
+                    // CR estokes: evaluating this is not tail recursive
                     n = gen::apply(fnode, vec![n, x], self.mftype.clone(), self.top_id);
                 }
                 self.head = Some(n);
@@ -534,7 +527,6 @@ pub(super) struct Group<C: Ctx, E: UserEvent> {
     queue: VecDeque<Value>,
     buf: SmallVec<[Value; 16]>,
     pred: Node<C, E>,
-    typ: FnType<NoRefs>,
     mftyp: TArc<FnType<NoRefs>>,
     etyp: Type<NoRefs>,
     ready: bool,
@@ -567,7 +559,6 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
                 Ok(Box::new(Self {
                     queue: VecDeque::new(),
                     buf: smallvec![],
-                    typ: typ.clone(),
                     mftyp,
                     etyp,
                     pred,

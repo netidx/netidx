@@ -31,7 +31,9 @@ macro_rules! deftype {
 
 #[macro_export]
 macro_rules! errf {
-    ($pat:expr, $($arg:expr),*) => { Some(Value::Error(ArcStr::from(format_compact!($pat, $($arg),*).as_str()))) };
+    ($pat:expr, $($arg:expr),*) => {
+        Some(Value::Error(ArcStr::from(format_compact!($pat, $($arg),*).as_str())))
+    };
     ($pat:expr) => { Some(Value::Error(ArcStr::from(format_compact!($pat).as_str()))) };
 }
 

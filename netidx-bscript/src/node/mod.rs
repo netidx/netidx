@@ -75,7 +75,6 @@ pub struct CallSite<C: Ctx, E: UserEvent> {
     arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
     function: Option<(LambdaId, Box<dyn Apply<C, E> + Send + Sync>)>,
     top_id: ExprId,
-    init: bool,
 }
 
 impl<C: Ctx, E: UserEvent> Default for CallSite<C, E> {
@@ -182,8 +181,20 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
             Some((_, f)) if !bound => f.update(ctx, &mut self.args, event),
             Some((_, f)) => {
                 let init = mem::replace(&mut event.init, true);
+                let mut set = vec![];
+                f.refs(&mut |id| {
+                    if !event.variables.contains_key(&id) {
+                        if let Some(v) = ctx.cached.get(&id) {
+                            event.variables.insert(id, v.clone());
+                            set.push(id);
+                        }
+                    }
+                });
                 let res = f.update(ctx, &mut self.args, event);
                 event.init = init;
+                for id in set {
+                    event.variables.remove(&id);
+                }
                 res
             }
         }

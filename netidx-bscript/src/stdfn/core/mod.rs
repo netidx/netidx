@@ -1,15 +1,16 @@
 use crate::{
     deftype, err, errf,
-    expr::Expr,
+    expr::{Expr, ExprId},
     node::{gen, Node},
     stdfn::{CachedArgs, CachedVals, EvalCached},
+    typ::{FnType, NoRefs},
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
 };
 use anyhow::bail;
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use netidx::subscriber::Value;
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 use triomphe::Arc as TArc;
 
 pub mod array;
@@ -421,9 +422,14 @@ impl EvalCached for SliceEv {
 type Slice = CachedArgs<SliceEv>;
 
 struct Filter<C: Ctx, E: UserEvent> {
+    ready: bool,
+    queue: VecDeque<Value>,
     pred: Node<C, E>,
+    typ: TArc<FnType<NoRefs>>,
+    top_id: ExprId,
     fid: BindId,
     x: BindId,
+    out: BindId,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
@@ -437,8 +443,11 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
                 let fid = BindId::new();
                 let fnode = gen::reference(ctx, fid, fnode.typ.clone(), top_id);
                 let typ = TArc::new(typ.clone());
-                let pred = gen::apply(fnode, vec![xn], typ, top_id);
-                Ok(Box::new(Self { pred, fid, x }))
+                let pred = gen::apply(fnode, vec![xn], typ.clone(), top_id);
+                let queue = VecDeque::new();
+                let out = BindId::new();
+                ctx.user.ref_var(out, top_id);
+                Ok(Box::new(Self { ready: false, queue, pred, typ, fid, x, out, top_id }))
             }
             _ => bail!("expected two arguments"),
         })
@@ -452,22 +461,44 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
+        macro_rules! set {
+            ($v:expr) => {{
+                self.ready = false;
+                event.variables.insert(self.x, $v);
+            }};
+        }
+        if let Some(v) = from[0].update(ctx, event) {
+            self.queue.push_back(v);
+        }
         if let Some(v) = from[1].update(ctx, event) {
             event.variables.insert(self.fid, v);
         }
-        match from[0].update(ctx, event) {
-            None => {
-                self.pred.update(ctx, event);
-                None
-            }
-            Some(v) => {
-                event.variables.insert(self.x, v.clone());
-                match self.pred.update(ctx, event) {
-                    Some(Value::Bool(true)) => Some(v),
-                    _ => None,
+        if self.ready && self.queue.len() > 0 {
+            set!(self.queue.front().unwrap().clone());
+        }
+        loop {
+            match self.pred.update(ctx, event) {
+                None => break,
+                Some(v) => {
+                    self.ready = true;
+                    match v {
+                        Value::Bool(true) => {
+                            ctx.user.set_var(self.out, self.queue.pop_front().unwrap());
+                            set!(self.queue.front().unwrap().clone());
+                        }
+                        _ => {
+                            let _ = self.queue.pop_front();
+                            if let Some(v) = self.queue.front().cloned() {
+                                set!(v);
+                                continue;
+                            }
+                            break;
+                        }
+                    }
                 }
             }
         }
+        event.variables.get(&self.out).map(|v| v.clone())
     }
 
     fn typecheck(
@@ -478,7 +509,44 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
+        self.typ.args[0].typ.check_contains(&from[0].typ)?;
+        self.typ.args[1].typ.check_contains(&from[1].typ)?;
         self.pred.typecheck(ctx)
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.out, self.top_id)
+    }
+}
+
+struct Queue {
+    queue: VecDeque<Value>,
+}
+
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Queue {
+    const NAME: &str = "queue";
+    deftype!("fn(#trigger:Any, 'a) -> 'a");
+
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, from, _| match from {
+            [_, _] => Ok(Box::new(Self { queue: VecDeque::new() })),
+            _ => bail!("expected two arguments"),
+        })
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Queue {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        let triggered = from[0].update(ctx, event).is_some();
+        if let Some(v) = from[1].update(ctx, event) {
+            self.queue.push_back(v);
+        }
+        triggered.then(|| self.queue.pop_front()).flatten()
     }
 }
 
@@ -517,7 +585,7 @@ struct Sample {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Sample {
     const NAME: &str = "sample";
-    deftype!("fn(Any, 'a) -> 'a");
+    deftype!("fn(#trigger:Any, 'a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, _, _| Ok(Box::new(Sample { last: None })))
@@ -689,15 +757,17 @@ pub mod core {
     pub let once = |v| 'once
     pub let or = |@args| 'or
     pub let product = |@args| 'product
-    pub let sample = |trigger, v| 'sample
+    pub let sample = |#trigger, v| 'sample
     pub let sum = |@args| 'sum
     pub let uniq = |v| 'uniq
+    pub let queue = |#trigger, v| 'queue
 
     pub let errors: error = never()
 }
 "#;
 
 pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
+    ctx.register_builtin::<Queue>().unwrap();
     ctx.register_builtin::<All>().unwrap();
     ctx.register_builtin::<And>().unwrap();
     ctx.register_builtin::<Count>().unwrap();

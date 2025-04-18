@@ -20,7 +20,6 @@ use std::{
     iter,
     marker::PhantomData,
     ops::Deref,
-    sync::LazyLock,
 };
 use triomphe::Arc;
 

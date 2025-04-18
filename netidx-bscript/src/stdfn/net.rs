@@ -1,10 +1,10 @@
 use crate::{
     arity1, arity2, deftype, errf,
-    expr::{Expr, ExprId, ExprKind},
-    node::{Node, NodeKind},
+    expr::{Expr, ExprId, ModPath},
+    node::{gen, Node},
     stdfn::CachedVals,
-    typ::{FnArgType, FnType, NoRefs, Type},
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
+    typ::{FnType, NoRefs, Type},
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
@@ -16,7 +16,8 @@ use netidx::{
     subscriber::{self, Dval, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, mem, sync::Arc};
+use triomphe::Arc as TArc;
 
 fn as_path(v: Value) -> Option<Path> {
     match v.cast_to::<String>() {
@@ -346,49 +347,42 @@ struct Publish<C: Ctx, E: UserEvent> {
     args: CachedVals,
     current: Option<(Path, Val)>,
     top_id: ExprId,
-    typ: FnType<NoRefs>,
+    mftyp: TArc<FnType<NoRefs>>,
     x: BindId,
-    on_write: Option<Box<dyn Apply<C, E> + Send + Sync>>,
-    from: [Node<C, E>; 1],
+    pid: BindId,
+    on_write: Node<C, E>,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Publish<C, E> {
     const NAME: &str = "publish";
-    deftype!("fn(?#on_write:[null, fn(Any) -> Any], string, Any) -> error");
+    deftype!("fn(?#on_write:fn(Any) -> _, string, Any) -> error");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|ctx, typ, _, from, top_id| {
-            let x = BindId::new();
-            let mut args = [Node {
-                spec: Box::new(ExprKind::Ref { name: ["x"].into() }.to_expr()),
-                typ: from[0].typ.clone(),
-                kind: NodeKind::Ref { id: x, top_id },
-            }];
-            match from {
-                [Node { spec: _, typ: _, kind: NodeKind::Lambda(lb) }, _, _] => {
-                    Ok(Box::new(Publish {
-                        args: CachedVals::new(from),
-                        current: None,
-                        typ: typ.clone(),
-                        top_id,
-                        x,
-                        on_write: Some((lb.init)(ctx, &mut args, top_id)?),
-                        from: args,
-                    }))
-                }
-                [Node { spec: _, typ: _, kind: NodeKind::Constant(Value::Null) }, _, _] => {
-                    Ok(Box::new(Publish {
-                        args: CachedVals::new(from),
-                        current: None,
-                        typ: typ.clone(),
-                        top_id,
-                        x: BindId::new(),
-                        on_write: None,
-                        from: args,
-                    }))
-                }
-                _ => bail!("expected function"),
+        Arc::new(|ctx, typ, scope, from, top_id| match from {
+            [_, _, _] => {
+                let scope = ModPath(
+                    scope.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
+                );
+                let pid = BindId::new();
+                let mftyp = match &typ.args[0].typ {
+                    Type::Fn(ft) => ft.clone(),
+                    t => bail!("expected function not {t}"),
+                };
+                let (x, xn) =
+                    gen::bind(ctx, &scope, "x", Type::Primitive(Typ::any()), top_id);
+                let fnode = gen::reference(ctx, pid, Type::Fn(mftyp.clone()), top_id);
+                let on_write = gen::apply(fnode, vec![xn], mftyp.clone(), top_id);
+                Ok(Box::new(Publish {
+                    args: CachedVals::new(from),
+                    current: None,
+                    mftyp,
+                    top_id,
+                    pid,
+                    x,
+                    on_write,
+                }))
             }
+            _ => bail!("expected three arguments"),
         })
     }
 }
@@ -401,6 +395,11 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         event: &mut Event<E>,
     ) -> Option<Value> {
         let up = self.args.update_diff(ctx, from, event);
+        if up[0] {
+            if let Some(v) = self.args.0[0].clone() {
+                event.variables.insert(self.pid, v);
+            }
+        }
         match (&up[1..], &self.args.0[1..]) {
             ([true, _], [Some(Value::String(path)), Some(v)])
                 if self.current.as_ref().map(|(p, _)| &**p != path).unwrap_or(true) =>
@@ -430,11 +429,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
                 reply = req.send_result;
             }
         }
-        if let Some(on_write) = &mut self.on_write {
-            if let Some(v) = on_write.update(ctx, &mut self.from, event) {
-                if let Some(reply) = reply {
-                    reply.send(v)
-                }
+        if let Some(v) = self.on_write.update(ctx, event) {
+            if let Some(reply) = reply {
+                reply.send(v)
             }
         }
         None
@@ -448,33 +445,17 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
+        Type::Fn(self.mftyp.clone()).check_contains(&from[0].typ)?;
         Type::Primitive(Typ::String.into()).check_contains(&from[1].typ)?;
         Type::Primitive(Typ::any()).check_contains(&from[2].typ)?;
-        match &mut self.on_write {
-            None => Type::Primitive(Typ::Null.into()).check_contains(&from[0].typ)?,
-            Some(app) => match self.typ.args.get(0) {
-                Some(FnArgType { label: _, typ: Type::Set(s) }) if s.len() == 2 => {
-                    match &s[1] {
-                        Type::Fn(ft) => {
-                            ft.check_contains(&app.typ())?;
-                            app.typecheck(ctx, &mut self.from)?
-                        }
-                        _ => bail!("expected function as 1st arg"),
-                    }
-                }
-                _ => bail!("expected function as 1st arg"),
-            },
-        }
-        Ok(())
+        self.on_write.typecheck(ctx)
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         if let Some((_, val)) = self.current.take() {
             ctx.user.unpublish(val, self.top_id);
         }
-        if let Some(mut app) = self.on_write.take() {
-            app.delete(ctx);
-        }
+        mem::take(&mut self.on_write).delete(ctx)
     }
 }
 
@@ -487,7 +468,7 @@ pub mod net {
     pub let call = |path, args| 'call
     pub let list = |#update = time::timer(1, true), path| 'list
     pub let list_table = |#update = time::timer(1, true), path| 'list_table
-    pub let publish = |#on_write = null, path, v| 'publish
+    pub let publish = |#on_write = |v| never(v), path, v| 'publish
 }
 "#;
 

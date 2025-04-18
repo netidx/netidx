@@ -218,6 +218,8 @@ pub trait Ctx: 'static {
     /// that set_vars for the same variable in the same cycle must be
     /// queued and deferred to the next cycle.
     ///
+    /// The runtime must place the variable in cached.
+    ///
     /// The runtime MUST NOT change event while a cycle is in
     /// progress. set_var must be queued until the cycle ends and then
     /// presented as a new batch.

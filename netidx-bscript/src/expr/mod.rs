@@ -667,9 +667,9 @@ impl ExprKind {
                 writeln!(buf, "{}let {pattern}{} = ", exp(*export), typ!(typ))?;
                 value.kind.pretty_print(indent + 2, limit, false, buf)
             }
-            ExprKind::StructWith { name, replace } => {
+            ExprKind::StructWith { source, replace } => {
                 try_single_line!(true);
-                writeln!(buf, "{{ {name} with")?;
+                writeln!(buf, "{{ {source} with")?;
                 let indent = indent + 2;
                 for (i, (name, e)) in replace.iter().enumerate() {
                     push_indent(indent, buf);
@@ -959,8 +959,8 @@ impl fmt::Display for ExprKind {
             ExprKind::Bind { pattern, typ, export, value } => {
                 write!(f, "{}let {pattern}{} = {value}", exp(*export), typ!(typ))
             }
-            ExprKind::StructWith { name, replace } => {
-                write!(f, "{{ {name} with ")?;
+            ExprKind::StructWith { source, replace } => {
+                write!(f, "{{ {source} with ")?;
                 for (i, (name, e)) in replace.iter().enumerate() {
                     write!(f, "{name}: {e}")?;
                     if i < replace.len() - 1 {
@@ -976,11 +976,11 @@ impl fmt::Display for ExprKind {
             ExprKind::Ref { name } => {
                 write!(f, "{name}")
             }
-            ExprKind::StructRef { name, field } => {
-                write!(f, "{name}.{field}")
+            ExprKind::StructRef { source, field } => {
+                write!(f, "{source}.{field}")
             }
-            ExprKind::TupleRef { name, field } => {
-                write!(f, "{name}.{field}")
+            ExprKind::TupleRef { source, field } => {
+                write!(f, "{source}.{field}")
             }
             ExprKind::Module { name, export, value } => {
                 write!(f, "{}mod {name}", exp(*export))?;
@@ -1446,11 +1446,11 @@ impl Expr {
                     kind: ExprKind::Bind { pattern, typ, export, value: Arc::new(value) },
                 })
             }),
-            ExprKind::StructWith { name, replace } => Box::pin(async move {
+            ExprKind::StructWith { source, replace } => Box::pin(async move {
                 Ok(Expr {
                     id: self.id,
                     kind: ExprKind::StructWith {
-                        name,
+                        source,
                         replace: Arc::from(subtuples!(replace)),
                     },
                 })
