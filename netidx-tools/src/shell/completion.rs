@@ -66,14 +66,7 @@ impl Completer for BComplete {
                         {
                             let description = match self.0.by_id.get(&id) {
                                 None => format!("_"),
-                                Some(b) => match b.fun.as_ref().and_then(|f| f.upgrade())
-                                {
-                                    None => format!("{}", b.typ),
-                                    Some(lb) => match &lb.builtin {
-                                        Some(t) => format!("{t}"),
-                                        None => format!("{}", b.typ),
-                                    },
-                                },
+                                Some(b) => format!("{}", b.typ),
                             };
                             let value = match Path::dirname(&part.0) {
                                 None => String::from(value.as_str()),
