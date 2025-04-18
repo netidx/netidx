@@ -877,13 +877,13 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             NodeKind::Apply(site) => site.update(ctx, event),
             NodeKind::Bind { pattern, node } => {
                 if let Some(v) = node.update(ctx, event) {
-                    pattern.bind(&v, &mut |id, v| ctx.user.set_var(id, v))
+                    pattern.bind(&v, &mut |id, v| ctx.set_var(id, v))
                 }
                 None
             }
             NodeKind::Connect(id, rhs) => {
                 if let Some(v) = rhs.update(ctx, event) {
-                    ctx.user.set_var(*id, v)
+                    ctx.set_var(*id, v)
                 }
                 None
             }
@@ -906,7 +906,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             NodeKind::Qop(id, n) => match n.update(ctx, event) {
                 None => None,
                 Some(e @ Value::Error(_)) => {
-                    ctx.user.set_var(*id, e);
+                    ctx.set_var(*id, e);
                     None
                 }
                 Some(v) => Some(v),

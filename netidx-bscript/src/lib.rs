@@ -211,14 +211,13 @@ pub trait Ctx: 'static {
     fn ref_var(&mut self, id: BindId, ref_by: ExprId);
     fn unref_var(&mut self, id: BindId, ref_by: ExprId);
 
-    /// Called when a variable updates. All expressions that ref the
-    /// id should be updated when this happens.
+    /// Called by the ExecCtx when set_var is called on it. All
+    /// expressions that ref the id should be updated when this
+    /// happens.
     ///
     /// The runtime must deliver all set_vars in a single event except
     /// that set_vars for the same variable in the same cycle must be
     /// queued and deferred to the next cycle.
-    ///
-    /// The runtime must place the variable in cached.
     ///
     /// The runtime MUST NOT change event while a cycle is in
     /// progress. set_var must be queued until the cycle ends and then
@@ -322,5 +321,12 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
             Entry::Occupied(_) => bail!("builtin {} is already registered", T::NAME),
         }
         Ok(())
+    }
+
+    /// Built in functions should call this when variables are
+    /// set. This will also call the user ctx set_var.
+    pub fn set_var(&mut self, id: BindId, v: Value) {
+        self.cached.insert(id, v.clone());
+        self.user.set_var(id, v)
     }
 }
