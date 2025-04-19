@@ -1,3 +1,14 @@
+/// A general purpose bscript runtime
+///
+/// This module implements a generic bscript runtime suitable for most
+/// applications, including applications that implement custom bscript
+/// builtins. The bscript interperter is run in a background task, and
+/// can be interacted with via a handle. All features of the standard
+/// library are supported by this runtime.
+///
+/// In special cases where this runtime is not suitable for your
+/// application you can implement your own, see the [Ctx] and
+/// [UserEvent] traits.
 use crate::{
     env::Env,
     expr::{self, Expr, ExprId, ExprKind, ModPath, ModuleResolver},
@@ -50,7 +61,7 @@ impl fmt::Display for CouldNotResolve {
     }
 }
 
-struct ReplCtx {
+pub struct BSCtx {
     by_ref: FxHashMap<BindId, FxHashMap<ExprId, usize>>,
     subscribed: FxHashMap<SubId, FxHashMap<ExprId, usize>>,
     published: FxHashMap<Id, FxHashMap<ExprId, usize>>,
@@ -69,7 +80,7 @@ struct ReplCtx {
     writes: mpsc::Receiver<WriteBatch>,
 }
 
-impl ReplCtx {
+impl BSCtx {
     fn new(publisher: Publisher, subscriber: Subscriber) -> Self {
         let (updates_tx, updates) = mpsc::channel(3);
         let (writes_tx, writes) = mpsc::channel(3);
@@ -122,7 +133,7 @@ macro_rules! check_changed {
     };
 }
 
-impl Ctx for ReplCtx {
+impl Ctx for BSCtx {
     fn call_rpc(
         &mut self,
         _name: Path,
@@ -297,7 +308,7 @@ impl Ctx for ReplCtx {
     }
 }
 
-fn is_output(n: &Node<ReplCtx, NoUserEvent>) -> bool {
+fn is_output(n: &Node<BSCtx, NoUserEvent>) -> bool {
     match &n.kind {
         NodeKind::Bind { .. }
         | NodeKind::Lambda(_)
@@ -330,7 +341,7 @@ async fn unsubscribe_ready(pending: &VecDeque<(Instant, Dval)>) {
 
 pub struct CompRes {
     pub eids: SmallVec<[(ExprId, bool); 1]>,
-    pub env: Env<ReplCtx, NoUserEvent>,
+    pub env: Env<BSCtx, NoUserEvent>,
 }
 
 #[derive(Clone)]
@@ -344,18 +355,20 @@ enum ToRt {
     Subscribe { ch: mpsc::Sender<RtEvent> },
 }
 
+// setting expectations is one of the most under rated skills in
+// software engineering
 struct BS {
-    ctx: ExecCtx<ReplCtx, NoUserEvent>,
+    ctx: ExecCtx<BSCtx, NoUserEvent>,
     event: Event<NoUserEvent>,
     updated: FxHashMap<ExprId, bool>,
-    nodes: IndexMap<ExprId, Node<ReplCtx, NoUserEvent>, FxBuildHasher>,
+    nodes: IndexMap<ExprId, Node<BSCtx, NoUserEvent>, FxBuildHasher>,
     subs: Vec<mpsc::Sender<RtEvent>>,
     resolvers: Vec<ModuleResolver>,
     publish_timeout: Option<Duration>,
 }
 
 impl BS {
-    fn new(rt: BSCfg) -> Self {
+    fn new(rt: BSConfig) -> Self {
         let resolvers_default = || match dirs::data_dir() {
             None => vec![ModuleResolver::Files("".into())],
             Some(dd) => vec![
@@ -378,7 +391,7 @@ impl BS {
             },
         };
         Self {
-            ctx: ExecCtx::new(ReplCtx::new(rt.publisher, rt.subscriber)),
+            ctx: ExecCtx::new(BSCtx::new(rt.publisher, rt.subscriber)),
             event: Event::new(NoUserEvent),
             updated: HashMap::default(),
             nodes: IndexMap::default(),
@@ -644,6 +657,8 @@ impl BS {
     }
 }
 
+/// A handle to a running BS instance. Drop the handle to shutdown the
+/// associated background tasks.
 pub struct BSHandle(mpsc::UnboundedSender<ToRt>);
 
 impl BSHandle {
@@ -692,7 +707,9 @@ pub struct BSConfig {
 }
 
 impl BSConfig {
-    pub fn run(self) -> BSHandle {
+    /// Start the BS runtime with the specified config, return a
+    /// handle capable of interacting with it.
+    pub fn start(self) -> BSHandle {
         let (tx, rx) = mpsc::unbounded();
         task::spawn(async move {
             let bs = BS::new(self);
