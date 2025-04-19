@@ -8,6 +8,7 @@ extern crate serde_derive;
 pub mod env;
 pub mod expr;
 pub mod node;
+pub mod rt;
 pub mod stdfn;
 pub mod typ;
 
