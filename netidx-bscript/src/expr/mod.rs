@@ -1326,7 +1326,7 @@ impl Expr {
         &'a self,
         scope: &'a ModPath,
         resolvers: &'a [ModuleResolver],
-    ) -> Pin<Box<dyn Future<Output = Result<Expr>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Expr>> + Send + Sync + 'a>> {
         macro_rules! subexprs {
             ($args:expr) => {{
                 let mut tmp = vec![];

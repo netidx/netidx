@@ -2,34 +2,29 @@ use crate::{
     env::Env,
     expr::{self, Expr, ExprId, ExprKind, ModPath, ModuleResolver},
     node::{Node, NodeKind},
-    BindId, Ctx, Event, ExecCtx, NoUserEvent, UserEvent,
+    BindId, Ctx, Event, ExecCtx, NoUserEvent,
 };
-use anyhow::{anyhow, bail, Context, Error, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use arcstr::{literal, ArcStr};
 use chrono::prelude::*;
 use compact_str::format_compact;
-use completion::BComplete;
 use core::fmt;
 use derive_builder::Builder;
 use futures::{channel::mpsc, FutureExt, SinkExt, StreamExt};
-use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
+use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
-use log::{error, info};
+use log::error;
 use netidx::{
-    config::Config,
     path::Path,
     pool::Pooled,
     protocol::valarray::ValArray,
-    publisher::{
-        self, DesiredAuth, Id, PublishFlags, Publisher, PublisherBuilder, Val, Value,
-        WriteRequest,
-    },
+    publisher::{self, Id, PublishFlags, Publisher, Val, Value, WriteRequest},
     resolver_client::ChangeTracker,
-    subscriber::{self, Dval, SubId, Subscriber, SubscriberBuilder, UpdatesFlags},
+    subscriber::{self, Dval, SubId, Subscriber, UpdatesFlags},
 };
 use smallvec::{smallvec, SmallVec};
 use std::{
-    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
+    collections::{hash_map::Entry, HashMap, VecDeque},
     future, mem,
     os::unix::ffi::OsStrExt,
     path::{Component, PathBuf},
@@ -65,7 +60,6 @@ struct ReplCtx {
     pending_unsubscribe: VecDeque<(Instant, Dval)>,
     change_trackers: FxHashMap<BindId, Arc<Mutex<ChangeTracker>>>,
     tasks: JoinSet<(BindId, Value)>,
-    cached: FxHashMap<BindId, Value>,
     batch: publisher::UpdateBatch,
     publisher: Publisher,
     subscriber: Subscriber,
@@ -91,7 +85,6 @@ impl ReplCtx {
             pending_unsubscribe: VecDeque::new(),
             published: HashMap::default(),
             change_trackers: HashMap::default(),
-            cached: HashMap::default(),
             tasks,
             batch,
             publisher,
@@ -151,9 +144,7 @@ impl Ctx for ReplCtx {
             pending_unsubscribe,
             change_trackers,
             tasks,
-            cached,
             batch,
-            script,
             publisher,
             subscriber: _,
             updates_tx,
@@ -171,9 +162,7 @@ impl Ctx for ReplCtx {
         change_trackers.clear();
         *tasks = JoinSet::new();
         tasks.spawn(async { future::pending().await });
-        cached.clear();
         *batch = publisher.start_batch();
-        *script = false;
         let (tx, rx) = mpsc::channel(3);
         *updates_tx = tx;
         *updates = rx;
@@ -305,9 +294,6 @@ impl Ctx for ReplCtx {
 
     fn set_var(&mut self, id: BindId, value: Value) {
         self.var_updates.push_back((id, value.clone()));
-        if !self.script {
-            self.cached.insert(id, value);
-        }
     }
 }
 
@@ -323,26 +309,53 @@ fn is_output(n: &Node<ReplCtx, NoUserEvent>) -> bool {
     }
 }
 
+async fn or_never(b: bool) {
+    if !b {
+        future::pending().await
+    }
+}
+
+async fn unsubscribe_ready(pending: &VecDeque<(Instant, Dval)>) {
+    if pending.len() == 0 {
+        future::pending().await
+    } else {
+        let (ts, _) = pending.front().unwrap();
+        let one = Duration::from_secs(1);
+        let elapsed = ts.elapsed();
+        if elapsed < one {
+            time::sleep(one - elapsed).await
+        }
+    }
+}
+
+pub struct CompRes {
+    pub eids: SmallVec<[(ExprId, bool); 1]>,
+    pub env: Env<ReplCtx, NoUserEvent>,
+}
+
 #[derive(Clone)]
 pub enum RtEvent {
     Updated(ExprId, Value),
 }
 
-struct Repl<E: UserEvent> {
+enum ToRt {
+    Load { path: PathBuf, res: oneshot::Sender<Result<CompRes>> },
+    Compile { text: String, res: oneshot::Sender<Result<CompRes>> },
+    Subscribe { ch: mpsc::Sender<RtEvent> },
+}
+
+struct BS {
     ctx: ExecCtx<ReplCtx, NoUserEvent>,
     event: Event<NoUserEvent>,
-    updated: FxHashSet<ExprId>,
+    updated: FxHashMap<ExprId, bool>,
     nodes: IndexMap<ExprId, Node<ReplCtx, NoUserEvent>, FxBuildHasher>,
     subs: Vec<mpsc::Sender<RtEvent>>,
     resolvers: Vec<ModuleResolver>,
+    publish_timeout: Option<Duration>,
 }
 
-impl<E: UserEvent> Repl<E> {
-    fn new(
-        publisher: Publisher,
-        subscriber: Subscriber,
-        subscribe_timeout: Option<Duration>,
-    ) -> Result<Self> {
+impl BS {
+    fn new(rt: BSCfg) -> Self {
         let resolvers_default = || match dirs::data_dir() {
             None => vec![ModuleResolver::Files("".into())],
             Some(dd) => vec![
@@ -353,8 +366,8 @@ impl<E: UserEvent> Repl<E> {
         let resolvers = match std::env::var("BSCRIPT_MODPATH") {
             Err(_) => resolvers_default(),
             Ok(mp) => match ModuleResolver::parse_env(
-                subscriber.clone(),
-                subscribe_timeout,
+                rt.subscriber.clone(),
+                rt.subscribe_timeout,
                 &mp,
             ) {
                 Ok(r) => r,
@@ -364,19 +377,19 @@ impl<E: UserEvent> Repl<E> {
                 }
             },
         };
-        Ok(Self {
-            ctx: ExecCtx::new(ReplCtx::new(publisher, subscriber)),
+        Self {
+            ctx: ExecCtx::new(ReplCtx::new(rt.publisher, rt.subscriber)),
             event: Event::new(NoUserEvent),
-            updated: HashSet::default(),
+            updated: HashMap::default(),
             nodes: IndexMap::default(),
             subs: vec![],
             resolvers,
-        })
+            publish_timeout: rt.publish_timeout,
+        }
     }
 
     async fn do_cycle(
         &mut self,
-        init: &mut FxHashSet<ExprId>,
         updates: Option<UpdateBatch>,
         writes: Option<WriteBatch>,
         tasks: &mut Vec<(BindId, Value)>,
@@ -388,7 +401,7 @@ impl<E: UserEvent> Repl<E> {
                         e.insert($v);
                         if let Some(exps) = self.ctx.user.$refed.get(&$id) {
                             for id in exps.keys() {
-                                self.updated.insert(*id);
+                                self.updated.entry(*id).or_insert(false);
                             }
                         }
                     }
@@ -398,7 +411,6 @@ impl<E: UserEvent> Repl<E> {
                 }
             };
         }
-        self.updated.extend(init.iter().cloned());
         for _ in 0..self.ctx.user.var_updates.len() {
             let (id, v) = self.ctx.user.var_updates.pop_front().unwrap();
             push_event!(id, v, variables, by_ref, var_updates)
@@ -426,12 +438,10 @@ impl<E: UserEvent> Repl<E> {
             }
         }
         for (id, n) in self.nodes.iter_mut() {
-            if self.updated.contains(id) {
+            if let Some(init) = self.updated.get(id) {
                 let mut clear: SmallVec<[BindId; 16]> = smallvec![];
-                if !init.contains(id) {
-                    self.event.init = false;
-                } else {
-                    self.event.init = true;
+                self.event.init = *init;
+                if self.event.init {
                     n.refs(&mut |id| {
                         if let Some(v) = self.ctx.cached.get(&id) {
                             if let Entry::Vacant(e) = self.event.variables.entry(id) {
@@ -460,6 +470,13 @@ impl<E: UserEvent> Repl<E> {
         }
         self.event.clear();
         self.updated.clear();
+        if self.ctx.user.batch.len() > 0 {
+            let batch = mem::replace(
+                &mut self.ctx.user.batch,
+                self.ctx.user.publisher.start_batch(),
+            );
+            batch.commit(self.publish_timeout).await;
+        }
     }
 
     fn cycle_ready(&self) -> bool {
@@ -468,7 +485,7 @@ impl<E: UserEvent> Repl<E> {
             || self.ctx.user.net_writes.len() > 0
     }
 
-    async fn compile(&mut self, text: &str, init: &mut Init) -> Result<(ExprId, bool)> {
+    async fn compile(&mut self, text: &str) -> Result<CompRes> {
         let scope = ModPath::root();
         let spec = match text.parse::<Expr>() {
             Ok(spec) => spec,
@@ -484,18 +501,17 @@ impl<E: UserEvent> Repl<E> {
             Some(e) => bail!("compile error: {e}"),
             None => {
                 let output = is_output(&n);
-                *init = Init::One(top_id);
+                self.updated.insert(top_id, true);
                 self.nodes.insert(top_id, n);
-                Ok((top_id, output))
+                Ok(CompRes {
+                    eids: smallvec![(top_id, output)],
+                    env: self.ctx.env.clone(),
+                })
             }
         }
     }
 
-    async fn load(
-        &mut self,
-        file: &PathBuf,
-        init: &mut Vec<ExprId>,
-    ) -> Result<Vec<(ExprId, bool)>> {
+    async fn load(&mut self, file: &PathBuf) -> Result<CompRes> {
         let scope = ModPath::root();
         let (scope, exprs) = match file.extension() {
             Some(e) if e.as_bytes() == b"bs" => {
@@ -534,7 +550,7 @@ impl<E: UserEvent> Repl<E> {
                 (scope, vec![e])
             }
         };
-        let mut out = vec![];
+        let mut eids: SmallVec<[(ExprId, bool); 1]> = smallvec![];
         for expr in exprs {
             let expr = expr.resolve_modules(&scope, &self.resolvers).await?;
             let top_id = expr.id;
@@ -544,159 +560,146 @@ impl<E: UserEvent> Repl<E> {
                 bail!("{e:?}")
             }
             self.nodes.insert(top_id, n);
-            init.push(top_id);
-            out.push((top_id, has_out))
+            self.updated.insert(top_id, true);
+            eids.push((top_id, has_out))
         }
-        Ok(out)
+        Ok(CompRes { eids, env: self.ctx.env.clone() })
     }
-}
 
-async fn or_never(b: bool) {
-    if !b {
-        future::pending().await
-    }
-}
-
-async fn unsubscribe_ready(pending: &VecDeque<(Instant, Dval)>) {
-    if pending.len() == 0 {
-        future::pending().await
-    } else {
-        let (ts, _) = pending.front().unwrap();
-        let one = Duration::from_secs(1);
-        let elapsed = ts.elapsed();
-        if elapsed < one {
-            time::sleep(one - elapsed).await
-        }
-    }
-}
-
-pub struct CompRes {
-    pub eids: SmallVec<[(ExprId, bool); 1]>,
-    pub env: Env<ReplCtx, NoUserEvent>,
-}
-
-enum ToRt {
-    Load { path: PathBuf, res: oneshot::Sender<Result<CompRes>> },
-    Compile { text: String, res: oneshot::Sender<Result<CompRes>> },
-    Subscribe { ch: mpsc::Sender<(ExprId, Value)> },
-}
-
-async fn run(
-    publisher: Publisher,
-    subscriber: Subscriber,
-    subscribe_timeout: Option<Duration>,
-    publish_timeout: Option<Duration>,
-    mut to_rt: mpsc::UnboundedReceiver<ToRt>,
-) -> Result<()> {
-    let mut repl = Repl::new(publisher, subscriber, subscribe_timeout)?;
-    let mut tasks = vec![];
-    'main: loop {
-        let ready = repl.cycle_ready();
-        let mut updates = None;
-        let mut writes = None;
-        let mut input = None;
-        let mut init = FxHashSet::default();
-        macro_rules! peek {
-            (updates) => {
-                if let Ok(Some(up)) = repl.ctx.user.updates.try_next() {
-                    updates = Some(up);
-                }
-            };
-            (writes) => {
-                if let Ok(Some(wr)) = repl.ctx.user.writes.try_next() {
-                    writes = Some(wr);
-                }
-            };
-            (tasks) => {
-                while let Some(Ok(up)) = repl.ctx.user.tasks.try_join_next() {
-                    tasks.push(up);
-                }
-            };
-            ($($item:tt),+) => {{
-                $(peek!($item));+
-            }};
-        }
-        select! {
-            wr = repl.ctx.user.writes.select_next_some() => {
-                writes = Some(wr);
-                peek!(updates, tasks);
-            },
-            up = repl.ctx.user.updates.select_next_some() => {
-                updates = Some(up);
-                peek!(writes, tasks);
-            },
-            up = repl.ctx.user.tasks.join_next() => {
-                if let Some(Ok(up)) = up {
-                    tasks.push(up);
-                }
-                peek!(updates, writes, tasks)
-            },
-            n = to_rt.next() => match n {
-                None => break 'main Ok(()),
-                Some(i) => {
-                    peek!(updates, writes, tasks);
-                    input = Some(i);
-                }
-            },
-            _ = or_never(ready) => peek!(updates, writes, tasks),
-            () = unsubscribe_ready(&repl.ctx.user.pending_unsubscribe) => {
-                while let Some((ts, _)) = repl.ctx.user.pending_unsubscribe.front() {
-                    if ts.elapsed() >= Duration::from_secs(1) {
-                        repl.ctx.user.pending_unsubscribe.pop_front();
-                    } else {
-                        break
+    async fn run(mut self, mut to_rt: mpsc::UnboundedReceiver<ToRt>) -> Result<()> {
+        let mut tasks = vec![];
+        'main: loop {
+            let ready = self.cycle_ready();
+            let mut updates = None;
+            let mut writes = None;
+            let mut input = None;
+            macro_rules! peek {
+                (updates) => {
+                    if let Ok(Some(up)) = self.ctx.user.updates.try_next() {
+                        updates = Some(up);
                     }
+                };
+                (writes) => {
+                    if let Ok(Some(wr)) = self.ctx.user.writes.try_next() {
+                        writes = Some(wr);
+                    }
+                };
+                (tasks) => {
+                    while let Some(Ok(up)) = self.ctx.user.tasks.try_join_next() {
+                        tasks.push(up);
+                    }
+                };
+                ($($item:tt),+) => {{
+                    $(peek!($item));+
+                }};
+            }
+            select! {
+                wr = self.ctx.user.writes.select_next_some() => {
+                    writes = Some(wr);
+                    peek!(updates, tasks);
+                },
+                up = self.ctx.user.updates.select_next_some() => {
+                    updates = Some(up);
+                    peek!(writes, tasks);
+                },
+                up = self.ctx.user.tasks.join_next() => {
+                    if let Some(Ok(up)) = up {
+                        tasks.push(up);
+                    }
+                    peek!(updates, writes, tasks)
+                },
+                n = to_rt.next() => match n {
+                    None => break 'main Ok(()),
+                    Some(i) => {
+                        peek!(updates, writes, tasks);
+                        input = Some(i);
+                    }
+                },
+                _ = or_never(ready) => peek!(updates, writes, tasks),
+                () = unsubscribe_ready(&self.ctx.user.pending_unsubscribe) => {
+                    while let Some((ts, _)) = self.ctx.user.pending_unsubscribe.front() {
+                        if ts.elapsed() >= Duration::from_secs(1) {
+                            self.ctx.user.pending_unsubscribe.pop_front();
+                        } else {
+                            break
+                        }
+                    }
+                    continue 'main
                 }
-                continue 'main
             }
-        }
-        match input {
-            None => (),
-            Some(ToRt::Compile { text, res }) => {
-                let r = repl.compile(&text, &mut init).await.map(|(eid, b)| CompRes {
-                    eids: smallvec![(eid, b)],
-                    env: repl.ctx.env.clone(),
-                });
-                let _ = res.send(r);
+            match input {
+                None => (),
+                Some(ToRt::Compile { text, res }) => {
+                    let _ = res.send(self.compile(&text).await);
+                }
+                Some(ToRt::Load { path, res }) => {
+                    let _ = res.send(self.load(&path).await);
+                }
+                Some(ToRt::Subscribe { ch }) => {
+                    self.subs.push(ch);
+                }
             }
-            Some(ToRt::Load { path, res }) => {
-                let r = repl.load(&path, &mut init).await.map(|r| CompRes {
-                    eids: r.into_iter().collect(),
-                    env: repl.ctx.env.clone(),
-                });
-                let _ = res.send(r);
-            }
-        }
-        if let Some(v) = repl.do_cycle(init, updates, writes, &mut tasks) {
-            if output {
-                println!("{v}")
-            }
-        }
-        if repl.ctx.user.batch.len() > 0 {
-            let batch = mem::replace(
-                &mut repl.ctx.user.batch,
-                repl.ctx.user.publisher.start_batch(),
-            );
-            let timeout = p.publish_timeout.map(|t| Duration::from_secs(t));
-            task::spawn(async move { batch.commit(timeout).await });
+            self.do_cycle(updates, writes, &mut tasks).await;
         }
     }
 }
 
-pub struct RuntimeHandle(mpsc::UnboundedSender<ToRt>);
+pub struct BSHandle(mpsc::UnboundedSender<ToRt>);
+
+impl BSHandle {
+    async fn comp_int<F: FnOnce(oneshot::Sender<Result<CompRes>>) -> ToRt>(
+        &self,
+        f: F,
+    ) -> Result<CompRes> {
+        let (tx, rx) = oneshot::channel();
+        self.0.unbounded_send(f(tx)).map_err(|_| anyhow!("runtime is dead"))?;
+        Ok(rx.await.map_err(|_| anyhow!("runtime did not respond"))??)
+    }
+
+    /// Compile and execute the specified bscript expression. It can
+    /// either be a module expression or a single expression. If it
+    /// generates results, they will be sent to all the channels that
+    /// are subscribed.
+    pub async fn compile(&self, text: String) -> Result<CompRes> {
+        self.comp_int(|tx| ToRt::Compile { text, res: tx }).await
+    }
+
+    /// Load and execute the specified bscript module. The path may
+    /// have one of two forms. If it is the path to a file with
+    /// extension .bs then the rt will load the file directly. If it
+    /// is a modpath (e.g. foo::bar::baz) then the module resolver
+    /// will look for a matching module in the modpath.
+    pub async fn load(&self, path: PathBuf) -> Result<CompRes> {
+        self.comp_int(|tx| ToRt::Load { path, res: tx }).await
+    }
+
+    /// The specified channel will receive events generated by all
+    /// bscript expressions being run by the runtime. To unsubscribe,
+    /// just drop the receiver.
+    pub fn subscribe(&self, ch: mpsc::Sender<RtEvent>) -> Result<()> {
+        self.0
+            .unbounded_send(ToRt::Subscribe { ch })
+            .map_err(|_| anyhow!("runtime is dead"))
+    }
+}
 
 #[derive(Builder)]
-pub struct Runtime {
+pub struct BSConfig {
     publisher: Publisher,
     subscriber: Subscriber,
     subscribe_timeout: Option<Duration>,
     publish_timeout: Option<Duration>,
 }
 
-impl Runtime {
-    pub fn run(self) -> RuntimeHandle {
+impl BSConfig {
+    pub fn run(self) -> BSHandle {
         let (tx, rx) = mpsc::unbounded();
-        task::spawn(async move { todo!() });
-        RuntimeHandle(tx)
+        task::spawn(async move {
+            let bs = BS::new(self);
+            if let Err(e) = bs.run(rx).await {
+                error!("run loop exited with error {e:?}")
+            }
+        });
+        BSHandle(tx)
     }
 }
