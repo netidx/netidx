@@ -1,10 +1,12 @@
 use crate::{
     expr::{Expr, ExprId, ModPath},
     node::Node,
+    rt::{BSConfigBuilder, BSHandle, RtEvent},
     BindId, Ctx, Event, ExecCtx, NoUserEvent,
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
+use futures::{channel::mpsc, StreamExt};
 use fxhash::FxHashMap;
 use netidx::{
     publisher::{Publisher, PublisherBuilder, Value},
@@ -14,143 +16,57 @@ use netidx::{
 use smallvec::SmallVec;
 use std::collections::{HashMap, VecDeque};
 
-pub struct TestCtx {
-    pub by_ref: FxHashMap<BindId, SmallVec<[ExprId; 3]>>,
-    pub var_updates: VecDeque<(BindId, Value)>,
-    pub _resolver: resolver_server::Server,
-    pub _publisher: Publisher,
-    pub _subscriber: Subscriber,
-}
-
-impl TestCtx {
-    pub async fn new() -> Result<Self> {
-        let resolver = {
-            use resolver_server::config::{self, file};
-            let cfg = file::ConfigBuilder::default()
-                .member_servers(vec![file::MemberServerBuilder::default()
-                    .auth(file::Auth::Anonymous)
-                    .addr("127.0.0.1:0".parse()?)
-                    .bind_addr("127.0.0.1".parse()?)
-                    .build()?])
-                .build()?;
-            let cfg = config::Config::from_file(cfg)?;
-            resolver_server::Server::new(cfg, false, 0).await?
-        };
-        let addr = *resolver.local_addr();
-        let cfg = {
-            use netidx::config::{self, file, DefaultAuthMech};
-            let cfg = file::ConfigBuilder::default()
-                .addrs(vec![(addr, file::Auth::Anonymous)])
-                .default_auth(DefaultAuthMech::Anonymous)
-                .default_bind_config("local")
-                .build()?;
-            config::Config::from_file(cfg)?
-        };
-        let publisher = PublisherBuilder::new(cfg.clone()).build().await?;
-        let subscriber = SubscriberBuilder::new(cfg).build()?;
-        Ok(Self {
-            by_ref: HashMap::default(),
-            var_updates: VecDeque::new(),
-            _resolver: resolver,
-            _publisher: publisher,
-            _subscriber: subscriber,
-        })
-    }
-}
-
-impl Ctx for TestCtx {
-    fn call_rpc(
-        &mut self,
-        _name: netidx::path::Path,
-        _args: Vec<(ArcStr, netidx::publisher::Value)>,
-        _ref_by: ExprId,
-        _id: BindId,
-    ) {
-        unimplemented!()
-    }
-
-    fn clear(&mut self) {
-        self.by_ref.clear();
-        self.var_updates.clear();
-    }
-
-    fn durable_subscribe(
-        &mut self,
-        _flags: netidx::subscriber::UpdatesFlags,
-        _path: netidx::path::Path,
-        _ref_by: ExprId,
-    ) -> netidx::subscriber::Dval {
-        unimplemented!()
-    }
-
-    fn unsubscribe(
-        &mut self,
-        _path: netidx::path::Path,
-        _dv: netidx::subscriber::Dval,
-        _ref_by: ExprId,
-    ) {
-        unimplemented!()
-    }
-
-    fn set_timer(&mut self, _id: BindId, _timeout: std::time::Duration, _ref_by: ExprId) {
-        unimplemented!()
-    }
-
-    fn ref_var(&mut self, id: BindId, ref_by: ExprId) {
-        let refs = self.by_ref.entry(id).or_default();
-        if !refs.contains(&ref_by) {
-            refs.push(ref_by);
-        }
-    }
-
-    fn unref_var(&mut self, _id: BindId, _ref_by: ExprId) {
-        ()
-    }
-
-    fn set_var(&mut self, id: BindId, value: Value) {
-        self.var_updates.push_back((id, value));
-    }
-}
-
-pub struct TestState {
-    pub ctx: ExecCtx<TestCtx, NoUserEvent>,
-    pub event: Event<NoUserEvent>,
-}
-
-impl TestState {
-    pub async fn new() -> Result<Self> {
-        Ok(Self {
-            ctx: ExecCtx::new(TestCtx::new().await?),
-            event: Event::new(NoUserEvent),
-        })
-    }
+pub async fn init() -> Result<BSHandle> {
+    let resolver = {
+        use resolver_server::config::{self, file};
+        let cfg = file::ConfigBuilder::default()
+            .member_servers(vec![file::MemberServerBuilder::default()
+                .auth(file::Auth::Anonymous)
+                .addr("127.0.0.1:0".parse()?)
+                .bind_addr("127.0.0.1".parse()?)
+                .build()?])
+            .build()?;
+        let cfg = config::Config::from_file(cfg)?;
+        resolver_server::Server::new(cfg, false, 0).await?
+    };
+    let addr = *resolver.local_addr();
+    let cfg = {
+        use netidx::config::{self, file, DefaultAuthMech};
+        let cfg = file::ConfigBuilder::default()
+            .addrs(vec![(addr, file::Auth::Anonymous)])
+            .default_auth(DefaultAuthMech::Anonymous)
+            .default_bind_config("local")
+            .build()?;
+        config::Config::from_file(cfg)?
+    };
+    let publisher = PublisherBuilder::new(cfg.clone()).build().await?;
+    let subscriber = SubscriberBuilder::new(cfg).build()?;
+    Ok(BSConfigBuilder::default()
+        .publisher(publisher)
+        .subscriber(subscriber)
+        .build()?
+        .start())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn bind_ref_arith() -> Result<()> {
-    let mut state = TestState::new().await?;
+    let bs = init().await?;
     let e = r#"
 {
   let v = (((1 + 1) * 2) / 2) - 1;
   v
 }
-"#
-    .parse::<Expr>()?;
-    let mut n = Node::compile(&mut state.ctx, &ModPath::root(), e);
-    if let Some(e) = n.extract_err() {
-        bail!("compilation failed {e}")
+"#;
+    let (tx, mut rx) = mpsc::channel(10);
+    bs.subscribe(tx)?;
+    let eid = bs.compile(String::from(e)).await?.eids[0].0;
+    match rx.next().await {
+        None => bail!("runtime died"),
+        Some(RtEvent::Updated(id, v)) => {
+            assert_eq!(id, eid);
+            assert_eq!(v, Value::I64(1))
+        }
     }
-    state.event.init = true;
-    assert_eq!(n.update(&mut state.ctx, &mut state.event), None);
-    state.event.clear();
-    assert_eq!(state.ctx.user.var_updates.len(), 1);
-    let (_, v) = &state.ctx.user.var_updates[0];
-    assert_eq!(v, &Value::I64(1));
-    let (id, v) = state.ctx.user.var_updates.pop_front().unwrap();
-    state.event.variables.insert(id, v);
-    assert_eq!(n.update(&mut state.ctx, &mut state.event), Some(Value::I64(1)));
-    assert_eq!(state.ctx.user.var_updates.len(), 0);
-    state.event.clear();
     Ok(())
 }
 
@@ -159,59 +75,23 @@ macro_rules! run {
     ($name:ident, $code:expr, $pred:expr) => {
         #[tokio::test(flavor = "current_thread")]
         async fn $name() -> ::anyhow::Result<()> {
-            let mut state = $crate::tests::TestState::new().await?;
-            state.ctx.dbg_ctx.trace = false;
-            let mut n = $crate::node::Node::compile(
-                &mut state.ctx,
-                &$crate::expr::ModPath::root(),
-                $code.parse()?,
-            );
-            if let Some(e) = n.extract_err() {
-                if $pred(Err(::anyhow::anyhow!("compilation failed {e}"))) {
-                    return Ok(());
-                }
-                bail!("compilation failed {e}")
-            }
-            dbg!("compilation succeeded");
-            let mut fin = false;
-            let mut init = true;
-            while init || state.ctx.user.var_updates.len() > 0 {
-                state.event.clear();
-                if init {
-                    state.event.init = true;
-                    init = false;
-                }
-                for _ in 0..state.ctx.user.var_updates.len() {
-                    if let Some((id, v)) = state.ctx.user.var_updates.pop_front() {
-                        match state.event.variables.entry(id) {
-                            ::std::collections::hash_map::Entry::Vacant(e) => {
-                                e.insert(v);
-                            }
-                            ::std::collections::hash_map::Entry::Occupied(_) => {
-                                state.ctx.user.var_updates.push_back((id, v));
-                            }
+            let bs = $crate::tests::init().await?;
+            let (tx, mut rx) = futures::channel::mpsc::channel(10);
+            bs.subscribe(tx)?;
+            match bs.compile(String::from($code)).await.map(|r| r.eids[0].0) {
+                Err(e) => assert!($pred(Err(e))),
+                Ok(eid) => {
+                    dbg!("compilation succeeded");
+                    match futures::StreamExt::next(&mut rx).await {
+                        None => bail!("runtime died"),
+                        Some($crate::rt::RtEvent::Updated(id, v)) => {
+                            assert_eq!(id, eid);
+                            assert!($pred(Ok(&v)))
                         }
                     }
                 }
-                match n.update(&mut state.ctx, &mut state.event) {
-                    None => (),
-                    Some(v) if !fin && $pred(Ok(&v)) => fin = true,
-                    v => {
-                        for (_, (ts, e, v)) in state.ctx.dbg_ctx.iter_events() {
-                            dbg!((ts, e, v));
-                        }
-                        bail!("unexpected result {v:?}")
-                    }
-                }
             }
-            if !fin {
-                for (_, (ts, e, v)) in state.ctx.dbg_ctx.iter_events() {
-                    dbg!((ts, e, v));
-                }
-                bail!("did not receive any result")
-            } else {
-                Ok(())
-            }
+            Ok(())
         }
     };
 }
