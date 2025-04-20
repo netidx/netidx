@@ -1,5 +1,6 @@
 use crate::{
     env::LambdaDef,
+    err,
     expr::{Expr, ExprId, ExprKind, ModPath},
     node::pattern::PatternNode,
     typ::{FnType, NoRefs, Type},
@@ -13,7 +14,9 @@ use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
-use std::{collections::HashMap, fmt, iter, marker::PhantomData, mem, sync::Arc};
+use std::{
+    cell::RefCell, collections::HashMap, fmt, iter, marker::PhantomData, mem, sync::Arc,
+};
 use triomphe::Arc as TArc;
 
 mod compiler;
@@ -377,6 +380,155 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
     }
 }
 
+struct ArrayRefNode<C: Ctx, E: UserEvent> {
+    source: Cached<C, E>,
+    i: Cached<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> Default for ArrayRefNode<C, E> {
+    fn default() -> Self {
+        Self { source: Default::default(), i: Default::default() }
+    }
+}
+
+impl<C: Ctx, E: UserEvent> ArrayRefNode<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        let up = self.source.update(ctx, event);
+        let up = self.i.update(ctx, event) || up;
+        if !up {
+            return None;
+        }
+        let i = match &self.i.cached {
+            Some(Value::I64(i)) => *i,
+            Some(v) => match v.clone().cast_to::<i64>() {
+                Ok(i) => i,
+                Err(_) => return err!("op::index(array, index): expected an integer"),
+            },
+            None => return None,
+        };
+        match &self.source.cached {
+            Some(Value::Array(elts)) if i >= 0 => {
+                let i = i as usize;
+                if i < elts.len() {
+                    Some(elts[i].clone())
+                } else {
+                    err!("array index out of bounds")
+                }
+            }
+            Some(Value::Array(elts)) if i < 0 => {
+                let len = elts.len();
+                let i = len as i64 + i;
+                if i > 0 {
+                    Some(elts[i as usize].clone())
+                } else {
+                    err!("array index out of bounds")
+                }
+            }
+            None => None,
+            _ => err!("op::index(array, index): expected an array"),
+        }
+    }
+
+    pub fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.source.node.refs(f);
+        self.i.node.refs(f);
+    }
+
+    pub fn delete(self, ctx: &mut ExecCtx<C, E>) {
+        self.source.node.delete(ctx);
+        self.i.node.delete(ctx);
+    }
+}
+
+struct ArraySliceNode<C: Ctx, E: UserEvent> {
+    source: Cached<C, E>,
+    start: Option<Cached<C, E>>,
+    end: Option<Cached<C, E>>,
+}
+
+impl<C: Ctx, E: UserEvent> Default for ArraySliceNode<C, E> {
+    fn default() -> Self {
+        Self {
+            source: Default::default(),
+            start: Default::default(),
+            end: Default::default(),
+        }
+    }
+}
+
+impl<C: Ctx, E: UserEvent> ArraySliceNode<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        macro_rules! number {
+            ($e:expr) => {
+                match $e.clone().cast_to::<usize>() {
+                    Ok(i) => i,
+                    Err(_) => return err!("expected a non negative number"),
+                }
+            };
+        }
+        macro_rules! bound {
+            ($bound:expr) => {{
+                match $bound.cached.as_ref() {
+                    None => return None,
+                    Some(Value::U64(i) | Value::V64(i)) => Some(*i as usize),
+                    Some(v) => Some(number!(v)),
+                }
+            }};
+        }
+        let up = self.source.update(ctx, event);
+        let up = self.start.as_mut().map(|c| c.update(ctx, event)).unwrap_or(false) || up;
+        let up = self.end.as_mut().map(|c| c.update(ctx, event)).unwrap_or(false) || up;
+        if !up {
+            return None;
+        }
+        let (start, end) = match (&self.start, &self.end) {
+            (None, None) => (None, None),
+            (Some(c), None) => (bound!(c), None),
+            (None, Some(c)) => (None, bound!(c)),
+            (Some(c0), Some(c1)) => (bound!(c0), bound!(c1)),
+        };
+        match &self.source.cached {
+            Some(Value::Array(elts)) => match (start, end) {
+                (None, None) => Some(Value::Array(elts.clone())),
+                (Some(i), Some(j)) => match elts.subslice(i..j) {
+                    Ok(a) => Some(Value::Array(a)),
+                    Err(e) => Some(Value::Error(e.to_string().into())),
+                },
+                (Some(i), None) => match elts.subslice(i..) {
+                    Ok(a) => Some(Value::Array(a)),
+                    Err(e) => Some(Value::Error(e.to_string().into())),
+                },
+                (None, Some(i)) => match elts.subslice(..i) {
+                    Ok(a) => Some(Value::Array(a)),
+                    Err(e) => Some(Value::Error(e.to_string().into())),
+                },
+            },
+            Some(_) => err!("expected array"),
+            None => None,
+        }
+    }
+
+    pub fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.source.node.refs(f);
+        if let Some(start) = &self.start {
+            start.node.refs(f)
+        }
+        if let Some(end) = &self.end {
+            end.node.refs(f)
+        }
+    }
+
+    pub fn delete(self, ctx: &mut ExecCtx<C, E>) {
+        self.source.node.delete(ctx);
+        if let Some(start) = self.start {
+            start.node.delete(ctx);
+        }
+        if let Some(end) = self.end {
+            end.node.delete(ctx);
+        }
+    }
+}
+
 pub enum NodeKind<C: Ctx, E: UserEvent> {
     Nop,
     Use {
@@ -407,6 +559,11 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
         source: Box<Node<C, E>>,
         field: usize,
         top_id: ExprId,
+    },
+    ArrayRef(Box<ArrayRefNode<C, E>>),
+    ArraySlice(Box<ArraySliceNode<C, E>>),
+    StringInterpolate {
+        args: Box<[Cached<C, E>]>,
     },
     Connect(BindId, Box<Node<C, E>>),
     Lambda(Arc<LambdaDef<C, E>>),
@@ -577,6 +734,8 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::TupleRef { mut source, field: _, top_id: _ } => {
                 mem::take(&mut *source).delete(ctx)
             }
+            NodeKind::ArrayRef(mut n) => mem::take(&mut *n).delete(ctx),
+            NodeKind::ArraySlice(mut n) => mem::take(&mut *n).delete(ctx),
             NodeKind::Add { mut lhs, mut rhs }
             | NodeKind::Sub { mut lhs, mut rhs }
             | NodeKind::Mul { mut lhs, mut rhs }
@@ -607,6 +766,11 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::Error { error: _, children: nodes } => {
                 for n in nodes {
                     n.delete(ctx)
+                }
+            }
+            NodeKind::StringInterpolate { args } => {
+                for n in args {
+                    n.node.delete(ctx)
                 }
             }
             NodeKind::Connect(_, mut n)
@@ -654,6 +818,13 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             NodeKind::StructRef { source, field: _, top_id: _ }
             | NodeKind::TupleRef { source, field: _, top_id: _ } => {
                 source.refs(f);
+            }
+            NodeKind::ArrayRef(n) => n.refs(f),
+            NodeKind::ArraySlice(n) => n.refs(f),
+            NodeKind::StringInterpolate { args } => {
+                for a in args {
+                    a.node.refs(f)
+                }
             }
             NodeKind::Add { lhs, rhs }
             | NodeKind::Sub { lhs, rhs }
@@ -786,6 +957,34 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     None
                 }
             }
+            NodeKind::StringInterpolate { args } => {
+                thread_local! {
+                    static BUF: RefCell<String> = RefCell::new(String::new());
+                }
+                let (updated, determined) = update_args!(args);
+                if updated && determined {
+                    BUF.with_borrow_mut(|buf| {
+                        buf.clear();
+                        for c in args {
+                            match c.cached.as_ref().unwrap() {
+                                Value::String(c) => buf.push_str(c.as_ref()),
+                                v => match v.clone().cast_to::<ArcStr>().ok() {
+                                    Some(c) => buf.push_str(c.as_ref()),
+                                    None => {
+                                        let m = literal!("args must be strings");
+                                        return Some(Value::Error(m));
+                                    }
+                                },
+                            }
+                        }
+                        Some(Value::String(buf.as_str().into()))
+                    })
+                } else {
+                    None
+                }
+            }
+            NodeKind::ArrayRef(n) => n.update(ctx, event),
+            NodeKind::ArraySlice(n) => n.update(ctx, event),
             NodeKind::Array { args } | NodeKind::Tuple { args } => {
                 let (updated, determined) = update_args!(args);
                 if updated && determined {

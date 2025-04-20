@@ -4,7 +4,7 @@ use crate::{
     node::{
         lambda,
         pattern::{PatternNode, StructPatternNode},
-        Cached, CallSite, Node, NodeKind, SelectNode,
+        ArrayRefNode, ArraySliceNode, Cached, CallSite, Node, NodeKind, SelectNode,
     },
     typ::{FnType, NoRefs, Type},
     Ctx, ExecCtx, UserEvent,
@@ -179,6 +179,54 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 let args = Box::from_iter(args.into_iter().map(|n| Cached::new(n)));
                 Node { kind: NodeKind::Array { args }, spec: Box::new(spec), typ }
             }
+        }
+        Expr { kind: ExprKind::ArrayRef { source, i }, id: _ } => {
+            let source = compile(ctx, (**source).clone(), scope, top_id);
+            if source.is_err() {
+                return error!("", vec![source]);
+            }
+            let i = compile(ctx, (**i).clone(), scope, top_id);
+            if i.is_err() {
+                return error!("", vec![i]);
+            }
+            let typ = Type::empty_tvar();
+            let n = ArrayRefNode { source: Cached::new(source), i: Cached::new(i) };
+            Node { kind: NodeKind::ArrayRef(Box::new(n)), spec: Box::new(spec), typ }
+        }
+        Expr { kind: ExprKind::ArraySlice { source, start, end }, id: _ } => {
+            macro_rules! maybe_compile {
+                ($n:expr) => {
+                    match $n {
+                        None => None,
+                        Some(e) => {
+                            let n = compile(ctx, (**e).clone(), scope, top_id);
+                            if n.is_err() {
+                                return error!("", vec![n]);
+                            }
+                            Some(Cached::new(n))
+                        }
+                    }
+                };
+            }
+            let source = compile(ctx, (**source).clone(), scope, top_id);
+            if source.is_err() {
+                return error!("", vec![source]);
+            }
+            let start = maybe_compile!(start);
+            let end = maybe_compile!(end);
+            let typ = source.typ.clone();
+            let n = ArraySliceNode { source: Cached::new(source), start, end };
+            Node { kind: NodeKind::ArraySlice(Box::new(n)), spec: Box::new(spec), typ }
+        }
+        Expr { kind: ExprKind::StringInterpolate { args }, id: _ } => {
+            let (error, args) = subexprs!(scope, args);
+            if error {
+                return error!("", args);
+            }
+            let typ = Type::Primitive(Typ::String.into());
+            let args = Box::from_iter(args.into_iter().map(|n| Cached::new(n)));
+            let spec = Box::new(spec);
+            Node { kind: NodeKind::StringInterpolate { args }, spec, typ }
         }
         Expr { kind: ExprKind::Tuple { args }, id: _ } => {
             let (error, args) = subexprs!(scope, args);

@@ -30,21 +30,6 @@ macro_rules! deftype {
 }
 
 #[macro_export]
-macro_rules! errf {
-    ($pat:expr, $($arg:expr),*) => {
-        Some(Value::Error(ArcStr::from(format_compact!($pat, $($arg),*).as_str())))
-    };
-    ($pat:expr) => { Some(Value::Error(ArcStr::from(format_compact!($pat).as_str()))) };
-}
-
-#[macro_export]
-macro_rules! err {
-    ($pat:literal) => {
-        Some(Value::Error(literal!($pat)))
-    };
-}
-
-#[macro_export]
 macro_rules! arity1 {
     ($from:expr, $updates:expr) => {
         match (&*$from, &*$updates) {

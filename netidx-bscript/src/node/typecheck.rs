@@ -107,6 +107,36 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 let rtype = Type::Array(Arc::new(rtype));
                 Ok(self.typ.check_contains(&rtype)?)
             }
+            NodeKind::ArraySlice(n) => {
+                wrap!(n.source.node, n.source.node.typecheck(ctx))?;
+                let it = Type::Primitive(Typ::unsigned_integer());
+                let at = Type::Array(Arc::new(Type::empty_tvar()));
+                wrap!(n.source.node, at.check_contains(&n.source.node.typ))?;
+                if let Some(start) = n.start.as_mut() {
+                    wrap!(start.node, start.node.typecheck(ctx))?;
+                    wrap!(start.node, it.check_contains(&start.node.typ))?;
+                }
+                if let Some(end) = n.end.as_mut() {
+                    wrap!(end.node, end.node.typecheck(ctx))?;
+                    wrap!(end.node, it.check_contains(&end.node.typ))?;
+                }
+                Ok(())
+            }
+            NodeKind::ArrayRef(n) => {
+                wrap!(n.source.node, n.source.node.typecheck(ctx))?;
+                wrap!(n.i.node, n.i.node.typecheck(ctx))?;
+                let et = Type::empty_tvar();
+                let at = Type::Array(Arc::new(et.clone()));
+                wrap!(at.check_contains(&n.source.node.typ))?;
+                wrap!(Type::Primitive(Typ::integer()).check_contains(&n.i.node.typ))?;
+                Ok(wrap!(self.typ.check_contains(&et))?)
+            }
+            NodeKind::StringInterpolate { args } => {
+                for a in args.iter_mut() {
+                    wrap!(a.node, a.node.typecheck(ctx))?
+                }
+                Ok(())
+            }
             NodeKind::Any { args } => {
                 for n in args.iter_mut() {
                     wrap!(n, n.typecheck(ctx))?

@@ -42,6 +42,21 @@ mod tests;
 atomic_id!(BindId);
 atomic_id!(LambdaId);
 
+#[macro_export]
+macro_rules! errf {
+    ($pat:expr, $($arg:expr),*) => {
+        Some(Value::Error(ArcStr::from(format_compact!($pat, $($arg),*).as_str())))
+    };
+    ($pat:expr) => { Some(Value::Error(ArcStr::from(format_compact!($pat).as_str()))) };
+}
+
+#[macro_export]
+macro_rules! err {
+    ($pat:literal) => {
+        Some(Value::Error(literal!($pat)))
+    };
+}
+
 pub trait UserEvent: Clone + Debug + 'static {
     fn clear(&mut self);
 }

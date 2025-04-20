@@ -325,102 +325,6 @@ impl EvalCached for OrEv {
 
 type Or = CachedArgs<OrEv>;
 
-#[derive(Default)]
-struct IndexEv;
-
-impl EvalCached for IndexEv {
-    const NAME: &str = "index";
-    deftype!("fn(Array<'a>, Int) -> ['a, error]");
-
-    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
-        let i = match &from.0[1] {
-            Some(Value::I64(i)) => *i,
-            Some(v) => match v.clone().cast_to::<i64>() {
-                Ok(i) => i,
-                Err(_) => return err!("op::index(array, index): expected an integer"),
-            },
-            None => return None,
-        };
-        match &from.0[0] {
-            Some(Value::Array(elts)) if i >= 0 => {
-                let i = i as usize;
-                if i < elts.len() {
-                    Some(elts[i].clone())
-                } else {
-                    err!("array index out of bounds")
-                }
-            }
-            Some(Value::Array(elts)) if i < 0 => {
-                let len = elts.len();
-                let i = len as i64 + i;
-                if i > 0 {
-                    Some(elts[i as usize].clone())
-                } else {
-                    err!("array index out of bounds")
-                }
-            }
-            None => None,
-            _ => err!("op::index(array, index): expected an array"),
-        }
-    }
-}
-
-type Index = CachedArgs<IndexEv>;
-
-#[derive(Default)]
-struct SliceEv;
-
-impl EvalCached for SliceEv {
-    const NAME: &str = "slice";
-    deftype!("fn(Array<'a>, [Int, null], [Int, null]) -> [Array<'a>, error]");
-
-    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
-        macro_rules! number {
-            ($e:expr) => {
-                match $e.clone().cast_to::<usize>() {
-                    Ok(i) => i,
-                    Err(_) => return err!("expected a positive number"),
-                }
-            };
-        }
-        let (start, end) = match (&from.0[1], &from.0[2]) {
-            (None, _) | (_, None) => return None,
-            (Some(v0), Some(v1)) => match (v0, v1) {
-                (Value::Null, Value::Null) => (None, None),
-                (Value::Null, Value::U64(i)) => (None, Some(*i as usize)),
-                (Value::Null, v) => (None, Some(number!(v))),
-                (Value::U64(i), Value::Null) => (Some(*i as usize), None),
-                (v, Value::Null) => (Some(number!(v)), None),
-                (Value::U64(v0), Value::U64(v1)) => {
-                    (Some(*v0 as usize), Some(*v1 as usize))
-                }
-                (v0, v1) => (Some(number!(v0)), Some(number!(v1))),
-            },
-        };
-        match &from.0[0] {
-            Some(Value::Array(elts)) => match (start, end) {
-                (None, None) => Some(Value::Array(elts.clone())),
-                (Some(i), Some(j)) => match elts.subslice(i..j) {
-                    Ok(a) => Some(Value::Array(a)),
-                    Err(e) => Some(Value::Error(e.to_string().into())),
-                },
-                (Some(i), None) => match elts.subslice(i..) {
-                    Ok(a) => Some(Value::Array(a)),
-                    Err(e) => Some(Value::Error(e.to_string().into())),
-                },
-                (None, Some(i)) => match elts.subslice(..i) {
-                    Ok(a) => Some(Value::Array(a)),
-                    Err(e) => Some(Value::Error(e.to_string().into())),
-                },
-            },
-            Some(_) => err!("expected array"),
-            None => None,
-        }
-    }
-}
-
-type Slice = CachedArgs<SliceEv>;
-
 struct Filter<C: Ctx, E: UserEvent> {
     ready: bool,
     queue: VecDeque<Value>,
@@ -722,11 +626,6 @@ pub mod core {
         null
     ]
 
-    pub mod op {
-        let index = |a, i| 'index
-        let slice = |a, i, j| 'slice
-    }
-
     pub mod array {
         pub let filter = |a, f| 'array_filter
         pub let filter_map = |a, f| 'array_filter_map
@@ -785,8 +684,6 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<array::FilterMap<C, E>>().unwrap();
     ctx.register_builtin::<FilterErr>().unwrap();
     ctx.register_builtin::<array::Group<C, E>>().unwrap();
-    ctx.register_builtin::<Index>().unwrap();
-    ctx.register_builtin::<Slice>().unwrap();
     ctx.register_builtin::<IsErr>().unwrap();
     ctx.register_builtin::<Max>().unwrap();
     ctx.register_builtin::<Mean>().unwrap();

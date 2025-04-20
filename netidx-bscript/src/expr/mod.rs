@@ -441,6 +441,9 @@ pub enum ExprKind {
         name: ModPath,
         value: Arc<Expr>,
     },
+    StringInterpolate {
+        args: Arc<[Expr]>,
+    },
     StructRef {
         source: Arc<Expr>,
         field: ArcStr,
@@ -448,6 +451,15 @@ pub enum ExprKind {
     TupleRef {
         source: Arc<Expr>,
         field: usize,
+    },
+    ArrayRef {
+        source: Arc<Expr>,
+        i: Arc<Expr>,
+    },
+    ArraySlice {
+        source: Arc<Expr>,
+        start: Option<Arc<Expr>>,
+        end: Option<Arc<Expr>>,
     },
     StructWith {
         source: Arc<Expr>,
@@ -976,12 +988,18 @@ impl fmt::Display for ExprKind {
             ExprKind::Ref { name } => {
                 write!(f, "{name}")
             }
-            ExprKind::StructRef { source, field } => {
-                write!(f, "{source}.{field}")
-            }
-            ExprKind::TupleRef { source, field } => {
-                write!(f, "{source}.{field}")
-            }
+            ExprKind::StructRef { source, field } => match &source.kind {
+                ExprKind::Do { .. } | ExprKind::Ref { .. } | ExprKind::Apply { .. } => {
+                    write!(f, "{source}.{field}")
+                }
+                source => write!(f, "({source}).{field}"),
+            },
+            ExprKind::TupleRef { source, field } => match &source.kind {
+                ExprKind::Do { .. } | ExprKind::Ref { .. } | ExprKind::Apply { .. } => {
+                    write!(f, "{source}.{field}")
+                }
+                source => write!(f, "({source}).{field}"),
+            },
             ExprKind::Module { name, export, value } => {
                 write!(f, "{}mod {name}", exp(*export))?;
                 match value {
@@ -1087,7 +1105,12 @@ impl fmt::Display for ExprKind {
                     write!(f, "{}[{}..{}]", &args[0].1, s, e)
                 }
                 function => {
-                    write!(f, "{function}")?;
+                    match function {
+                        ExprKind::Ref { name: _ } | ExprKind::Do { exprs: _ } => {
+                            write!(f, "{function}")?
+                        }
+                        function => write!(f, "({function})")?,
+                    }
                     write!(f, "(")?;
                     for i in 0..args.len() {
                         match &args[i].0 {

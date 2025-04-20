@@ -228,14 +228,8 @@ where
                     (None, Intp::Expr(s)) => {
                         argvec.push(s);
                         Some(
-                            ExprKind::Apply {
-                                args: Arc::from_iter(
-                                    argvec.clone().into_iter().map(|a| (None, a)),
-                                ),
-                                function: Arc::new(
-                                    ExprKind::Ref { name: ["str", "concat"].into() }
-                                        .to_expr(),
-                                ),
+                            ExprKind::StringInterpolate {
+                                args: Arc::from_iter(argvec.clone().into_iter()),
                             }
                             .to_expr(),
                         )
@@ -243,14 +237,8 @@ where
                     (Some(src @ Expr { kind: ExprKind::Constant(_), .. }), s) => {
                         argvec.extend([src, s.to_expr()]);
                         Some(
-                            ExprKind::Apply {
-                                args: Arc::from_iter(
-                                    argvec.clone().into_iter().map(|a| (None, a)),
-                                ),
-                                function: Arc::new(
-                                    ExprKind::Ref { name: ["str", "concat"].into() }
-                                        .to_expr(),
-                                ),
+                            ExprKind::StringInterpolate {
+                                args: Arc::from_iter(argvec.clone().into_iter()),
                             }
                             .to_expr(),
                         )
@@ -303,6 +291,9 @@ where
                     | (Some(Expr { kind: ExprKind::Select { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::TypeCast { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::TypeDef { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::StringInterpolate { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::ArrayRef { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::ArraySlice { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
                         unreachable!()
                     }
@@ -455,14 +446,10 @@ where
                 )
                 .map(
                     |(start, end): (Option<CompactString>, Option<CompactString>)| {
-                        let start = start
-                            .map(|i| Value::U64(i.parse().unwrap()))
-                            .unwrap_or(Value::Null);
-                        let start = ExprKind::Constant(start).to_expr();
-                        let end = end
-                            .map(|i| Value::U64(i.parse().unwrap()))
-                            .unwrap_or(Value::Null);
-                        let end = ExprKind::Constant(end).to_expr();
+                        let start = start.map(|i| Value::U64(i.parse().unwrap()));
+                        let start = start.map(|e| ExprKind::Constant(e).to_expr());
+                        let end = end.map(|i| Value::U64(i.parse().unwrap()));
+                        let end = end.map(|e| ExprKind::Constant(e).to_expr());
                         Either::Left((start, end))
                     },
                 ),
@@ -470,31 +457,21 @@ where
                     optional(attempt(expr())).skip(spstring("..")),
                     optional(attempt(expr())),
                 ))
-                .map(|(start, end)| {
-                    let start =
-                        start.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
-                    let end = end.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
-                    Either::Left((start, end))
-                }),
+                .map(|(start, end)| Either::Left((start, end))),
                 attempt(expr()).map(|e| Either::Right(e)),
             )),
         ),
     )
         .map(|(a, args)| match args {
-            Either::Left((start, end)) => ExprKind::Apply {
-                function: Arc::new(
-                    ExprKind::Ref { name: ["op", "slice"].into() }.to_expr(),
-                ),
-                args: Arc::from_iter([(None, a), (None, start), (None, end)]),
+            Either::Left((start, end)) => ExprKind::ArraySlice {
+                source: Arc::new(a),
+                start: start.map(Arc::new),
+                end: end.map(Arc::new),
             }
             .to_expr(),
-            Either::Right(e) => ExprKind::Apply {
-                function: Arc::new(
-                    ExprKind::Ref { name: ["op", "index"].into() }.to_expr(),
-                ),
-                args: Arc::from_iter([(None, a), (None, e)]),
+            Either::Right(i) => {
+                ExprKind::ArrayRef { source: Arc::new(a), i: Arc::new(i) }.to_expr()
             }
-            .to_expr(),
         })
 }
 
@@ -1353,7 +1330,7 @@ where
         token('{'),
         sptoken('}'),
         (
-            expr().skip(space()).skip(spstring("with")).skip(space()),
+            ref_pexp().skip(space()).skip(spstring("with")).skip(space()),
             sep_by1((spfname().skip(sptoken(':')), expr()), csep()),
         ),
     )
