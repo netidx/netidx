@@ -384,13 +384,41 @@ where
     )
 }
 
+fn apply_pexp<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        attempt(spaces().with(qop(do_block()))),
+        attempt(spaces().with(qop(reference()))),
+        between(sptoken('('), sptoken(')'), expr()),
+    ))
+}
+
+fn ref_pexp<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        attempt(spaces().with(qop(do_block()))),
+        attempt(spaces().with(qop(reference()))),
+        attempt(spaces().with(qop(apply()))),
+        between(sptoken('('), sptoken(')'), expr()),
+    ))
+    .map(|e| dbg!(e))
+}
+
 fn structref<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (expr().skip(sptoken('.')), spfname()).map(|(source, field)| {
+    (ref_pexp().skip(sptoken('.')), spfname()).map(|(source, field)| {
         ExprKind::StructRef { source: Arc::new(source), field }.to_expr()
     })
 }
@@ -401,7 +429,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (expr().skip(sptoken('.')), int::<_, usize>()).map(|(source, field)| {
+    (ref_pexp().skip(sptoken('.')), int::<_, usize>()).map(|(source, field)| {
         ExprKind::TupleRef { source: Arc::new(source), field }.to_expr()
     })
 }
@@ -413,7 +441,7 @@ where
     I::Range: Range,
 {
     (
-        expr(),
+        ref_pexp(),
         between(
             token('['),
             sptoken(']'),
@@ -477,7 +505,7 @@ where
     I::Range: Range,
 {
     (
-        expr(),
+        apply_pexp(),
         between(
             sptoken('('),
             sptoken(')'),
@@ -866,9 +894,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    modpath()
-        .skip(not_followed_by(token('[')))
-        .map(|name| ExprKind::Ref { name }.to_expr())
+    modpath().map(|name| ExprKind::Ref { name }.to_expr())
 }
 
 fn qop<I, P: Parser<I, Output = Expr>>(p: P) -> impl Parser<I, Output = Expr>
@@ -1391,8 +1417,8 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(spaces().with(module())),
         attempt(spaces().with(qop(do_block()))),
+        attempt(spaces().with(module())),
         attempt(spaces().with(use_module())),
         attempt(spaces().with(typedef())),
         attempt(spaces().with(letbind())),
