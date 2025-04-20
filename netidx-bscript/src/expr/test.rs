@@ -985,6 +985,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::Connect { name: name0, value: value0 },
             ExprKind::Connect { name: name1, value: value1 },
         ) => dbg!(dbg!(name0 == name1) && dbg!(check(value0, value1))),
+        (ExprKind::Qop(e0), ExprKind::Qop(e1)) => check(e0, e1),
         (ExprKind::Ref { name: name0 }, ExprKind::Ref { name: name1 }) => {
             dbg!(name0 == name1)
         }
