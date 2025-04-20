@@ -245,17 +245,14 @@ where
                     }
                     (
                         Some(Expr {
-                            kind: ExprKind::Apply { args: _, function }, ..
+                            kind: ExprKind::StringInterpolate { args: _ }, ..
                         }),
                         s,
                     ) => {
                         argvec.push(s.to_expr());
                         Some(
-                            ExprKind::Apply {
-                                args: Arc::from_iter(
-                                    argvec.clone().into_iter().map(|a| (None, a)),
-                                ),
-                                function,
+                            ExprKind::StringInterpolate {
+                                args: Arc::from_iter(argvec.clone().into_iter()),
                             }
                             .to_expr(),
                         )
@@ -291,9 +288,9 @@ where
                     | (Some(Expr { kind: ExprKind::Select { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::TypeCast { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::TypeDef { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::StringInterpolate { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::ArrayRef { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::ArraySlice { .. }, .. }), _)
+                    | (Some(Expr { kind: ExprKind::Apply { .. }, .. }), _)
                     | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
                         unreachable!()
                     }

@@ -380,9 +380,9 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
     }
 }
 
-struct ArrayRefNode<C: Ctx, E: UserEvent> {
-    source: Cached<C, E>,
-    i: Cached<C, E>,
+pub struct ArrayRefNode<C: Ctx, E: UserEvent> {
+    pub source: Cached<C, E>,
+    pub i: Cached<C, E>,
 }
 
 impl<C: Ctx, E: UserEvent> Default for ArrayRefNode<C, E> {
@@ -440,10 +440,10 @@ impl<C: Ctx, E: UserEvent> ArrayRefNode<C, E> {
     }
 }
 
-struct ArraySliceNode<C: Ctx, E: UserEvent> {
-    source: Cached<C, E>,
-    start: Option<Cached<C, E>>,
-    end: Option<Cached<C, E>>,
+pub struct ArraySliceNode<C: Ctx, E: UserEvent> {
+    pub source: Cached<C, E>,
+    pub start: Option<Cached<C, E>>,
+    pub end: Option<Cached<C, E>>,
 }
 
 impl<C: Ctx, E: UserEvent> Default for ArraySliceNode<C, E> {
