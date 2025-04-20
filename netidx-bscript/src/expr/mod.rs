@@ -668,6 +668,9 @@ impl ExprKind {
             | ExprKind::StructRef { .. }
             | ExprKind::TupleRef { .. }
             | ExprKind::TypeDef { .. }
+            | ExprKind::ArrayRef { .. }
+            | ExprKind::ArraySlice { .. }
+            | ExprKind::StringInterpolate { .. }
             | ExprKind::Module { name: _, export: _, value: None } => {
                 if newline {
                     push_indent(indent, buf);
@@ -759,55 +762,51 @@ impl ExprKind {
                 kill_newline!(buf);
                 writeln!(buf, "?")
             }
-            ExprKind::Apply { function, args } => match &function.kind {
-                ExprKind::Ref { name }
-                    if name == &["str", "concat"]
-                        || name == &["op", "index"]
-                        || name == &["op", "slice"] =>
-                {
-                    try_single_line!(false);
-                    Ok(())
-                }
-                function => {
-                    try_single_line!(true);
-                    function.pretty_print(indent, limit, true, buf)?;
-                    kill_newline!(buf);
-                    writeln!(buf, "(")?;
-                    for i in 0..args.len() {
-                        match &args[i].0 {
-                            None => args[i].1.kind.pretty_print(
-                                indent + 2,
-                                limit,
-                                true,
-                                buf,
-                            )?,
-                            Some(name) => match &args[i].1.kind {
-                                ExprKind::Ref { name: n }
-                                    if Path::dirname(&n.0).is_none()
-                                        && Path::basename(&n.0)
-                                            == Some(name.as_str()) =>
-                                {
-                                    writeln!(buf, "#{name}")?
-                                }
-                                _ => {
-                                    write!(buf, "#{name}: ")?;
-                                    args[i].1.kind.pretty_print(
-                                        indent + 2,
-                                        limit,
-                                        false,
-                                        buf,
-                                    )?
-                                }
-                            },
-                        }
-                        if i < args.len() - 1 {
-                            kill_newline!(buf);
-                            writeln!(buf, ",")?
-                        }
+            ExprKind::Apply { function, args } => {
+                try_single_line!(true);
+                match &function.kind {
+                    ExprKind::Ref { .. } | ExprKind::Do { .. } => {
+                        function.kind.pretty_print(indent, limit, true, buf)?
                     }
-                    writeln!(buf, ")")
+                    e => {
+                        write!(buf, "(")?;
+                        e.pretty_print(indent, limit, true, buf)?;
+                        kill_newline!(buf);
+                        write!(buf, ")")?;
+                    }
                 }
-            },
+                kill_newline!(buf);
+                writeln!(buf, "(")?;
+                for i in 0..args.len() {
+                    match &args[i].0 {
+                        None => {
+                            args[i].1.kind.pretty_print(indent + 2, limit, true, buf)?
+                        }
+                        Some(name) => match &args[i].1.kind {
+                            ExprKind::Ref { name: n }
+                                if Path::dirname(&n.0).is_none()
+                                    && Path::basename(&n.0) == Some(name.as_str()) =>
+                            {
+                                writeln!(buf, "#{name}")?
+                            }
+                            _ => {
+                                write!(buf, "#{name}: ")?;
+                                args[i].1.kind.pretty_print(
+                                    indent + 2,
+                                    limit,
+                                    false,
+                                    buf,
+                                )?
+                            }
+                        },
+                    }
+                    if i < args.len() - 1 {
+                        kill_newline!(buf);
+                        writeln!(buf, ",")?
+                    }
+                }
+                writeln!(buf, ")")
+            }
             ExprKind::Lambda { args, vargs, rtype, constraints, body } => {
                 try_single_line!(true);
                 for (i, (tvar, typ)) in constraints.iter().enumerate() {
@@ -1072,67 +1071,72 @@ impl fmt::Display for ExprKind {
                 write!(f, " }}")
             }
             ExprKind::Qop(e) => write!(f, "{}?", e),
-            ExprKind::Apply { args, function } => match &function.kind {
-                ExprKind::Ref { name }
-                    if name == &["str", "concat"] && args.len() > 0 =>
-                {
-                    write!(f, "\"")?;
-                    for s in args.iter() {
-                        match &s.1.kind {
-                            ExprKind::Constant(Value::String(s)) if s.len() > 0 => {
-                                let es = utils::escape(&*s, '\\', &parser::BSCRIPT_ESC);
-                                write!(f, "{es}",)?;
-                            }
-                            s => {
-                                write!(f, "[{s}]")?;
-                            }
+            ExprKind::StringInterpolate { args } => {
+                write!(f, "\"")?;
+                for s in args.iter() {
+                    match &s.kind {
+                        ExprKind::Constant(Value::String(s)) if s.len() > 0 => {
+                            let es = utils::escape(&*s, '\\', &parser::BSCRIPT_ESC);
+                            write!(f, "{es}",)?;
+                        }
+                        s => {
+                            write!(f, "[{s}]")?;
                         }
                     }
-                    write!(f, "\"")
                 }
-                ExprKind::Ref { name } if name == &["op", "index"] && args.len() == 2 => {
-                    write!(f, "{}[{}]", &args[0].1, &args[1].1)
+                write!(f, "\"")
+            }
+            ExprKind::ArrayRef { source, i } => match &source.kind {
+                ExprKind::Ref { .. } | ExprKind::Do { .. } | ExprKind::Apply { .. } => {
+                    write!(f, "{}[{}]", source, i)
                 }
-                ExprKind::Ref { name } if name == &["op", "slice"] && args.len() == 3 => {
-                    let s = match &args[1].1.kind {
-                        ExprKind::Constant(Value::Null) => "",
-                        e => &format_compact!("{e}"),
-                    };
-                    let e = match &args[2].1.kind {
-                        ExprKind::Constant(Value::Null) => "",
-                        e => &format_compact!("{e}"),
-                    };
-                    write!(f, "{}[{}..{}]", &args[0].1, s, e)
-                }
-                function => {
-                    match function {
-                        ExprKind::Ref { name: _ } | ExprKind::Do { exprs: _ } => {
-                            write!(f, "{function}")?
-                        }
-                        function => write!(f, "({function})")?,
-                    }
-                    write!(f, "(")?;
-                    for i in 0..args.len() {
-                        match &args[i].0 {
-                            None => write!(f, "{}", &args[i].1)?,
-                            Some(name) => match &args[i].1.kind {
-                                ExprKind::Ref { name: n }
-                                    if Path::dirname(&n.0).is_none()
-                                        && Path::basename(&n.0)
-                                            == Some(name.as_str()) =>
-                                {
-                                    write!(f, "#{name}")?
-                                }
-                                _ => write!(f, "#{name}: {}", &args[i].1)?,
-                            },
-                        }
-                        if i < args.len() - 1 {
-                            write!(f, ", ")?
-                        }
-                    }
-                    write!(f, ")")
-                }
+                _ => write!(f, "({})[{}]", &source, &i),
             },
+            ExprKind::ArraySlice { source, start, end } => {
+                let s = match start.as_ref() {
+                    None => "",
+                    Some(e) => &format_compact!("{e}"),
+                };
+                let e = match &end.as_ref() {
+                    None => "",
+                    Some(e) => &format_compact!("{e}"),
+                };
+                match &source.kind {
+                    ExprKind::Ref { .. }
+                    | ExprKind::Do { .. }
+                    | ExprKind::Apply { .. } => {
+                        write!(f, "{}[{}..{}]", source, s, e)
+                    }
+                    _ => write!(f, "({})[{}..{}]", source, s, e),
+                }
+            }
+            ExprKind::Apply { args, function } => {
+                match &function.kind {
+                    ExprKind::Ref { name: _ } | ExprKind::Do { exprs: _ } => {
+                        write!(f, "{function}")?
+                    }
+                    function => write!(f, "({function})")?,
+                }
+                write!(f, "(")?;
+                for i in 0..args.len() {
+                    match &args[i].0 {
+                        None => write!(f, "{}", &args[i].1)?,
+                        Some(name) => match &args[i].1.kind {
+                            ExprKind::Ref { name: n }
+                                if Path::dirname(&n.0).is_none()
+                                    && Path::basename(&n.0) == Some(name.as_str()) =>
+                            {
+                                write!(f, "#{name}")?
+                            }
+                            _ => write!(f, "#{name}: {}", &args[i].1)?,
+                        },
+                    }
+                    if i < args.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                write!(f, ")")
+            }
             ExprKind::Select { arg, arms } => {
                 write!(f, "select {arg} {{")?;
                 for (i, (pat, rhs)) in arms.iter().enumerate() {
@@ -1285,8 +1289,24 @@ impl Expr {
             ExprKind::Any { args }
             | ExprKind::Array { args }
             | ExprKind::Tuple { args }
-            | ExprKind::Variant { args, .. } => {
+            | ExprKind::Variant { args, .. }
+            | ExprKind::StringInterpolate { args } => {
                 args.iter().fold(init, |init, e| e.fold(init, f))
+            }
+            ExprKind::ArrayRef { source, i } => {
+                let init = source.fold(init, f);
+                i.fold(init, f)
+            }
+            ExprKind::ArraySlice { source, start, end } => {
+                let init = source.fold(init, f);
+                let init = match start {
+                    None => init,
+                    Some(e) => e.fold(init, f),
+                };
+                match end {
+                    None => init,
+                    Some(e) => e.fold(init, f),
+                }
             }
             ExprKind::Struct { args } => {
                 args.iter().fold(init, |init, (_, e)| e.fold(init, f))
@@ -1473,7 +1493,7 @@ impl Expr {
                 Ok(Expr {
                     id: self.id,
                     kind: ExprKind::StructWith {
-                        source,
+                        source: Arc::new(source.resolve_modules(scope, resolvers).await?),
                         replace: Arc::from(subtuples!(replace)),
                     },
                 })
@@ -1516,9 +1536,30 @@ impl Expr {
             ExprKind::Any { args } => only_args!(Any, args),
             ExprKind::Array { args } => only_args!(Array, args),
             ExprKind::Tuple { args } => only_args!(Tuple, args),
+            ExprKind::StringInterpolate { args } => only_args!(StringInterpolate, args),
             ExprKind::Struct { args } => Box::pin(async move {
                 let args = Arc::from(subtuples!(args));
                 Ok(Expr { id: self.id, kind: ExprKind::Struct { args } })
+            }),
+            ExprKind::ArrayRef { source, i } => Box::pin(async move {
+                let source = Arc::new(source.resolve_modules(scope, resolvers).await?);
+                let i = Arc::new(i.resolve_modules(scope, resolvers).await?);
+                Ok(Expr { id: self.id, kind: ExprKind::ArrayRef { source, i } })
+            }),
+            ExprKind::ArraySlice { source, start, end } => Box::pin(async move {
+                let source = Arc::new(source.resolve_modules(scope, resolvers).await?);
+                let start = match start {
+                    None => None,
+                    Some(e) => Some(Arc::new(e.resolve_modules(scope, resolvers).await?)),
+                };
+                let end = match end {
+                    None => None,
+                    Some(e) => Some(Arc::new(e.resolve_modules(scope, resolvers).await?)),
+                };
+                Ok(Expr {
+                    id: self.id,
+                    kind: ExprKind::ArraySlice { source, start, end },
+                })
             }),
             ExprKind::Variant { tag, args } => Box::pin(async move {
                 let args = Arc::from(subexprs!(args));

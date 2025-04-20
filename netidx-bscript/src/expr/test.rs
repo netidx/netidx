@@ -369,44 +369,25 @@ macro_rules! qop {
             ExprKind::Do { .. }
             | ExprKind::Select { .. }
             | ExprKind::TypeCast { .. }
-            | ExprKind::Ref { .. } => ExprKind::Apply {
-                function: Arc::new(
-                    ExprKind::Ref { name: ["op", "question"].into() }.to_expr(),
-                ),
-                args: Arc::from_iter([(None, e)]),
-            }
-            .to_expr(),
-            ExprKind::Apply { function, .. } => match &function.kind {
-                ExprKind::Ref { name }
-                    if name == &["op", "question"] || name == &["str", "concat"] =>
-                {
-                    e
-                }
-                _ => ExprKind::Apply {
-                    function: Arc::new(
-                        ExprKind::Ref { name: ["op", "question"].into() }.to_expr(),
-                    ),
-                    args: Arc::from_iter([(None, e)]),
-                }
-                .to_expr(),
-            },
+            | ExprKind::Ref { .. }
+            | ExprKind::Any { .. }
+            | ExprKind::Apply { .. }
+            | ExprKind::ArrayRef { .. }
+            | ExprKind::TupleRef { .. }
+            | ExprKind::StructRef { .. } => ExprKind::Qop(Arc::new(e)).to_expr(),
             _ => e,
         })
     };
 }
 
-macro_rules! slice {
+macro_rules! arrayslice {
     ($inner:expr) => {
-        (modpath(), option::of($inner), option::of($inner)).prop_map(
-            |(name, start, end)| {
-                let a = ExprKind::Ref { name }.to_expr();
-                let start = start.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
-                let end = end.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
-                ExprKind::Apply {
-                    function: Arc::new(
-                        ExprKind::Ref { name: ["op", "slice"].into() }.to_expr(),
-                    ),
-                    args: Arc::from_iter([(None, a), (None, start), (None, end)]),
+        ($inner, option::of($inner), option::of($inner)).prop_map(
+            |(source, start, end)| {
+                ExprKind::ArraySlice {
+                    source: Arc::new(source),
+                    start: start.map(Arc::new),
+                    end: end.map(Arc::new),
                 }
                 .to_expr()
             },
@@ -518,17 +499,10 @@ macro_rules! connect {
     };
 }
 
-macro_rules! arrayidx {
+macro_rules! arrayref {
     ($inner:expr) => {
-        (modpath(), $inner).prop_map(|(name, e)| {
-            let a = ExprKind::Ref { name }.to_expr();
-            ExprKind::Apply {
-                function: Arc::new(
-                    ExprKind::Ref { name: ["op", "index"].into() }.to_expr(),
-                ),
-                args: Arc::from_iter([(None, a), (None, e)]),
-            }
-            .to_expr()
+        ($inner, $inner).prop_map(|(source, i)| {
+            ExprKind::ArrayRef { source: Arc::new(source), i: Arc::new(i) }.to_expr()
         })
     };
 }
@@ -586,7 +560,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
             any!(inner.clone()),
             apply!(inner.clone(), false),
             typecast!(inner.clone()),
-            arrayidx!(inner.clone()),
+            arrayref!(inner.clone()),
             structref!(inner.clone()),
             tupleref!(inner.clone()),
             binop!(inner.clone(), Eq),
@@ -610,9 +584,9 @@ fn expr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
     leaf.prop_recursive(10, 100, 10, |inner| {
         prop_oneof![
-            arrayidx!(inner.clone()),
+            arrayref!(inner.clone()),
+            arrayslice!(inner.clone()),
             qop!(inner.clone()),
-            slice!(inner.clone()),
             arithexpr(),
             structref!(inner.clone()),
             tupleref!(inner.clone()),
@@ -824,6 +798,14 @@ fn check_args(args0: &[Arg<Refs>], args1: &[Arg<Refs>]) -> bool {
     })
 }
 
+fn check_opt(s0: &Option<Arc<Expr>>, s1: &Option<Arc<Expr>>) -> bool {
+    match (s0, s1) {
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+        (Some(e0), Some(e1)) => check(e0, e1),
+    }
+}
+
 fn check(s0: &Expr, s1: &Expr) -> bool {
     match (&s0.kind, &s1.kind) {
         (ExprKind::Constant(v0), ExprKind::Constant(v1)) => match (v0, v1) {
@@ -870,6 +852,14 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                     .all(|((n0, e0), (n1, e1))| n0 == n1 && check(e0, e1))
         }
         (
+            ExprKind::ArrayRef { source: s0, i: i0 },
+            ExprKind::ArrayRef { source: s1, i: i1 },
+        ) => check(s0, s1) && check(i0, i1),
+        (
+            ExprKind::ArraySlice { source: s0, start: st0, end: e0 },
+            ExprKind::ArraySlice { source: s1, start: st1, end: e1 },
+        ) => check(s0, s1) && check_opt(st0, st1) && check_opt(e0, e1),
+        (
             ExprKind::TupleRef { source: s0, field: f0 },
             ExprKind::TupleRef { source: s1, field: f1 },
         ) => check(s0, s1) && f0 == f1,
@@ -878,24 +868,20 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::StructRef { source: s1, field: f1 },
         ) => check(s0, s1) && f0 == f1,
         (
-            ExprKind::Apply { args: srs0, function },
+            ExprKind::StringInterpolate { args: a0 },
             ExprKind::Constant(Value::String(c1)),
-        ) if &function.kind == &ExprKind::Ref { name: ["str", "concat"].into() } => {
-            match &acc_strings(srs0.iter().map(|(_, e)| e))[..] {
-                [Expr { kind: ExprKind::Constant(Value::String(c0)), .. }] => {
-                    dbg!(c0 == c1)
-                }
-                _ => false,
+        ) => match &acc_strings(a0.iter())[..] {
+            [Expr { kind: ExprKind::Constant(Value::String(c0)), .. }] => {
+                dbg!(c0 == c1)
             }
-        }
+            _ => false,
+        },
         (
-            ExprKind::Apply { args: srs0, function: fn0 },
-            ExprKind::Apply { args: srs1, function: fn1 },
-        ) if check(fn0, fn1)
-            && &fn0.kind == &ExprKind::Ref { name: ["str", "concat"].into() } =>
-        {
-            let srs0 = acc_strings(srs0.iter().map(|a| &a.1));
-            let srs1 = acc_strings(srs1.iter().map(|a| &a.1));
+            ExprKind::StringInterpolate { args: a0 },
+            ExprKind::StringInterpolate { args: a1 },
+        ) => {
+            let srs0 = acc_strings(a0.iter());
+            let srs1 = acc_strings(a1.iter());
             dbg!(srs0
                 .iter()
                 .zip(srs1.iter())
