@@ -1399,6 +1399,7 @@ where
         attempt(spaces().with(connect())),
         attempt(spaces().with(qop(any()))),
         attempt(spaces().with(qop(apply()))),
+        attempt(spaces().with(interpolated())),
     ))
 }
 

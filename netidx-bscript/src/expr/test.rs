@@ -336,14 +336,20 @@ fn typedef() -> impl Strategy<Value = Expr> {
     (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef { name, typ }.to_expr())
 }
 
-fn structref() -> impl Strategy<Value = Expr> {
-    (modpath(), random_fname())
-        .prop_map(|(name, field)| ExprKind::StructRef { name, field }.to_expr())
+macro_rules! structref {
+    ($inner:expr) => {
+        ($inner, random_fname()).prop_map(|(source, field)| {
+            ExprKind::StructRef { source: Arc::new(source), field }.to_expr()
+        })
+    };
 }
 
-fn tupleref() -> impl Strategy<Value = Expr> {
-    (modpath(), any::<usize>())
-        .prop_map(|(name, field)| ExprKind::TupleRef { name, field }.to_expr())
+macro_rules! tupleref {
+    ($inner:expr) => {
+        ($inner, any::<usize>()).prop_map(|(source, field)| {
+            ExprKind::TupleRef { source: Arc::new(source), field }.to_expr()
+        })
+    };
 }
 
 macro_rules! bind {
@@ -364,19 +370,26 @@ macro_rules! qop {
             | ExprKind::Select { .. }
             | ExprKind::TypeCast { .. }
             | ExprKind::Ref { .. } => ExprKind::Apply {
-                function: ApplyKind::Ref { name: ["op", "question"].into() },
+                function: Arc::new(
+                    ExprKind::Ref { name: ["op", "question"].into() }.to_expr(),
+                ),
                 args: Arc::from_iter([(None, e)]),
             }
             .to_expr(),
-            ExprKind::Apply { function: ApplyKind::Ref { name }, .. }
-                if name != &["op", "question"] && name != &["str", "concat"] =>
-            {
-                ExprKind::Apply {
-                    function: ApplyKind::Ref { name: ["op", "question"].into() },
+            ExprKind::Apply { function, .. } => match &function.kind {
+                ExprKind::Ref { name }
+                    if name == &["op", "question"] || name == &["str", "concat"] =>
+                {
+                    e
+                }
+                _ => ExprKind::Apply {
+                    function: Arc::new(
+                        ExprKind::Ref { name: ["op", "question"].into() }.to_expr(),
+                    ),
                     args: Arc::from_iter([(None, e)]),
                 }
-                .to_expr()
-            }
+                .to_expr(),
+            },
             _ => e,
         })
     };
@@ -390,7 +403,9 @@ macro_rules! slice {
                 let start = start.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
                 let end = end.unwrap_or(ExprKind::Constant(Value::Null).to_expr());
                 ExprKind::Apply {
-                    function: ApplyKind::Ref { name: ["op", "slice"].into() },
+                    function: Arc::new(
+                        ExprKind::Ref { name: ["op", "slice"].into() }.to_expr(),
+                    ),
                     args: Arc::from_iter([(None, a), (None, start), (None, end)]),
                 }
                 .to_expr()
@@ -401,24 +416,12 @@ macro_rules! slice {
 
 macro_rules! apply {
     ($inner:expr, $concat:literal) => {
-        (collection::vec((option::of(random_fname()), $inner), (0, 10)),
-         modpath(),
-         option::of(random_fname()),
-         option::of(any::<usize>()))
-            .prop_map(|(mut s, f, fld_s, fld_t)| {
-                let f = if $concat && f == ModPath::from(["str", "concat"]) {
-                    ["str", "concat1"].into() // str::concat is illegal at the module level
-                } else {
-                    f
-                };
-                let f = match (fld_s, fld_t) {
-                    (Some(fld), _) => ApplyKind::StructRef { name: f, field: fld },
-                    (_, Some(fld)) => ApplyKind::TupleRef { name: f, field: fld },
-                    (None, None) => ApplyKind::Ref { name: f }
-                };
-                s.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
-                ExprKind::Apply { function: f, args: Arc::from(s) }.to_expr()
-            })
+        ($inner, collection::vec((option::of(random_fname()), $inner), (0, 10))).prop_map(
+            |(f, mut args)| {
+                args.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
+                ExprKind::Apply { function: Arc::new(f), args: Arc::from(args) }.to_expr()
+            },
+        )
     };
 }
 
@@ -520,7 +523,9 @@ macro_rules! arrayidx {
         (modpath(), $inner).prop_map(|(name, e)| {
             let a = ExprKind::Ref { name }.to_expr();
             ExprKind::Apply {
-                function: ApplyKind::Ref { name: ["op", "index"].into() },
+                function: Arc::new(
+                    ExprKind::Ref { name: ["op", "index"].into() }.to_expr(),
+                ),
                 args: Arc::from_iter([(None, a), (None, e)]),
             }
             .to_expr()
@@ -560,18 +565,20 @@ macro_rules! binop {
 
 macro_rules! structwith {
     ($inner:expr) => {
-        (modpath(), collection::vec((random_fname(), $inner), (1, 10))).prop_map(
-            |(name, mut replace)| {
+        ($inner, collection::vec((random_fname(), $inner), (1, 10))).prop_map(
+            |(source, mut replace)| {
+                let source = Arc::new(source);
                 replace.sort_by_key(|(f, _)| f.clone());
                 replace.dedup_by_key(|(f, _)| f.clone());
-                ExprKind::StructWith { name, replace: Arc::from_iter(replace) }.to_expr()
+                ExprKind::StructWith { source, replace: Arc::from_iter(replace) }
+                    .to_expr()
             },
         )
     };
 }
 
 fn arithexpr() -> impl Strategy<Value = Expr> {
-    let leaf = prop_oneof![constant(), reference(), structref(), tupleref()];
+    let leaf = prop_oneof![constant(), reference()];
     leaf.prop_recursive(5, 25, 5, |inner| {
         prop_oneof![
             select!(inner.clone()),
@@ -580,6 +587,8 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
             apply!(inner.clone(), false),
             typecast!(inner.clone()),
             arrayidx!(inner.clone()),
+            structref!(inner.clone()),
+            tupleref!(inner.clone()),
             binop!(inner.clone(), Eq),
             binop!(inner.clone(), Ne),
             binop!(inner.clone(), Lt),
@@ -598,13 +607,15 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
 }
 
 fn expr() -> impl Strategy<Value = Expr> {
-    let leaf = prop_oneof![constant(), reference(), structref(), tupleref()];
+    let leaf = prop_oneof![constant(), reference()];
     leaf.prop_recursive(10, 100, 10, |inner| {
         prop_oneof![
             arrayidx!(inner.clone()),
             qop!(inner.clone()),
             slice!(inner.clone()),
             arithexpr(),
+            structref!(inner.clone()),
+            tupleref!(inner.clone()),
             any!(inner.clone()),
             apply!(inner.clone(), false),
             typecast!(inner.clone()),
@@ -848,10 +859,10 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                     .all(|((n0, e0), (n1, e1))| n0 == n1 && check(e0, e1))
         }
         (
-            ExprKind::StructWith { name: n0, replace: r0 },
-            ExprKind::StructWith { name: n1, replace: r1 },
+            ExprKind::StructWith { source: s0, replace: r0 },
+            ExprKind::StructWith { source: s1, replace: r1 },
         ) => {
-            n0 == n1
+            check(s0, s1)
                 && r0.len() == r1.len()
                 && r0
                     .iter()
@@ -859,26 +870,30 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
                     .all(|((n0, e0), (n1, e1))| n0 == n1 && check(e0, e1))
         }
         (
-            ExprKind::TupleRef { name: n0, field: f0 },
-            ExprKind::TupleRef { name: n1, field: f1 },
-        ) => n0 == n1 && f0 == f1,
+            ExprKind::TupleRef { source: s0, field: f0 },
+            ExprKind::TupleRef { source: s1, field: f1 },
+        ) => check(s0, s1) && f0 == f1,
         (
-            ExprKind::StructRef { name: n0, field: f0 },
-            ExprKind::StructRef { name: n1, field: f1 },
-        ) => n0 == n1 && f0 == f1,
+            ExprKind::StructRef { source: s0, field: f0 },
+            ExprKind::StructRef { source: s1, field: f1 },
+        ) => check(s0, s1) && f0 == f1,
         (
-            ExprKind::Apply { args: srs0, function: ApplyKind::Ref { name: fn0 } },
+            ExprKind::Apply { args: srs0, function },
             ExprKind::Constant(Value::String(c1)),
-        ) if fn0 == &["str", "concat"] => match &acc_strings(srs0.iter().map(|(_, e)| e))
-            [..]
-        {
-            [Expr { kind: ExprKind::Constant(Value::String(c0)), .. }] => dbg!(c0 == c1),
-            _ => false,
-        },
+        ) if &function.kind == &ExprKind::Ref { name: ["str", "concat"].into() } => {
+            match &acc_strings(srs0.iter().map(|(_, e)| e))[..] {
+                [Expr { kind: ExprKind::Constant(Value::String(c0)), .. }] => {
+                    dbg!(c0 == c1)
+                }
+                _ => false,
+            }
+        }
         (
-            ExprKind::Apply { args: srs0, function: ApplyKind::Ref { name: fn0 } },
-            ExprKind::Apply { args: srs1, function: ApplyKind::Ref { name: fn1 } },
-        ) if fn0 == fn1 && fn0 == &["str", "concat"] => {
+            ExprKind::Apply { args: srs0, function: fn0 },
+            ExprKind::Apply { args: srs1, function: fn1 },
+        ) if check(fn0, fn1)
+            && &fn0.kind == &ExprKind::Ref { name: ["str", "concat"].into() } =>
+        {
             let srs0 = acc_strings(srs0.iter().map(|a| &a.1));
             let srs1 = acc_strings(srs1.iter().map(|a| &a.1));
             dbg!(srs0
@@ -889,7 +904,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (
             ExprKind::Apply { args: srs0, function: f0 },
             ExprKind::Apply { args: srs1, function: f1 },
-        ) if f0 == f1 && srs0.len() == srs1.len() => {
+        ) if check(f0, f1) && srs0.len() == srs1.len() => {
             dbg!(srs0
                 .iter()
                 .zip(srs1.iter())
