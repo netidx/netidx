@@ -858,7 +858,9 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    netidx_value(&BSCRIPT_ESC).map(|v| ExprKind::Constant(v).to_expr())
+    netidx_value(&BSCRIPT_ESC)
+        .skip(not_followed_by(token('_')))
+        .map(|v| ExprKind::Constant(v).to_expr())
 }
 
 fn reference<I>() -> impl Parser<I, Output = Expr>
