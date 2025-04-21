@@ -684,7 +684,12 @@ impl ExprKind {
             }
             ExprKind::StructWith { source, replace } => {
                 try_single_line!(true);
-                writeln!(buf, "{{ {source} with")?;
+                match &source.kind {
+                    ExprKind::Ref { .. }
+                    | ExprKind::Do { .. }
+                    | ExprKind::Apply { .. } => writeln!(buf, "{{ {source} with")?,
+                    _ => writeln!(buf, "{{ ({source}) with")?,
+                }
                 let indent = indent + 2;
                 for (i, (name, e)) in replace.iter().enumerate() {
                     push_indent(indent, buf);
@@ -971,7 +976,12 @@ impl fmt::Display for ExprKind {
                 write!(f, "{}let {pattern}{} = {value}", exp(*export), typ!(typ))
             }
             ExprKind::StructWith { source, replace } => {
-                write!(f, "{{ {source} with ")?;
+                match &source.kind {
+                    ExprKind::Ref { .. }
+                    | ExprKind::Do { .. }
+                    | ExprKind::Apply { .. } => write!(f, "{{ {source} with ")?,
+                    _ => write!(f, "{{ ({source}) with ")?,
+                }
                 for (i, (name, e)) in replace.iter().enumerate() {
                     write!(f, "{name}: {e}")?;
                     if i < replace.len() - 1 {

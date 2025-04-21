@@ -1266,6 +1266,6 @@ fn tupleref() {
 
 #[test]
 fn prop0() {
-    let s = "`A";
-    dbg!(parse_structure_pattern(s).unwrap());
+    let s = "{ (u32:0) with a: u32:0 }";
+    dbg!(parse_expr(s).unwrap());
 }

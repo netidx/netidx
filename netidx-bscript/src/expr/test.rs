@@ -204,7 +204,7 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
         }),
         typath().prop_map(Type::Ref),
     ];
-    leaf.prop_recursive(5, 25, 5, |inner| {
+    leaf.prop_recursive(5, 25, 10, |inner| {
         prop_oneof![
             collection::vec(inner.clone(), (2, 20)).prop_map(|t| Type::Set(Arc::from(t))),
             collection::vec(inner.clone(), (2, 20))
@@ -553,7 +553,7 @@ macro_rules! structwith {
 
 fn arithexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
-    leaf.prop_recursive(5, 25, 5, |inner| {
+    leaf.prop_recursive(5, 25, 10, |inner| {
         prop_oneof![
             select!(inner.clone()),
             do_block!(inner.clone()),
@@ -582,7 +582,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
 
 fn expr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
-    leaf.prop_recursive(10, 100, 10, |inner| {
+    leaf.prop_recursive(5, 100, 25, |inner| {
         prop_oneof![
             arrayref!(inner.clone()),
             arrayslice!(inner.clone()),
@@ -617,7 +617,7 @@ fn modexpr() -> impl Strategy<Value = Expr> {
         bind!(expr()),
         connect!(expr()),
     ];
-    leaf.prop_recursive(10, 100, 10, |inner| {
+    leaf.prop_recursive(5, 100, 25, |inner| {
         prop_oneof![
             (any::<bool>(), random_fname(), collection::vec(inner.clone(), (0, 10)))
                 .prop_map(|(export, name, body)| ExprKind::Module {
