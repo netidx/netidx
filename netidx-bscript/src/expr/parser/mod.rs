@@ -319,7 +319,7 @@ where
         spstring("mod").with(space()).with(spfname()),
         choice((
             attempt(sptoken(';')).map(|_| None),
-            between(sptoken('{'), sptoken('}'), many(modexpr()))
+            between(sptoken('{'), sptoken('}'), sep_by(modexpr(), attempt(sptoken(';'))))
                 .map(|m: Vec<Expr>| Some(Arc::from(m))),
         )),
     )
@@ -890,16 +890,16 @@ where
     I::Range: Range,
 {
     choice((
+        attempt(spaces().with(qop(apply()))),
+        attempt(spaces().with(qop(arrayref()))),
+        attempt(spaces().with(qop(tupleref()))),
+        attempt(spaces().with(qop(structref()))),
         attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(qop(select()))),
         attempt(spaces().with(qop(cast()))),
         attempt(spaces().with(qop(any()))),
-        attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
-        attempt(spaces().with(qop(arrayref()))),
-        attempt(spaces().with(qop(tupleref()))),
-        attempt(spaces().with(qop(structref()))),
         attempt(spaces().with(qop(reference()))),
         attempt(
             sptoken('!')
@@ -1359,6 +1359,10 @@ where
         attempt(spaces().with(structure())),
         attempt(spaces().with(variant())),
         attempt(spaces().with(structwith())),
+        attempt(spaces().with(qop(apply()))),
+        attempt(spaces().with(qop(arrayref()))),
+        attempt(spaces().with(qop(tupleref()))),
+        attempt(spaces().with(qop(structref()))),
         attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(lambda())),
         attempt(spaces().with(letbind())),
@@ -1366,12 +1370,8 @@ where
         attempt(spaces().with(qop(select()))),
         attempt(spaces().with(qop(cast()))),
         attempt(spaces().with(qop(any()))),
-        attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
-        attempt(spaces().with(qop(arrayref()))),
-        attempt(spaces().with(qop(tupleref()))),
-        attempt(spaces().with(qop(structref()))),
         attempt(spaces().with(qop(reference()))),
     ))
 }
@@ -1391,6 +1391,7 @@ where
     I::Range: Range,
 {
     choice((
+        attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(module())),
         attempt(spaces().with(use_module())),
@@ -1398,7 +1399,6 @@ where
         attempt(spaces().with(letbind())),
         attempt(spaces().with(connect())),
         attempt(spaces().with(qop(any()))),
-        attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(interpolated())),
     ))
 }

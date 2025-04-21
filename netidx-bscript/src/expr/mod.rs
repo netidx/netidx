@@ -705,7 +705,7 @@ impl ExprKind {
             ExprKind::Module { name, export, value: Some(exprs) } => {
                 try_single_line!(true);
                 write!(buf, "{}mod {name} ", exp(*export))?;
-                pretty_print_exprs(indent, limit, buf, exprs, "{", "}", "")
+                pretty_print_exprs(indent, limit, buf, exprs, "{", "}", ";")
             }
             ExprKind::Do { exprs } => {
                 try_single_line!(true);
@@ -1013,7 +1013,7 @@ impl fmt::Display for ExprKind {
                 write!(f, "{}mod {name}", exp(*export))?;
                 match value {
                     None => write!(f, ";"),
-                    Some(exprs) => print_exprs(f, &**exprs, "{", "}", " "),
+                    Some(exprs) => print_exprs(f, &**exprs, "{", "}", "; "),
                 }
             }
             ExprKind::TypeCast { expr, typ } => write!(f, "cast<{typ}>({expr})"),
