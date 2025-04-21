@@ -208,7 +208,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
 
 const MOD: &str = r#"
 pub mod time {
-    pub let after_idle = |timeout, v| 'after_idle
+    pub let after_idle = |timeout, v| 'after_idle;
     pub let timer = |timeout, repeat| 'timer
 }
 "#;

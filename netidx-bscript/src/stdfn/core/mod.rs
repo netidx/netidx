@@ -608,11 +608,11 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Never {
 
 const MOD: &str = r#"
 pub mod core {
-    type Sint = [ i32, z32, i64, z64 ]
-    type Uint = [ u32, v32, u64, v64 ]
-    type Int = [ Sint, Uint ]
-    type Real = [ f32, f64, decimal ]
-    type Number = [ Int, Real ]
+    type Sint = [ i32, z32, i64, z64 ];
+    type Uint = [ u32, v32, u64, v64 ];
+    type Int = [ Sint, Uint ];
+    type Real = [ f32, f64, decimal ];
+    type Number = [ Int, Real ];
 
     type Any = [
         Number,
@@ -624,42 +624,42 @@ pub mod core {
         error,
         array,
         null
-    ]
+    ];
 
     pub mod array {
-        pub let filter = |a, f| 'array_filter
-        pub let filter_map = |a, f| 'array_filter_map
-        pub let map = |a, f| 'array_map
-        pub let flat_map = |a, f| 'array_flat_map
-        pub let fold = |a, init, f| 'array_fold
-        pub let group = |v, f| 'group
-        pub let iter = |a| 'iter
-        pub let len = |a| 'array_len
-        pub let concat = |x, @args| 'array_concat
-        pub let flatten = |a| 'array_flatten
-        pub let find = |a, f| 'array_find
+        pub let filter = |a, f| 'array_filter;
+        pub let filter_map = |a, f| 'array_filter_map;
+        pub let map = |a, f| 'array_map;
+        pub let flat_map = |a, f| 'array_flat_map;
+        pub let fold = |a, init, f| 'array_fold;
+        pub let group = |v, f| 'group;
+        pub let iter = |a| 'iter;
+        pub let len = |a| 'array_len;
+        pub let concat = |x, @args| 'array_concat;
+        pub let flatten = |a| 'array_flatten;
+        pub let find = |a, f| 'array_find;
         pub let find_map = |a, f| 'array_find_map
-    }
+    };
 
-    pub let all = |@args| 'all
-    pub let and = |@args| 'and
-    pub let count = |x| 'count
-    pub let divide = |@args| 'divide
-    pub let filter_err = |e| 'filter_err
-    pub let filter = |v, f| 'filter
-    pub let is_err = |e| 'is_err
-    pub let error = |e| 'error
-    pub let max = |@args| 'max
-    pub let mean = |v, @args| 'mean
-    pub let min = |@args| 'min
-    pub let never = |@args| 'never
-    pub let once = |v| 'once
-    pub let or = |@args| 'or
-    pub let product = |@args| 'product
-    pub let sample = |#trigger, v| 'sample
-    pub let sum = |@args| 'sum
-    pub let uniq = |v| 'uniq
-    pub let queue = |#trigger, v| 'queue
+    pub let all = |@args| 'all;
+    pub let and = |@args| 'and;
+    pub let count = |x| 'count;
+    pub let divide = |@args| 'divide;
+    pub let filter_err = |e| 'filter_err;
+    pub let filter = |v, f| 'filter;
+    pub let is_err = |e| 'is_err;
+    pub let error = |e| 'error;
+    pub let max = |@args| 'max;
+    pub let mean = |v, @args| 'mean;
+    pub let min = |@args| 'min;
+    pub let never = |@args| 'never;
+    pub let once = |v| 'once;
+    pub let or = |@args| 'or;
+    pub let product = |@args| 'product;
+    pub let sample = |#trigger, v| 'sample;
+    pub let sum = |@args| 'sum;
+    pub let uniq = |v| 'uniq;
+    pub let queue = |#trigger, v| 'queue;
 
     pub let errors: error = never()
 }

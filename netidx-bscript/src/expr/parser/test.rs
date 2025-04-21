@@ -2,13 +2,6 @@ use super::*;
 use crate::typ::{Refs, Type};
 use arcstr::literal;
 
-fn parse_expr(s: &str) -> anyhow::Result<Expr> {
-    expr()
-        .easy_parse(position::Stream::new(s))
-        .map(|(r, _)| r)
-        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
-}
-
 #[allow(unused)]
 fn parse_typexpr(s: &str) -> anyhow::Result<Type<Refs>> {
     typexp()
@@ -649,7 +642,7 @@ fn inline_module() {
     }
     .to_expr();
     let s = r#"pub mod foo {
-        pub let z = 42
+        pub let z = 42;
         let m = 42
     }"#;
     assert_eq!(exp, parse(s).unwrap());
@@ -1266,6 +1259,6 @@ fn tupleref() {
 
 #[test]
 fn prop0() {
-    let s = "mod a{let u32:0 = a; ((u32:0)[u32:0])()}";
+    let s = "let a = a()[..]";
     dbg!(parse(s).unwrap());
 }

@@ -393,11 +393,10 @@ where
 {
     choice((
         attempt(spaces().with(qop(do_block()))),
-        attempt(spaces().with(qop(reference()))),
         attempt(spaces().with(qop(apply()))),
+        attempt(spaces().with(qop(reference()))),
         between(sptoken('('), sptoken(')'), expr()),
     ))
-    .map(|e| dbg!(e))
 }
 
 fn structref<I>() -> impl Parser<I, Output = Expr>
@@ -890,10 +889,10 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(qop(arrayref()))),
         attempt(spaces().with(qop(tupleref()))),
         attempt(spaces().with(qop(structref()))),
+        attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(qop(select()))),
         attempt(spaces().with(qop(cast()))),
@@ -1359,10 +1358,10 @@ where
         attempt(spaces().with(structure())),
         attempt(spaces().with(variant())),
         attempt(spaces().with(structwith())),
-        attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(qop(arrayref()))),
         attempt(spaces().with(qop(tupleref()))),
         attempt(spaces().with(qop(structref()))),
+        attempt(spaces().with(qop(apply()))),
         attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(lambda())),
         attempt(spaces().with(letbind())),

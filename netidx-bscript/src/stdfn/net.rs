@@ -461,13 +461,13 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
 
 const MOD: &str = r#"
 pub mod net {
-    type Table = { rows: Array<string>, columns: Array<(string, v64)> }
+    type Table = { rows: Array<string>, columns: Array<(string, v64)> };
 
-    pub let write = |path, value| 'write
-    pub let subscribe = |path| 'subscribe
-    pub let call = |path, args| 'call
-    pub let list = |#update = time::timer(1, true), path| 'list
-    pub let list_table = |#update = time::timer(1, true), path| 'list_table
+    pub let write = |path, value| 'write;
+    pub let subscribe = |path| 'subscribe;
+    pub let call = |path, args| 'call;
+    pub let list = |#update = time::timer(1, true), path| 'list;
+    pub let list_table = |#update = time::timer(1, true), path| 'list_table;
     pub let publish = |#on_write = |v| never(v), path, v| 'publish
 }
 "#;
