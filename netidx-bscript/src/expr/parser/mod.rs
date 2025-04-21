@@ -392,8 +392,8 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(qop(apply()))),
+        attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(qop(reference()))),
         between(sptoken('('), sptoken(')'), expr()),
     ))
@@ -700,7 +700,7 @@ where
             (
                 sptoken('`').with(typname()),
                 optional(attempt(between(
-                    sptoken('('),
+                    token('('),
                     sptoken(')'),
                     sep_by1(typexp(), csep()),
                 ))),
