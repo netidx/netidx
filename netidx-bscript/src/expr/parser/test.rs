@@ -1259,6 +1259,6 @@ fn tupleref() {
 
 #[test]
 fn prop0() {
-    let s = "mod a{any({ {type A = _}() with a: u32:0 })}\n";
-    dbg!(parse(s).unwrap());
+    let s = "select u32:0 {[true_, ..] => u32:0}";
+    dbg!(parse_expr(s).unwrap());
 }

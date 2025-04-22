@@ -1183,7 +1183,8 @@ where
         attempt(tuple_pattern()),
         attempt(struct_pattern()),
         attempt(variant_pattern()),
-        attempt(netidx_value(&VAL_ESC)).map(|v| StructurePattern::Literal(v)),
+        attempt(netidx_value(&VAL_ESC).skip(not_followed_by(token('_'))))
+            .map(|v| StructurePattern::Literal(v)),
         attempt(sptoken('_')).map(|_| StructurePattern::Ignore),
         spfname().map(|name| StructurePattern::Bind(name)),
     ))
