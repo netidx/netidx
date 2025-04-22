@@ -667,7 +667,6 @@ where
 {
     choice((
         attempt(sptoken('_').map(|_| Type::Bottom(PhantomData))),
-        attempt(typeprim()).map(|typ| Type::Primitive(typ.into())),
         attempt(
             between(sptoken('['), sptoken(']'), sep_by(typexp(), csep()))
                 .map(|ts: SmallVec<[Type<Refs>; 16]>| Type::flatten_set(ts)),
@@ -719,6 +718,7 @@ where
         attempt(spstring("Array").with(between(sptoken('<'), sptoken('>'), typexp())))
             .map(|t| Type::Array(Arc::new(t))),
         attempt(sptypath()).map(|n| Type::Ref(n)),
+        attempt(typeprim()).map(|typ| Type::Primitive(typ.into())),
         attempt(tvar()).map(|tv| Type::TVar(tv)),
     ))
 }

@@ -5,6 +5,18 @@ use arcstr::literal;
 #[allow(unused)]
 fn parse_typexpr(s: &str) -> anyhow::Result<Type<Refs>> {
     typexp()
+        .skip(spaces())
+        .skip(eof())
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
+}
+
+#[allow(unused)]
+fn parse_typath(s: &str) -> anyhow::Result<ModPath> {
+    typath()
+        .skip(spaces())
+        .skip(eof())
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
@@ -13,6 +25,8 @@ fn parse_typexpr(s: &str) -> anyhow::Result<Type<Refs>> {
 #[allow(unused)]
 fn parse_structure_pattern(s: &str) -> anyhow::Result<StructurePattern> {
     structure_pattern()
+        .skip(spaces())
+        .skip(eof())
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
@@ -1259,6 +1273,6 @@ fn tupleref() {
 
 #[test]
 fn prop0() {
-    let s = "select u32:0 {[true_, ..] => u32:0}";
-    dbg!(parse_expr(s).unwrap());
+    let s = "mod a{any({type A = `A(array::A)})}";
+    dbg!(parse(s).unwrap());
 }
