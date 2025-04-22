@@ -1080,7 +1080,7 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
 
 proptest! {
     #[test]
-    fn expr_round_trip(s in modexpr()) {
+    fn expr_round_trip0(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(s.to_string());
         let e = dbg!(parse(st.as_str()).unwrap());
@@ -1088,7 +1088,119 @@ proptest! {
     }
 
     #[test]
-    fn expr_pp_round_trip(s in modexpr()) {
+    fn expr_round_trip1(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string());
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_round_trip2(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string());
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_round_trip3(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string());
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_round_trip4(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string());
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_round_trip5(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string());
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_round_trip6(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string());
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_round_trip7(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string());
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_pp_round_trip0(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string_pretty(80));
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_pp_round_trip1(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string_pretty(80));
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_pp_round_trip2(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string_pretty(80));
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_pp_round_trip3(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string_pretty(80));
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_pp_round_trip4(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string_pretty(80));
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_pp_round_trip5(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string_pretty(80));
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_pp_round_trip6(s in modexpr()) {
+        let s = dbg!(s);
+        let st = dbg!(s.to_string_pretty(80));
+        let e = dbg!(parse(st.as_str()).unwrap());
+        assert!(check(&s, &e))
+    }
+
+    #[test]
+    fn expr_pp_round_trip7(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(s.to_string_pretty(80));
         let e = dbg!(parse(st.as_str()).unwrap());
