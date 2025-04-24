@@ -464,7 +464,7 @@ impl BS {
                         }
                     });
                 }
-                let res = n.update(&mut self.ctx, &mut self.event);
+                let res = dbg!(n.update(&mut self.ctx, &mut self.event));
                 for id in clear {
                     self.event.variables.remove(&id);
                 }

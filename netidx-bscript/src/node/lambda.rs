@@ -1,3 +1,4 @@
+use super::genn;
 use crate::{
     env::LambdaDef,
     expr::{Arg, Expr, ExprId, ModPath},
@@ -15,8 +16,6 @@ use std::{
     cell::RefCell, collections::HashMap, marker::PhantomData, mem, sync::Arc as SArc,
 };
 use triomphe::Arc;
-
-use super::gen;
 
 pub(super) struct LambdaCallSite<C: Ctx, E: UserEvent> {
     args: Box<[StructPatternNode]>,
@@ -76,7 +75,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for LambdaCallSite<C, E> {
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        mem::replace(&mut self.body, gen::nop()).delete(ctx)
+        mem::replace(&mut self.body, genn::nop()).delete(ctx)
     }
 }
 

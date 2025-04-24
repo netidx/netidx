@@ -1,7 +1,7 @@
 use crate::{
     deftype, err, errf,
     expr::{Expr, ExprId},
-    node::{gen, Node},
+    node::{genn, Node},
     stdfn::{CachedArgs, CachedVals, EvalCached},
     typ::{FnType, NoRefs},
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
@@ -343,11 +343,11 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
             [arg, fnode] => {
-                let (x, xn) = gen::bind(ctx, scope, "x", arg.typ.clone(), top_id);
+                let (x, xn) = genn::bind(ctx, scope, "x", arg.typ.clone(), top_id);
                 let fid = BindId::new();
-                let fnode = gen::reference(ctx, fid, fnode.typ.clone(), top_id);
+                let fnode = genn::reference(ctx, fid, fnode.typ.clone(), top_id);
                 let typ = TArc::new(typ.clone());
-                let pred = gen::apply(fnode, vec![xn], typ.clone(), top_id);
+                let pred = genn::apply(fnode, vec![xn], typ.clone(), top_id);
                 let queue = VecDeque::new();
                 let out = BindId::new();
                 ctx.user.ref_var(out, top_id);

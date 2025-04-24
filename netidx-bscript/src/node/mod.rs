@@ -661,7 +661,7 @@ pub struct Node<C: Ctx, E: UserEvent> {
 
 impl<C: Ctx, E: UserEvent> Default for Node<C, E> {
     fn default() -> Self {
-        gen::nop()
+        genn::nop()
     }
 }
 
@@ -1146,7 +1146,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
 }
 
 /// helpers for dynamically generating code in built-in functions. Not used by the compiler
-pub mod gen {
+pub mod genn {
     use super::*;
 
     /// return a no op node

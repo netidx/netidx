@@ -1,7 +1,7 @@
 use crate::{
     arity1, arity2, deftype, errf,
     expr::{Expr, ExprId, ModPath},
-    node::{gen, Node},
+    node::{genn, Node},
     stdfn::CachedVals,
     typ::{FnType, NoRefs, Type},
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, UserEvent,
@@ -369,9 +369,9 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Publish<C, E> {
                     t => bail!("expected function not {t}"),
                 };
                 let (x, xn) =
-                    gen::bind(ctx, &scope, "x", Type::Primitive(Typ::any()), top_id);
-                let fnode = gen::reference(ctx, pid, Type::Fn(mftyp.clone()), top_id);
-                let on_write = gen::apply(fnode, vec![xn], mftyp.clone(), top_id);
+                    genn::bind(ctx, &scope, "x", Type::Primitive(Typ::any()), top_id);
+                let fnode = genn::reference(ctx, pid, Type::Fn(mftyp.clone()), top_id);
+                let on_write = genn::apply(fnode, vec![xn], mftyp.clone(), top_id);
                 Ok(Box::new(Publish {
                     args: CachedVals::new(from),
                     current: None,

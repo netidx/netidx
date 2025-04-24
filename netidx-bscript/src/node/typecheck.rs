@@ -1,6 +1,6 @@
 use crate::{
     expr::{ExprId, ExprKind},
-    node::{gen, Node, NodeKind},
+    node::{genn, Node, NodeKind},
     typ::{FnArgType, Type},
     Ctx, ExecCtx, UserEvent,
 };
@@ -290,23 +290,18 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     wrap!(arg, arg.typecheck(ctx))?;
                     wrap!(arg, typ.check_contains(&arg.typ))?;
                 }
-                if site.ftype.has_unbound() {
-                    let e = anyhow!(
-                        "type annotations needed {} has unbound type variables",
-                        site.ftype
-                    );
-                    wrap!(self, Err(e))?
-                }
+                wrap!(site.ftype.rtype.check_contains(&self.typ))?;
                 Ok(())
             }
             NodeKind::Lambda(lds) => {
                 let mut faux_args = Box::from_iter(lds.typ.args.iter().map(|a| {
-                    let mut n: Node<C, E> = gen::nop();
+                    let mut n: Node<C, E> = genn::nop();
                     n.typ = a.typ.clone();
                     n
                 }));
                 let mut f = wrap!((lds.init)(ctx, &faux_args, ExprId::new()))?;
                 let res = wrap!(f.typecheck(ctx, &mut faux_args));
+                f.typ().freeze();
                 f.delete(ctx);
                 res
             }

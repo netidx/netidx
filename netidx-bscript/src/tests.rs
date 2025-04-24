@@ -70,14 +70,14 @@ macro_rules! run {
             let (tx, mut rx) = futures::channel::mpsc::channel(10);
             bs.subscribe(tx)?;
             match bs.compile(String::from($code)).await.map(|r| r.eids[0].0) {
-                Err(e) => assert!($pred(Err(e))),
+                Err(e) => assert!($pred(dbg!(Err(e)))),
                 Ok(eid) => {
                     dbg!("compilation succeeded");
                     match futures::StreamExt::next(&mut rx).await {
                         None => bail!("runtime died"),
                         Some($crate::rt::RtEvent::Updated(id, v)) => {
                             assert_eq!(id, eid);
-                            assert!($pred(Ok(&v)))
+                            assert!($pred(dbg!(Ok(&v))))
                         }
                     }
                 }
