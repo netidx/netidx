@@ -702,7 +702,9 @@ impl BSHandle {
 pub struct BSConfig {
     publisher: Publisher,
     subscriber: Subscriber,
+    #[builder(setter(strip_option), default)]
     subscribe_timeout: Option<Duration>,
+    #[builder(setter(strip_option), default)]
     publish_timeout: Option<Duration>,
 }
 
