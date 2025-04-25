@@ -72,12 +72,12 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
     for a in typ.args.iter() {
         match &a.label {
             None => break,
-            Some((n, required)) => match named.remove(n) {
+            Some((n, optional)) => match named.remove(n) {
                 Some(e) => {
                     nodes.push(compile!(e));
                     arg_spec.insert(n.clone(), false);
                 }
-                None if *required => bail!("missing required argument {n}"),
+                None if !optional => bail!("missing required argument {n}"),
                 None => {
                     let node = Node {
                         spec: Box::new(
