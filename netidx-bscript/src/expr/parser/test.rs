@@ -1273,6 +1273,11 @@ fn tupleref() {
 
 #[test]
 fn prop0() {
-    let s = "mod a{any({type A = `A(array::A)})}";
+    let s = r#"
+{
+  let f = 'a: Number |x: 'a, y: 'a| -> 'a x + y;
+  f("foo", "bar")
+}
+"#;
     dbg!(parse(s).unwrap());
 }

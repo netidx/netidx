@@ -292,6 +292,9 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     wrap!(arg, typ.check_contains(&arg.typ))?;
                 }
                 wrap!(site.ftype.rtype.check_contains(&self.typ))?;
+                for (tv, tc) in site.ftype.constraints.read().iter() {
+                    tc.check_contains(&Type::TVar(tv.clone()))?
+                }
                 Ok(())
             }
             NodeKind::Lambda(lds) => {

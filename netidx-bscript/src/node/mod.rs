@@ -83,7 +83,15 @@ pub struct CallSite<C: Ctx, E: UserEvent> {
 
 impl<C: Ctx, E: UserEvent> fmt::Debug for CallSite<C, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CallSite({:?})", self.fnode)
+        write!(f, "CallSite({:?}, [", self.fnode)?;
+        for (i, n) in self.args.iter().enumerate() {
+            if i < self.args.len() - 1 {
+                write!(f, "{:?}, ", n)?;
+            } else {
+                write!(f, "{:?}", n)?;
+            }
+        }
+        write!(f, "])")
     }
 }
 
