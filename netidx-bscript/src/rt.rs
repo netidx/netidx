@@ -61,6 +61,7 @@ impl fmt::Display for CouldNotResolve {
     }
 }
 
+#[derive(Debug)]
 pub struct BSCtx {
     by_ref: FxHashMap<BindId, FxHashMap<ExprId, usize>>,
     subscribed: FxHashMap<SubId, FxHashMap<ExprId, usize>>,
@@ -390,9 +391,18 @@ impl BS {
                 }
             },
         };
+        let mut event = Event::new(NoUserEvent);
+        let mut ctx = ExecCtx::new(BSCtx::new(rt.publisher, rt.subscriber));
+        event.init = true;
+        let mut std = mem::take(&mut ctx.std);
+        for n in std.iter_mut() {
+            let _ = n.update(&mut ctx, &mut event);
+        }
+        ctx.std = std;
+        event.init = false;
         Self {
-            ctx: ExecCtx::new(BSCtx::new(rt.publisher, rt.subscriber)),
-            event: Event::new(NoUserEvent),
+            ctx,
+            event,
             updated: HashMap::default(),
             nodes: IndexMap::default(),
             subs: vec![],
@@ -464,7 +474,7 @@ impl BS {
                         }
                     });
                 }
-                let res = dbg!(n.update(&mut self.ctx, &mut self.event));
+                let res = n.update(&mut self.ctx, &mut self.event);
                 for id in clear {
                     self.event.variables.remove(&id);
                 }

@@ -458,6 +458,7 @@ impl StructPatternNode {
     }
 }
 
+#[derive(Debug)]
 pub struct PatternNode<C: Ctx, E: UserEvent> {
     pub type_predicate: Type<NoRefs>,
     pub structure_predicate: StructPatternNode,

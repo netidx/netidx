@@ -61,6 +61,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::Gte { lhs, rhs } => {
                 wrap!(lhs.node.typecheck(ctx))?;
                 wrap!(rhs.node.typecheck(ctx))?;
+                wrap!(lhs.node.typ.check_contains(&rhs.node.typ))?;
                 wrap!(self.typ.check_contains(&Type::boolean()))?;
                 Ok(())
             }

@@ -595,7 +595,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
             event.variables.insert(self.pid, v);
         }
         if self.ready && self.queue.len() > 0 {
-            set!(self.queue.pop_front().unwrap());
+            let v = self.queue.pop_front().unwrap();
+            set!(v);
         }
         loop {
             match self.pred.update(ctx, event) {

@@ -712,6 +712,7 @@ pub enum BatchMsg {
 
 /// A batch of updates to Vals
 #[must_use = "update batches do nothing unless committed"]
+#[derive(Debug)]
 pub struct UpdateBatch {
     origin: Publisher,
     updates: Pooled<Vec<BatchMsg>>,

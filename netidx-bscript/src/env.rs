@@ -20,6 +20,12 @@ pub struct LambdaDef<C: Ctx, E: UserEvent> {
     pub init: InitFn<C, E>,
 }
 
+impl<C: Ctx, E: UserEvent> fmt::Debug for LambdaDef<C, E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LambdaDef({:?})", self.id)
+    }
+}
+
 pub struct Bind {
     pub id: BindId,
     pub export: bool,

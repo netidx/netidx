@@ -179,7 +179,7 @@ pub trait BuiltIn<C: Ctx, E: UserEvent> {
     fn init(ctx: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E>;
 }
 
-pub trait Ctx: 'static {
+pub trait Ctx: Debug + 'static {
     fn clear(&mut self);
 
     /// Subscribe to the specified netidx path. When the subscription

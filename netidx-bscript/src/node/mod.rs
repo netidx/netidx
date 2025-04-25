@@ -24,6 +24,7 @@ mod lambda;
 pub mod pattern;
 mod typecheck;
 
+#[derive(Debug)]
 pub struct Cached<C: Ctx, E: UserEvent> {
     pub cached: Option<Value>,
     pub node: Node<C, E>,
@@ -78,6 +79,12 @@ pub struct CallSite<C: Ctx, E: UserEvent> {
     arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
     function: Option<(LambdaId, Box<dyn Apply<C, E> + Send + Sync>)>,
     top_id: ExprId,
+}
+
+impl<C: Ctx, E: UserEvent> fmt::Debug for CallSite<C, E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CallSite({:?})", self.fnode)
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Default for CallSite<C, E> {
@@ -148,8 +155,7 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
                 (None, None) => bail!("unexpected args"),
             }
         }
-        let mut rf = (f.init)(ctx, &self.args, self.top_id)?;
-        rf.typecheck(ctx, &mut self.args)?;
+        let rf = (f.init)(ctx, &self.args, self.top_id)?;
         self.ftype = f.typ.clone();
         self.function = Some((f.id, rf));
         Ok(())
@@ -215,6 +221,7 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
     }
 }
 
+#[derive(Debug)]
 pub struct SelectNode<C: Ctx, E: UserEvent> {
     selected: Option<usize>,
     arg: Cached<C, E>,
@@ -380,6 +387,7 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
     }
 }
 
+#[derive(Debug)]
 pub struct ArrayRefNode<C: Ctx, E: UserEvent> {
     pub source: Cached<C, E>,
     pub i: Cached<C, E>,
@@ -440,6 +448,7 @@ impl<C: Ctx, E: UserEvent> ArrayRefNode<C, E> {
     }
 }
 
+#[derive(Debug)]
 pub struct ArraySliceNode<C: Ctx, E: UserEvent> {
     pub source: Cached<C, E>,
     pub start: Option<Cached<C, E>>,
@@ -529,6 +538,7 @@ impl<C: Ctx, E: UserEvent> ArraySliceNode<C, E> {
     }
 }
 
+#[derive(Debug)]
 pub enum NodeKind<C: Ctx, E: UserEvent> {
     Nop,
     Use {
@@ -657,6 +667,12 @@ pub struct Node<C: Ctx, E: UserEvent> {
     pub spec: Box<Expr>,
     pub typ: Type<NoRefs>,
     pub kind: NodeKind<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> fmt::Debug for Node<C, E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.kind)
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Default for Node<C, E> {
