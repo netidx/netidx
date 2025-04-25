@@ -1608,15 +1608,15 @@ impl FnType<NoRefs> {
                 (_, _) => false,
             }
             && self.rtype.contains(&t.rtype)
-            && {
-                let this = self.constraints.read();
-                let other = t.constraints.read();
-                this.len() == other.len()
-                    && this
-                        .iter()
-                        .zip(other.iter())
-                        .all(|((_, tc0), (_, tc1))| tc0.contains(tc1))
-            }
+            && self
+                .constraints
+                .read()
+                .iter()
+                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
+            && t.constraints
+                .read()
+                .iter()
+                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
     }
 
     pub fn check_contains(&self, other: &Self) -> Result<()> {
@@ -1644,14 +1644,14 @@ impl FnType<NoRefs> {
                 (Some(t0), Some(t1)) => t0.contains(t1),
             }
             && rtype0.contains(rtype1)
-            && {
-                let constraints0 = constraints0.read();
-                let constraints1 = constraints1.read();
-                constraints0.len() == constraints1.len()
-                    && constraints0.iter().zip(constraints1.iter()).all(
-                        |((tv0, t0), (tv1, t1))| tv0.name == tv1.name && t0.contains(t1),
-                    )
-            }
+            && constraints0
+                .read()
+                .iter()
+                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
+            && constraints1
+                .read()
+                .iter()
+                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
     }
 
     pub fn check_sigmatch(&self, other: &Self) -> Result<()> {

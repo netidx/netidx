@@ -288,12 +288,12 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 for (arg, FnArgType { typ, .. }) in
                     site.args.iter_mut().zip(site.ftype.args.iter())
                 {
-                    wrap!(arg, arg.typecheck(ctx))?;
-                    wrap!(arg, typ.check_contains(&arg.typ))?;
+                    dbg!(wrap!(arg, arg.typecheck(ctx)))?;
+                    dbg!(wrap!(arg, typ.check_contains(&arg.typ)))?;
                 }
-                wrap!(site.ftype.rtype.check_contains(&self.typ))?;
+                dbg!(wrap!(site.ftype.rtype.check_contains(&self.typ)))?;
                 for (tv, tc) in site.ftype.constraints.read().iter() {
-                    tc.check_contains(&Type::TVar(tv.clone()))?
+                    dbg!(wrap!(tc.check_contains(&Type::TVar(tv.clone()))))?
                 }
                 Ok(())
             }
