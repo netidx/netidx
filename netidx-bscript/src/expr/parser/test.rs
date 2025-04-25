@@ -1275,8 +1275,9 @@ fn tupleref() {
 fn prop0() {
     let s = r#"
 {
-  let f = 'a: Number |x: 'a, y: 'a| -> 'a x + y;
-  f("foo", "bar")
+  type T = { foo: string, bar: i64, f: fn(#x: i64, #y: i64) -> i64 };
+  let t: T = { foo: "hello world", bar: 3, f: |#x, #y| x - y };
+  (t.f)(#y: 3, #x: 4)
 }
 "#;
     dbg!(parse(s).unwrap());

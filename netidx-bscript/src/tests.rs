@@ -174,7 +174,7 @@ run!(undefined, UNDEFINED, |v: Result<&Value>| match v {
 const FIRST_CLASS_LAMBDAS: &str = r#"
 {
   let doit = |x| x + 1;
-  let g = |f, y| f(y) + 1;
+  let g = |f: fn(Number) -> Number, y| f(y) + 1;
   g(doit, 1)
 }
 "#;
@@ -954,7 +954,7 @@ const LATE_BINDING2: &str = r#"
 {
   type T = { foo: string, bar: i64, f: fn(#x: i64, #y: i64) -> i64 };
   let t: T = { foo: "hello world", bar: 3, f: |#x, #y| x - y };
-  t.f(#y: 3, #x: 4)
+  (t.f)(#y: 3, #x: 4)
 }
 "#;
 

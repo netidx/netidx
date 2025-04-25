@@ -288,12 +288,12 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 for (arg, FnArgType { typ, .. }) in
                     site.args.iter_mut().zip(site.ftype.args.iter())
                 {
-                    dbg!(wrap!(arg, arg.typecheck(ctx)))?;
-                    dbg!(wrap!(arg, typ.check_contains(&arg.typ)))?;
+                    wrap!(arg, arg.typecheck(ctx))?;
+                    wrap!(arg, typ.check_contains(&arg.typ))?;
                 }
-                dbg!(wrap!(site.ftype.rtype.check_contains(&self.typ)))?;
+                wrap!(site.ftype.rtype.check_contains(&self.typ))?;
                 for (tv, tc) in site.ftype.constraints.read().iter() {
-                    dbg!(wrap!(tc.check_contains(&Type::TVar(tv.clone()))))?
+                    wrap!(tc.check_contains(&Type::TVar(tv.clone())))?
                 }
                 Ok(())
             }
@@ -306,6 +306,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 let mut f = wrap!((lds.init)(ctx, &faux_args, ExprId::new()))?;
                 let res = wrap!(f.typecheck(ctx, &mut faux_args));
                 f.typ().constrain_known();
+                f.typ().unbind_tvars();
                 f.delete(ctx);
                 res
             }
