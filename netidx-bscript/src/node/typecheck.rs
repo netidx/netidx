@@ -121,7 +121,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     wrap!(end.node, end.node.typecheck(ctx))?;
                     wrap!(end.node, it.check_contains(&end.node.typ))?;
                 }
-                Ok(())
+                wrap!(self.typ.check_contains(&at))
             }
             NodeKind::ArrayRef(n) => {
                 wrap!(n.source.node, n.source.node.typecheck(ctx))?;
@@ -306,10 +306,15 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 f.delete(ctx);
                 res
             }
+            NodeKind::Module(children) => {
+                for n in children.iter_mut() {
+                    wrap!(n, n.typecheck(ctx))?
+                }
+                Ok(())
+            }
             NodeKind::Constant(_)
             | NodeKind::Use { .. }
             | NodeKind::TypeDef { .. }
-            | NodeKind::Module(_)
             | NodeKind::Ref { .. }
             | NodeKind::Error { .. }
             | NodeKind::Nop => Ok(()),

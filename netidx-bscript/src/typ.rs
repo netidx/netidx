@@ -250,33 +250,43 @@ impl TVar<NoRefs> {
     }
 }
 
+fn would_cycle_inner(addr: usize, t: &Type<NoRefs>) -> bool {
+    match t {
+        Type::Primitive(_) | Type::Bottom(_) | Type::Ref(_) => false,
+        Type::TVar(t) => {
+            Arc::as_ptr(&t.read().typ).addr() == addr
+                || match &*t.read().typ.read() {
+                    TVarType::Unbound => false,
+                    TVarType::Bound(t) | TVarType::Permanent(t) => {
+                        would_cycle_inner(addr, t)
+                    }
+                }
+        }
+        Type::Array(a) => would_cycle_inner(addr, &**a),
+        Type::Tuple(ts) => ts.iter().any(|t| would_cycle_inner(addr, t)),
+        Type::Variant(_, ts) => ts.iter().any(|t| would_cycle_inner(addr, t)),
+        Type::Struct(ts) => ts.iter().any(|(_, t)| would_cycle_inner(addr, t)),
+        Type::Set(s) => s.iter().any(|t| would_cycle_inner(addr, t)),
+        Type::Fn(f) => {
+            let FnType { args, vargs, rtype, constraints } = &**f;
+            args.iter().any(|t| would_cycle_inner(addr, &t.typ))
+                || match vargs {
+                    None => false,
+                    Some(t) => would_cycle_inner(addr, t),
+                }
+                || would_cycle_inner(addr, &rtype)
+                || constraints.iter().any(|a| {
+                    Arc::as_ptr(&a.0.read().typ).addr() == addr
+                        || would_cycle_inner(addr, &a.1)
+                })
+        }
+    }
+}
+
 impl TVar<NoRefs> {
     fn would_cycle(&self, t: &Type<NoRefs>) -> bool {
-        fn would_cycle(addr: usize, t: &Type<NoRefs>) -> bool {
-            match t {
-                Type::Primitive(_) | Type::Bottom(_) | Type::Ref(_) => false,
-                Type::TVar(t) => Arc::as_ptr(&t.read().typ).addr() == addr,
-                Type::Array(a) => would_cycle(addr, &**a),
-                Type::Tuple(ts) => ts.iter().any(|t| would_cycle(addr, t)),
-                Type::Variant(_, ts) => ts.iter().any(|t| would_cycle(addr, t)),
-                Type::Struct(ts) => ts.iter().any(|(_, t)| would_cycle(addr, t)),
-                Type::Set(s) => s.iter().any(|t| would_cycle(addr, t)),
-                Type::Fn(f) => {
-                    let FnType { args, vargs, rtype, constraints } = &**f;
-                    args.iter().any(|t| would_cycle(addr, &t.typ))
-                        || match vargs {
-                            None => false,
-                            Some(t) => would_cycle(addr, t),
-                        } && would_cycle(addr, &rtype)
-                            && constraints.iter().any(|a| {
-                                Arc::as_ptr(&a.0.read().typ).addr() == addr
-                                    || would_cycle(addr, &a.1)
-                            })
-                }
-            }
-        }
         let addr = Arc::as_ptr(&self.read().typ).addr();
-        would_cycle(addr, t)
+        would_cycle_inner(addr, t)
     }
 }
 
@@ -389,6 +399,13 @@ impl Type<NoRefs> {
 
     pub fn contains(&self, t: &Self) -> bool {
         match (self, t) {
+            (Self::TVar(t0), Self::Bottom(_)) => {
+                if let Some(_) = t0.read().typ.read().bound() {
+                    return true;
+                }
+                *t0.read().typ.write() = TVarType::Bound(Self::Bottom(PhantomData));
+                true
+            }
             (Self::Bottom(_), _) | (_, Self::Bottom(_)) => true,
             (Self::Primitive(p0), Self::Primitive(p1)) => p0.contains(*p1),
             (
@@ -432,19 +449,30 @@ impl Type<NoRefs> {
             | (Self::Variant(_, _), Self::Struct(_))
             | (Self::Variant(_, _), Self::Primitive(_))
             | (Self::Variant(_, _), Self::Tuple(_)) => false,
-            (Self::TVar(t0), Self::TVar(t1)) => {
+            (Self::TVar(t0), tt1 @ Self::TVar(t1)) => {
                 let alias = {
                     let t0 = t0.read();
                     let t1 = t1.read();
-                    if t0.typ.as_ptr().addr() == t1.typ.as_ptr().addr() {
+                    let addr = Arc::as_ptr(&t0.typ).addr();
+                    if addr == Arc::as_ptr(&t1.typ).addr() {
                         return true;
                     }
                     let t0i = t0.typ.read();
                     let t1i = t1.typ.read();
                     match (t0i.bound(), t1i.bound()) {
                         (Some(t0), Some(t1)) => return t0.contains(&*t1),
-                        (None, None) | (Some(_), None) => Either::Right(()),
-                        (None, Some(_)) => Either::Left(()),
+                        (None, None) | (Some(_), None) => {
+                            if would_cycle_inner(addr, tt1) {
+                                return false;
+                            }
+                            Either::Right(())
+                        }
+                        (None, Some(_)) => {
+                            if would_cycle_inner(addr, tt1) {
+                                return false;
+                            }
+                            Either::Left(())
+                        }
                     }
                 };
                 match alias {

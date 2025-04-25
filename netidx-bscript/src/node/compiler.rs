@@ -189,7 +189,13 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             if i.is_err() {
                 return error!("", vec![i]);
             }
-            let typ = Type::empty_tvar();
+            let ert = Type::Primitive(Typ::Error.into());
+            let typ = match &source.typ {
+                Type::Array(et) => {
+                    Type::Set(Arc::from_iter([(**et).clone(), ert.clone()]))
+                }
+                _ => Type::Set(Arc::from_iter([Type::empty_tvar(), ert.clone()])),
+            };
             let n = ArrayRefNode { source: Cached::new(source), i: Cached::new(i) };
             Node { kind: NodeKind::ArrayRef(Box::new(n)), spec: Box::new(spec), typ }
         }
@@ -214,7 +220,10 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             }
             let start = maybe_compile!(start);
             let end = maybe_compile!(end);
-            let typ = source.typ.clone();
+            let typ = Type::Set(Arc::from_iter([
+                source.typ.clone(),
+                Type::Primitive(Typ::Error.into()),
+            ]));
             let n = ArraySliceNode { source: Cached::new(source), start, end };
             Node { kind: NodeKind::ArraySlice(Box::new(n)), spec: Box::new(spec), typ }
         }
@@ -352,7 +361,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                         function: None,
                         top_id,
                     });
-                    let typ = Type::Fn(ftype);
+                    let typ = ftype.rtype.clone();
                     Node { spec: Box::new(spec), typ, kind: NodeKind::Apply(site) }
                 }
             }

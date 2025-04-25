@@ -62,7 +62,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> BuiltIn<C, E> for MapQ<C, E, T> {
                 top_id,
                 ftyp: TArc::new(typ.clone()),
 
-                etyp: match &typ.args[1].typ {
+                etyp: match &typ.args[0].typ {
                     Type::Array(et) => (**et).clone(),
                     t => bail!("expected array not {t}"),
                 },
@@ -176,8 +176,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
         let mut node = genn::apply(fnode, fargs, ft, self.top_id);
         let r = node.typecheck(ctx);
         node.delete(ctx);
-        r?;
-        Ok(())
+        r
     }
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
@@ -634,14 +633,18 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
     }
 }
 
-pub(super) struct Iter(BindId);
+pub(super) struct Iter(BindId, ExprId);
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Iter {
     const NAME: &str = "iter";
     deftype!("fn(Array<'a>) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|_, _, _, _, _| Ok(Box::new(Iter(BindId::new()))))
+        Arc::new(|ctx, _, _, _, top_id| {
+            let id = BindId::new();
+            ctx.user.ref_var(id, top_id);
+            Ok(Box::new(Iter(id, top_id)))
+        })
     }
 }
 
@@ -658,5 +661,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Iter {
             }
         }
         event.variables.get(&self.0).map(|v| v.clone())
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.0, self.1)
     }
 }

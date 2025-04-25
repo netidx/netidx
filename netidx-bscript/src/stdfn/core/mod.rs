@@ -652,7 +652,6 @@ pub mod core {
     pub let max = |@args| 'max;
     pub let mean = |v, @args| 'mean;
     pub let min = |@args| 'min;
-    pub let never = |@args| 'never;
     pub let once = |v| 'once;
     pub let or = |@args| 'or;
     pub let product = |@args| 'product;
@@ -661,6 +660,7 @@ pub mod core {
     pub let uniq = |v| 'uniq;
     pub let queue = |#trigger, v| 'queue;
 
+    pub let never = |@args| 'never;
     pub let errors: error = never()
 }
 "#;

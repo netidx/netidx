@@ -168,6 +168,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInCallSite<C, E> {
         for (tv, tc) in self.specified_type.constraints.iter() {
             tc.check_contains(&Type::TVar(tv.clone()))?
         }
+        self.inferred_type.freeze();
         self.apply.typecheck(ctx, args)?;
         Ok(())
     }

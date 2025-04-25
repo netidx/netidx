@@ -194,7 +194,7 @@ const SELECT: &str = r#"
     _ as v if v == 2 => "second [v]",
     _ as v => "third [v]"
   };
-  array::group(s, |n, x| n == 3)
+  array::group(s, |n, x| n == u64:3)
 }
 "#;
 
@@ -527,7 +527,7 @@ const ARRAY_INDEXING5: &str = r#"
   let out = select array::iter(a) {
     i64 as i => a[i] + 1
   };
-  array::group(out, |i, x| i == 6)
+  array::group(out, |i, x| i == u64:7)
 }
 "#;
 
@@ -542,7 +542,7 @@ const ARRAY_INDEXING6: &str = r#"
   let out = select array::iter(a) {
     i64 as i => a[i]? + 1
   };
-  array::group(out, |i, x| i == 7)
+  array::group(out, |i, x| i == u64:7)
 }
 "#;
 
@@ -585,7 +585,7 @@ const ARRAY_MATCH1: &str = r#"
       [x, y]
     }
   };
-  array::group(out, |i, x| i == 4)
+  array::group(out, |i, x| i == u64:4)
 }
 "#;
 
@@ -845,7 +845,7 @@ const ANY0: &str = r#"
   let x = 1;
   let y = x + 1;
   let z = y + 1;
-  array::group(any(x, y, z), |n, _| n == 3)
+  array::group(any(x, y, z), |n, _| n == u64:3)
 }
 "#;
 
@@ -865,7 +865,7 @@ const ANY1: &str = r#"
   let y = "[x] + 1";
   let z = [y, y];
   let r: [i64, string, Array<string>] = any(x, y, z);
-  array::group(r, |n, _| n == 3)
+  array::group(r, |n, _| n == u64:3)
 }
 "#;
 
@@ -894,7 +894,7 @@ const VARIANTS0: &str = r#"
     `Bar(s) if s == "hello world" => 1,
      _ => 2
   };
-  array::group(a, |n, _| n == 2)
+  array::group(a, |n, _| n == u64:2)
 }
 "#;
 
@@ -936,7 +936,7 @@ const LATE_BINDING1: &str = r#"
     1 => u.f,
     _ => never()
   };
-  array::group(f(#y: 3, #x: 4), |n, _| n == 2)
+  array::group(f(#y: 3, #x: 4), |n, _| n == u64:2)
 }
 "#;
 

@@ -1235,7 +1235,7 @@ pub mod genn {
             function: None,
             top_id,
         });
-        let typ = Type::Fn(typ);
+        let typ = typ.rtype.clone();
         Node { spec: Box::new(spec), typ, kind: NodeKind::Apply(site) }
     }
 }
