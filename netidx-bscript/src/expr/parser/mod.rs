@@ -26,6 +26,7 @@ use netidx::{
 use netidx_netproto::value_parser::{
     escaped_string, int, value as netidx_value, VAL_ESC,
 };
+use parking_lot::RwLock;
 use smallvec::{smallvec, SmallVec};
 use std::{marker::PhantomData, sync::LazyLock};
 use triomphe::Arc;
@@ -572,8 +573,8 @@ where
             )))
             .map(|cs: Option<SmallVec<[(TVar<Refs>, Type<Refs>); 4]>>| {
                 match cs {
-                    None => Arc::from_iter([]),
-                    Some(cs) => Arc::from_iter(cs),
+                    Some(cs) => Arc::new(RwLock::new(cs.into_iter().collect())),
+                    None => Arc::new(RwLock::new(vec![])),
                 }
             }),
             between(
@@ -613,7 +614,7 @@ where
         ))
         .then(
             |(constraints, mut args, rtype): (
-                Arc<[(TVar<Refs>, Type<Refs>)]>,
+                Arc<RwLock<Vec<(TVar<Refs>, Type<Refs>)>>>,
                 Vec<Either<FnArgType<Refs>, Type<Refs>>>,
                 Type<Refs>,
             )| {

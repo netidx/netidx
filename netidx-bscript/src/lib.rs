@@ -26,6 +26,7 @@ use netidx::{
     publisher::{Id, Val, WriteRequest},
     subscriber::{self, Dval, SubId, UpdatesFlags, Value},
 };
+use parking_lot::RwLock;
 use std::{
     collections::{hash_map::Entry, HashMap},
     fmt::Debug,
@@ -155,7 +156,7 @@ pub trait Apply<C: Ctx, E: UserEvent> {
         const EMPTY: LazyLock<Arc<FnType<NoRefs>>> = LazyLock::new(|| {
             Arc::new(FnType {
                 args: Arc::from_iter([]),
-                constraints: Arc::from_iter([]),
+                constraints: Arc::new(RwLock::new(vec![])),
                 rtype: Type::Bottom(PhantomData),
                 vargs: None,
             })

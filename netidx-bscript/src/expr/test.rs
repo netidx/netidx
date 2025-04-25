@@ -5,6 +5,7 @@ use chrono::prelude::*;
 use enumflags2::BitFlags;
 use netidx::protocol::value::Typ;
 use netidx_netproto::pbuf::PBytes;
+use parking_lot::RwLock;
 use parser::{parse, RESERVED};
 use prop::option;
 use proptest::{collection, prelude::*};
@@ -239,11 +240,12 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
                         args: Arc::from_iter(args),
                         vargs,
                         rtype,
-                        constraints: Arc::from_iter(
+                        constraints: Arc::new(RwLock::new(
                             constraints
                                 .into_iter()
-                                .map(|(a, t)| (TVar::empty_named(a), t)),
-                        ),
+                                .map(|(a, t)| (TVar::empty_named(a), t))
+                                .collect(),
+                        )),
                     }))
                 })
         ]

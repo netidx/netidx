@@ -302,7 +302,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }));
                 let mut f = wrap!((lds.init)(ctx, &faux_args, ExprId::new()))?;
                 let res = wrap!(f.typecheck(ctx, &mut faux_args));
-                f.typ().freeze();
+                f.typ().constrain_known();
                 f.delete(ctx);
                 res
             }

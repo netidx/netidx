@@ -12,14 +12,13 @@ use netidx_netproto::valarray::ValArray;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use smallvec::{smallvec, SmallVec};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     cmp::{Eq, Ordering, PartialEq},
-    collections::hash_map::Entry,
+    collections::{hash_map::Entry, HashMap},
     fmt::{self, Debug},
     hash::Hash,
     iter,
     marker::PhantomData,
-    mem,
     ops::Deref,
 };
 use triomphe::Arc;
@@ -41,98 +40,10 @@ pub struct NoRefs;
 
 impl TypeMark for NoRefs {}
 
-#[derive(Debug, Clone)]
-pub enum TVarType<T: TypeMark> {
-    Unbound,
-    Bound(Type<T>),
-    Permanent(Type<T>),
-}
-
-impl<T: TypeMark> PartialEq for TVarType<T> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Unbound, Self::Unbound) => true,
-            (
-                Self::Bound(t0) | Self::Permanent(t0),
-                Self::Bound(t1) | Self::Permanent(t1),
-            ) => t0 == t1,
-            (Self::Unbound, Self::Bound(_) | Self::Permanent(_))
-            | (Self::Bound(_) | Self::Permanent(_), Self::Unbound) => false,
-        }
-    }
-}
-
-impl<T: TypeMark> Eq for TVarType<T> {}
-
-impl<T: TypeMark> PartialOrd for TVarType<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match (self, other) {
-            (Self::Unbound, Self::Unbound) => Some(Ordering::Equal),
-            (
-                Self::Bound(t0) | Self::Permanent(t0),
-                Self::Bound(t1) | Self::Permanent(t1),
-            ) => t0.partial_cmp(t1),
-            (Self::Unbound, Self::Bound(_) | Self::Permanent(_)) => Some(Ordering::Less),
-            (Self::Bound(_) | Self::Permanent(_), Self::Unbound) => {
-                Some(Ordering::Greater)
-            }
-        }
-    }
-}
-
-impl<T: TypeMark> Ord for TVarType<T> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
-    }
-}
-
-impl<T: TypeMark> TVarType<T> {
-    fn is_bound(&self) -> bool {
-        match self {
-            Self::Unbound => false,
-            Self::Bound(_) | Self::Permanent(_) => true,
-        }
-    }
-
-    fn is_unbound(&self) -> bool {
-        !self.is_bound()
-    }
-
-    fn bound(&self) -> Option<&Type<T>> {
-        match self {
-            Self::Unbound => None,
-            Self::Bound(t) | Self::Permanent(t) => Some(t),
-        }
-    }
-}
-
-impl TVarType<NoRefs> {
-    pub fn unbind(&mut self) {
-        match self {
-            Self::Unbound => (),
-            Self::Bound(t) => {
-                t.unbind_tvars();
-                *self = Self::Unbound
-            }
-            Self::Permanent(t) => t.unbind_tvars(),
-        }
-    }
-
-    /// make the current bound type permanent
-    pub fn freeze(&mut self) {
-        match self {
-            Self::Unbound | Self::Permanent(_) => (),
-            Self::Bound(t) => {
-                *self = Self::Permanent(mem::replace(t, Type::Bottom(PhantomData)));
-            }
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct TVarInnerInner<T: TypeMark> {
     id: TVarId,
-    typ: Arc<RwLock<TVarType<T>>>,
+    typ: Arc<RwLock<Option<Type<T>>>>,
 }
 
 #[derive(Debug)]
@@ -165,9 +76,8 @@ impl<T: TypeMark> fmt::Display for TVar<T> {
         } else {
             write!(f, "'{}: ", self.name)?;
             match &*self.read().typ.read() {
-                TVarType::Bound(t) => write!(f, "{t}"),
-                TVarType::Permanent(t) => write!(f, "!{t}"),
-                TVarType::Unbound => write!(f, "unbound"),
+                Some(t) => write!(f, "{t}"),
+                None => write!(f, "unbound"),
             }
         }
     }
@@ -198,7 +108,7 @@ impl<T: TypeMark> TVar<T> {
             name,
             typ: RwLock::new(TVarInnerInner {
                 id: TVarId::new(),
-                typ: Arc::new(RwLock::new(TVarType::Unbound)),
+                typ: Arc::new(RwLock::new(None)),
             }),
         }))
     }
@@ -208,7 +118,7 @@ impl<T: TypeMark> TVar<T> {
             name,
             typ: RwLock::new(TVarInnerInner {
                 id: TVarId::new(),
-                typ: Arc::new(RwLock::new(TVarType::Bound(typ))),
+                typ: Arc::new(RwLock::new(Some(typ))),
             }),
         }))
     }
@@ -231,8 +141,8 @@ impl<T: TypeMark> TVar<T> {
 
     pub fn normalize(&self) -> Self {
         match &mut *self.read().typ.write() {
-            TVarType::Unbound => (),
-            TVarType::Bound(t) | TVarType::Permanent(t) => {
+            None => (),
+            Some(t) => {
                 *t = t.normalize();
             }
         }
@@ -242,11 +152,7 @@ impl<T: TypeMark> TVar<T> {
 
 impl TVar<NoRefs> {
     pub fn unbind(&self) {
-        self.read().typ.write().unbind()
-    }
-
-    pub fn freeze(&self) {
-        self.read().typ.write().freeze()
+        *self.read().typ.write() = None
     }
 }
 
@@ -256,10 +162,8 @@ fn would_cycle_inner(addr: usize, t: &Type<NoRefs>) -> bool {
         Type::TVar(t) => {
             Arc::as_ptr(&t.read().typ).addr() == addr
                 || match &*t.read().typ.read() {
-                    TVarType::Unbound => false,
-                    TVarType::Bound(t) | TVarType::Permanent(t) => {
-                        would_cycle_inner(addr, t)
-                    }
+                    None => false,
+                    Some(t) => would_cycle_inner(addr, t),
                 }
         }
         Type::Array(a) => would_cycle_inner(addr, &**a),
@@ -275,7 +179,7 @@ fn would_cycle_inner(addr: usize, t: &Type<NoRefs>) -> bool {
                     Some(t) => would_cycle_inner(addr, t),
                 }
                 || would_cycle_inner(addr, &rtype)
-                || constraints.iter().any(|a| {
+                || constraints.read().iter().any(|a| {
                     Arc::as_ptr(&a.0.read().typ).addr() == addr
                         || would_cycle_inner(addr, &a.1)
                 })
@@ -384,7 +288,7 @@ impl Type<NoRefs> {
             | Self::Tuple(_)
             | Self::Struct(_)
             | Self::Variant(_, _) => true,
-            Self::TVar(tv) => tv.read().typ.read().is_bound(),
+            Self::TVar(tv) => tv.read().typ.read().is_some(),
             Self::Ref(_) => unreachable!(),
         }
     }
@@ -400,10 +304,10 @@ impl Type<NoRefs> {
     pub fn contains(&self, t: &Self) -> bool {
         match (self, t) {
             (Self::TVar(t0), Self::Bottom(_)) => {
-                if let Some(_) = t0.read().typ.read().bound() {
+                if let Some(_) = &*t0.read().typ.read() {
                     return true;
                 }
-                *t0.read().typ.write() = TVarType::Bound(Self::Bottom(PhantomData));
+                *t0.read().typ.write() = Some(Self::Bottom(PhantomData));
                 true
             }
             (Self::Bottom(_), _) | (_, Self::Bottom(_)) => true,
@@ -459,7 +363,7 @@ impl Type<NoRefs> {
                     }
                     let t0i = t0.typ.read();
                     let t1i = t1.typ.read();
-                    match (t0i.bound(), t1i.bound()) {
+                    match (&*t0i, &*t1i) {
                         (Some(t0), Some(t1)) => return t0.contains(&*t1),
                         (None, None) | (Some(_), None) => {
                             if would_cycle_inner(addr, tt1) {
@@ -482,17 +386,17 @@ impl Type<NoRefs> {
                 true
             }
             (Self::TVar(t0), t1) if !t0.would_cycle(t1) => {
-                if let Some(t0) = t0.read().typ.read().bound() {
+                if let Some(t0) = &*t0.read().typ.read() {
                     return t0.contains(t1);
                 }
-                *t0.read().typ.write() = TVarType::Bound(t1.clone());
+                *t0.read().typ.write() = Some(t1.clone());
                 true
             }
             (t0, Self::TVar(t1)) if !t1.would_cycle(t0) => {
-                if let Some(t1) = t1.read().typ.read().bound() {
+                if let Some(t1) = &*t1.read().typ.read() {
                     return t0.contains(t1);
                 }
-                *t1.read().typ.write() = TVarType::Bound(t0.clone());
+                *t1.read().typ.write() = Some(t0.clone());
                 true
             }
             (t0, Self::Set(s)) => {
@@ -698,16 +602,16 @@ impl Type<NoRefs> {
                 if tv0.read().typ.as_ptr() == tv1.read().typ.as_ptr() {
                     return Type::Primitive(BitFlags::empty());
                 }
-                match (tv0.read().typ.read().bound(), tv1.read().typ.read().bound()) {
+                match (&*tv0.read().typ.read(), &*tv1.read().typ.read()) {
                     (None, _) | (_, None) => Type::TVar(tv0.clone()),
                     (Some(t0), Some(t1)) => t0.diff_int(t1),
                 }
             }
-            (Type::TVar(tv), t1) => match tv.read().typ.read().bound() {
+            (Type::TVar(tv), t1) => match &*tv.read().typ.read() {
                 None => Type::TVar(tv.clone()),
                 Some(t0) => t0.diff_int(t1),
             },
-            (t0, Type::TVar(tv)) => match tv.read().typ.read().bound() {
+            (t0, Type::TVar(tv)) => match &*tv.read().typ.read() {
                 None => t0.clone(),
                 Some(t1) => t0.diff_int(t1),
             },
@@ -776,6 +680,42 @@ impl Type<NoRefs> {
         }
     }
 
+    pub fn collect_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
+        match self {
+            Type::Bottom(_) | Type::Primitive(_) => (),
+            Type::Ref(_) => unreachable!(),
+            Type::Array(t) => t.collect_tvars(known),
+            Type::Tuple(ts) => {
+                for t in ts.iter() {
+                    t.collect_tvars(known)
+                }
+            }
+            Type::Struct(ts) => {
+                for (_, t) in ts.iter() {
+                    t.collect_tvars(known)
+                }
+            }
+            Type::Variant(_, ts) => {
+                for t in ts.iter() {
+                    t.collect_tvars(known)
+                }
+            }
+            Type::TVar(tv) => match known.entry(tv.name.clone()) {
+                Entry::Occupied(_) => (),
+                Entry::Vacant(e) => {
+                    e.insert(tv.clone());
+                    ()
+                }
+            },
+            Type::Fn(ft) => ft.collect_tvars(known),
+            Type::Set(s) => {
+                for typ in s.iter() {
+                    typ.collect_tvars(known)
+                }
+            }
+        }
+    }
+
     pub fn has_unbound(&self) -> bool {
         match self {
             Type::Bottom(_) | Type::Primitive(_) => false,
@@ -784,7 +724,7 @@ impl Type<NoRefs> {
             Type::Tuple(ts) => ts.iter().any(|t| t.has_unbound()),
             Type::Struct(ts) => ts.iter().any(|(_, t)| t.has_unbound()),
             Type::Variant(_, ts) => ts.iter().any(|t| t.has_unbound()),
-            Type::TVar(tv) => tv.read().typ.read().is_bound(),
+            Type::TVar(tv) => tv.read().typ.read().is_some(),
             Type::Set(s) => s.iter().any(|t| t.has_unbound()),
             Type::Fn(ft) => ft.has_unbound(),
         }
@@ -835,28 +775,6 @@ impl Type<NoRefs> {
         }
     }
 
-    /// Freeze any bound tvars, such that unbind_tvars will no longer
-    /// erase their type.
-    fn freeze(&self) {
-        match self {
-            Type::Bottom(_) | Type::Primitive(_) => (),
-            Type::Array(t0) => t0.freeze(),
-            Type::Tuple(ts) | Type::Variant(_, ts) | Type::Set(ts) => {
-                for t in ts.iter() {
-                    t.freeze()
-                }
-            }
-            Type::Struct(ts) => {
-                for (_, t) in ts.iter() {
-                    t.freeze()
-                }
-            }
-            Type::TVar(tv) => tv.freeze(),
-            Type::Fn(fntyp) => fntyp.freeze(),
-            Type::Ref(_) => unreachable!(),
-        }
-    }
-
     fn first_prim(&self) -> Option<Typ> {
         match self {
             Type::Primitive(p) => p.iter().next(),
@@ -864,7 +782,7 @@ impl Type<NoRefs> {
             Type::Ref(_) => unreachable!(),
             Type::Fn(_) => None,
             Type::Set(s) => s.iter().find_map(|t| t.first_prim()),
-            Type::TVar(tv) => tv.read().typ.read().bound().and_then(|t| t.first_prim()),
+            Type::TVar(tv) => tv.read().typ.read().as_ref().and_then(|t| t.first_prim()),
             // array, tuple, and struct casting are handled directly
             Type::Array(_) | Type::Tuple(_) | Type::Struct(_) | Type::Variant(_, _) => {
                 None
@@ -881,7 +799,7 @@ impl Type<NoRefs> {
             Type::Set(s) => Ok(for t in s.iter() {
                 t.check_cast()?
             }),
-            Type::TVar(tv) => match tv.read().typ.read().bound() {
+            Type::TVar(tv) => match &*tv.read().typ.read() {
                 Some(t) => t.check_cast(),
                 None => bail!("can't cast a value to a free type variable"),
             },
@@ -1101,7 +1019,7 @@ impl<T: TypeMark> Type<T> {
             | Self::Struct(_)
             | Self::Variant(_, _)
             | Self::Ref(_) => f(Some(self)),
-            Self::TVar(tv) => f(tv.read().typ.read().bound()),
+            Self::TVar(tv) => f(tv.read().typ.read().as_ref()),
         }
     }
 
@@ -1264,10 +1182,10 @@ impl<T: TypeMark> Type<T> {
                 Some(Type::TVar(tv0.clone()))
             }
             (Type::TVar(tv), t) => {
-                tv.read().typ.read().bound().and_then(|tv| tv.merge(t))
+                tv.read().typ.read().as_ref().and_then(|tv| tv.merge(t))
             }
             (t, Type::TVar(tv)) => {
-                tv.read().typ.read().bound().and_then(|tv| t.merge(tv))
+                tv.read().typ.read().as_ref().and_then(|tv| t.merge(tv))
             }
             (Type::Tuple(_), _)
             | (_, Type::Tuple(_))
@@ -1317,7 +1235,7 @@ impl Type<Refs> {
                     .into_iter();
                 Ok(Type::Struct(Arc::from_iter(i)))
             }
-            Type::TVar(tv) => match tv.read().typ.read().bound() {
+            Type::TVar(tv) => match tv.read().typ.read().as_ref() {
                 None => Ok(Type::TVar(TVar::empty_named(tv.name.clone()))),
                 Some(typ) => {
                     let typ = typ.resolve_typerefs(scope, env)?;
@@ -1352,7 +1270,7 @@ impl Type<Refs> {
                     res.push(a);
                 }
                 let mut cres: SmallVec<[(TVar<NoRefs>, Type<NoRefs>); 4]> = smallvec![];
-                for (tv, tc) in f.constraints.iter() {
+                for (tv, tc) in f.constraints.read().iter() {
                     let tv = tv.resolve_typerefs(scope, env)?;
                     let tc = tc.resolve_typerefs(scope, env)?;
                     cres.push((tv, tc));
@@ -1360,7 +1278,7 @@ impl Type<Refs> {
                 Ok(Type::Fn(Arc::new(FnType {
                     args: Arc::from_iter(res),
                     rtype,
-                    constraints: Arc::from_iter(cres),
+                    constraints: Arc::new(RwLock::new(cres.into_iter().collect())),
                     vargs,
                 })))
             }
@@ -1445,12 +1363,55 @@ pub struct FnArgType<T: TypeMark> {
     pub typ: Type<T>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone)]
 pub struct FnType<T: TypeMark> {
     pub args: Arc<[FnArgType<T>]>,
     pub vargs: Option<Type<T>>,
     pub rtype: Type<T>,
-    pub constraints: Arc<[(TVar<T>, Type<T>)]>,
+    pub constraints: Arc<RwLock<Vec<(TVar<T>, Type<T>)>>>,
+}
+
+impl<T: TypeMark> PartialEq for FnType<T> {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { args: args0, vargs: vargs0, rtype: rtype0, constraints: constraints0 } =
+            self;
+        let Self { args: args1, vargs: vargs1, rtype: rtype1, constraints: constraints1 } =
+            other;
+        args0 == args1
+            && vargs0 == vargs1
+            && rtype0 == rtype1
+            && &*constraints0.read() == &*constraints1.read()
+    }
+}
+
+impl<T: TypeMark> Eq for FnType<T> {}
+
+impl<T: TypeMark> PartialOrd for FnType<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        use std::cmp::Ordering;
+        let Self { args: args0, vargs: vargs0, rtype: rtype0, constraints: constraints0 } =
+            self;
+        let Self { args: args1, vargs: vargs1, rtype: rtype1, constraints: constraints1 } =
+            other;
+        match args0.partial_cmp(&args1) {
+            Some(Ordering::Equal) => match vargs0.partial_cmp(vargs1) {
+                Some(Ordering::Equal) => match rtype0.partial_cmp(rtype1) {
+                    Some(Ordering::Equal) => {
+                        constraints0.read().partial_cmp(&*constraints1.read())
+                    }
+                    r => r,
+                },
+                r => r,
+            },
+            r => r,
+        }
+    }
+}
+
+impl<T: TypeMark> Ord for FnType<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
+    }
 }
 
 impl<T: TypeMark> Default for FnType<T> {
@@ -1459,7 +1420,7 @@ impl<T: TypeMark> Default for FnType<T> {
             args: Arc::from_iter([]),
             vargs: None,
             rtype: Default::default(),
-            constraints: Arc::from_iter([]),
+            constraints: Arc::new(RwLock::new(vec![])),
         }
     }
 }
@@ -1487,8 +1448,13 @@ impl<T: TypeMark> FnType<T> {
         );
         let vargs = vargs.as_ref().map(|t| t.normalize());
         let rtype = rtype.normalize();
-        let constraints =
-            Arc::from_iter(constraints.iter().map(|(tv, t)| (tv.clone(), t.normalize())));
+        let constraints = Arc::new(RwLock::new(
+            constraints
+                .read()
+                .iter()
+                .map(|(tv, t)| (tv.clone(), t.normalize()))
+                .collect(),
+        ));
         FnType { args, vargs, rtype, constraints }
     }
 }
@@ -1503,25 +1469,28 @@ impl FnType<NoRefs> {
             t.unbind_tvars()
         }
         rtype.unbind_tvars();
-        for (tv, tc) in constraints.iter() {
+        for (tv, tc) in constraints.read().iter() {
             tv.unbind();
             tc.unbind_tvars()
         }
     }
 
-    pub fn freeze(&self) {
-        let FnType { args, vargs, rtype, constraints } = self;
-        for arg in args.iter() {
-            arg.typ.freeze()
+    pub fn constrain_known(&self) {
+        thread_local! {
+            static KNOWN: RefCell<FxHashMap<ArcStr, TVar<NoRefs>>> = RefCell::new(HashMap::default());
         }
-        if let Some(t) = vargs {
-            t.freeze()
-        }
-        rtype.freeze();
-        for (tv, tc) in constraints.iter() {
-            tv.freeze();
-            tc.freeze()
-        }
+        KNOWN.with_borrow_mut(|known| {
+            known.clear();
+            self.collect_tvars(known);
+            let mut constraints = self.constraints.write();
+            for (name, tv) in known.drain() {
+                if let Some(t) = tv.read().typ.read().as_ref() {
+                    if !constraints.iter().any(|(tv, _)| tv.name == name) {
+                        constraints.push((tv.clone(), t.clone()));
+                    }
+                }
+            }
+        });
     }
 
     pub fn reset_tvars(&self) -> Self {
@@ -1532,11 +1501,13 @@ impl FnType<NoRefs> {
         );
         let vargs = vargs.as_ref().map(|t| t.reset_tvars());
         let rtype = rtype.reset_tvars();
-        let constraints = Arc::from_iter(
+        let constraints = Arc::new(RwLock::new(
             constraints
+                .read()
                 .iter()
-                .map(|(tv, tc)| (TVar::empty_named(tv.name.clone()), tc.reset_tvars())),
-        );
+                .map(|(tv, tc)| (TVar::empty_named(tv.name.clone()), tc.reset_tvars()))
+                .collect(),
+        ));
         FnType { args, vargs, rtype, constraints }
     }
 
@@ -1546,8 +1517,9 @@ impl FnType<NoRefs> {
             || vargs.as_ref().map(|t| t.has_unbound()).unwrap_or(false)
             || rtype.has_unbound()
             || constraints
+                .read()
                 .iter()
-                .any(|(tv, tc)| tv.read().typ.read().is_unbound() || tc.has_unbound())
+                .any(|(tv, tc)| tv.read().typ.read().is_none() || tc.has_unbound())
     }
 
     pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
@@ -1559,9 +1531,24 @@ impl FnType<NoRefs> {
             vargs.alias_tvars(known)
         }
         rtype.alias_tvars(known);
-        for (tv, tc) in constraints.iter() {
+        for (tv, tc) in constraints.read().iter() {
             Type::TVar(tv.clone()).alias_tvars(known);
             tc.alias_tvars(known);
+        }
+    }
+
+    pub fn collect_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
+        let FnType { args, vargs, rtype, constraints } = self;
+        for arg in args.iter() {
+            arg.typ.collect_tvars(known)
+        }
+        if let Some(vargs) = vargs {
+            vargs.collect_tvars(known)
+        }
+        rtype.collect_tvars(known);
+        for (tv, tc) in constraints.read().iter() {
+            Type::TVar(tv.clone()).collect_tvars(known);
+            tc.collect_tvars(known);
         }
     }
 
@@ -1621,12 +1608,15 @@ impl FnType<NoRefs> {
                 (_, _) => false,
             }
             && self.rtype.contains(&t.rtype)
-            && self.constraints.len() == t.constraints.len()
-            && self
-                .constraints
-                .iter()
-                .zip(t.constraints.iter())
-                .all(|((_, tc0), (_, tc1))| tc0.contains(tc1))
+            && {
+                let this = self.constraints.read();
+                let other = t.constraints.read();
+                this.len() == other.len()
+                    && this
+                        .iter()
+                        .zip(other.iter())
+                        .all(|((_, tc0), (_, tc1))| tc0.contains(tc1))
+            }
     }
 
     pub fn check_contains(&self, other: &Self) -> Result<()> {
@@ -1654,11 +1644,14 @@ impl FnType<NoRefs> {
                 (Some(t0), Some(t1)) => t0.contains(t1),
             }
             && rtype0.contains(rtype1)
-            && constraints0.len() == constraints1.len()
-            && constraints0
-                .iter()
-                .zip(constraints1.iter())
-                .all(|((tv0, t0), (tv1, t1))| tv0.name == tv1.name && t0.contains(t1))
+            && {
+                let constraints0 = constraints0.read();
+                let constraints1 = constraints1.read();
+                constraints0.len() == constraints1.len()
+                    && constraints0.iter().zip(constraints1.iter()).all(
+                        |((tv0, t0), (tv1, t1))| tv0.name == tv1.name && t0.contains(t1),
+                    )
+            }
     }
 
     pub fn check_sigmatch(&self, other: &Self) -> Result<()> {
@@ -1692,13 +1685,14 @@ impl FnType<NoRefs> {
 
 impl<T: TypeMark> fmt::Display for FnType<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.constraints.len() == 0 {
+        let constraints = self.constraints.read();
+        if constraints.len() == 0 {
             write!(f, "fn(")?;
         } else {
             write!(f, "fn<")?;
-            for (i, (tv, t)) in self.constraints.iter().enumerate() {
+            for (i, (tv, t)) in constraints.iter().enumerate() {
                 write!(f, "{tv}: {t}")?;
-                if i < self.constraints.len() - 1 {
+                if i < constraints.len() - 1 {
                     write!(f, ", ")?;
                 }
             }

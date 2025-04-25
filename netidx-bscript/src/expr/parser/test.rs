@@ -954,7 +954,7 @@ fn labeled_argument_lambda() {
                 ]),
                 vargs: None,
                 rtype: Type::Primitive(Typ::String.into()),
-                constraints: Arc::from_iter([]),
+                constraints: Arc::new(RwLock::new(vec![])),
             }))),
             value: Arc::new(
                 ExprKind::Lambda {

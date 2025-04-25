@@ -11,6 +11,7 @@ use arcstr::ArcStr;
 use compact_str::format_compact;
 use fxhash::FxHashMap;
 use netidx::{subscriber::Value, utils::Either};
+use parking_lot::RwLock;
 use smallvec::{smallvec, SmallVec};
 use std::{
     cell::RefCell, collections::HashMap, marker::PhantomData, mem, sync::Arc as SArc,
@@ -60,7 +61,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for LambdaCallSite<C, E> {
         }
         wrap!(self.body, self.body.typecheck(ctx))?;
         wrap!(self.body, self.typ.rtype.check_contains(&self.body.typ))?;
-        for (tv, tc) in self.typ.constraints.iter() {
+        for (tv, tc) in self.typ.constraints.read().iter() {
             tc.check_contains(&Type::TVar(tv.clone()))?
         }
         Ok(())
@@ -165,10 +166,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInCallSite<C, E> {
             };
             wrap!(args[i], atyp.check_contains(&args[i].typ))?
         }
-        for (tv, tc) in self.specified_type.constraints.iter() {
+        for (tv, tc) in self.specified_type.constraints.read().iter() {
             tc.check_contains(&Type::TVar(tv.clone()))?
         }
-        self.inferred_type.freeze();
+        self.inferred_type.constrain_known();
         self.apply.typecheck(ctx, args)?;
         Ok(())
     }
@@ -271,7 +272,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         })
         .collect::<Result<SmallVec<[_; 4]>>>();
     let constraints = match constraints {
-        Ok(c) => Arc::from_iter(c),
+        Ok(c) => Arc::new(RwLock::new(c.into_iter().collect())),
         Err(e) => error!("{e}",),
     };
     let typ = {
