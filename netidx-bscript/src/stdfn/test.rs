@@ -225,7 +225,7 @@ run!(filter, FILTER, |v: Result<&Value>| {
 const COUNT: &str = r#"
 {
   let a = [0, 1, 2, 3];
-  array::group(count(array::iter(a)), |n, _| n == 4)
+  array::group(count(array::iter(a)), |n, _| n == u64:4)
 }
 "#;
 
@@ -245,7 +245,7 @@ const SAMPLE: &str = r#"
 {
   let a = [0, 1, 2, 3];
   let x = "tweeeenywon!";
-  array::group(sample(array::iter(a), x), |n, _| n == 4)
+  array::group(sample(#trigger:array::iter(a), x), |n, _| n == u64:4)
 }
 "#;
 
@@ -314,7 +314,7 @@ run!(mean, MEAN, |v: Result<&Value>| {
 const ARRAY_MAP: &str = r#"
 {
   let a = [1, 2, 3, 4];
-  array::mapq(a, |x| x > 3)
+  array::map(a, |x| x > 3)
 }
 "#;
 
@@ -375,9 +375,9 @@ run!(array_flat_map, ARRAY_FLAT_MAP, |v: Result<&Value>| {
 const ARRAY_FILTER_MAP: &str = r#"
 {
   let a = [1, 2, 3, 4, 5, 6, 7, 8];
-  array::filter_map(a, |x| select x > 5 {
+  array::filter_map(a, |x: i64| -> [i64, null] select x > 5 {
     true => x + 1,
-    false => sample(x, null)
+    false => sample(#trigger: x, null)
   })
 }
 "#;
@@ -418,9 +418,9 @@ const ARRAY_FIND_MAP: &str = r#"
 {
   type T = (string, i64);
   let a: Array<T> = [("foo", 1), ("bar", 2), ("baz", 3)];
-  array::find_map(a, |(k, v): T| select k == "bar" {
+  array::find_map(a, |(k, v): T| -> [i64, null] select k == "bar" {
     true => v,
-    false => sample(v, null)
+    false => sample(#trigger:v, null)
   })
 }
 "#;

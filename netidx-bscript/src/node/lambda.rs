@@ -170,8 +170,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInCallSite<C, E> {
             tc.check_contains(&Type::TVar(tv.clone()))?
         }
         self.inferred_type.constrain_known();
-        self.apply.typecheck(ctx, args)?;
-        Ok(())
+        self.apply.typecheck(ctx, args)
     }
 
     fn typ(&self) -> Arc<FnType<NoRefs>> {

@@ -351,7 +351,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
                 let queue = VecDeque::new();
                 let out = BindId::new();
                 ctx.user.ref_var(out, top_id);
-                Ok(Box::new(Self { ready: false, queue, pred, typ, fid, x, out, top_id }))
+                Ok(Box::new(Self { ready: true, queue, pred, typ, fid, x, out, top_id }))
             }
             _ => bail!("expected two arguments"),
         })
@@ -371,14 +371,25 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
                 event.variables.insert(self.x, $v);
             }};
         }
+        macro_rules! maybe_cont {
+            () => {{
+                if let Some(v) = self.queue.front().cloned() {
+                    set!(v);
+                    continue;
+                }
+                break;
+            }};
+        }
         if let Some(v) = from[0].update(ctx, event) {
             self.queue.push_back(v);
         }
         if let Some(v) = from[1].update(ctx, event) {
+            ctx.cached.insert(self.fid, v.clone());
             event.variables.insert(self.fid, v);
         }
         if self.ready && self.queue.len() > 0 {
-            set!(self.queue.front().unwrap().clone());
+            let v = self.queue.front().unwrap().clone();
+            set!(v);
         }
         loop {
             match self.pred.update(ctx, event) {
@@ -388,15 +399,11 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
                     match v {
                         Value::Bool(true) => {
                             ctx.user.set_var(self.out, self.queue.pop_front().unwrap());
-                            set!(self.queue.front().unwrap().clone());
+                            maybe_cont!();
                         }
                         _ => {
                             let _ = self.queue.pop_front();
-                            if let Some(v) = self.queue.front().cloned() {
-                                set!(v);
-                                continue;
-                            }
-                            break;
+                            maybe_cont!();
                         }
                     }
                 }
