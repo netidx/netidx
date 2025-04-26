@@ -680,3 +680,210 @@ run!(str_strip_suffix, STR_STRIP_SUFFIX, |v: Result<&Value>| {
         _ => false,
     }
 });
+
+#[cfg(test)]
+const STR_TRIM: &str = r#"
+{
+  str::trim(" foobarbaz ")
+}
+"#;
+
+#[cfg(test)]
+run!(str_trim, STR_TRIM, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "foobarbaz",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_TRIM_START: &str = r#"
+{
+  str::trim_start(" foobarbaz ")
+}
+"#;
+
+#[cfg(test)]
+run!(str_trim_start, STR_TRIM_START, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "foobarbaz ",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_TRIM_END: &str = r#"
+{
+  str::trim_end(" foobarbaz ")
+}
+"#;
+
+#[cfg(test)]
+run!(str_trim_end, STR_TRIM_END, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == " foobarbaz",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_REPLACE: &str = r#"
+{
+  str::replace(#pat:"foo", #rep:"baz", "foobarbazfoo")
+}
+"#;
+
+#[cfg(test)]
+run!(str_replace, STR_REPLACE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "bazbarbazbaz",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_DIRNAME: &str = r#"
+{
+  str::dirname("/foo/bar/baz")
+}
+"#;
+
+#[cfg(test)]
+run!(str_dirname, STR_DIRNAME, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "/foo/bar",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_BASENAME: &str = r#"
+{
+  str::basename("/foo/bar/baz")
+}
+"#;
+
+#[cfg(test)]
+run!(str_basename, STR_BASENAME, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "baz",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_JOIN: &str = r#"
+{
+  str::join(#sep:"/", "/foo", "bar", ["baz", "zam"])
+}
+"#;
+
+#[cfg(test)]
+run!(str_join, STR_JOIN, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "/foo/bar/baz/zam",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_CONCAT: &str = r#"
+{
+  str::concat("foo", "bar", ["baz", "zam"])
+}
+"#;
+
+#[cfg(test)]
+run!(str_concat, STR_CONCAT, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "foobarbazzam",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_ESCAPE: &str = r#"
+{
+  str::escape("/foo/bar")
+}
+"#;
+
+#[cfg(test)]
+run!(str_escape, STR_ESCAPE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "\\/foo\\/bar",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_UNESCAPE: &str = r#"
+{
+  str::unescape("\\/foo\\/bar")
+}
+"#;
+
+#[cfg(test)]
+run!(str_unescape, STR_UNESCAPE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "/foo/bar",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_SPLIT: &str = r#"
+{
+  let a = str::split(#pat:",", "foo, bar, baz");
+  array::map(a, |s| str::trim(s))
+}
+"#;
+
+#[cfg(test)]
+run!(str_split, STR_SPLIT, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::String(s0), Value::String(s1), Value::String(s2)] => {
+                s0 == "foo" && s1 == "bar" && s2 == "baz"
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_SPLIT_ONCE: &str = r#"
+{
+  str::split_once(#pat:", ", "foo, bar, baz")
+}
+"#;
+
+#[cfg(test)]
+run!(str_split_once, STR_SPLIT_ONCE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::String(s0), Value::String(s1)] => s0 == "foo" && s1 == "bar, baz",
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_RSPLIT_ONCE: &str = r#"
+{
+  str::rsplit_once(#pat:", ", "foo, bar, baz")
+}
+"#;
+
+#[cfg(test)]
+run!(str_rsplit_once, STR_RSPLIT_ONCE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::String(s0), Value::String(s1)] => s0 == "foo, bar" && s1 == "baz",
+            _ => false,
+        },
+        _ => false,
+    }
+});

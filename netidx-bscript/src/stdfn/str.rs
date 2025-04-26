@@ -5,7 +5,9 @@ use crate::{
     Ctx, ExecCtx, UserEvent,
 };
 use arcstr::{literal, ArcStr};
-use netidx::{path::Path, subscriber::Value};
+use netidx::{path::Path, subscriber::Value, utils};
+use netidx_netproto::valarray::ValArray;
+use smallvec::SmallVec;
 use std::cell::RefCell;
 
 #[derive(Default)]
@@ -179,7 +181,7 @@ struct ReplaceEv;
 
 impl EvalCached for ReplaceEv {
     const NAME: &str = "replace";
-    deftype!("fn(string, string, string) -> string");
+    deftype!("fn(#pat:string, #rep:string, string) -> string");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1], &from.0[2]) {
@@ -243,7 +245,7 @@ struct StringJoinEv;
 
 impl EvalCached for StringJoinEv {
     const NAME: &str = "string_join";
-    deftype!("fn(string, @args: string) -> string");
+    deftype!("fn(#sep:string, @args: [string, Array<string>]) -> string");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         thread_local! {
@@ -267,24 +269,33 @@ impl EvalCached for StringJoinEv {
                     },
                 };
                 BUF.with_borrow_mut(|buf| {
+                    macro_rules! push {
+                        ($c:expr) => {
+                            if buf.is_empty() {
+                                buf.push_str($c.as_str());
+                            } else {
+                                buf.push_str(sep.as_str());
+                                buf.push_str($c.as_str());
+                            }
+                        };
+                    }
                     buf.clear();
                     for p in parts {
-                        let c = match p.as_ref().unwrap() {
-                            Value::String(c) => c.clone(),
-                            v => match v.clone().cast_to::<ArcStr>().ok() {
-                                Some(c) => c,
-                                None => {
-                                    return err!(
-                                        "string_join, components must be strings"
-                                    )
+                        match p.as_ref().unwrap() {
+                            Value::String(c) => push!(c),
+                            Value::Array(a) => {
+                                for v in a.iter() {
+                                    match v {
+                                        Value::String(c) => push!(c),
+                                        _ => {
+                                            return err!(
+                                                "string_join, components must be strings"
+                                            )
+                                        }
+                                    }
                                 }
-                            },
-                        };
-                        if buf.is_empty() {
-                            buf.push_str(c.as_str());
-                        } else {
-                            buf.push_str(sep.as_str());
-                            buf.push_str(c.as_str());
+                            }
+                            _ => return err!("string_join, components must be strings"),
                         }
                     }
                     Some(Value::String(buf.as_str().into()))
@@ -301,7 +312,7 @@ struct StringConcatEv;
 
 impl EvalCached for StringConcatEv {
     const NAME: &str = "string_concat";
-    deftype!("fn(@args: Any) -> string");
+    deftype!("fn(@args: [string, Array<string>]) -> string");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         thread_local! {
@@ -319,10 +330,19 @@ impl EvalCached for StringConcatEv {
             for p in parts {
                 match p.as_ref().unwrap() {
                     Value::String(c) => buf.push_str(c.as_ref()),
-                    v => match v.clone().cast_to::<ArcStr>().ok() {
-                        Some(c) => buf.push_str(c.as_ref()),
-                        None => return err!("string_concat: arguments must be strings"),
-                    },
+                    Value::Array(a) => {
+                        for v in a.iter() {
+                            match v {
+                                Value::String(c) => buf.push_str(c.as_ref()),
+                                _ => {
+                                    return err!(
+                                        "string_concat: arguments must be strings"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    _ => return err!("string_concat: arguments must be strings"),
                 }
             }
             Some(Value::String(buf.as_str().into()))
@@ -331,6 +351,166 @@ impl EvalCached for StringConcatEv {
 }
 
 type StringConcat = CachedArgs<StringConcatEv>;
+
+#[derive(Default)]
+struct StringEscapeEv {
+    to_escape: SmallVec<[char; 8]>,
+}
+
+impl EvalCached for StringEscapeEv {
+    const NAME: &str = "string_escape";
+    deftype!("fn(?#to_escape:string, ?#escape:string, string) -> [string, error]");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        // this is a fairly common case, so we check it before doing any real work
+        for p in &from.0[..] {
+            if p.is_none() {
+                return None;
+            }
+        }
+        match &from.0[0] {
+            Some(Value::String(s)) => {
+                self.to_escape.clear();
+                self.to_escape.extend(s.chars());
+            }
+            _ => return err!("escape: expected a string"),
+        }
+        let ec = match &from.0[1] {
+            Some(Value::String(s)) if s.len() == 1 => s.chars().next().unwrap(),
+            _ => return err!("escape: expected a single escape char"),
+        };
+        match &from.0[2] {
+            Some(Value::String(s)) => {
+                Some(Value::String(utils::escape(s, ec, &self.to_escape).into()))
+            }
+            _ => err!("escape: expected a string"),
+        }
+    }
+}
+
+type StringEscape = CachedArgs<StringEscapeEv>;
+
+#[derive(Default)]
+struct StringUnescapeEv;
+
+impl EvalCached for StringUnescapeEv {
+    const NAME: &str = "string_unescape";
+    deftype!("fn(?#escape:string, string) -> string");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        // this is a fairly common case, so we check it before doing any real work
+        for p in &from.0[..] {
+            if p.is_none() {
+                return None;
+            }
+        }
+        let ec = match &from.0[0] {
+            Some(Value::String(s)) if s.len() == 1 => s.chars().next().unwrap(),
+            _ => return err!("escape: expected a single escape char"),
+        };
+        match &from.0[1] {
+            Some(Value::String(s)) => Some(Value::String(utils::unescape(s, ec).into())),
+            _ => err!("escape: expected a string"),
+        }
+    }
+}
+
+type StringUnescape = CachedArgs<StringUnescapeEv>;
+
+#[derive(Default)]
+struct StringSplitEv;
+
+impl EvalCached for StringSplitEv {
+    const NAME: &str = "string_split";
+    deftype!("fn(#pat:string, string) -> Array<string>");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        // this is a fairly common case, so we check it before doing any real work
+        for p in &from.0[..] {
+            if p.is_none() {
+                return None;
+            }
+        }
+        let pat = match &from.0[0] {
+            Some(Value::String(s)) => s,
+            _ => return err!("split: expected string"),
+        };
+        match &from.0[1] {
+            Some(Value::String(s)) => Some(Value::Array(ValArray::from_iter(
+                s.split(&**pat).map(|s| Value::String(ArcStr::from(s))),
+            ))),
+            _ => err!("split: expected a string"),
+        }
+    }
+}
+
+type StringSplit = CachedArgs<StringSplitEv>;
+
+#[derive(Default)]
+struct StringSplitOnceEv;
+
+impl EvalCached for StringSplitOnceEv {
+    const NAME: &str = "string_split_once";
+    deftype!("fn(#pat:string, string) -> [null, (string, string)]");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        // this is a fairly common case, so we check it before doing any real work
+        for p in &from.0[..] {
+            if p.is_none() {
+                return None;
+            }
+        }
+        let pat = match &from.0[0] {
+            Some(Value::String(s)) => s,
+            _ => return err!("split_once: expected string"),
+        };
+        match &from.0[1] {
+            Some(Value::String(s)) => match s.split_once(&**pat) {
+                None => Some(Value::Null),
+                Some((s0, s1)) => Some(Value::Array(ValArray::from([
+                    Value::String(s0.into()),
+                    Value::String(s1.into()),
+                ]))),
+            },
+            _ => err!("split_once: expected a string"),
+        }
+    }
+}
+
+type StringSplitOnce = CachedArgs<StringSplitOnceEv>;
+
+#[derive(Default)]
+struct StringRSplitOnceEv;
+
+impl EvalCached for StringRSplitOnceEv {
+    const NAME: &str = "string_rsplit_once";
+    deftype!("fn(#pat:string, string) -> [null, (string, string)]");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        // this is a fairly common case, so we check it before doing any real work
+        for p in &from.0[..] {
+            if p.is_none() {
+                return None;
+            }
+        }
+        let pat = match &from.0[0] {
+            Some(Value::String(s)) => s,
+            _ => return err!("split_once: expected string"),
+        };
+        match &from.0[1] {
+            Some(Value::String(s)) => match s.rsplit_once(&**pat) {
+                None => Some(Value::Null),
+                Some((s0, s1)) => Some(Value::Array(ValArray::from([
+                    Value::String(s0.into()),
+                    Value::String(s1.into()),
+                ]))),
+            },
+            _ => err!("split_once: expected a string"),
+        }
+    }
+}
+
+type StringRSplitOnce = CachedArgs<StringRSplitOnceEv>;
 
 const MOD: &str = r#"
 pub mod str {
@@ -342,11 +522,16 @@ pub mod str {
     pub let trim = |s| 'trim;
     pub let trim_start = |s| 'trim_start;
     pub let trim_end = |s| 'trim_end;
-    pub let replace = |pattern, replacement, s| 'replace;
+    pub let replace = |#pat, #rep, s| 'replace;
     pub let dirname = |path| 'dirname;
     pub let basename = |path| 'basename;
-    pub let join = |sep, @args| 'string_join;
-    pub let concat = |@args| 'string_concat
+    pub let join = |#sep, @args| 'string_join;
+    pub let concat = |@args| 'string_concat;
+    pub let escape = |#to_escape = "/", #escape = "\\", s| 'string_escape;
+    pub let unescape = |#escape = "\\", s| 'string_unescape;
+    pub let split = |#pat, s| 'string_split;
+    pub let split_once = |#pat, s| 'string_split_once;
+    pub let rsplit_once = |#pat, s| 'string_rsplit_once
 }
 "#;
 
@@ -364,5 +549,10 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Basename>().unwrap();
     ctx.register_builtin::<StringJoin>().unwrap();
     ctx.register_builtin::<StringConcat>().unwrap();
+    ctx.register_builtin::<StringEscape>().unwrap();
+    ctx.register_builtin::<StringUnescape>().unwrap();
+    ctx.register_builtin::<StringSplit>().unwrap();
+    ctx.register_builtin::<StringSplitOnce>().unwrap();
+    ctx.register_builtin::<StringRSplitOnce>().unwrap();
     MOD.parse().unwrap()
 }
