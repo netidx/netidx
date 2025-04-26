@@ -512,6 +512,42 @@ impl EvalCached for StringRSplitOnceEv {
 
 type StringRSplitOnce = CachedArgs<StringRSplitOnceEv>;
 
+#[derive(Default)]
+struct StringToLowerEv;
+
+impl EvalCached for StringToLowerEv {
+    const NAME: &str = "string_to_lower";
+    deftype!("fn(string) -> string");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        match &from.0[0] {
+            None => None,
+            Some(Value::String(s)) => Some(Value::String(s.to_lowercase().into())),
+            _ => err!("to_lower: expected a string"),
+        }
+    }
+}
+
+type StringToLower = CachedArgs<StringToLowerEv>;
+
+#[derive(Default)]
+struct StringToUpperEv;
+
+impl EvalCached for StringToUpperEv {
+    const NAME: &str = "string_to_upper";
+    deftype!("fn(string) -> string");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        match &from.0[0] {
+            None => None,
+            Some(Value::String(s)) => Some(Value::String(s.to_uppercase().into())),
+            _ => err!("to_upper: expected a string"),
+        }
+    }
+}
+
+type StringToUpper = CachedArgs<StringToUpperEv>;
+
 const MOD: &str = r#"
 pub mod str {
     pub let starts_with = |#pfx, s| 'starts_with;
@@ -531,7 +567,9 @@ pub mod str {
     pub let unescape = |#escape = "\\", s| 'string_unescape;
     pub let split = |#pat, s| 'string_split;
     pub let split_once = |#pat, s| 'string_split_once;
-    pub let rsplit_once = |#pat, s| 'string_rsplit_once
+    pub let rsplit_once = |#pat, s| 'string_rsplit_once;
+    pub let to_lower = |s| 'string_to_lower;
+    pub let to_upper = |s| 'string_to_upper
 }
 "#;
 
@@ -554,5 +592,7 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<StringSplit>().unwrap();
     ctx.register_builtin::<StringSplitOnce>().unwrap();
     ctx.register_builtin::<StringRSplitOnce>().unwrap();
+    ctx.register_builtin::<StringToLower>().unwrap();
+    ctx.register_builtin::<StringToUpper>().unwrap();
     MOD.parse().unwrap()
 }

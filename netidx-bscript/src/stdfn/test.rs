@@ -887,3 +887,33 @@ run!(str_rsplit_once, STR_RSPLIT_ONCE, |v: Result<&Value>| {
         _ => false,
     }
 });
+
+#[cfg(test)]
+const STR_TO_LOWER: &str = r#"
+{
+  str::to_lower("FOO")
+}
+"#;
+
+#[cfg(test)]
+run!(str_to_lower, STR_TO_LOWER, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "foo",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_TO_UPPER: &str = r#"
+{
+  str::to_upper("foo")
+}
+"#;
+
+#[cfg(test)]
+run!(str_to_upper, STR_TO_UPPER, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "FOO",
+        _ => false,
+    }
+});
