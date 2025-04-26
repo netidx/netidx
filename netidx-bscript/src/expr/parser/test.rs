@@ -48,7 +48,7 @@ fn escaped_string() {
 
 #[test]
 fn raw_string() {
-    let s = r#"'[]asd[[][]askj'"#;
+    let s = r#"r'[]asd[[][]askj'"#;
     let p = Value::String(literal!(r#"[]asd[[][]askj"#));
     assert_eq!(ExprKind::Constant(p).to_expr(), parse_expr(&s).unwrap());
 }
@@ -1282,7 +1282,7 @@ fn tupleref() {
 fn prop0() {
     let s = r#"
 {
-  re::split(#pat:'\\s*', 'foo, bar, baz')
+  re::split(#pat:r'\\s*', r'foo, bar, baz')
 }
 "#;
     dbg!(parse(s).unwrap());

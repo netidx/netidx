@@ -133,7 +133,7 @@ run!(core_use, CORE_USE, |v: Result<&Value>| match v {
 const NAME_MODPATH: &str = r#"
 {
   let z = "baz";
-  str::join(", ", "foo", "bar", z)
+  str::join(#sep:", ", "foo", "bar", z)
 }
 "#;
 

@@ -921,7 +921,7 @@ run!(str_to_upper, STR_TO_UPPER, |v: Result<&Value>| {
 #[cfg(test)]
 const RE_IS_MATCH: &str = r#"
 {
-  re::is_match(#pat:'[\\[\\]0-9]+', 'foo[0]')
+  re::is_match(#pat:r'[\\[\\]0-9]+', r'foo[0]')
 }
 "#;
 
@@ -936,7 +936,7 @@ run!(re_is_match, RE_IS_MATCH, |v: Result<&Value>| {
 #[cfg(test)]
 const RE_FIND: &str = r#"
 {
-  re::find(#pat:'foo', 'foobarfoobazfoo')
+  re::find(#pat:r'foo', r'foobarfoobazfoo')
 }
 "#;
 
@@ -956,7 +956,7 @@ run!(re_find, RE_FIND, |v: Result<&Value>| {
 #[cfg(test)]
 const RE_CAPTURES: &str = r#"
 {
-  re::captures(#pat:'(fo)ob', 'foobarfoobazfoo')
+  re::captures(#pat:r'(fo)ob', r'foobarfoobazfoo')
 }
 "#;
 
@@ -980,7 +980,7 @@ run!(re_captures, RE_CAPTURES, |v: Result<&Value>| {
 #[cfg(test)]
 const RE_SPLIT: &str = r#"
 {
-  re::split(#pat:',\\s*', 'foo, bar, baz')
+  re::split(#pat:r',\\s*', r'foo, bar, baz')
 }
 "#;
 
@@ -1000,7 +1000,7 @@ run!(re_split, RE_SPLIT, |v: Result<&Value>| {
 #[cfg(test)]
 const RE_SPLITN: &str = r#"
 {
-  re::splitn(#pat:',\\s*', #limit:u64:2, 'foo, bar, baz')
+  re::splitn(#pat:r',\\s*', #limit:u64:2, r'foo, bar, baz')
 }
 "#;
 

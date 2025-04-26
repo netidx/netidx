@@ -1,17 +1,15 @@
 use crate::{
-    deftype, err, errf,
+    deftype, errf,
     expr::Expr,
     stdfn::{CachedArgs, CachedVals, EvalCached},
     Ctx, ExecCtx, UserEvent,
 };
 use anyhow::Result;
-use arcstr::{literal, ArcStr};
+use arcstr::ArcStr;
 use compact_str::format_compact;
-use netidx::{path::Path, subscriber::Value, utils};
+use netidx::subscriber::Value;
 use netidx_netproto::valarray::ValArray;
 use regex::Regex;
-use smallvec::SmallVec;
-use std::cell::RefCell;
 
 fn maybe_compile(s: &str, re: &mut Option<Regex>) -> Result<()> {
     let compile = match re {

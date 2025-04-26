@@ -11,7 +11,6 @@ use combine::{
         char::{alpha_num, digit, space, spaces, string},
         combinator::recognize,
         range::{take_while, take_while1},
-        repeat::take_until,
     },
     sep_by, sep_by1,
     stream::{position, Range},
@@ -22,7 +21,7 @@ use fxhash::FxHashSet;
 use netidx::{
     path::Path,
     publisher::{Typ, Value},
-    utils::{self, Either},
+    utils::Either,
 };
 use netidx_netproto::value_parser::{
     escaped_string, int, value as netidx_value, VAL_ESC,
@@ -1084,7 +1083,7 @@ where
     I::Range: Range,
 {
     const ESC: [char; 2] = ['\'', '\\'];
-    between(token('\''), token('\''), escaped_string(&ESC))
+    between(string("r\'"), token('\''), escaped_string(&ESC))
         .map(|s: String| ExprKind::Constant(Value::String(s.into())).to_expr())
 }
 
