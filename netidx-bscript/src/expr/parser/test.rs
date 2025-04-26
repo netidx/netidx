@@ -47,6 +47,13 @@ fn escaped_string() {
 }
 
 #[test]
+fn raw_string() {
+    let s = r#"'[]asd[[][]askj'"#;
+    let p = Value::String(literal!(r#"[]asd[[][]askj"#));
+    assert_eq!(ExprKind::Constant(p).to_expr(), parse_expr(&s).unwrap());
+}
+
+#[test]
 fn interpolated0() {
     let p = ExprKind::Apply {
         function: Arc::new(ExprKind::Ref { name: ["load"].into() }.to_expr()),
@@ -1275,9 +1282,7 @@ fn tupleref() {
 fn prop0() {
     let s = r#"
 {
-  type T = { foo: string, bar: i64, f: fn(#x: i64, #y: i64) -> i64 };
-  let t: T = { foo: "hello world", bar: 3, f: |#x, #y| x - y };
-  (t.f)(#y: 3, #x: 4)
+  re::split(#pat:'\\s*', 'foo, bar, baz')
 }
 "#;
     dbg!(parse(s).unwrap());

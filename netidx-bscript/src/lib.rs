@@ -320,6 +320,12 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
             panic!("failed to compile the str module {e}")
         }
         t.std.push(node);
+        let re = stdfn::re::register(&mut t);
+        let node = Node::compile(&mut t, &root, re);
+        if let Some(e) = node.extract_err() {
+            panic!("failed to compile the re module {e}")
+        }
+        t.std.push(node);
         let time = stdfn::time::register(&mut t);
         let node = Node::compile(&mut t, &root, time);
         if let Some(e) = node.extract_err() {
