@@ -431,7 +431,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
 }
 
 struct Queue {
+    triggered: usize,
     queue: VecDeque<Value>,
+    id: BindId,
+    top_id: ExprId,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Queue {
@@ -439,8 +442,12 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Queue {
     deftype!("fn(#trigger:Any, 'a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|_, _, _, from, _| match from {
-            [_, _] => Ok(Box::new(Self { queue: VecDeque::new() })),
+        Arc::new(|ctx, _, _, from, top_id| match from {
+            [_, _] => {
+                let id = BindId::new();
+                ctx.user.ref_var(id, top_id);
+                Ok(Box::new(Self { triggered: 0, queue: VecDeque::new(), id, top_id }))
+            }
             _ => bail!("expected two arguments"),
         })
     }
@@ -453,11 +460,62 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Queue {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        let triggered = from[0].update(ctx, event).is_some();
-        if let Some(v) = from[1].update(ctx, event) {
-            self.queue.push_back(v);
+        if from[0].update(ctx, event).is_some() {
+            self.triggered += 1;
         }
-        triggered.then(|| self.queue.pop_front()).flatten()
+        if let Some(v) = from[1].update(ctx, event) {
+            self.queue.push_back(dbg!(v));
+        }
+        while self.triggered > 0 && self.queue.len() > 0 {
+            self.triggered -= 1;
+            ctx.user.set_var(self.id, self.queue.pop_front().unwrap());
+        }
+        dbg!(event.variables.get(&self.id).cloned())
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id);
+    }
+}
+
+struct Seq {
+    id: BindId,
+    top_id: ExprId,
+}
+
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Seq {
+    const NAME: &str = "seq";
+    deftype!("fn(u64) -> u64");
+
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|ctx, _, _, from, top_id| match from {
+            [_] => {
+                let id = BindId::new();
+                ctx.user.ref_var(id, top_id);
+                Ok(Box::new(Self { id, top_id }))
+            }
+            _ => bail!("expected one argument"),
+        })
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Seq {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        if let Some(Value::U64(i)) = from[0].update(ctx, event) {
+            for i in 0..i {
+                ctx.user.set_var(self.id, Value::U64(i));
+            }
+        }
+        event.variables.get(&self.id).cloned()
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id);
     }
 }
 
@@ -641,6 +699,7 @@ pub mod core {
         pub let fold = |a, init, f| 'array_fold;
         pub let group = |v, f| 'group;
         pub let iter = |a| 'iter;
+        pub let iterq = |#trigger, a| 'iterq;
         pub let len = |a| 'array_len;
         pub let concat = |x, @args| 'array_concat;
         pub let flatten = |a| 'array_flatten;
@@ -660,6 +719,7 @@ pub mod core {
     pub let mean = |v, @args| 'mean;
     pub let min = |@args| 'min;
     pub let once = |v| 'once;
+    pub let seq = |i| 'seq;
     pub let or = |@args| 'or;
     pub let product = |@args| 'product;
     pub let sample = |#trigger, v| 'sample;
@@ -689,6 +749,7 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<array::Map<C, E>>().unwrap();
     ctx.register_builtin::<array::Fold<C, E>>().unwrap();
     ctx.register_builtin::<array::FilterMap<C, E>>().unwrap();
+    ctx.register_builtin::<array::IterQ>().unwrap();
     ctx.register_builtin::<FilterErr>().unwrap();
     ctx.register_builtin::<array::Group<C, E>>().unwrap();
     ctx.register_builtin::<IsErr>().unwrap();
@@ -697,6 +758,7 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Min>().unwrap();
     ctx.register_builtin::<Never>().unwrap();
     ctx.register_builtin::<Once>().unwrap();
+    ctx.register_builtin::<Seq>().unwrap();
     ctx.register_builtin::<Or>().unwrap();
     ctx.register_builtin::<Product>().unwrap();
     ctx.register_builtin::<Sample>().unwrap();

@@ -168,7 +168,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
                 }
                 let dval = ctx.user.subscribe(
                     UpdatesFlags::BEGIN_WITH_LAST,
-                    path.clone(),
+                    dbg!(path.clone()),
                     self.top_id,
                 );
                 self.cur = Some((path, dval));

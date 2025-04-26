@@ -667,3 +667,57 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Iter {
         ctx.user.unref_var(self.0, self.1)
     }
 }
+
+pub(super) struct IterQ {
+    triggered: usize,
+    queue: VecDeque<(usize, ValArray)>,
+    id: BindId,
+    top_id: ExprId,
+}
+
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for IterQ {
+    const NAME: &str = "iterq";
+    deftype!("fn(#trigger:Any, Array<'a>) -> 'a");
+
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|ctx, _, _, _, top_id| {
+            let id = BindId::new();
+            ctx.user.ref_var(id, top_id);
+            Ok(Box::new(IterQ { triggered: 0, queue: VecDeque::new(), id, top_id }))
+        })
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Apply<C, E> for IterQ {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        if from[0].update(ctx, event).is_some() {
+            self.triggered += 1;
+        }
+        if let Some(Value::Array(a)) = from[1].update(ctx, event) {
+            if a.len() > 0 {
+                self.queue.push_back((0, a));
+            }
+        }
+        while self.triggered > 0 && self.queue.len() > 0 {
+            let (i, a) = self.queue.front_mut().unwrap();
+            while self.triggered > 0 && *i < a.len() {
+                ctx.user.set_var(self.id, a[*i].clone());
+                *i += 1;
+                self.triggered -= 1;
+            }
+            if *i == a.len() {
+                self.queue.pop_front();
+            }
+        }
+        event.variables.get(&self.id).cloned()
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id)
+    }
+}

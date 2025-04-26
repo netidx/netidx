@@ -42,3 +42,4 @@ triomphe = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"
+env_logger = { workspace = true }

@@ -13,7 +13,7 @@ struct StartsWithEv;
 
 impl EvalCached for StartsWithEv {
     const NAME: &str = "starts_with";
-    deftype!("fn(string, string) -> bool");
+    deftype!("fn(#pfx:string, string) -> bool");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -37,7 +37,7 @@ struct EndsWithEv;
 
 impl EvalCached for EndsWithEv {
     const NAME: &str = "ends_with";
-    deftype!("fn(string, string) -> bool");
+    deftype!("fn(#sfx:string, string) -> bool");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -61,7 +61,7 @@ struct ContainsEv;
 
 impl EvalCached for ContainsEv {
     const NAME: &str = "contains";
-    deftype!("fn(string, string) -> bool");
+    deftype!("fn(#part:string, string) -> bool");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -85,7 +85,7 @@ struct StripPrefixEv;
 
 impl EvalCached for StripPrefixEv {
     const NAME: &str = "strip_prefix";
-    deftype!("fn(string, string) -> string");
+    deftype!("fn(#pfx:string, string) -> string");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -105,7 +105,7 @@ struct StripSuffixEv;
 
 impl EvalCached for StripSuffixEv {
     const NAME: &str = "strip_suffix";
-    deftype!("fn(string, string) -> string");
+    deftype!("fn(#sfx:string, string) -> string");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
@@ -334,11 +334,11 @@ type StringConcat = CachedArgs<StringConcatEv>;
 
 const MOD: &str = r#"
 pub mod str {
-    pub let starts_with = |prefix, s| 'starts_with;
-    pub let ends_with = |suffix, s| 'ends_with;
-    pub let contains = |part, s| 'contains;
-    pub let strip_prefix = |prefix, s| 'strip_prefix;
-    pub let strip_suffix = |suffix, s| 'strip_suffix;
+    pub let starts_with = |#pfx, s| 'starts_with;
+    pub let ends_with = |#sfx, s| 'ends_with;
+    pub let contains = |#part, s| 'contains;
+    pub let strip_prefix = |#pfx, s| 'strip_prefix;
+    pub let strip_suffix = |#sfx, s| 'strip_suffix;
     pub let trim = |s| 'trim;
     pub let trim_start = |s| 'trim_start;
     pub let trim_end = |s| 'trim_end;

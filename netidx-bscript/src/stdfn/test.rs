@@ -222,6 +222,33 @@ run!(filter, FILTER, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
+const QUEUE: &str = r#"
+{
+  let a = [1, 2, 3, 4, 5, 6, 7, 8];
+  array::map(a, |v| net::publish("/local/[v]", v));
+  let v = array::iter(a);
+  let trigger = once(v);
+  let q = queue(#trigger, v);
+  let out = net::subscribe("/local/[q]")?;
+  trigger <- out;
+  array::group(out, |n, _| n == u64:8)
+}
+"#;
+
+#[cfg(test)]
+run!(queue, QUEUE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::I64(1), Value::I64(2), Value::I64(3), Value::I64(4), Value::I64(5), Value::I64(6), Value::I64(7), Value::I64(8)] => {
+                true
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
 const COUNT: &str = r#"
 {
   let a = [0, 1, 2, 3];
@@ -274,6 +301,24 @@ const UNIQ: &str = r#"
 run!(uniq, UNIQ, |v: Result<&Value>| {
     match v {
         Ok(Value::I64(1)) => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const SEQ: &str = r#"
+{
+  array::group(seq(u64:4), |n, _| n == u64:4)
+}
+"#;
+
+#[cfg(test)]
+run!(seq, SEQ, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::U64(0), Value::U64(1), Value::U64(2), Value::U64(3)] => true,
+            _ => false,
+        },
         _ => false,
     }
 });
@@ -434,16 +479,36 @@ run!(array_find_map, ARRAY_FIND_MAP, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
-const ITER: &str = r#"
+const ARRAY_ITER: &str = r#"
 {
    filter(array::iter([1, 2, 3, 4]), |x| x == 4)
 }
 "#;
 
 #[cfg(test)]
-run!(iter, ITER, |v: Result<&Value>| {
+run!(array_iter, ARRAY_ITER, |v: Result<&Value>| {
     match v {
         Ok(Value::I64(4)) => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const ARRAY_ITERQ: &str = r#"
+{
+   let a = [1, 2, 3, 4];
+   a <- [5, 6, 7, 8];
+   let trigger = once(null);
+   let v = array::iterq(#trigger, a);
+   trigger <- v;
+   filter(v, |x| x == 8)
+}
+"#;
+
+#[cfg(test)]
+run!(array_iterq, ARRAY_ITERQ, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(8)) => true,
         _ => false,
     }
 });
@@ -521,7 +586,7 @@ run!(array_flatten, ARRAY_FLATTEN, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
-const GROUP: &str = r#"
+const ARRAY_GROUP: &str = r#"
 {
    let x = 1;
    let y = x + 1;
@@ -531,12 +596,87 @@ const GROUP: &str = r#"
 "#;
 
 #[cfg(test)]
-run!(group, GROUP, |v: Result<&Value>| {
+run!(array_group, ARRAY_GROUP, |v: Result<&Value>| {
     match v {
         Ok(Value::Array(a)) => match &a[..] {
             [Value::I64(1), Value::I64(2), Value::I64(3)] => true,
             _ => false,
         },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_STARTS_WITH: &str = r#"
+{
+  str::starts_with(#pfx:"foo", "foobarbaz")
+}
+"#;
+
+#[cfg(test)]
+run!(str_starts_with, STR_STARTS_WITH, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Bool(true)) => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_ENDS_WITH: &str = r#"
+{
+  str::ends_with(#sfx:"baz", "foobarbaz")
+}
+"#;
+
+#[cfg(test)]
+run!(str_ends_with, STR_ENDS_WITH, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Bool(true)) => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_CONTAINS: &str = r#"
+{
+  str::contains(#part:"bar", "foobarbaz")
+}
+"#;
+
+#[cfg(test)]
+run!(str_contains, STR_CONTAINS, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Bool(true)) => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_STRIP_PREFIX: &str = r#"
+{
+  str::strip_prefix(#pfx:"foo", "foobarbaz")
+}
+"#;
+
+#[cfg(test)]
+run!(str_strip_prefix, STR_STRIP_PREFIX, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "barbaz",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const STR_STRIP_SUFFIX: &str = r#"
+{
+  str::strip_suffix(#sfx:"baz", "foobarbaz")
+}
+"#;
+
+#[cfg(test)]
+run!(str_strip_suffix, STR_STRIP_SUFFIX, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) => s == "foobar",
         _ => false,
     }
 });

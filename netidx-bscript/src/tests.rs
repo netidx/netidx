@@ -7,7 +7,13 @@ use netidx::{
     subscriber::SubscriberBuilder,
 };
 
-pub async fn init() -> Result<BSHandle> {
+pub struct TestCtx {
+    pub _resolver: resolver_server::Server,
+    pub rt: BSHandle,
+}
+
+pub async fn init() -> Result<TestCtx> {
+    let _ = env_logger::try_init();
     let resolver = {
         use resolver_server::config::{self, file};
         let cfg = file::ConfigBuilder::default()
@@ -32,16 +38,20 @@ pub async fn init() -> Result<BSHandle> {
     };
     let publisher = PublisherBuilder::new(cfg.clone()).build().await?;
     let subscriber = SubscriberBuilder::new(cfg).build()?;
-    Ok(BSConfigBuilder::default()
-        .publisher(publisher)
-        .subscriber(subscriber)
-        .build()?
-        .start())
+    Ok(TestCtx {
+        _resolver: resolver,
+        rt: BSConfigBuilder::default()
+            .publisher(publisher)
+            .subscriber(subscriber)
+            .build()?
+            .start(),
+    })
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn bind_ref_arith() -> Result<()> {
-    let bs = init().await?;
+    let ctx = init().await?;
+    let bs = ctx.rt;
     let e = r#"
 {
   let v = (((1 + 1) * 2) / 2) - 1;
@@ -66,7 +76,8 @@ macro_rules! run {
     ($name:ident, $code:expr, $pred:expr) => {
         #[tokio::test(flavor = "current_thread")]
         async fn $name() -> ::anyhow::Result<()> {
-            let bs = $crate::tests::init().await?;
+            let ctx = $crate::tests::init().await?;
+            let bs = ctx.rt;
             let (tx, mut rx) = futures::channel::mpsc::channel(10);
             bs.subscribe(tx)?;
             match bs.compile(String::from($code)).await.map(|r| r.eids[0].0) {
