@@ -704,7 +704,8 @@ pub mod core {
         pub let concat = |x, @args| 'array_concat;
         pub let flatten = |a| 'array_flatten;
         pub let find = |a, f| 'array_find;
-        pub let find_map = |a, f| 'array_find_map
+        pub let find_map = |a, f| 'array_find_map;
+        pub let sort = |a| 'array_sort
     };
 
     pub let all = |@args| 'all;
@@ -738,10 +739,10 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<And>().unwrap();
     ctx.register_builtin::<Count>().unwrap();
     ctx.register_builtin::<Divide>().unwrap();
+    ctx.register_builtin::<Filter<C, E>>().unwrap();
     ctx.register_builtin::<array::Concat>().unwrap();
     ctx.register_builtin::<array::Len>().unwrap();
     ctx.register_builtin::<array::Flatten>().unwrap();
-    ctx.register_builtin::<Filter<C, E>>().unwrap();
     ctx.register_builtin::<array::Filter<C, E>>().unwrap();
     ctx.register_builtin::<array::FlatMap<C, E>>().unwrap();
     ctx.register_builtin::<array::Find<C, E>>().unwrap();
@@ -750,8 +751,9 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<array::Fold<C, E>>().unwrap();
     ctx.register_builtin::<array::FilterMap<C, E>>().unwrap();
     ctx.register_builtin::<array::IterQ>().unwrap();
-    ctx.register_builtin::<FilterErr>().unwrap();
     ctx.register_builtin::<array::Group<C, E>>().unwrap();
+    ctx.register_builtin::<array::Sort>().unwrap();
+    ctx.register_builtin::<FilterErr>().unwrap();
     ctx.register_builtin::<IsErr>().unwrap();
     ctx.register_builtin::<Max>().unwrap();
     ctx.register_builtin::<Mean>().unwrap();

@@ -522,6 +522,25 @@ impl EvalCached for FlattenEv {
 
 pub(super) type Flatten = CachedArgs<FlattenEv>;
 
+#[derive(Default)]
+pub(super) struct SortEv(SmallVec<[Value; 32]>);
+
+impl EvalCached for SortEv {
+    const NAME: &str = "array_sort";
+    deftype!("fn(Array<'a>) -> Array<'a>");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        if let Some(Value::Array(a)) = &from.0[0] {
+            self.0.extend(a.iter().cloned());
+            self.0.sort();
+            return Some(Value::Array(ValArray::from_iter_exact(self.0.drain(..))));
+        }
+        None
+    }
+}
+
+pub(super) type Sort = CachedArgs<SortEv>;
+
 pub(super) struct Group<C: Ctx, E: UserEvent> {
     queue: VecDeque<Value>,
     buf: SmallVec<[Value; 16]>,

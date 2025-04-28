@@ -607,6 +607,27 @@ run!(array_group, ARRAY_GROUP, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
+const ARRAY_SORT: &str = r#"
+{
+   let a = [5, 4, 3, 2, 1];
+   array::sort(a)
+}
+"#;
+
+#[cfg(test)]
+run!(array_sort, ARRAY_SORT, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::I64(1), Value::I64(2), Value::I64(3), Value::I64(4), Value::I64(5)] => {
+                true
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
 const STR_STARTS_WITH: &str = r#"
 {
   str::starts_with(#pfx:"foo", "foobarbaz")
@@ -1011,6 +1032,91 @@ run!(re_splitn, RE_SPLITN, |v: Result<&Value>| {
             [Value::String(s0), Value::String(s1)] => s0 == "foo" && s1 == "bar, baz",
             _ => false,
         },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const NET_PUB_SUB: &str = r#"
+{
+  net::publish("/local/foo", 42);
+  net::subscribe("/local/foo")?
+}
+"#;
+
+#[cfg(test)]
+run!(net_pub_sub, NET_PUB_SUB, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(42)) => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const NET_WRITE: &str = r#"
+{
+  let p = "/local/foo";
+  let x = 42;
+  net::publish(#on_write:|v| x <- cast<i64>(v)?, p, x);
+  let s = cast<i64>(net::subscribe(p)?)?;
+  net::write(p, once(s + 1));
+  array::group(s, |n, _| n == u64:2)
+}
+"#;
+
+#[cfg(test)]
+run!(net_write, NET_WRITE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::I64(42), Value::I64(43)] => true,
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const NET_LIST: &str = r#"
+{
+  net::publish("/local/foo", 42);
+  net::publish("/local/bar", 42);
+  net::list("/local")
+}
+"#;
+
+#[cfg(test)]
+run!(net_list, NET_LIST, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::String(s0), Value::String(s1)] => {
+                let mut a = [s0, s1];
+                a.sort();
+                a[0] == "/local/bar" && a[1] == "/local/foo"
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const NET_LIST_TABLE: &str = r#"
+{
+  net::publish("/local/t/0/foo", 42);
+  net::publish("/local/t/0/bar", 42);
+  net::publish("/local/t/1/foo", 42);
+  net::publish("/local/t/1/bar", 42);
+  let t = net::list_table("/local/t");
+  let cols = array::map(t.columns, |(n, _): (string, _)| n);
+  (array::sort(cols) == ["bar", "foo"])
+  && (array::sort(t.rows) == ["/local/t/0", "/local/t/1"])
+}
+"#;
+
+#[cfg(test)]
+run!(net_list_table, NET_LIST_TABLE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Bool(true)) => true,
         _ => false,
     }
 });
