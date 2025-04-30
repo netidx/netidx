@@ -101,6 +101,7 @@ pub mod server {
         static ref ARGS: Pool<HashMap<ArcStr, Value>> = Pool::new(1000, 50);
     }
 
+    #[derive(Debug)]
     pub struct RpcReply(Option<SendResult>);
 
     impl Drop for RpcReply {
@@ -126,6 +127,7 @@ pub mod server {
         pub default_value: Value,
     }
 
+    #[derive(Debug)]
     pub struct RpcCall {
         pub client: ClId,
         pub id: ProcId,
@@ -240,6 +242,7 @@ pub mod server {
     }
 
     /// A remote procedure published in netidx
+    #[derive(Debug)]
     pub struct Proc {
         _stop: oneshot::Sender<()>,
         id: ProcId,

@@ -26,6 +26,7 @@ use netidx::{
     publisher::{Id, Val, WriteRequest},
     subscriber::{self, Dval, SubId, UpdatesFlags, Value},
 };
+use netidx_protocols::rpc::server::{ArgSpec, RpcCall};
 use parking_lot::RwLock;
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -80,6 +81,7 @@ pub struct Event<E: UserEvent> {
     pub variables: FxHashMap<BindId, Value>,
     pub netidx: FxHashMap<SubId, subscriber::Event>,
     pub writes: FxHashMap<Id, WriteRequest>,
+    pub rpc_calls: FxHashMap<BindId, RpcCall>,
     pub user: E,
 }
 
@@ -90,15 +92,17 @@ impl<E: UserEvent> Event<E> {
             variables: HashMap::default(),
             netidx: HashMap::default(),
             writes: HashMap::default(),
+            rpc_calls: HashMap::default(),
             user,
         }
     }
 
     pub fn clear(&mut self) {
-        let Self { init, variables, netidx, writes, user } = self;
+        let Self { init, variables, netidx, rpc_calls, writes, user } = self;
         *init = false;
         variables.clear();
         netidx.clear();
+        rpc_calls.clear();
         writes.clear();
         user.clear();
     }
@@ -247,6 +251,26 @@ pub trait Ctx: Debug + 'static {
     /// event with the specified id to the expression specified by
     /// ref_by.
     fn call_rpc(&mut self, name: Path, args: Vec<(ArcStr, Value)>, id: BindId);
+
+    /// Publish an rpc at the specified path with the specified
+    /// procedure level doc and arg spec.
+    ///
+    /// When the RPC is called the rpc table in event will be
+    /// populated under the specified bind id.
+    ///
+    /// If the procedure is already published an error will be
+    /// returned
+    fn publish_rpc(
+        &mut self,
+        name: Path,
+        doc: Value,
+        spec: Vec<ArgSpec>,
+        id: BindId,
+        ref_by: ExprId,
+    ) -> Result<()>;
+
+    /// unpublish the rpc identified by the bind id.
+    fn unpublish_rpc(&mut self, id: BindId, ref_by: ExprId);
 
     /// arrange to have a Timer event delivered after timeout. When
     /// the timer expires you are expected to deliver a Variable event

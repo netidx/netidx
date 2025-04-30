@@ -33,7 +33,7 @@ use netidx::{
     resolver_client::ChangeTracker,
     subscriber::{self, Dval, SubId, Subscriber, UpdatesFlags},
 };
-use netidx_protocols::rpc;
+use netidx_protocols::rpc::{self, server::RpcCall};
 use smallvec::{smallvec, SmallVec};
 use std::{
     collections::{hash_map::Entry, HashMap, VecDeque},
@@ -77,6 +77,8 @@ pub struct BSCtx {
     net_updates: VecDeque<(SubId, subscriber::Event)>,
     net_writes: VecDeque<(Id, WriteRequest)>,
     rpc_clients: FxHashMap<Path, RpcClient>,
+    published_rpcs: FxHashMap<Path, rpc::server::Proc>,
+    published_rpcs_by_id: FxHashMap<BindId, (Path, ExprId)>,
     pending_unsubscribe: VecDeque<(Instant, Dval)>,
     change_trackers: FxHashMap<BindId, Arc<Mutex<ChangeTracker>>>,
     tasks: JoinSet<(BindId, Value)>,
@@ -87,12 +89,15 @@ pub struct BSCtx {
     updates: mpsc::Receiver<UpdateBatch>,
     writes_tx: mpsc::Sender<WriteBatch>,
     writes: mpsc::Receiver<WriteBatch>,
+    rpcs_tx: mpsc::Sender<(BindId, RpcCall)>,
+    rpcs: mpsc::Receiver<(BindId, RpcCall)>,
 }
 
 impl BSCtx {
     fn new(publisher: Publisher, subscriber: Subscriber) -> Self {
         let (updates_tx, updates) = mpsc::channel(3);
-        let (writes_tx, writes) = mpsc::channel(3);
+        let (writes_tx, writes) = mpsc::channel(100);
+        let (rpcs_tx, rpcs) = mpsc::channel(100);
         let batch = publisher.start_batch();
         let mut tasks = JoinSet::new();
         tasks.spawn(async { future::pending().await });
@@ -106,6 +111,8 @@ impl BSCtx {
             pending_unsubscribe: VecDeque::new(),
             published: HashMap::default(),
             change_trackers: HashMap::default(),
+            published_rpcs: HashMap::default(),
+            published_rpcs_by_id: HashMap::default(),
             tasks,
             batch,
             publisher,
@@ -114,6 +121,8 @@ impl BSCtx {
             updates_tx,
             writes,
             writes_tx,
+            rpcs_tx,
+            rpcs,
         }
     }
 }
@@ -153,6 +162,8 @@ impl Ctx for BSCtx {
             rpc_clients,
             subscribed,
             published,
+            published_rpcs,
+            published_rpcs_by_id,
             pending_unsubscribe,
             change_trackers,
             tasks,
@@ -163,6 +174,8 @@ impl Ctx for BSCtx {
             updates,
             writes_tx,
             writes,
+            rpcs,
+            rpcs_tx,
         } = self;
         by_ref.clear();
         var_updates.clear();
@@ -171,6 +184,8 @@ impl Ctx for BSCtx {
         rpc_clients.clear();
         subscribed.clear();
         published.clear();
+        published_rpcs.clear();
+        published_rpcs_by_id.clear();
         pending_unsubscribe.clear();
         change_trackers.clear();
         *tasks = JoinSet::new();
@@ -179,9 +194,12 @@ impl Ctx for BSCtx {
         let (tx, rx) = mpsc::channel(3);
         *updates_tx = tx;
         *updates = rx;
-        let (tx, rx) = mpsc::channel(3);
+        let (tx, rx) = mpsc::channel(100);
         *writes_tx = tx;
         *writes = rx;
+        let (tx, rx) = mpsc::channel(100);
+        *rpcs_tx = tx;
+        *rpcs = rx
     }
 
     fn call_rpc(&mut self, name: Path, args: Vec<(ArcStr, Value)>, id: BindId) {
@@ -218,6 +236,21 @@ impl Ctx for BSCtx {
                 },
             }
         });
+    }
+
+    fn publish_rpc(
+        &mut self,
+        name: Path,
+        doc: Value,
+        spec: Vec<rpc::server::ArgSpec>,
+        id: BindId,
+        ref_by: ExprId,
+    ) -> Result<()> {
+        todo!()
+    }
+
+    fn unpublish_rpc(&mut self, id: BindId, ref_by: ExprId) {
+        todo!()
     }
 
     fn subscribe(&mut self, flags: UpdatesFlags, path: Path, ref_by: ExprId) -> Dval {
@@ -403,6 +436,7 @@ struct BS {
     subs: Vec<mpsc::Sender<RtEvent>>,
     resolvers: Vec<ModuleResolver>,
     publish_timeout: Option<Duration>,
+    last_rpc_gc: DateTime<Utc>,
 }
 
 impl BS {
@@ -445,6 +479,7 @@ impl BS {
             subs: vec![],
             resolvers,
             publish_timeout: rt.publish_timeout,
+            last_rpc_gc: Utc::now(),
         }
     }
 
@@ -535,7 +570,8 @@ impl BS {
                 &mut self.ctx.user.batch,
                 self.ctx.user.publisher.start_batch(),
             );
-            batch.commit(self.publish_timeout).await;
+            let timeout = self.publish_timeout;
+            task::spawn(async move { batch.commit(timeout).await });
         }
     }
 
@@ -628,6 +664,7 @@ impl BS {
 
     async fn run(mut self, mut to_rt: mpsc::UnboundedReceiver<ToRt>) -> Result<()> {
         let mut tasks = vec![];
+        let onemin = chrono::Duration::seconds(60);
         'main: loop {
             let ready = self.cycle_ready();
             let mut updates = None;
@@ -700,6 +737,13 @@ impl BS {
                 }
             }
             self.do_cycle(updates, writes, &mut tasks).await;
+            if !self.ctx.user.rpc_clients.is_empty() {
+                let now = Utc::now();
+                if now - self.last_rpc_gc >= onemin {
+                    self.last_rpc_gc = now;
+                    self.ctx.user.rpc_clients.retain(|_, c| now - c.last_used <= onemin);
+                }
+            }
         }
     }
 }
