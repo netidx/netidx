@@ -13,9 +13,8 @@ use std::{ops::SubAssign, sync::Arc, time::Duration};
 
 struct AfterIdle {
     args: CachedVals,
-    scheduled: usize,
-    id: BindId,
-    top_id: ExprId,
+    id: Option<BindId>,
+    eid: ExprId,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for AfterIdle {
@@ -23,15 +22,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for AfterIdle {
     deftype!("fn([duration, Number], 'a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|ctx, _, _, from, top_id| {
-            let id = BindId::new();
-            ctx.user.ref_var(id, top_id);
-            Ok(Box::new(AfterIdle {
-                args: CachedVals::new(from),
-                scheduled: 0,
-                id,
-                top_id,
-            }))
+        Arc::new(|_, _, _, from, eid| {
+            Ok(Box::new(AfterIdle { args: CachedVals::new(from), id: None, eid }))
         })
     }
 }
@@ -51,11 +43,14 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for AfterIdle {
                 .cast_to::<Duration>()
             {
                 Err(e) => {
+                    self.id = None;
                     return errf!("after_idle(timeout, cur): expected duration {e:?}");
                 }
                 Ok(dur) => {
-                    self.scheduled += 1;
-                    ctx.user.set_timer(self.id, dur);
+                    let id = BindId::new();
+                    self.id = Some(id);
+                    ctx.user.ref_var(id, self.eid);
+                    ctx.user.set_timer(id, dur);
                     return None;
                 }
             },
@@ -63,22 +58,21 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for AfterIdle {
             | ((_, None), (_, _))
             | ((Some(_), Some(_)), (false, _)) => (),
         };
-        if self.scheduled == 0 {
-            None
-        } else {
-            event.variables.get(&self.id).and_then(|_| {
-                self.scheduled -= 1;
-                if self.scheduled == 0 {
-                    self.args.0[1].clone()
-                } else {
-                    None
-                }
-            })
-        }
+        self.id.and_then(|id| {
+            if event.variables.contains_key(&id) {
+                self.id = None;
+                ctx.user.unref_var(id, self.eid);
+                self.args.0.get(1).and_then(|v| v.clone())
+            } else {
+                None
+            }
+        })
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        ctx.user.unref_var(self.id, self.top_id)
+        if let Some(id) = self.id.take() {
+            ctx.user.unref_var(id, self.eid)
+        }
     }
 }
 
@@ -125,9 +119,8 @@ struct Timer {
     args: CachedVals,
     timeout: Option<Duration>,
     repeat: Repeat,
-    scheduled: bool,
-    id: BindId,
-    top_id: ExprId,
+    id: Option<BindId>,
+    eid: ExprId,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Timer {
@@ -135,16 +128,13 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Timer {
     deftype!("fn([duration, Number], [bool, Number]) -> datetime");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|ctx, _, _, from, top_id| {
-            let id = BindId::new();
-            ctx.user.ref_var(id, top_id);
+        Arc::new(|_, _, _, from, eid| {
             Ok(Box::new(Self {
                 args: CachedVals::new(from),
                 timeout: None,
                 repeat: Repeat::No,
-                scheduled: false,
-                id,
-                top_id,
+                id: None,
+                eid,
             }))
         })
     }
@@ -159,6 +149,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
     ) -> Option<Value> {
         macro_rules! error {
             () => {{
+                self.id = None;
                 self.timeout = None;
                 self.repeat = Repeat::No;
                 return err!("timer(per, rep): expected duration, bool or number >= 0");
@@ -166,8 +157,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
         }
         macro_rules! schedule {
             ($dur:expr) => {{
-                self.scheduled = true;
-                ctx.user.set_timer(self.id, $dur)
+                let id = BindId::new();
+                self.id = Some(id);
+                ctx.user.ref_var(id, self.eid);
+                ctx.user.set_timer(id, $dur);
             }};
         }
         let up = self.args.update_diff(ctx, from, event);
@@ -179,7 +172,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
                     Ok(repeat) => {
                         self.repeat = repeat;
                         if let Some(dur) = self.timeout {
-                            if self.scheduled && repeat.will_repeat() {
+                            if self.id.is_none() && repeat.will_repeat() {
                                 schedule!(dur)
                             }
                         }
@@ -205,20 +198,19 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
             | ((None, _), (true, false))
             | ((_, None), (false, true)) => (),
         }
-        event.variables.get(&self.id).map(|now| {
-            self.repeat -= 1;
-            self.scheduled = false;
-            if let Some(dur) = self.timeout {
-                if self.repeat.will_repeat() {
-                    schedule!(dur);
+        self.id.and_then(|id| event.variables.get(&id).map(|now| (id, now))).map(
+            |(id, now)| {
+                ctx.user.unref_var(id, self.eid);
+                self.id = None;
+                self.repeat -= 1;
+                if let Some(dur) = self.timeout {
+                    if self.repeat.will_repeat() {
+                        schedule!(dur)
+                    }
                 }
-            }
-            now.clone()
-        })
-    }
-
-    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        ctx.user.unref_var(self.id, self.top_id)
+                now.clone()
+            },
+        )
     }
 }
 
