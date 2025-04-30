@@ -33,6 +33,7 @@ use netidx::{
     resolver_client::ChangeTracker,
     subscriber::{self, Dval, SubId, Subscriber, UpdatesFlags},
 };
+use netidx_protocols::rpc;
 use smallvec::{smallvec, SmallVec};
 use std::{
     collections::{hash_map::Entry, HashMap, VecDeque},
@@ -62,6 +63,12 @@ impl fmt::Display for CouldNotResolve {
 }
 
 #[derive(Debug)]
+struct RpcClient {
+    proc: rpc::client::Proc,
+    last_used: DateTime<Utc>,
+}
+
+#[derive(Debug)]
 pub struct BSCtx {
     by_ref: FxHashMap<BindId, FxHashMap<ExprId, usize>>,
     subscribed: FxHashMap<SubId, FxHashMap<ExprId, usize>>,
@@ -69,6 +76,7 @@ pub struct BSCtx {
     var_updates: VecDeque<(BindId, Value)>,
     net_updates: VecDeque<(SubId, subscriber::Event)>,
     net_writes: VecDeque<(Id, WriteRequest)>,
+    rpc_clients: FxHashMap<Path, RpcClient>,
     pending_unsubscribe: VecDeque<(Instant, Dval)>,
     change_trackers: FxHashMap<BindId, Arc<Mutex<ChangeTracker>>>,
     tasks: JoinSet<(BindId, Value)>,
@@ -93,6 +101,7 @@ impl BSCtx {
             var_updates: VecDeque::new(),
             net_updates: VecDeque::new(),
             net_writes: VecDeque::new(),
+            rpc_clients: HashMap::default(),
             subscribed: HashMap::default(),
             pending_unsubscribe: VecDeque::new(),
             published: HashMap::default(),
@@ -135,22 +144,13 @@ macro_rules! check_changed {
 }
 
 impl Ctx for BSCtx {
-    fn call_rpc(
-        &mut self,
-        _name: Path,
-        _args: Vec<(ArcStr, Value)>,
-        _ref_by: ExprId,
-        _id: BindId,
-    ) {
-        todo!()
-    }
-
     fn clear(&mut self) {
         let Self {
             by_ref,
             var_updates,
             net_updates,
             net_writes,
+            rpc_clients,
             subscribed,
             published,
             pending_unsubscribe,
@@ -168,6 +168,7 @@ impl Ctx for BSCtx {
         var_updates.clear();
         net_updates.clear();
         net_writes.clear();
+        rpc_clients.clear();
         subscribed.clear();
         published.clear();
         pending_unsubscribe.clear();
@@ -181,6 +182,42 @@ impl Ctx for BSCtx {
         let (tx, rx) = mpsc::channel(3);
         *writes_tx = tx;
         *writes = rx;
+    }
+
+    fn call_rpc(&mut self, name: Path, args: Vec<(ArcStr, Value)>, id: BindId) {
+        let now = Utc::now();
+        let proc = match self.rpc_clients.entry(name) {
+            Entry::Occupied(mut e) => {
+                let cl = e.get_mut();
+                cl.last_used = now;
+                Ok(cl.proc.clone())
+            }
+            Entry::Vacant(e) => {
+                match rpc::client::Proc::new(&self.subscriber, e.key().clone()) {
+                    Err(e) => Err(e),
+                    Ok(proc) => {
+                        let cl = RpcClient { last_used: now, proc: proc.clone() };
+                        e.insert(cl);
+                        Ok(proc)
+                    }
+                }
+            }
+        };
+        self.tasks.spawn(async move {
+            macro_rules! err {
+                ($e:expr) => {{
+                    let e = format_compact!("{:?}", $e);
+                    (id, Value::Error(e.as_str().into()))
+                }};
+            }
+            match proc {
+                Err(e) => err!(e),
+                Ok(proc) => match proc.call(args).await {
+                    Err(e) => err!(e),
+                    Ok(res) => (id, res),
+                },
+            }
+        });
     }
 
     fn subscribe(&mut self, flags: UpdatesFlags, path: Path, ref_by: ExprId) -> Dval {
@@ -281,7 +318,7 @@ impl Ctx for BSCtx {
         }
     }
 
-    fn set_timer(&mut self, id: BindId, timeout: Duration, _ref_by: ExprId) {
+    fn set_timer(&mut self, id: BindId, timeout: Duration) {
         self.tasks
             .spawn(time::sleep(timeout).map(move |()| (id, Value::DateTime(Utc::now()))));
     }

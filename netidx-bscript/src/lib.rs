@@ -241,25 +241,17 @@ pub trait Ctx: Debug + 'static {
     /// presented as a new batch.
     fn set_var(&mut self, id: BindId, value: Value);
 
-    /// For a given name, this must have at most one outstanding call
-    /// at a time, and must preserve the order of the calls. Calls to
-    /// different names may execute concurrently.
+    /// This must return results from the same path in the call order.
     ///
     /// when the rpc returns you are expected to deliver a Variable
     /// event with the specified id to the expression specified by
     /// ref_by.
-    fn call_rpc(
-        &mut self,
-        name: Path,
-        args: Vec<(ArcStr, Value)>,
-        ref_by: ExprId,
-        id: BindId,
-    );
+    fn call_rpc(&mut self, name: Path, args: Vec<(ArcStr, Value)>, id: BindId);
 
     /// arrange to have a Timer event delivered after timeout. When
     /// the timer expires you are expected to deliver a Variable event
     /// for the id, containing the current time.
-    fn set_timer(&mut self, id: BindId, timeout: Duration, ref_by: ExprId);
+    fn set_timer(&mut self, id: BindId, timeout: Duration);
 }
 
 pub struct ExecCtx<C: Ctx, E: UserEvent> {

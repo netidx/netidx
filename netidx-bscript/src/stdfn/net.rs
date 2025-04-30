@@ -9,14 +9,13 @@ use crate::{
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
-use fxhash::FxHashSet;
 use netidx::{
     path::Path,
     publisher::{Typ, Val},
     subscriber::{self, Dval, UpdatesFlags, Value},
 };
 use netidx_core::utils::Either;
-use std::{collections::HashSet, mem, sync::Arc};
+use std::{mem, sync::Arc};
 use triomphe::Arc as TArc;
 
 fn as_path(v: Value) -> Option<Path> {
@@ -193,20 +192,18 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
 struct RpcCall {
     args: CachedVals,
     top_id: ExprId,
-    pending: FxHashSet<BindId>,
+    id: BindId,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for RpcCall {
     const NAME: &str = "call";
-    deftype!("fn(string, Array<Array<Any>>) -> Any");
+    deftype!("fn(string, Array<(string, Any)>) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|_, _, _, from, top_id| {
-            Ok(Box::new(RpcCall {
-                args: CachedVals::new(from),
-                top_id,
-                pending: HashSet::default(),
-            }))
+        Arc::new(|ctx, _, _, from, top_id| {
+            let id = BindId::new();
+            ctx.user.ref_var(id, top_id);
+            Ok(Box::new(RpcCall { args: CachedVals::new(from), top_id, id }))
         })
     }
 }
@@ -246,30 +243,15 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for RpcCall {
             ((Some(path), Some(args)), (_, true))
             | ((Some(path), Some(args)), (true, _)) => match parse_args(path, args) {
                 Err(e) => return errf!("{e}"),
-                Ok((path, args)) => {
-                    let id = BindId::new();
-                    self.pending.insert(id);
-                    ctx.user.call_rpc(path, args, self.top_id, id);
-                }
+                Ok((path, args)) => ctx.user.call_rpc(path, args, self.id),
             },
             ((None, _), (_, _)) | ((_, None), (_, _)) | ((_, _), (false, false)) => (),
         }
-        let mut res = None;
-        self.pending.retain(|id| match event.variables.get(id) {
-            None => true,
-            Some(v) => match res {
-                None => {
-                    res = Some(v.clone());
-                    false
-                }
-                Some(_) => {
-                    // multiple calls resolved simultaneously, defer until the next cycle
-                    ctx.user.set_var(*id, v.clone());
-                    true
-                }
-            },
-        });
-        res
+        event.variables.get(&self.id).cloned()
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id)
     }
 }
 
