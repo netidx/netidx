@@ -473,10 +473,6 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for PublishRpc<C, E> {
                 let id = BindId::new();
                 ctx.user.ref_var(id, top_id);
                 let pid = BindId::new();
-                let typ = match &typ.args[3].typ {
-                    Type::Fn(ft) => ft.clone(),
-                    t => bail!("expected function not {t}"),
-                };
                 let mftyp = match &typ.args[3].typ {
                     Type::Fn(ft) => ft.clone(),
                     t => bail!("expected a function not {t}"),
@@ -493,7 +489,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for PublishRpc<C, E> {
                     top_id,
                     f,
                     pid,
-                    typ,
+                    typ: TArc::new(typ.clone()),
                     argbuf: smallvec![],
                     ready: true,
                     current: None,
