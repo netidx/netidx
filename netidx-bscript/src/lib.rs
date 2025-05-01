@@ -266,11 +266,10 @@ pub trait Ctx: Debug + 'static {
         doc: Value,
         spec: Vec<ArgSpec>,
         id: BindId,
-        ref_by: ExprId,
     ) -> Result<()>;
 
     /// unpublish the rpc identified by the bind id.
-    fn unpublish_rpc(&mut self, id: BindId, ref_by: ExprId);
+    fn unpublish_rpc(&mut self, name: Path);
 
     /// arrange to have a Timer event delivered after timeout. When
     /// the timer expires you are expected to deliver a Variable event

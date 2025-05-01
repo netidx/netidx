@@ -33,7 +33,10 @@ use netidx::{
     resolver_client::ChangeTracker,
     subscriber::{self, Dval, SubId, Subscriber, UpdatesFlags},
 };
-use netidx_protocols::rpc::{self, server::RpcCall};
+use netidx_protocols::rpc::{
+    self,
+    server::{ArgSpec, RpcCall},
+};
 use smallvec::{smallvec, SmallVec};
 use std::{
     collections::{hash_map::Entry, HashMap, VecDeque},
@@ -65,7 +68,7 @@ impl fmt::Display for CouldNotResolve {
 #[derive(Debug)]
 struct RpcClient {
     proc: rpc::client::Proc,
-    last_used: DateTime<Utc>,
+    last_used: Instant,
 }
 
 #[derive(Debug)]
@@ -76,9 +79,9 @@ pub struct BSCtx {
     var_updates: VecDeque<(BindId, Value)>,
     net_updates: VecDeque<(SubId, subscriber::Event)>,
     net_writes: VecDeque<(Id, WriteRequest)>,
+    rpc_overflow: VecDeque<(BindId, RpcCall)>,
     rpc_clients: FxHashMap<Path, RpcClient>,
     published_rpcs: FxHashMap<Path, rpc::server::Proc>,
-    published_rpcs_by_id: FxHashMap<BindId, (Path, ExprId)>,
     pending_unsubscribe: VecDeque<(Instant, Dval)>,
     change_trackers: FxHashMap<BindId, Arc<Mutex<ChangeTracker>>>,
     tasks: JoinSet<(BindId, Value)>,
@@ -106,13 +109,13 @@ impl BSCtx {
             var_updates: VecDeque::new(),
             net_updates: VecDeque::new(),
             net_writes: VecDeque::new(),
+            rpc_overflow: VecDeque::new(),
             rpc_clients: HashMap::default(),
             subscribed: HashMap::default(),
             pending_unsubscribe: VecDeque::new(),
             published: HashMap::default(),
             change_trackers: HashMap::default(),
             published_rpcs: HashMap::default(),
-            published_rpcs_by_id: HashMap::default(),
             tasks,
             batch,
             publisher,
@@ -160,10 +163,10 @@ impl Ctx for BSCtx {
             net_updates,
             net_writes,
             rpc_clients,
+            rpc_overflow,
             subscribed,
             published,
             published_rpcs,
-            published_rpcs_by_id,
             pending_unsubscribe,
             change_trackers,
             tasks,
@@ -181,11 +184,11 @@ impl Ctx for BSCtx {
         var_updates.clear();
         net_updates.clear();
         net_writes.clear();
+        rpc_overflow.clear();
         rpc_clients.clear();
         subscribed.clear();
         published.clear();
         published_rpcs.clear();
-        published_rpcs_by_id.clear();
         pending_unsubscribe.clear();
         change_trackers.clear();
         *tasks = JoinSet::new();
@@ -203,7 +206,7 @@ impl Ctx for BSCtx {
     }
 
     fn call_rpc(&mut self, name: Path, args: Vec<(ArcStr, Value)>, id: BindId) {
-        let now = Utc::now();
+        let now = Instant::now();
         let proc = match self.rpc_clients.entry(name) {
             Entry::Occupied(mut e) => {
                 let cl = e.get_mut();
@@ -242,15 +245,28 @@ impl Ctx for BSCtx {
         &mut self,
         name: Path,
         doc: Value,
-        spec: Vec<rpc::server::ArgSpec>,
+        spec: Vec<ArgSpec>,
         id: BindId,
-        ref_by: ExprId,
     ) -> Result<()> {
-        todo!()
+        use rpc::server::Proc;
+        let e = match self.published_rpcs.entry(name) {
+            Entry::Vacant(e) => e,
+            Entry::Occupied(_) => bail!("already published"),
+        };
+        let proc = Proc::new(
+            &self.publisher,
+            e.key().clone(),
+            doc,
+            spec,
+            move |c| Some((id, c)),
+            Some(self.rpcs_tx.clone()),
+        )?;
+        e.insert(proc);
+        Ok(())
     }
 
-    fn unpublish_rpc(&mut self, id: BindId, ref_by: ExprId) {
-        todo!()
+    fn unpublish_rpc(&mut self, name: Path) {
+        self.published_rpcs.remove(&name);
     }
 
     fn subscribe(&mut self, flags: UpdatesFlags, path: Path, ref_by: ExprId) -> Dval {
@@ -397,13 +413,24 @@ async fn or_never(b: bool) {
     }
 }
 
-async fn unsubscribe_ready(pending: &VecDeque<(Instant, Dval)>) {
+async fn maybe_next<T>(go: bool, ch: &mut mpsc::Receiver<T>) -> T {
+    if go {
+        match ch.next().await {
+            None => future::pending().await,
+            Some(v) => v,
+        }
+    } else {
+        future::pending().await
+    }
+}
+
+async fn unsubscribe_ready(pending: &VecDeque<(Instant, Dval)>, now: Instant) {
     if pending.len() == 0 {
         future::pending().await
     } else {
         let (ts, _) = pending.front().unwrap();
         let one = Duration::from_secs(1);
-        let elapsed = ts.elapsed();
+        let elapsed = now - *ts;
         if elapsed < one {
             time::sleep(one - elapsed).await
         }
@@ -436,7 +463,7 @@ struct BS {
     subs: Vec<mpsc::Sender<RtEvent>>,
     resolvers: Vec<ModuleResolver>,
     publish_timeout: Option<Duration>,
-    last_rpc_gc: DateTime<Utc>,
+    last_rpc_gc: Instant,
 }
 
 impl BS {
@@ -479,7 +506,7 @@ impl BS {
             subs: vec![],
             resolvers,
             publish_timeout: rt.publish_timeout,
-            last_rpc_gc: Utc::now(),
+            last_rpc_gc: Instant::now(),
         }
     }
 
@@ -488,6 +515,7 @@ impl BS {
         updates: Option<UpdateBatch>,
         writes: Option<WriteBatch>,
         tasks: &mut Vec<(BindId, Value)>,
+        rpcs: &mut Vec<(BindId, RpcCall)>,
     ) {
         macro_rules! push_event {
             ($id:expr, $v:expr, $event:ident, $refed:ident, $overflow:ident) => {
@@ -512,6 +540,13 @@ impl BS {
         }
         for (id, v) in tasks.drain(..) {
             push_event!(id, v, variables, by_ref, var_updates)
+        }
+        for _ in 0..self.ctx.user.rpc_overflow.len() {
+            let (id, v) = self.ctx.user.rpc_overflow.pop_front().unwrap();
+            push_event!(id, v, rpc_calls, by_ref, rpc_overflow)
+        }
+        for (id, v) in rpcs.drain(..) {
+            push_event!(id, v, rpc_calls, by_ref, rpc_overflow)
         }
         for _ in 0..self.ctx.user.net_updates.len() {
             let (id, v) = self.ctx.user.net_updates.pop_front().unwrap();
@@ -579,6 +614,7 @@ impl BS {
         self.ctx.user.var_updates.len() > 0
             || self.ctx.user.net_updates.len() > 0
             || self.ctx.user.net_writes.len() > 0
+            || self.ctx.user.rpc_overflow.len() > 0
     }
 
     async fn compile(&mut self, text: &str) -> Result<CompRes> {
@@ -664,21 +700,27 @@ impl BS {
 
     async fn run(mut self, mut to_rt: mpsc::UnboundedReceiver<ToRt>) -> Result<()> {
         let mut tasks = vec![];
-        let onemin = chrono::Duration::seconds(60);
+        let mut rpcs = vec![];
+        let onemin = Duration::from_secs(60);
         'main: loop {
+            let now = Instant::now();
             let ready = self.cycle_ready();
             let mut updates = None;
             let mut writes = None;
             let mut input = None;
             macro_rules! peek {
                 (updates) => {
-                    if let Ok(Some(up)) = self.ctx.user.updates.try_next() {
-                        updates = Some(up);
+                    if self.ctx.user.net_updates.is_empty() {
+                        if let Ok(Some(up)) = self.ctx.user.updates.try_next() {
+                            updates = Some(up);
+                        }
                     }
                 };
                 (writes) => {
-                    if let Ok(Some(wr)) = self.ctx.user.writes.try_next() {
-                        writes = Some(wr);
+                    if self.ctx.user.net_writes.is_empty() {
+                        if let Ok(Some(wr)) = self.ctx.user.writes.try_next() {
+                            writes = Some(wr);
+                        }
                     }
                 };
                 (tasks) => {
@@ -686,34 +728,45 @@ impl BS {
                         tasks.push(up);
                     }
                 };
+                (rpcs) => {
+                    if self.ctx.user.rpc_overflow.is_empty() {
+                        while let Ok(Some(up)) = self.ctx.user.rpcs.try_next() {
+                            rpcs.push(up);
+                        }
+                    }
+                };
                 ($($item:tt),+) => {{
                     $(peek!($item));+
                 }};
             }
             select! {
-                wr = self.ctx.user.writes.select_next_some() => {
+                rp = maybe_next(self.ctx.user.rpc_overflow.is_empty(), &mut self.ctx.user.rpcs) => {
+                    rpcs.push(rp);
+                    peek!(updates, tasks, writes, rpcs)
+                }
+                wr = maybe_next(self.ctx.user.net_writes.is_empty(), &mut self.ctx.user.writes) => {
                     writes = Some(wr);
-                    peek!(updates, tasks);
+                    peek!(updates, tasks, rpcs);
                 },
-                up = self.ctx.user.updates.select_next_some() => {
+                up = maybe_next(self.ctx.user.net_updates.is_empty(), &mut self.ctx.user.updates) => {
                     updates = Some(up);
-                    peek!(writes, tasks);
+                    peek!(writes, tasks, rpcs);
                 },
                 up = self.ctx.user.tasks.join_next() => {
                     if let Some(Ok(up)) = up {
                         tasks.push(up);
                     }
-                    peek!(updates, writes, tasks)
+                    peek!(updates, writes, tasks, rpcs)
                 },
                 n = to_rt.next() => match n {
                     None => break 'main Ok(()),
                     Some(i) => {
-                        peek!(updates, writes, tasks);
+                        peek!(updates, writes, tasks, rpcs);
                         input = Some(i);
                     }
                 },
-                _ = or_never(ready) => peek!(updates, writes, tasks),
-                () = unsubscribe_ready(&self.ctx.user.pending_unsubscribe) => {
+                _ = or_never(ready) => peek!(updates, writes, tasks, rpcs),
+                () = unsubscribe_ready(&self.ctx.user.pending_unsubscribe, now) => {
                     while let Some((ts, _)) = self.ctx.user.pending_unsubscribe.front() {
                         if ts.elapsed() >= Duration::from_secs(1) {
                             self.ctx.user.pending_unsubscribe.pop_front();
@@ -736,9 +789,8 @@ impl BS {
                     self.subs.push(ch);
                 }
             }
-            self.do_cycle(updates, writes, &mut tasks).await;
+            self.do_cycle(updates, writes, &mut tasks, &mut rpcs).await;
             if !self.ctx.user.rpc_clients.is_empty() {
-                let now = Utc::now();
                 if now - self.last_rpc_gc >= onemin {
                     self.last_rpc_gc = now;
                     self.ctx.user.rpc_clients.retain(|_, c| now - c.last_used <= onemin);

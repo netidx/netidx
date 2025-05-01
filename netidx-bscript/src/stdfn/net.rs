@@ -455,6 +455,7 @@ struct PublishRpc<C: Ctx, E: UserEvent> {
     queue: VecDeque<server::RpcCall>,
     argbuf: SmallVec<[(ArcStr, Value); 6]>,
     ready: bool,
+    current: Option<Path>,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for PublishRpc<C, E> {
@@ -495,6 +496,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for PublishRpc<C, E> {
                     typ,
                     argbuf: smallvec![],
                     ready: true,
+                    current: None,
                 }))
             }
             _ => bail!("expected two arguments"),
@@ -524,7 +526,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
             }
         }
         if changed[0] || changed[1] || changed[2] {
-            ctx.user.unpublish_rpc(self.id, self.top_id);
+            if let Some(path) = self.current.take() {
+                ctx.user.unpublish_rpc(path);
+            }
             if let (Some(Value::String(path)), Some(doc), Some(Value::Array(spec))) =
                 (&self.args.0[0], &self.args.0[1], &self.args.0[2])
             {
@@ -542,11 +546,12 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
                     })
                     .collect::<Vec<_>>();
                 if let Err(e) =
-                    ctx.user.publish_rpc(path, doc.clone(), spec, self.id, self.top_id)
+                    ctx.user.publish_rpc(path.clone(), doc.clone(), spec, self.id)
                 {
                     let e = Value::Error(format_compact!("{e:?}").as_str().into());
                     return Some(e);
                 }
+                self.current = Some(path);
             }
         }
         macro_rules! set {
@@ -604,7 +609,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         ctx.user.unref_var(self.id, self.top_id);
-        ctx.user.unpublish_rpc(self.id, self.top_id);
+        if let Some(path) = self.current.take() {
+            ctx.user.unpublish_rpc(path);
+        }
         ctx.cached.remove(&self.x);
         mem::take(&mut self.f).delete(ctx);
     }
