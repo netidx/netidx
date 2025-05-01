@@ -464,13 +464,13 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Queue {
             self.triggered += 1;
         }
         if let Some(v) = from[1].update(ctx, event) {
-            self.queue.push_back(dbg!(v));
+            self.queue.push_back(v);
         }
         while self.triggered > 0 && self.queue.len() > 0 {
             self.triggered -= 1;
             ctx.user.set_var(self.id, self.queue.pop_front().unwrap());
         }
-        dbg!(event.variables.get(&self.id).cloned())
+        event.variables.get(&self.id).cloned()
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {

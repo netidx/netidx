@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use crate::{
     expr::{ExprId, ExprKind},
     node::{genn, Node, NodeKind},
@@ -103,7 +105,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 for n in args.iter_mut() {
                     wrap!(n.node, n.node.typecheck(ctx))?
                 }
-                let rtype = Type::Primitive(BitFlags::empty());
+                let rtype = Type::Bottom(PhantomData);
                 let rtype = args.iter().fold(rtype, |rtype, n| n.node.typ.union(&rtype));
                 let rtype = Type::Array(Arc::new(rtype));
                 Ok(self.typ.check_contains(&rtype)?)

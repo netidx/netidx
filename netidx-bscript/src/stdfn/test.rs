@@ -1120,3 +1120,38 @@ run!(net_list_table, NET_LIST_TABLE, |v: Result<&Value>| {
         _ => false,
     }
 });
+
+#[cfg(test)]
+const NET_RPC: &str = r#"
+{
+  let get_val = "/local/get_val";
+  let set_val = "/local/set_val";
+  let v: Any = never();
+  net::publish_rpc(
+    #path:get_val,
+    #doc:"get the value",
+    #spec:[],
+    #f:|a| sample(#trigger:a, v));
+  net::publish_rpc(
+    #path:set_val,
+    #doc:"set the value",
+    #spec:[{name: "val", doc: "The value", default: null}],
+    #f:|args| select cast<{val: Any}>(args) {
+        error as e => e,
+        { val } => {
+          v <- val;
+          sample(#trigger:val, null)
+        }
+    });
+  net::call(set_val, [("val", 42)]);
+  net::call(get_val, [])
+}
+"#;
+
+#[cfg(test)]
+run!(net_rpc, NET_RPC, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(42)) => true,
+        _ => false,
+    }
+});

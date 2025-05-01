@@ -444,11 +444,11 @@ impl Type<NoRefs> {
             | (Type::Array(t), Type::Primitive(p)) => {
                 Type::Set(Arc::from_iter([Type::Primitive(*p), Type::Array(t.clone())]))
             }
-            (Type::Array(t0), Type::Array(t1)) => {
+            (t @ Type::Array(t0), u @ Type::Array(t1)) => {
                 if t0 == t1 {
                     Type::Array(t0.clone())
                 } else {
-                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+                    Type::Set(Arc::from_iter([u.clone(), t.clone()]))
                 }
             }
             (Type::Set(s0), Type::Set(s1)) => {
@@ -457,36 +457,36 @@ impl Type<NoRefs> {
             (Type::Set(s), t) | (t, Type::Set(s)) => {
                 Type::Set(Arc::from_iter(s.iter().cloned().chain(iter::once(t.clone()))))
             }
-            (Type::Struct(t0), Type::Struct(t1)) => {
+            (u @ Type::Struct(t0), t @ Type::Struct(t1)) => {
                 if t0.len() == t1.len() && t0 == t1 {
-                    self.clone()
+                    u.clone()
                 } else {
-                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+                    Type::Set(Arc::from_iter([u.clone(), t.clone()]))
                 }
             }
-            (Type::Struct(_), t) | (t, Type::Struct(_)) => {
-                Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+            (u @ Type::Struct(_), t) | (t, u @ Type::Struct(_)) => {
+                Type::Set(Arc::from_iter([u.clone(), t.clone()]))
             }
-            (Type::Tuple(t0), Type::Tuple(t1)) => {
+            (u @ Type::Tuple(t0), t @ Type::Tuple(t1)) => {
                 if t0 == t1 {
-                    self.clone()
+                    u.clone()
                 } else {
-                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+                    Type::Set(Arc::from_iter([u.clone(), t.clone()]))
                 }
             }
-            (Type::Tuple(_), t) | (t, Type::Tuple(_)) => {
-                Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+            (u @ Type::Tuple(_), t) | (t, u @ Type::Tuple(_)) => {
+                Type::Set(Arc::from_iter([u.clone(), t.clone()]))
             }
-            (Type::Variant(tg0, t0), Type::Variant(tg1, t1)) => {
+            (u @ Type::Variant(tg0, t0), t @ Type::Variant(tg1, t1)) => {
                 if tg0 == tg1 && t0.len() == t1.len() {
                     let typs = t0.iter().zip(t1.iter()).map(|(t0, t1)| t0.union_int(t1));
                     Type::Variant(tg0.clone(), Arc::from_iter(typs))
                 } else {
-                    Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+                    Type::Set(Arc::from_iter([u.clone(), t.clone()]))
                 }
             }
-            (Type::Variant(_, _), t) | (t, Type::Variant(_, _)) => {
-                Type::Set(Arc::from_iter([self.clone(), t.clone()]))
+            (u @ Type::Variant(_, _), t) | (t, u @ Type::Variant(_, _)) => {
+                Type::Set(Arc::from_iter([u.clone(), t.clone()]))
             }
             (Type::Fn(f0), Type::Fn(f1)) => {
                 if f0 == f1 {
@@ -727,6 +727,43 @@ impl Type<NoRefs> {
             Type::TVar(tv) => tv.read().typ.read().is_some(),
             Type::Set(s) => s.iter().any(|t| t.has_unbound()),
             Type::Fn(ft) => ft.has_unbound(),
+        }
+    }
+
+    /// bind all unbound type variables to the specified type
+    pub fn bind_as(&self, t: &Self) {
+        match self {
+            Type::Bottom(_) | Type::Primitive(_) => (),
+            Type::Ref(_) => unreachable!(),
+            Type::Array(t0) => t0.bind_as(t),
+            Type::Tuple(ts) => {
+                for elt in ts.iter() {
+                    elt.bind_as(t)
+                }
+            }
+            Type::Struct(ts) => {
+                for (_, elt) in ts.iter() {
+                    elt.bind_as(t)
+                }
+            }
+            Type::Variant(_, ts) => {
+                for elt in ts.iter() {
+                    elt.bind_as(t)
+                }
+            }
+            Type::TVar(tv) => {
+                let tv = tv.read();
+                let mut tv = tv.typ.write();
+                if tv.is_none() {
+                    *tv = Some(t.clone());
+                }
+            }
+            Type::Set(s) => {
+                for elt in s.iter() {
+                    elt.bind_as(t)
+                }
+            }
+            Type::Fn(ft) => ft.bind_as(t),
         }
     }
 
@@ -1338,7 +1375,9 @@ impl<T: TypeMark> fmt::Display for Type<T> {
                 write!(f, "]")
             }
             Self::Primitive(s) => {
-                if s.len() == 0 {
+                if *s == Typ::any() {
+                    write!(f, "Any")
+                } else if s.len() == 0 {
                     write!(f, "[]")
                 } else if s.len() == 1 {
                     write!(f, "{}", s.iter().next().unwrap())
@@ -1486,7 +1525,8 @@ impl FnType<NoRefs> {
             for (name, tv) in known.drain() {
                 if let Some(t) = tv.read().typ.read().as_ref() {
                     if !constraints.iter().any(|(tv, _)| tv.name == name) {
-                        constraints.push((tv.clone(), t.clone()));
+                        t.bind_as(&Type::Primitive(Typ::any()));
+                        constraints.push((tv.clone(), t.normalize()));
                     }
                 }
             }
@@ -1520,6 +1560,25 @@ impl FnType<NoRefs> {
                 .read()
                 .iter()
                 .any(|(tv, tc)| tv.read().typ.read().is_none() || tc.has_unbound())
+    }
+
+    pub fn bind_as(&self, t: &Type<NoRefs>) {
+        let FnType { args, vargs, rtype, constraints } = self;
+        for a in args.iter() {
+            a.typ.bind_as(t)
+        }
+        if let Some(va) = vargs.as_ref() {
+            va.bind_as(t)
+        }
+        rtype.bind_as(t);
+        for (tv, tc) in constraints.read().iter() {
+            let tv = tv.read();
+            let mut tv = tv.typ.write();
+            if tv.is_none() {
+                *tv = Some(t.clone())
+            }
+            tc.bind_as(t)
+        }
     }
 
     pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
