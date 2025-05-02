@@ -550,6 +550,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Count {
 
 struct Sample {
     last: Option<Value>,
+    triggered: usize,
+    id: BindId,
+    top_id: ExprId,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Sample {
@@ -557,7 +560,11 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Sample {
     deftype!("fn(#trigger:Any, 'a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|_, _, _, _, _| Ok(Box::new(Sample { last: None })))
+        Arc::new(|ctx, _, _, _, top_id| {
+            let id = BindId::new();
+            ctx.user.ref_var(id, top_id);
+            Ok(Box::new(Sample { last: None, triggered: 0, id, top_id }))
+        })
     }
 }
 
@@ -568,15 +575,21 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Sample {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        match from {
-            [trigger, source] => {
-                if let Some(v) = source.update(ctx, event) {
-                    self.last = Some(v);
-                }
-                trigger.update(ctx, event).and_then(|_| self.last.clone())
-            }
-            _ => unreachable!(),
+        if let Some(_) = from[0].update(ctx, event) {
+            self.triggered += 1;
         }
+        if let Some(v) = from[1].update(ctx, event) {
+            self.last = Some(v);
+        }
+        while self.triggered > 0 && self.last.is_some() {
+            self.triggered -= 1;
+            ctx.user.set_var(self.id, self.last.clone().unwrap());
+        }
+        event.variables.get(&self.id).cloned()
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id)
     }
 }
 

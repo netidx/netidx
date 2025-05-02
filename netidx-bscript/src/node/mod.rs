@@ -1010,6 +1010,9 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             NodeKind::ArrayRef(n) => n.update(ctx, event),
             NodeKind::ArraySlice(n) => n.update(ctx, event),
             NodeKind::Array { args } | NodeKind::Tuple { args } => {
+                if args.is_empty() && event.init {
+                    return Some(Value::Array(ValArray::from([])));
+                }
                 let (updated, determined) = update_args!(args);
                 if updated && determined {
                     let iter = args.iter().map(|n| n.cached.clone().unwrap());
@@ -1041,6 +1044,9 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 .filter_map(|s| s.update(ctx, event))
                 .fold(None, |r, v| r.or(Some(v))),
             NodeKind::Struct { names, args } => {
+                if args.is_empty() && event.init {
+                    return Some(Value::Array(ValArray::from([])));
+                }
                 let mut updated = false;
                 let mut determined = true;
                 for n in args.iter_mut() {
