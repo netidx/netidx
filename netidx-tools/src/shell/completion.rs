@@ -1,9 +1,8 @@
-use super::ReplCtx;
 use anyhow::Result;
 use arcstr::ArcStr;
 use log::debug;
 use netidx::path::Path;
-use netidx_bscript::{env::Env, expr::ModPath, typ::Type, NoUserEvent};
+use netidx_bscript::{env::Env, expr::ModPath, rt::BSCtx, typ::Type, NoUserEvent};
 use reedline::{Completer, Span, Suggestion};
 
 #[derive(Debug)]
@@ -47,7 +46,7 @@ impl<'a> CompletionContext<'a> {
     }
 }
 
-pub(super) struct BComplete(pub Env<ReplCtx, NoUserEvent>);
+pub(super) struct BComplete(pub Env<BSCtx, NoUserEvent>);
 
 impl Completer for BComplete {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {

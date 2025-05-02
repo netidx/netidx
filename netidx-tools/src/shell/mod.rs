@@ -209,7 +209,14 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                     Ok(Signal::Success(line)) => {
                         match bs.compile(line).await {
                             Err(e) => eprintln!("error: {e:?}"),
-                            Ok(res) => newenv = Some(res.env)
+                            Ok(res) => {
+                                newenv = Some(res.env);
+                                if let Some((id, out)) = res.eids.last() {
+                                    if *out {
+                                        output_expr = Some(*id);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
