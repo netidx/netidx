@@ -1127,12 +1127,12 @@ const NET_RPC: &str = r#"
   let get_val = "/local/get_val";
   let set_val = "/local/set_val";
   let v: Any = never();
-  net::publish_rpc(
+  net::rpc(
     #path:get_val,
     #doc:"get the value",
     #spec:[],
     #f:|a| sample(#trigger:a, v));
-  net::publish_rpc(
+  net::rpc(
     #path:set_val,
     #doc:"set the value",
     #spec:[{name: "val", doc: "The value", default: null}],

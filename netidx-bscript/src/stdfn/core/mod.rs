@@ -581,11 +581,18 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Sample {
         if let Some(v) = from[1].update(ctx, event) {
             self.last = Some(v);
         }
+        let var = event.variables.get(&self.id).cloned();
+        let res = if self.triggered > 0 && self.last.is_some() && var.is_none() {
+            self.triggered -= 1;
+            self.last.clone()
+        } else {
+            var
+        };
         while self.triggered > 0 && self.last.is_some() {
             self.triggered -= 1;
             ctx.user.set_var(self.id, self.last.clone().unwrap());
         }
-        event.variables.get(&self.id).cloned()
+        res
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {

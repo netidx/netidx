@@ -621,7 +621,7 @@ pub mod net {
     pub let write = |path, value| 'write;
     pub let subscribe = |path| 'subscribe;
     pub let call = |path, args| 'call;
-    pub let publish_rpc = |#path, #doc, #spec, #f| 'publish_rpc;
+    pub let rpc = |#path, #doc, #spec, #f| 'publish_rpc;
     pub let list = |#update = time::timer(1, true), path| 'list;
     pub let list_table = |#update = time::timer(1, true), path| 'list_table;
     pub let publish = |#on_write = |v| never(v), path, v| 'publish
