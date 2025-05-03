@@ -791,6 +791,35 @@ impl Type<NoRefs> {
         }
     }
 
+    /// return a copy of self with every TVar named in known replaced
+    /// with the corresponding type
+    pub fn replace_tvars(&self, known: &FxHashMap<ArcStr, Self>) -> Type<NoRefs> {
+        match self {
+            Type::TVar(tv) => match known.get(&tv.name) {
+                Some(t) => t.clone(),
+                None => Type::TVar(tv.clone()),
+            },
+            Type::Bottom(_) => Type::Bottom(PhantomData),
+            Type::Primitive(p) => Type::Primitive(*p),
+            Type::Ref(_) => unreachable!(),
+            Type::Array(t0) => Type::Array(Arc::new(t0.replace_tvars(known))),
+            Type::Tuple(ts) => {
+                Type::Tuple(Arc::from_iter(ts.iter().map(|t| t.replace_tvars(known))))
+            }
+            Type::Struct(ts) => Type::Struct(Arc::from_iter(
+                ts.iter().map(|(n, t)| (n.clone(), t.replace_tvars(known))),
+            )),
+            Type::Variant(tag, ts) => Type::Variant(
+                tag.clone(),
+                Arc::from_iter(ts.iter().map(|t| t.replace_tvars(known))),
+            ),
+            Type::Set(s) => {
+                Type::Set(Arc::from_iter(s.iter().map(|t| t.replace_tvars(known))))
+            }
+            Type::Fn(fntyp) => Type::Fn(Arc::new(fntyp.replace_tvars(known))),
+        }
+    }
+
     /// Unbind any bound tvars, but do not unalias them.
     fn unbind_tvars(&self) {
         match self {
@@ -1549,6 +1578,50 @@ impl FnType<NoRefs> {
                 .collect(),
         ));
         FnType { args, vargs, rtype, constraints }
+    }
+
+    pub fn replace_tvars(&self, known: &FxHashMap<ArcStr, Type<NoRefs>>) -> Self {
+        let FnType { args, vargs, rtype, constraints } = self;
+        let args = Arc::from_iter(args.iter().map(|a| FnArgType {
+            label: a.label.clone(),
+            typ: a.typ.replace_tvars(known),
+        }));
+        let vargs = vargs.as_ref().map(|t| t.replace_tvars(known));
+        let rtype = rtype.replace_tvars(known);
+        let constraints = constraints.clone();
+        FnType { args, vargs, rtype, constraints }
+    }
+
+    /// replace automatically constrained type variables with their
+    /// constraint type. This is only useful for making nicer display
+    /// types in IDEs and shells.
+    pub fn replace_auto_constrained(&self) -> Self {
+        thread_local! {
+            static KNOWN: RefCell<FxHashMap<ArcStr, Type<NoRefs>>> = RefCell::new(HashMap::default());
+        }
+        KNOWN.with_borrow_mut(|known| {
+            known.clear();
+            let Self { args, vargs, rtype, constraints } = self;
+            let constraints: Vec<(TVar<NoRefs>, Type<NoRefs>)> = constraints
+                .read()
+                .iter()
+                .filter_map(|(tv, ct)| {
+                    if tv.name.starts_with("_") {
+                        known.insert(tv.name.clone(), ct.clone());
+                        None
+                    } else {
+                        Some((tv.clone(), ct.clone()))
+                    }
+                })
+                .collect();
+            let constraints = Arc::new(RwLock::new(constraints));
+            let args = Arc::from_iter(args.iter().map(|FnArgType { label, typ }| {
+                FnArgType { label: label.clone(), typ: typ.replace_tvars(&known) }
+            }));
+            let vargs = vargs.as_ref().map(|t| t.replace_tvars(&known));
+            let rtype = rtype.replace_tvars(&known);
+            Self { args, vargs, rtype, constraints }
+        })
     }
 
     pub fn has_unbound(&self) -> bool {

@@ -65,7 +65,13 @@ impl Completer for BComplete {
                         {
                             let description = match self.0.by_id.get(&id) {
                                 None => format!("_"),
-                                Some(b) => format!("{}", b.typ),
+                                Some(b) => match &b.typ {
+                                    Type::Fn(ft) => {
+                                        let ft = ft.replace_auto_constrained();
+                                        format!("{}", ft)
+                                    }
+                                    t => format!("{}", t),
+                                },
                             };
                             let value = match Path::dirname(&part.0) {
                                 None => String::from(value.as_str()),
