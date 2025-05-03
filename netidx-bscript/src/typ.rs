@@ -1406,6 +1406,16 @@ impl<T: TypeMark> fmt::Display for Type<T> {
             Self::Primitive(s) => {
                 if *s == Typ::any() {
                     write!(f, "Any")
+                } else if *s == Typ::number() {
+                    write!(f, "Number")
+                } else if *s == Typ::real() {
+                    write!(f, "Real")
+                } else if *s == Typ::integer() {
+                    write!(f, "Int")
+                } else if *s == Typ::unsigned_integer() {
+                    write!(f, "Uint")
+                } else if *s == Typ::signed_integer() {
+                    write!(f, "Sint")
                 } else if s.len() == 0 {
                     write!(f, "[]")
                 } else if s.len() == 1 {

@@ -4,6 +4,7 @@ use crate::{
     BindId, Ctx, InitFn, LambdaId, UserEvent,
 };
 use anyhow::{bail, Result};
+use arcstr::ArcStr;
 use compact_str::CompactString;
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::path::Path;
@@ -164,7 +165,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
     ) -> Option<R> {
         let mut buf = CompactString::from("");
         let name_scope = Path::dirname(&**name);
-        let name = Path::basename(&**name)?;
+        let name = Path::basename(&**name).unwrap_or("");
         for scope in Path::dirnames(&**scope).rev() {
             let used = self.used.get(scope);
             let used = iter::once(scope)
@@ -217,6 +218,31 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
                 for (name, bind) in r {
                     if name.starts_with(part) {
                         res.push((name.clone(), *bind));
+                    }
+                }
+            }
+            None::<()>
+        });
+        res
+    }
+
+    /// lookup modules in scope that match the specified partial
+    /// name. This is intended to be used for IDEs and interactive
+    /// shells, and is not used by the compiler.
+    pub fn lookup_matching_modules(
+        &self,
+        scope: &ModPath,
+        part: &ModPath,
+    ) -> Vec<ModPath> {
+        let mut res = vec![];
+        self.find_visible(scope, part, |scope, part| {
+            let p = ModPath(Path::from(ArcStr::from(scope)).append(part));
+            for m in self.modules.range((Bound::Included(p.clone()), Bound::Unbounded)) {
+                if m.0.starts_with(&*p.0) {
+                    if let Some(m) = m.strip_prefix(scope) {
+                        if !m.trim().is_empty() {
+                            res.push(ModPath(Path::from(ArcStr::from(m))));
+                        }
                     }
                 }
             }

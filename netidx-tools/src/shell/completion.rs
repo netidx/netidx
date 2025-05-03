@@ -61,6 +61,17 @@ impl Completer for BComplete {
                 match cc {
                     CompletionContext::Bind(span, s) => {
                         let part = ModPath::from_iter(s.split("::"));
+                        for m in self.0.lookup_matching_modules(&ModPath::root(), &part) {
+                            let value = format!("{m}");
+                            res.push(Suggestion {
+                                span,
+                                value,
+                                description: Some("module".into()),
+                                style: None,
+                                extra: None,
+                                append_whitespace: false,
+                            })
+                        }
                         for (value, id) in self.0.lookup_matching(&ModPath::root(), &part)
                         {
                             let description = match self.0.by_id.get(&id) {
