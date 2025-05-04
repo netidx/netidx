@@ -381,13 +381,13 @@ impl Type<NoRefs> {
                         (Some(t0), Some(t1)) => return t0.contains(&*t1),
                         (None, None) | (Some(_), None) => {
                             if would_cycle_inner(addr, tt1) {
-                                return false;
+                                return true;
                             }
                             Either::Right(())
                         }
                         (None, Some(_)) => {
                             if would_cycle_inner(addr, tt1) {
-                                return false;
+                                return true;
                             }
                             Either::Left(())
                         }
