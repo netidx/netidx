@@ -463,7 +463,7 @@ const ARRAY_FIND_MAP: &str = r#"
 {
   type T = (string, i64);
   let a: Array<T> = [("foo", 1), ("bar", 2), ("baz", 3)];
-  array::find_map(a, |(k, v): T| -> [i64, null] select k == "bar" {
+  array::find_map(a, |(k, v): T| select k == "bar" {
     true => v,
     false => sample(#trigger:v, null)
   })

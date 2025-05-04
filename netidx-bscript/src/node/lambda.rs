@@ -113,8 +113,7 @@ impl<C: Ctx, E: UserEvent> LambdaCallSite<C, E> {
 }
 
 pub(super) struct BuiltInCallSite<C: Ctx, E: UserEvent> {
-    specified_type: Arc<FnType<NoRefs>>,
-    inferred_type: Arc<FnType<NoRefs>>,
+    typ: Arc<FnType<NoRefs>>,
     apply: Box<dyn Apply<C, E> + Send + Sync + 'static>,
 }
 
@@ -141,40 +140,36 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInCallSite<C, E> {
                 }
             };
         }
-        self.inferred_type.unbind_tvars();
-        self.specified_type.unbind_tvars();
-        self.inferred_type.check_sigmatch(&self.specified_type)?;
-        if args.len() < self.specified_type.args.len()
-            || (args.len() > self.specified_type.args.len()
-                && self.specified_type.vargs.is_none())
+        if args.len() < self.typ.args.len()
+            || (args.len() > self.typ.args.len() && self.typ.vargs.is_none())
         {
-            let vargs =
-                if self.specified_type.vargs.is_some() { "at least " } else { "" };
+            let vargs = if self.typ.vargs.is_some() { "at least " } else { "" };
             bail!(
                 "expected {}{} arguments got {}",
-                self.specified_type.args.len(),
+                self.typ.args.len(),
                 vargs,
                 args.len()
             )
         }
         for i in 0..args.len() {
             wrap!(args[i], args[i].typecheck(ctx))?;
-            let atyp = if i < self.specified_type.args.len() {
-                &self.specified_type.args[i].typ
+            let atyp = if i < self.typ.args.len() {
+                &self.typ.args[i].typ
             } else {
-                self.specified_type.vargs.as_ref().unwrap()
+                self.typ.vargs.as_ref().unwrap()
             };
             wrap!(args[i], atyp.check_contains(&args[i].typ))?
         }
-        for (tv, tc) in self.specified_type.constraints.read().iter() {
+        for (tv, tc) in self.typ.constraints.read().iter() {
             tc.check_contains(&Type::TVar(tv.clone()))?
         }
-        self.inferred_type.constrain_known();
-        self.apply.typecheck(ctx, args)
+        self.apply.typecheck(ctx, args)?;
+        self.typ.unbind_tvars();
+        Ok(())
     }
 
     fn typ(&self) -> Arc<FnType<NoRefs>> {
-        Arc::clone(&self.specified_type)
+        Arc::clone(&self.typ)
     }
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
@@ -274,23 +269,32 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         Ok(c) => Arc::new(RwLock::new(c.into_iter().collect())),
         Err(e) => error!("{e}",),
     };
-    let typ = {
-        let args = Arc::from_iter(argspec.iter().map(|a| FnArgType {
-            label: a.labeled.as_ref().and_then(|dv| {
-                a.pattern.single_bind().map(|n| (n.clone(), dv.is_some()))
-            }),
-            typ: match a.constraint.as_ref() {
-                Some(t) => t.clone(),
-                None => Type::empty_tvar(),
+    let typ = match &body {
+        Either::Left(_) => {
+            let args = Arc::from_iter(argspec.iter().map(|a| FnArgType {
+                label: a.labeled.as_ref().and_then(|dv| {
+                    a.pattern.single_bind().map(|n| (n.clone(), dv.is_some()))
+                }),
+                typ: match a.constraint.as_ref() {
+                    Some(t) => t.clone(),
+                    None => Type::empty_tvar(),
+                },
+            }));
+            let vargs = match vargs {
+                Some(Some(t)) => Some(t.clone()),
+                Some(None) => Some(Type::empty_tvar()),
+                None => None,
+            };
+            let rtype = rtype.clone().unwrap_or_else(|| Type::empty_tvar());
+            Arc::new(FnType { constraints, args, vargs, rtype })
+        }
+        Either::Right(builtin) => match ctx.builtins.get(builtin.as_str()) {
+            Some((styp, _)) => match styp.clone().resolve_typerefs(&_scope, &ctx.env) {
+                Ok(ft) => Arc::new(ft),
+                Err(e) => error!("{e:?}",),
             },
-        }));
-        let vargs = match vargs {
-            Some(Some(t)) => Some(t.clone()),
-            Some(None) => Some(Type::empty_tvar()),
-            None => None,
-        };
-        let rtype = rtype.clone().unwrap_or_else(|| Type::empty_tvar());
-        Arc::new(FnType { constraints, args, vargs, rtype })
+            None => error!("unknown builtin function {builtin}",),
+        },
     };
     thread_local! {
         static KNOWN: RefCell<FxHashMap<ArcStr, TVar<NoRefs>>> = RefCell::new(HashMap::default());
@@ -301,13 +305,6 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
     });
     let _typ = typ.clone();
     let _argspec = argspec.clone();
-    let builtin = match &body {
-        Either::Left(_) => None,
-        Either::Right(builtin) => match ctx.builtins.get(builtin.as_str()) {
-            Some((styp, _)) => Some(Type::Fn(Arc::new(styp.clone()))),
-            None => None,
-        },
-    };
     let init: InitFn<C, E> = SArc::new(move |ctx, args, tid| {
         // restore the lexical environment to the state it was in
         // when the closure was created
@@ -331,18 +328,12 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             }
             Either::Right(builtin) => match ctx.builtins.get(&*builtin) {
                 None => bail!("unknown builtin function {builtin}"),
-                Some((styp, init)) => {
+                Some((_, init)) => {
                     let init = SArc::clone(init);
-                    styp.resolve_typerefs(&_scope, &ctx.env).and_then(|specified_type| {
-                        init(ctx, &specified_type, &_scope, args, tid).map(|apply| {
-                            let f: Box<dyn Apply<C, E> + Send + Sync + 'static> =
-                                Box::new(BuiltInCallSite {
-                                    specified_type: Arc::new(specified_type),
-                                    inferred_type: _typ.clone(),
-                                    apply,
-                                });
-                            f
-                        })
+                    init(ctx, &_typ, &_scope, args, tid).map(|apply| {
+                        let f: Box<dyn Apply<C, E> + Send + Sync + 'static> =
+                            Box::new(BuiltInCallSite { typ: _typ.clone(), apply });
+                        f
                     })
                 }
             },
@@ -350,8 +341,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         ctx.env = ctx.env.merge_lexical(&orig_env);
         res
     });
-    let l =
-        SArc::new(LambdaDef { id, typ: typ.clone(), builtin, env, argspec, init, scope });
+    let l = SArc::new(LambdaDef { id, typ: typ.clone(), env, argspec, init, scope });
     ctx.env.lambdas.insert_cow(id, SArc::downgrade(&l));
     Node { spec: Box::new(spec), typ: Type::Fn(typ), kind: NodeKind::Lambda(l) }
 }
