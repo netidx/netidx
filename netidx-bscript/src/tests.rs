@@ -922,8 +922,8 @@ run!(variants0, VARIANTS0, |v: Result<&Value>| match v {
 const LATE_BINDING0: &str = r#"
 {
   type T = { foo: string, bar: i64, f: fn(#x: i64, #y: i64) -> i64 };
-  let t: T = { foo: "hello world", bar: 3, f: |#x, #y| x - y };
-  let u: T = { foo: "hello foo", bar: 42, f: |#c = 1, #y, #x| x - y + c };
+  let t: T = { foo: "hello world", bar: 3, f: |#x: i64, #y: i64| x - y };
+  let u: T = { foo: "hello foo", bar: 42, f: |#c: i64 = 1, #y: i64, #x: i64| x - y + c };
   let f = t.f;
   f(#y: 3, #x: 4)
 }
@@ -940,8 +940,8 @@ const LATE_BINDING1: &str = r#"
 {
   type F = fn(#x: i64, #y: i64) -> i64;
   type T = { foo: string, bar: i64, f: F };
-  let t: T = { foo: "hello world", bar: 3, f: |#x, #y| x - y };
-  let u: T = { foo: "hello foo", bar: 42, f: |#c = 1, #y, #x| (x - y) + c };
+  let t: T = { foo: "hello world", bar: 3, f: |#x: i64, #y: i64| x - y };
+  let u: T = { foo: "hello foo", bar: 42, f: |#c: i64 = 1, #y: i64, #x: i64| (x - y) + c };
   let f: F = select array::iter([0, 1]) {
     0 => t.f,
     1 => u.f,
@@ -964,7 +964,7 @@ run!(late_binding1, LATE_BINDING1, |v: Result<&Value>| match v {
 const LATE_BINDING2: &str = r#"
 {
   type T = { foo: string, bar: i64, f: fn(#x: i64, #y: i64) -> i64 };
-  let t: T = { foo: "hello world", bar: 3, f: |#x, #y| x - y };
+  let t: T = { foo: "hello world", bar: 3, f: |#x: i64, #y: i64| x - y };
   (t.f)(#y: 3, #x: 4)
 }
 "#;

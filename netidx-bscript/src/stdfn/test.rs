@@ -227,7 +227,7 @@ const QUEUE: &str = r#"
   let a = [1, 2, 3, 4, 5, 6, 7, 8];
   array::map(a, |v| net::publish("/local/[v]", v));
   let v = array::iter(a);
-  let trigger = once(v);
+  let trigger: Any = once(v);
   let q = queue(#trigger, v);
   let out = net::subscribe("/local/[q]")?;
   trigger <- out;
@@ -498,7 +498,7 @@ const ARRAY_ITERQ: &str = r#"
 {
    let a = [1, 2, 3, 4];
    a <- [5, 6, 7, 8];
-   let trigger = once(null);
+   let trigger: Any = once(null);
    let v = array::iterq(#trigger, a);
    trigger <- v;
    filter(v, |x| x == 8)
