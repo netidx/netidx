@@ -2,7 +2,7 @@ use crate::{env::Env, expr::ModPath, Ctx, UserEvent};
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use compact_str::format_compact;
-use enumflags2::BitFlags;
+use enumflags2::{bitflags, BitFlags};
 use fxhash::FxHashMap;
 use netidx::{
     publisher::{Typ, Value},
@@ -55,23 +55,35 @@ pub struct TVarInner<T: TypeMark> {
 #[derive(Debug, Clone)]
 pub struct TVar<T: TypeMark>(Arc<TVarInner<T>>);
 
-thread_local! {
-    static TVAR_DEREF: Cell<bool> = Cell::new(false);
+#[derive(Debug, Clone, Copy)]
+#[bitflags]
+#[repr(u64)]
+pub enum PrintFlag {
+    /// Dereference type variables and print both the tvar name and
+    /// the bound type or "unbound".
+    DerefTVars,
+    /// Replace common primitive with shorter type names as defined in
+    /// core. e.g. Any, instead of the set of every primitive type.
+    ReplacePrims,
 }
 
-/// For the duration of the closure F change the way type
-/// variables are formatted (on this thread only) such that the
-/// inferred type is also shown.
-pub fn format_with_deref<R, F: FnOnce() -> R>(f: F) -> R {
-    let prev = TVAR_DEREF.replace(true);
+thread_local! {
+    static PRINT_FLAGS: Cell<BitFlags<PrintFlag>> = Cell::new(PrintFlag::ReplacePrims.into());
+}
+
+/// For the duration of the closure F change the way type variables
+/// are formatted (on this thread only) according to the specified
+/// flags.
+pub fn format_with_flags<R, F: FnOnce() -> R>(flags: BitFlags<PrintFlag>, f: F) -> R {
+    let prev = PRINT_FLAGS.replace(flags);
     let res = f();
-    TVAR_DEREF.set(prev);
+    PRINT_FLAGS.set(prev);
     res
 }
 
 impl<T: TypeMark> fmt::Display for TVar<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !TVAR_DEREF.get() {
+        if !PRINT_FLAGS.get().contains(PrintFlag::DerefTVars) {
             write!(f, "'{}", self.name)
         } else {
             write!(f, "'{}: ", self.name)?;
@@ -297,7 +309,9 @@ impl Type<NoRefs> {
         if self.contains(t) {
             Ok(())
         } else {
-            format_with_deref(|| bail!("type mismatch {self} does not contain {t}"))
+            format_with_flags(PrintFlag::DerefTVars | PrintFlag::ReplacePrims, || {
+                bail!("type mismatch {self} does not contain {t}")
+            })
         }
     }
 
@@ -1404,17 +1418,18 @@ impl<T: TypeMark> fmt::Display for Type<T> {
                 write!(f, "]")
             }
             Self::Primitive(s) => {
-                if *s == Typ::any() {
+                let replace = PRINT_FLAGS.get().contains(PrintFlag::ReplacePrims);
+                if replace && *s == Typ::any() {
                     write!(f, "Any")
-                } else if *s == Typ::number() {
+                } else if replace && *s == Typ::number() {
                     write!(f, "Number")
-                } else if *s == Typ::real() {
+                } else if replace && *s == Typ::real() {
                     write!(f, "Real")
-                } else if *s == Typ::integer() {
+                } else if replace && *s == Typ::integer() {
                     write!(f, "Int")
-                } else if *s == Typ::unsigned_integer() {
+                } else if replace && *s == Typ::unsigned_integer() {
                     write!(f, "Uint")
-                } else if *s == Typ::signed_integer() {
+                } else if replace && *s == Typ::signed_integer() {
                     write!(f, "Sint")
                 } else if s.len() == 0 {
                     write!(f, "[]")
