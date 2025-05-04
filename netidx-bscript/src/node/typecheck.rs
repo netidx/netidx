@@ -288,9 +288,8 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
                 site.ftype.unbind_tvars();
                 for (arg, FnArgType { typ, .. }) in
-                    site.args.iter_mut().zip(site.ftype.args.iter())
+                    site.args.iter().zip(site.ftype.args.iter())
                 {
-                    wrap!(arg, arg.typecheck(ctx))?;
                     wrap!(arg, typ.check_contains(&arg.typ))?;
                 }
                 wrap!(site.ftype.rtype.check_contains(&self.typ))?;

@@ -517,7 +517,7 @@ run!(array_iterq, ARRAY_ITERQ, |v: Result<&Value>| {
 const ARRAY_FOLD: &str = r#"
 {
   let a = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-  array::fold(a, 0, |acc, x| x + acc)
+  array::fold(a, 0, |acc: i64, x: i64| x + acc)
 }
 "#;
 

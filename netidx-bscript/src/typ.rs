@@ -151,6 +151,13 @@ impl<T: TypeMark> TVar<T> {
         s.typ = Arc::clone(&o.typ);
     }
 
+    /// copy self from other
+    pub fn copy(&self, other: &Self) {
+        let s = self.read();
+        let o = other.read();
+        *s.typ.write() = o.typ.read().clone();
+    }
+
     pub fn normalize(&self) -> Self {
         match &mut *self.read().typ.write() {
             None => (),
@@ -368,7 +375,13 @@ impl Type<NoRefs> {
             | (Self::Variant(_, _), Self::Primitive(_))
             | (Self::Variant(_, _), Self::Tuple(_)) => false,
             (Self::TVar(t0), tt1 @ Self::TVar(t1)) => {
-                let alias = {
+                #[derive(Debug)]
+                enum Act {
+                    RightCopy,
+                    LeftAlias,
+                    LeftCopy,
+                }
+                let act = {
                     let t0 = t0.read();
                     let t1 = t1.read();
                     let addr = Arc::as_ptr(&t0.typ).addr();
@@ -379,23 +392,30 @@ impl Type<NoRefs> {
                     let t1i = t1.typ.read();
                     match (&*t0i, &*t1i) {
                         (Some(t0), Some(t1)) => return t0.contains(&*t1),
-                        (None, None) | (Some(_), None) => {
+                        (None, None) => {
                             if would_cycle_inner(addr, tt1) {
                                 return true;
                             }
-                            Either::Right(())
+                            Act::LeftAlias
+                        }
+                        (Some(_), None) => {
+                            if would_cycle_inner(addr, tt1) {
+                                return true;
+                            }
+                            Act::RightCopy
                         }
                         (None, Some(_)) => {
                             if would_cycle_inner(addr, tt1) {
                                 return true;
                             }
-                            Either::Left(())
+                            Act::LeftCopy
                         }
                     }
                 };
-                match alias {
-                    Either::Right(()) => t1.alias(t0),
-                    Either::Left(()) => t0.alias(t1),
+                match act {
+                    Act::RightCopy => t1.copy(t0),
+                    Act::LeftAlias => t0.alias(t1),
+                    Act::LeftCopy => t0.copy(t1),
                 }
                 true
             }
@@ -1755,6 +1775,15 @@ impl FnType<NoRefs> {
         let slen = self.args.len() - sul;
         let tlen = t.args.len() - tul;
         slen == tlen
+            && self
+                .constraints
+                .read()
+                .iter()
+                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
+            && t.constraints
+                .read()
+                .iter()
+                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
             && t.args[tul..]
                 .iter()
                 .zip(self.args[sul..].iter())
@@ -1765,15 +1794,6 @@ impl FnType<NoRefs> {
                 (_, _) => false,
             }
             && self.rtype.contains(&t.rtype)
-            && self
-                .constraints
-                .read()
-                .iter()
-                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
-            && t.constraints
-                .read()
-                .iter()
-                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
     }
 
     pub fn check_contains(&self, other: &Self) -> Result<()> {

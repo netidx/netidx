@@ -893,6 +893,7 @@ where
 {
     choice((
         attempt(spaces().with(raw_string())),
+        attempt(spaces().with(array())),
         attempt(spaces().with(qop(arrayref()))),
         attempt(spaces().with(qop(tupleref()))),
         attempt(spaces().with(qop(structref()))),

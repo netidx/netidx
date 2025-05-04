@@ -175,7 +175,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             if error {
                 error!("", args)
             } else {
-                let typ = Type::empty_tvar();
+                let typ = Type::Array(Arc::new(Type::empty_tvar()));
                 let args = Box::from_iter(args.into_iter().map(|n| Cached::new(n)));
                 Node { kind: NodeKind::Array { args }, spec: Box::new(spec), typ }
             }

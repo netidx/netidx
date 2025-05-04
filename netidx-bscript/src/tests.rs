@@ -402,7 +402,7 @@ const EXPLICIT_TYPE_VARS2: &str = r#"
   let f = 'a: Number |x: 'a, y: 'a| -> 'a x + y;
   select f(1, 1) {
     i64 as t => t,
-    _ as t => error("unexpected [t]")
+    t => error("unexpected [t]")
   }
 }
 "#;
@@ -417,7 +417,7 @@ const EXPLICIT_TYPE_VARS3: &str = r#"
   let f = 'a: Number, 'b: Number |x: 'a, y: 'b| -> ['a, 'b] x + y;
   select f(u32:1, u64:1) {
     [u32, u64] as t => t,
-    _ as t => error("unexpected [t]")
+    t => error("unexpected [t]")
   }
 }
 "#;
