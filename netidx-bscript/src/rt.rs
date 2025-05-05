@@ -13,6 +13,7 @@ use crate::{
     env::Env,
     expr::{self, Expr, ExprId, ExprKind, ModPath, ModuleResolver},
     node::{Node, NodeKind},
+    typ::{NoRefs, Type},
     BindId, BuiltIn, Ctx, Event, ExecCtx, NoUserEvent,
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -437,8 +438,16 @@ async fn unsubscribe_ready(pending: &VecDeque<(Instant, Dval)>, now: Instant) {
     }
 }
 
+#[derive(Clone)]
+pub struct CompExp {
+    pub id: ExprId,
+    pub typ: Type<NoRefs>,
+    pub output: bool,
+}
+
+#[derive(Clone)]
 pub struct CompRes {
-    pub eids: SmallVec<[(ExprId, bool); 1]>,
+    pub exprs: SmallVec<[CompExp; 1]>,
     pub env: Env<BSCtx, NoUserEvent>,
 }
 
@@ -638,10 +647,11 @@ impl BS {
             Some(e) => bail!("compile error: {e}"),
             None => {
                 let output = is_output(&n);
+                let typ = n.typ.clone();
                 self.updated.insert(top_id, true);
                 self.nodes.insert(top_id, n);
                 Ok(CompRes {
-                    eids: smallvec![(top_id, output)],
+                    exprs: smallvec![CompExp { id: top_id, output, typ }],
                     env: self.ctx.env.clone(),
                 })
             }
@@ -687,20 +697,21 @@ impl BS {
                 (scope, vec![e])
             }
         };
-        let mut eids: SmallVec<[(ExprId, bool); 1]> = smallvec![];
+        let mut es: SmallVec<[CompExp; 1]> = smallvec![];
         for expr in exprs {
             let expr = expr.resolve_modules(&scope, &self.resolvers).await?;
             let top_id = expr.id;
             let n = Node::compile(&mut self.ctx, &scope, expr);
             let has_out = is_output(&n);
+            let typ = n.typ.clone();
             if let Some(e) = n.extract_err() {
                 bail!("{e:?}")
             }
             self.nodes.insert(top_id, n);
             self.updated.insert(top_id, true);
-            eids.push((top_id, has_out))
+            es.push(CompExp { id: top_id, output: has_out, typ })
         }
-        Ok(CompRes { eids, env: self.ctx.env.clone() })
+        Ok(CompRes { exprs: es, env: self.ctx.env.clone() })
     }
 
     async fn run(mut self, mut to_rt: mpsc::UnboundedReceiver<ToRt>) -> Result<()> {
