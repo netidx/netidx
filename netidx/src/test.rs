@@ -451,11 +451,11 @@ mod publisher {
                     if &*p == "/app/q/foo" {
                         let f = PublishFlags::DESTROY_ON_IDLE;
                         let p =
-                            publisher.publish_with_flags(f, p, Value::True).unwrap();
+                            publisher.publish_with_flags(f, p, Value::Bool(true)).unwrap();
                         dfp = Some(p);
                         let _ = reply.send(());
                     } else if &*p == "/app/q/adv" {
-                        _adv = Some(publisher.publish(p, Value::False).unwrap());
+                        _adv = Some(publisher.publish(p, Value::Bool(false)).unwrap());
                         let _ = reply.send(());
                     } else {
                         panic!("unexpected default subscription {}", p);
@@ -490,13 +490,13 @@ mod publisher {
             subscriber.subscribe_nondurable_one("/app/v1".into(), None).await.unwrap();
         let q =
             subscriber.subscribe_nondurable_one("/app/q/foo".into(), None).await.unwrap();
-        assert_eq!(q.last(), Event::Update(Value::True));
+        assert_eq!(q.last(), Event::Update(Value::Bool(true)));
         let (_, res) =
             subscriber.resolver().resolve(iter::once("/app/q/adv".into())).await.unwrap();
         assert_eq!(res.len(), 1);
         let a =
             subscriber.subscribe_nondurable_one("/app/q/adv".into(), None).await.unwrap();
-        assert_eq!(a.last(), Event::Update(Value::False));
+        assert_eq!(a.last(), Event::Update(Value::Bool(false)));
         drop(q);
         drop(a);
         let mut c: u64 = 0;
