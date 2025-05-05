@@ -10,8 +10,8 @@ use netidx::{
 };
 use netidx_bscript::{
     env::Env,
-    expr::ExprId,
-    rt::{BSConfigBuilder, BSCtx, CouldNotResolve, RtEvent},
+    rt::{BSConfigBuilder, BSCtx, CompExp, CouldNotResolve, RtEvent},
+    typ::TVal,
     NoUserEvent,
 };
 use reedline::{
@@ -165,11 +165,11 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     let bs = bs.build().context("building rt config")?.start();
     let (tx, mut output) = mpsc::channel(3);
     bs.subscribe(tx).context("subscribing to rt output")?;
-    let mut output_expr: Option<ExprId> = None;
+    let mut output_expr: Option<CompExp> = None;
     let mut newenv = if let Some(file) = p.file.as_ref() {
-        let r = bs.load(file.clone()).await?;
-        if let Some(id) = r.eids.last().map(|(id, _)| id) {
-            output_expr = Some(*id);
+        let mut r = bs.load(file.clone()).await?;
+        if let Some(e) = r.exprs.pop() {
+            output_expr = Some(e);
         }
         None
     } else if !p.no_init {
@@ -187,9 +187,9 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     loop {
         select! {
             RtEvent::Updated(id, v) = output.select_next_some() => {
-                if let Some(out_id) = output_expr {
-                    if out_id == id {
-                        println!("{v}")
+                if let Some(e) = &output_expr {
+                    if e.id == id {
+                        println!("{}", TVal(&e.typ, &v))
                     }
                 }
             },
@@ -198,8 +198,8 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                     Err(e) => eprintln!("error reading line {e:?}"),
                     Ok(Signal::CtrlC) if script => break Ok(()),
                     Ok(Signal::CtrlC) => {
-                        if let Some(id) = output_expr.take() {
-                            match bs.delete(id).await {
+                        if let Some(e) = output_expr.take() {
+                            match bs.delete(e.id).await {
                                 Err(e) => eprintln!("could not delete node {e:?}"),
                                 Ok(env) => newenv = Some(env),
                             }
@@ -209,11 +209,12 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                     Ok(Signal::Success(line)) => {
                         match bs.compile(line).await {
                             Err(e) => eprintln!("error: {e:?}"),
-                            Ok(res) => {
+                            Ok(mut res) => {
                                 newenv = Some(res.env);
-                                if let Some((id, out)) = res.eids.last() {
-                                    if *out {
-                                        output_expr = Some(*id);
+                                if let Some(e) = res.exprs.pop() {
+                                    println!("-: {}", e.typ);
+                                    if e.output {
+                                        output_expr = Some(e);
                                     }
                                 }
                             }
