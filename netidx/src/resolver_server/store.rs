@@ -193,7 +193,7 @@ impl Store {
         let mut save = false;
         loop {
             let n = Path::levels(p);
-            if save {
+            if !save {
                 save = p == "/"
                     || self.published_by_path.contains_key(p)
                     || self.defaults.contains_key(p)
