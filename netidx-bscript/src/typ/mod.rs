@@ -903,7 +903,7 @@ impl Type<NoRefs> {
         match self {
             Type::Primitive(t) => t.contains(Typ::get(&v)),
             Type::Array(et) => match v {
-                Value::Array(elts) => et.check_array(&elts),
+                Value::Array(a) => a.iter().all(|v| et.is_a(v)),
                 _ => false,
             },
             Type::Tuple(ts) => match v {

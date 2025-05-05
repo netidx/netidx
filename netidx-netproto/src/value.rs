@@ -26,7 +26,7 @@ use std::{
     hint::unreachable_unchecked,
     iter, mem,
     num::Wrapping,
-    ops::{Add, Div, Mul, Not, Sub},
+    ops::{Add, Deref, Div, Mul, Not, Sub},
     panic::{catch_unwind, AssertUnwindSafe},
     ptr, result,
     str::FromStr,
@@ -326,6 +326,23 @@ fn _assert_variants_are_copy(v: &Value) -> Value {
         Value::Array(i) => Value::Array(i.clone()),
     };
     panic!("{i}")
+}
+
+/// A value reference that formats without type tags
+pub struct NakedValue<'a>(pub &'a Value);
+
+impl<'a> Deref for NakedValue<'a> {
+    type Target = Value;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl<'a> fmt::Display for NakedValue<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.fmt_naked(f)
+    }
 }
 
 // CR estokes: evaluate the performance implications of this new repr
@@ -1097,13 +1114,7 @@ impl Value {
     }
 
     pub fn to_string_naked(&self) -> String {
-        struct WVal<'a>(&'a Value);
-        impl<'a> fmt::Display for WVal<'a> {
-            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                self.0.fmt_naked(f)
-            }
-        }
-        format!("{}", WVal(self))
+        format!("{}", NakedValue(self))
     }
 
     pub fn fmt_naked(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1124,7 +1135,7 @@ impl Value {
                     write!(f, "{}s", v)
                 }
             }
-            Value::String(s) => write!(f, "{}", s),
+            Value::String(s) => write!(f, "\"{}\"", s),
             Value::Bytes(b) => write!(f, "{}", BASE64.encode(b)),
             Value::Bool(true) => write!(f, "true"),
             Value::Bool(false) => write!(f, "false"),
