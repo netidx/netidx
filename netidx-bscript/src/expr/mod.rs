@@ -1238,6 +1238,14 @@ impl Default for Expr {
     }
 }
 
+impl FromStr for Expr {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
+        parser::parse_one_modexpr(s)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ExprVisitor;
 
@@ -1492,12 +1500,8 @@ impl Expr {
                                 }
                             }
                         };
-                        let exprs = parser::parse_many_modexpr(&s)?;
-                        let value = ModuleKind::Resolved(Origin {
-                            name: Some(filename),
-                            source: s,
-                            exprs: Arc::from(exprs),
-                        });
+                        let value =
+                            ModuleKind::Resolved(parser::parse(Some(filename), s)?);
                         return Ok(Expr {
                             id: self.id,
                             pos: self.pos,
@@ -1709,13 +1713,5 @@ impl Expr {
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.kind)
-    }
-}
-
-impl FromStr for Expr {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> result::Result<Self, Self::Err> {
-        parser::parse(s)
     }
 }
