@@ -1,7 +1,7 @@
 use crate::typ::{NoRefs, Refs, TVar, Type, TypeMark};
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
-use combine::EasyParser;
+use combine::{stream::position::SourcePosition, EasyParser};
 use compact_str::{format_compact, CompactString};
 use netidx::{
     path::Path,
@@ -415,12 +415,19 @@ pub struct Arg<T: TypeMark> {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub enum ModuleKind {
+    Inline(Arc<[Expr]>),
+    Resolved(Origin),
+    Unresolved,
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum ExprKind {
     Constant(Value),
     Module {
         name: ArcStr,
         export: bool,
-        value: Option<Arc<[Expr]>>,
+        value: ModuleKind,
     },
     Do {
         exprs: Arc<[Expr]>,
@@ -559,8 +566,8 @@ pub enum ExprKind {
 }
 
 impl ExprKind {
-    pub fn to_expr(self) -> Expr {
-        Expr { id: ExprId::new(), kind: self }
+    pub fn to_expr(self, pos: SourcePosition) -> Expr {
+        Expr { id: ExprId::new(), pos, kind: self }
     }
 
     pub fn to_string_pretty(&self, col_limit: usize) -> String {
@@ -671,7 +678,11 @@ impl ExprKind {
             | ExprKind::ArrayRef { .. }
             | ExprKind::ArraySlice { .. }
             | ExprKind::StringInterpolate { .. }
-            | ExprKind::Module { name: _, export: _, value: None } => {
+            | ExprKind::Module {
+                name: _,
+                export: _,
+                value: ModuleKind::Unresolved | ModuleKind::Resolved(_),
+            } => {
                 if newline {
                     push_indent(indent, buf);
                 }
@@ -702,7 +713,7 @@ impl ExprKind {
                 }
                 writeln!(buf, "}}")
             }
-            ExprKind::Module { name, export, value: Some(exprs) } => {
+            ExprKind::Module { name, export, value: ModuleKind::Inline(exprs) } => {
                 try_single_line!(true);
                 write!(buf, "{}mod {name} ", exp(*export))?;
                 pretty_print_exprs(indent, limit, buf, exprs, "{", "}", ";")
@@ -1012,8 +1023,8 @@ impl fmt::Display for ExprKind {
             ExprKind::Module { name, export, value } => {
                 write!(f, "{}mod {name}", exp(*export))?;
                 match value {
-                    None => write!(f, ";"),
-                    Some(exprs) => print_exprs(f, &**exprs, "{", "}", "; "),
+                    ModuleKind::Resolved(_) | ModuleKind::Unresolved => write!(f, ";"),
+                    ModuleKind::Inline(exprs) => print_exprs(f, &**exprs, "{", "}", "; "),
                 }
             }
             ExprKind::TypeCast { expr, typ } => write!(f, "cast<{typ}>({expr})"),
@@ -1186,7 +1197,16 @@ impl fmt::Display for ExprKind {
 #[derive(Debug, Clone)]
 pub struct Expr {
     pub id: ExprId,
+    pub pos: SourcePosition,
     pub kind: ExprKind,
+}
+
+// hallowed are the ori
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub struct Origin {
+    pub name: Option<ArcStr>,
+    pub source: ArcStr,
+    pub exprs: Arc<[Expr]>,
 }
 
 impl PartialOrd for Expr {
@@ -1214,7 +1234,7 @@ impl Serialize for Expr {
 
 impl Default for Expr {
     fn default() -> Self {
-        ExprKind::Constant(Value::Null).to_expr()
+        ExprKind::Constant(Value::Null).to_expr(Default::default())
     }
 }
 
@@ -1260,8 +1280,8 @@ impl<'de> Deserialize<'de> for Expr {
 }
 
 impl Expr {
-    pub fn new(kind: ExprKind) -> Self {
-        Expr { id: ExprId::new(), kind }
+    pub fn new(kind: ExprKind, pos: SourcePosition) -> Self {
+        Expr { id: ExprId::new(), pos, kind }
     }
 
     pub fn to_string_pretty(&self, col_limit: usize) -> String {
@@ -1278,10 +1298,13 @@ impl Expr {
             | ExprKind::StructRef { .. }
             | ExprKind::TupleRef { .. }
             | ExprKind::TypeDef { .. } => init,
-            ExprKind::Module { value: Some(e), .. } => {
+            ExprKind::Module { value: ModuleKind::Inline(e), .. } => {
                 e.iter().fold(init, |init, e| e.fold(init, f))
             }
-            ExprKind::Module { value: None, .. } => init,
+            ExprKind::Module { value: ModuleKind::Resolved(o), .. } => {
+                o.exprs.iter().fold(init, |init, e| e.fold(init, f))
+            }
+            ExprKind::Module { value: ModuleKind::Unresolved, .. } => init,
             ExprKind::Do { exprs } => exprs.iter().fold(init, |init, e| e.fold(init, f)),
             ExprKind::Bind { value, .. } => value.fold(init, f),
             ExprKind::StructWith { replace, .. } => {
@@ -1353,7 +1376,7 @@ impl Expr {
     pub fn has_unresolved_modules(&self) -> bool {
         self.fold(false, &mut |acc, e| {
             acc || match &e.kind {
-                ExprKind::Module { value, .. } => value.is_none(),
+                ExprKind::Module { value: ModuleKind::Unresolved, .. } => true,
                 _ => false,
             }
         })
@@ -1403,7 +1426,11 @@ impl Expr {
             ($kind:ident, $args:expr) => {
                 Box::pin(async move {
                     let args = Arc::from(subexprs!($args));
-                    Ok(Expr { id: self.id, kind: ExprKind::$kind { args } })
+                    Ok(Expr {
+                        id: self.id,
+                        pos: self.pos,
+                        kind: ExprKind::$kind { args },
+                    })
                 })
             };
         }
@@ -1412,7 +1439,11 @@ impl Expr {
                 Box::pin(async move {
                     let lhs = Arc::from($lhs.resolve_modules(scope, resolvers).await?);
                     let rhs = Arc::from($rhs.resolve_modules(scope, resolvers).await?);
-                    Ok(Expr { id: self.id, kind: ExprKind::$kind { lhs, rhs } })
+                    Ok(Expr {
+                        id: self.id,
+                        pos: self.pos,
+                        kind: ExprKind::$kind { lhs, rhs },
+                    })
                 })
             };
         }
@@ -1420,58 +1451,69 @@ impl Expr {
             return Box::pin(async { Ok(self.clone()) });
         }
         match self.kind.clone() {
-            ExprKind::Module { value: None, export, name } => Box::pin(async move {
-                let full_name = scope.append(&name);
-                let full_name = full_name.trim_start_matches(Path::SEP);
-                let mut errors = vec![];
-                for r in resolvers {
-                    let s = match r {
-                        ModuleResolver::Files(base) => {
-                            let full_path = base.join(full_name).with_extension("bs");
-                            match tokio::fs::read_to_string(&full_path).await {
-                                Ok(s) => ArcStr::from(s),
-                                Err(e) => {
-                                    errors.push(anyhow::Error::from(e));
-                                    continue;
-                                }
-                            }
-                        }
-                        ModuleResolver::Netidx { subscriber, base, timeout } => {
-                            let full_path = base.append(full_name);
-                            let sub = subscriber
-                                .subscribe_nondurable_one(full_path, *timeout)
-                                .await;
-                            match sub {
-                                Err(e) => {
-                                    errors.push(e);
-                                    continue;
-                                }
-                                Ok(v) => match v.last() {
-                                    Event::Update(Value::String(s)) => s,
-                                    Event::Unsubscribed | Event::Update(_) => {
-                                        errors.push(anyhow!("expected string"));
+            ExprKind::Module { value: ModuleKind::Unresolved, export, name } => {
+                Box::pin(async move {
+                    let full_name = scope.append(&name);
+                    let full_name = full_name.trim_start_matches(Path::SEP);
+                    let mut errors = vec![];
+                    for r in resolvers {
+                        let (filename, s) = match r {
+                            ModuleResolver::Files(base) => {
+                                let full_path = base.join(full_name).with_extension("bs");
+                                match tokio::fs::read_to_string(&full_path).await {
+                                    Ok(s) => (
+                                        ArcStr::from(full_path.to_string_lossy()),
+                                        ArcStr::from(s),
+                                    ),
+                                    Err(e) => {
+                                        errors.push(anyhow::Error::from(e));
                                         continue;
                                     }
-                                },
+                                }
                             }
-                        }
-                    };
-                    let exprs = parser::parse_many_modexpr(&s)?;
-                    let value = Some(Arc::from(exprs));
-                    return Ok(Expr {
-                        id: self.id,
-                        kind: ExprKind::Module { name, export, value },
-                    });
-                }
-                bail!("module {name} could not be found {errors:?}")
-            }),
+                            ModuleResolver::Netidx { subscriber, base, timeout } => {
+                                let full_path = base.append(full_name);
+                                let name: ArcStr = full_path.clone().into();
+                                let sub = subscriber
+                                    .subscribe_nondurable_one(full_path, *timeout)
+                                    .await;
+                                match sub {
+                                    Err(e) => {
+                                        errors.push(e);
+                                        continue;
+                                    }
+                                    Ok(v) => match v.last() {
+                                        Event::Update(Value::String(s)) => (name, s),
+                                        Event::Unsubscribed | Event::Update(_) => {
+                                            errors.push(anyhow!("expected string"));
+                                            continue;
+                                        }
+                                    },
+                                }
+                            }
+                        };
+                        let exprs = parser::parse_many_modexpr(&s)?;
+                        let value = ModuleKind::Resolved(Origin {
+                            name: Some(filename),
+                            source: s,
+                            exprs: Arc::from(exprs),
+                        });
+                        return Ok(Expr {
+                            id: self.id,
+                            pos: self.pos,
+                            kind: ExprKind::Module { name, export, value },
+                        });
+                    }
+                    bail!("module {name} could not be found {errors:?}")
+                })
+            }
             ExprKind::Constant(_)
             | ExprKind::Use { .. }
             | ExprKind::Ref { .. }
             | ExprKind::StructRef { .. }
             | ExprKind::TupleRef { .. }
             | ExprKind::TypeDef { .. } => Box::pin(async move { Ok(self.clone()) }),
-            ExprKind::Module { value: Some(exprs), export, name } => {
+            ExprKind::Module { value: ModuleKind::Inline(exprs), export, name } => {
                 Box::pin(async move {
                     let scope = ModPath(scope.append(&name));
                     let mut tmp = vec![];
@@ -1480,8 +1522,30 @@ impl Expr {
                     }
                     Ok(Expr {
                         id: self.id,
+                        pos: self.pos,
                         kind: ExprKind::Module {
-                            value: Some(Arc::from(tmp)),
+                            value: ModuleKind::Inline(Arc::from(tmp)),
+                            name,
+                            export,
+                        },
+                    })
+                })
+            }
+            ExprKind::Module { value: ModuleKind::Resolved(o), export, name } => {
+                Box::pin(async move {
+                    let scope = ModPath(scope.append(&name));
+                    let mut tmp = vec![];
+                    for e in o.exprs.iter() {
+                        tmp.push(e.resolve_modules(&scope, resolvers).await?);
+                    }
+                    Ok(Expr {
+                        id: self.id,
+                        pos: self.pos,
+                        kind: ExprKind::Module {
+                            value: ModuleKind::Resolved(Origin {
+                                exprs: Arc::from(tmp),
+                                ..o.clone()
+                            }),
                             name,
                             export,
                         },
@@ -1490,18 +1554,20 @@ impl Expr {
             }
             ExprKind::Do { exprs } => Box::pin(async move {
                 let exprs = Arc::from(subexprs!(exprs));
-                Ok(Expr { id: self.id, kind: ExprKind::Do { exprs } })
+                Ok(Expr { id: self.id, pos: self.pos, kind: ExprKind::Do { exprs } })
             }),
             ExprKind::Bind { pattern, typ, export, value } => Box::pin(async move {
                 let value = value.resolve_modules(scope, resolvers).await?;
                 Ok(Expr {
                     id: self.id,
+                    pos: self.pos,
                     kind: ExprKind::Bind { pattern, typ, export, value: Arc::new(value) },
                 })
             }),
             ExprKind::StructWith { source, replace } => Box::pin(async move {
                 Ok(Expr {
                     id: self.id,
+                    pos: self.pos,
                     kind: ExprKind::StructWith {
                         source: Arc::new(source.resolve_modules(scope, resolvers).await?),
                         replace: Arc::from(subtuples!(replace)),
@@ -1512,6 +1578,7 @@ impl Expr {
                 let value = value.resolve_modules(scope, resolvers).await?;
                 Ok(Expr {
                     id: self.id,
+                    pos: self.pos,
                     kind: ExprKind::Connect { name, value: Arc::new(value) },
                 })
             }),
@@ -1526,6 +1593,7 @@ impl Expr {
                     };
                     Ok(Expr {
                         id: self.id,
+                        pos: self.pos,
                         kind: ExprKind::Lambda { args, vargs, rtype, constraints, body },
                     })
                 })
@@ -1534,12 +1602,14 @@ impl Expr {
                 let expr = expr.resolve_modules(scope, resolvers).await?;
                 Ok(Expr {
                     id: self.id,
+                    pos: self.pos,
                     kind: ExprKind::TypeCast { expr: Arc::new(expr), typ },
                 })
             }),
             ExprKind::Apply { args, function } => Box::pin(async move {
                 Ok(Expr {
                     id: self.id,
+                    pos: self.pos,
                     kind: ExprKind::Apply { args: Arc::from(subtuples!(args)), function },
                 })
             }),
@@ -1549,12 +1619,16 @@ impl Expr {
             ExprKind::StringInterpolate { args } => only_args!(StringInterpolate, args),
             ExprKind::Struct { args } => Box::pin(async move {
                 let args = Arc::from(subtuples!(args));
-                Ok(Expr { id: self.id, kind: ExprKind::Struct { args } })
+                Ok(Expr { id: self.id, pos: self.pos, kind: ExprKind::Struct { args } })
             }),
             ExprKind::ArrayRef { source, i } => Box::pin(async move {
                 let source = Arc::new(source.resolve_modules(scope, resolvers).await?);
                 let i = Arc::new(i.resolve_modules(scope, resolvers).await?);
-                Ok(Expr { id: self.id, kind: ExprKind::ArrayRef { source, i } })
+                Ok(Expr {
+                    id: self.id,
+                    pos: self.pos,
+                    kind: ExprKind::ArrayRef { source, i },
+                })
             }),
             ExprKind::ArraySlice { source, start, end } => Box::pin(async move {
                 let source = Arc::new(source.resolve_modules(scope, resolvers).await?);
@@ -1568,12 +1642,17 @@ impl Expr {
                 };
                 Ok(Expr {
                     id: self.id,
+                    pos: self.pos,
                     kind: ExprKind::ArraySlice { source, start, end },
                 })
             }),
             ExprKind::Variant { tag, args } => Box::pin(async move {
                 let args = Arc::from(subexprs!(args));
-                Ok(Expr { id: self.id, kind: ExprKind::Variant { tag, args } })
+                Ok(Expr {
+                    id: self.id,
+                    pos: self.pos,
+                    kind: ExprKind::Variant { tag, args },
+                })
             }),
             ExprKind::Select { arg, arms } => Box::pin(async move {
                 let arg = Arc::new(arg.resolve_modules(scope, resolvers).await?);
@@ -1595,16 +1674,21 @@ impl Expr {
                 }
                 Ok(Expr {
                     id: self.id,
+                    pos: self.pos,
                     kind: ExprKind::Select { arg, arms: Arc::from(tmp) },
                 })
             }),
             ExprKind::Qop(e) => Box::pin(async move {
                 let e = e.resolve_modules(scope, resolvers).await?;
-                Ok(Expr { id: self.id, kind: ExprKind::Qop(Arc::new(e)) })
+                Ok(Expr { id: self.id, pos: self.pos, kind: ExprKind::Qop(Arc::new(e)) })
             }),
             ExprKind::Not { expr: e } => Box::pin(async move {
                 let e = e.resolve_modules(scope, resolvers).await?;
-                Ok(Expr { id: self.id, kind: ExprKind::Not { expr: Arc::new(e) } })
+                Ok(Expr {
+                    id: self.id,
+                    pos: self.pos,
+                    kind: ExprKind::Not { expr: Arc::new(e) },
+                })
             }),
             ExprKind::Add { lhs, rhs } => bin_op!(Add, lhs, rhs),
             ExprKind::Sub { lhs, rhs } => bin_op!(Sub, lhs, rhs),

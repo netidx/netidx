@@ -1,5 +1,5 @@
 use crate::{
-    expr::{Arg, Expr, ExprId, ExprKind, ModPath, Pattern, StructurePattern},
+    expr::{Arg, Expr, ExprId, ExprKind, ModPath, ModuleKind, Pattern, StructurePattern},
     typ::{FnArgType, FnType, Refs, TVar, Type},
 };
 use anyhow::{bail, Result};
@@ -12,8 +12,11 @@ use combine::{
         combinator::recognize,
         range::{take_while, take_while1},
     },
-    sep_by, sep_by1,
-    stream::{position, Range},
+    position, sep_by, sep_by1,
+    stream::{
+        position::{self, SourcePosition},
+        Range,
+    },
     token, unexpected_any, value, EasyParser, ParseError, Parser, RangeStream,
 };
 use compact_str::CompactString;
@@ -30,6 +33,8 @@ use parking_lot::RwLock;
 use smallvec::{smallvec, SmallVec};
 use std::{marker::PhantomData, sync::LazyLock};
 use triomphe::Arc;
+
+use super::Origin;
 
 #[cfg(test)]
 mod test;
@@ -185,125 +190,129 @@ where
 
 fn interpolated_<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     enum Intp {
-        Lit(String),
+        Lit(SourcePosition, String),
         Expr(Expr),
     }
     impl Intp {
         fn to_expr(self) -> Expr {
             match self {
-                Intp::Lit(s) => {
-                    Expr { id: ExprId::new(), kind: ExprKind::Constant(Value::from(s)) }
-                }
+                Intp::Lit(pos, s) => Expr {
+                    id: ExprId::new(),
+                    pos,
+                    kind: ExprKind::Constant(Value::from(s)),
+                },
                 Intp::Expr(s) => s,
             }
         }
     }
-    between(
-        token('"'),
-        token('"'),
-        many(choice((
-            attempt(between(token('['), sptoken(']'), expr()).map(Intp::Expr)),
-            escaped_string(&BSCRIPT_ESC)
-                .then(|s| {
+    (
+        position(),
+        between(
+            token('"'),
+            token('"'),
+            many(choice((
+                attempt(between(token('['), sptoken(']'), expr()).map(Intp::Expr)),
+                (position(), escaped_string(&BSCRIPT_ESC)).then(|(pos, s)| {
                     if s.is_empty() {
                         unexpected_any("empty string").right()
                     } else {
-                        value(s).left()
+                        value(Intp::Lit(pos, s)).left()
+                    }
+                }),
+            ))),
+        ),
+    )
+        .map(|(pos, toks): (_, SmallVec<[Intp; 8]>)| {
+            let mut argvec = vec![];
+            toks.into_iter()
+                .fold(None, |src, tok| -> Option<Expr> {
+                    match (src, tok) {
+                        (None, t @ Intp::Lit(_, _)) => Some(t.to_expr()),
+                        (None, Intp::Expr(s)) => {
+                            argvec.push(s);
+                            Some(
+                                ExprKind::StringInterpolate {
+                                    args: Arc::from_iter(argvec.clone().into_iter()),
+                                }
+                                .to_expr(pos),
+                            )
+                        }
+                        (Some(src @ Expr { kind: ExprKind::Constant(_), .. }), s) => {
+                            argvec.extend([src, s.to_expr()]);
+                            Some(
+                                ExprKind::StringInterpolate {
+                                    args: Arc::from_iter(argvec.clone().into_iter()),
+                                }
+                                .to_expr(pos),
+                            )
+                        }
+                        (
+                            Some(Expr {
+                                kind: ExprKind::StringInterpolate { args: _ },
+                                ..
+                            }),
+                            s,
+                        ) => {
+                            argvec.push(s.to_expr());
+                            Some(
+                                ExprKind::StringInterpolate {
+                                    args: Arc::from_iter(argvec.clone().into_iter()),
+                                }
+                                .to_expr(pos),
+                            )
+                        }
+                        (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::StructWith { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Array { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Any { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::StructRef { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::TupleRef { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Tuple { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Variant { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Struct { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Qop(_), .. }), _)
+                        | (Some(Expr { kind: ExprKind::Do { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Module { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Use { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Connect { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Ref { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Eq { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Ne { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Lt { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Gt { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Gte { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Lte { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::And { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Or { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Not { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Add { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Sub { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Mul { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Div { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Select { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::TypeCast { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::TypeDef { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::ArrayRef { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::ArraySlice { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Apply { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
+                            unreachable!()
+                        }
                     }
                 })
-                .map(Intp::Lit),
-        ))),
-    )
-    .map(|toks: SmallVec<[Intp; 8]>| {
-        let mut argvec = vec![];
-        toks.into_iter()
-            .fold(None, |src, tok| -> Option<Expr> {
-                match (src, tok) {
-                    (None, t @ Intp::Lit(_)) => Some(t.to_expr()),
-                    (None, Intp::Expr(s)) => {
-                        argvec.push(s);
-                        Some(
-                            ExprKind::StringInterpolate {
-                                args: Arc::from_iter(argvec.clone().into_iter()),
-                            }
-                            .to_expr(),
-                        )
-                    }
-                    (Some(src @ Expr { kind: ExprKind::Constant(_), .. }), s) => {
-                        argvec.extend([src, s.to_expr()]);
-                        Some(
-                            ExprKind::StringInterpolate {
-                                args: Arc::from_iter(argvec.clone().into_iter()),
-                            }
-                            .to_expr(),
-                        )
-                    }
-                    (
-                        Some(Expr {
-                            kind: ExprKind::StringInterpolate { args: _ }, ..
-                        }),
-                        s,
-                    ) => {
-                        argvec.push(s.to_expr());
-                        Some(
-                            ExprKind::StringInterpolate {
-                                args: Arc::from_iter(argvec.clone().into_iter()),
-                            }
-                            .to_expr(),
-                        )
-                    }
-                    (Some(Expr { kind: ExprKind::Bind { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::StructWith { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Array { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Any { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::StructRef { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::TupleRef { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Tuple { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Variant { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Struct { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Qop(_), .. }), _)
-                    | (Some(Expr { kind: ExprKind::Do { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Module { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Use { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Connect { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Ref { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Eq { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Ne { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Lt { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Gt { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Gte { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Lte { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::And { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Or { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Not { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Add { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Sub { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Mul { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Div { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Select { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::TypeCast { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::TypeDef { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::ArrayRef { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::ArraySlice { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Apply { .. }, .. }), _)
-                    | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
-                        unreachable!()
-                    }
-                }
-            })
-            .unwrap_or_else(|| ExprKind::Constant(Value::from("")).to_expr())
-    })
+                .unwrap_or_else(|| ExprKind::Constant(Value::from("")).to_expr(pos))
+        })
 }
 
 parser! {
     fn interpolated[I]()(I) -> Expr
-    where [I: RangeStream<Token = char>, I::Range: Range]
+    where [I: RangeStream<Token = char, Position = SourcePosition>, I::Range: Range]
     {
         interpolated_()
     }
@@ -311,71 +320,77 @@ parser! {
 
 fn module<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     (
+        position(),
         optional(string("pub").skip(space())).map(|o| o.is_some()),
         spstring("mod").with(space()).with(spfname()),
         choice((
-            attempt(sptoken(';')).map(|_| None),
+            attempt(sptoken(';')).map(|_| ModuleKind::Unresolved),
             between(sptoken('{'), sptoken('}'), sep_by(modexpr(), attempt(sptoken(';'))))
-                .map(|m: Vec<Expr>| Some(Arc::from(m))),
+                .map(|m: Vec<Expr>| ModuleKind::Inline(Arc::from(m))),
         )),
     )
-        .map(|(export, name, value)| ExprKind::Module { name, export, value }.to_expr())
+        .map(|(pos, export, name, value)| {
+            ExprKind::Module { name, export, value }.to_expr(pos)
+        })
 }
 
 fn use_module<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    string("use")
-        .with(space())
-        .with(spmodpath())
-        .map(|name| ExprKind::Use { name }.to_expr())
+    (position(), string("use").with(space()).with(spmodpath()))
+        .map(|(pos, name)| ExprKind::Use { name }.to_expr(pos))
 }
 
 fn do_block<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    between(
-        token('{'),
-        sptoken('}'),
-        sep_by(
-            choice((
-                attempt(spaces().with(use_module())),
-                attempt(spaces().with(typedef())),
-                expr(),
-            )),
-            attempt(sptoken(';')),
+    (
+        position(),
+        between(
+            token('{'),
+            sptoken('}'),
+            sep_by(
+                choice((
+                    attempt(spaces().with(use_module())),
+                    attempt(spaces().with(typedef())),
+                    expr(),
+                )),
+                attempt(sptoken(';')),
+            ),
         ),
     )
-    .map(|args: Vec<Expr>| ExprKind::Do { exprs: Arc::from(args) }.to_expr())
+        .map(|(pos, args): (_, Vec<Expr>)| {
+            ExprKind::Do { exprs: Arc::from(args) }.to_expr(pos)
+        })
 }
 
 fn array<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    between(token('['), sptoken(']'), sep_by(expr(), csep())).map(
-        |args: SmallVec<[Expr; 4]>| {
-            ExprKind::Array { args: Arc::from_iter(args.into_iter()) }.to_expr()
+    (position(), between(token('['), sptoken(']'), sep_by(expr(), csep()))).map(
+        |(pos, args): (_, SmallVec<[Expr; 4]>)| {
+            ExprKind::Array { args: Arc::from_iter(args.into_iter()) }.to_expr(pos)
         },
     )
 }
 
 fn apply_pexp<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
@@ -388,7 +403,7 @@ where
 
 fn ref_pexp<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
@@ -402,33 +417,36 @@ where
 
 fn structref<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (ref_pexp().skip(sptoken('.')), spfname()).map(|(source, field)| {
-        ExprKind::StructRef { source: Arc::new(source), field }.to_expr()
+    (position(), ref_pexp().skip(sptoken('.')), spfname()).map(|(pos, source, field)| {
+        ExprKind::StructRef { source: Arc::new(source), field }.to_expr(pos)
     })
 }
 
 fn tupleref<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (ref_pexp().skip(sptoken('.')), int::<_, usize>()).map(|(source, field)| {
-        ExprKind::TupleRef { source: Arc::new(source), field }.to_expr()
-    })
+    (position(), ref_pexp().skip(sptoken('.')), int::<_, usize>()).map(
+        |(pos, source, field)| {
+            ExprKind::TupleRef { source: Arc::new(source), field }.to_expr(pos)
+        },
+    )
 }
 
 fn arrayref<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     (
+        position(),
         ref_pexp(),
         between(
             token('['),
@@ -436,17 +454,22 @@ where
             choice((
                 attempt(
                     (
+                        position(),
                         spaces().with(optional(many1(digit()))).skip(spstring("..")),
                         spaces().with(optional(many1(digit()))),
                     )
                         .skip(look_ahead(sptoken(']'))),
                 )
                 .map(
-                    |(start, end): (Option<CompactString>, Option<CompactString>)| {
+                    |(pos, start, end): (
+                        _,
+                        Option<CompactString>,
+                        Option<CompactString>,
+                    )| {
                         let start = start.map(|i| Value::U64(i.parse().unwrap()));
-                        let start = start.map(|e| ExprKind::Constant(e).to_expr());
+                        let start = start.map(|e| ExprKind::Constant(e).to_expr(pos));
                         let end = end.map(|i| Value::U64(i.parse().unwrap()));
-                        let end = end.map(|e| ExprKind::Constant(e).to_expr());
+                        let end = end.map(|e| ExprKind::Constant(e).to_expr(pos));
                         Either::Left((start, end))
                     },
                 ),
@@ -459,37 +482,41 @@ where
             )),
         ),
     )
-        .map(|(a, args)| match args {
+        .map(|(pos, a, args)| match args {
             Either::Left((start, end)) => ExprKind::ArraySlice {
                 source: Arc::new(a),
                 start: start.map(Arc::new),
                 end: end.map(Arc::new),
             }
-            .to_expr(),
+            .to_expr(pos),
             Either::Right(i) => {
-                ExprKind::ArrayRef { source: Arc::new(a), i: Arc::new(i) }.to_expr()
+                ExprKind::ArrayRef { source: Arc::new(a), i: Arc::new(i) }.to_expr(pos)
             }
         })
 }
 
 fn apply<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     (
+        position(),
         apply_pexp(),
         between(
             sptoken('('),
             sptoken(')'),
             sep_by(
                 choice((
-                    attempt(sptoken('#').with(fname()).skip(not_followed_by(token(':'))))
-                        .map(|n| {
-                            let e = ExprKind::Ref { name: [n.clone()].into() }.to_expr();
-                            (Some(n), e)
-                        }),
+                    attempt((
+                        position(),
+                        sptoken('#').with(fname()).skip(not_followed_by(token(':'))),
+                    ))
+                    .map(|(pos, n)| {
+                        let e = ExprKind::Ref { name: [n.clone()].into() }.to_expr(pos);
+                        (Some(n), e)
+                    }),
                     attempt((sptoken('#').with(fname()).skip(token(':')), expr()))
                         .map(|(n, e)| (Some(n), e)),
                     expr().map(|e| (None, e)),
@@ -498,7 +525,7 @@ where
             ),
         ),
     )
-        .then(|(function, args): (Expr, Vec<(Option<ArcStr>, Expr)>)| {
+        .then(|(pos, function, args): (_, Expr, Vec<(Option<ArcStr>, Expr)>)| {
             let mut anon = false;
             for (a, _) in &args {
                 if a.is_some() && anon {
@@ -509,23 +536,27 @@ where
                 }
                 anon |= a.is_none();
             }
-            value((function, args)).left()
+            value((pos, function, args)).left()
         })
-        .map(|(function, args): (Expr, Vec<(Option<ArcStr>, Expr)>)| {
+        .map(|(pos, function, args): (_, Expr, Vec<(Option<ArcStr>, Expr)>)| {
             ExprKind::Apply { function: Arc::new(function), args: Arc::from(args) }
-                .to_expr()
+                .to_expr(pos)
         })
 }
 
 fn any<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    string("any")
-        .with(between(sptoken('('), sptoken(')'), sep_by(expr(), csep())))
-        .map(|args: Vec<Expr>| ExprKind::Any { args: Arc::from(args) }.to_expr())
+    (
+        position(),
+        string("any").with(between(sptoken('('), sptoken(')'), sep_by(expr(), csep()))),
+    )
+        .map(|(pos, args): (_, Vec<Expr>)| {
+            ExprKind::Any { args: Arc::from(args) }.to_expr(pos)
+        })
 }
 
 fn typeprim<I>() -> impl Parser<I, Output = Typ>
@@ -735,7 +766,7 @@ parser! {
 fn lambda_args<I>(
 ) -> impl Parser<I, Output = (Vec<Arg<Refs>>, Option<Option<Type<Refs>>>)>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
@@ -803,11 +834,12 @@ where
 
 fn lambda<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     (
+        position(),
         attempt(sep_by((tvar().skip(sptoken(':')), typexp()), csep()))
             .map(|tvs: SmallVec<[(TVar<Refs>, Type<Refs>); 4]>| Arc::from_iter(tvs)),
         between(sptoken('|'), sptoken('|'), lambda_args()),
@@ -818,19 +850,20 @@ where
             expr().map(|e| Either::Left(Arc::new(e))),
         )),
     )
-        .map(|(constraints, (args, vargs), rtype, body)| {
+        .map(|(pos, constraints, (args, vargs), rtype, body)| {
             let args = Arc::from_iter(args);
-            ExprKind::Lambda { args, vargs, rtype, constraints, body }.to_expr()
+            ExprKind::Lambda { args, vargs, rtype, constraints, body }.to_expr(pos)
         })
 }
 
 fn letbind<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     (
+        position(),
         optional(string("pub").skip(space())).map(|o| o.is_some()),
         spstring("let")
             .with(space())
@@ -838,56 +871,55 @@ where
             .skip(spstring("=")),
         expr(),
     )
-        .map(|(export, (pattern, typ), v)| {
-            ExprKind::Bind { export, pattern, typ, value: Arc::new(v) }.to_expr()
+        .map(|(pos, export, (pattern, typ), v)| {
+            ExprKind::Bind { export, pattern, typ, value: Arc::new(v) }.to_expr(pos)
         })
 }
 
 fn connect<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (modpath().skip(spstring("<-")), expr())
-        .map(|(name, e)| ExprKind::Connect { name, value: Arc::new(e) }.to_expr())
+    (position(), modpath().skip(spstring("<-")), expr())
+        .map(|(pos, name, e)| ExprKind::Connect { name, value: Arc::new(e) }.to_expr(pos))
 }
 
 fn literal<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    netidx_value(&BSCRIPT_ESC)
-        .skip(not_followed_by(token('_')))
-        .map(|v| ExprKind::Constant(v).to_expr())
+    (position(), netidx_value(&BSCRIPT_ESC).skip(not_followed_by(token('_'))))
+        .map(|(pos, v)| ExprKind::Constant(v).to_expr(pos))
 }
 
 fn reference<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    modpath().map(|name| ExprKind::Ref { name }.to_expr())
+    (position(), modpath()).map(|(pos, name)| ExprKind::Ref { name }.to_expr(pos))
 }
 
 fn qop<I, P: Parser<I, Output = Expr>>(p: P) -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (p, optional(attempt(sptoken('?')))).map(|(e, qop)| match qop {
+    (position(), p, optional(attempt(sptoken('?')))).map(|(pos, e, qop)| match qop {
         None => e,
-        Some(_) => ExprKind::Qop(Arc::new(e)).to_expr(),
+        Some(_) => ExprKind::Qop(Arc::new(e)).to_expr(pos),
     })
 }
 
 fn arith_term<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
@@ -906,9 +938,8 @@ where
         attempt(spaces().with(literal())),
         attempt(spaces().with(qop(reference()))),
         attempt(
-            sptoken('!')
-                .with(arith())
-                .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
+            (position(), sptoken('!').with(arith()))
+                .map(|(pos, expr)| ExprKind::Not { expr: Arc::new(expr) }.to_expr(pos)),
         ),
         attempt(between(sptoken('('), sptoken(')'), arith())),
     ))
@@ -917,7 +948,7 @@ where
 
 fn arith_<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
@@ -939,54 +970,62 @@ where
                 attempt(spstring("||")),
             ))
             .map(|op: &str| match op {
-                "+" => |lhs, rhs| {
-                    ExprKind::Add { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                "-" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Sub { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
-                "-" => |lhs, rhs| {
-                    ExprKind::Sub { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                "*" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Mul { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
-                "*" => |lhs, rhs| {
-                    ExprKind::Mul { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                "/" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Div { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
-                "/" => |lhs, rhs| {
-                    ExprKind::Div { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                "==" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Eq { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
-                "==" => |lhs, rhs| {
-                    ExprKind::Eq { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                "!=" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Ne { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
-                "!=" => |lhs, rhs| {
-                    ExprKind::Ne { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                ">" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Gt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
-                ">" => |lhs, rhs| {
-                    ExprKind::Gt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                "<" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Lt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
-                "<" => |lhs, rhs| {
-                    ExprKind::Lt { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                ">=" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Gte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
-                ">=" => |lhs, rhs| {
-                    ExprKind::Gte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                "<=" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Lte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
-                "<=" => |lhs, rhs| {
-                    ExprKind::Lte { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                "&&" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::And { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
-                "&&" => |lhs, rhs| {
-                    ExprKind::And { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
-                },
-                "||" => |lhs, rhs| {
-                    ExprKind::Or { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr()
+                "||" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Or { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
                 _ => unreachable!(),
             }),
         )),
-        attempt(sptoken('!').with(arith_term()))
-            .map(|expr| ExprKind::Not { expr: Arc::new(expr) }.to_expr()),
+        attempt((position(), sptoken('!').with(arith_term())))
+            .map(|(pos, expr)| ExprKind::Not { expr: Arc::new(expr) }.to_expr(pos)),
         attempt(between(sptoken('('), sptoken(')'), arith())),
     ))
 }
 
 parser! {
     fn arith[I]()(I) -> Expr
-    where [I: RangeStream<Token = char>, I::Range: Range]
+    where [I: RangeStream<Token = char, Position = SourcePosition>, I::Range: Range]
     {
         arith_()
     }
@@ -1079,13 +1118,14 @@ where
 
 fn raw_string<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     const ESC: [char; 2] = ['\'', '\\'];
-    between(string("r\'"), token('\''), escaped_string(&ESC))
-        .map(|s: String| ExprKind::Constant(Value::String(s.into())).to_expr())
+    (position(), between(string("r\'"), token('\''), escaped_string(&ESC))).map(
+        |(pos, s): (_, String)| ExprKind::Constant(Value::String(s.into())).to_expr(pos),
+    )
 }
 
 fn tuple_pattern<I>() -> impl Parser<I, Output = StructurePattern>
@@ -1234,60 +1274,63 @@ where
 
 fn select<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    string("select")
-        .with(space())
-        .with((
+    (
+        position(),
+        string("select").with(space()).with((
             expr(),
             between(
                 sptoken('{'),
                 sptoken('}'),
                 sep_by1((pattern(), spstring("=>").with(expr())), csep()),
             ),
-        ))
-        .map(|(arg, arms): (Expr, Vec<(Pattern, Expr)>)| {
-            ExprKind::Select { arg: Arc::new(arg), arms: Arc::from(arms) }.to_expr()
+        )),
+    )
+        .map(|(pos, (arg, arms)): (_, (Expr, Vec<(Pattern, Expr)>))| {
+            ExprKind::Select { arg: Arc::new(arg), arms: Arc::from(arms) }.to_expr(pos)
         })
 }
 
 fn cast<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     (
+        position(),
         string("cast").with(between(token('<'), sptoken('>'), typexp())),
         between(sptoken('('), sptoken(')'), expr()),
     )
-        .map(|(typ, e)| ExprKind::TypeCast { expr: Arc::new(e), typ }.to_expr())
+        .map(|(pos, typ, e)| ExprKind::TypeCast { expr: Arc::new(e), typ }.to_expr(pos))
 }
 
 fn typedef<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (string("type").with(sptypname()), sptoken('=').with(typexp()))
-        .map(|(name, typ)| ExprKind::TypeDef { name, typ }.to_expr())
+    (position(), string("type").with(sptypname()), sptoken('=').with(typexp()))
+        .map(|(pos, name, typ)| ExprKind::TypeDef { name, typ }.to_expr(pos))
 }
 
 fn tuple<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    between(token('('), sptoken(')'), sep_by1(expr(), csep())).then(
-        |exprs: SmallVec<[Expr; 8]>| {
+    (position(), between(token('('), sptoken(')'), sep_by1(expr(), csep()))).then(
+        |(pos, exprs): (_, SmallVec<[Expr; 8]>)| {
             if exprs.len() < 2 {
                 unexpected_any("tuples must have at least 2 elements").left()
             } else {
-                value(ExprKind::Tuple { args: Arc::from_iter(exprs) }.to_expr()).right()
+                value(ExprKind::Tuple { args: Arc::from_iter(exprs) }.to_expr(pos))
+                    .right()
             }
         },
     )
@@ -1295,76 +1338,85 @@ where
 
 fn structure<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    between(
-        token('{'),
-        sptoken('}'),
-        sep_by1((spfname().skip(sptoken(':')), expr()), csep()),
-    )
-    .then(|mut exprs: SmallVec<[(ArcStr, Expr); 8]>| {
-        let s = exprs.iter().map(|(n, _)| n).collect::<FxHashSet<_>>();
-        if s.len() < exprs.len() {
-            return unexpected_any("struct fields must be unique").left();
-        }
-        exprs.sort_by_key(|(n, _)| n.clone());
-        value(ExprKind::Struct { args: Arc::from_iter(exprs) }.to_expr()).right()
-    })
-}
-
-fn variant<I>() -> impl Parser<I, Output = Expr>
-where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     (
+        position(),
+        between(
+            token('{'),
+            sptoken('}'),
+            sep_by1((spfname().skip(sptoken(':')), expr()), csep()),
+        ),
+    )
+        .then(|(pos, mut exprs): (_, SmallVec<[(ArcStr, Expr); 8]>)| {
+            let s = exprs.iter().map(|(n, _)| n).collect::<FxHashSet<_>>();
+            if s.len() < exprs.len() {
+                return unexpected_any("struct fields must be unique").left();
+            }
+            exprs.sort_by_key(|(n, _)| n.clone());
+            value(ExprKind::Struct { args: Arc::from_iter(exprs) }.to_expr(pos)).right()
+        })
+}
+
+fn variant<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char, Position = SourcePosition>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        position(),
         token('`').with(typname()),
         optional(attempt(between(token('('), sptoken(')'), sep_by1(expr(), csep())))),
     )
-        .map(|(tag, args): (ArcStr, Option<SmallVec<[Expr; 5]>>)| {
+        .map(|(pos, tag, args): (_, ArcStr, Option<SmallVec<[Expr; 5]>>)| {
             let args = match args {
                 None => smallvec![],
                 Some(a) => a,
             };
-            ExprKind::Variant { tag, args: Arc::from_iter(args.into_iter()) }.to_expr()
+            ExprKind::Variant { tag, args: Arc::from_iter(args.into_iter()) }.to_expr(pos)
         })
 }
 
 fn structwith<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    between(
-        token('{'),
-        sptoken('}'),
-        (
-            ref_pexp().skip(space()).skip(spstring("with")).skip(space()),
-            sep_by1((spfname().skip(sptoken(':')), expr()), csep()),
+    (
+        position(),
+        between(
+            token('{'),
+            sptoken('}'),
+            (
+                ref_pexp().skip(space()).skip(spstring("with")).skip(space()),
+                sep_by1((spfname().skip(sptoken(':')), expr()), csep()),
+            ),
         ),
     )
-    .then(|(source, mut exprs): (Expr, SmallVec<[(ArcStr, Expr); 8]>)| {
-        let s = exprs.iter().map(|(n, _)| n).collect::<FxHashSet<_>>();
-        if s.len() < exprs.len() {
-            return unexpected_any("struct fields must be unique").left();
-        }
-        exprs.sort_by_key(|(n, _)| n.clone());
-        let e = ExprKind::StructWith {
-            source: Arc::new(source),
-            replace: Arc::from_iter(exprs),
-        }
-        .to_expr();
-        value(e).right()
-    })
+        .then(
+            |(pos, (source, mut exprs)): (_, (Expr, SmallVec<[(ArcStr, Expr); 8]>))| {
+                let s = exprs.iter().map(|(n, _)| n).collect::<FxHashSet<_>>();
+                if s.len() < exprs.len() {
+                    return unexpected_any("struct fields must be unique").left();
+                }
+                exprs.sort_by_key(|(n, _)| n.clone());
+                let e = ExprKind::StructWith {
+                    source: Arc::new(source),
+                    replace: Arc::from_iter(exprs),
+                }
+                .to_expr(pos);
+                value(e).right()
+            },
+        )
 }
 
 fn expr_<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
@@ -1395,7 +1447,7 @@ where
 
 parser! {
     fn expr[I]()(I) -> Expr
-    where [I: RangeStream<Token = char>, I::Range: Range]
+    where [I: RangeStream<Token = char, Position = SourcePosition>, I::Range: Range]
     {
         expr_()
     }
@@ -1403,7 +1455,7 @@ parser! {
 
 fn modexpr_<I>() -> impl Parser<I, Output = Expr>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
@@ -1422,35 +1474,24 @@ where
 
 parser! {
     fn modexpr[I]()(I) -> Expr
-    where [I: RangeStream<Token = char>, I::Range: Range]
+    where [I: RangeStream<Token = char, Position = SourcePosition>, I::Range: Range]
     {
         modexpr_()
     }
-}
-
-pub(super) fn parse(s: &str) -> anyhow::Result<Expr> {
-    modexpr()
-        .skip(spaces())
-        .skip(eof())
-        .easy_parse(position::Stream::new(s))
-        .map(|(r, _)| r)
-        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
 }
 
 /// Parse one or more toplevel module expressions
 ///
 /// followed by (optional) whitespace and then eof. At least one
 /// expression is required otherwise this function will fail.
-///
-/// if you wish to parse a str containing one and only one module
-/// expression just call [str.parse::<Expr>()].
-pub fn parse_many_modexpr(s: &str) -> anyhow::Result<Vec<Expr>> {
-    many1(modexpr())
+pub fn parse(name: Option<ArcStr>, s: ArcStr) -> anyhow::Result<Origin> {
+    let r: Vec<Expr> = many1(modexpr())
         .skip(spaces())
         .skip(eof())
-        .easy_parse(position::Stream::new(s))
+        .easy_parse(position::Stream::new(&*s))
         .map(|(r, _)| r)
-        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
+        .map_err(|e| anyhow::anyhow!(format!("{}", e)))?;
+    Ok(Origin { name, source: s, exprs: Arc::from(r) })
 }
 
 /// Parse a fntype
@@ -1463,12 +1504,16 @@ pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType<Refs>> {
         .map_err(|e| anyhow::anyhow!(format!("{e}")))
 }
 
-/// Parse an expression instead of a module expression
-pub fn parse_expr(s: &str) -> anyhow::Result<Expr> {
-    expr()
+/// Parse expressions instead of module expressions
+///
+/// followed by (optional) whitespace and then eof. At least one
+/// expression is required or this function will fail.
+pub fn parse_expr(name: Option<ArcStr>, s: ArcStr) -> anyhow::Result<Origin> {
+    let r: Vec<Expr> = many1(expr())
         .skip(spaces())
         .skip(eof())
-        .easy_parse(position::Stream::new(s))
+        .easy_parse(position::Stream::new(&*s))
         .map(|(r, _)| r)
-        .map_err(|e| anyhow::anyhow!(format!("{e}")))
+        .map_err(|e| anyhow::anyhow!(format!("{e}")))?;
+    Ok(Origin { name, source: s, exprs: Arc::from(r) })
 }
