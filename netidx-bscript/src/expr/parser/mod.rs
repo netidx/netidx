@@ -1254,7 +1254,7 @@ parser! {
 
 fn pattern<I>() -> impl Parser<I, Output = Pattern>
 where
-    I: RangeStream<Token = char>,
+    I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {

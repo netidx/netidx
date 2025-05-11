@@ -310,7 +310,7 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         let node = Node::compile(
             &mut t,
             &root,
-            ExprKind::Use { name: ModPath::from(["core"]) }.to_expr(),
+            ExprKind::Use { name: ModPath::from(["core"]) }.to_expr(Default::default()),
         );
         if let Some(e) = node.extract_err() {
             panic!("error using core {e}")

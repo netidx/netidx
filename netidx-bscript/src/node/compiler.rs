@@ -1,6 +1,6 @@
 use crate::{
     env::Bind,
-    expr::{Expr, ExprId, ExprKind, ModPath},
+    expr::{Expr, ExprId, ExprKind, ModPath, ModuleKind},
     node::{
         lambda,
         pattern::{PatternNode, StructPatternNode},
@@ -9,7 +9,7 @@ use crate::{
     typ::{FnType, NoRefs, Type},
     Ctx, ExecCtx, UserEvent,
 };
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::{format_compact, CompactString};
 use fxhash::FxHashMap;
@@ -112,83 +112,50 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
     spec: Expr,
     scope: &ModPath,
     top_id: ExprId,
-) -> Node<C, E> {
+) -> Result<Node<C, E>> {
     macro_rules! subexprs {
-        ($scope:expr, $exprs:expr) => {
-            $exprs.into_iter().fold((false, vec![]), |(e, mut nodes), spec| {
-                let n = compile(ctx, spec.clone(), &$scope, top_id);
-                let e = e || n.is_err();
-                nodes.push(n);
-                (e, nodes)
-            })
-        };
-    }
-    macro_rules! error {
-        ("", $children:expr) => {{
-            let kind = NodeKind::Error { error: None, children: Box::from_iter($children) };
-            Node { spec: Box::new(spec), kind, typ: Type::Bottom(PhantomData) }
+        ($scope:expr, $exprs:expr, $map:expr) => {{
+            $exprs
+                .into_iter()
+                .map(|spec| compile(ctx, spec.clone(), &$scope, top_id).map($map))
+                .collect::<Result<Vec<_>>>()
         }};
-        ($fmt:expr, $children:expr, $($arg:expr),*) => {{
-            let e = ArcStr::from(format_compact!($fmt, $($arg),*).as_str());
-            let kind = NodeKind::Error { error: Some(e), children: Box::from_iter($children) };
-            Node { spec: Box::new(spec), kind, typ: Type::Bottom(PhantomData) }
-        }};
-        ($fmt:expr) => { error!($fmt, [],) };
-        ($fmt:expr, $children:expr) => { error!($fmt, $children,) };
     }
     macro_rules! binary_op {
         ($op:ident, $lhs:expr, $rhs:expr) => {{
-            let lhs = compile(ctx, (**$lhs).clone(), scope, top_id);
-            let rhs = compile(ctx, (**$rhs).clone(), scope, top_id);
-            if lhs.is_err() || rhs.is_err() {
-                return error!("", [lhs, rhs]);
-            }
+            let lhs = compile(ctx, (**$lhs).clone(), scope, top_id)?;
+            let rhs = compile(ctx, (**$rhs).clone(), scope, top_id)?;
             let lhs = Box::new(Cached::new(lhs));
             let rhs = Box::new(Cached::new(rhs));
-            Node {
+            Ok(Node {
                 spec: Box::new(spec),
                 typ: Type::empty_tvar(),
                 kind: NodeKind::$op { lhs, rhs },
-            }
+            })
         }};
     }
     match &spec {
-        Expr { kind: ExprKind::Constant(v), id: _ } => {
+        Expr { kind: ExprKind::Constant(v), id: _, pos: _ } => {
             let typ = Type::Primitive(Typ::get(&v).into());
-            Node { kind: NodeKind::Constant(v.clone()), spec: Box::new(spec), typ }
+            Ok(Node { kind: NodeKind::Constant(v.clone()), spec: Box::new(spec), typ })
         }
-        Expr { kind: ExprKind::Do { exprs }, id } => {
+        Expr { kind: ExprKind::Do { exprs }, id, pos: _ } => {
             let scope = ModPath(scope.append(&format_compact!("do{}", id.inner())));
-            let (error, exp) = subexprs!(scope, exprs);
-            if error {
-                error!("", exp)
-            } else {
-                let typ = exp
-                    .last()
-                    .map(|n| n.typ.clone())
-                    .unwrap_or_else(|| Type::Bottom(PhantomData));
-                Node { kind: NodeKind::Do(Box::from(exp)), spec: Box::new(spec), typ }
-            }
+            let exp = subexprs!(scope, exprs, |n| n)?;
+            let typ = exp
+                .last()
+                .map(|n| n.typ.clone())
+                .unwrap_or_else(|| Type::Bottom(PhantomData));
+            Ok(Node { kind: NodeKind::Do(Box::from(exp)), spec: Box::new(spec), typ })
         }
-        Expr { kind: ExprKind::Array { args }, id: _ } => {
-            let (error, args) = subexprs!(scope, args);
-            if error {
-                error!("", args)
-            } else {
-                let typ = Type::Array(Arc::new(Type::empty_tvar()));
-                let args = Box::from_iter(args.into_iter().map(|n| Cached::new(n)));
-                Node { kind: NodeKind::Array { args }, spec: Box::new(spec), typ }
-            }
+        Expr { kind: ExprKind::Array { args }, id: _, pos: _ } => {
+            let args = Box::from(subexprs!(scope, args, Cached::new)?);
+            let typ = Type::Array(Arc::new(Type::empty_tvar()));
+            Ok(Node { kind: NodeKind::Array { args }, spec: Box::new(spec), typ })
         }
-        Expr { kind: ExprKind::ArrayRef { source, i }, id: _ } => {
-            let source = compile(ctx, (**source).clone(), scope, top_id);
-            if source.is_err() {
-                return error!("", vec![source]);
-            }
-            let i = compile(ctx, (**i).clone(), scope, top_id);
-            if i.is_err() {
-                return error!("", vec![i]);
-            }
+        Expr { kind: ExprKind::ArrayRef { source, i }, id: _, pos: _ } => {
+            let source = compile(ctx, (**source).clone(), scope, top_id)?;
+            let i = compile(ctx, (**i).clone(), scope, top_id)?;
             let ert = Type::Primitive(Typ::Error.into());
             let typ = match &source.typ {
                 Type::Array(et) => {
@@ -197,131 +164,110 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 _ => Type::Set(Arc::from_iter([Type::empty_tvar(), ert.clone()])),
             };
             let n = ArrayRefNode { source: Cached::new(source), i: Cached::new(i) };
-            Node { kind: NodeKind::ArrayRef(Box::new(n)), spec: Box::new(spec), typ }
+            Ok(Node { kind: NodeKind::ArrayRef(Box::new(n)), spec: Box::new(spec), typ })
         }
-        Expr { kind: ExprKind::ArraySlice { source, start, end }, id: _ } => {
-            macro_rules! maybe_compile {
-                ($n:expr) => {
-                    match $n {
-                        None => None,
-                        Some(e) => {
-                            let n = compile(ctx, (**e).clone(), scope, top_id);
-                            if n.is_err() {
-                                return error!("", vec![n]);
-                            }
-                            Some(Cached::new(n))
-                        }
-                    }
-                };
-            }
-            let source = compile(ctx, (**source).clone(), scope, top_id);
-            if source.is_err() {
-                return error!("", vec![source]);
-            }
-            let start = maybe_compile!(start);
-            let end = maybe_compile!(end);
+        Expr { kind: ExprKind::ArraySlice { source, start, end }, id: _, pos: _ } => {
+            let source = compile(ctx, (**source).clone(), scope, top_id)?;
+            let start = start
+                .as_ref()
+                .map(|e| compile(ctx, (**e).clone(), scope, top_id).map(Cached::new))
+                .transpose()?;
+            let end = end
+                .as_ref()
+                .map(|e| compile(ctx, (**e).clone(), scope, top_id).map(Cached::new))
+                .transpose()?;
             let typ = Type::Set(Arc::from_iter([
                 source.typ.clone(),
                 Type::Primitive(Typ::Error.into()),
             ]));
             let n = ArraySliceNode { source: Cached::new(source), start, end };
-            Node { kind: NodeKind::ArraySlice(Box::new(n)), spec: Box::new(spec), typ }
+            Ok(Node {
+                kind: NodeKind::ArraySlice(Box::new(n)),
+                spec: Box::new(spec),
+                typ,
+            })
         }
-        Expr { kind: ExprKind::StringInterpolate { args }, id: _ } => {
-            let (error, args) = subexprs!(scope, args);
-            if error {
-                return error!("", args);
-            }
+        Expr { kind: ExprKind::StringInterpolate { args }, id: _, pos: _ } => {
+            let args = Box::from(subexprs!(scope, args, Cached::new)?);
             let typ = Type::Primitive(Typ::String.into());
-            let args = Box::from_iter(args.into_iter().map(|n| Cached::new(n)));
             let spec = Box::new(spec);
-            Node { kind: NodeKind::StringInterpolate { args }, spec, typ }
+            Ok(Node { kind: NodeKind::StringInterpolate { args }, spec, typ })
         }
-        Expr { kind: ExprKind::Tuple { args }, id: _ } => {
-            let (error, args) = subexprs!(scope, args);
-            if error {
-                error!("", args)
-            } else {
-                let typ = Type::Tuple(Arc::from_iter(args.iter().map(|n| n.typ.clone())));
-                let args = Box::from_iter(args.into_iter().map(|n| Cached::new(n)));
-                Node { kind: NodeKind::Tuple { args }, spec: Box::new(spec), typ }
-            }
+        Expr { kind: ExprKind::Tuple { args }, id: _, pos: _ } => {
+            let args: Box<[_]> = Box::from(subexprs!(scope, args, Cached::new)?);
+            let typ =
+                Type::Tuple(Arc::from_iter(args.iter().map(|n| n.node.typ.clone())));
+            Ok(Node { kind: NodeKind::Tuple { args }, spec: Box::new(spec), typ })
         }
-        Expr { kind: ExprKind::Variant { tag, args }, id: _ } => {
-            let (error, args) = subexprs!(scope, args);
-            if error {
-                error!("", args)
-            } else {
-                let typs = Arc::from_iter(args.iter().map(|n| n.typ.clone()));
-                let typ = Type::Variant(tag.clone(), typs);
-                let args = Box::from_iter(args.into_iter().map(|n| Cached::new(n)));
-                let tag = tag.clone();
-                Node { kind: NodeKind::Variant { tag, args }, spec: Box::new(spec), typ }
-            }
+        Expr { kind: ExprKind::Variant { tag, args }, id: _, pos: _ } => {
+            let args: Box<[_]> = Box::from(subexprs!(scope, args, Cached::new)?);
+            let typs = Arc::from_iter(args.iter().map(|n| n.node.typ.clone()));
+            let typ = Type::Variant(tag.clone(), typs);
+            let tag = tag.clone();
+            Ok(Node { kind: NodeKind::Variant { tag, args }, spec: Box::new(spec), typ })
         }
-        Expr { kind: ExprKind::Struct { args }, id: _ } => {
+        Expr { kind: ExprKind::Struct { args }, id: _, pos: _ } => {
             let mut names = Vec::with_capacity(args.len());
             let args = args.iter().map(|(n, s)| {
                 names.push(n.clone());
                 s
             });
-            let (error, nodes) = subexprs!(scope, args);
-            if error {
-                return error!("", nodes);
-            }
+            let args: Box<[_]> = Box::from(subexprs!(scope, args, Cached::new)?);
             let names: Box<[ArcStr]> = Box::from(names);
-            let args: Box<[Cached<C, E>]> =
-                Box::from_iter(nodes.into_iter().map(|n| Cached::new(n)));
             let typs = names
                 .iter()
                 .zip(args.iter())
                 .map(|(n, a)| (n.clone(), a.node.typ.clone()));
             let typ = Type::Struct(Arc::from_iter(typs));
-            Node { kind: NodeKind::Struct { args, names }, spec: Box::new(spec), typ }
+            Ok(Node { kind: NodeKind::Struct { args, names }, spec: Box::new(spec), typ })
         }
-        Expr { kind: ExprKind::Module { name, export: _, value }, id: _ } => {
+        Expr { kind: ExprKind::Module { name, export: _, value }, id: _, pos } => {
             let scope = ModPath(scope.append(&name));
             match value {
-                None => error!("you must deref external modules"),
-                Some(exprs) => {
-                    let (error, children) = subexprs!(scope, exprs);
-                    if error {
-                        error!("", children)
-                    } else {
-                        ctx.env.modules.insert_cow(scope.clone());
-                        let typ = Type::Bottom(PhantomData);
-                        let kind = NodeKind::Module(Box::from(children));
-                        Node { spec: Box::new(spec), typ, kind }
-                    }
+                ModuleKind::Unresolved => {
+                    bail!("at {} you must resolve external modules", pos)
+                }
+                ModuleKind::Resolved(ori) => {
+                    let exprs = subexprs!(scope, ori.exprs, |n| n)
+                        .with_context(|| format!("{ori}"))?;
+                    let kind = NodeKind::Module(Box::from(exprs));
+                    ctx.env.modules.insert_cow(scope.clone());
+                    let typ = Type::Bottom(PhantomData);
+                    Ok(Node { spec: Box::new(spec), typ, kind })
+                }
+                ModuleKind::Inline(exprs) => {
+                    let kind =
+                        NodeKind::Module(Box::from(subexprs!(scope, exprs, |n| n)?));
+                    ctx.env.modules.insert_cow(scope.clone());
+                    let typ = Type::Bottom(PhantomData);
+                    Ok(Node { spec: Box::new(spec), typ, kind })
                 }
             }
         }
-        Expr { kind: ExprKind::Use { name }, id: _ } => {
+        Expr { kind: ExprKind::Use { name }, id: _, pos } => {
             if !ctx.env.modules.contains(name) {
-                error!("no such module {name}")
+                bail!("at {pos} no such module {name}")
             } else {
                 let used = ctx.env.used.get_or_default_cow(scope.clone());
                 Arc::make_mut(used).push(name.clone());
                 let kind = NodeKind::Use { scope: scope.clone(), name: name.clone() };
-                Node { spec: Box::new(spec), typ: Type::Bottom(PhantomData), kind }
+                Ok(Node { spec: Box::new(spec), typ: Type::Bottom(PhantomData), kind })
             }
         }
-        Expr { kind: ExprKind::Connect { name, value }, id: _ } => {
+        Expr { kind: ExprKind::Connect { name, value }, id: _, pos } => {
             let id = match ctx.env.lookup_bind(scope, name) {
-                None => return error!("{name} is undefined"),
+                None => bail!("at {pos} {name} is undefined"),
                 Some((_, Bind { id, .. })) => *id,
             };
-            let node = compile(ctx, (**value).clone(), scope, top_id);
-            if node.is_err() {
-                return error!("", vec![node]);
-            }
+            let node = compile(ctx, (**value).clone(), scope, top_id)?;
             let kind = NodeKind::Connect(id, Box::new(node));
             let typ = Type::Bottom(PhantomData);
-            Node { spec: Box::new(spec), typ, kind }
+            Ok(Node { spec: Box::new(spec), typ, kind })
         }
         Expr {
             kind: ExprKind::Lambda { args, vargs, rtype, constraints, body },
             id: _,
+            pos: _,
         } => {
             let (args, vargs, rtype, constraints, body) = (
                 args.clone(),
@@ -332,105 +278,74 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             );
             lambda::compile(ctx, spec, args, vargs, rtype, constraints, scope, body)
         }
-        Expr { kind: ExprKind::Any { args }, id: _ } => {
-            let (error, children) = subexprs!(scope, args);
-            if error {
-                error!("", children)
-            } else {
-                let kind = NodeKind::Any { args: Box::from(children) };
-                Node { spec: Box::new(spec), typ: Type::empty_tvar(), kind }
-            }
+        Expr { kind: ExprKind::Any { args }, id: _, pos: _ } => {
+            let children = subexprs!(scope, args, |n| n)?;
+            let kind = NodeKind::Any { args: Box::from(children) };
+            Ok(Node { spec: Box::new(spec), typ: Type::empty_tvar(), kind })
         }
-        Expr { kind: ExprKind::Apply { args, function: f }, id: _ } => {
-            let fnode = compile(ctx, (**f).clone(), scope, top_id);
-            if fnode.is_err() {
-                return error!("", [fnode]);
-            }
+        Expr { kind: ExprKind::Apply { args, function: f }, id: _, pos } => {
+            let fnode = compile(ctx, (**f).clone(), scope, top_id)?;
             let ftype = match &fnode.typ {
                 Type::Fn(ftype) => ftype.clone(),
-                typ => return error!("{f} of type {} is not a function", vec![], typ),
+                typ => bail!("at {pos} {f} has {typ}, expected a function"),
             };
-            match compile_apply_args(ctx, scope, top_id, &ftype, &args) {
-                Err(e) => error!("{e}"),
-                Ok((args, arg_spec)) => {
-                    let site = Box::new(CallSite {
-                        ftype: ftype.clone(),
-                        args,
-                        arg_spec,
-                        fnode,
-                        function: None,
-                        top_id,
-                    });
-                    let typ = ftype.rtype.clone();
-                    Node { spec: Box::new(spec), typ, kind: NodeKind::Apply(site) }
-                }
-            }
+            let (args, arg_spec) = compile_apply_args(ctx, scope, top_id, &ftype, &args)?;
+            let site = Box::new(CallSite {
+                ftype: ftype.clone(),
+                args,
+                arg_spec,
+                fnode,
+                function: None,
+                top_id,
+            });
+            let typ = ftype.rtype.clone();
+            Ok(Node { spec: Box::new(spec), typ, kind: NodeKind::Apply(site) })
         }
-        Expr { kind: ExprKind::Bind { pattern, typ, export: _, value }, id: _ } => {
-            let node = compile(ctx, (**value).clone(), &scope, top_id);
-            if node.is_err() {
-                return error!("", vec![node]);
-            }
+        Expr { kind: ExprKind::Bind { pattern, typ, export: _, value }, id: _, pos } => {
+            let node = compile(ctx, (**value).clone(), &scope, top_id)?;
             let typ = match typ {
-                Some(typ) => match typ.resolve_typerefs(scope, &ctx.env) {
-                    Ok(typ) => typ.clone(),
-                    Err(e) => return error!("{e}", vec![node]),
-                },
+                Some(typ) => typ.resolve_typerefs(scope, &ctx.env)?,
                 None => {
                     let typ = node.typ.clone();
                     let ptyp = pattern.infer_type_predicate();
                     if !ptyp.contains(&typ) {
-                        return error!(
-                            "match error {typ} can't be matched by {ptyp}",
-                            vec![node]
-                        );
+                        bail!("at {pos} match error {typ} can't be matched by {ptyp}");
                     }
                     typ
                 }
             };
-            let pn = match StructPatternNode::compile(ctx, &typ, pattern, scope) {
-                Ok(p) => p,
-                Err(e) => return error!("{e:?}", vec![node]),
-            };
+            let pn = StructPatternNode::compile(ctx, &typ, pattern, scope)
+                .with_context(|| format!("at {pos}"))?;
             if pn.is_refutable() {
-                return error!("refutable patterns are not allowed in let", vec![node]);
+                bail!("at {pos} refutable patterns are not allowed in let");
             }
             let kind = NodeKind::Bind { pattern: Box::new(pn), node: Box::new(node) };
-            Node { spec: Box::new(spec), typ, kind }
+            Ok(Node { spec: Box::new(spec), typ, kind })
         }
-        Expr { kind: ExprKind::Qop(e), id: _ } => {
-            let n = compile(ctx, (**e).clone(), scope, top_id);
-            if n.is_err() {
-                return error!("", vec![n]);
-            }
+        Expr { kind: ExprKind::Qop(e), id: _, pos } => {
+            let n = compile(ctx, (**e).clone(), scope, top_id)?;
             match ctx.env.lookup_bind(scope, &ModPath::from(["errors"])) {
-                None => error!("BUG: errors is undefined"),
+                None => bail!("at {pos} BUG: errors is undefined"),
                 Some((_, bind)) => {
                     let typ = Type::empty_tvar();
                     let spec = Box::new(spec);
-                    Node { spec, typ, kind: NodeKind::Qop(bind.id, Box::new(n)) }
+                    Ok(Node { spec, typ, kind: NodeKind::Qop(bind.id, Box::new(n)) })
                 }
             }
         }
-        Expr { kind: ExprKind::Ref { name }, id: _ } => {
+        Expr { kind: ExprKind::Ref { name }, id: _, pos } => {
             match ctx.env.lookup_bind(scope, name) {
-                None => error!("{name} not defined"),
+                None => bail!("at {pos} {name} not defined"),
                 Some((_, bind)) => {
                     ctx.user.ref_var(bind.id, top_id);
                     let typ = bind.typ.clone();
-                    Node {
-                        spec: Box::new(spec),
-                        typ,
-                        kind: NodeKind::Ref { id: bind.id, top_id },
-                    }
+                    let spec = Box::new(spec);
+                    Ok(Node { spec, typ, kind: NodeKind::Ref { id: bind.id, top_id } })
                 }
             }
         }
-        Expr { kind: ExprKind::TupleRef { source, field }, id: _ } => {
-            let source = compile(ctx, (**source).clone(), scope, top_id);
-            if source.is_err() {
-                return error!("", vec![source]);
-            }
+        Expr { kind: ExprKind::TupleRef { source, field }, id: _, pos: _ } => {
+            let source = compile(ctx, (**source).clone(), scope, top_id)?;
             let field = *field;
             let typ = match &source.typ {
                 Type::Tuple(ts) => {
@@ -440,14 +355,10 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             };
             let spec = Box::new(spec);
             let source = Box::new(source);
-            let kind = NodeKind::TupleRef { source, field, top_id };
-            Node { spec, typ, kind }
+            Ok(Node { spec, typ, kind: NodeKind::TupleRef { source, field, top_id } })
         }
-        Expr { kind: ExprKind::StructRef { source, field }, id: _ } => {
-            let source = compile(ctx, (**source).clone(), scope, top_id);
-            if source.is_err() {
-                return error!("", vec![source]);
-            }
+        Expr { kind: ExprKind::StructRef { source, field }, id: _, pos: _ } => {
+            let source = compile(ctx, (**source).clone(), scope, top_id)?;
             let (typ, fid) = match &source.typ {
                 Type::Struct(flds) => flds
                     .iter()
@@ -464,135 +375,105 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                     .unwrap_or_else(|| (Type::empty_tvar(), 0)),
                 _ => (Type::empty_tvar(), 0),
             };
-            let spec = Box::new(spec);
             let source = Box::new(source);
             // typcheck will resolve the field index if we didn't find it already
             let kind = NodeKind::StructRef { source, field: fid, top_id };
-            Node { spec, typ, kind }
+            Ok(Node { spec: Box::new(spec), typ, kind })
         }
-        Expr { kind: ExprKind::StructWith { source, replace }, id: _ } => {
-            let source = compile(ctx, (**source).clone(), scope, top_id);
-            if source.is_err() {
-                return error!("", vec![source]);
-            }
-            let mut error = false;
-            let mut nodes = Vec::with_capacity(replace.len());
-            for (_, e) in replace.iter() {
-                let n = compile(ctx, e.clone(), scope, top_id);
-                error |= n.is_err();
-                nodes.push((0, Cached::new(n)));
-            }
-            if error {
-                let nodes: Vec<_> = nodes.into_iter().map(|(_, c)| c.node).collect();
-                return error!("", nodes);
-            }
-            let typ = Type::empty_tvar();
-            let spec = Box::new(spec);
-            let replace = Box::from(nodes);
+        Expr { kind: ExprKind::StructWith { source, replace }, id: _, pos: _ } => {
+            let source = compile(ctx, (**source).clone(), scope, top_id)?;
+            let replace = subexprs!(scope, replace.iter().map(|(_, e)| e), Cached::new)?;
+            let replace = Box::from_iter(replace.into_iter().map(|n| (0, n)));
             let source = Box::new(source);
             let kind = NodeKind::StructWith { current: None, source, replace };
-            Node { spec, typ, kind }
+            Ok(Node { spec: Box::new(spec), typ: Type::empty_tvar(), kind })
         }
-        Expr { kind: ExprKind::Select { arg, arms }, id: _ } => {
-            let arg = compile(ctx, (**arg).clone(), scope, top_id);
-            if let Some(e) = arg.extract_err() {
-                return error!("{e}");
-            }
-            let arg = Cached::new(arg);
-            let (error, arms) =
-                arms.iter().fold((false, vec![]), |(e, mut nodes), (pat, spec)| {
+        Expr { kind: ExprKind::Select { arg, arms }, id: _, pos } => {
+            let arg = Cached::new(compile(ctx, (**arg).clone(), scope, top_id)?);
+            let arms = arms
+                .iter()
+                .map(|(pat, spec)| {
                     let scope = ModPath(
                         scope.append(&format_compact!("sel{}", SelectId::new().0)),
                     );
-                    let pat = PatternNode::compile(ctx, pat, &scope, top_id);
-                    let n = compile(ctx, spec.clone(), &scope, top_id);
-                    let e = e
-                        || pat.is_err()
-                        || pat.as_ref().unwrap().extract_err().is_some()
-                        || n.is_err();
-                    nodes.push((pat, Cached::new(n)));
-                    (e, nodes)
-                });
-            use std::fmt::Write;
-            let mut err = CompactString::new("");
-            if error {
-                let mut v = vec![];
-                for (pat, n) in arms {
-                    match pat {
-                        Err(e) => write!(err, "{e}, ").unwrap(),
-                        Ok(p) => {
-                            if let Some(e) = p.extract_err() {
-                                write!(err, "{e}, ").unwrap();
-                            }
-                            if let Some(g) = p.guard {
-                                v.push(g.node);
-                            }
-                        }
-                    }
-                    v.push(n.node)
-                }
-                return error!("{err}", v);
-            }
-            let arms = Box::from_iter(arms.into_iter().map(|(p, n)| (p.unwrap(), n)));
-            let sn = Box::new(SelectNode { selected: None, arg, arms });
+                    let pat = PatternNode::compile(ctx, pat, &scope, top_id)
+                        .with_context(|| format!("in select at {pos}"))?;
+                    let n = Cached::new(compile(ctx, spec.clone(), &scope, top_id)?);
+                    Ok((pat, n))
+                })
+                .collect::<Result<Vec<_>>>()
+                .with_context(|| format!("in select at {pos}"))?;
+            let sn = Box::new(SelectNode { selected: None, arg, arms: Box::from(arms) });
             let kind = NodeKind::Select(sn);
-            Node { spec: Box::new(spec), typ: Type::empty_tvar(), kind }
+            Ok(Node { spec: Box::new(spec), typ: Type::empty_tvar(), kind })
         }
-        Expr { kind: ExprKind::TypeCast { expr, typ }, id: _ } => {
-            let n = compile(ctx, (**expr).clone(), scope, top_id);
-            if n.is_err() {
-                return error!("", vec![n]);
-            }
+        Expr { kind: ExprKind::TypeCast { expr, typ }, id: _, pos } => {
+            let n = compile(ctx, (**expr).clone(), scope, top_id)?;
             let typ = match typ.resolve_typerefs(scope, &ctx.env) {
-                Err(e) => return error!("{e}", vec![n]),
+                Err(e) => bail!("in cast at {pos} {e}"),
                 Ok(typ) => typ,
             };
             if let Err(e) = typ.check_cast() {
-                return error!("{e}", vec![n]);
+                bail!("in cast at {pos} {e}");
             }
             let rtyp = typ.union(&Type::Primitive(Typ::Error.into()));
             let kind = NodeKind::TypeCast { target: typ, n: Box::new(n) };
-            Node { spec: Box::new(spec), typ: rtyp, kind }
+            Ok(Node { spec: Box::new(spec), typ: rtyp, kind })
         }
-        Expr { kind: ExprKind::TypeDef { name, typ }, id: _ } => {
-            match typ.resolve_typerefs(scope, &ctx.env) {
-                Err(e) => error!("{e}"),
-                Ok(typ) => match ctx.env.deftype(scope, name, typ) {
-                    Err(e) => error!("{e}"),
-                    Ok(()) => {
-                        let name = name.clone();
-                        let spec = Box::new(spec);
-                        let typ = Type::Bottom(PhantomData);
-                        Node {
-                            spec,
-                            typ,
-                            kind: NodeKind::TypeDef { scope: scope.clone(), name },
-                        }
-                    }
-                },
-            }
+        Expr { kind: ExprKind::TypeDef { name, typ }, id: _, pos } => {
+            let typ = typ
+                .resolve_typerefs(scope, &ctx.env)
+                .with_context(|| format!("in typedef at {pos}"))?;
+            ctx.env
+                .deftype(scope, name, typ)
+                .with_context(|| format!("in typedef at {pos}"))?;
+            let name = name.clone();
+            let spec = Box::new(spec);
+            let typ = Type::Bottom(PhantomData);
+            Ok(Node { spec, typ, kind: NodeKind::TypeDef { scope: scope.clone(), name } })
         }
-        Expr { kind: ExprKind::Not { expr }, id: _ } => {
-            let node = compile(ctx, (**expr).clone(), scope, top_id);
-            if node.is_err() {
-                return error!("", vec![node]);
-            }
+        Expr { kind: ExprKind::Not { expr }, id: _, pos: _ } => {
+            let node = compile(ctx, (**expr).clone(), scope, top_id)?;
             let node = Box::new(node);
             let spec = Box::new(spec);
             let typ = Type::Primitive(Typ::Bool.into());
-            Node { spec, typ, kind: NodeKind::Not { node } }
+            Ok(Node { spec, typ, kind: NodeKind::Not { node } })
         }
-        Expr { kind: ExprKind::Eq { lhs, rhs }, id: _ } => binary_op!(Eq, lhs, rhs),
-        Expr { kind: ExprKind::Ne { lhs, rhs }, id: _ } => binary_op!(Ne, lhs, rhs),
-        Expr { kind: ExprKind::Lt { lhs, rhs }, id: _ } => binary_op!(Lt, lhs, rhs),
-        Expr { kind: ExprKind::Gt { lhs, rhs }, id: _ } => binary_op!(Gt, lhs, rhs),
-        Expr { kind: ExprKind::Lte { lhs, rhs }, id: _ } => binary_op!(Lte, lhs, rhs),
-        Expr { kind: ExprKind::Gte { lhs, rhs }, id: _ } => binary_op!(Gte, lhs, rhs),
-        Expr { kind: ExprKind::And { lhs, rhs }, id: _ } => binary_op!(And, lhs, rhs),
-        Expr { kind: ExprKind::Or { lhs, rhs }, id: _ } => binary_op!(Or, lhs, rhs),
-        Expr { kind: ExprKind::Add { lhs, rhs }, id: _ } => binary_op!(Add, lhs, rhs),
-        Expr { kind: ExprKind::Sub { lhs, rhs }, id: _ } => binary_op!(Sub, lhs, rhs),
-        Expr { kind: ExprKind::Mul { lhs, rhs }, id: _ } => binary_op!(Mul, lhs, rhs),
-        Expr { kind: ExprKind::Div { lhs, rhs }, id: _ } => binary_op!(Div, lhs, rhs),
+        Expr { kind: ExprKind::Eq { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(Eq, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Ne { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(Ne, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Lt { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(Lt, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Gt { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(Gt, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Lte { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(Lte, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Gte { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(Gte, lhs, rhs)
+        }
+        Expr { kind: ExprKind::And { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(And, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Or { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(Or, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Add { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(Add, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Sub { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(Sub, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Mul { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(Mul, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Div { lhs, rhs }, id: _, pos: _ } => {
+            binary_op!(Div, lhs, rhs)
+        }
     }
 }

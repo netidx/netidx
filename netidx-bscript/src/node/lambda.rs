@@ -190,7 +190,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
     constraints: Arc<[(TVar<Refs>, Type<Refs>)]>,
     scope: &ModPath,
     body: Either<Arc<Expr>, ArcStr>,
-) -> Node<C, E> {
+) -> Result<Node<C, E>> {
     macro_rules! error {
         ($msg:expr, $($arg:expr),*) => {{
             let e = ArcStr::from(format_compact!($msg, $($arg),*).as_str());

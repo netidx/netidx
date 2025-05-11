@@ -1201,14 +1201,6 @@ pub struct Expr {
     pub kind: ExprKind,
 }
 
-// hallowed are the ori
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
-pub struct Origin {
-    pub name: Option<ArcStr>,
-    pub source: ArcStr,
-    pub exprs: Arc<[Expr]>,
-}
-
 impl PartialOrd for Expr {
     fn partial_cmp(&self, rhs: &Expr) -> Option<Ordering> {
         self.kind.partial_cmp(&rhs.kind)
@@ -1243,6 +1235,23 @@ impl FromStr for Expr {
 
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
         parser::parse_one_modexpr(s)
+    }
+}
+
+// hallowed are the ori
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub struct Origin {
+    pub name: Option<ArcStr>,
+    pub source: ArcStr,
+    pub exprs: Arc<[Expr]>,
+}
+
+impl fmt::Display for Origin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.name {
+            None => write!(f, "in anonymous"),
+            Some(n) => write!(f, "in file {n}"),
+        }
     }
 }
 

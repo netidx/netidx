@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
-use compact_str::{format_compact, CompactString};
+use compact_str::format_compact;
 use fxhash::FxHashMap;
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
@@ -665,10 +665,6 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
         lhs: Box<Cached<C, E>>,
         rhs: Box<Cached<C, E>>,
     },
-    Error {
-        error: Option<ArcStr>,
-        children: Box<[Node<C, E>]>,
-    },
 }
 
 pub struct Node<C: Ctx, E: UserEvent> {
@@ -696,55 +692,19 @@ impl<C: Ctx, E: UserEvent> fmt::Display for Node<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Node<C, E> {
-    pub fn is_err(&self) -> bool {
-        match &self.kind {
-            NodeKind::Error { .. } => true,
-            _ => false,
-        }
-    }
-
-    /// extracts the full set of errors
-    pub fn extract_err(&self) -> Option<ArcStr> {
-        match &self.kind {
-            NodeKind::Error { error, children, .. } => {
-                let mut s = CompactString::new("");
-                if let Some(e) = error {
-                    s.push_str(e);
-                    s.push_str(", ");
-                }
-                for node in children {
-                    if let Some(e) = node.extract_err() {
-                        s.push_str(e.as_str());
-                        s.push_str(", ");
-                    }
-                }
-                if s.len() > 0 {
-                    Some(ArcStr::from(s.as_str()))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    pub fn compile(ctx: &mut ExecCtx<C, E>, scope: &ModPath, spec: Expr) -> Self {
+    pub fn compile(ctx: &mut ExecCtx<C, E>, scope: &ModPath, spec: Expr) -> Result<Self> {
         let top_id = spec.id;
         let env = ctx.env.clone();
-        let mut node = compiler::compile(ctx, spec, scope, top_id);
-        let node = match node.typecheck(ctx) {
-            Ok(()) => node,
-            Err(e) => Node {
-                spec: node.spec.clone(),
-                typ: Type::Bottom(PhantomData),
-                kind: NodeKind::Error {
-                    error: Some(format_compact!("{e}").as_str().into()),
-                    children: Box::from_iter([node]),
-                },
-            },
+        let mut node = match compiler::compile(ctx, spec, scope, top_id) {
+            Ok(n) => n,
+            Err(e) => {
+                ctx.env = env;
+                return Err(e);
+            }
         };
-        if node.is_err() {
+        if let Err(e) = node.typecheck(ctx) {
             ctx.env = env;
+            return Err(e);
         }
         node
     }
@@ -786,8 +746,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             NodeKind::TypeDef { scope, name } => ctx.env.undeftype(&scope, &name),
             NodeKind::Module(nodes)
             | NodeKind::Do(nodes)
-            | NodeKind::Any { args: nodes }
-            | NodeKind::Error { error: _, children: nodes } => {
+            | NodeKind::Any { args: nodes } => {
                 for n in nodes {
                     n.delete(ctx)
                 }
@@ -867,8 +826,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             }
             NodeKind::Module(nodes)
             | NodeKind::Do(nodes)
-            | NodeKind::Any { args: nodes }
-            | NodeKind::Error { error: _, children: nodes } => {
+            | NodeKind::Any { args: nodes } => {
                 for n in nodes {
                     n.refs(f)
                 }
@@ -973,7 +931,6 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             }};
         }
         match &mut self.kind {
-            NodeKind::Error { .. } => self.extract_err().map(|e| Value::Error(e)),
             NodeKind::Constant(v) => {
                 if event.init {
                     Some(v.clone())
@@ -1182,7 +1139,10 @@ pub mod genn {
     /// return a no op node
     pub fn nop<C: Ctx, E: UserEvent>() -> Node<C, E> {
         Node {
-            spec: Box::new(ExprKind::Constant(Value::String(literal!("nop"))).to_expr()),
+            spec: Box::new(
+                ExprKind::Constant(Value::String(literal!("nop")))
+                    .to_expr(Default::default()),
+            ),
             typ: Type::Bottom(PhantomData),
             kind: NodeKind::Nop,
         }
@@ -1198,8 +1158,10 @@ pub mod genn {
     ) -> (BindId, Node<C, E>) {
         let id = ctx.env.bind_variable(scope, name, typ.clone()).id;
         ctx.user.ref_var(id, top_id);
-        let spec =
-            Box::new(ExprKind::Ref { name: ModPath(scope.0.append(name)) }.to_expr());
+        let spec = Box::new(
+            ExprKind::Ref { name: ModPath(scope.0.append(name)) }
+                .to_expr(Default::default()),
+        );
         let kind = NodeKind::Ref { id, top_id };
         (id, Node { spec, kind, typ })
     }
@@ -1212,7 +1174,9 @@ pub mod genn {
         top_id: ExprId,
     ) -> Node<C, E> {
         ctx.user.ref_var(id, top_id);
-        let spec = Box::new(ExprKind::Ref { name: ModPath::from(["x"]) }.to_expr());
+        let spec = Box::new(
+            ExprKind::Ref { name: ModPath::from(["x"]) }.to_expr(Default::default()),
+        );
         let kind = NodeKind::Ref { id, top_id };
         Node { spec, kind, typ }
     }
@@ -1240,7 +1204,7 @@ pub mod genn {
             args: TArc::from_iter(args.iter().map(|n| (None, (*n.spec).clone()))),
             function: TArc::new((*fnode.spec).clone()),
         }
-        .to_expr();
+        .to_expr(Default::default());
         let site = Box::new(CallSite {
             ftype: typ.clone(),
             args,
