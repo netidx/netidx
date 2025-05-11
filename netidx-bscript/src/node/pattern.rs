@@ -497,7 +497,9 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         let guard = spec
             .guard
             .as_ref()
-            .map(|g| Cached::new(compiler::compile(ctx, g.clone(), &scope, top_id)));
+            .map(|g| compiler::compile(ctx, g.clone(), &scope, top_id))
+            .transpose()?
+            .map(Cached::new);
         Ok(PatternNode { type_predicate, structure_predicate, guard })
     }
 
@@ -511,10 +513,6 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         self.structure_predicate.unbind(&mut |id| {
             event.variables.remove(&id);
         })
-    }
-
-    pub(super) fn extract_err(&self) -> Option<ArcStr> {
-        self.guard.as_ref().and_then(|n| n.node.extract_err())
     }
 
     pub(super) fn update(

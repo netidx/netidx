@@ -1249,8 +1249,14 @@ pub struct Origin {
 impl fmt::Display for Origin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.name {
-            None => write!(f, "in anonymous"),
-            Some(n) => write!(f, "in file {n}"),
+            None => write!(f, "in expr {}", self.source),
+            Some(n) => {
+                if n.ends_with(".bs") {
+                    write!(f, "in file {n}")
+                } else {
+                    write!(f, "in module {n}")
+                }
+            }
         }
     }
 }

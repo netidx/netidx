@@ -11,7 +11,7 @@
 /// [UserEvent] traits.
 use crate::{
     env::Env,
-    expr::{self, Expr, ExprId, ExprKind, ModPath, ModuleResolver},
+    expr::{self, ExprId, ExprKind, ModPath, ModuleKind, ModuleResolver, Origin},
     node::{Node, NodeKind},
     typ::{NoRefs, Type},
     BindId, BuiltIn, Ctx, Event, ExecCtx, NoUserEvent,
@@ -22,7 +22,7 @@ use chrono::prelude::*;
 use compact_str::format_compact;
 use core::fmt;
 use derive_builder::Builder;
-use futures::{channel::mpsc, FutureExt, SinkExt, StreamExt};
+use futures::{channel::mpsc, future::join_all, FutureExt, SinkExt, StreamExt};
 use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
 use log::error;
@@ -460,7 +460,7 @@ enum ToRt {
     GetEnv { res: oneshot::Sender<Env<BSCtx, NoUserEvent>> },
     Delete { id: ExprId, res: oneshot::Sender<Result<Env<BSCtx, NoUserEvent>>> },
     Load { path: PathBuf, res: oneshot::Sender<Result<CompRes>> },
-    Compile { text: String, res: oneshot::Sender<Result<CompRes>> },
+    Compile { text: ArcStr, res: oneshot::Sender<Result<CompRes>> },
     Subscribe { ch: mpsc::Sender<RtEvent> },
 }
 
@@ -631,43 +631,52 @@ impl BS {
             || self.ctx.user.rpc_overflow.len() > 0
     }
 
-    async fn compile(&mut self, text: &str) -> Result<CompRes> {
+    async fn compile(&mut self, text: ArcStr) -> Result<CompRes> {
         let scope = ModPath::root();
-        let spec = match text.parse::<Expr>() {
-            Ok(spec) => spec,
-            Err(_) => expr::parser::parse_expr(&text)?,
+        let ori = match expr::parser::parse(None, text.clone()) {
+            Ok(ori) => ori,
+            Err(_) => expr::parser::parse_expr(None, text)?,
         };
-        let spec = spec
-            .resolve_modules(&scope, &self.resolvers)
-            .await
-            .context(CouldNotResolve)?;
-        let top_id = spec.id;
-        let n = Node::compile(&mut self.ctx, &scope, spec);
-        match n.extract_err() {
-            Some(e) => bail!("compile error: {e}"),
-            None => {
+        let exprs = join_all(
+            ori.exprs.iter().map(|e| e.resolve_modules(&scope, &self.resolvers)),
+        )
+        .await
+        .into_iter()
+        .collect::<Result<SmallVec<[_; 4]>>>()
+        .context(CouldNotResolve)?;
+        let ori = Origin { exprs: Arc::from_iter(exprs), ..ori };
+        let nodes = ori
+            .exprs
+            .iter()
+            .map(|e| Node::compile(&mut self.ctx, &scope, e.clone()))
+            .collect::<Result<SmallVec<[_; 4]>>>()
+            .with_context(|| ori.clone())?;
+        let exprs = ori
+            .exprs
+            .iter()
+            .zip(nodes.into_iter())
+            .map(|(e, n)| {
                 let output = is_output(&n);
                 let typ = n.typ.clone();
-                self.updated.insert(top_id, true);
-                self.nodes.insert(top_id, n);
-                Ok(CompRes {
-                    exprs: smallvec![CompExp { id: top_id, output, typ }],
-                    env: self.ctx.env.clone(),
-                })
-            }
-        }
+                self.updated.insert(e.id, true);
+                self.nodes.insert(e.id, n);
+                CompExp { id: e.id, output, typ }
+            })
+            .collect::<SmallVec<[_; 1]>>();
+        Ok(CompRes { exprs, env: self.ctx.env.clone() })
     }
 
     async fn load(&mut self, file: &PathBuf) -> Result<CompRes> {
         let scope = ModPath::root();
-        let (scope, exprs) = match file.extension() {
+        let (scope, ori) = match file.extension() {
             Some(e) if e.as_bytes() == b"bs" => {
                 let scope = match file.file_name() {
                     None => scope,
                     Some(name) => ModPath(scope.append(&*name.to_string_lossy())),
                 };
-                let s = fs::read_to_string(file).await?;
-                (scope, expr::parser::parse_many_modexpr(&s)?)
+                let s = ArcStr::from(fs::read_to_string(file).await?);
+                let name = ArcStr::from(file.to_string_lossy());
+                (scope, expr::parser::parse(Some(name), s)?)
             }
             Some(e) => bail!("invalid file extension {e:?}"),
             None => {
@@ -693,20 +702,31 @@ impl BS {
                 let name = Path::basename(&*name)
                     .ok_or_else(|| anyhow!("invalid module name {file:?}"))?;
                 let name = ArcStr::from(name);
-                let e = ExprKind::Module { export: true, name, value: None }.to_expr();
-                (scope, vec![e])
+                let e = ExprKind::Module {
+                    export: true,
+                    name: name.clone(),
+                    value: ModuleKind::Unresolved,
+                }
+                .to_expr(Default::default());
+                let ori = Origin {
+                    name: Some(name),
+                    source: literal!(""),
+                    exprs: Arc::from_iter([e]),
+                };
+                (scope, ori)
             }
         };
         let mut es: SmallVec<[CompExp; 1]> = smallvec![];
-        for expr in exprs {
-            let expr = expr.resolve_modules(&scope, &self.resolvers).await?;
+        for expr in &*ori.exprs {
+            let expr = expr
+                .resolve_modules(&scope, &self.resolvers)
+                .await
+                .with_context(|| ori.clone())?;
             let top_id = expr.id;
-            let n = Node::compile(&mut self.ctx, &scope, expr);
+            let n = Node::compile(&mut self.ctx, &scope, expr)
+                .with_context(|| ori.clone())?;
             let has_out = is_output(&n);
             let typ = n.typ.clone();
-            if let Some(e) = n.extract_err() {
-                bail!("{e:?}")
-            }
             self.nodes.insert(top_id, n);
             self.updated.insert(top_id, true);
             es.push(CompExp { id: top_id, output: has_out, typ })
@@ -799,7 +819,7 @@ impl BS {
                     let _ = res.send(self.ctx.env.clone());
                 }
                 Some(ToRt::Compile { text, res }) => {
-                    let _ = res.send(self.compile(&text).await);
+                    let _ = res.send(self.compile(text).await);
                 }
                 Some(ToRt::Load { path, res }) => {
                     let _ = res.send(self.load(&path).await);
@@ -846,7 +866,7 @@ impl BSHandle {
     /// either be a module expression or a single expression. If it
     /// generates results, they will be sent to all the channels that
     /// are subscribed.
-    pub async fn compile(&self, text: String) -> Result<CompRes> {
+    pub async fn compile(&self, text: ArcStr) -> Result<CompRes> {
         Ok(self.exec(|tx| ToRt::Compile { text, res: tx }).await??)
     }
 

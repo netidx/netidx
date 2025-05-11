@@ -302,19 +302,14 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         };
         let core = stdfn::core::register(&mut t);
         let root = ModPath(Path::root());
-        let node = Node::compile(&mut t, &root, core);
-        if let Some(e) = node.extract_err() {
-            panic!("error compiling core {e}")
-        }
+        let node = Node::compile(&mut t, &root, core).expect("error compiling core");
         t.std.push(node);
         let node = Node::compile(
             &mut t,
             &root,
             ExprKind::Use { name: ModPath::from(["core"]) }.to_expr(Default::default()),
-        );
-        if let Some(e) = node.extract_err() {
-            panic!("error using core {e}")
-        }
+        )
+        .expect("error compiling use core");
         t.std.push(node);
         t
     }
@@ -324,28 +319,20 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         let mut t = Self::new_no_std(user);
         let root = ModPath(Path::root());
         let net = stdfn::net::register(&mut t);
-        let node = Node::compile(&mut t, &root, net);
-        if let Some(e) = node.extract_err() {
-            panic!("failed to compile the net module {e}")
-        }
+        let node =
+            Node::compile(&mut t, &root, net).expect("failed to compile the net module");
         t.std.push(node);
         let str = stdfn::str::register(&mut t);
-        let node = Node::compile(&mut t, &root, str);
-        if let Some(e) = node.extract_err() {
-            panic!("failed to compile the str module {e}")
-        }
+        let node =
+            Node::compile(&mut t, &root, str).expect("failed to compile the str module");
         t.std.push(node);
         let re = stdfn::re::register(&mut t);
-        let node = Node::compile(&mut t, &root, re);
-        if let Some(e) = node.extract_err() {
-            panic!("failed to compile the re module {e}")
-        }
+        let node =
+            Node::compile(&mut t, &root, re).expect("failed to compile the re module");
         t.std.push(node);
         let time = stdfn::time::register(&mut t);
-        let node = Node::compile(&mut t, &root, time);
-        if let Some(e) = node.extract_err() {
-            panic!("failed to compile the time module {e}")
-        }
+        let node = Node::compile(&mut t, &root, time)
+            .expect("failed to compile the time module");
         t.std.push(node);
         t
     }

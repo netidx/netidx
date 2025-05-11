@@ -56,13 +56,9 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
     args: &Arc<[(Option<ArcStr>, Expr)]>,
 ) -> Result<(Vec<Node<C, E>>, FxHashMap<ArcStr, bool>)> {
     macro_rules! compile {
-        ($e:expr) => {{
-            let n = compile(ctx, $e, scope, top_id);
-            if let Some(e) = n.extract_err() {
-                bail!(e)
-            }
-            n
-        }};
+        ($e:expr) => {
+            compile(ctx, $e, scope, top_id)?
+        };
     }
     let mut named = FxHashMap::default();
     let mut nodes: Vec<Node<C, E>> = vec![];
@@ -79,16 +75,11 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
                 }
                 None if !optional => bail!("missing required argument {n}"),
                 None => {
-                    let node = Node {
-                        spec: Box::new(
-                            ExprKind::Constant(Value::String(literal!("nop"))).to_expr(),
-                        ),
-                        kind: NodeKind::Error {
-                            error: None,
-                            children: Box::from_iter([]),
-                        },
-                        typ: a.typ.clone(),
-                    };
+                    let spec = Box::new(
+                        ExprKind::Constant(Value::String(literal!("nop")))
+                            .to_expr(Default::default()),
+                    );
+                    let node = Node { spec, kind: NodeKind::Nop, typ: a.typ.clone() };
                     nodes.push(node);
                     arg_spec.insert(n.clone(), true);
                 }
@@ -229,7 +220,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 }
                 ModuleKind::Resolved(ori) => {
                     let exprs = subexprs!(scope, ori.exprs, |n| n)
-                        .with_context(|| format!("{ori}"))?;
+                        .with_context(|| ori.clone())?;
                     let kind = NodeKind::Module(Box::from(exprs));
                     ctx.env.modules.insert_cow(scope.clone());
                     let typ = Type::Bottom(PhantomData);
@@ -289,7 +280,8 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 Type::Fn(ftype) => ftype.clone(),
                 typ => bail!("at {pos} {f} has {typ}, expected a function"),
             };
-            let (args, arg_spec) = compile_apply_args(ctx, scope, top_id, &ftype, &args)?;
+            let (args, arg_spec) = compile_apply_args(ctx, scope, top_id, &ftype, &args)
+                .with_context(|| format!("in apply at {pos}"))?;
             let site = Box::new(CallSite {
                 ftype: ftype.clone(),
                 args,

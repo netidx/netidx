@@ -119,10 +119,7 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
                         let n =
                             compiler::compile(ctx, expr.clone(), &$f.scope, self.top_id);
                         ctx.env = ctx.env.merge_lexical(&orig_env);
-                        if let Some(e) = n.extract_err() {
-                            bail!("default arg compile error {e}")
-                        }
-                        n
+                        n?
                     }
                 }
             }};
@@ -706,7 +703,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             ctx.env = env;
             return Err(e);
         }
-        node
+        Ok(node)
     }
 
     pub fn delete(self, ctx: &mut ExecCtx<C, E>) {
@@ -1179,18 +1176,6 @@ pub mod genn {
         );
         let kind = NodeKind::Ref { id, top_id };
         Node { spec, kind, typ }
-    }
-
-    /// generate and return an error node
-    pub fn error<C: Ctx, E: UserEvent>(spec: Box<Expr>, msg: &str) -> Node<C, E> {
-        Node {
-            spec,
-            kind: NodeKind::Error {
-                error: Some(msg.into()),
-                children: Box::from_iter([]),
-            },
-            typ: Type::Bottom(PhantomData),
-        }
     }
 
     /// generate and return an apply node for the given lambda

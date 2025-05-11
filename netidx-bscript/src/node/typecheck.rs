@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use crate::{
     expr::{ExprId, ExprKind},
     node::{genn, Node, NodeKind},
@@ -11,6 +9,7 @@ use arcstr::ArcStr;
 use enumflags2::BitFlags;
 use netidx::publisher::Typ;
 use smallvec::SmallVec;
+use std::marker::PhantomData;
 use triomphe::Arc;
 
 impl<C: Ctx, E: UserEvent> Node<C, E> {
@@ -321,7 +320,6 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::Use { .. }
             | NodeKind::TypeDef { .. }
             | NodeKind::Ref { .. }
-            | NodeKind::Error { .. }
             | NodeKind::Nop => Ok(()),
         }
     }

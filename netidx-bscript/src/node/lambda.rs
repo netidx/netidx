@@ -13,9 +13,7 @@ use fxhash::FxHashMap;
 use netidx::{subscriber::Value, utils::Either};
 use parking_lot::RwLock;
 use smallvec::{smallvec, SmallVec};
-use std::{
-    cell::RefCell, collections::HashMap, marker::PhantomData, mem, sync::Arc as SArc,
-};
+use std::{cell::RefCell, collections::HashMap, mem, sync::Arc as SArc};
 use triomphe::Arc;
 
 pub(super) struct LambdaCallSite<C: Ctx, E: UserEvent> {
@@ -104,11 +102,8 @@ impl<C: Ctx, E: UserEvent> LambdaCallSite<C, E> {
             }
             argpats.push(pattern);
         }
-        let body = compiler::compile(ctx, body, &scope, tid);
-        match body.extract_err() {
-            None => Ok(Self { args: Box::from(argpats), typ, body }),
-            Some(e) => bail!("{e}"),
-        }
+        let body = compiler::compile(ctx, body, &scope, tid)?;
+        Ok(Self { args: Box::from(argpats), typ, body })
     }
 }
 
@@ -191,18 +186,6 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
     scope: &ModPath,
     body: Either<Arc<Expr>, ArcStr>,
 ) -> Result<Node<C, E>> {
-    macro_rules! error {
-        ($msg:expr, $($arg:expr),*) => {{
-            let e = ArcStr::from(format_compact!($msg, $($arg),*).as_str());
-            let kind =
-                NodeKind::Error { error: Some(e), children: Box::from_iter([]) };
-            return Node {
-                spec: Box::new(spec),
-                typ: Type::Bottom(PhantomData),
-                kind,
-            };
-        }};
-    }
     {
         let mut s: SmallVec<[&ArcStr; 16]> = smallvec![];
         for a in argspec.iter() {
@@ -212,7 +195,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         s.sort();
         s.dedup();
         if len != s.len() {
-            error!("arguments must have unique names",);
+            bail!("arguments must have unique names");
         }
     }
     let id = LambdaId::new();
@@ -223,18 +206,10 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
     let vargs = match vargs {
         None => None,
         Some(None) => Some(None),
-        Some(Some(typ)) => match typ.resolve_typerefs(&scope, &ctx.env) {
-            Ok(typ) => Some(Some(typ)),
-            Err(e) => error!("{e}",),
-        },
+        Some(Some(typ)) => Some(Some(typ.resolve_typerefs(&scope, &ctx.env)?)),
     };
-    let rtype = match rtype {
-        None => None,
-        Some(typ) => match typ.resolve_typerefs(&scope, &ctx.env) {
-            Ok(typ) => Some(typ),
-            Err(e) => error!("{e}",),
-        },
-    };
+    let rtype =
+        rtype.as_ref().map(|t| t.resolve_typerefs(&scope, &ctx.env)).transpose()?;
     let argspec = argspec
         .iter()
         .map(|a| match &a.constraint {
@@ -252,11 +227,8 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 })
             }
         })
-        .collect::<Result<SmallVec<[_; 16]>>>();
-    let argspec: Arc<[Arg<NoRefs>]> = match argspec {
-        Ok(a) => Arc::from_iter(a),
-        Err(e) => error!("{e}",),
-    };
+        .collect::<Result<SmallVec<[_; 16]>>>()?;
+    let argspec = Arc::from_iter(argspec);
     let constraints = constraints
         .iter()
         .map(|(tv, tc)| {
@@ -264,11 +236,8 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             let tc = tc.resolve_typerefs(&scope, &env)?;
             Ok((tv, tc))
         })
-        .collect::<Result<SmallVec<[_; 4]>>>();
-    let constraints = match constraints {
-        Ok(c) => Arc::new(RwLock::new(c.into_iter().collect())),
-        Err(e) => error!("{e}",),
-    };
+        .collect::<Result<SmallVec<[_; 4]>>>()?;
+    let constraints = Arc::new(RwLock::new(constraints.into_iter().collect()));
     let typ = match &body {
         Either::Left(_) => {
             let args = Arc::from_iter(argspec.iter().map(|a| FnArgType {
@@ -289,11 +258,10 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             Arc::new(FnType { constraints, args, vargs, rtype })
         }
         Either::Right(builtin) => match ctx.builtins.get(builtin.as_str()) {
-            Some((styp, _)) => match styp.clone().resolve_typerefs(&_scope, &ctx.env) {
-                Ok(ft) => Arc::new(ft),
-                Err(e) => error!("{e:?}",),
-            },
-            None => error!("unknown builtin function {builtin}",),
+            None => bail!("unknown builtin function {builtin}"),
+            Some((styp, _)) => {
+                Arc::new(styp.clone().resolve_typerefs(&_scope, &ctx.env)?)
+            }
         },
     };
     thread_local! {
@@ -343,5 +311,5 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
     });
     let l = SArc::new(LambdaDef { id, typ: typ.clone(), env, argspec, init, scope });
     ctx.env.lambdas.insert_cow(id, SArc::downgrade(&l));
-    Node { spec: Box::new(spec), typ: Type::Fn(typ), kind: NodeKind::Lambda(l) }
+    Ok(Node { spec: Box::new(spec), typ: Type::Fn(typ), kind: NodeKind::Lambda(l) })
 }
