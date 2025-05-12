@@ -1,4 +1,5 @@
 use anyhow::{Context, Error, Result};
+use arcstr::ArcStr;
 use completion::BComplete;
 use flexi_logger::{FileSpec, Logger};
 use futures::{channel::mpsc, StreamExt};
@@ -207,7 +208,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                     }
                     Ok(Signal::CtrlD) => break Ok(()),
                     Ok(Signal::Success(line)) => {
-                        match bs.compile(line).await {
+                        match bs.compile(ArcStr::from(line)).await {
                             Err(e) => eprintln!("error: {e:?}"),
                             Ok(mut res) => {
                                 newenv = Some(res.env);
