@@ -302,7 +302,7 @@ where
                         | (Some(Expr { kind: ExprKind::ArraySlice { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::Apply { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
-                            panic!("unreachable interp")
+                            unreachable!()
                         }
                     }
                 })
@@ -665,7 +665,7 @@ where
                 }
                 let args = Arc::from_iter(args.into_iter().map(|t| match t {
                     Either::Left(t) => t,
-                    Either::Right(_) => panic!("unreachable fntype"),
+                    Either::Right(_) => unreachable!(),
                 }));
                 let mut anon = false;
                 for a in args.iter() {
@@ -1018,7 +1018,7 @@ where
                     let pos = lhs.pos;
                     ExprKind::Or { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
-                s => panic!("unreachable arithop {s}"),
+                _ => unreachable!(),
             }),
         )),
         attempt((position(), sptoken('!').with(arith_term())))
