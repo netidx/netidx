@@ -1,12 +1,15 @@
 use super::*;
-use crate::typ::{self, FnArgType, FnType, Refs, Type};
+use crate::{
+    expr::parser::parse_one_modexpr,
+    typ::{self, FnArgType, FnType, Refs, Type},
+};
 use bytes::Bytes;
 use chrono::prelude::*;
 use enumflags2::BitFlags;
 use netidx::protocol::value::Typ;
 use netidx_netproto::pbuf::PBytes;
 use parking_lot::RwLock;
-use parser::{parse, RESERVED};
+use parser::RESERVED;
 use prop::option;
 use proptest::{collection, prelude::*};
 use smallvec::SmallVec;
@@ -164,11 +167,11 @@ fn modpath() -> impl Strategy<Value = ModPath> {
 }
 
 fn constant() -> impl Strategy<Value = Expr> {
-    value().prop_map(|v| ExprKind::Constant(v).to_expr())
+    value().prop_map(|v| ExprKind::Constant(v).to_expr_nopos())
 }
 
 fn reference() -> impl Strategy<Value = Expr> {
-    modpath().prop_map(|name| ExprKind::Ref { name }.to_expr())
+    modpath().prop_map(|name| ExprKind::Ref { name }.to_expr_nopos())
 }
 
 fn typ() -> impl Strategy<Value = Typ> {
@@ -327,21 +330,22 @@ fn build_pattern(arg: Expr, arms: Vec<(Option<Expr>, Pattern, Expr)>) -> Expr {
         pat.guard = guard;
         (pat, expr)
     });
-    ExprKind::Select { arg: Arc::new(arg), arms: Arc::from_iter(arms) }.to_expr()
+    ExprKind::Select { arg: Arc::new(arg), arms: Arc::from_iter(arms) }.to_expr_nopos()
 }
 
 fn usestmt() -> impl Strategy<Value = Expr> {
-    modpath().prop_map(|name| ExprKind::Use { name }.to_expr())
+    modpath().prop_map(|name| ExprKind::Use { name }.to_expr_nopos())
 }
 
 fn typedef() -> impl Strategy<Value = Expr> {
-    (typart(), typexp()).prop_map(|(name, typ)| ExprKind::TypeDef { name, typ }.to_expr())
+    (typart(), typexp())
+        .prop_map(|(name, typ)| ExprKind::TypeDef { name, typ }.to_expr_nopos())
 }
 
 macro_rules! structref {
     ($inner:expr) => {
         ($inner, random_fname()).prop_map(|(source, field)| {
-            ExprKind::StructRef { source: Arc::new(source), field }.to_expr()
+            ExprKind::StructRef { source: Arc::new(source), field }.to_expr_nopos()
         })
     };
 }
@@ -349,7 +353,7 @@ macro_rules! structref {
 macro_rules! tupleref {
     ($inner:expr) => {
         ($inner, any::<usize>()).prop_map(|(source, field)| {
-            ExprKind::TupleRef { source: Arc::new(source), field }.to_expr()
+            ExprKind::TupleRef { source: Arc::new(source), field }.to_expr_nopos()
         })
     };
 }
@@ -359,7 +363,7 @@ macro_rules! bind {
         ($inner, structure_pattern(), any::<bool>(), option::of(typexp())).prop_map(
             |(e, p, exp, typ)| {
                 ExprKind::Bind { export: exp, pattern: p, value: Arc::new(e), typ }
-                    .to_expr()
+                    .to_expr_nopos()
             },
         )
     };
@@ -376,7 +380,7 @@ macro_rules! qop {
             | ExprKind::Apply { .. }
             | ExprKind::ArrayRef { .. }
             | ExprKind::TupleRef { .. }
-            | ExprKind::StructRef { .. } => ExprKind::Qop(Arc::new(e)).to_expr(),
+            | ExprKind::StructRef { .. } => ExprKind::Qop(Arc::new(e)).to_expr_nopos(),
             _ => e,
         })
     };
@@ -391,7 +395,7 @@ macro_rules! arrayslice {
                     start: start.map(Arc::new),
                     end: end.map(Arc::new),
                 }
-                .to_expr()
+                .to_expr_nopos()
             },
         )
     };
@@ -402,7 +406,8 @@ macro_rules! apply {
         ($inner, collection::vec((option::of(random_fname()), $inner), (0, 10))).prop_map(
             |(f, mut args)| {
                 args.sort_unstable_by(|(n0, _), (n1, _)| n1.cmp(n0));
-                ExprKind::Apply { function: Arc::new(f), args: Arc::from(args) }.to_expr()
+                ExprKind::Apply { function: Arc::new(f), args: Arc::from(args) }
+                    .to_expr_nopos()
             },
         )
     };
@@ -411,14 +416,14 @@ macro_rules! apply {
 macro_rules! any {
     ($inner:expr) => {
         collection::vec($inner, (0, 10))
-            .prop_map(|args| ExprKind::Any { args: Arc::from(args) }.to_expr())
+            .prop_map(|args| ExprKind::Any { args: Arc::from(args) }.to_expr_nopos())
     };
 }
 
 macro_rules! do_block {
     ($inner:expr) => {
         collection::vec(prop_oneof![typedef(), usestmt(), $inner], (1, 10))
-            .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr())
+            .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr_nopos())
     };
 }
 
@@ -463,7 +468,7 @@ macro_rules! lambda {
                         Some(name) => Either::Right(name),
                     },
                 }
-                .to_expr()
+                .to_expr_nopos()
             })
     };
 }
@@ -480,7 +485,7 @@ macro_rules! structure {
         collection::vec((random_fname(), $inner), (1, 10)).prop_map(|mut a| {
             a.sort_by_key(|(n, _)| n.clone());
             a.dedup_by_key(|(n, _)| n.clone());
-            ExprKind::Struct { args: Arc::from_iter(a) }.to_expr()
+            ExprKind::Struct { args: Arc::from_iter(a) }.to_expr_nopos()
         })
     };
 }
@@ -488,7 +493,7 @@ macro_rules! structure {
 macro_rules! variant {
     ($inner:expr) => {
         (typart(), collection::vec($inner, (0, 10))).prop_map(|(tag, a)| {
-            ExprKind::Variant { tag, args: Arc::from_iter(a) }.to_expr()
+            ExprKind::Variant { tag, args: Arc::from_iter(a) }.to_expr_nopos()
         })
     };
 }
@@ -496,7 +501,7 @@ macro_rules! variant {
 macro_rules! connect {
     ($inner:expr) => {
         ($inner, modpath()).prop_map(|(e, n)| {
-            ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr()
+            ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr_nopos()
         })
     };
 }
@@ -504,7 +509,8 @@ macro_rules! connect {
 macro_rules! arrayref {
     ($inner:expr) => {
         ($inner, $inner).prop_map(|(source, i)| {
-            ExprKind::ArrayRef { source: Arc::new(source), i: Arc::new(i) }.to_expr()
+            ExprKind::ArrayRef { source: Arc::new(source), i: Arc::new(i) }
+                .to_expr_nopos()
         })
     };
 }
@@ -512,7 +518,7 @@ macro_rules! arrayref {
 macro_rules! typecast {
     ($inner:expr) => {
         ($inner, typexp()).prop_map(|(expr, typ)| {
-            ExprKind::TypeCast { expr: Arc::new(expr), typ }.to_expr()
+            ExprKind::TypeCast { expr: Arc::new(expr), typ }.to_expr_nopos()
         })
     };
 }
@@ -520,21 +526,21 @@ macro_rules! typecast {
 macro_rules! array {
     ($inner:expr) => {
         collection::vec($inner, (0, 10))
-            .prop_map(|a| { ExprKind::Array { args: Arc::from_iter(a) } }.to_expr())
+            .prop_map(|a| { ExprKind::Array { args: Arc::from_iter(a) } }.to_expr_nopos())
     };
 }
 
 macro_rules! tuple {
     ($inner:expr) => {
         collection::vec($inner, (2, 10))
-            .prop_map(|a| { ExprKind::Tuple { args: Arc::from_iter(a) } }.to_expr())
+            .prop_map(|a| { ExprKind::Tuple { args: Arc::from_iter(a) } }.to_expr_nopos())
     };
 }
 
 macro_rules! binop {
     ($inner:expr, $op:ident) => {
         ($inner, $inner).prop_map(|(e0, e1)| {
-            ExprKind::$op { lhs: Arc::new(e0), rhs: Arc::new(e1) }.to_expr()
+            ExprKind::$op { lhs: Arc::new(e0), rhs: Arc::new(e1) }.to_expr_nopos()
         })
     };
 }
@@ -547,7 +553,7 @@ macro_rules! structwith {
                 replace.sort_by_key(|(f, _)| f.clone());
                 replace.dedup_by_key(|(f, _)| f.clone());
                 ExprKind::StructWith { source, replace: Arc::from_iter(replace) }
-                    .to_expr()
+                    .to_expr_nopos()
             },
         )
     };
@@ -573,7 +579,9 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
             binop!(inner.clone(), Lte),
             binop!(inner.clone(), And),
             binop!(inner.clone(), Or),
-            inner.clone().prop_map(|e0| ExprKind::Not { expr: Arc::new(e0) }.to_expr()),
+            inner
+                .clone()
+                .prop_map(|e0| ExprKind::Not { expr: Arc::new(e0) }.to_expr_nopos()),
             binop!(inner.clone(), Add),
             binop!(inner.clone(), Sub),
             binop!(inner.clone(), Mul),
@@ -625,15 +633,15 @@ fn modexpr() -> impl Strategy<Value = Expr> {
                 .prop_map(|(export, name, body)| ExprKind::Module {
                     export,
                     name,
-                    value: Some(Arc::from(body))
+                    value: ModuleKind::Inline(Arc::from(body))
                 }
-                .to_expr()),
+                .to_expr_nopos()),
             (any::<bool>(), random_fname()).prop_map(|(export, name)| ExprKind::Module {
                 export,
                 name,
-                value: None
+                value: ModuleKind::Unresolved
             }
-            .to_expr()),
+            .to_expr_nopos()),
         ]
     })
 }
@@ -950,8 +958,16 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             dbg!(check(expr0, expr1))
         }
         (
-            ExprKind::Module { name: name0, export: export0, value: Some(value0) },
-            ExprKind::Module { name: name1, export: export1, value: Some(value1) },
+            ExprKind::Module {
+                name: name0,
+                export: export0,
+                value: ModuleKind::Inline(value0),
+            },
+            ExprKind::Module {
+                name: name1,
+                export: export1,
+                value: ModuleKind::Inline(value1),
+            },
         ) => {
             dbg!(
                 dbg!(name0 == name1)
@@ -964,8 +980,16 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             )
         }
         (
-            ExprKind::Module { name: name0, export: export0, value: None },
-            ExprKind::Module { name: name1, export: export1, value: None },
+            ExprKind::Module {
+                name: name0,
+                export: export0,
+                value: ModuleKind::Unresolved,
+            },
+            ExprKind::Module {
+                name: name1,
+                export: export1,
+                value: ModuleKind::Unresolved,
+            },
         ) => dbg!(dbg!(name0 == name1) && dbg!(export0 == export1)),
         (ExprKind::Do { exprs: exprs0 }, ExprKind::Do { exprs: exprs1 }) => {
             exprs0.len() == exprs1.len()
@@ -1085,7 +1109,7 @@ proptest! {
     fn expr_round_trip0(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1093,7 +1117,7 @@ proptest! {
     fn expr_round_trip1(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1101,7 +1125,7 @@ proptest! {
     fn expr_round_trip2(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1109,7 +1133,7 @@ proptest! {
     fn expr_round_trip3(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1117,7 +1141,7 @@ proptest! {
     fn expr_round_trip4(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1125,7 +1149,7 @@ proptest! {
     fn expr_round_trip5(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1133,7 +1157,7 @@ proptest! {
     fn expr_round_trip6(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1141,7 +1165,7 @@ proptest! {
     fn expr_round_trip7(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1149,7 +1173,7 @@ proptest! {
     fn expr_pp_round_trip0(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1157,7 +1181,7 @@ proptest! {
     fn expr_pp_round_trip1(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1165,7 +1189,7 @@ proptest! {
     fn expr_pp_round_trip2(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1173,7 +1197,7 @@ proptest! {
     fn expr_pp_round_trip3(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1181,7 +1205,7 @@ proptest! {
     fn expr_pp_round_trip4(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1189,7 +1213,7 @@ proptest! {
     fn expr_pp_round_trip5(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1197,7 +1221,7 @@ proptest! {
     fn expr_pp_round_trip6(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
@@ -1205,7 +1229,7 @@ proptest! {
     fn expr_pp_round_trip7(s in modexpr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse(st.as_str()).unwrap());
+        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 }

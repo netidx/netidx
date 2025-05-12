@@ -1,5 +1,6 @@
 use crate::rt::{BSConfigBuilder, BSHandle, RtEvent};
 use anyhow::{bail, Result};
+use arcstr::ArcStr;
 use futures::{channel::mpsc, StreamExt};
 use netidx::{
     publisher::{PublisherBuilder, Value},
@@ -60,7 +61,7 @@ async fn bind_ref_arith() -> Result<()> {
 "#;
     let (tx, mut rx) = mpsc::channel(10);
     bs.subscribe(tx)?;
-    let eid = bs.compile(String::from(e)).await?.eids[0].0;
+    let eid = bs.compile(ArcStr::from(e)).await?.exprs[0].id;
     match rx.next().await {
         None => bail!("runtime died"),
         Some(RtEvent::Updated(id, v)) => {
@@ -80,7 +81,7 @@ macro_rules! run {
             let bs = ctx.rt;
             let (tx, mut rx) = futures::channel::mpsc::channel(10);
             bs.subscribe(tx)?;
-            match bs.compile(String::from($code)).await.map(|r| r.eids[0].0) {
+            match bs.compile(arcstr::ArcStr::from($code)).await.map(|r| r.exprs[0].id) {
                 Err(e) => assert!($pred(dbg!(Err(e)))),
                 Ok(eid) => {
                     dbg!("compilation succeeded");

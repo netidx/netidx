@@ -570,6 +570,11 @@ impl ExprKind {
         Expr { id: ExprId::new(), pos, kind: self }
     }
 
+    /// does not provide any position information
+    pub fn to_expr_nopos(self) -> Expr {
+        Expr { id: ExprId::new(), pos: Default::default(), kind: self }
+    }
+
     pub fn to_string_pretty(&self, col_limit: usize) -> String {
         let mut buf = String::new();
         self.pretty_print(0, col_limit, true, &mut buf).unwrap();
