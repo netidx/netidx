@@ -1322,7 +1322,7 @@ impl<T: TypeMark> fmt::Display for Type<T> {
                     let mut s = *s;
                     macro_rules! builtin {
                         ($set:expr, $name:literal) => {
-                            if s.contains($set) {
+                            if replace && s.contains($set) {
                                 s.remove($set);
                                 write!(f, $name)?;
                                 if !s.is_empty() {
