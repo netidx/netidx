@@ -12,7 +12,7 @@ use netidx::{
 use netidx_bscript::{
     env::Env,
     rt::{BSConfigBuilder, BSCtx, CompExp, CouldNotResolve, RtEvent},
-    typ::TVal,
+    typ::{format_with_flags, PrintFlag, TVal},
     NoUserEvent,
 };
 use reedline::{
@@ -216,7 +216,10 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                                     let typ = e.typ
                                         .with_deref(|t| t.cloned())
                                         .unwrap_or_else(|| e.typ.clone());
-                                    println!("-: {}", typ);
+                                    format_with_flags(
+                                        PrintFlag::DerefTVars | PrintFlag::ReplacePrims,
+                                        || println!("-: {}", typ)
+                                    );
                                     if e.output {
                                         output_expr = Some(e);
                                     }
