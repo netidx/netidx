@@ -1319,7 +1319,24 @@ impl<T: TypeMark> fmt::Display for Type<T> {
                 } else if s.len() == 1 {
                     write!(f, "{}", s.iter().next().unwrap())
                 } else {
+                    let mut s = *s;
+                    macro_rules! builtin {
+                        ($set:expr, $name:literal) => {
+                            if s.contains($set) {
+                                s.remove($set);
+                                write!(f, $name)?;
+                                if !s.is_empty() {
+                                    write!(f, ", ")?
+                                }
+                            }
+                        };
+                    }
                     write!(f, "[")?;
+                    builtin!(Typ::number(), "Number");
+                    builtin!(Typ::real(), "Real");
+                    builtin!(Typ::integer(), "Int");
+                    builtin!(Typ::unsigned_integer(), "Uint");
+                    builtin!(Typ::signed_integer(), "Sint");
                     for (i, t) in s.iter().enumerate() {
                         write!(f, "{t}")?;
                         if i < s.len() - 1 {
