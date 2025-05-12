@@ -213,7 +213,10 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                             Ok(mut res) => {
                                 newenv = Some(res.env);
                                 if let Some(e) = res.exprs.pop() {
-                                    println!("-: {}", e.typ);
+                                    let typ = e.typ
+                                        .with_deref(|t| t.cloned())
+                                        .unwrap_or_else(|| e.typ.clone());
+                                    println!("-: {}", typ);
                                     if e.output {
                                         output_expr = Some(e);
                                     }
