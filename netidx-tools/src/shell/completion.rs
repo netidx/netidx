@@ -76,13 +76,21 @@ impl Completer for BComplete {
                         {
                             let description = match self.0.by_id.get(&id) {
                                 None => format!("_"),
-                                Some(b) => match &b.typ {
-                                    Type::Fn(ft) => {
-                                        let ft = ft.replace_auto_constrained();
-                                        format!("{}", ft)
+                                Some(b) => {
+                                    use std::fmt::Write;
+                                    let mut res = String::new();
+                                    if let Some(doc) = &b.doc {
+                                        write!(res, "{doc}\n").unwrap();
+                                    };
+                                    match &b.typ {
+                                        Type::Fn(ft) => {
+                                            let ft = ft.replace_auto_constrained();
+                                            write!(res, "{}", ft).unwrap()
+                                        }
+                                        t => write!(res, "{}", t).unwrap(),
                                     }
-                                    t => format!("{}", t),
-                                },
+                                    res
+                                }
                             };
                             let value = match Path::dirname(&part.0) {
                                 None => String::from(value.as_str()),
@@ -97,7 +105,7 @@ impl Completer for BComplete {
                                 value,
                                 description: Some(description),
                                 style: None,
-                                extra: None,
+                                extra: Some(vec!["hello world!".into()]),
                                 append_whitespace: false,
                             })
                         }

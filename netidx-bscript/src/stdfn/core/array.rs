@@ -453,7 +453,7 @@ pub(super) struct ConcatEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for ConcatEv {
     const NAME: &str = "array_concat";
-    deftype!("fn(Array<'a>, @args: Array<'a>) -> Array<'a>");
+    deftype!("fn(Array<'a>, @args: [Array<'a>, 'a]) -> Array<'a>");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut present = true;
@@ -472,6 +472,7 @@ impl EvalCached for ConcatEv {
             let a = ValArray::from_iter_exact(self.0.drain(..));
             Some(Value::Array(a))
         } else {
+            self.0.clear();
             None
         }
     }

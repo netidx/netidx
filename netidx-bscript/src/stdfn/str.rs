@@ -87,13 +87,14 @@ struct StripPrefixEv;
 
 impl EvalCached for StripPrefixEv {
     const NAME: &str = "strip_prefix";
-    deftype!("fn(#pfx:string, string) -> string");
+    deftype!("fn(#pfx:string, string) -> [string, null]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
-            (Some(Value::String(pfx)), Some(Value::String(val))) => {
-                val.strip_prefix(&**pfx).map(|s| Value::String(s.into()))
-            }
+            (Some(Value::String(pfx)), Some(Value::String(val))) => val
+                .strip_prefix(&**pfx)
+                .map(|s| Value::String(s.into()))
+                .or(Some(Value::Null)),
             (None, _) | (_, None) => None,
             _ => err!("strip_prefix expected string"),
         }
@@ -107,13 +108,14 @@ struct StripSuffixEv;
 
 impl EvalCached for StripSuffixEv {
     const NAME: &str = "strip_suffix";
-    deftype!("fn(#sfx:string, string) -> string");
+    deftype!("fn(#sfx:string, string) -> [string, null]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match (&from.0[0], &from.0[1]) {
-            (Some(Value::String(sfx)), Some(Value::String(val))) => {
-                val.strip_suffix(&**sfx).map(|s| Value::String(s.into()))
-            }
+            (Some(Value::String(sfx)), Some(Value::String(val))) => val
+                .strip_suffix(&**sfx)
+                .map(|s| Value::String(s.into()))
+                .or(Some(Value::Null)),
             (None, _) | (_, None) => None,
             _ => err!("strip_suffix expected string"),
         }
@@ -550,25 +552,67 @@ type StringToUpper = CachedArgs<StringToUpperEv>;
 
 const MOD: &str = r#"
 pub mod str {
+    /// return true if s starts with #pfx, otherwise return false
     pub let starts_with = |#pfx, s| 'starts_with;
+
+    /// return true if s ends with #sfx otherwise return false
     pub let ends_with = |#sfx, s| 'ends_with;
+
+    /// return true if s contains #part, otherwise return false
     pub let contains = |#part, s| 'contains;
+
+    /// if s starts with #pfx then return s with #pfx stripped otherwise return null
     pub let strip_prefix = |#pfx, s| 'strip_prefix;
+
+    /// if s ends with #sfx then return s with #sfx stripped otherwise return null
     pub let strip_suffix = |#sfx, s| 'strip_suffix;
+
+    /// return s with leading and trailing whitespace removed
     pub let trim = |s| 'trim;
+
+    /// return s with leading whitespace removed
     pub let trim_start = |s| 'trim_start;
+
+    /// return s with trailing whitespace removed
     pub let trim_end = |s| 'trim_end;
+
+    /// replace all instances of #pat in s with #rep and return s
     pub let replace = |#pat, #rep, s| 'replace;
+
+    /// return the parent path of s, or null if s does not have a parent path
     pub let dirname = |path| 'dirname;
+
+    /// return the leaf path of s, or null if s is not a path. e.g. /foo/bar -> bar
     pub let basename = |path| 'basename;
+
+    /// return a single string with the arguments concatenated and separated by #sep
     pub let join = |#sep, @args| 'string_join;
+
+    /// concatenate the specified strings into a single string
     pub let concat = |@args| 'string_concat;
+
+    /// escape all the charachters in #to_escape in s with the escape charachter #escape.
+    /// The escape charachter must appear in #to_escape
     pub let escape = |#to_escape = "/", #escape = "\\", s| 'string_escape;
+
+    /// unescape all the charachters in s escaped by the specified #escape charachter
     pub let unescape = |#escape = "\\", s| 'string_unescape;
+
+    /// split the string by the specified #pat and return an array of each part
     pub let split = |#pat, s| 'string_split;
+
+    /// split the string once from the beginning by #pat and return a
+    /// tuple of strings, or return null if #pat was not found in the string
     pub let split_once = |#pat, s| 'string_split_once;
+
+    /// split the string once from the end by #pat and return a tuple of strings
+    /// or return null if #pat was not found in the string    
     pub let rsplit_once = |#pat, s| 'string_rsplit_once;
+
+    /// change the string to lowercase
     pub let to_lower = |s| 'string_to_lower;
+
+    /// change the string to uppercase
     pub let to_upper = |s| 'string_to_upper
 }
 "#;
