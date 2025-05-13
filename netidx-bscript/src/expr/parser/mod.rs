@@ -15,7 +15,7 @@ use combine::{
         combinator::recognize,
         range::{take_while, take_while1},
     },
-    position, sep_by, sep_by1,
+    position, sep_by, sep_by1, skip_many,
     stream::{
         position::{self, SourcePosition},
         Range,
@@ -58,13 +58,12 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    choice((
-        combine::parser::char::spaces(),
+    combine::parser::char::spaces().with(skip_many(attempt(
         string("//")
             .with(not_followed_by(token('/')))
-            .with(many(none_of(['\n'])))
-            .map(|_: String| ()),
-    ))
+            .with(skip_many(none_of(['\n'])))
+            .with(combine::parser::char::spaces()),
+    )))
 }
 
 fn doc_comment<I>() -> impl Parser<I, Output = Option<ArcStr>>
@@ -73,9 +72,21 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    optional(attempt(
-        string("///").with(many(none_of(['\n']))).map(|s: String| ArcStr::from(s)),
-    ))
+    combine::parser::char::spaces()
+        .with(many(
+            string("///")
+                .with(many(none_of(['\n'])))
+                .skip(combine::parser::char::spaces()),
+        ))
+        .map(
+            |lines: SmallVec<[String; 8]>| {
+                if lines.len() == 0 {
+                    None
+                } else {
+                    Some(ArcStr::from(lines.join("\n")))
+                }
+            },
+        )
 }
 
 fn spstring<'a, I>(s: &'static str) -> impl Parser<I, Output = &'a str>

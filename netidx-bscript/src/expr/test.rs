@@ -360,12 +360,23 @@ macro_rules! tupleref {
 
 macro_rules! bind {
     ($inner:expr) => {
-        ($inner, structure_pattern(), any::<bool>(), option::of(typexp())).prop_map(
-            |(e, p, exp, typ)| {
-                ExprKind::Bind { export: exp, pattern: p, value: Arc::new(e), typ }
-                    .to_expr_nopos()
-            },
+        (
+            $inner,
+            option::of(arcstr()),
+            structure_pattern(),
+            any::<bool>(),
+            option::of(typexp()),
         )
+            .prop_map(|(value, doc, p, exp, typ)| {
+                ExprKind::Bind(Arc::new(Bind {
+                    doc,
+                    export: exp,
+                    pattern: p,
+                    value,
+                    typ,
+                }))
+                .to_expr_nopos()
+            })
     };
 }
 
@@ -458,16 +469,16 @@ macro_rules! lambda {
                 let constraints = Arc::from_iter(
                     constraints.into_iter().map(|(a, t)| (TVar::empty_named(a), t)),
                 );
-                ExprKind::Lambda {
+                ExprKind::Lambda(Arc::new(Lambda {
                     args: Arc::from_iter(args),
                     vargs,
                     rtype,
                     constraints,
                     body: match builtin {
-                        None => Either::Left(Arc::new(body)),
+                        None => Either::Left(body),
                         Some(name) => Either::Right(name),
                     },
-                }
+                }))
                 .to_expr_nopos()
             })
     };
@@ -998,15 +1009,19 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (ExprKind::Use { name: name0 }, ExprKind::Use { name: name1 }) => {
             dbg!(name0 == name1)
         }
-        (
-            ExprKind::Bind { pattern: p0, export: export0, value: value0, typ: typ0 },
-            ExprKind::Bind { pattern: p1, export: export1, value: value1, typ: typ1 },
-        ) => dbg!(
-            dbg!(check_structure_pattern(p0, p1))
-                && dbg!(export0 == export1)
-                && dbg!(check_type_opt(typ0, typ1))
-                && dbg!(check(value0, value1))
-        ),
+        (ExprKind::Bind(b0), ExprKind::Bind(b1)) => {
+            let Bind { doc: d0, pattern: p0, export: export0, value: value0, typ: typ0 } =
+                &**b0;
+            let Bind { doc: d1, pattern: p1, export: export1, value: value1, typ: typ1 } =
+                &**b1;
+            dbg!(
+                dbg!(check_structure_pattern(p0, p1))
+                    && dbg!(d0 == d1)
+                    && dbg!(export0 == export1)
+                    && dbg!(check_type_opt(typ0, typ1))
+                    && dbg!(check(value0, value1))
+            )
+        }
         (
             ExprKind::Connect { name: name0, value: value0 },
             ExprKind::Connect { name: name1, value: value1 },
@@ -1015,66 +1030,69 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (ExprKind::Ref { name: name0 }, ExprKind::Ref { name: name1 }) => {
             dbg!(name0 == name1)
         }
-        (
-            ExprKind::Lambda {
-                args: args0,
-                vargs: vargs0,
-                rtype: rtype0,
-                constraints: constraints0,
-                body: Either::Left(body0),
-            },
-            ExprKind::Lambda {
-                args: args1,
-                vargs: vargs1,
-                rtype: rtype1,
-                constraints: constraints1,
-                body: Either::Left(body1),
-            },
-        ) => dbg!(
-            dbg!(check_args(args0, args1))
-                && dbg!(match (vargs0, vargs1) {
-                    (Some(t0), Some(t1)) => check_type_opt(t0, t1),
-                    (None, None) => true,
-                    _ => false,
-                })
-                && dbg!(check_type_opt(rtype0, rtype1))
-                && dbg!(constraints0
-                    .iter()
-                    .zip(constraints1.iter())
-                    .all(|((tv0, tc0), (tv1, tc1))| tv0.name == tv1.name
-                        && check_type(&tc0, &tc1)))
-                && dbg!(check(body0, body1))
-        ),
-        (
-            ExprKind::Lambda {
-                args: args0,
-                vargs: vargs0,
-                rtype: rtype0,
-                constraints: constraints0,
-                body: Either::Right(b0),
-            },
-            ExprKind::Lambda {
-                args: args1,
-                vargs: vargs1,
-                rtype: rtype1,
-                constraints: constraints1,
-                body: Either::Right(b1),
-            },
-        ) => dbg!(
-            dbg!(check_args(args0, args1))
-                && dbg!(match (vargs0, vargs1) {
-                    (Some(t0), Some(t1)) => check_type_opt(t0, t1),
-                    (None, None) => true,
-                    _ => false,
-                })
-                && dbg!(check_type_opt(rtype0, rtype1))
-                && dbg!(constraints0
-                    .iter()
-                    .zip(constraints1.iter())
-                    .all(|((tv0, tc0), (tv1, tc1))| tv0.name == tv1.name
-                        && check_type(&tc0, &tc1)))
-                && dbg!(b0 == b1)
-        ),
+        (ExprKind::Lambda(l0), ExprKind::Lambda(l1)) => match (&**l0, &**l1) {
+            (
+                Lambda {
+                    args: args0,
+                    vargs: vargs0,
+                    rtype: rtype0,
+                    constraints: constraints0,
+                    body: Either::Left(body0),
+                },
+                Lambda {
+                    args: args1,
+                    vargs: vargs1,
+                    rtype: rtype1,
+                    constraints: constraints1,
+                    body: Either::Left(body1),
+                },
+            ) => dbg!(
+                dbg!(check_args(args0, args1))
+                    && dbg!(match (vargs0, vargs1) {
+                        (Some(t0), Some(t1)) => check_type_opt(t0, t1),
+                        (None, None) => true,
+                        _ => false,
+                    })
+                    && dbg!(check_type_opt(rtype0, rtype1))
+                    && dbg!(constraints0
+                        .iter()
+                        .zip(constraints1.iter())
+                        .all(|((tv0, tc0), (tv1, tc1))| tv0.name == tv1.name
+                            && check_type(&tc0, &tc1)))
+                    && dbg!(check(body0, body1))
+            ),
+            (
+                Lambda {
+                    args: args0,
+                    vargs: vargs0,
+                    rtype: rtype0,
+                    constraints: constraints0,
+                    body: Either::Right(b0),
+                },
+                Lambda {
+                    args: args1,
+                    vargs: vargs1,
+                    rtype: rtype1,
+                    constraints: constraints1,
+                    body: Either::Right(b1),
+                },
+            ) => dbg!(
+                dbg!(check_args(args0, args1))
+                    && dbg!(match (vargs0, vargs1) {
+                        (Some(t0), Some(t1)) => check_type_opt(t0, t1),
+                        (None, None) => true,
+                        _ => false,
+                    })
+                    && dbg!(check_type_opt(rtype0, rtype1))
+                    && dbg!(constraints0
+                        .iter()
+                        .zip(constraints1.iter())
+                        .all(|((tv0, tc0), (tv1, tc1))| tv0.name == tv1.name
+                            && check_type(&tc0, &tc1)))
+                    && dbg!(b0 == b1)
+            ),
+            (_, _) => false,
+        },
         (
             ExprKind::Select { arg: arg0, arms: arms0 },
             ExprKind::Select { arg: arg1, arms: arms1 },

@@ -612,8 +612,12 @@ impl ExprKind {
                 let Bind { doc, pattern, typ, export, value } = &**b;
                 try_single_line!(true);
                 if let Some(doc) = doc {
-                    for line in doc.lines() {
-                        writeln!(buf, "/// {line}")?;
+                    if doc == "" {
+                        writeln!(buf, "///")?;
+                    } else {
+                        for line in doc.lines() {
+                            writeln!(buf, "///{line}")?;
+                        }
                     }
                 }
                 writeln!(buf, "{}let {pattern}{} = ", exp(*export), typ!(typ))?;
@@ -913,8 +917,12 @@ impl fmt::Display for ExprKind {
             ExprKind::Bind(b) => {
                 let Bind { doc, pattern, typ, export, value } = &**b;
                 if let Some(doc) = doc {
-                    for line in doc.lines() {
-                        writeln!(f, "/// {line}")?
+                    if doc == "" {
+                        writeln!(f, "///")?
+                    } else {
+                        for line in doc.lines() {
+                            writeln!(f, "///{line}")?
+                        }
                     }
                 }
                 write!(f, "{}let {pattern}{} = {value}", exp(*export), typ!(typ))

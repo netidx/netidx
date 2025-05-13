@@ -13,6 +13,16 @@ fn parse_typexpr(s: &str) -> anyhow::Result<Type<Refs>> {
 }
 
 #[allow(unused)]
+fn parse_doc(s: &str) -> anyhow::Result<Option<ArcStr>> {
+    doc_comment()
+        .skip(spaces())
+        .skip(eof())
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
+}
+
+#[allow(unused)]
 fn parse_typath(s: &str) -> anyhow::Result<ModPath> {
     typath()
         .skip(spaces())
@@ -195,26 +205,69 @@ fn var_ref() {
 #[test]
 fn letbind() {
     assert_eq!(
-        ExprKind::Bind {
+        ExprKind::Bind(Arc::new(Bind {
+            doc: None,
             export: false,
             typ: None,
             pattern: StructurePattern::Bind(literal!("foo")),
-            value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr_nopos())
-        }
+            value: ExprKind::Constant(Value::I64(42)).to_expr_nopos()
+        }))
         .to_expr_nopos(),
         parse_one_modexpr("let foo = 42").unwrap()
     );
 }
 
 #[test]
+fn doc() {
+    assert_eq!(
+        Some(literal!(
+            " here is a let bind\n there are many like it\n but this one is mine"
+        )),
+        parse_doc(
+            r#"
+/// here is a let bind
+/// there are many like it
+/// but this one is mine
+"#
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn letbinddoc() {
+    let doc =
+        literal!(" here is a let bind\n there are many like it\n but this one is mine");
+    assert_eq!(
+        ExprKind::Bind(Arc::new(Bind {
+            doc: Some(doc),
+            export: false,
+            typ: None,
+            pattern: StructurePattern::Bind(literal!("foo")),
+            value: ExprKind::Constant(Value::I64(42)).to_expr_nopos()
+        }))
+        .to_expr_nopos(),
+        parse_one_modexpr(
+            r#"
+/// here is a let bind
+/// there are many like it
+/// but this one is mine
+let foo = 42"#
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn typed_letbind() {
     assert_eq!(
-        ExprKind::Bind {
+        ExprKind::Bind(Arc::new(Bind {
+            doc: None,
             export: false,
             typ: Some(Type::Primitive(Typ::I64.into())),
             pattern: StructurePattern::Bind(literal!("foo")),
-            value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr_nopos())
-        }
+            value: ExprKind::Constant(Value::I64(42)).to_expr_nopos()
+        }))
         .to_expr_nopos(),
         parse_one_modexpr("let foo: i64 = 42").unwrap()
     );
@@ -663,19 +716,21 @@ fn inline_module() {
         name: literal!("foo"),
         export: true,
         value: ModuleKind::Inline(Arc::from_iter([
-            ExprKind::Bind {
+            ExprKind::Bind(Arc::new(Bind {
+                doc: None,
                 typ: None,
                 export: true,
                 pattern: StructurePattern::Bind(literal!("z")),
-                value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr_nopos()),
-            }
+                value: ExprKind::Constant(Value::I64(42)).to_expr_nopos(),
+            }))
             .to_expr_nopos(),
-            ExprKind::Bind {
+            ExprKind::Bind(Arc::new(Bind {
+                doc: None,
                 typ: None,
                 export: false,
                 pattern: StructurePattern::Bind(literal!("m")),
-                value: Arc::new(ExprKind::Constant(Value::I64(42)).to_expr_nopos()),
-            }
+                value: ExprKind::Constant(Value::I64(42)).to_expr_nopos(),
+            }))
             .to_expr_nopos(),
         ])),
     }
@@ -738,12 +793,13 @@ fn array() {
 fn doexpr() {
     let exp = ExprKind::Do {
         exprs: Arc::from_iter([
-            ExprKind::Bind {
+            ExprKind::Bind(Arc::new(Bind {
+                doc: None,
                 typ: None,
                 export: false,
                 pattern: StructurePattern::Bind(literal!("baz")),
-                value: Arc::new(ExprKind::Constant(Value::from(42)).to_expr_nopos()),
-            }
+                value: ExprKind::Constant(Value::from(42)).to_expr_nopos(),
+            }))
             .to_expr_nopos(),
             ExprKind::Ref { name: ModPath::from(["baz"]) }.to_expr_nopos(),
         ]),
@@ -755,7 +811,7 @@ fn doexpr() {
 
 #[test]
 fn lambda() {
-    let exp = ExprKind::Lambda {
+    let exp = ExprKind::Lambda(Arc::new(Lambda {
         args: Arc::from_iter([
             Arg {
                 labeled: None,
@@ -771,7 +827,7 @@ fn lambda() {
         rtype: None,
         vargs: None,
         constraints: Arc::from_iter([]),
-        body: Either::Left(Arc::new(
+        body: Either::Left(
             ExprKind::Add {
                 lhs: Arc::new(
                     ExprKind::Add {
@@ -787,8 +843,8 @@ fn lambda() {
                 rhs: Arc::new(ExprKind::Ref { name: ["c"].into() }.to_expr_nopos()),
             }
             .to_expr_nopos(),
-        )),
-    }
+        ),
+    }))
     .to_expr_nopos();
     let s = r#"|foo, bar| (a + b + c)"#;
     assert_eq!(exp, parse_one_expr(s).unwrap());
@@ -796,35 +852,33 @@ fn lambda() {
 
 #[test]
 fn nested_lambda() {
-    let e = Arc::new(
-        ExprKind::Add {
-            lhs: Arc::new(
-                ExprKind::Add {
-                    lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
-                    rhs: Arc::new(ExprKind::Ref { name: ["b"].into() }.to_expr_nopos()),
-                }
-                .to_expr_nopos(),
-            ),
-            rhs: Arc::new(ExprKind::Ref { name: ["c"].into() }.to_expr_nopos()),
-        }
-        .to_expr_nopos(),
-    );
-    let exp = ExprKind::Lambda {
+    let e = ExprKind::Add {
+        lhs: Arc::new(
+            ExprKind::Add {
+                lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
+                rhs: Arc::new(ExprKind::Ref { name: ["b"].into() }.to_expr_nopos()),
+            }
+            .to_expr_nopos(),
+        ),
+        rhs: Arc::new(ExprKind::Ref { name: ["c"].into() }.to_expr_nopos()),
+    }
+    .to_expr_nopos();
+    let exp = ExprKind::Lambda(Arc::new(Lambda {
         args: Arc::from_iter([]),
         rtype: None,
         vargs: None,
         constraints: Arc::from_iter([]),
-        body: Either::Left(Arc::new(
-            ExprKind::Lambda {
+        body: Either::Left(
+            ExprKind::Lambda(Arc::new(Lambda {
                 args: Arc::from_iter([]),
                 rtype: None,
                 vargs: None,
                 constraints: Arc::from_iter([]),
                 body: Either::Left(e),
-            }
+            }))
             .to_expr_nopos(),
-        )),
-    }
+        ),
+    }))
     .to_expr_nopos();
     let s = r#"|| || (a + b + c)"#;
     assert_eq!(exp, parse_one_expr(s).unwrap());
@@ -835,7 +889,7 @@ fn apply_lambda() {
     let e = ExprKind::Apply {
         args: Arc::from_iter([(
             None,
-            ExprKind::Lambda {
+            ExprKind::Lambda(Arc::new(Lambda {
                 args: Arc::from_iter([Arg {
                     labeled: None,
                     pattern: StructurePattern::Bind("a".into()),
@@ -845,7 +899,7 @@ fn apply_lambda() {
                 rtype: None,
                 constraints: Arc::from_iter([]),
                 body: Either::Right("a".into()),
-            }
+            }))
             .to_expr_nopos(),
         )]),
         function: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
@@ -861,7 +915,7 @@ fn apply_typed_lambda() {
     let e = ExprKind::Apply {
         args: Arc::from_iter([(
             None,
-            ExprKind::Lambda {
+            ExprKind::Lambda(Arc::new(Lambda {
                 args: Arc::from_iter([
                     Arg {
                         labeled: None,
@@ -881,7 +935,7 @@ fn apply_typed_lambda() {
                 rtype: Some(Type::Bottom(PhantomData)),
                 constraints: Arc::from_iter([]),
                 body: Either::Right("a".into()),
-            }
+            }))
             .to_expr_nopos(),
         )]),
         function: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
@@ -932,29 +986,26 @@ fn multi_line_do() {
 #[test]
 fn typed_array() {
     let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::Bind {
+        exprs: Arc::from_iter([ExprKind::Bind(Arc::new(Bind {
+            doc: None,
             export: false,
             pattern: StructurePattern::Bind(literal!("f")),
             typ: None,
-            value: Arc::new(
-                ExprKind::Lambda {
-                    args: Arc::from_iter([Arg {
-                        labeled: None,
-                        pattern: StructurePattern::Bind("a".into()),
-                        constraint: Some(Type::Array(Arc::new(Type::TVar(
-                            TVar::empty_named("a".into()),
-                        )))),
-                    }]),
-                    vargs: None,
-                    constraints: Arc::from_iter([]),
-                    rtype: Some(Type::TVar(TVar::empty_named("a".into()))),
-                    body: Either::Left(Arc::new(
-                        ExprKind::Ref { name: ["a"].into() }.to_expr_nopos(),
-                    )),
-                }
-                .to_expr_nopos(),
-            ),
-        }
+            value: ExprKind::Lambda(Arc::new(Lambda {
+                args: Arc::from_iter([Arg {
+                    labeled: None,
+                    pattern: StructurePattern::Bind("a".into()),
+                    constraint: Some(Type::Array(Arc::new(Type::TVar(
+                        TVar::empty_named("a".into()),
+                    )))),
+                }]),
+                vargs: None,
+                constraints: Arc::from_iter([]),
+                rtype: Some(Type::TVar(TVar::empty_named("a".into()))),
+                body: Either::Left(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
+            }))
+            .to_expr_nopos(),
+        }))
         .to_expr_nopos()]),
     }
     .to_expr_nopos();
@@ -966,7 +1017,8 @@ fn typed_array() {
 #[test]
 fn labeled_argument_lambda() {
     let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::Bind {
+        exprs: Arc::from_iter([ExprKind::Bind(Arc::new(Bind {
+            doc: None,
             export: false,
             pattern: StructurePattern::Bind(literal!("a")),
             typ: Some(Type::Fn(Arc::new(FnType {
@@ -989,42 +1041,38 @@ fn labeled_argument_lambda() {
                 rtype: Type::Primitive(Typ::String.into()),
                 constraints: Arc::new(RwLock::new(vec![])),
             }))),
-            value: Arc::new(
-                ExprKind::Lambda {
-                    args: Arc::from_iter([
-                        Arg {
-                            pattern: StructurePattern::Bind("foo".into()),
-                            labeled: Some(Some(
-                                ExprKind::Constant(3.into()).to_expr_nopos(),
-                            )),
-                            constraint: Some(Type::Ref(["Number"].into())),
-                        },
-                        Arg {
-                            pattern: StructurePattern::Bind("bar".into()),
-                            labeled: Some(Some(
-                                ExprKind::Constant("hello".into()).to_expr_nopos(),
-                            )),
-                            constraint: None,
-                        },
-                        Arg {
-                            pattern: StructurePattern::Bind("a".into()),
-                            labeled: Some(None),
-                            constraint: None,
-                        },
-                        Arg {
-                            pattern: StructurePattern::Bind("baz".into()),
-                            labeled: None,
-                            constraint: None,
-                        },
-                    ]),
-                    vargs: None,
-                    rtype: None,
-                    constraints: Arc::from_iter([]),
-                    body: Either::Right("foo".into()),
-                }
-                .to_expr_nopos(),
-            ),
-        }
+            value: ExprKind::Lambda(Arc::new(Lambda {
+                args: Arc::from_iter([
+                    Arg {
+                        pattern: StructurePattern::Bind("foo".into()),
+                        labeled: Some(Some(ExprKind::Constant(3.into()).to_expr_nopos())),
+                        constraint: Some(Type::Ref(["Number"].into())),
+                    },
+                    Arg {
+                        pattern: StructurePattern::Bind("bar".into()),
+                        labeled: Some(Some(
+                            ExprKind::Constant("hello".into()).to_expr_nopos(),
+                        )),
+                        constraint: None,
+                    },
+                    Arg {
+                        pattern: StructurePattern::Bind("a".into()),
+                        labeled: Some(None),
+                        constraint: None,
+                    },
+                    Arg {
+                        pattern: StructurePattern::Bind("baz".into()),
+                        labeled: None,
+                        constraint: None,
+                    },
+                ]),
+                vargs: None,
+                rtype: None,
+                constraints: Arc::from_iter([]),
+                body: Either::Right("foo".into()),
+            }))
+            .to_expr_nopos(),
+        }))
         .to_expr_nopos()]),
     }
     .to_expr_nopos();
@@ -1163,7 +1211,8 @@ fn tuple0() {
 
 #[test]
 fn tuple1() {
-    let e = ExprKind::Bind {
+    let e = ExprKind::Bind(Arc::new(Bind {
+        doc: None,
         export: false,
         pattern: StructurePattern::Tuple {
             all: None,
@@ -1174,11 +1223,42 @@ fn tuple1() {
             ]),
         },
         typ: None,
-        value: Arc::new(
-            ExprKind::Tuple {
-                args: Arc::from_iter([
-                    ExprKind::Constant(Value::I64(42)).to_expr_nopos(),
-                    ExprKind::Ref { name: ["a"].into() }.to_expr_nopos(),
+        value: ExprKind::Tuple {
+            args: Arc::from_iter([
+                ExprKind::Constant(Value::I64(42)).to_expr_nopos(),
+                ExprKind::Ref { name: ["a"].into() }.to_expr_nopos(),
+                ExprKind::Apply {
+                    function: Arc::new(
+                        ExprKind::Ref { name: ["f"].into() }.to_expr_nopos(),
+                    ),
+                    args: Arc::from_iter([(
+                        None,
+                        ExprKind::Ref { name: ["b"].into() }.to_expr_nopos(),
+                    )]),
+                }
+                .to_expr_nopos(),
+            ]),
+        }
+        .to_expr_nopos(),
+    }))
+    .to_expr_nopos();
+    let s = "let (_, x, y) = (42, a, f(b))";
+    let pe = parse_one_modexpr(s).unwrap();
+    assert_eq!(e, pe)
+}
+
+#[test]
+fn struct0() {
+    let e = ExprKind::Bind(Arc::new(Bind {
+        doc: None,
+        export: false,
+        pattern: StructurePattern::Bind(literal!("a")),
+        typ: None,
+        value: ExprKind::Struct {
+            args: Arc::from_iter([
+                ("bar".into(), ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
+                (
+                    "baz".into(),
                     ExprKind::Apply {
                         function: Arc::new(
                             ExprKind::Ref { name: ["f"].into() }.to_expr_nopos(),
@@ -1189,46 +1269,12 @@ fn tuple1() {
                         )]),
                     }
                     .to_expr_nopos(),
-                ]),
-            }
-            .to_expr_nopos(),
-        ),
-    }
-    .to_expr_nopos();
-    let s = "let (_, x, y) = (42, a, f(b))";
-    let pe = parse_one_modexpr(s).unwrap();
-    assert_eq!(e, pe)
-}
-
-#[test]
-fn struct0() {
-    let e = ExprKind::Bind {
-        export: false,
-        pattern: StructurePattern::Bind(literal!("a")),
-        typ: None,
-        value: Arc::new(
-            ExprKind::Struct {
-                args: Arc::from_iter([
-                    ("bar".into(), ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
-                    (
-                        "baz".into(),
-                        ExprKind::Apply {
-                            function: Arc::new(
-                                ExprKind::Ref { name: ["f"].into() }.to_expr_nopos(),
-                            ),
-                            args: Arc::from_iter([(
-                                None,
-                                ExprKind::Ref { name: ["b"].into() }.to_expr_nopos(),
-                            )]),
-                        }
-                        .to_expr_nopos(),
-                    ),
-                    ("foo".into(), ExprKind::Constant(Value::I64(42)).to_expr_nopos()),
-                ]),
-            }
-            .to_expr_nopos(),
-        ),
-    }
+                ),
+                ("foo".into(), ExprKind::Constant(Value::I64(42)).to_expr_nopos()),
+            ]),
+        }
+        .to_expr_nopos(),
+    }))
     .to_expr_nopos();
     let s = "let a = { foo: 42, bar: a, baz: f(b) }";
     let pe = parse_one_modexpr(s).unwrap();
@@ -1237,7 +1283,8 @@ fn struct0() {
 
 #[test]
 fn bindstruct() {
-    let e = ExprKind::Bind {
+    let e = ExprKind::Bind(Arc::new(Bind {
+        doc: None,
         export: false,
         pattern: StructurePattern::Struct {
             all: None,
@@ -1249,29 +1296,27 @@ fn bindstruct() {
             ]),
         },
         typ: None,
-        value: Arc::new(
-            ExprKind::Struct {
-                args: Arc::from_iter([
-                    ("bar".into(), ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
-                    (
-                        "baz".into(),
-                        ExprKind::Apply {
-                            function: Arc::new(
-                                ExprKind::Ref { name: ["f"].into() }.to_expr_nopos(),
-                            ),
-                            args: Arc::from_iter([(
-                                None,
-                                ExprKind::Ref { name: ["b"].into() }.to_expr_nopos(),
-                            )]),
-                        }
-                        .to_expr_nopos(),
-                    ),
-                    ("foo".into(), ExprKind::Constant(Value::I64(42)).to_expr_nopos()),
-                ]),
-            }
-            .to_expr_nopos(),
-        ),
-    }
+        value: ExprKind::Struct {
+            args: Arc::from_iter([
+                ("bar".into(), ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
+                (
+                    "baz".into(),
+                    ExprKind::Apply {
+                        function: Arc::new(
+                            ExprKind::Ref { name: ["f"].into() }.to_expr_nopos(),
+                        ),
+                        args: Arc::from_iter([(
+                            None,
+                            ExprKind::Ref { name: ["b"].into() }.to_expr_nopos(),
+                        )]),
+                    }
+                    .to_expr_nopos(),
+                ),
+                ("foo".into(), ExprKind::Constant(Value::I64(42)).to_expr_nopos()),
+            ]),
+        }
+        .to_expr_nopos(),
+    }))
     .to_expr_nopos();
     let s = "let { foo, bar: _, baz: zam } = { foo: 42, bar: a, baz: f(b) }";
     let pe = parse_one_modexpr(s).unwrap();
