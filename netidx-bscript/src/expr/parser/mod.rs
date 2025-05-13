@@ -1,14 +1,17 @@
 use crate::{
-    expr::{Arg, Expr, ExprId, ExprKind, ModPath, ModuleKind, Pattern, StructurePattern},
+    expr::{
+        Arg, Bind, Expr, ExprId, ExprKind, Lambda, ModPath, ModuleKind, Pattern,
+        StructurePattern,
+    },
     typ::{FnArgType, FnType, Refs, TVar, Type},
 };
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
 use combine::{
-    attempt, between, chainl1, choice, eof, look_ahead, many, many1, not_followed_by,
-    optional,
+    attempt, between, chainl1, choice, eof, look_ahead, many, many1, none_of,
+    not_followed_by, optional,
     parser::{
-        char::{alpha_num, digit, space, spaces, string},
+        char::{alpha_num, digit, space, string},
         combinator::recognize,
         range::{take_while, take_while1},
     },
@@ -48,6 +51,32 @@ pub const RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
         "null", "_", "?", "fn", "Array", "any",
     ])
 });
+
+fn spaces<I>() -> impl Parser<I, Output = ()>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        combine::parser::char::spaces(),
+        string("//")
+            .with(not_followed_by(token('/')))
+            .with(many(none_of(['\n'])))
+            .map(|_: String| ()),
+    ))
+}
+
+fn doc_comment<I>() -> impl Parser<I, Output = Option<ArcStr>>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    optional(attempt(
+        string("///").with(many(none_of(['\n']))).map(|s: String| ArcStr::from(s)),
+    ))
+}
 
 fn spstring<'a, I>(s: &'static str) -> impl Parser<I, Output = &'a str>
 where
@@ -847,12 +876,13 @@ where
         choice((
             attempt(sptoken('\'').with(fname()).skip(not_followed_by(sptoken(':'))))
                 .map(Either::Right),
-            expr().map(|e| Either::Left(Arc::new(e))),
+            expr().map(|e| Either::Left(e)),
         )),
     )
         .map(|(pos, constraints, (args, vargs), rtype, body)| {
             let args = Arc::from_iter(args);
-            ExprKind::Lambda { args, vargs, rtype, constraints, body }.to_expr(pos)
+            ExprKind::Lambda(Arc::new(Lambda { args, vargs, rtype, constraints, body }))
+                .to_expr(pos)
         })
 }
 
@@ -864,6 +894,7 @@ where
 {
     (
         position(),
+        doc_comment(),
         optional(string("pub").skip(space())).map(|o| o.is_some()),
         spstring("let")
             .with(space())
@@ -871,8 +902,9 @@ where
             .skip(spstring("=")),
         expr(),
     )
-        .map(|(pos, export, (pattern, typ), v)| {
-            ExprKind::Bind { export, pattern, typ, value: Arc::new(v) }.to_expr(pos)
+        .map(|(pos, doc, export, (pattern, typ), value)| {
+            ExprKind::Bind(Arc::new(Bind { doc, export, pattern, typ, value }))
+                .to_expr(pos)
         })
 }
 

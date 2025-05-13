@@ -1,6 +1,6 @@
 use crate::{
     env::Bind,
-    expr::{Expr, ExprId, ExprKind, ModPath, ModuleKind},
+    expr::{self, Expr, ExprId, ExprKind, Lambda, ModPath, ModuleKind},
     node::{
         lambda,
         pattern::{PatternNode, StructPatternNode},
@@ -255,11 +255,8 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             let typ = Type::Bottom(PhantomData);
             Ok(Node { spec: Box::new(spec), typ, kind })
         }
-        Expr {
-            kind: ExprKind::Lambda { args, vargs, rtype, constraints, body },
-            id: _,
-            pos: _,
-        } => {
+        Expr { kind: ExprKind::Lambda(l), id: _, pos: _ } => {
+            let Lambda { args, vargs, rtype, constraints, body } = &**l;
             let (args, vargs, rtype, constraints, body) = (
                 args.clone(),
                 vargs.clone(),
@@ -293,8 +290,9 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             let typ = ftype.rtype.clone();
             Ok(Node { spec: Box::new(spec), typ, kind: NodeKind::Apply(site) })
         }
-        Expr { kind: ExprKind::Bind { pattern, typ, export: _, value }, id: _, pos } => {
-            let node = compile(ctx, (**value).clone(), &scope, top_id)?;
+        Expr { kind: ExprKind::Bind(b), id: _, pos } => {
+            let expr::Bind { doc, pattern, typ, export: _, value } = &**b;
+            let node = compile(ctx, value.clone(), &scope, top_id)?;
             let typ = match typ {
                 Some(typ) => typ.resolve_typerefs(scope, &ctx.env)?,
                 None => {
@@ -310,6 +308,13 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 .with_context(|| format!("at {pos}"))?;
             if pn.is_refutable() {
                 bail!("at {pos} refutable patterns are not allowed in let");
+            }
+            if let Some(doc) = doc {
+                pn.ids(&mut |id| {
+                    if let Some(b) = ctx.env.by_id.get_mut_cow(&id) {
+                        b.doc = Some(doc.clone());
+                    }
+                });
             }
             let kind = NodeKind::Bind { pattern: Box::new(pn), node: Box::new(node) };
             Ok(Node { spec: Box::new(spec), typ, kind })

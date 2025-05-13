@@ -184,7 +184,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
     rtype: Option<Type<Refs>>,
     constraints: Arc<[(TVar<Refs>, Type<Refs>)]>,
     scope: &ModPath,
-    body: Either<Arc<Expr>, ArcStr>,
+    body: Either<Expr, ArcStr>,
 ) -> Result<Node<C, E>> {
     {
         let mut s: SmallVec<[&ArcStr; 16]> = smallvec![];
@@ -287,7 +287,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                     args,
                     &_scope,
                     tid,
-                    (*body).clone(),
+                    body.clone(),
                 );
                 apply.map(|a| {
                     let f: Box<dyn Apply<C, E> + Send + Sync + 'static> = Box::new(a);

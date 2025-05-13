@@ -30,6 +30,7 @@ pub struct Bind {
     pub id: BindId,
     pub export: bool,
     pub typ: Type<NoRefs>,
+    pub doc: Option<ArcStr>,
     scope: ModPath,
     name: CompactString,
 }
@@ -46,6 +47,7 @@ impl Clone for Bind {
             id: self.id,
             scope: self.scope.clone(),
             name: self.name.clone(),
+            doc: self.doc.clone(),
             export: self.export,
             typ: self.typ.clone(),
         }
@@ -295,6 +297,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
             export: true,
             id: *id,
             scope: scope.clone(),
+            doc: None,
             name: CompactString::from(name),
             typ,
         })

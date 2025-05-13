@@ -422,147 +422,62 @@ pub enum ModuleKind {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub struct Bind {
+    pub doc: Option<ArcStr>,
+    pub pattern: StructurePattern,
+    pub typ: Option<Type<Refs>>,
+    pub export: bool,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+pub struct Lambda {
+    pub args: Arc<[Arg<Refs>]>,
+    pub vargs: Option<Option<Type<Refs>>>,
+    pub rtype: Option<Type<Refs>>,
+    pub constraints: Arc<[(TVar<Refs>, Type<Refs>)]>,
+    pub body: Either<Expr, ArcStr>,
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum ExprKind {
     Constant(Value),
-    Module {
-        name: ArcStr,
-        export: bool,
-        value: ModuleKind,
-    },
-    Do {
-        exprs: Arc<[Expr]>,
-    },
-    Use {
-        name: ModPath,
-    },
-    Bind {
-        pattern: StructurePattern,
-        typ: Option<Type<Refs>>,
-        export: bool,
-        value: Arc<Expr>,
-    },
-    Ref {
-        name: ModPath,
-    },
-    Connect {
-        name: ModPath,
-        value: Arc<Expr>,
-    },
-    StringInterpolate {
-        args: Arc<[Expr]>,
-    },
-    StructRef {
-        source: Arc<Expr>,
-        field: ArcStr,
-    },
-    TupleRef {
-        source: Arc<Expr>,
-        field: usize,
-    },
-    ArrayRef {
-        source: Arc<Expr>,
-        i: Arc<Expr>,
-    },
-    ArraySlice {
-        source: Arc<Expr>,
-        start: Option<Arc<Expr>>,
-        end: Option<Arc<Expr>>,
-    },
-    StructWith {
-        source: Arc<Expr>,
-        replace: Arc<[(ArcStr, Expr)]>,
-    },
-    Lambda {
-        args: Arc<[Arg<Refs>]>,
-        vargs: Option<Option<Type<Refs>>>,
-        rtype: Option<Type<Refs>>,
-        constraints: Arc<[(TVar<Refs>, Type<Refs>)]>,
-        body: Either<Arc<Expr>, ArcStr>,
-    },
-    TypeDef {
-        name: ArcStr,
-        typ: Type<Refs>,
-    },
-    TypeCast {
-        expr: Arc<Expr>,
-        typ: Type<Refs>,
-    },
-    Apply {
-        args: Arc<[(Option<ArcStr>, Expr)]>,
-        function: Arc<Expr>,
-    },
-    Any {
-        args: Arc<[Expr]>,
-    },
-    Array {
-        args: Arc<[Expr]>,
-    },
-    Tuple {
-        args: Arc<[Expr]>,
-    },
-    Variant {
-        tag: ArcStr,
-        args: Arc<[Expr]>,
-    },
-    Struct {
-        args: Arc<[(ArcStr, Expr)]>,
-    },
-    Select {
-        arg: Arc<Expr>,
-        arms: Arc<[(Pattern, Expr)]>,
-    },
+    Module { name: ArcStr, export: bool, value: ModuleKind },
+    Do { exprs: Arc<[Expr]> },
+    Use { name: ModPath },
+    Bind(Arc<Bind>),
+    Ref { name: ModPath },
+    Connect { name: ModPath, value: Arc<Expr> },
+    StringInterpolate { args: Arc<[Expr]> },
+    StructRef { source: Arc<Expr>, field: ArcStr },
+    TupleRef { source: Arc<Expr>, field: usize },
+    ArrayRef { source: Arc<Expr>, i: Arc<Expr> },
+    ArraySlice { source: Arc<Expr>, start: Option<Arc<Expr>>, end: Option<Arc<Expr>> },
+    StructWith { source: Arc<Expr>, replace: Arc<[(ArcStr, Expr)]> },
+    Lambda(Arc<Lambda>),
+    TypeDef { name: ArcStr, typ: Type<Refs> },
+    TypeCast { expr: Arc<Expr>, typ: Type<Refs> },
+    Apply { args: Arc<[(Option<ArcStr>, Expr)]>, function: Arc<Expr> },
+    Any { args: Arc<[Expr]> },
+    Array { args: Arc<[Expr]> },
+    Tuple { args: Arc<[Expr]> },
+    Variant { tag: ArcStr, args: Arc<[Expr]> },
+    Struct { args: Arc<[(ArcStr, Expr)]> },
+    Select { arg: Arc<Expr>, arms: Arc<[(Pattern, Expr)]> },
     Qop(Arc<Expr>),
-    Eq {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
-    Ne {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
-    Lt {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
-    Gt {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
-    Lte {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
-    Gte {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
-    And {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
-    Or {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
-    Not {
-        expr: Arc<Expr>,
-    },
-    Add {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
-    Sub {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
-    Mul {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
-    Div {
-        lhs: Arc<Expr>,
-        rhs: Arc<Expr>,
-    },
+    Eq { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Ne { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Lt { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Gt { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Lte { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Gte { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    And { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Or { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Not { expr: Arc<Expr> },
+    Add { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Sub { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Mul { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Div { lhs: Arc<Expr>, rhs: Arc<Expr> },
 }
 
 impl ExprKind {
@@ -570,7 +485,7 @@ impl ExprKind {
         Expr { id: ExprId::new(), pos, kind: self }
     }
 
-    /// does not provide any position information
+    /// does not provide any position information or comment
     pub fn to_expr_nopos(self) -> Expr {
         Expr { id: ExprId::new(), pos: Default::default(), kind: self }
     }
@@ -693,8 +608,14 @@ impl ExprKind {
                 }
                 writeln!(buf, "{self}")
             }
-            ExprKind::Bind { pattern, typ, export, value } => {
+            ExprKind::Bind(b) => {
+                let Bind { doc, pattern, typ, export, value } = &**b;
                 try_single_line!(true);
+                if let Some(doc) = doc {
+                    for line in doc.lines() {
+                        writeln!(buf, "/// {line}")?;
+                    }
+                }
                 writeln!(buf, "{}let {pattern}{} = ", exp(*export), typ!(typ))?;
                 value.kind.pretty_print(indent + 2, limit, false, buf)
             }
@@ -828,7 +749,8 @@ impl ExprKind {
                 }
                 writeln!(buf, ")")
             }
-            ExprKind::Lambda { args, vargs, rtype, constraints, body } => {
+            ExprKind::Lambda(l) => {
+                let Lambda { args, vargs, rtype, constraints, body } = &**l;
                 try_single_line!(true);
                 for (i, (tvar, typ)) in constraints.iter().enumerate() {
                     write!(buf, "{tvar}: {typ}")?;
@@ -988,7 +910,13 @@ impl fmt::Display for ExprKind {
         let exp = |export| if export { "pub " } else { "" };
         match self {
             ExprKind::Constant(v) => v.fmt_ext(f, &parser::BSCRIPT_ESC, true),
-            ExprKind::Bind { pattern, typ, export, value } => {
+            ExprKind::Bind(b) => {
+                let Bind { doc, pattern, typ, export, value } = &**b;
+                if let Some(doc) = doc {
+                    for line in doc.lines() {
+                        writeln!(f, "/// {line}")?
+                    }
+                }
                 write!(f, "{}let {pattern}{} = {value}", exp(*export), typ!(typ))
             }
             ExprKind::StructWith { source, replace } => {
@@ -1035,7 +963,8 @@ impl fmt::Display for ExprKind {
             ExprKind::TypeCast { expr, typ } => write!(f, "cast<{typ}>({expr})"),
             ExprKind::TypeDef { name, typ } => write!(f, "type {name} = {typ}"),
             ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", "; "),
-            ExprKind::Lambda { args, vargs, rtype, constraints, body } => {
+            ExprKind::Lambda(l) => {
+                let Lambda { args, vargs, rtype, constraints, body } = &**l;
                 for (i, (tvar, typ)) in constraints.iter().enumerate() {
                     write!(f, "{tvar}: {typ}")?;
                     if i < constraints.len() - 1 {
@@ -1334,12 +1263,12 @@ impl Expr {
             }
             ExprKind::Module { value: ModuleKind::Unresolved, .. } => init,
             ExprKind::Do { exprs } => exprs.iter().fold(init, |init, e| e.fold(init, f)),
-            ExprKind::Bind { value, .. } => value.fold(init, f),
+            ExprKind::Bind(b) => b.value.fold(init, f),
             ExprKind::StructWith { replace, .. } => {
                 replace.iter().fold(init, |init, (_, e)| e.fold(init, f))
             }
             ExprKind::Connect { value, .. } => value.fold(init, f),
-            ExprKind::Lambda { body, .. } => match body {
+            ExprKind::Lambda(l) => match &l.body {
                 Either::Left(e) => e.fold(init, f),
                 Either::Right(_) => init,
             },
@@ -1580,12 +1509,19 @@ impl Expr {
                 let exprs = Arc::from(subexprs!(exprs));
                 Ok(Expr { id: self.id, pos: self.pos, kind: ExprKind::Do { exprs } })
             }),
-            ExprKind::Bind { pattern, typ, export, value } => Box::pin(async move {
+            ExprKind::Bind(b) => Box::pin(async move {
+                let Bind { doc, pattern, typ, export, value } = &*b;
                 let value = value.resolve_modules(scope, resolvers).await?;
                 Ok(Expr {
                     id: self.id,
                     pos: self.pos,
-                    kind: ExprKind::Bind { pattern, typ, export, value: Arc::new(value) },
+                    kind: ExprKind::Bind(Arc::new(Bind {
+                        doc: doc.clone(),
+                        pattern: pattern.clone(),
+                        typ: typ.clone(),
+                        export: *export,
+                        value,
+                    })),
                 })
             }),
             ExprKind::StructWith { source, replace } => Box::pin(async move {
@@ -1606,22 +1542,24 @@ impl Expr {
                     kind: ExprKind::Connect { name, value: Arc::new(value) },
                 })
             }),
-            ExprKind::Lambda { args, vargs, rtype, constraints, body } => {
-                Box::pin(async move {
-                    let body = match body {
-                        Either::Left(e) => {
-                            let e = e.resolve_modules(scope, resolvers).await?;
-                            Either::Left(Arc::new(e))
-                        }
-                        Either::Right(s) => Either::Right(s.clone()),
-                    };
-                    Ok(Expr {
-                        id: self.id,
-                        pos: self.pos,
-                        kind: ExprKind::Lambda { args, vargs, rtype, constraints, body },
-                    })
-                })
-            }
+            ExprKind::Lambda(l) => Box::pin(async move {
+                let Lambda { args, vargs, rtype, constraints, body } = &*l;
+                let body = match body {
+                    Either::Right(s) => Either::Right(s.clone()),
+                    Either::Left(e) => {
+                        Either::Left(e.resolve_modules(scope, resolvers).await?)
+                    }
+                };
+                let l = Lambda {
+                    args: args.clone(),
+                    vargs: vargs.clone(),
+                    rtype: rtype.clone(),
+                    constraints: constraints.clone(),
+                    body,
+                };
+                let kind = ExprKind::Lambda(Arc::new(l));
+                Ok(Expr { id: self.id, pos: self.pos, kind })
+            }),
             ExprKind::TypeCast { expr, typ } => Box::pin(async move {
                 let expr = expr.resolve_modules(scope, resolvers).await?;
                 Ok(Expr {
