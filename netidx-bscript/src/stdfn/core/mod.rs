@@ -696,7 +696,8 @@ pub mod core {
     type Sint = [ i32, z32, i64, z64 ];
     type Uint = [ u32, v32, u64, v64 ];
     type Int = [ Sint, Uint ];
-    type Real = [ f32, f64, decimal ];
+    type Float = [ f32, f64 ];
+    type Real = [ Float, decimal ];
     type Number = [ Int, Real ];
 
     type Any = [

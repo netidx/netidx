@@ -13,6 +13,7 @@ use std::{
 
 pub mod core;
 pub mod net;
+pub mod rand;
 pub mod re;
 pub mod str;
 #[cfg(test)]

@@ -200,6 +200,10 @@ impl Typ {
         Self::unsigned_integer().contains(*self)
     }
 
+    pub fn float() -> BitFlags<Typ> {
+        Typ::F32 | Typ::F64
+    }
+
     pub fn real() -> BitFlags<Typ> {
         Typ::F32 | Typ::F64 | Typ::Decimal
     }

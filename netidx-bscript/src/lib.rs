@@ -334,6 +334,10 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         let node = Node::compile(&mut t, &root, time)
             .expect("failed to compile the time module");
         t.std.push(node);
+        let rand = stdfn::rand::register(&mut t);
+        let node =
+            Node::compile(&mut t, &root, rand).expect("failed to compile rand module");
+        t.std.push(node);
         t
     }
 

@@ -31,9 +31,10 @@ indexmap = { workspace = true }
 log = { workspace = true }
 netidx-core = { path = "../netidx-core", version = "0.26.0" }
 netidx-netproto = { path = "../netidx-netproto", version = "0.27.2" }
-netidx-protocols = { path = "../netidx-protocols", version = "0.27.2" }
 netidx = { path = "../netidx", version = "0.27.0", default-features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.27.2" }
 parking_lot = { workspace = true }
+rand = { workspace = true }
 regex = { workspace = true }
 serde_derive = { workspace = true }
 serde = { workspace = true }

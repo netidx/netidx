@@ -1306,6 +1306,8 @@ impl<T: TypeMark> fmt::Display for Type<T> {
                     write!(f, "Any")
                 } else if replace && *s == Typ::number() {
                     write!(f, "Number")
+                } else if replace && *s == Typ::float() {
+                    write!(f, "Float")
                 } else if replace && *s == Typ::real() {
                     write!(f, "Real")
                 } else if replace && *s == Typ::integer() {
@@ -1334,6 +1336,7 @@ impl<T: TypeMark> fmt::Display for Type<T> {
                     write!(f, "[")?;
                     builtin!(Typ::number(), "Number");
                     builtin!(Typ::real(), "Real");
+                    builtin!(Typ::float(), "Float");
                     builtin!(Typ::integer(), "Int");
                     builtin!(Typ::unsigned_integer(), "Uint");
                     builtin!(Typ::signed_integer(), "Sint");
