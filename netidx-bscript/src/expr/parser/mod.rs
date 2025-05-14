@@ -1532,7 +1532,7 @@ parser! {
 /// followed by (optional) whitespace and then eof. At least one
 /// expression is required otherwise this function will fail.
 pub fn parse(name: Option<ArcStr>, s: ArcStr) -> anyhow::Result<Origin> {
-    let r: Vec<Expr> = many1(modexpr())
+    let r: Vec<Expr> = sep_by1(modexpr(), attempt(sptoken(';')))
         .skip(spaces())
         .skip(eof())
         .easy_parse(position::Stream::new(&*s))
@@ -1556,7 +1556,7 @@ pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType<Refs>> {
 /// followed by (optional) whitespace and then eof. At least one
 /// expression is required or this function will fail.
 pub fn parse_expr(name: Option<ArcStr>, s: ArcStr) -> anyhow::Result<Origin> {
-    let r: Vec<Expr> = many1(expr())
+    let r: Vec<Expr> = sep_by1(expr(), attempt(sptoken(';')))
         .skip(spaces())
         .skip(eof())
         .easy_parse(position::Stream::new(&*s))
