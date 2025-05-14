@@ -120,7 +120,7 @@ pub mod rand {
     /// pick a random element from the array and return it. Update
     /// each time the array updates. If the array is empty return
     /// nothing.
-    pub let pick = |a| 'rand_pick
+    pub let pick = |a| 'rand_pick;
 
     /// return a shuffled copy of a
     pub let shuffle = |a| 'rand_shuffle

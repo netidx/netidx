@@ -1155,3 +1155,52 @@ run!(net_rpc, NET_RPC, |v: Result<&Value>| {
         _ => false,
     }
 });
+
+#[cfg(test)]
+const RAND: &str = r#"
+{
+  rand::rand(#trigger:null)
+}
+"#;
+
+#[cfg(test)]
+run!(rand, RAND, |v: Result<&Value>| {
+    match v {
+        Ok(Value::F64(v)) if *v >= 0. && *v < 1.0 => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const RAND_PICK: &str = r#"
+{
+  rand::pick(["Chicken is coming", "Grape", "Pilot!"])
+}
+"#;
+
+#[cfg(test)]
+run!(rand_pick, RAND_PICK, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(v)) => v == "Chicken is coming" || v == "Grape" || v == "Pilot!",
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const RAND_SHUFFLE: &str = r#"
+{
+  rand::shuffle(["Chicken is coming", "Grape", "Pilot!"])
+}
+"#;
+
+#[cfg(test)]
+run!(rand_shuffle, RAND_SHUFFLE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) if a.len() == 3 => {
+            a.contains(&Value::from("Chicken is coming"))
+                && a.contains(&Value::from("Grape"))
+                && a.contains(&Value::from("Pilot!"))
+        }
+        _ => false,
+    }
+});
