@@ -1,18 +1,12 @@
 use crate::{
-    arity2, deftype, err, errf,
-    expr::{Expr, ExprId},
-    node::Node,
-    stdfn::CachedVals,
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
+    deftype, expr::Expr, node::Node, stdfn::CachedVals, Apply, BuiltIn, BuiltInInitFn,
+    Ctx, Event, ExecCtx, UserEvent,
 };
-use anyhow::{bail, Result};
-use arcstr::{literal, ArcStr};
-use compact_str::format_compact;
-use netidx::{publisher::FromValue, subscriber::Value};
+use netidx::subscriber::Value;
 use netidx_netproto::valarray::ValArray;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use smallvec::{smallvec, SmallVec};
-use std::{ops::SubAssign, sync::Arc, time::Duration};
+use std::sync::Arc;
 
 struct Rand {
     args: CachedVals,
