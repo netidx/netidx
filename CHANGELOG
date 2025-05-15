@@ -37,6 +37,9 @@
   This will run until ctrl-c is pressed and continously print the
   value of the last expression in the file as it changes.
 
+- the gtk browser is deprecated and will be replaced in a future
+  release
+
 * 0.27.3
 
 - Fix a bug in the recorder that prevented it being used
