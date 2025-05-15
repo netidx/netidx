@@ -79,16 +79,16 @@ impl Completer for BComplete {
                                 Some(b) => {
                                     use std::fmt::Write;
                                     let mut res = String::new();
-                                    if let Some(doc) = &b.doc {
-                                        write!(res, "{doc}\n").unwrap();
-                                    };
                                     match &b.typ {
                                         Type::Fn(ft) => {
                                             let ft = ft.replace_auto_constrained();
-                                            write!(res, "{}", ft).unwrap()
+                                            write!(res, "{} ", ft).unwrap()
                                         }
-                                        t => write!(res, "{}", t).unwrap(),
+                                        t => write!(res, "{} ", t).unwrap(),
                                     }
+                                    if let Some(doc) = &b.doc {
+                                        write!(res, "{doc}").unwrap();
+                                    };
                                     res
                                 }
                             };
