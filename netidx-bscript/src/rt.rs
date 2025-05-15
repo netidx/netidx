@@ -674,7 +674,17 @@ impl BS {
                     None => scope,
                     Some(name) => ModPath(scope.append(&*name.to_string_lossy())),
                 };
-                let s = ArcStr::from(fs::read_to_string(file).await?);
+                let s = fs::read_to_string(file).await?;
+                let s = if s.starts_with("#!") {
+                    if let Some(i) = s.find('\n') {
+                        &s[i..]
+                    } else {
+                        s.as_str()
+                    }
+                } else {
+                    s.as_str()
+                };
+                let s = ArcStr::from(s);
                 let name = ArcStr::from(file.to_string_lossy());
                 (scope, expr::parser::parse(Some(name), s)?)
             }

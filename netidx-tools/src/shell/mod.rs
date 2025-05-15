@@ -185,6 +185,10 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     } else {
         Some(bs.get_env().await?)
     };
+    if !script {
+        println!("Welcome to the bscript shell");
+        println!("Press ctrl-c to cancel, ctrl-d to exit, and tab for help")
+    }
     loop {
         select! {
             RtEvent::Updated(id, v) = output.select_next_some() => {
