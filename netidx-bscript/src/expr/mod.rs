@@ -1176,7 +1176,7 @@ impl FromStr for Expr {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
-        parser::parse_one_modexpr(s)
+        parser::parse_one(s)
     }
 }
 

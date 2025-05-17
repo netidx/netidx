@@ -52,7 +52,7 @@ fn escaped_string() {
             args: Arc::from_iter([(None, ExprKind::Constant(p).to_expr_nopos())])
         }
         .to_expr_nopos(),
-        parse_one_modexpr(s).unwrap()
+        parse_one(s).unwrap()
     );
 }
 
@@ -60,7 +60,7 @@ fn escaped_string() {
 fn raw_string() {
     let s = r#"r'[]asd[[][]askj'"#;
     let p = Value::String(literal!(r#"[]asd[[][]askj"#));
-    assert_eq!(ExprKind::Constant(p).to_expr_nopos(), parse_one_expr(&s).unwrap());
+    assert_eq!(ExprKind::Constant(p).to_expr_nopos(), parse_one(&s).unwrap());
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn interpolated0() {
     }
     .to_expr_nopos();
     let s = r#"load("/foo/[get("[sid]_var")]/baz")"#;
-    assert_eq!(p, parse_one_modexpr(s).unwrap());
+    assert_eq!(p, parse_one(s).unwrap());
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn interpolated1() {
         .to_expr_nopos()]),
     }
     .to_expr_nopos();
-    assert_eq!(p, parse_one_modexpr(s).unwrap());
+    assert_eq!(p, parse_one(s).unwrap());
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn interpolated2() {
         function: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
     }
     .to_expr_nopos();
-    assert_eq!(p, parse_one_modexpr(s).unwrap());
+    assert_eq!(p, parse_one(s).unwrap());
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn apply_path() {
             function: Arc::new(ExprKind::Ref { name: ["load"].into() }.to_expr_nopos()),
         }
         .to_expr_nopos(),
-        parse_one_modexpr(s).unwrap()
+        parse_one(s).unwrap()
     );
 }
 
@@ -198,7 +198,7 @@ fn apply_path() {
 fn var_ref() {
     assert_eq!(
         ExprKind::Ref { name: ["sum"].into() }.to_expr_nopos(),
-        parse_one_expr("sum").unwrap()
+        parse_one("sum").unwrap()
     );
 }
 
@@ -213,7 +213,7 @@ fn letbind() {
             value: ExprKind::Constant(Value::I64(42)).to_expr_nopos()
         }))
         .to_expr_nopos(),
-        parse_one_modexpr("let foo = 42").unwrap()
+        parse_one("let foo = 42").unwrap()
     );
 }
 
@@ -247,7 +247,7 @@ fn letbinddoc() {
             value: ExprKind::Constant(Value::I64(42)).to_expr_nopos()
         }))
         .to_expr_nopos(),
-        parse_one_modexpr(
+        parse_one(
             r#"
 /// here is a let bind
 /// there are many like it
@@ -269,7 +269,7 @@ fn typed_letbind() {
             value: ExprKind::Constant(Value::I64(42)).to_expr_nopos()
         }))
         .to_expr_nopos(),
-        parse_one_modexpr("let foo: i64 = 42").unwrap()
+        parse_one("let foo: i64 = 42").unwrap()
     );
 }
 
@@ -336,7 +336,7 @@ fn nested_apply() {
     }
     .to_expr_nopos();
     let s = r#"sum(f32:1., load("/foo/bar"), max(f32:675.6, load("/foo/baz")), rand())"#;
-    assert_eq!(src, parse_one_modexpr(s).unwrap());
+    assert_eq!(src, parse_one(s).unwrap());
 }
 
 #[test]
@@ -347,7 +347,7 @@ fn arith_eq() {
     }
     .to_expr_nopos();
     let s = r#"a == b"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -358,7 +358,7 @@ fn arith_ne() {
     }
     .to_expr_nopos();
     let s = r#"a != b"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -369,7 +369,7 @@ fn arith_gt() {
     }
     .to_expr_nopos();
     let s = r#"a > b"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -380,7 +380,7 @@ fn arith_lt() {
     }
     .to_expr_nopos();
     let s = r#"a < b"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -391,7 +391,7 @@ fn arith_gte() {
     }
     .to_expr_nopos();
     let s = r#"a >= b"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn arith_lte() {
     }
     .to_expr_nopos();
     let s = r#"a <= b"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -419,7 +419,7 @@ fn arith_add() {
     }
     .to_expr_nopos();
     let s = r#"a + b + c"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -430,7 +430,7 @@ fn arith_sub() {
     }
     .to_expr_nopos();
     let s = r#"a - b"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -441,7 +441,7 @@ fn arith_mul() {
     }
     .to_expr_nopos();
     let s = r#"a * b"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -452,7 +452,7 @@ fn arith_div() {
     }
     .to_expr_nopos();
     let s = r#"a / b"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -463,7 +463,7 @@ fn arith_paren() {
     }
     .to_expr_nopos();
     let s = r#"a / b"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -502,7 +502,7 @@ fn arith_nested() {
     }
     .to_expr_nopos();
     let s = r#"((a + b + c) == (a - b - c)) && !a"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -549,7 +549,7 @@ fn select0() {
     );
     let exp = ExprKind::Select { arg, arms }.to_expr_nopos();
     let s = r#"select foo(b) { i64 as a if a < 10 => a * 2, a => a }"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -676,7 +676,7 @@ select foo(b) {
     Foo as { foo: 42, bar: _, baz, foobar: a, .. } => a,
     a => a
 }"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -707,7 +707,7 @@ fn connect() {
     }
     .to_expr_nopos();
     let s = r#"m::foo <- (a + 1)"#;
-    assert_eq!(exp, parse_one_modexpr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -739,7 +739,7 @@ fn inline_module() {
         pub let z = 42;
         let m = 42
     }"#;
-    assert_eq!(exp, parse_one_modexpr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -751,14 +751,14 @@ fn external_module() {
     }
     .to_expr_nopos();
     let s = r#"pub mod foo;"#;
-    assert_eq!(exp, parse_one_modexpr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
 fn usemodule() {
     let exp = ExprKind::Use { name: ModPath::from(["foo"]) }.to_expr_nopos();
     let s = r#"use foo"#;
-    assert_eq!(exp, parse_one_modexpr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -786,7 +786,7 @@ fn array() {
     }
     .to_expr_nopos();
     let s = r#"{[["foo", 42], ["bar", 42]]}"#;
-    assert_eq!(exp, parse_one_modexpr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -806,7 +806,7 @@ fn doexpr() {
     }
     .to_expr_nopos();
     let s = r#"{ let baz = 42; baz }"#;
-    assert_eq!(exp, parse_one_modexpr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -847,7 +847,7 @@ fn lambda() {
     }))
     .to_expr_nopos();
     let s = r#"|foo, bar| (a + b + c)"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -881,7 +881,7 @@ fn nested_lambda() {
     }))
     .to_expr_nopos();
     let s = r#"|| || (a + b + c)"#;
-    assert_eq!(exp, parse_one_expr(s).unwrap());
+    assert_eq!(exp, parse_one(s).unwrap());
 }
 
 #[test]
@@ -906,7 +906,7 @@ fn apply_lambda() {
     }
     .to_expr_nopos();
     let s = "a(|a, @args| 'a)";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -942,7 +942,7 @@ fn apply_typed_lambda() {
     }
     .to_expr_nopos();
     let s = "a(|a, b: [null, Number], @args: string| -> _ 'a)";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -964,7 +964,7 @@ fn mod_interpolate() {
     }
     .to_expr_nopos();
     let s = "mod a{{\"foo_[42]\"}}";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -979,7 +979,7 @@ fn multi_line_do() {
     }
     .to_expr_nopos();
     let s = "{\n  (a *\n  u64:1\n)}\n";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1010,7 +1010,7 @@ fn typed_array() {
     }
     .to_expr_nopos();
     let s = "{let f = |a: Array<'a>| -> 'a a}";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1080,7 +1080,7 @@ fn labeled_argument_lambda() {
 let a: fn(?#foo: Number, ?#bar: string, #a: Any, Any) -> string =
   |#foo: Number = 3, #bar = "hello", #a, baz| 'foo
 }"#;
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1095,7 +1095,7 @@ fn arrayref0() {
     }
     .to_expr_nopos();
     let s = "{foo[3]}";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1111,7 +1111,7 @@ fn arrayref1() {
     }
     .to_expr_nopos();
     let s = "{foo[..]}";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1127,7 +1127,7 @@ fn arrayref2() {
     }
     .to_expr_nopos();
     let s = "{foo[1..]}";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1143,7 +1143,7 @@ fn arrayref3() {
     }
     .to_expr_nopos();
     let s = "{foo[..1]}";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1159,7 +1159,7 @@ fn arrayref4() {
     }
     .to_expr_nopos();
     let s = "{foo[1..10]}";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1178,7 +1178,7 @@ fn qop() {
     }
     .to_expr_nopos();
     let s = "{foo[1..10]?}";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1205,7 +1205,7 @@ fn tuple0() {
     }
     .to_expr_nopos();
     let s = "{(42, a, f(b))}";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1243,7 +1243,7 @@ fn tuple1() {
     }))
     .to_expr_nopos();
     let s = "let (_, x, y) = (42, a, f(b))";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1277,7 +1277,7 @@ fn struct0() {
     }))
     .to_expr_nopos();
     let s = "let a = { foo: 42, bar: a, baz: f(b) }";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1319,7 +1319,7 @@ fn bindstruct() {
     }))
     .to_expr_nopos();
     let s = "let { foo, bar: _, baz: zam } = { foo: 42, bar: a, baz: f(b) }";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1334,7 +1334,7 @@ fn structref() {
     }
     .to_expr_nopos();
     let s = "{ a.foo }";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1349,7 +1349,7 @@ fn tupleref() {
     }
     .to_expr_nopos();
     let s = "{ a.2 }";
-    let pe = parse_one_modexpr(s).unwrap();
+    let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
@@ -1360,5 +1360,5 @@ fn prop0() {
   re::split(#pat:r'\\s*', r'foo, bar, baz')
 }
 "#;
-    dbg!(parse_one_modexpr(s).unwrap());
+    dbg!(parse_one(s).unwrap());
 }

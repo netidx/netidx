@@ -19,6 +19,7 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use arcstr::{literal, ArcStr};
 use chrono::prelude::*;
+use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
 use core::fmt;
 use derive_builder::Builder;
@@ -633,10 +634,7 @@ impl BS {
 
     async fn compile(&mut self, text: ArcStr) -> Result<CompRes> {
         let scope = ModPath::root();
-        let ori = match expr::parser::parse(None, text.clone()) {
-            Ok(ori) => ori,
-            Err(_) => expr::parser::parse_expr(None, text)?,
-        };
+        let ori = expr::parser::parse(None, text.clone())?;
         let exprs = join_all(
             ori.exprs.iter().map(|e| e.resolve_modules(&scope, &self.resolvers)),
         )
@@ -726,22 +724,25 @@ impl BS {
                 (scope, ori)
             }
         };
-        let mut es: SmallVec<[CompExp; 1]> = smallvec![];
-        for expr in &*ori.exprs {
-            let expr = expr
-                .resolve_modules(&scope, &self.resolvers)
-                .await
-                .with_context(|| ori.clone())?;
-            let top_id = expr.id;
-            let n = Node::compile(&mut self.ctx, &scope, expr)
-                .with_context(|| ori.clone())?;
-            let has_out = is_output(&n);
-            let typ = n.typ.clone();
-            self.nodes.insert(top_id, n);
-            self.updated.insert(top_id, true);
-            es.push(CompExp { id: top_id, output: has_out, typ })
+        let expr = ExprKind::Module {
+            export: true,
+            name: ori.name.clone().unwrap_or(literal!("")),
+            value: ModuleKind::Inline(ori.exprs.clone()),
         }
-        Ok(CompRes { exprs: es, env: self.ctx.env.clone() })
+        .to_expr(SourcePosition::default());
+        let expr = expr
+            .resolve_modules(&scope, &self.resolvers)
+            .await
+            .with_context(|| ori.clone())?;
+        let top_id = expr.id;
+        let n =
+            Node::compile(&mut self.ctx, &scope, expr).with_context(|| ori.clone())?;
+        let has_out = is_output(&n);
+        let typ = n.typ.clone();
+        self.nodes.insert(top_id, n);
+        self.updated.insert(top_id, true);
+        let exprs = smallvec![CompExp { id: top_id, output: has_out, typ }];
+        Ok(CompRes { exprs, env: self.ctx.env.clone() })
     }
 
     async fn run(mut self, mut to_rt: mpsc::UnboundedReceiver<ToRt>) -> Result<()> {

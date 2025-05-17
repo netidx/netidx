@@ -370,7 +370,7 @@ where
         spstring("mod").with(space()).with(spfname()),
         choice((
             attempt(sptoken(';')).map(|_| ModuleKind::Unresolved),
-            between(sptoken('{'), sptoken('}'), sep_by(modexpr(), attempt(sptoken(';'))))
+            between(sptoken('{'), sptoken('}'), sep_by(expr(), attempt(sptoken(';'))))
                 .map(|m: Vec<Expr>| ModuleKind::Inline(Arc::from(m))),
         )),
     )
@@ -395,21 +395,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (
-        position(),
-        between(
-            token('{'),
-            sptoken('}'),
-            sep_by(
-                choice((
-                    attempt(spaces().with(use_module())),
-                    attempt(spaces().with(typedef())),
-                    expr(),
-                )),
-                attempt(sptoken(';')),
-            ),
-        ),
-    )
+    (position(), between(token('{'), sptoken('}'), sep_by(expr(), attempt(sptoken(';')))))
         .map(|(pos, args): (_, Vec<Expr>)| {
             ExprKind::Do { exprs: Arc::from(args) }.to_expr(pos)
         })
@@ -1468,6 +1454,9 @@ where
     I::Range: Range,
 {
     choice((
+        attempt(spaces().with(module())),
+        attempt(spaces().with(use_module())),
+        attempt(spaces().with(typedef())),
         attempt(spaces().with(raw_string())),
         attempt(spaces().with(array())),
         attempt(spaces().with(arith())),
@@ -1500,39 +1489,12 @@ parser! {
     }
 }
 
-fn modexpr_<I>() -> impl Parser<I, Output = Expr>
-where
-    I: RangeStream<Token = char, Position = SourcePosition>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    choice((
-        attempt(spaces().with(qop(apply()))),
-        attempt(spaces().with(qop(do_block()))),
-        attempt(spaces().with(module())),
-        attempt(spaces().with(use_module())),
-        attempt(spaces().with(typedef())),
-        attempt(spaces().with(letbind())),
-        attempt(spaces().with(connect())),
-        attempt(spaces().with(qop(any()))),
-        attempt(spaces().with(interpolated())),
-    ))
-}
-
-parser! {
-    fn modexpr[I]()(I) -> Expr
-    where [I: RangeStream<Token = char, Position = SourcePosition>, I::Range: Range]
-    {
-        modexpr_()
-    }
-}
-
 /// Parse one or more toplevel module expressions
 ///
 /// followed by (optional) whitespace and then eof. At least one
 /// expression is required otherwise this function will fail.
 pub fn parse(name: Option<ArcStr>, s: ArcStr) -> anyhow::Result<Origin> {
-    let r: Vec<Expr> = sep_by1(modexpr(), attempt(sptoken(';')))
+    let r: Vec<Expr> = sep_by1(expr(), attempt(sptoken(';')))
         .skip(spaces())
         .skip(eof())
         .easy_parse(position::Stream::new(&*s))
@@ -1541,32 +1503,8 @@ pub fn parse(name: Option<ArcStr>, s: ArcStr) -> anyhow::Result<Origin> {
     Ok(Origin { name, source: s, exprs: Arc::from(r) })
 }
 
-/// Parse a fntype
-pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType<Refs>> {
-    fntype()
-        .skip(spaces())
-        .skip(eof())
-        .easy_parse(position::Stream::new(s))
-        .map(|(r, _)| r)
-        .map_err(|e| anyhow::anyhow!(format!("{e}")))
-}
-
-/// Parse expressions instead of module expressions
-///
-/// followed by (optional) whitespace and then eof. At least one
-/// expression is required or this function will fail.
-pub fn parse_expr(name: Option<ArcStr>, s: ArcStr) -> anyhow::Result<Origin> {
-    let r: Vec<Expr> = sep_by1(expr(), attempt(sptoken(';')))
-        .skip(spaces())
-        .skip(eof())
-        .easy_parse(position::Stream::new(&*s))
-        .map(|(r, _)| r)
-        .map_err(|e| anyhow::anyhow!(format!("{e}")))?;
-    Ok(Origin { name, source: s, exprs: Arc::from(r) })
-}
-
 /// Parse one and only one expression. Do not wrap it in an origin.
-pub fn parse_one_expr(s: &str) -> anyhow::Result<Expr> {
+pub fn parse_one(s: &str) -> anyhow::Result<Expr> {
     expr()
         .skip(spaces())
         .skip(eof())
@@ -1575,12 +1513,12 @@ pub fn parse_one_expr(s: &str) -> anyhow::Result<Expr> {
         .map_err(|e| anyhow::anyhow!(format!("{e}")))
 }
 
-/// Parse one and only one module expression. Do not wrap it in an origin.
-pub fn parse_one_modexpr(s: &str) -> anyhow::Result<Expr> {
-    modexpr()
+/// Parse a fntype
+pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType<Refs>> {
+    fntype()
         .skip(spaces())
         .skip(eof())
-        .easy_parse(position::Stream::new(&*s))
+        .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{e}")))
 }

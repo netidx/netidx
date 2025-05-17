@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    expr::parser::parse_one_modexpr,
+    expr::parser::parse_one,
     typ::{self, FnArgType, FnType, Refs, Type},
 };
 use bytes::Bytes;
@@ -570,6 +570,27 @@ macro_rules! structwith {
     };
 }
 
+macro_rules! inlinemodule {
+    ($inner:expr) => {
+        (any::<bool>(), random_fname(), collection::vec($inner, (0, 10))).prop_map(
+            |(export, name, body)| {
+                ExprKind::Module {
+                    export,
+                    name,
+                    value: ModuleKind::Inline(Arc::from(body)),
+                }
+                .to_expr_nopos()
+            },
+        )
+    };
+}
+
+fn module() -> impl Strategy<Value = Expr> {
+    (any::<bool>(), random_fname()).prop_map(|(export, name)| {
+        ExprKind::Module { export, name, value: ModuleKind::Unresolved }.to_expr_nopos()
+    })
+}
+
 fn arithexpr() -> impl Strategy<Value = Expr> {
     let leaf = prop_oneof![constant(), reference()];
     leaf.prop_recursive(5, 20, 10, |inner| {
@@ -602,9 +623,10 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
 }
 
 fn expr() -> impl Strategy<Value = Expr> {
-    let leaf = prop_oneof![constant(), reference()];
+    let leaf = prop_oneof![constant(), reference(), usestmt(), typedef(), module()];
     leaf.prop_recursive(5, 100, 25, |inner| {
         prop_oneof![
+            inlinemodule!(inner.clone()),
             arrayref!(inner.clone()),
             arrayslice!(inner.clone()),
             qop!(inner.clone()),
@@ -624,35 +646,6 @@ fn expr() -> impl Strategy<Value = Expr> {
             variant!(inner.clone()),
             structure!(inner.clone()),
             structwith!(inner.clone()),
-        ]
-    })
-}
-
-fn modexpr() -> impl Strategy<Value = Expr> {
-    let leaf = prop_oneof![
-        any!(expr()),
-        apply!(expr(), true),
-        do_block!(expr()),
-        usestmt(),
-        typedef(),
-        bind!(expr()),
-        connect!(expr()),
-    ];
-    leaf.prop_recursive(5, 400, 100, |inner| {
-        prop_oneof![
-            (any::<bool>(), random_fname(), collection::vec(inner.clone(), (0, 10)))
-                .prop_map(|(export, name, body)| ExprKind::Module {
-                    export,
-                    name,
-                    value: ModuleKind::Inline(Arc::from(body))
-                }
-                .to_expr_nopos()),
-            (any::<bool>(), random_fname()).prop_map(|(export, name)| ExprKind::Module {
-                export,
-                name,
-                value: ModuleKind::Unresolved
-            }
-            .to_expr_nopos()),
         ]
     })
 }
@@ -1124,130 +1117,130 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
 
 proptest! {
     #[test]
-    fn expr_round_trip0(s in modexpr()) {
+    fn expr_round_trip0(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_round_trip1(s in modexpr()) {
+    fn expr_round_trip1(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_round_trip2(s in modexpr()) {
+    fn expr_round_trip2(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_round_trip3(s in modexpr()) {
+    fn expr_round_trip3(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_round_trip4(s in modexpr()) {
+    fn expr_round_trip4(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_round_trip5(s in modexpr()) {
+    fn expr_round_trip5(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_round_trip6(s in modexpr()) {
+    fn expr_round_trip6(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_round_trip7(s in modexpr()) {
+    fn expr_round_trip7(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string()));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_pp_round_trip0(s in modexpr()) {
+    fn expr_pp_round_trip0(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_pp_round_trip1(s in modexpr()) {
+    fn expr_pp_round_trip1(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_pp_round_trip2(s in modexpr()) {
+    fn expr_pp_round_trip2(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_pp_round_trip3(s in modexpr()) {
+    fn expr_pp_round_trip3(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_pp_round_trip4(s in modexpr()) {
+    fn expr_pp_round_trip4(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_pp_round_trip5(s in modexpr()) {
+    fn expr_pp_round_trip5(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_pp_round_trip6(s in modexpr()) {
+    fn expr_pp_round_trip6(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 
     #[test]
-    fn expr_pp_round_trip7(s in modexpr()) {
+    fn expr_pp_round_trip7(s in expr()) {
         let s = dbg!(s);
         let st = dbg!(typ::format_with_flags(BitFlags::empty(), || s.to_string_pretty(80)));
-        let e = dbg!(parse_one_modexpr(st.as_str()).unwrap());
+        let e = dbg!(parse_one(st.as_str()).unwrap());
         assert!(check(&s, &e))
     }
 }

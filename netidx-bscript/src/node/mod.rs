@@ -1094,13 +1094,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
                 Some(v) => Some(v),
             },
-            NodeKind::Module(children) => {
-                for n in children {
-                    n.update(ctx, event);
-                }
-                None
-            }
-            NodeKind::Do(children) => {
+            NodeKind::Module(children) | NodeKind::Do(children) => {
                 children.into_iter().fold(None, |_, n| n.update(ctx, event))
             }
             NodeKind::TypeCast { target, n } => {
