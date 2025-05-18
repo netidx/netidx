@@ -379,6 +379,17 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
+        macro_rules! publish {
+            ($path:expr, $v:expr) => {{
+                let path = Path::from($path.clone());
+                match ctx.user.publish(path.clone(), $v.clone(), self.top_id) {
+                    Err(e) => return Some(Value::Error(format!("{e:?}").into())),
+                    Ok(id) => {
+                        self.current = Some((path, id));
+                    }
+                }
+            }};
+        }
         let up = self.args.update_diff(ctx, from, event);
         if up[0] {
             if let Some(v) = self.args.0[0].clone() {
@@ -392,19 +403,12 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
                 if let Some((_, id)) = self.current.take() {
                     ctx.user.unpublish(id, self.top_id);
                 }
-                let path = Path::from(path.clone());
-                match ctx.user.publish(path.clone(), v.clone(), self.top_id) {
-                    Err(e) => return Some(Value::Error(format!("{e:?}").into())),
-                    Ok(id) => {
-                        self.current = Some((path, id));
-                    }
-                }
+                publish!(path, v)
             }
-            ([_, true], [_, Some(v)]) => {
-                if let Some((_, val)) = &self.current {
-                    ctx.user.update(val, v.clone())
-                }
-            }
+            ([_, true], [Some(Value::String(path)), Some(v)]) => match &self.current {
+                Some((_, val)) => ctx.user.update(val, v.clone()),
+                None => publish!(path, v),
+            },
             _ => (),
         }
         let mut reply = None;

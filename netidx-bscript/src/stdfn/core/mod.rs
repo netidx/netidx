@@ -8,6 +8,7 @@ use crate::{
 };
 use anyhow::bail;
 use arcstr::{literal, ArcStr};
+use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
 use netidx::subscriber::Value;
 use std::{collections::VecDeque, sync::Arc};
@@ -691,6 +692,31 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Never {
     }
 }
 
+struct Dbg(SourcePosition);
+
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Dbg {
+    const NAME: &str = "dbg";
+    deftype!("fn('a) -> 'a");
+
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, from, _| Ok(Box::new(Dbg(from[0].spec.pos))))
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Dbg {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        from[0].update(ctx, event).map(|v| {
+            eprintln!("{}: {v}", self.0);
+            v
+        })
+    }
+}
+
 const MOD: &str = r#"
 pub mod core {
     type Sint = [ i32, z32, i64, z64 ];
@@ -838,6 +864,9 @@ pub mod core {
     /// ignore updates to any argument and never return anything
     pub let never = |@args| 'never;
 
+    /// when v updates, return it, but also print it along with the position of the expression
+    pub let dbg = |v| 'dbg;
+
     /// This is the toplevel error sink for the ? operator. If no other lexical binding of errors
     /// exists closer to the error site then errors handled by ? will come here.
     pub let errors: error = never()
@@ -879,5 +908,6 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Uniq>().unwrap();
     ctx.register_builtin::<array::Iter>().unwrap();
     ctx.register_builtin::<ToError>().unwrap();
+    ctx.register_builtin::<Dbg>().unwrap();
     MOD.parse().unwrap()
 }
