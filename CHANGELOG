@@ -26,11 +26,11 @@
 
 - bscript dependencies purged from every crate except tools.
 
-- bscript has grown up into a real programming language. For now you
-  can try it out in the shell subcommand of netidx tools. This
-  provides both a repl with completion and api docs as well as a
-  script runner. bscript modules have a .bs extension and can be
-  executed with e.g.
+- bscript has grown up into a real programming language. This is still
+  EXPERIMENTAL, for now you can try it out in the shell subcommand of
+  netidx tools. This provides both a repl with completion and api docs
+  as well as a script runner. bscript modules have a .bs extension and
+  can be executed with e.g.
 
   netidx shell ~/bin/prog.bs
 
