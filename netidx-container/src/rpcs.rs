@@ -1,9 +1,7 @@
 use anyhow::Result;
 use arcstr::ArcStr;
 use futures::channel::mpsc;
-use netidx::{
-    chars::Chars, path::Path, publisher::Publisher, subscriber::Value, utils::Batched,
-};
+use netidx::{path::Path, publisher::Publisher, subscriber::Value, utils::Batched};
 use netidx_protocols::rpc::server::{ArgSpec, Proc, RpcCall, RpcReply};
 
 pub(super) enum RpcRequestKind {
@@ -14,11 +12,6 @@ pub(super) enum RpcRequestKind {
     SetData {
         path: Path,
         value: Value,
-    },
-    SetFormula {
-        path: Path,
-        formula: Option<Chars>,
-        on_write: Option<Chars>,
     },
     CreateSheet {
         path: Path,
@@ -34,14 +27,14 @@ pub(super) enum RpcRequestKind {
     DelSheetCols(Path, usize),
     CreateTable {
         path: Path,
-        rows: Vec<Chars>,
-        columns: Vec<Chars>,
+        rows: Vec<ArcStr>,
+        columns: Vec<ArcStr>,
         lock: bool,
     },
-    AddTableRows(Path, Vec<Chars>),
-    AddTableCols(Path, Vec<Chars>),
-    DelTableRows(Path, Vec<Chars>),
-    DelTableCols(Path, Vec<Chars>),
+    AddTableRows(Path, Vec<ArcStr>),
+    AddTableCols(Path, Vec<ArcStr>),
+    DelTableRows(Path, Vec<ArcStr>),
+    DelTableCols(Path, Vec<ArcStr>),
     AddRoot(Path),
     DelRoot(Path),
     Packed(Vec<Self>),
@@ -58,7 +51,6 @@ pub(super) struct RpcApi {
     _lock_subtree_rpc: Proc,
     _unlock_subtree_rpc: Proc,
     _set_data_rpc: Proc,
-    _set_formula_rpc: Proc,
     _create_sheet_rpc: Proc,
     _add_sheet_rows: Proc,
     _add_sheet_cols: Proc,
@@ -85,7 +77,6 @@ impl RpcApi {
         let _unlock_subtree_rpc =
             start_unlock_subtree_rpc(&publisher, &base_path, tx.clone())?;
         let _set_data_rpc = start_set_data_rpc(&publisher, &base_path, tx.clone())?;
-        let _set_formula_rpc = start_set_formula_rpc(&publisher, &base_path, tx.clone())?;
         let _create_sheet_rpc =
             start_create_sheet_rpc(&publisher, &base_path, tx.clone())?;
         let _add_sheet_rows =
@@ -114,7 +105,6 @@ impl RpcApi {
             _lock_subtree_rpc,
             _unlock_subtree_rpc,
             _set_data_rpc,
-            _set_formula_rpc,
             _create_sheet_rpc,
             _add_sheet_rows,
             _add_sheet_cols,
@@ -289,47 +279,6 @@ pub(super) fn start_set_data_rpc(
     )
 }
 
-pub(super) fn start_set_formula_rpc(
-    publisher: &Publisher,
-    base_path: &Path,
-    tx: mpsc::Sender<RpcRequest>,
-) -> Result<Proc> {
-    fn map(
-        mut c: RpcCall,
-        mut path: Vec<Path>,
-        formula: Option<Chars>,
-        on_write: Option<Chars>,
-    ) -> Option<RpcRequest> {
-        if path.len() == 0 {
-            rpc_err!(c.reply, "expected at least 1 path")
-        } else if path.len() == 1 {
-            let path = path.pop().unwrap();
-            let kind = RpcRequestKind::SetFormula { path, formula, on_write };
-            Some(RpcRequest { reply: c.reply, kind })
-        } else {
-            let reqs = path
-                .into_iter()
-                .map(|path| RpcRequestKind::SetFormula {
-                    path,
-                    formula: formula.clone(),
-                    on_write: on_write.clone(),
-                })
-                .collect();
-            Some(RpcRequest { reply: c.reply, kind: RpcRequestKind::Packed(reqs) })
-        }
-    }
-    define_rpc!(
-        publisher,
-        base_path.append("set-formula"),
-        "make the specified paths calculated and set their formula",
-        map,
-        Some(tx),
-        path: Vec<Path> = Vec::<Path>::new(); "the paths to set",
-        formula: Option<Chars> = None::<Chars>; "the formula",
-        on_write: Option<Chars> = None::<Chars>; "the on write formula"
-    )
-}
-
 pub(super) fn start_create_sheet_rpc(
     publisher: &Publisher,
     base_path: &Path,
@@ -461,8 +410,8 @@ pub(super) fn start_create_table_rpc(
     fn map(
         c: RpcCall,
         path: Path,
-        rows: Vec<Chars>,
-        columns: Vec<Chars>,
+        rows: Vec<ArcStr>,
+        columns: Vec<ArcStr>,
         lock: bool,
     ) -> Option<RpcRequest> {
         let kind = RpcRequestKind::CreateTable { path, rows, columns, lock };
@@ -475,8 +424,8 @@ pub(super) fn start_create_table_rpc(
         map,
         Some(tx),
         path: Path = Value::Null; "where to put the table",
-        rows: Vec<Chars> = Value::Null; "the row names",
-        columns: Vec<Chars> = Value::Null; "the column names",
+        rows: Vec<ArcStr> = Value::Null; "the row names",
+        columns: Vec<ArcStr> = Value::Null; "the column names",
         lock: bool = true; "lock the table subtree"
     )
 }
@@ -486,7 +435,7 @@ pub(super) fn start_add_table_rows_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    fn map(c: RpcCall, path: Path, rows: Vec<Chars>) -> Option<RpcRequest> {
+    fn map(c: RpcCall, path: Path, rows: Vec<ArcStr>) -> Option<RpcRequest> {
         let kind = RpcRequestKind::AddTableRows(path, rows);
         Some(RpcRequest { kind, reply: c.reply })
     }
@@ -497,7 +446,7 @@ pub(super) fn start_add_table_rows_rpc(
         map,
         Some(tx),
         path: Path = Value::Null; "the table to modify",
-        rows: Vec<Chars> = Value::Null; "the rows to add"
+        rows: Vec<ArcStr> = Value::Null; "the rows to add"
     )
 }
 
@@ -506,7 +455,7 @@ pub(super) fn start_add_table_cols_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    fn map(c: RpcCall, path: Path, columns: Vec<Chars>) -> Option<RpcRequest> {
+    fn map(c: RpcCall, path: Path, columns: Vec<ArcStr>) -> Option<RpcRequest> {
         let kind = RpcRequestKind::AddTableCols(path, columns);
         Some(RpcRequest { reply: c.reply, kind })
     }
@@ -517,7 +466,7 @@ pub(super) fn start_add_table_cols_rpc(
         map,
         Some(tx),
         path: Path = Value::Null; "the table to modify",
-        columns: Vec<Chars> = Value::Null; "the columns to add"
+        columns: Vec<ArcStr> = Value::Null; "the columns to add"
     )
 }
 
@@ -526,7 +475,7 @@ pub(super) fn start_del_table_rows_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    fn map(c: RpcCall, path: Path, rows: Vec<Chars>) -> Option<RpcRequest> {
+    fn map(c: RpcCall, path: Path, rows: Vec<ArcStr>) -> Option<RpcRequest> {
         let kind = RpcRequestKind::DelTableRows(path, rows);
         Some(RpcRequest { reply: c.reply, kind })
     }
@@ -537,7 +486,7 @@ pub(super) fn start_del_table_rows_rpc(
         map,
         Some(tx),
         path: Path = Value::Null; "the table to modify",
-        rows: Vec<Chars> = Value::Null; "the rows to delete"
+        rows: Vec<ArcStr> = Value::Null; "the rows to delete"
     )
 }
 
@@ -546,7 +495,7 @@ pub(super) fn start_del_table_cols_rpc(
     base_path: &Path,
     tx: mpsc::Sender<RpcRequest>,
 ) -> Result<Proc> {
-    fn map(c: RpcCall, path: Path, columns: Vec<Chars>) -> Option<RpcRequest> {
+    fn map(c: RpcCall, path: Path, columns: Vec<ArcStr>) -> Option<RpcRequest> {
         let kind = RpcRequestKind::DelTableCols(path, columns);
         Some(RpcRequest { reply: c.reply, kind })
     }
@@ -557,6 +506,6 @@ pub(super) fn start_del_table_cols_rpc(
         map,
         Some(tx),
         path: Path = Value::Null; "the table to modify",
-        columns: Vec<Chars> = Value::Null; "the columns to delete"
+        columns: Vec<ArcStr> = Value::Null; "the columns to delete"
     )
 }

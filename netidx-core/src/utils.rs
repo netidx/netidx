@@ -1,4 +1,7 @@
-use crate::{pack::{Pack, PackError}, pool::{Poolable, Pooled, Pool}};
+use crate::{
+    pack::{Pack, PackError},
+    pool::{Pool, Poolable, Pooled},
+};
 use anyhow::{self, Result};
 use bytes::{Bytes, BytesMut};
 use digest::Digest;
@@ -12,15 +15,17 @@ use futures::{
 use fxhash::FxHashMap;
 use sha3::Sha3_512;
 use std::{
+    any::{Any, TypeId},
     borrow::Borrow,
     borrow::Cow,
     cell::RefCell,
     cmp::{Ord, Ordering, PartialOrd},
+    collections::HashMap,
     hash::Hash,
     iter::{IntoIterator, Iterator},
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    str, any::{TypeId, Any}, collections::HashMap,
+    str,
 };
 
 #[macro_export]
@@ -210,6 +215,26 @@ pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
 }
 
 /// escape the specified string using the specified escape character
+/// and a slice of special characters that need escaping. Place the
+/// results into the specified buffer
+pub fn escape_to<T>(s: &T, buf: &mut String, esc: char, spec: &[char])
+where
+    T: AsRef<str> + ?Sized,
+{
+    for c in s.as_ref().chars() {
+        if spec.contains(&c) {
+            buf.push(esc);
+            buf.push(c);
+        } else if c == esc {
+            buf.push(esc);
+            buf.push(c);
+        } else {
+            buf.push(c);
+        }
+    }
+}
+
+/// escape the specified string using the specified escape character
 /// and a slice of special characters that need escaping.
 pub fn escape<'a, 'b, T>(s: &'a T, esc: char, spec: &'b [char]) -> Cow<'a, str>
 where
@@ -221,19 +246,27 @@ where
         Cow::Borrowed(s.as_ref())
     } else {
         let mut out = String::with_capacity(s.len());
-        for c in s.chars() {
-            if spec.contains(&c) {
-                out.push(esc);
-                out.push(c);
-            } else if c == esc {
-                out.push(esc);
-                out.push(c);
-            } else {
-                out.push(c);
-            }
-        }
+        escape_to(s, &mut out, esc, spec);
         Cow::Owned(out)
     }
+}
+
+/// unescape the specified string using the specified escape
+/// character. Place the result in the specified buffer.
+pub fn unescape_to<T>(s: &T, buf: &mut String, esc: char)
+where
+    T: AsRef<str> + ?Sized,
+{
+    let mut escaped = false;
+    buf.extend(s.as_ref().chars().filter_map(|c| {
+        if c == esc && !escaped {
+            escaped = true;
+            None
+        } else {
+            escaped = false;
+            Some(c)
+        }
+    }))
 }
 
 /// unescape the specified string using the specified escape character
@@ -246,16 +279,7 @@ where
         Cow::Borrowed(s.as_ref())
     } else {
         let mut res = String::with_capacity(s.len());
-        let mut escaped = false;
-        res.extend(s.chars().filter_map(|c| {
-            if c == esc && !escaped {
-                escaped = true;
-                None
-            } else {
-                escaped = false;
-                Some(c)
-            }
-        }));
+        unescape_to(s, &mut res, esc);
         Cow::Owned(res)
     }
 }
@@ -335,10 +359,7 @@ thread_local! {
 /// Note it is much more efficient to construct your own pools.
 /// size and max are the pool parameters used if the pool doesn't
 /// already exist.
-pub fn take_t<T: Any + Poolable + Send + 'static>(
-    size: usize,
-    max: usize,
-) -> Pooled<T> {
+pub fn take_t<T: Any + Poolable + Send + 'static>(size: usize, max: usize) -> Pooled<T> {
     POOLS.with(|pools| {
         let mut pools = pools.borrow_mut();
         let pool: &mut Pool<T> = pools
@@ -554,9 +575,40 @@ impl Ord for Addr {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub enum Either<T, U> {
     Left(T),
     Right(U),
+}
+
+impl<T, U> Either<T, U> {
+    pub fn is_left(&self) -> bool {
+        match self {
+            Self::Left(_) => true,
+            Self::Right(_) => false,
+        }
+    }
+
+    pub fn is_right(&self) -> bool {
+        match self {
+            Self::Left(_) => false,
+            Self::Right(_) => true,
+        }
+    }
+
+    pub fn left(self) -> Option<T> {
+        match self {
+            Either::Left(t) => Some(t),
+            Either::Right(_) => None,
+        }
+    }
+
+    pub fn right(self) -> Option<U> {
+        match self {
+            Either::Right(t) => Some(t),
+            Either::Left(_) => None,
+        }
+    }
 }
 
 impl<I, T: Iterator<Item = I>, U: Iterator<Item = I>> Iterator for Either<T, U> {

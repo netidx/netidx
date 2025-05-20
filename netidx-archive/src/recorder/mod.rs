@@ -9,7 +9,6 @@ use chrono::prelude::*;
 use fxhash::FxHashMap;
 use log::error;
 use netidx::{
-    chars::Chars,
     pool::Pooled,
     protocol::value::FromValue,
     publisher::{Publisher, PublisherBuilder, Value},
@@ -67,7 +66,7 @@ impl Into<Value> for State {
 
 impl FromValue for State {
     fn from_value(v: Value) -> Result<Self> {
-        Ok(v.get_as::<Chars>()
+        Ok(v.get_as::<ArcStr>()
             .ok_or_else(|| anyhow!("state expected string"))?
             .parse::<State>()?)
     }

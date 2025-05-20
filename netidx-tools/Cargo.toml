@@ -31,29 +31,35 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-netidx-tools-core = { path = "../netidx-tools-core", version = "0.27.0", default-features = false }
-netidx-archive = { path = "../netidx-archive", version = "0.27.0", default-features = false }
-netidx = { path = "../netidx", version = "0.27.0", default-features = false }
-netidx-protocols = { path = "../netidx-protocols", version = "0.27.0", default-features = false }
-netidx-bscript = { path = "../netidx-bscript", version = "0.27.0", default-features = false }
-netidx-container = { path = "../netidx-container", version = "0.27.0", default-features = false }
-netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.27.0", default-features = false }
-tokio = { workspace = true }
 anyhow = { workspace = true }
+arcstr = { workspace = true }
 async-stream = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+combine = { workspace = true }
+compact_str = { workspace = true }
+crossterm = { workspace = true }
+dirs = { workspace = true }
 env_logger = { workspace = true }
+flexi_logger = { workspace = true }
 futures = { workspace = true }
 fxhash = { workspace = true }
+hdrhistogram = { workspace = true }
+indexmap = { workspace = true }
 log = { workspace = true }
+netidx-archive = { path = "../netidx-archive", version = "0.27.0", default-features = false }
+netidx-bscript = { path = "../netidx-bscript", version = "0.27.0", default-features = false }
+netidx-container = { path = "../netidx-container", version = "0.27.0", default-features = false }
+netidx = { path = "../netidx", version = "0.27.0", default-features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.27.0", default-features = false }
+netidx-tools-core = { path = "../netidx-tools-core", version = "0.27.0", default-features = false }
+netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.27.0", default-features = false }
 parking_lot = { workspace = true }
-serde = { workspace = true }
+reedline = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+smallvec = { workspace = true }
 structopt = { workspace = true }
-uuid = { workspace = true }
-arcstr = { workspace = true }
-combine = { workspace = true }
-dirs = { workspace = true }
-hdrhistogram = { workspace = true }
+tokio = { workspace = true }
+triomphe = { workspace = true }

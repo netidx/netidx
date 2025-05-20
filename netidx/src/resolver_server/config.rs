@@ -1,11 +1,11 @@
 use self::file::IdMapType;
 use crate::{
-    chars::Chars,
     path::Path,
     protocol::resolver::{self, Referral},
     tls, utils,
 };
 use anyhow::Result;
+use arcstr::ArcStr;
 use serde_json::from_str;
 use std::{
     collections::{
@@ -22,15 +22,15 @@ use std::{
     time::Duration,
 };
 
-type Permissions = String;
-type Entity = String;
+type Permissions = ArcStr;
+type Entity = ArcStr;
 
 #[derive(Debug, Clone)]
 pub enum Auth {
     Anonymous,
-    Local { path: Chars },
-    Krb5 { spn: Chars },
-    Tls { name: Chars, trusted: Chars, certificate: Chars, private_key: Chars },
+    Local { path: ArcStr },
+    Krb5 { spn: ArcStr },
+    Tls { name: ArcStr, trusted: ArcStr, certificate: ArcStr, private_key: ArcStr },
 }
 
 impl Into<resolver::Auth> for Auth {
@@ -48,14 +48,11 @@ impl From<file::Auth> for Auth {
     fn from(f: file::Auth) -> Self {
         match f {
             file::Auth::Anonymous => Self::Anonymous,
-            file::Auth::Krb5(spn) => Self::Krb5 { spn: Chars::from(spn) },
-            file::Auth::Local(path) => Self::Local { path: Chars::from(path) },
-            file::Auth::Tls { name, trusted, certificate, private_key } => Self::Tls {
-                name: Chars::from(name),
-                trusted: Chars::from(trusted),
-                certificate: Chars::from(certificate),
-                private_key: Chars::from(private_key),
-            },
+            file::Auth::Krb5(spn) => Self::Krb5 { spn },
+            file::Auth::Local(path) => Self::Local { path },
+            file::Auth::Tls { name, trusted, certificate, private_key } => {
+                Self::Tls { name, trusted, certificate, private_key }
+            }
         }
     }
 }
@@ -93,7 +90,7 @@ pub(crate) fn check_addrs<T: Clone + Into<resolver::Auth>>(
 
 /// The permissions format
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PMap(pub HashMap<String, HashMap<Entity, Permissions>>);
+pub struct PMap(pub HashMap<ArcStr, HashMap<Entity, Permissions>>);
 
 impl Default for PMap {
     fn default() -> Self {
@@ -103,9 +100,10 @@ impl Default for PMap {
 
 /// The on disk format, encoded as JSON
 pub mod file {
-    use super::{super::config::check_addrs, resolver, Chars, PMap};
+    use super::{super::config::check_addrs, resolver, PMap};
     use crate::{path::Path, pool::Pooled};
     use anyhow::Result;
+    use arcstr::ArcStr;
     use derive_builder::Builder;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -116,18 +114,18 @@ pub mod file {
     #[serde(deny_unknown_fields)]
     pub enum Auth {
         Anonymous,
-        Krb5(String),
-        Local(String),
-        Tls { name: String, trusted: String, certificate: String, private_key: String },
+        Krb5(ArcStr),
+        Local(ArcStr),
+        Tls { name: ArcStr, trusted: ArcStr, certificate: ArcStr, private_key: ArcStr },
     }
 
     impl Into<resolver::Auth> for Auth {
         fn into(self) -> resolver::Auth {
             match self {
                 Self::Anonymous => resolver::Auth::Anonymous,
-                Self::Krb5(spn) => resolver::Auth::Krb5 { spn: Chars::from(spn) },
-                Self::Local(path) => resolver::Auth::Local { path: Chars::from(path) },
-                Self::Tls { name, .. } => resolver::Auth::Tls { name: Chars::from(name) },
+                Self::Krb5(spn) => resolver::Auth::Krb5 { spn },
+                Self::Local(path) => resolver::Auth::Local { path },
+                Self::Tls { name, .. } => resolver::Auth::Tls { name },
             }
         }
     }
@@ -136,18 +134,18 @@ pub mod file {
     #[serde(deny_unknown_fields)]
     pub enum RefAuth {
         Anonymous,
-        Krb5(String),
-        Local(String),
-        Tls(String),
+        Krb5(ArcStr),
+        Local(ArcStr),
+        Tls(ArcStr),
     }
 
     impl Into<resolver::Auth> for RefAuth {
         fn into(self) -> resolver::Auth {
             match self {
                 Self::Anonymous => resolver::Auth::Anonymous,
-                Self::Krb5(spn) => resolver::Auth::Krb5 { spn: Chars::from(spn) },
-                Self::Local(path) => resolver::Auth::Local { path: Chars::from(path) },
-                Self::Tls(name) => resolver::Auth::Tls { name: Chars::from(name) },
+                Self::Krb5(spn) => resolver::Auth::Krb5 { spn },
+                Self::Local(path) => resolver::Auth::Local { path },
+                Self::Tls(name) => resolver::Auth::Tls { name },
             }
         }
     }
@@ -157,7 +155,7 @@ pub mod file {
     pub struct Referral {
         /// The path where the referred cluster attaches to the tree
         #[builder(setter(into))]
-        pub path: String,
+        pub path: ArcStr,
         /// The time to live in seconds, default forever
         #[serde(default)]
         #[builder(setter(strip_option), default)]
@@ -286,7 +284,7 @@ pub mod file {
         /// not specified a platform default will be chosen.
         #[serde(default)]
         #[builder(setter(into, strip_option), default)]
-        pub id_map_command: Option<String>,
+        pub id_map_command: Option<ArcStr>,
         /// The type of id mapping to perform. Id mapping maps netidx
         /// names to platform names for the purposes of determining
         /// group membership. The default type is to call /bin/id with
@@ -332,8 +330,8 @@ pub mod file {
 pub enum IdMap {
     DoNotMap,
     PlatformDefault,
-    Command(String),
-    Socket(String),
+    Command(ArcStr),
+    Socket(ArcStr),
 }
 
 #[derive(Debug, Clone)]
@@ -413,13 +411,13 @@ impl Config {
 		    IdMapType::Command => match m.id_map_command {
 			None => IdMap::PlatformDefault,
 			Some(cmd) => {
-			    if let Err(e) = std::fs::File::open(&cmd) {
+			    if let Err(e) = std::fs::File::open(&*cmd) {
 				bail!("id_map_command error: {}", e)
 			    }
 			    #[cfg(unix)]
 			    {
 				use std::os::unix::fs::MetadataExt;
-				if std::fs::metadata(&cmd)?.mode() & 0o001 == 0 {
+				if std::fs::metadata(&*cmd)?.mode() & 0o001 == 0 {
 				    bail!("id_map_command must be executable")
 				}
 			    }

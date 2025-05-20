@@ -107,7 +107,7 @@
 #[macro_use] extern crate anyhow;
 #[macro_use] extern crate netidx_core;
 
-pub use netidx_core::{chars, pack, pool, path, utils};
+pub use netidx_core::{pack, pool, path, utils};
 pub use netidx_netproto as protocol;
 
 pub mod tls;

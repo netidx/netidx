@@ -5,7 +5,6 @@ use super::common::{
 
 use crate::{
     channel::{self, Channel, K5CtxWrap},
-    chars::Chars,
     os::local_auth::AuthClient,
     path::Path,
     pool::Pooled,
@@ -16,6 +15,7 @@ use crate::{
     tls, utils,
 };
 use anyhow::{anyhow, Result};
+use arcstr::ArcStr;
 use cross_krb5::{ClientCtx, K5Ctx};
 use futures::{
     channel::{mpsc, oneshot},
@@ -295,7 +295,7 @@ impl Connection {
                             debug!("starting a new krb5 session");
                             let upn = upn.as_ref().map(|s| s.as_str());
                             let spn =
-                                Chars::from(spn.clone().ok_or_else(|| {
+                                ArcStr::from(spn.clone().ok_or_else(|| {
                                     anyhow!("spn is required for writers")
                                 })?);
                             wt!(
@@ -323,12 +323,14 @@ impl Connection {
                     debug!("tls auth selected");
                     let tls = self.tls.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
                     let ctx = task::spawn_blocking({
-			let tls = tls.clone();
-			let name = name.clone();
-			move || tls.load(&name)
-		    }).await??;
+                        let tls = tls.clone();
+                        let name = name.clone();
+                        move || tls.load(&name)
+                    })
+                    .await??;
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
-                    let name = rustls_pki_types::ServerName::try_from(&**name)?.to_owned();
+                    let name =
+                        rustls_pki_types::ServerName::try_from(&**name)?.to_owned();
                     match secret {
                         Some(secret) => {
                             debug!("reusing existing tls session");
@@ -347,7 +349,7 @@ impl Connection {
                             (con, r, false)
                         }
                         None => {
-                            let publisher_name = Chars::from(match identity {
+                            let publisher_name = ArcStr::from(match identity {
                                 None => tls.default_identity().name.clone(),
                                 Some(id) => match tls.get_identity(id) {
                                     None => bail!("identity not found"),

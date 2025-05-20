@@ -1,5 +1,5 @@
 use anyhow::Result;
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 use futures::{
     channel::{mpsc, oneshot},
     future,
@@ -9,7 +9,6 @@ use futures::{
 use fxhash::{FxHashMap, FxHashSet};
 use log::{error, info};
 use netidx::{
-    chars::Chars,
     path::Path,
     pool::{Pool, Pooled},
     publisher::{
@@ -41,7 +40,7 @@ pub mod server {
     #[macro_export]
     macro_rules! rpc_err {
         ($reply:expr, $msg:expr) => {{
-            $reply.send(Value::Error(Chars::from($msg)));
+            $reply.send(Value::Error($msg.into()));
             return None;
         }};
     }
@@ -102,12 +101,13 @@ pub mod server {
         static ref ARGS: Pool<HashMap<ArcStr, Value>> = Pool::new(1000, 50);
     }
 
+    #[derive(Debug)]
     pub struct RpcReply(Option<SendResult>);
 
     impl Drop for RpcReply {
         fn drop(&mut self) {
             if let Some(reply) = self.0.take() {
-                let _ = reply.send(Value::Error(Chars::from("rpc call failed")));
+                let _ = reply.send(Value::Error(literal!("rpc call failed")));
             }
         }
     }
@@ -127,6 +127,7 @@ pub mod server {
         pub default_value: Value,
     }
 
+    #[derive(Debug)]
     pub struct RpcCall {
         pub client: ClId,
         pub id: ProcId,
@@ -184,7 +185,7 @@ pub mod server {
 			    match req.value {
 				Value::Null => (),
 				Value::Array(a) => for v in &*a {
-				    match v.clone().cast_to::<(Chars, Value)>() {
+				    match v.clone().cast_to::<(ArcStr, Value)>() {
 					Ok((name, val)) => {
 					    if let Some(name) = self.arg_names.get(&*name) {
 						args.insert(name.clone(), val);
@@ -241,6 +242,7 @@ pub mod server {
     }
 
     /// A remote procedure published in netidx
+    #[derive(Debug)]
     pub struct Proc {
         _stop: oneshot::Sender<()>,
         id: ProcId,
@@ -274,7 +276,7 @@ pub mod server {
         # Example
         ```no_run
         #[macro_use] extern crate netidx_protocols;
-        use netidx::{path::Path, subscriber::Value, chars::Chars};
+        use netidx::{path::Path, subscriber::Value};
         use netidx_protocols::rpc::server::{Proc, ArgSpec, RpcCall};
         use arcstr::ArcStr;
         # use anyhow::Result;
@@ -429,7 +431,7 @@ pub mod client {
     #[derive(Debug)]
     struct ProcInner {
         call: Dval,
-        args: OnceCell<FxHashSet<Chars>>,
+        args: OnceCell<FxHashSet<ArcStr>>,
         subscribe_timeout: Duration,
     }
 
@@ -510,19 +512,19 @@ pub mod client {
                             debug!("args are {:?}", v);
                             let args = v
                                 .clone()
-                                .cast_to::<FxHashSet<Chars>>()
+                                .cast_to::<FxHashSet<ArcStr>>()
                                 .ok()
                                 .unwrap_or(HashSet::default());
                             // Another thread may have set these args already,
                             // so ignore if `set` returns Err.
-                            let _: Result<(), FxHashSet<Chars>> = self.0.args.set(args);
+                            let _: Result<(), FxHashSet<ArcStr>> = self.0.args.set(args);
                             break;
                         }
                     }
                 }
             }
             let args = {
-                let mut set: FxHashMap<Chars, Value> = HashMap::default();
+                let mut set: FxHashMap<ArcStr, Value> = HashMap::default();
                 let names = match self.0.args.get() {
                     Some(names) => names,
                     None => bail!("no args set"),

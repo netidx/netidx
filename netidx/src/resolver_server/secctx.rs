@@ -4,7 +4,6 @@ use super::{
 };
 use crate::{
     channel::K5CtxWrap,
-    chars::Chars,
     os::{
         local_auth::{AuthServer, Credential},
         Mapper,
@@ -151,7 +150,7 @@ impl<'a> SecCtxDataReadGuard<'a> {
 #[derive(Clone)]
 pub(super) enum SecCtx {
     Anonymous,
-    Krb5(Arc<(Chars, RwLock<SecCtxData<K5SecData>>)>),
+    Krb5(Arc<(ArcStr, RwLock<SecCtxData<K5SecData>>)>),
     Local(Arc<(LocalAuth, RwLock<SecCtxData<LocalSecData>>)>),
     Tls(Arc<(tokio_rustls::TlsAcceptor, RwLock<SecCtxData<TlsSecData>>)>),
 }

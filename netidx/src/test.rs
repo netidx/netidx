@@ -1,6 +1,5 @@
 mod resolver {
     use crate::{
-        chars::Chars,
         config::Config as ClientConfig,
         path::Path,
         protocol::glob::{Glob, GlobSet},
@@ -8,6 +7,7 @@ mod resolver {
         resolver_client::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
         resolver_server::{config::Config as ServerConfig, Server},
     };
+    use arcstr::literal;
     use netidx_netproto::resolver::TargetAuth;
     use rand::{thread_rng, Rng};
     use std::{iter, net::SocketAddr, time::Duration};
@@ -211,7 +211,7 @@ mod resolver {
             &*l,
             &[p("/app/huge1/sub/x"), p("/app/huge1/sub/y"), p("/app/huge1/sub/z")]
         );
-        let pat = Glob::new(Chars::from("/app/huge*/*")).unwrap();
+        let pat = Glob::new(literal!("/app/huge*/*")).unwrap();
         let pset = GlobSet::new(true, iter::once(pat)).unwrap();
         let mut l = Vec::new();
         for mut b in r.list_matching(&pset).await.unwrap().drain(..) {
@@ -451,11 +451,11 @@ mod publisher {
                     if &*p == "/app/q/foo" {
                         let f = PublishFlags::DESTROY_ON_IDLE;
                         let p =
-                            publisher.publish_with_flags(f, p, Value::True).unwrap();
+                            publisher.publish_with_flags(f, p, Value::Bool(true)).unwrap();
                         dfp = Some(p);
                         let _ = reply.send(());
                     } else if &*p == "/app/q/adv" {
-                        _adv = Some(publisher.publish(p, Value::False).unwrap());
+                        _adv = Some(publisher.publish(p, Value::Bool(false)).unwrap());
                         let _ = reply.send(());
                     } else {
                         panic!("unexpected default subscription {}", p);
@@ -490,13 +490,13 @@ mod publisher {
             subscriber.subscribe_nondurable_one("/app/v1".into(), None).await.unwrap();
         let q =
             subscriber.subscribe_nondurable_one("/app/q/foo".into(), None).await.unwrap();
-        assert_eq!(q.last(), Event::Update(Value::True));
+        assert_eq!(q.last(), Event::Update(Value::Bool(true)));
         let (_, res) =
             subscriber.resolver().resolve(iter::once("/app/q/adv".into())).await.unwrap();
         assert_eq!(res.len(), 1);
         let a =
             subscriber.subscribe_nondurable_one("/app/q/adv".into(), None).await.unwrap();
-        assert_eq!(a.last(), Event::Update(Value::False));
+        assert_eq!(a.last(), Event::Update(Value::Bool(false)));
         drop(q);
         drop(a);
         let mut c: u64 = 0;

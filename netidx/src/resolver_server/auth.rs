@@ -198,7 +198,7 @@ thread_local! {
 pub(super) struct PMap {
     normal: BTreeMap<Path, FxHashMap<Entity, Permissions>>,
     user_dynamic: BTreeMap<Path, Permissions>,
-    group_dynamic: BTreeMap<Path, Vec<(String, Permissions)>>,
+    group_dynamic: BTreeMap<Path, Vec<(ArcStr, Permissions)>>,
 }
 
 impl PMap {

@@ -47,7 +47,7 @@ impl Connection {
 
     /// Send a batch of messages to the other side.
     pub async fn send(&self, mut batch: Batch) -> Result<()> {
-        let v = Value::Bytes(batch.data.split().freeze());
+        let v = Value::from(batch.data.split().freeze());
         self.inner.send_one(v).await?;
         *self.buf.lock() = batch.data;
         Ok(())
@@ -63,7 +63,7 @@ impl Connection {
     async fn try_fill_queue(&self, queue: &mut Bytes) -> Result<()> {
         if !queue.has_remaining() {
             match self.inner.try_recv_one().await? {
-                Some(Value::Bytes(buf)) => *queue = buf,
+                Some(Value::Bytes(buf)) => *queue = (*buf).clone(),
                 Some(_) => bail!("unexpected response"),
                 None => (),
             }
@@ -74,7 +74,7 @@ impl Connection {
     async fn fill_queue(&self, queue: &mut Bytes) -> Result<()> {
         if !queue.has_remaining() {
             match self.inner.recv_one().await? {
-                Value::Bytes(buf) => *queue = buf,
+                Value::Bytes(buf) => *queue = (*buf).clone(),
                 _ => bail!("unexpected response"),
             }
         }

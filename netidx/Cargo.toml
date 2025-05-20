@@ -25,7 +25,6 @@ bitflags = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
-crossbeam = { workspace = true }
 cross-krb5 = { workspace = true }
 derive_builder = { workspace = true }
 dirs = { workspace = true }
@@ -51,7 +50,6 @@ smallvec = { workspace = true }
 tokio-rustls = { workspace = true }
 tokio = { workspace = true }
 triomphe = { workspace = true }
-webpki = { workspace = true }
 x509-parser = { workspace = true }
 
 [dev-dependencies]

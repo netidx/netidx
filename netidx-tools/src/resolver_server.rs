@@ -38,6 +38,7 @@ async fn tokio_run(config: Config, params: Params) -> Result<()> {
 }
 
 pub(crate) fn run(params: Params) -> Result<()> {
+    env_logger::init();
     #[cfg(unix)]
     {
         if params.foreground {

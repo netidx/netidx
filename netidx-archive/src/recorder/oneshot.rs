@@ -11,13 +11,12 @@ use crate::{
     recorder_client::{OneshotReply, OneshotReplyShard, PATHMAPS, SHARDS},
 };
 use anyhow::Result;
-use arcstr::ArcStr;
+use arcstr::{ArcStr, literal};
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
 use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, error};
 use netidx::{
-    chars::Chars,
     path::Path,
     pool::Pool,
     publisher::{Publisher, Value},
@@ -68,7 +67,7 @@ impl OneshotConfig {
         mut req: RpcCall,
         start: Value,
         end: Value,
-        filter: Vec<Chars>,
+        filter: Vec<ArcStr>,
     ) -> Option<(Self, RpcReply)> {
         let start = match parse_bound(start) {
             Ok(s) => s,
@@ -187,13 +186,13 @@ impl PendingOneshot {
         } else {
             let replies = self.replies.drain(..).collect::<Result<SmallVec<[_; 64]>>>();
             match replies {
-                Err(e) => self.reply.send(Value::Error(Chars::from(e.to_string()))),
+                Err(e) => self.reply.send(Value::Error(e.to_string().into())),
                 Ok(mut replies) => {
                     let mut reply = replies.pop().unwrap();
                     for mut r in replies.drain(..) {
                         reply.0.extend(r.0.drain(..));
                     }
-                    self.reply.send(Value::Bytes(pack(&reply)?.freeze()));
+                    self.reply.send(Value::Bytes(pack(&reply)?.freeze().into()));
                 }
             }
             Ok(true)
@@ -283,7 +282,7 @@ pub(super) async fn run(
         Some(control_tx),
         start: Value = "Unbounded"; START_DOC,
         end: Value = "Unbounded"; END_DOC,
-        filter: Vec<Chars> = vec![Chars::from("/**")]; FILTER_DOC
+        filter: Vec<ArcStr> = vec![literal!("/**")]; FILTER_DOC
     )?;
     publisher.flushed().await;
     let _ = init.send(());
@@ -333,7 +332,7 @@ pub(super) async fn run(
                     // your call is important to us. please stay on
                     // the line until the next available representive
                     // is ready to assist you. Goodbye.
-                    reply.send(Value::Error(Chars::from("busy")));
+                    reply.send(Value::Error(literal!("busy")));
                 } else {
                     let id = Oid::new();
                     let path = our_path.clone();

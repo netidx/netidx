@@ -216,7 +216,7 @@ impl ArchiveReader {
     pub fn open(path: impl AsRef<FilePath>) -> Result<Self> {
         let file =
             OpenOptions::new().read(true).open(path.as_ref()).context("open file")?;
-        file.try_lock_shared().context("locking reader for shared access")?;
+        FileExt::try_lock_shared(&file).context("locking reader for shared access")?;
         Self::open_with(Arc::new(file))
     }
 

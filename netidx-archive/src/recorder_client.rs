@@ -6,8 +6,8 @@ use anyhow::Result;
 use chrono::prelude::*;
 use futures::{channel::mpsc, prelude::*};
 use fxhash::FxHashMap;
+use arcstr::{literal, ArcStr};
 use netidx::{
-    chars::Chars,
     pack::Pack,
     path::Path,
     pool::{Pool, Pooled},
@@ -17,7 +17,7 @@ use netidx::{
 };
 use netidx_derive::Pack;
 use netidx_protocols::{call_rpc, rpc::client::Proc};
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{collections::VecDeque, time::Duration};
 use tokio::{task, try_join};
 
 lazy_static! {
@@ -37,7 +37,7 @@ pub struct OneshotReply(pub Pooled<Vec<OneshotReplyShard>>);
 
 fn encode_bound(bound: &Option<DateTime<Utc>>) -> Value {
     match bound {
-        None => Value::String(Chars::from("unbounded")),
+        None => Value::String(literal!("unbounded")),
         Some(dt) => Value::DateTime(*dt),
     }
 }
@@ -45,7 +45,7 @@ fn encode_bound(bound: &Option<DateTime<Utc>>) -> Value {
 fn encode_filter(filter: &GlobSet) -> Value {
     let v =
         filter.iter().map(|glob| Value::String(glob.raw().clone())).collect::<Vec<_>>();
-    Value::Array(Arc::from(v))
+    Value::Array(v.into())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,7 +119,7 @@ impl Session {
     pub async fn set_start(&self, st: Option<DateTime<Utc>>) -> Result<()> {
         match self.start.write_with_recipt(st.into()).await {
             Err(_) => bail!("canceled"),
-            Ok(Value::Ok) => Ok(()),
+            Ok(Value::Null) => Ok(()),
             Ok(v) => bail!("{v:?}"),
         }
     }
@@ -136,7 +136,7 @@ impl Session {
     pub async fn set_end(&self, st: Option<DateTime<Utc>>) -> Result<()> {
         match self.end.write_with_recipt(st.into()).await {
             Err(_) => bail!("canceled"),
-            Ok(Value::Ok) => Ok(()),
+            Ok(Value::Null) => Ok(()),
             Ok(v) => bail!("{v:?}"),
         }
     }
@@ -153,7 +153,7 @@ impl Session {
     pub async fn set_speed(&self, sp: Speed) -> Result<()> {
         match self.speed.write_with_recipt(sp.into()).await {
             Err(_) => bail!("canceled"),
-            Ok(Value::Ok) => Ok(()),
+            Ok(Value::Null) => Ok(()),
             Ok(v) => bail!("{v:?}"),
         }
     }
@@ -170,7 +170,7 @@ impl Session {
     pub async fn set_state(&self, s: State) -> Result<()> {
         match self.state.write_with_recipt(s.into()).await {
             Err(_) => bail!("canceled"),
-            Ok(Value::Ok) => Ok(()),
+            Ok(Value::Null) => Ok(()),
             Ok(v) => bail!("{v:?}"),
         }
     }
@@ -187,7 +187,7 @@ impl Session {
     pub async fn set_pos(&self, s: Seek) -> Result<()> {
         match self.pos.write_with_recipt(s.into()).await {
             Err(_) => bail!("canceled"),
-            Ok(Value::Ok) => Ok(()),
+            Ok(Value::Null) => Ok(()),
             Ok(v) => bail!("{v:?}"),
         }
     }
@@ -328,11 +328,11 @@ impl SessionBuilder {
             pos: self.pos,
             state: self.state,
             play_after: self.play_after,
-            filter: self.filter.as_ref().map(|g| g.raw()).unwrap_or_else(|| vec![Chars::from("/**")])
+            filter: self.filter.as_ref().map(|g| g.raw()).unwrap_or_else(|| vec![literal!("/**")])
         ).await?;
         let id = match res {
             Value::Error(e) => return Err(anyhow!(e)),
-            v => v.get_as::<Chars>().ok_or_else(|| anyhow!("expected a string"))?,
+            v => v.get_as::<ArcStr>().ok_or_else(|| anyhow!("expected a string"))?,
         };
         Session::new(self.base.append(&id), self.subscriber.clone()).await
     }
@@ -372,7 +372,7 @@ impl Client {
         .await?;
         match res {
             Value::Error(e) => bail!("{}", e.to_string()),
-            Value::Bytes(buf) => Ok(Pack::decode(&mut &*buf)?),
+            Value::Bytes(buf) => Ok(Pack::decode(&mut (*buf).clone())?),
             _ => bail!("unexpected response type"),
         }
     }

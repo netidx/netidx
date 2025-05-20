@@ -33,13 +33,13 @@ use std::{
     collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
     convert::{From, Into, TryInto},
     default::Default,
-    iter, mem,
+    fmt, iter, mem,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     pin::Pin,
     result,
     str::FromStr,
     sync::{Arc, Weak},
-    time::Duration, fmt,
+    time::Duration,
 };
 use tokio::{net::TcpListener, task};
 
@@ -460,14 +460,15 @@ type MsgQ = Sender<(Option<Duration>, Update)>;
 type Subscribed = Arc<FxHashSet<ClId>>;
 
 /// Extended authorization hook
-pub type ExtendedAuth = Box<dyn Fn(ClId, Id, Option<&UserInfo>) -> bool + Send + Sync + 'static>;
+pub type ExtendedAuth =
+    Box<dyn Fn(ClId, Id, Option<&UserInfo>) -> bool + Send + Sync + 'static>;
 
 #[repr(transparent)]
 struct ExtendedAuthWrap(ExtendedAuth);
 
 impl fmt::Debug for ExtendedAuthWrap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-	write!(f, "<Fn>")
+        write!(f, "<Fn>")
     }
 }
 
@@ -711,6 +712,7 @@ pub enum BatchMsg {
 
 /// A batch of updates to Vals
 #[must_use = "update batches do nothing unless committed"]
+#[derive(Debug)]
 pub struct UpdateBatch {
     origin: Publisher,
     updates: Pooled<Vec<BatchMsg>>,
@@ -1054,7 +1056,7 @@ impl PublisherBuilder {
     }
 
     pub async fn build(&mut self) -> Result<Publisher> {
-        let cfg = self.config.take().unwrap();
+        let cfg = self.config.take().ok_or_else(|| anyhow!("config is required"))?;
         let desired_auth = self.desired_auth.take().unwrap_or_else(|| cfg.default_auth());
         let bind_cfg =
             self.bind_cfg.take().unwrap_or_else(|| cfg.default_bind_config.clone());

@@ -2,6 +2,7 @@
 mod publisher;
 mod record_client;
 mod resolver;
+mod shell;
 mod stress_channel_publisher;
 mod stress_channel_subscriber;
 mod stress_publisher;
@@ -83,6 +84,13 @@ enum Opt {
         #[structopt(flatten)]
         params: subscriber::Params,
     },
+    #[structopt(name = "shell", about = "bscript repl and script executor")]
+    Shell {
+        #[structopt(flatten)]
+        common: ClientParams,
+        #[structopt(flatten)]
+        params: shell::Params,
+    },
     #[structopt(name = "container", about = "a hierarchical database in netidx")]
     Container {
         #[structopt(flatten)]
@@ -153,6 +161,10 @@ async fn tokio_main() -> Result<()> {
             let (cfg, auth) = common.load();
             subscriber::run(cfg, auth, params).await
         }
+        Opt::Shell { common, params } => {
+            let (cfg, auth) = common.load();
+            shell::run(cfg, auth, params).await
+        }
         Opt::Container { common, params } => {
             let (cfg, auth) = common.load();
             container::run(cfg, auth, params).await
@@ -189,7 +201,6 @@ async fn tokio_main() -> Result<()> {
 // as early as possible, before the async runtime is initialized. This means we can't
 // use the tokio_main macro on main, so we short-circuit ResolverServer handling here.
 fn main() -> Result<()> {
-    env_logger::init();
     let opt = Opt::from_args();
     match opt {
         Opt::ResolverServer(p) => resolver_server::run(p),

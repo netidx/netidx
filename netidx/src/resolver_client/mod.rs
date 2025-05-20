@@ -571,10 +571,11 @@ impl ResolverRead {
                     Ok(cn.referrals)
                 }
                 Entry::Occupied(mut e) => {
-                    if **e.get() < *cn.change_number {
+                    let n = e.get_mut();
+                    if **n != *cn.change_number {
                         res = true;
                     }
-                    *e.get_mut() = cn.change_number;
+                    *n = cn.change_number;
                     Ok(cn.referrals)
                 }
             },

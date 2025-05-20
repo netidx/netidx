@@ -1,3 +1,45 @@
+* 0.28.0
+
+- The value type's in memory layout has been reworked
+  - Value is now repr C and tag is a u32
+  - Value is smaller by 2 words from 5 down to 3
+  - Value::Ok has been removed, but the wire format did not
+    change. Ok will map to Value::Null.
+  - Value::Bool replaces Value::True and Value::False
+  - Typ now corresponds directly to the tag of Value, therefore
+    getting the Typ of a value is now just reading the tag
+  - Value::clone has been optimized. Value tags are now divided into
+    two classes. Tags for Copy values grow up from zero, and tags for
+    clone values grow down from 0x1000_0000. With a single compare on
+    tag clone can either call ptr::read if the value is copy, or
+    match and call clone if not.
+  - Value::Array now uses memory pools for small arrays to avoid lots of
+    small allocations
+  - Value::Array now supports zero copy array sub slicing
+  - The net effect of all the above changes is to improve throughput in
+    the stress test by about 40% (on x86_64).
+
+- The container no longer supports executing bscript. This removed a
+  bunch of complex code that I suspect was never used. If you need a
+  replacement for executing code in the container, check out the
+  bscript shell now included with tools
+
+- bscript dependencies purged from every crate except tools.
+
+- bscript has grown up into a real programming language. This is still
+  EXPERIMENTAL, for now you can try it out in the shell subcommand of
+  netidx tools. This provides both a repl with completion and api docs
+  as well as a script runner. bscript modules have a .bs extension and
+  can be executed with e.g.
+
+  netidx shell ~/bin/prog.bs
+
+  This will run until ctrl-c is pressed and continously print the
+  value of the last expression in the file as it changes.
+
+- the gtk browser is deprecated and will be replaced in a future
+  release
+
 * 0.27.3
 
 - Fix a bug in the recorder that prevented it being used

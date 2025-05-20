@@ -748,19 +748,17 @@ pub struct SubscriberBuilder {
 }
 
 impl SubscriberBuilder {
-    pub fn new() -> Self {
-        Self { cfg: None, desired_auth: None }
+    pub fn new(cfg: Config) -> Self {
+        Self { cfg: Some(cfg), desired_auth: None }
     }
 
     pub fn build(&mut self) -> Result<Subscriber> {
-        let cfg = self.cfg.take().ok_or_else(|| anyhow!("config is required"))?;
+        let cfg = self
+            .cfg
+            .take()
+            .ok_or_else(|| anyhow!("config is required, did you reuse the builder?"))?;
         let desired_auth = self.desired_auth.take().unwrap_or_else(|| cfg.default_auth());
         Subscriber::new(cfg, desired_auth)
-    }
-
-    pub fn config(&mut self, cfg: Config) -> &mut Self {
-        self.cfg = Some(cfg);
-        self
     }
 
     pub fn desired_auth(&mut self, auth: DesiredAuth) -> &mut Self {
@@ -964,9 +962,12 @@ impl Subscriber {
                                 }
                                 if let DvState::Dead(d) = &mut dv.sub {
                                     for (v, resp) in d.queued_writes.drain(..) {
-                                        sub.0
-                                            .connection
-                                            .send(ToCon::Write(sub.0.id, v, WriteId::new(), resp));
+                                        sub.0.connection.send(ToCon::Write(
+                                            sub.0.id,
+                                            v,
+                                            WriteId::new(),
+                                            resp,
+                                        ));
                                     }
                                 }
                                 dv.sub = DvState::Subscribed(sub);

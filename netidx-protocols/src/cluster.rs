@@ -1,5 +1,4 @@
 use anyhow::Result;
-use bytes::Bytes;
 use futures::{channel::mpsc, prelude::*};
 use log::{info, warn};
 use netidx::{
@@ -141,7 +140,7 @@ impl<T: Pack> Cluster<T> {
                 let mut cmds = Vec::new();
                 for req in reqs.drain(..) {
                     if let Value::Bytes(b) = &req.value {
-                        if let Ok(cmd) = <T as Pack>::decode(&mut &**b) {
+                        if let Ok(cmd) = Pack::decode(&mut &***b) {
                             cmds.push(cmd);
                             continue;
                         }
@@ -156,8 +155,7 @@ impl<T: Pack> Cluster<T> {
     /// Send a command out to other members of the cluster.
     pub fn send_cmd(&self, cmd: &T) {
         if self.others.len() > 0 {
-            let cmd = utils::pack(cmd).unwrap();
-            let cmd = Value::Bytes(Bytes::from(cmd));
+            let cmd: Value = utils::pack(cmd).unwrap().freeze().into();
             for other in self.others.values() {
                 other.write(cmd.clone());
             }
@@ -167,8 +165,7 @@ impl<T: Pack> Cluster<T> {
     /// Send a command to just one other, identified by it's path.
     pub fn send_cmd_to_one(&self, path: &Path, cmd: &T) {
         if let Some(other) = self.others.get(path) {
-            let cmd = utils::pack(cmd).unwrap();
-            let cmd = Value::Bytes(Bytes::from(cmd));
+            let cmd = utils::pack(cmd).unwrap().freeze().into();
             other.write(cmd);
         }
     }

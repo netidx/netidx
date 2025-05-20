@@ -15,20 +15,33 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-netidx-netproto = { path = "../netidx-netproto", version = "0.27.2" }
-netidx-core = { path = "../netidx-core", version = "0.26.0" }
-netidx = { path = "../netidx", version = "0.27.0", default-features = false }
 anyhow = { workspace = true }
-base64 = { workspace = true }
+arcstr = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 combine = { workspace = true }
+compact_str = { workspace = true }
+derive_builder = { workspace = true }
+dirs = { workspace = true }
+enumflags2 = { workspace = true }
+futures = { workspace = true }
 fxhash = { workspace = true }
-lazy_static = { workspace = true }
+immutable-chunkmap = { workspace = true }
+indexmap = { workspace = true }
+log = { workspace = true }
+netidx-core = { path = "../netidx-core", version = "0.26.0" }
+netidx-netproto = { path = "../netidx-netproto", version = "0.27.2" }
+netidx = { path = "../netidx", version = "0.27.0", default-features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.27.2" }
+parking_lot = { workspace = true }
+rand = { workspace = true }
 regex = { workspace = true }
-serde = { workspace = true }
 serde_derive = { workspace = true }
-arcstr = { workspace = true }
+serde = { workspace = true }
+smallvec = { workspace = true }
+tokio = { workspace = true }
+triomphe = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"
+env_logger = { workspace = true }

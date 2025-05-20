@@ -19,22 +19,14 @@ krb5_iov = ["netidx/krb5_iov"]
 [dependencies]
 netidx = { path = "../netidx", version = "0.27.0", default-features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.27.0", default-features = false }
-netidx-core = { path = "../netidx-core", version = "0.26.0", default-features = false }
 anyhow = { workspace = true }
-bytes = { workspace = true }
-chrono = { workspace = true }
-env_logger = { workspace = true }
 futures = { workspace = true }
 fxhash = { workspace = true }
 log = { workspace = true }
-parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
 structopt = { workspace = true }
 tokio = { workspace = true }
-uuid = { workspace = true }
-arcstr = { workspace = true }
 warp = { workspace = true }
-futures-util = { workspace = true }
 once_cell = { workspace = true }

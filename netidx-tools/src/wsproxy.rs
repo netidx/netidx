@@ -12,6 +12,7 @@ pub(super) async fn run(
     pcfg: publisher::Params,
     proxy: netidx_wsproxy::config::Config,
 ) -> Result<()> {
+    env_logger::init();
     let publisher = PublisherBuilder::new(cfg.clone())
         .desired_auth(auth.clone())
         .bind_cfg(pcfg.bind)

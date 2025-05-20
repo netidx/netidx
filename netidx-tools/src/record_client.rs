@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
+use arcstr::literal;
 use bytes::BytesMut;
 use chrono::prelude::*;
 use netidx::{
-    chars::Chars,
     path::Path,
     resolver_client::{Glob, GlobSet},
     subscriber::{Event, Subscriber, Value},
@@ -130,7 +130,7 @@ async fn oneshot(subscriber: Subscriber, params: OneshotParams) -> Result<()> {
         params
             .filter
             .into_iter()
-            .map(|g| Glob::new(Chars::from(g)))
+            .map(|g| Glob::new(g.into()))
             .collect::<Result<Vec<Glob>>>()?,
     )?;
     let client = Client::new(&subscriber, &params.base)?;
@@ -195,11 +195,11 @@ async fn session(subscriber: Subscriber, params: SessionParams) -> Result<()> {
     session_end.wait_subscribed().await?;
     session_pos.wait_subscribed().await?;
     session_state.wait_subscribed().await?;
-    session_start.write(Value::String(Chars::from("Unbounded")));
-    session_end.write(Value::String(Chars::from("Unbounded")));
-    session_speed.write(Value::String(Chars::from("Unlimited")));
+    session_start.write(Value::String(literal!("Unbounded")));
+    session_end.write(Value::String(literal!("Unbounded")));
+    session_speed.write(Value::String(literal!("Unlimited")));
     session_pos.write(params.pos.unwrap_or("Beginning".into()).into());
-    session_state.write(Value::String(Chars::from("play")));
+    session_state.write(Value::String(literal!("play")));
     future::pending::<()>().await;
     Ok(())
 }
@@ -297,6 +297,7 @@ fn compressed(file: PathBuf) -> Result<()> {
 }
 
 pub(super) async fn run(cmd: Cmd) -> Result<()> {
+    env_logger::init();
     match cmd {
         Cmd::Oneshot { common, params } => {
             let (cfg, auth) = common.load();

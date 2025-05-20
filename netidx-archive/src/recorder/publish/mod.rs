@@ -11,7 +11,7 @@ use crate::{
     },
 };
 use anyhow::Result;
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 use chrono::prelude::*;
 use controls::{
     NewSessionConfig, END_DOC, FILTER_DOC, PLAY_AFTER_DOC, POS_DOC, SPEED_DOC, START_DOC,
@@ -21,7 +21,6 @@ use futures::{channel::mpsc, prelude::*, select_biased};
 use fxhash::FxHashMap;
 use log::{error, info, warn};
 use netidx::{
-    chars::Chars,
     publisher::{ClId, Publisher, Value},
     resolver_client::GlobSet,
     subscriber::Subscriber,
@@ -263,10 +262,10 @@ pub(super) async fn run(
         pos: Option<Seek> = Value::Null; POS_DOC,
         state: Option<State> = Value::Null; STATE_DOC,
         play_after: Option<Duration> = None::<Duration>; PLAY_AFTER_DOC,
-        filter: Vec<Chars> = vec![Chars::from("/**")]; FILTER_DOC
+        filter: Vec<ArcStr> = vec![literal!("/**")]; FILTER_DOC
     );
     let _new_session = _new_session?;
-    let mut cluster = Cluster::<(ClId, Uuid, Vec<Chars>)>::new(
+    let mut cluster = Cluster::<(ClId, Uuid, Vec<ArcStr>)>::new(
         &publisher,
         subscriber.clone(),
         publish_config.base.append(&publish_config.cluster).append("publish"),
@@ -301,7 +300,7 @@ pub(super) async fn run(
     )?;
     let mut ecm_rx = ecm_rx.fuse();
     let ecm_reply = |res: Result<()>, mut reply: RpcReply| match res {
-        Ok(()) => reply.send(Value::Ok),
+        Ok(()) => reply.send(Value::Null),
         Err(e) => reply.send(Value::Error(e.to_string().into())),
     };
     publisher.flushed().await;
@@ -362,7 +361,7 @@ pub(super) async fn run(
                     match sessions.add_session(cfg.client) {
                         None => {
                             let m = format!("too many sessions, client {:?}", cfg.client);
-                            reply.send(Value::Error(Chars::from(m)));
+                            reply.send(Value::Error(m.into()));
                         },
                         Some(session_token) => {
                             let filter_txt = cfg.filter.clone();

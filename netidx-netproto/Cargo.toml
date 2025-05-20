@@ -11,23 +11,26 @@ readme = "../README.md"
 license = "MIT"
 
 [dependencies]
-combine = { workspace = true }
-netidx-core = { version = "0.26.0", path = "../netidx-core" }
-netidx-derive = { version = "0.22", path = "../netidx-derive" }
+anyhow = { workspace = true }
+arcstr = { workspace = true }
+base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
-anyhow = { workspace = true }
-globset = { workspace = true }
-fxhash = { workspace = true }
-lazy_static = { workspace = true }
-serde = { workspace = true }
-serde_derive = { workspace = true }
-base64 = { workspace = true }
-arcstr = { workspace = true }
-smallvec = { workspace = true }
+combine = { workspace = true }
+compact_str = { workspace = true }
 enumflags2 = { workspace = true }
+fxhash = { workspace = true }
+globset = { workspace = true }
 indexmap = { workspace = true }
+lazy_static = { workspace = true }
+netidx-core = { version = "0.26.0", path = "../netidx-core" }
+netidx-derive = { version = "0.22", path = "../netidx-derive" }
 rust_decimal = { workspace = true }
+serde_derive = { workspace = true }
+serde = { workspace = true }
+seq-macro = { workspace = true }
+smallvec = { workspace = true }
+triomphe = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]

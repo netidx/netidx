@@ -1,5 +1,4 @@
 use crate::{
-    chars::Chars,
     pack::{Pack, PackError},
     utils,
 };
@@ -7,6 +6,7 @@ use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use std::{
     borrow::{Borrow, Cow},
+    cell::RefCell,
     cmp::{Eq, Ord, PartialEq, PartialOrd},
     convert::{AsRef, From},
     fmt,
@@ -16,8 +16,9 @@ use std::{
     str::{self, FromStr},
 };
 
-pub static ESC: char = '\\';
-pub static SEP: char = '/';
+pub const ESC: char = '\\';
+pub const SEP: char = '/';
+pub const ROOT: &str = "/";
 
 fn is_canonical(s: &str) -> bool {
     for _ in Path::parts(s).filter(|p| *p == "") {
@@ -94,16 +95,6 @@ impl Deref for Path {
     }
 }
 
-impl From<Chars> for Path {
-    fn from(c: Chars) -> Path {
-        if is_canonical(&c) {
-            Path(ArcStr::from(c.as_ref()))
-        } else {
-            Path(ArcStr::from(canonize(&c)))
-        }
-    }
-}
-
 impl From<String> for Path {
     fn from(s: String) -> Path {
         if is_canonical(&s) {
@@ -144,6 +135,36 @@ impl From<ArcStr> for Path {
     }
 }
 
+impl From<&ArcStr> for Path {
+    fn from(s: &ArcStr) -> Path {
+        if is_canonical(s) {
+            Path(s.clone())
+        } else {
+            Path(ArcStr::from(canonize(s)))
+        }
+    }
+}
+
+impl<C: Borrow<str>> FromIterator<C> for Path {
+    fn from_iter<T: IntoIterator<Item = C>>(iter: T) -> Self {
+        thread_local! {
+            static BUF: RefCell<String> = RefCell::new(String::new());
+        }
+        BUF.with_borrow_mut(|buf| {
+            buf.clear();
+            buf.push(SEP);
+            for c in iter {
+                utils::escape_to(c.borrow(), buf, ESC, &[SEP]);
+                buf.push(SEP)
+            }
+            if buf.len() > 1 {
+                buf.pop(); // remove trailing sep
+            }
+            Self(ArcStr::from(buf.as_str()))
+        })
+    }
+}
+
 impl FromStr for Path {
     type Err = anyhow::Error;
 
@@ -153,6 +174,12 @@ impl FromStr for Path {
         } else {
             Ok(Path(ArcStr::from(canonize(s))))
         }
+    }
+}
+
+impl Into<ArcStr> for Path {
+    fn into(self) -> ArcStr {
+        self.0
     }
 }
 
@@ -203,8 +230,14 @@ impl<'a> DoubleEndedIterator for DirNames<'a> {
                         Some(res)
                     }
                     None => {
-                        *self = DirNames::Root(false);
-                        Some("/")
+                        if all == &ROOT {
+                            *self = DirNames::Root(false);
+                            Some("/")
+                        } else {
+                            let res = *all;
+                            *all = &ROOT;
+                            Some(res)
+                        }
                     }
                 }
             }
@@ -218,6 +251,10 @@ impl<'a> DoubleEndedIterator for DirNames<'a> {
 }
 
 impl Path {
+    pub const ESC: char = ESC;
+    pub const SEP: char = SEP;
+    pub const ROOT: &str = ROOT;
+
     /// create a path from a non static str by copying the contents of the str
     pub fn from_str(s: &str) -> Self {
         if is_canonical(s) {
@@ -285,14 +322,19 @@ impl Path {
     /// strips prefix from path at the separator boundry, including
     /// the separator. Returns None if prefix is not a parent of path
     /// (even if it happens to be a prefix).
-    pub fn strip_prefix<'a, T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(prefix: &T, path: &'a U) -> Option<&'a str> {
+    pub fn strip_prefix<'a, T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(
+        prefix: &T,
+        path: &'a U,
+    ) -> Option<&'a str> {
         if Path::is_parent(prefix, path) {
-            path.as_ref().strip_prefix(prefix.as_ref()).map(|s| s.strip_prefix("/").unwrap_or(s))
+            path.as_ref()
+                .strip_prefix(prefix.as_ref())
+                .map(|s| s.strip_prefix("/").unwrap_or(s))
         } else {
             None
         }
     }
-    
+
     /// finds the longest common parent of the two specified paths, /
     /// in the case they are completely disjoint.
     pub fn lcp<'a, T: AsRef<str> + ?Sized, U: AsRef<str> + ?Sized>(
@@ -427,6 +469,14 @@ impl Path {
     /// assert_eq!(bn.next(), Some("/some/path/ending/in"));
     /// assert_eq!(bn.next(), Some("/some/path/ending/in/foo"));
     /// assert_eq!(bn.next(), None);
+    /// let mut bn = Path::dirnames(&p);
+    /// assert_eq!(bn.next_back(), Some("/some/path/ending/in/foo"));
+    /// assert_eq!(bn.next_back(), Some("/some/path/ending/in"));
+    /// assert_eq!(bn.next_back(), Some("/some/path/ending"));
+    /// assert_eq!(bn.next_back(), Some("/some/path"));
+    /// assert_eq!(bn.next_back(), Some("/some"));
+    /// assert_eq!(bn.next_back(), Some("/"));
+    /// assert_eq!(bn.next_back(), None);
     /// ```
     pub fn dirnames<T: AsRef<str> + ?Sized>(s: &T) -> DirNames {
         let s = s.as_ref();

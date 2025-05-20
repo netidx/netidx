@@ -11,6 +11,7 @@ pub use self::{
     writer::ArchiveWriter,
 };
 use anyhow::{Context, Error, Result};
+use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use chrono::prelude::*;
 use fxhash::{FxBuildHasher, FxHashMap};
@@ -18,7 +19,6 @@ use indexmap::IndexMap;
 use log::warn;
 use memmap2::Mmap;
 use netidx::{
-    chars::Chars,
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
@@ -298,7 +298,7 @@ impl FromValue for Seek {
         match v {
             Value::DateTime(ts) => Ok(Seek::Absolute(ts)),
             v if v.number() => Ok(Seek::BatchRelative(v.cast_to::<i8>()?)),
-            v => v.cast_to::<Chars>()?.parse::<Seek>(),
+            v => v.cast_to::<ArcStr>()?.parse::<Seek>(),
         }
     }
 
