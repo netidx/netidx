@@ -87,7 +87,7 @@ async fn run() -> Result<()> {
     // load the site cluster config. You can also just use a file.
     let cfg = Config::load_default()?;
 
-    // no authentication (kerberos v5 is the other option)
+    // no authentication (kerberos v5 or TLS are other options)
     // listen on any unique address matching 192.168.0.0/16
     let publisher = Publisher::new(cfg, Auth::Anonymous, "192.168.0.0/16".parse()?).await?;
 
@@ -150,7 +150,7 @@ multiple published values in a hierarchy, since this makes your
 system more discoverable, and is also quite efficient.
 
 netidx includes optional support for kerberos v5 (including Active
-Directory). If enabled, all components will do mutual
+Directory), and TLS. If enabled, all components will do mutual
 authentication between the resolver, subscriber, and publisher as
 well as encryption of all data on the wire.
 
