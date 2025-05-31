@@ -204,6 +204,16 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         })
     }
 
+    pub fn lookup_typedef(
+        &self,
+        scope: &ModPath,
+        name: &ModPath,
+    ) -> Option<&Type<NoRefs>> {
+        self.find_visible(scope, name, |scope, name| {
+            self.typedefs.get(scope).and_then(|m| m.get(name))
+        })
+    }
+
     /// lookup binds in scope that match the specified partial
     /// name. This is intended to be used for IDEs and interactive
     /// shells, and is not used by the compiler.

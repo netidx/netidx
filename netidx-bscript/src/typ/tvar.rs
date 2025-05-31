@@ -1,7 +1,7 @@
 use crate::{
     env::Env,
     expr::ModPath,
-    typ::{FnType, NoRefs, PrintFlag, Refs, Type, TypeMark, PRINT_FLAGS},
+    typ::{FnType, PrintFlag, Scoped, Type, TypeMark, Unscoped, PRINT_FLAGS},
     Ctx, UserEvent,
 };
 use anyhow::{bail, Result};
@@ -53,15 +53,11 @@ impl<T: TypeMark> Default for TVar<T> {
     }
 }
 
-impl TVar<Refs> {
-    pub fn resolve_typerefs<'a, C: Ctx, E: UserEvent>(
-        &self,
-        scope: &ModPath,
-        env: &Env<C, E>,
-    ) -> Result<TVar<NoRefs>> {
-        match Type::TVar(self.clone()).resolve_typerefs(scope, env)? {
-            Type::TVar(tv) => Ok(tv),
-            _ => bail!("unexpected result from resolve_typerefs"),
+impl TVar<Unscoped> {
+    pub fn scope_refs(&self, scope: &ModPath) -> TVar<Scoped> {
+        match Type::TVar(self.clone()).scope_refs(scope) {
+            Type::TVar(tv) => tv,
+            _ => unreachable!(),
         }
     }
 }

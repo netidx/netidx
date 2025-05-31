@@ -775,7 +775,7 @@ where
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(spstring("Array").with(between(sptoken('<'), sptoken('>'), typexp())))
             .map(|t| Type::Array(Arc::new(t))),
-        attempt(sptypath()).map(|n| Type::Ref(n)),
+        attempt(sptypath()).map(|n| Type::Ref { scope: ModPath::root(), name: n }),
         attempt(typeprim()).map(|typ| Type::Primitive(typ.into())),
         attempt(tvar()).map(|tv| Type::TVar(tv)),
     ))

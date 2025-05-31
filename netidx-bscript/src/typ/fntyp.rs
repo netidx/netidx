@@ -17,6 +17,8 @@ use std::{
 };
 use triomphe::Arc;
 
+use super::AndAc;
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FnArgType<T: TypeMark> {
     pub label: Option<(ArcStr, bool)>,
@@ -276,7 +278,12 @@ impl FnType<NoRefs> {
         }
     }
 
-    pub fn contains(&self, t: &Self) -> bool {
+    pub(super) fn contains_int<C: Ctx, E: UserEvent>(
+        &self,
+        env: &Env<C, E>,
+        hist: &mut Vec<(usize, usize)>,
+        t: &Self,
+    ) -> Result<bool> {
         let mut sul = 0;
         let mut tul = 0;
         for (i, a) in self.args.iter().enumerate() {
@@ -290,10 +297,10 @@ impl FnType<NoRefs> {
                     .iter()
                     .find(|a| a.label.as_ref().map(|a| &a.0) == Some(l))
                 {
-                    None => return false,
+                    None => return Ok(false),
                     Some(o) => {
-                        if !o.typ.contains(&a.typ) {
-                            return false;
+                        if !o.typ.contains_int(env, hist, &a.typ)? {
+                            return Ok(false);
                         }
                     }
                 },
@@ -313,7 +320,7 @@ impl FnType<NoRefs> {
                     Some(_) => (),
                     None => {
                         if !opt {
-                            return false;
+                            return Ok(false);
                         }
                     }
                 },
@@ -321,30 +328,40 @@ impl FnType<NoRefs> {
         }
         let slen = self.args.len() - sul;
         let tlen = t.args.len() - tul;
-        slen == tlen
+        Ok(slen == tlen
             && self
                 .constraints
                 .read()
                 .iter()
-                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
+                .map(|(tv, tc)| tc.contains_int(env, hist, &Type::TVar(tv.clone())))
+                .collect::<Result<AndAc>>()?
+                .0
             && t.constraints
                 .read()
                 .iter()
-                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
+                .map(|(tv, tc)| tc.contains_int(env, hist, &Type::TVar(tv.clone())))
+                .collect::<Result<AndAc>>()?
+                .0
             && t.args[tul..]
                 .iter()
                 .zip(self.args[sul..].iter())
-                .all(|(t, s)| t.typ.contains(&s.typ))
+                .map(|(t, s)| t.typ.contains_int(env, hist, &s.typ))
+                .collect::<Result<AndAc>>()?
+                .0
             && match (&t.vargs, &self.vargs) {
-                (Some(tv), Some(sv)) => tv.contains(sv),
+                (Some(tv), Some(sv)) => tv.contains_int(env, hist, sv),
                 (None, None) => true,
                 (_, _) => false,
             }
-            && self.rtype.contains(&t.rtype)
+            && self.rtype.contains_int(env, hist, &t.rtype)?)
     }
 
-    pub fn check_contains(&self, other: &Self) -> Result<()> {
-        if !self.contains(other) {
+    pub fn check_contains<C: Ctx, E: UserEvent>(
+        &self,
+        env: &Env<C, E>,
+        other: &Self,
+    ) -> Result<()> {
+        if !self.contains(env, other)? {
             bail!("Fn type mismatch {self} does not contain {other}")
         }
         Ok(())
