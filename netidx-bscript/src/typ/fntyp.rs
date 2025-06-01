@@ -1,7 +1,7 @@
 use crate::{
     env::Env,
     expr::ModPath,
-    typ::{Scoped, TVar, Type, TypeMark, Unscoped},
+    typ::{TVar, Type},
     Ctx, UserEvent,
 };
 use anyhow::{bail, Result};
@@ -20,20 +20,20 @@ use triomphe::Arc;
 use super::AndAc;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FnArgType<T: TypeMark> {
+pub struct FnArgType {
     pub label: Option<(ArcStr, bool)>,
-    pub typ: Type<T>,
+    pub typ: Type,
 }
 
 #[derive(Debug, Clone)]
-pub struct FnType<T: TypeMark> {
-    pub args: Arc<[FnArgType<T>]>,
-    pub vargs: Option<Type<T>>,
-    pub rtype: Type<T>,
-    pub constraints: Arc<RwLock<Vec<(TVar<T>, Type<T>)>>>,
+pub struct FnType {
+    pub args: Arc<[FnArgType]>,
+    pub vargs: Option<Type>,
+    pub rtype: Type,
+    pub constraints: Arc<RwLock<Vec<(TVar, Type)>>>,
 }
 
-impl<T: TypeMark> PartialEq for FnType<T> {
+impl PartialEq for FnType {
     fn eq(&self, other: &Self) -> bool {
         let Self { args: args0, vargs: vargs0, rtype: rtype0, constraints: constraints0 } =
             self;
@@ -46,9 +46,9 @@ impl<T: TypeMark> PartialEq for FnType<T> {
     }
 }
 
-impl<T: TypeMark> Eq for FnType<T> {}
+impl Eq for FnType {}
 
-impl<T: TypeMark> PartialOrd for FnType<T> {
+impl PartialOrd for FnType {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         use std::cmp::Ordering;
         let Self { args: args0, vargs: vargs0, rtype: rtype0, constraints: constraints0 } =
@@ -70,13 +70,13 @@ impl<T: TypeMark> PartialOrd for FnType<T> {
     }
 }
 
-impl<T: TypeMark> Ord for FnType<T> {
+impl Ord for FnType {
     fn cmp(&self, other: &Self) -> Ordering {
         self.partial_cmp(other).unwrap()
     }
 }
 
-impl<T: TypeMark> Default for FnType<T> {
+impl Default for FnType {
     fn default() -> Self {
         Self {
             args: Arc::from_iter([]),
@@ -87,20 +87,15 @@ impl<T: TypeMark> Default for FnType<T> {
     }
 }
 
-impl FnType<Unscoped> {
-    pub fn scope_refs<'a, C: Ctx, E: UserEvent>(
-        &self,
-        scope: &ModPath,
-    ) -> FnType<Scoped> {
+impl FnType {
+    pub fn scope_refs<'a, C: Ctx, E: UserEvent>(&self, scope: &ModPath) -> FnType {
         let typ = Type::Fn(Arc::new(self.clone()));
         match typ.scope_refs(scope) {
             Type::Fn(f) => (*f).clone(),
             _ => unreachable!(),
         }
     }
-}
 
-impl<T: TypeMark> FnType<T> {
     pub(super) fn normalize(&self) -> Self {
         let Self { args, vargs, rtype, constraints } = self;
         let args = Arc::from_iter(
@@ -118,9 +113,7 @@ impl<T: TypeMark> FnType<T> {
         ));
         FnType { args, vargs, rtype, constraints }
     }
-}
 
-impl FnType<Scoped> {
     pub fn unbind_tvars(&self) {
         let FnType { args, vargs, rtype, constraints } = self;
         for arg in args.iter() {
@@ -138,7 +131,7 @@ impl FnType<Scoped> {
 
     pub fn constrain_known(&self) {
         thread_local! {
-            static KNOWN: RefCell<FxHashMap<ArcStr, TVar<Scoped>>> = RefCell::new(HashMap::default());
+            static KNOWN: RefCell<FxHashMap<ArcStr, TVar>> = RefCell::new(HashMap::default());
         }
         KNOWN.with_borrow_mut(|known| {
             known.clear();
@@ -173,7 +166,7 @@ impl FnType<Scoped> {
         FnType { args, vargs, rtype, constraints }
     }
 
-    pub fn replace_tvars(&self, known: &FxHashMap<ArcStr, Type<Scoped>>) -> Self {
+    pub fn replace_tvars(&self, known: &FxHashMap<ArcStr, Type>) -> Self {
         let FnType { args, vargs, rtype, constraints } = self;
         let args = Arc::from_iter(args.iter().map(|a| FnArgType {
             label: a.label.clone(),
@@ -190,12 +183,12 @@ impl FnType<Scoped> {
     /// types in IDEs and shells.
     pub fn replace_auto_constrained(&self) -> Self {
         thread_local! {
-            static KNOWN: RefCell<FxHashMap<ArcStr, Type<Scoped>>> = RefCell::new(HashMap::default());
+            static KNOWN: RefCell<FxHashMap<ArcStr, Type>> = RefCell::new(HashMap::default());
         }
         KNOWN.with_borrow_mut(|known| {
             known.clear();
             let Self { args, vargs, rtype, constraints } = self;
-            let constraints: Vec<(TVar<Scoped>, Type<Scoped>)> = constraints
+            let constraints: Vec<(TVar, Type)> = constraints
                 .read()
                 .iter()
                 .filter_map(|(tv, ct)| {
@@ -228,7 +221,7 @@ impl FnType<Scoped> {
                 .any(|(tv, tc)| tv.read().typ.read().is_none() || tc.has_unbound())
     }
 
-    pub fn bind_as(&self, t: &Type<Scoped>) {
+    pub fn bind_as(&self, t: &Type) {
         let FnType { args, vargs, rtype, constraints } = self;
         for a in args.iter() {
             a.typ.bind_as(t)
@@ -247,7 +240,7 @@ impl FnType<Scoped> {
         }
     }
 
-    pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<Scoped>>) {
+    pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar>) {
         let FnType { args, vargs, rtype, constraints } = self;
         for arg in args.iter() {
             arg.typ.alias_tvars(known)
@@ -262,7 +255,7 @@ impl FnType<Scoped> {
         }
     }
 
-    pub fn collect_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<Scoped>>) {
+    pub fn collect_tvars(&self, known: &mut FxHashMap<ArcStr, TVar>) {
         let FnType { args, vargs, rtype, constraints } = self;
         for arg in args.iter() {
             arg.typ.collect_tvars(known)
@@ -450,7 +443,7 @@ impl FnType<Scoped> {
     }
 }
 
-impl<T: TypeMark> fmt::Display for FnType<T> {
+impl fmt::Display for FnType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let constraints = self.constraints.read();
         if constraints.len() == 0 {
