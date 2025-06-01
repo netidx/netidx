@@ -1,15 +1,20 @@
-use super::{NoRefs, Type};
+use super::Type;
+use crate::{env::Env, Ctx, UserEvent};
 use netidx::publisher::Value;
 use netidx_netproto::value::NakedValue;
 use std::fmt;
 
 /// A value with it's type, used for formatting
 #[derive(Debug, Clone)]
-pub struct TVal<'a>(pub &'a Type<NoRefs>, pub &'a Value);
+pub struct TVal<'a, C: Ctx, E: UserEvent> {
+    pub env: &'a Env<C, E>,
+    pub typ: &'a Type,
+    pub v: &'a Value,
+}
 
-impl<'a> fmt::Display for TVal<'a> {
+impl<'a, C: Ctx, E: UserEvent> fmt::Display for TVal<'a, C, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.0.is_a(self.1) {
+        if !self.typ.is_a(&self.env, &self.v) {
             return write!(
                 f,
                 "error, type {} does not match value {}",
@@ -17,8 +22,8 @@ impl<'a> fmt::Display for TVal<'a> {
                 NakedValue(self.1)
             );
         }
-        match (self.0, self.1) {
-            (Type::Primitive(_) | Type::Bottom(_) | Type::Ref(_) | Type::Fn(_), v) => {
+        match (&self.typ, &self.v) {
+            (Type::Primitive(_) | Type::Bottom | Type::Ref(_) | Type::Fn(_), v) => {
                 write!(f, "{}", NakedValue(v))
             }
             (Type::Array(et), Value::Array(a)) => {
@@ -62,7 +67,7 @@ impl<'a> fmt::Display for TVal<'a> {
             (Type::Tuple(_), v) => write!(f, "{}", NakedValue(v)),
             (Type::TVar(tv), v) => match &*tv.read().typ.read() {
                 None => write!(f, "{}", NakedValue(v)),
-                Some(t) => write!(f, "{}", TVal(t, v)),
+                Some(typ) => write!(f, "{}", TVal { env: &self.env, typ, v }),
             },
             (Type::Variant(n, flds), Value::Array(a)) if a.len() >= 2 => {
                 write!(f, "`{n}(")?;

@@ -1,10 +1,7 @@
 use crate::{
-    env::Env,
     expr::ModPath,
-    typ::{FnType, PrintFlag, Scoped, Type, TypeMark, Unscoped, PRINT_FLAGS},
-    Ctx, UserEvent,
+    typ::{FnType, PrintFlag, Type, PRINT_FLAGS},
 };
-use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use compact_str::format_compact;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -18,114 +15,9 @@ use triomphe::Arc;
 
 atomic_id!(TVarId);
 
-#[derive(Debug)]
-pub struct TVarInnerInner<T: TypeMark> {
-    pub(super) id: TVarId,
-    pub(super) typ: Arc<RwLock<Option<Type<T>>>>,
-}
-
-#[derive(Debug)]
-pub struct TVarInner<T: TypeMark> {
-    pub name: ArcStr,
-    pub(super) typ: RwLock<TVarInnerInner<T>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TVar<T: TypeMark>(Arc<TVarInner<T>>);
-
-impl<T: TypeMark> fmt::Display for TVar<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !PRINT_FLAGS.get().contains(PrintFlag::DerefTVars) {
-            write!(f, "'{}", self.name)
-        } else {
-            write!(f, "'{}: ", self.name)?;
-            match &*self.read().typ.read() {
-                Some(t) => write!(f, "{t}"),
-                None => write!(f, "unbound"),
-            }
-        }
-    }
-}
-
-impl<T: TypeMark> Default for TVar<T> {
-    fn default() -> Self {
-        Self::empty_named(ArcStr::from(format_compact!("_{}", TVarId::new().0).as_str()))
-    }
-}
-
-impl TVar<Unscoped> {
-    pub fn scope_refs(&self, scope: &ModPath) -> TVar<Scoped> {
-        match Type::TVar(self.clone()).scope_refs(scope) {
-            Type::TVar(tv) => tv,
-            _ => unreachable!(),
-        }
-    }
-}
-
-impl<T: TypeMark> TVar<T> {
-    pub fn empty_named(name: ArcStr) -> Self {
-        Self(Arc::new(TVarInner {
-            name,
-            typ: RwLock::new(TVarInnerInner {
-                id: TVarId::new(),
-                typ: Arc::new(RwLock::new(None)),
-            }),
-        }))
-    }
-
-    pub fn named(name: ArcStr, typ: Type<T>) -> Self {
-        Self(Arc::new(TVarInner {
-            name,
-            typ: RwLock::new(TVarInnerInner {
-                id: TVarId::new(),
-                typ: Arc::new(RwLock::new(Some(typ))),
-            }),
-        }))
-    }
-
-    pub fn read(&self) -> RwLockReadGuard<TVarInnerInner<T>> {
-        self.typ.read()
-    }
-
-    pub fn write(&self) -> RwLockWriteGuard<TVarInnerInner<T>> {
-        self.typ.write()
-    }
-
-    /// make self an alias for other
-    pub fn alias(&self, other: &Self) {
-        let mut s = self.write();
-        let o = other.read();
-        s.id = o.id;
-        s.typ = Arc::clone(&o.typ);
-    }
-
-    /// copy self from other
-    pub fn copy(&self, other: &Self) {
-        let s = self.read();
-        let o = other.read();
-        *s.typ.write() = o.typ.read().clone();
-    }
-
-    pub fn normalize(&self) -> Self {
-        match &mut *self.read().typ.write() {
-            None => (),
-            Some(t) => {
-                *t = t.normalize();
-            }
-        }
-        self.clone()
-    }
-}
-
-impl TVar<NoRefs> {
-    pub fn unbind(&self) {
-        *self.read().typ.write() = None
-    }
-}
-
-pub(super) fn would_cycle_inner(addr: usize, t: &Type<NoRefs>) -> bool {
+pub(super) fn would_cycle_inner(addr: usize, t: &Type) -> bool {
     match t {
-        Type::Primitive(_) | Type::Bottom(_) | Type::Ref(_) => false,
+        Type::Primitive(_) | Type::Bottom | Type::Ref { .. } => false,
         Type::TVar(t) => {
             Arc::as_ptr(&t.read().typ).addr() == addr
                 || match &*t.read().typ.read() {
@@ -154,22 +46,50 @@ pub(super) fn would_cycle_inner(addr: usize, t: &Type<NoRefs>) -> bool {
     }
 }
 
-impl TVar<NoRefs> {
-    pub(super) fn would_cycle(&self, t: &Type<NoRefs>) -> bool {
-        let addr = Arc::as_ptr(&self.read().typ).addr();
-        would_cycle_inner(addr, t)
+#[derive(Debug)]
+pub struct TVarInnerInner {
+    pub(super) id: TVarId,
+    pub(super) typ: Arc<RwLock<Option<Type>>>,
+}
+
+#[derive(Debug)]
+pub struct TVarInner {
+    pub name: ArcStr,
+    pub(super) typ: RwLock<TVarInnerInner>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TVar(Arc<TVarInner>);
+
+impl fmt::Display for TVar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !PRINT_FLAGS.get().contains(PrintFlag::DerefTVars) {
+            write!(f, "'{}", self.name)
+        } else {
+            write!(f, "'{}: ", self.name)?;
+            match &*self.read().typ.read() {
+                Some(t) => write!(f, "{t}"),
+                None => write!(f, "unbound"),
+            }
+        }
     }
 }
 
-impl<T: TypeMark> Deref for TVar<T> {
-    type Target = TVarInner<T>;
+impl Default for TVar {
+    fn default() -> Self {
+        Self::empty_named(ArcStr::from(format_compact!("_{}", TVarId::new().0).as_str()))
+    }
+}
+
+impl Deref for TVar {
+    type Target = TVarInner;
 
     fn deref(&self) -> &Self::Target {
         &*self.0
     }
 }
 
-impl<T: TypeMark> PartialEq for TVar<T> {
+impl PartialEq for TVar {
     fn eq(&self, other: &Self) -> bool {
         let t0 = self.read();
         let t1 = other.read();
@@ -181,9 +101,9 @@ impl<T: TypeMark> PartialEq for TVar<T> {
     }
 }
 
-impl<T: TypeMark> Eq for TVar<T> {}
+impl Eq for TVar {}
 
-impl<T: TypeMark> PartialOrd for TVar<T> {
+impl PartialOrd for TVar {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         let t0 = self.read();
         let t1 = other.read();
@@ -197,7 +117,7 @@ impl<T: TypeMark> PartialOrd for TVar<T> {
     }
 }
 
-impl<T: TypeMark> Ord for TVar<T> {
+impl Ord for TVar {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         let t0 = self.read();
         let t1 = other.read();
@@ -208,5 +128,76 @@ impl<T: TypeMark> Ord for TVar<T> {
             let t1 = t1.typ.read();
             t0.cmp(&*t1)
         }
+    }
+}
+
+impl TVar {
+    pub fn scope_refs(&self, scope: &ModPath) -> Self {
+        match Type::TVar(self.clone()).scope_refs(scope) {
+            Type::TVar(tv) => tv,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn empty_named(name: ArcStr) -> Self {
+        Self(Arc::new(TVarInner {
+            name,
+            typ: RwLock::new(TVarInnerInner {
+                id: TVarId::new(),
+                typ: Arc::new(RwLock::new(None)),
+            }),
+        }))
+    }
+
+    pub fn named(name: ArcStr, typ: Type) -> Self {
+        Self(Arc::new(TVarInner {
+            name,
+            typ: RwLock::new(TVarInnerInner {
+                id: TVarId::new(),
+                typ: Arc::new(RwLock::new(Some(typ))),
+            }),
+        }))
+    }
+
+    pub fn read(&self) -> RwLockReadGuard<TVarInnerInner> {
+        self.typ.read()
+    }
+
+    pub fn write(&self) -> RwLockWriteGuard<TVarInnerInner> {
+        self.typ.write()
+    }
+
+    /// make self an alias for other
+    pub fn alias(&self, other: &Self) {
+        let mut s = self.write();
+        let o = other.read();
+        s.id = o.id;
+        s.typ = Arc::clone(&o.typ);
+    }
+
+    /// copy self from other
+    pub fn copy(&self, other: &Self) {
+        let s = self.read();
+        let o = other.read();
+        *s.typ.write() = o.typ.read().clone();
+    }
+
+    pub fn normalize(&self) -> Self {
+        match &mut *self.read().typ.write() {
+            None => (),
+            Some(t) => {
+                *t = t.normalize();
+            }
+        }
+        self.clone()
+    }
+
+    pub fn unbind(&self) {
+        *self.read().typ.write() = None
+    }
+
+    pub(super) fn would_cycle(&self, t: &Type) -> bool {
+        let addr = Arc::as_ptr(&self.read().typ).addr();
+        would_cycle_inner(addr, t)
     }
 }

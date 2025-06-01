@@ -15,7 +15,6 @@ use std::{
     cmp::{Eq, PartialEq},
     collections::{hash_map::Entry, HashMap, HashSet},
     fmt::{self, Debug},
-    hash::Hash,
     iter,
     marker::PhantomData,
 };
@@ -49,21 +48,6 @@ impl FromIterator<bool> for OrAc {
     }
 }
 
-pub trait TypeMark:
-    Debug + Clone + Copy + PartialOrd + Ord + PartialEq + Eq + Hash + 'static
-{
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Unscoped;
-
-impl TypeMark for Unscoped {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Scoped;
-
-impl TypeMark for Scoped {}
-
 #[derive(Debug, Clone, Copy)]
 #[bitflags]
 #[repr(u64)]
@@ -91,26 +75,26 @@ pub fn format_with_flags<R, F: FnOnce() -> R>(flags: BitFlags<PrintFlag>, f: F) 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Type<T: TypeMark> {
-    Bottom(PhantomData<T>),
+pub enum Type {
+    Bottom,
     Primitive(BitFlags<Typ>),
     Ref { scope: ModPath, name: ModPath },
-    Fn(Arc<FnType<T>>),
-    Set(Arc<[Type<T>]>),
-    TVar(TVar<T>),
-    Array(Arc<Type<T>>),
-    Tuple(Arc<[Type<T>]>),
-    Struct(Arc<[(ArcStr, Type<T>)]>),
-    Variant(ArcStr, Arc<[Type<T>]>),
+    Fn(Arc<FnType>),
+    Set(Arc<[Type]>),
+    TVar(TVar),
+    Array(Arc<Type>),
+    Tuple(Arc<[Type]>),
+    Struct(Arc<[(ArcStr, Type)]>),
+    Variant(ArcStr, Arc<[Type]>),
 }
 
-impl<T: TypeMark> Default for Type<T> {
+impl Default for Type {
     fn default() -> Self {
-        Self::Bottom(PhantomData)
+        Self::Bottom
     }
 }
 
-impl Type<Scoped> {
+impl Type {
     pub fn empty_tvar() -> Self {
         Type::TVar(TVar::default())
     }
@@ -126,7 +110,7 @@ impl Type<Scoped> {
 
     pub fn is_defined(&self) -> bool {
         match self {
-            Self::Bottom(_)
+            Self::Bottom
             | Self::Primitive(_)
             | Self::Fn(_)
             | Self::Set(_)
@@ -139,7 +123,7 @@ impl Type<Scoped> {
         }
     }
 
-    fn lookup_ref<C: Ctx, E: UserEvent>(&self, env: &Env<C, E>) -> Result<&Type<Scoped>> {
+    fn lookup_ref<C: Ctx, E: UserEvent>(&self, env: &Env<C, E>) -> Result<&Type> {
         match self {
             Self::Ref { scope, name } => env
                 .lookup_typedef(scope, name)
@@ -177,8 +161,8 @@ impl Type<Scoped> {
             (t0 @ Self::Ref { .. }, t1) | (t0, t1 @ Self::Ref { .. }) => {
                 let t0 = t0.lookup_ref(env)?;
                 let t1 = t1.lookup_ref(env)?;
-                let t0_addr = (t0 as *const Type<Scoped>).addr();
-                let t1_addr = (t1 as *const Type<Scoped>).addr();
+                let t0_addr = (t0 as *const Type).addr();
+                let t1_addr = (t1 as *const Type).addr();
                 match hist.get(&(t0_addr, t1_addr)) {
                     Some(r) => Ok(*r),
                     None => {
@@ -196,14 +180,14 @@ impl Type<Scoped> {
                     }
                 }
             }
-            (Self::TVar(t0), Self::Bottom(_)) => {
+            (Self::TVar(t0), Self::Bottom) => {
                 if let Some(_) = &*t0.read().typ.read() {
                     return Ok(true);
                 }
                 *t0.read().typ.write() = Some(Self::Bottom(PhantomData));
                 Ok(true)
             }
-            (Self::Bottom(_), _) | (_, Self::Bottom(_)) => Ok(true),
+            (Self::Bottom, _) | (_, Self::Bottom) => Ok(true),
             (Self::Primitive(p0), Self::Primitive(p1)) => Ok(p0.contains(*p1)),
             (
                 Self::Primitive(p),
@@ -355,7 +339,7 @@ impl Type<Scoped> {
 
     fn union_int(&self, t: &Self) -> Self {
         match (self, t) {
-            (Type::Bottom(_), t) | (t, Type::Bottom(_)) => t.clone(),
+            (Type::Bottom, t) | (t, Type::Bottom) => t.clone(),
             (Type::Primitive(p), t) | (t, Type::Primitive(p)) if p.is_empty() => {
                 t.clone()
             }
@@ -456,7 +440,7 @@ impl Type<Scoped> {
     fn diff_int<C: Ctx, E: UserEvent>(
         &self,
         env: &Env<C, E>,
-        hist: &mut FxHashMap<(usize, usize), Type<Scoped>>,
+        hist: &mut FxHashMap<(usize, usize), Type>,
         t: &Self,
     ) -> Result<Self> {
         match (self, t) {
@@ -468,8 +452,8 @@ impl Type<Scoped> {
             (t0 @ Type::Ref { .. }, t1) | (t0, t1 @ Type::Ref { .. }) => {
                 let t0 = t0.lookup_ref(env)?;
                 let t1 = t1.lookup_ref(env)?;
-                let t0_addr = (t0 as *const Type<Scoped>).addr();
-                let t1_addr = (t1 as *const Type<Scoped>).addr();
+                let t0_addr = (t0 as *const Type).addr();
+                let t1_addr = (t1 as *const Type).addr();
                 match hist.get(&(t0_addr, t1_addr)) {
                     Some(r) => Ok(r.clone()),
                     None => {
@@ -488,7 +472,7 @@ impl Type<Scoped> {
                     }
                 }
             }
-            (Type::Bottom(_), t) | (t, Type::Bottom(_)) => Ok(t.clone()),
+            (Type::Bottom, t) | (t, Type::Bottom) => Ok(t.clone()),
             (Type::Primitive(s0), Type::Primitive(s1)) => {
                 let mut s = *s0;
                 s.remove(*s1);
@@ -517,7 +501,7 @@ impl Type<Scoped> {
                 Ok(Type::Array(Arc::new(t0.diff_int(env, hist, t1)?)))
             }
             (Type::Set(s0), Type::Set(s1)) => {
-                let mut s: SmallVec<[Type<Scoped>; 4]> = smallvec![];
+                let mut s: SmallVec<[Type; 4]> = smallvec![];
                 for i in 0..s0.len() {
                     s.push(s0[i].clone());
                     for j in 0..s1.len() {
@@ -593,7 +577,7 @@ impl Type<Scoped> {
 
     pub fn diff<C: Ctx, E: UserEvent>(&self, env: &Env<C, E>, t: &Self) -> Result<Self> {
         thread_local! {
-            static HIST: RefCell<FxHashMap<(usize, usize), Type<Scoped>>> = RefCell::new(HashMap::default());
+            static HIST: RefCell<FxHashMap<(usize, usize), Type>> = RefCell::new(HashMap::default());
         }
         HIST.with_borrow_mut(|hist| {
             hist.clear();
@@ -622,9 +606,9 @@ impl Type<Scoped> {
     }
 
     /// alias type variables with the same name to each other
-    pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<Scoped>>) {
+    pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar>) {
         match self {
-            Type::Bottom(_) | Type::Primitive(_) => (),
+            Type::Bottom | Type::Primitive(_) => (),
             Type::Ref { .. } => (),
             Type::Array(t) => t.alias_tvars(known),
             Type::Tuple(ts) => {
@@ -658,9 +642,9 @@ impl Type<Scoped> {
         }
     }
 
-    pub fn collect_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<Scoped>>) {
+    pub fn collect_tvars(&self, known: &mut FxHashMap<ArcStr, TVar>) {
         match self {
-            Type::Bottom(_) | Type::Primitive(_) => (),
+            Type::Bottom | Type::Primitive(_) => (),
             Type::Ref { .. } => (),
             Type::Array(t) => t.collect_tvars(known),
             Type::Tuple(ts) => {
@@ -696,7 +680,7 @@ impl Type<Scoped> {
 
     pub fn has_unbound(&self) -> bool {
         match self {
-            Type::Bottom(_) | Type::Primitive(_) => false,
+            Type::Bottom | Type::Primitive(_) => false,
             Type::Ref { .. } => false,
             Type::Array(t0) => t0.has_unbound(),
             Type::Tuple(ts) => ts.iter().any(|t| t.has_unbound()),
@@ -711,7 +695,7 @@ impl Type<Scoped> {
     /// bind all unbound type variables to the specified type
     pub fn bind_as(&self, t: &Self) {
         match self {
-            Type::Bottom(_) | Type::Primitive(_) => (),
+            Type::Bottom | Type::Primitive(_) => (),
             Type::Ref { .. } => (),
             Type::Array(t0) => t0.bind_as(t),
             Type::Tuple(ts) => {
@@ -747,9 +731,9 @@ impl Type<Scoped> {
 
     /// return a copy of self with all type variables unbound and
     /// unaliased. self will not be modified
-    pub fn reset_tvars(&self) -> Type<Scoped> {
+    pub fn reset_tvars(&self) -> Type {
         match self {
-            Type::Bottom(_) => Type::Bottom(PhantomData),
+            Type::Bottom => Type::Bottom,
             Type::Primitive(p) => Type::Primitive(*p),
             Type::Ref { .. } => self.clone(),
             Type::Array(t0) => Type::Array(Arc::new(t0.reset_tvars())),
@@ -771,13 +755,13 @@ impl Type<Scoped> {
 
     /// return a copy of self with every TVar named in known replaced
     /// with the corresponding type
-    pub fn replace_tvars(&self, known: &FxHashMap<ArcStr, Self>) -> Type<Scoped> {
+    pub fn replace_tvars(&self, known: &FxHashMap<ArcStr, Self>) -> Type {
         match self {
             Type::TVar(tv) => match known.get(&tv.name) {
                 Some(t) => t.clone(),
                 None => Type::TVar(tv.clone()),
             },
-            Type::Bottom(_) => Type::Bottom(PhantomData),
+            Type::Bottom => Type::Bottom(PhantomData),
             Type::Primitive(p) => Type::Primitive(*p),
             Type::Ref { .. } => self.clone(),
             Type::Array(t0) => Type::Array(Arc::new(t0.replace_tvars(known))),
@@ -801,7 +785,7 @@ impl Type<Scoped> {
     /// Unbind any bound tvars, but do not unalias them.
     fn unbind_tvars(&self) {
         match self {
-            Type::Bottom(_) | Type::Primitive(_) | Type::Ref { .. } => (),
+            Type::Bottom | Type::Primitive(_) | Type::Ref { .. } => (),
             Type::Array(t0) => t0.unbind_tvars(),
             Type::Tuple(ts) | Type::Variant(_, ts) | Type::Set(ts) => {
                 for t in ts.iter() {
@@ -825,7 +809,7 @@ impl Type<Scoped> {
     ) -> Option<Typ> {
         match self {
             Type::Primitive(p) => p.iter().next(),
-            Type::Bottom(_) => None,
+            Type::Bottom => None,
             Type::Fn(_) => None,
             Type::Set(s) => s.iter().find_map(|t| t.first_prim_int(env, hist)),
             Type::TVar(tv) => {
@@ -837,7 +821,7 @@ impl Type<Scoped> {
             }
             Type::Ref { .. } => {
                 let t = self.lookup_ref(env).ok()?;
-                let t_addr = (t as *const Type<Scoped>).addr();
+                let t_addr = (t as *const Type).addr();
                 if hist.contains(&t_addr) {
                     None
                 } else {
@@ -866,7 +850,7 @@ impl Type<Scoped> {
         match self {
             Type::Primitive(_) => Ok(()),
             Type::Fn(_) => bail!("can't cast a value to a function"),
-            Type::Bottom(_) => bail!("can't cast a value to bottom"),
+            Type::Bottom => bail!("can't cast a value to bottom"),
             Type::Set(s) => Ok(for t in s.iter() {
                 t.check_cast(env)?
             }),
@@ -886,7 +870,7 @@ impl Type<Scoped> {
             }),
             Type::Ref { .. } => {
                 let t = self.lookup_ref(env)?;
-                let t_addr = (t as *const Type<Scoped>).addr();
+                let t_addr = (t as *const Type).addr();
                 if hist.contains(&t_addr) {
                     Ok(())
                 } else {
@@ -1116,7 +1100,7 @@ impl Type<Scoped> {
             Type::Ref { .. } => match self.lookup_ref(env) {
                 Err(_) => false,
                 Ok(t) => {
-                    let t_addr = (t as *const Type<Scoped>).addr();
+                    let t_addr = (t as *const Type).addr();
                     !hist.contains(&t_addr) && {
                         hist.insert(t_addr);
                         t.is_a_int(env, hist, v)
@@ -1179,7 +1163,7 @@ impl Type<Scoped> {
                 Value::U64(_) => true,
                 _ => false,
             },
-            Type::Bottom(_) => true,
+            Type::Bottom => true,
             Type::Set(ts) => ts.iter().any(|t| t.is_a_int(env, hist, v)),
         }
     }
@@ -1194,12 +1178,10 @@ impl Type<Scoped> {
             self.is_a_int(env, hist, v)
         })
     }
-}
 
-impl<T: TypeMark> Type<T> {
     pub fn is_bot(&self) -> bool {
         match self {
-            Type::Bottom(_) => true,
+            Type::Bottom => true,
             Type::TVar(_)
             | Type::Primitive(_)
             | Type::Ref { .. }
@@ -1214,7 +1196,7 @@ impl<T: TypeMark> Type<T> {
 
     pub fn with_deref<R, F: FnOnce(Option<&Self>) -> R>(&self, f: F) -> R {
         match self {
-            Self::Bottom(_)
+            Self::Bottom
             | Self::Primitive(_)
             | Self::Fn(_)
             | Self::Set(_)
@@ -1269,7 +1251,7 @@ impl<T: TypeMark> Type<T> {
 
     pub(crate) fn normalize(&self) -> Self {
         match self {
-            Type::Ref { .. } | Type::Bottom(_) | Type::Primitive(_) => self.clone(),
+            Type::Ref { .. } | Type::Bottom | Type::Primitive(_) => self.clone(),
             Type::TVar(tv) => Type::TVar(tv.normalize()),
             Type::Set(s) => Self::flatten_set(s.iter().map(|t| t.normalize())),
             Type::Array(t) => Type::Array(Arc::new(t.normalize())),
@@ -1297,7 +1279,7 @@ impl<T: TypeMark> Type<T> {
                 }
             }
             (Type::Ref { .. }, _) | (_, Type::Ref { .. }) => None,
-            (Type::Bottom(_), t) | (t, Type::Bottom(_)) => Some(t.clone()),
+            (Type::Bottom, t) | (t, Type::Bottom) => Some(t.clone()),
             (Type::Primitive(p), t) | (t, Type::Primitive(p)) if p.is_empty() => {
                 Some(t.clone())
             }
@@ -1346,7 +1328,7 @@ impl<T: TypeMark> Type<T> {
                         .iter()
                         .zip(t1.iter())
                         .map(|(t0, t1)| t0.merge(t1))
-                        .collect::<Option<SmallVec<[Type<T>; 8]>>>()?;
+                        .collect::<Option<SmallVec<[Type; 8]>>>()?;
                     Some(Type::Tuple(Arc::from_iter(t)))
                 } else {
                     None
@@ -1358,7 +1340,7 @@ impl<T: TypeMark> Type<T> {
                         .iter()
                         .zip(t1.iter())
                         .map(|(t0, t1)| t0.merge(t1))
-                        .collect::<Option<SmallVec<[Type<T>; 8]>>>()?;
+                        .collect::<Option<SmallVec<[Type; 8]>>>()?;
                     Some(Type::Variant(tag0.clone(), Arc::from_iter(t)))
                 } else {
                     None
@@ -1376,7 +1358,7 @@ impl<T: TypeMark> Type<T> {
                                 t0.merge(t1).map(|t| (n0.clone(), t))
                             }
                         })
-                        .collect::<Option<SmallVec<[(ArcStr, Type<T>); 8]>>>()?;
+                        .collect::<Option<SmallVec<[(ArcStr, Type); 8]>>>()?;
                     Some(Type::Struct(Arc::from_iter(t)))
                 } else {
                     None
@@ -1401,12 +1383,10 @@ impl<T: TypeMark> Type<T> {
             | (Type::Fn(_), _) => None,
         }
     }
-}
 
-impl Type<Unscoped> {
-    pub fn scope_refs(&self, scope: &ModPath) -> Type<Scoped> {
+    pub fn scope_refs(&self, scope: &ModPath) -> Type {
         match self {
-            Type::Bottom(_) => Type::Bottom(PhantomData),
+            Type::Bottom => Type::Bottom,
             Type::Primitive(s) => Type::Primitive(*s),
             Type::Array(t0) => Type::Array(Arc::new(t0.scope_refs(scope))),
             Type::Tuple(ts) => {
@@ -1441,7 +1421,7 @@ impl Type<Unscoped> {
                     label: a.label.clone(),
                     typ: a.typ.scope_refs(scope),
                 }));
-                let mut cres: SmallVec<[(TVar<Scoped>, Type<Scoped>); 4]> = smallvec![];
+                let mut cres: SmallVec<[(TVar, Type); 4]> = smallvec![];
                 for (tv, tc) in f.constraints.read().iter() {
                     let tv = tv.scope_refs(scope);
                     let tc = tc.scope_refs(scope);
@@ -1458,10 +1438,10 @@ impl Type<Unscoped> {
     }
 }
 
-impl<T: TypeMark> fmt::Display for Type<T> {
+impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bottom(_) => write!(f, "_"),
+            Self::Bottom => write!(f, "_"),
             Self::Ref { scope: _, name } => write!(f, "{name}"),
             Self::TVar(tv) => write!(f, "{tv}"),
             Self::Fn(t) => write!(f, "{t}"),

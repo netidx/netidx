@@ -1,7 +1,7 @@
 use crate::{
     env::Env,
     expr::ModPath,
-    typ::{NoRefs, Refs, TVar, Type, TypeMark},
+    typ::{Scoped, TVar, Type, TypeMark, Unscoped},
     Ctx, UserEvent,
 };
 use anyhow::{bail, Result};
@@ -87,16 +87,15 @@ impl<T: TypeMark> Default for FnType<T> {
     }
 }
 
-impl FnType<Refs> {
-    pub fn resolve_typerefs<'a, C: Ctx, E: UserEvent>(
+impl FnType<Unscoped> {
+    pub fn scope_refs<'a, C: Ctx, E: UserEvent>(
         &self,
         scope: &ModPath,
-        env: &Env<C, E>,
-    ) -> Result<FnType<NoRefs>> {
+    ) -> FnType<Scoped> {
         let typ = Type::Fn(Arc::new(self.clone()));
-        match typ.resolve_typerefs(scope, env)? {
-            Type::Fn(f) => Ok((*f).clone()),
-            _ => bail!("unexpected fn resolution"),
+        match typ.scope_refs(scope) {
+            Type::Fn(f) => (*f).clone(),
+            _ => unreachable!(),
         }
     }
 }
@@ -121,7 +120,7 @@ impl<T: TypeMark> FnType<T> {
     }
 }
 
-impl FnType<NoRefs> {
+impl FnType<Scoped> {
     pub fn unbind_tvars(&self) {
         let FnType { args, vargs, rtype, constraints } = self;
         for arg in args.iter() {
@@ -139,7 +138,7 @@ impl FnType<NoRefs> {
 
     pub fn constrain_known(&self) {
         thread_local! {
-            static KNOWN: RefCell<FxHashMap<ArcStr, TVar<NoRefs>>> = RefCell::new(HashMap::default());
+            static KNOWN: RefCell<FxHashMap<ArcStr, TVar<Scoped>>> = RefCell::new(HashMap::default());
         }
         KNOWN.with_borrow_mut(|known| {
             known.clear();
@@ -174,7 +173,7 @@ impl FnType<NoRefs> {
         FnType { args, vargs, rtype, constraints }
     }
 
-    pub fn replace_tvars(&self, known: &FxHashMap<ArcStr, Type<NoRefs>>) -> Self {
+    pub fn replace_tvars(&self, known: &FxHashMap<ArcStr, Type<Scoped>>) -> Self {
         let FnType { args, vargs, rtype, constraints } = self;
         let args = Arc::from_iter(args.iter().map(|a| FnArgType {
             label: a.label.clone(),
@@ -191,12 +190,12 @@ impl FnType<NoRefs> {
     /// types in IDEs and shells.
     pub fn replace_auto_constrained(&self) -> Self {
         thread_local! {
-            static KNOWN: RefCell<FxHashMap<ArcStr, Type<NoRefs>>> = RefCell::new(HashMap::default());
+            static KNOWN: RefCell<FxHashMap<ArcStr, Type<Scoped>>> = RefCell::new(HashMap::default());
         }
         KNOWN.with_borrow_mut(|known| {
             known.clear();
             let Self { args, vargs, rtype, constraints } = self;
-            let constraints: Vec<(TVar<NoRefs>, Type<NoRefs>)> = constraints
+            let constraints: Vec<(TVar<Scoped>, Type<Scoped>)> = constraints
                 .read()
                 .iter()
                 .filter_map(|(tv, ct)| {
@@ -229,7 +228,7 @@ impl FnType<NoRefs> {
                 .any(|(tv, tc)| tv.read().typ.read().is_none() || tc.has_unbound())
     }
 
-    pub fn bind_as(&self, t: &Type<NoRefs>) {
+    pub fn bind_as(&self, t: &Type<Scoped>) {
         let FnType { args, vargs, rtype, constraints } = self;
         for a in args.iter() {
             a.typ.bind_as(t)
@@ -248,7 +247,7 @@ impl FnType<NoRefs> {
         }
     }
 
-    pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
+    pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<Scoped>>) {
         let FnType { args, vargs, rtype, constraints } = self;
         for arg in args.iter() {
             arg.typ.alias_tvars(known)
@@ -263,7 +262,7 @@ impl FnType<NoRefs> {
         }
     }
 
-    pub fn collect_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<NoRefs>>) {
+    pub fn collect_tvars(&self, known: &mut FxHashMap<ArcStr, TVar<Scoped>>) {
         let FnType { args, vargs, rtype, constraints } = self;
         for arg in args.iter() {
             arg.typ.collect_tvars(known)
@@ -278,10 +277,21 @@ impl FnType<NoRefs> {
         }
     }
 
+    pub fn contains<C: Ctx, E: UserEvent>(
+        &self,
+        env: &Env<C, E>,
+        t: &Self,
+    ) -> Result<bool> {
+        thread_local! {
+            static HIST: RefCell<FxHashMap<(usize, usize), bool>> = RefCell::new(HashMap::default());
+        }
+        HIST.with_borrow_mut(|hist| self.contains_int(env, hist, t))
+    }
+
     pub(super) fn contains_int<C: Ctx, E: UserEvent>(
         &self,
         env: &Env<C, E>,
-        hist: &mut Vec<(usize, usize)>,
+        hist: &mut FxHashMap<(usize, usize), bool>,
         t: &Self,
     ) -> Result<bool> {
         let mut sul = 0;
@@ -349,7 +359,7 @@ impl FnType<NoRefs> {
                 .collect::<Result<AndAc>>()?
                 .0
             && match (&t.vargs, &self.vargs) {
-                (Some(tv), Some(sv)) => tv.contains_int(env, hist, sv),
+                (Some(tv), Some(sv)) => tv.contains_int(env, hist, sv)?,
                 (None, None) => true,
                 (_, _) => false,
             }
@@ -369,34 +379,50 @@ impl FnType<NoRefs> {
 
     /// Return true if function signatures match. This is contains,
     /// but does not allow labeled argument subtyping.
-    pub fn sigmatch(&self, other: &Self) -> bool {
+    pub fn sigmatch<C: Ctx, E: UserEvent>(
+        &self,
+        env: &Env<C, E>,
+        other: &Self,
+    ) -> Result<bool> {
         let Self { args: args0, vargs: vargs0, rtype: rtype0, constraints: constraints0 } =
             self;
         let Self { args: args1, vargs: vargs1, rtype: rtype1, constraints: constraints1 } =
             other;
-        args0.len() == args1.len()
+        Ok(args0.len() == args1.len()
             && args0
                 .iter()
                 .zip(args1.iter())
-                .all(|(a0, a1)| a0.label == a1.label && a0.typ.contains(&a1.typ))
+                .map(
+                    |(a0, a1)| Ok(a0.label == a1.label && a0.typ.contains(env, &a1.typ)?),
+                )
+                .collect::<Result<AndAc>>()?
+                .0
             && match (vargs0, vargs1) {
                 (None, None) => true,
                 (None, _) | (_, None) => false,
-                (Some(t0), Some(t1)) => t0.contains(t1),
+                (Some(t0), Some(t1)) => t0.contains(env, t1)?,
             }
-            && rtype0.contains(rtype1)
+            && rtype0.contains(env, rtype1)?
             && constraints0
                 .read()
                 .iter()
-                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
+                .map(|(tv, tc)| tc.contains(env, &Type::TVar(tv.clone())))
+                .collect::<Result<AndAc>>()?
+                .0
             && constraints1
                 .read()
                 .iter()
-                .all(|(tv, tc)| tc.contains(&Type::TVar(tv.clone())))
+                .map(|(tv, tc)| tc.contains(env, &Type::TVar(tv.clone())))
+                .collect::<Result<AndAc>>()?
+                .0)
     }
 
-    pub fn check_sigmatch(&self, other: &Self) -> Result<()> {
-        if !self.sigmatch(other) {
+    pub fn check_sigmatch<C: Ctx, E: UserEvent>(
+        &self,
+        env: &Env<C, E>,
+        other: &Self,
+    ) -> Result<()> {
+        if !self.sigmatch(env, other)? {
             bail!("Fn signatures do not match {self} does not match {other}")
         }
         Ok(())
