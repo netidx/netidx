@@ -3,7 +3,7 @@ use crate::{
     expr::{ExprId, ModPath},
     node::{genn, Node},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    typ::{FnType, NoRefs, Refs, Type},
+    typ::{FnType, Type},
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, UserEvent,
 };
 use anyhow::{anyhow, bail};
@@ -20,7 +20,7 @@ use triomphe::Arc as TArc;
 
 pub trait MapFn<C: Ctx, E: UserEvent>: Default + Send + Sync + 'static {
     const NAME: &str;
-    const TYP: LazyLock<FnType<Refs>>;
+    const TYP: LazyLock<FnType>;
 
     /// finish will be called when every lambda instance has produced
     /// a value for the updated array. Out contains the output of the
@@ -40,9 +40,9 @@ pub struct MapQ<C: Ctx, E: UserEvent, T: MapFn<C, E>> {
     scope: ModPath,
     predid: BindId,
     top_id: ExprId,
-    ftyp: TArc<FnType<NoRefs>>,
-    mftyp: TArc<FnType<NoRefs>>,
-    etyp: Type<NoRefs>,
+    ftyp: TArc<FnType>,
+    mftyp: TArc<FnType>,
+    etyp: Type,
     slots: Vec<Slot<C, E>>,
     cur: ValArray,
     t: T,
@@ -50,7 +50,7 @@ pub struct MapQ<C: Ctx, E: UserEvent, T: MapFn<C, E>> {
 
 impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> BuiltIn<C, E> for MapQ<C, E, T> {
     const NAME: &str = T::NAME;
-    const TYP: LazyLock<FnType<Refs>> = T::TYP;
+    const TYP: LazyLock<FnType> = T::TYP;
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_ctx, typ, scope, from, top_id| match from {
@@ -167,8 +167,8 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
             .get(0)
             .map(|a| a.typ.clone())
             .ok_or_else(|| anyhow!("expected 2 arguments"))?
-            .check_contains(&from[0].typ)?;
-        Type::Fn(self.mftyp.clone()).check_contains(&from[1].typ)?;
+            .check_contains(&ctx.env, &from[0].typ)?;
+        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[1].typ)?;
         let (_, node) = genn::bind(ctx, &self.scope, "x", self.etyp.clone(), self.top_id);
         let fargs = vec![node];
         let ft = self.mftyp.clone();
@@ -309,9 +309,9 @@ pub(super) struct Fold<C: Ctx, E: UserEvent> {
     initid: BindId,
     binds: Vec<BindId>,
     head: Option<Node<C, E>>,
-    mftype: TArc<FnType<NoRefs>>,
-    etyp: Type<NoRefs>,
-    ityp: Type<NoRefs>,
+    mftype: TArc<FnType>,
+    etyp: Type,
+    ityp: Type,
     init: Option<Value>,
 }
 
@@ -428,9 +428,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
             n.typecheck(ctx)?;
         }
         Type::Array(triomphe::Arc::new(self.etyp.clone()))
-            .check_contains(&from[0].typ)?;
-        self.ityp.check_contains(&from[1].typ)?;
-        Type::Fn(self.mftype.clone()).check_contains(&from[2].typ)?;
+            .check_contains(&ctx.env, &from[0].typ)?;
+        self.ityp.check_contains(&ctx.env, &from[1].typ)?;
+        Type::Fn(self.mftype.clone()).check_contains(&ctx.env, &from[2].typ)?;
         let mut n = genn::reference(ctx, self.initid, self.ityp.clone(), self.top_id);
         let x = genn::reference(ctx, BindId::new(), self.etyp.clone(), self.top_id);
         let fnode =
@@ -546,8 +546,8 @@ pub(super) struct Group<C: Ctx, E: UserEvent> {
     queue: VecDeque<Value>,
     buf: SmallVec<[Value; 16]>,
     pred: Node<C, E>,
-    mftyp: TArc<FnType<NoRefs>>,
-    etyp: Type<NoRefs>,
+    mftyp: TArc<FnType>,
+    etyp: Type,
     ready: bool,
     pid: BindId,
     nid: BindId,
@@ -646,8 +646,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?
         }
-        self.etyp.check_contains(&from[0].typ)?;
-        Type::Fn(self.mftyp.clone()).check_contains(&from[1].typ)?;
+        self.etyp.check_contains(&ctx.env, &from[0].typ)?;
+        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[1].typ)?;
         self.pred.typecheck(ctx)?;
         Ok(())
     }

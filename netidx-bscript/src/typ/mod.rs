@@ -16,7 +16,6 @@ use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
     fmt::{self, Debug},
     iter,
-    marker::PhantomData,
 };
 use triomphe::Arc;
 
@@ -33,18 +32,6 @@ struct AndAc(bool);
 impl FromIterator<bool> for AndAc {
     fn from_iter<T: IntoIterator<Item = bool>>(iter: T) -> Self {
         AndAc(iter.into_iter().all(|b| b))
-    }
-}
-
-struct OrAc(bool);
-
-impl FromIterator<bool> for OrAc {
-    fn from_iter<T: IntoIterator<Item = bool>>(iter: T) -> Self {
-        let mut res = false;
-        for b in iter {
-            res |= b;
-        }
-        OrAc(res)
     }
 }
 
@@ -123,12 +110,15 @@ impl Type {
         }
     }
 
-    fn lookup_ref<C: Ctx, E: UserEvent>(&self, env: &Env<C, E>) -> Result<&Type> {
+    fn lookup_ref<'b: 'a, 'a, C: Ctx, E: UserEvent>(
+        &'b self,
+        env: &'a Env<C, E>,
+    ) -> Result<&'a Type> {
         match self {
             Self::Ref { scope, name } => env
                 .lookup_typedef(scope, name)
-                .ok_or_else(|| anyhow!("undefined type {scope}::{name}"))?,
-            t => t,
+                .ok_or_else(|| anyhow!("undefined type {scope}::{name}")),
+            t => Ok(t),
         }
     }
 
@@ -184,7 +174,7 @@ impl Type {
                 if let Some(_) = &*t0.read().typ.read() {
                     return Ok(true);
                 }
-                *t0.read().typ.write() = Some(Self::Bottom(PhantomData));
+                *t0.read().typ.write() = Some(Self::Bottom);
                 Ok(true)
             }
             (Self::Bottom, _) | (_, Self::Bottom) => Ok(true),
@@ -306,10 +296,12 @@ impl Type {
                 .0),
             (Self::Set(s), t) => Ok(s
                 .iter()
-                .fold(Ok(false), |acc, t0| Ok(acc? || t0.contains_int(env, hist, t)?))?
-                || t.iter_prims().fold(Ok(true), |acc, t1| {
+                .fold(Ok::<_, anyhow::Error>(false), |acc, t0| {
+                    Ok(acc? || t0.contains_int(env, hist, t)?)
+                })?
+                || t.iter_prims().fold(Ok::<_, anyhow::Error>(true), |acc, t1| {
                     Ok(acc?
-                        && s.iter().fold(Ok(false), |acc, t0| {
+                        && s.iter().fold(Ok::<_, anyhow::Error>(false), |acc, t0| {
                             Ok(acc? || t0.contains_int(env, hist, &t1)?)
                         })?)
                 })?),
@@ -761,7 +753,7 @@ impl Type {
                 Some(t) => t.clone(),
                 None => Type::TVar(tv.clone()),
             },
-            Type::Bottom => Type::Bottom(PhantomData),
+            Type::Bottom => Type::Bottom,
             Type::Primitive(p) => Type::Primitive(*p),
             Type::Ref { .. } => self.clone(),
             Type::Array(t0) => Type::Array(Arc::new(t0.replace_tvars(known))),

@@ -3,7 +3,7 @@ use crate::{
     expr::{Expr, ExprId},
     node::{genn, Node},
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    typ::{FnType, NoRefs},
+    typ::FnType,
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
 };
 use anyhow::bail;
@@ -330,7 +330,7 @@ struct Filter<C: Ctx, E: UserEvent> {
     ready: bool,
     queue: VecDeque<Value>,
     pred: Node<C, E>,
-    typ: TArc<FnType<NoRefs>>,
+    typ: TArc<FnType>,
     top_id: ExprId,
     fid: BindId,
     x: BindId,
@@ -421,8 +421,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        self.typ.args[0].typ.check_contains(&from[0].typ)?;
-        self.typ.args[1].typ.check_contains(&from[1].typ)?;
+        self.typ.args[0].typ.check_contains(&ctx.env, &from[0].typ)?;
+        self.typ.args[1].typ.check_contains(&ctx.env, &from[1].typ)?;
         self.pred.typecheck(ctx)
     }
 

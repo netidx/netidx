@@ -16,7 +16,7 @@ use crate::{
     env::Env,
     expr::{ExprId, ExprKind, ModPath},
     node::Node,
-    typ::{FnType, NoRefs, Refs, Type},
+    typ::{FnType, Type},
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
@@ -31,7 +31,6 @@ use parking_lot::RwLock;
 use std::{
     collections::{hash_map::Entry, HashMap},
     fmt::Debug,
-    marker::PhantomData,
     sync::{self, LazyLock},
     time::Duration,
 };
@@ -111,7 +110,7 @@ impl<E: UserEvent> Event<E> {
 pub type BuiltInInitFn<C, E> = sync::Arc<
     dyn for<'a, 'b, 'c> Fn(
             &'a mut ExecCtx<C, E>,
-            &'a FnType<NoRefs>,
+            &'a FnType,
             &'b ModPath,
             &'c [Node<C, E>],
             ExprId,
@@ -156,12 +155,12 @@ pub trait Apply<C: Ctx, E: UserEvent> {
 
     /// return the lambdas type, builtins do not need to implement
     /// this, it is implemented by the BuiltIn wrapper
-    fn typ(&self) -> Arc<FnType<NoRefs>> {
-        const EMPTY: LazyLock<Arc<FnType<NoRefs>>> = LazyLock::new(|| {
+    fn typ(&self) -> Arc<FnType> {
+        const EMPTY: LazyLock<Arc<FnType>> = LazyLock::new(|| {
             Arc::new(FnType {
                 args: Arc::from_iter([]),
                 constraints: Arc::new(RwLock::new(vec![])),
-                rtype: Type::Bottom(PhantomData),
+                rtype: Type::Bottom,
                 vargs: None,
             })
         });
@@ -179,7 +178,7 @@ pub trait Apply<C: Ctx, E: UserEvent> {
 
 pub trait BuiltIn<C: Ctx, E: UserEvent> {
     const NAME: &str;
-    const TYP: LazyLock<FnType<Refs>>;
+    const TYP: LazyLock<FnType>;
 
     fn init(ctx: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E>;
 }
@@ -278,7 +277,7 @@ pub trait Ctx: Debug + 'static {
 }
 
 pub struct ExecCtx<C: Ctx, E: UserEvent> {
-    builtins: FxHashMap<&'static str, (FnType<Refs>, BuiltInInitFn<C, E>)>,
+    builtins: FxHashMap<&'static str, (FnType, BuiltInInitFn<C, E>)>,
     std: Vec<Node<C, E>>,
     pub env: Env<C, E>,
     pub cached: FxHashMap<BindId, Value>,

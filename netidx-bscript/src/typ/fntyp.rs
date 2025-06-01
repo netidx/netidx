@@ -88,7 +88,7 @@ impl Default for FnType {
 }
 
 impl FnType {
-    pub fn scope_refs<'a, C: Ctx, E: UserEvent>(&self, scope: &ModPath) -> FnType {
+    pub fn scope_refs(&self, scope: &ModPath) -> FnType {
         let typ = Type::Fn(Arc::new(self.clone()));
         match typ.scope_refs(scope) {
             Type::Fn(f) => (*f).clone(),

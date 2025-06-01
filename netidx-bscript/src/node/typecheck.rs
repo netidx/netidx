@@ -9,7 +9,6 @@ use arcstr::ArcStr;
 use enumflags2::BitFlags;
 use netidx::publisher::Typ;
 use smallvec::SmallVec;
-use std::marker::PhantomData;
 use triomphe::Arc;
 
 impl<C: Ctx, E: UserEvent> Node<C, E> {
@@ -33,25 +32,27 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 wrap!(lhs.node.typecheck(ctx))?;
                 wrap!(rhs.node.typecheck(ctx))?;
                 let typ = Type::Primitive(Typ::number());
-                wrap!(typ.check_contains(&lhs.node.typ))?;
-                wrap!(typ.check_contains(&rhs.node.typ))?;
-                wrap!(self.typ.check_contains(&lhs.node.typ.union(&rhs.node.typ)))?;
+                wrap!(typ.check_contains(&ctx.env, &lhs.node.typ))?;
+                wrap!(typ.check_contains(&ctx.env, &rhs.node.typ))?;
+                wrap!(self
+                    .typ
+                    .check_contains(&ctx.env, &lhs.node.typ.union(&rhs.node.typ)))?;
                 Ok(())
             }
             NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {
                 wrap!(lhs.node.typecheck(ctx))?;
                 wrap!(rhs.node.typecheck(ctx))?;
                 let typ = Type::Primitive(Typ::Bool.into());
-                wrap!(typ.check_contains(&lhs.node.typ))?;
-                wrap!(typ.check_contains(&rhs.node.typ))?;
-                wrap!(self.typ.check_contains(&Type::boolean()))?;
+                wrap!(typ.check_contains(&ctx.env, &lhs.node.typ))?;
+                wrap!(typ.check_contains(&ctx.env, &rhs.node.typ))?;
+                wrap!(self.typ.check_contains(&ctx.env, &Type::boolean()))?;
                 Ok(())
             }
             NodeKind::Not { node } => {
                 wrap!(node.typecheck(ctx))?;
                 let typ = Type::Primitive(Typ::Bool.into());
-                wrap!(typ.check_contains(&node.typ))?;
-                wrap!(self.typ.check_contains(&Type::boolean()))?;
+                wrap!(typ.check_contains(&ctx.env, &node.typ))?;
+                wrap!(self.typ.check_contains(&ctx.env, &Type::boolean()))?;
                 Ok(())
             }
             NodeKind::Eq { lhs, rhs }
@@ -62,8 +63,8 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             | NodeKind::Gte { lhs, rhs } => {
                 wrap!(lhs.node.typecheck(ctx))?;
                 wrap!(rhs.node.typecheck(ctx))?;
-                wrap!(lhs.node.typ.check_contains(&rhs.node.typ))?;
-                wrap!(self.typ.check_contains(&Type::boolean()))?;
+                wrap!(lhs.node.typ.check_contains(&ctx.env, &rhs.node.typ))?;
+                wrap!(self.typ.check_contains(&ctx.env, &Type::boolean()))?;
                 Ok(())
             }
             NodeKind::TypeCast { target: _, n } => Ok(wrap!(n.typecheck(ctx))?),
@@ -75,7 +76,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
             }
             NodeKind::Bind { pattern: _, node } => {
                 wrap!(node.typecheck(ctx))?;
-                wrap!(self.typ.check_contains(&node.typ))?;
+                wrap!(self.typ.check_contains(&ctx.env, &node.typ))?;
                 Ok(())
             }
             NodeKind::Qop(id, n) => {
@@ -83,13 +84,13 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 let bind =
                     ctx.env.by_id.get(id).ok_or_else(|| anyhow!("BUG: missing bind"))?;
                 let err = Type::Primitive(Typ::Error.into());
-                wrap!(bind.typ.check_contains(&err))?;
-                wrap!(err.check_contains(&bind.typ))?;
-                if !n.typ.contains(&err) {
+                wrap!(bind.typ.check_contains(&ctx.env, &err))?;
+                wrap!(err.check_contains(&ctx.env, &bind.typ))?;
+                if !n.typ.contains(&ctx.env, &err)? {
                     bail!("cannot use the ? operator on a non error type")
                 }
-                let rtyp = n.typ.diff(&err);
-                wrap!(self.typ.check_contains(&rtyp))?;
+                let rtyp = n.typ.diff(&ctx.env, &err)?;
+                wrap!(self.typ.check_contains(&ctx.env, &rtyp))?;
                 Ok(())
             }
             NodeKind::Connect(id, node) => {
@@ -98,40 +99,41 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     None => bail!("BUG missing bind {id:?}"),
                     Some(bind) => bind,
                 };
-                wrap!(bind.typ.check_contains(&node.typ))
+                wrap!(bind.typ.check_contains(&ctx.env, &node.typ))
             }
             NodeKind::Array { args } => {
                 for n in args.iter_mut() {
                     wrap!(n.node, n.node.typecheck(ctx))?
                 }
-                let rtype = Type::Bottom(PhantomData);
+                let rtype = Type::Bottom;
                 let rtype = args.iter().fold(rtype, |rtype, n| n.node.typ.union(&rtype));
                 let rtype = Type::Array(Arc::new(rtype));
-                Ok(self.typ.check_contains(&rtype)?)
+                Ok(self.typ.check_contains(&ctx.env, &rtype)?)
             }
             NodeKind::ArraySlice(n) => {
                 wrap!(n.source.node, n.source.node.typecheck(ctx))?;
                 let it = Type::Primitive(Typ::unsigned_integer());
                 let at = Type::Array(Arc::new(Type::empty_tvar()));
-                wrap!(n.source.node, at.check_contains(&n.source.node.typ))?;
+                wrap!(n.source.node, at.check_contains(&ctx.env, &n.source.node.typ))?;
                 if let Some(start) = n.start.as_mut() {
                     wrap!(start.node, start.node.typecheck(ctx))?;
-                    wrap!(start.node, it.check_contains(&start.node.typ))?;
+                    wrap!(start.node, it.check_contains(&ctx.env, &start.node.typ))?;
                 }
                 if let Some(end) = n.end.as_mut() {
                     wrap!(end.node, end.node.typecheck(ctx))?;
-                    wrap!(end.node, it.check_contains(&end.node.typ))?;
+                    wrap!(end.node, it.check_contains(&ctx.env, &end.node.typ))?;
                 }
-                wrap!(self.typ.check_contains(&at))
+                wrap!(self.typ.check_contains(&ctx.env, &at))
             }
             NodeKind::ArrayRef(n) => {
                 wrap!(n.source.node, n.source.node.typecheck(ctx))?;
                 wrap!(n.i.node, n.i.node.typecheck(ctx))?;
                 let et = Type::empty_tvar();
                 let at = Type::Array(Arc::new(et.clone()));
-                wrap!(at.check_contains(&n.source.node.typ))?;
-                wrap!(Type::Primitive(Typ::integer()).check_contains(&n.i.node.typ))?;
-                Ok(wrap!(self.typ.check_contains(&et))?)
+                wrap!(at.check_contains(&ctx.env, &n.source.node.typ))?;
+                wrap!(Type::Primitive(Typ::integer())
+                    .check_contains(&ctx.env, &n.i.node.typ))?;
+                Ok(wrap!(self.typ.check_contains(&ctx.env, &et))?)
             }
             NodeKind::StringInterpolate { args } => {
                 for a in args.iter_mut() {
@@ -145,7 +147,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 }
                 let rtyp = Type::Primitive(BitFlags::empty());
                 let rtyp = args.iter().fold(rtyp, |rtype, n| n.typ.union(&rtype));
-                Ok(self.typ.check_contains(&rtyp)?)
+                Ok(self.typ.check_contains(&ctx.env, &rtyp)?)
             }
             NodeKind::Tuple { args } => {
                 for n in args.iter_mut() {
@@ -157,7 +159,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                             bail!("tuple arity mismatch {} vs {}", args.len(), typs.len())
                         }
                         for (t, n) in typs.iter().zip(args.iter()) {
-                            t.check_contains(&n.node.typ)?
+                            t.check_contains(&ctx.env, &n.node.typ)?
                         }
                     }
                     _ => bail!("BUG: unexpected tuple rtype"),
@@ -177,7 +179,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                             bail!("arity mismatch {} vs {}", args.len(), typs.len())
                         }
                         for (t, n) in typs.iter().zip(args.iter()) {
-                            t.check_contains(&n.node.typ)?
+                            t.check_contains(&ctx.env, &n.node.typ)?
                         }
                     }
                     _ => bail!("BUG: unexpected variant rtype"),
@@ -198,7 +200,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                             )
                         }
                         for ((_, t), n) in typs.iter().zip(args.iter()) {
-                            t.check_contains(&n.node.typ)?
+                            t.check_contains(&ctx.env, &n.node.typ)?
                         }
                     }
                     _ => bail!("BUG: expected a struct rtype"),
@@ -213,7 +215,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     _ => bail!("expected tuple with at least {i} elements"),
                 });
                 let etyp = wrap!(etyp)?;
-                wrap!(self.typ.check_contains(&etyp))
+                wrap!(self.typ.check_contains(&ctx.env, &etyp))
             }
             NodeKind::StructRef { source, field: i, top_id: _ } => {
                 wrap!(source.typecheck(ctx))?;
@@ -240,7 +242,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 });
                 let (idx, typ) = wrap!(etyp)?;
                 *i = idx;
-                wrap!(self.typ.check_contains(&typ))
+                wrap!(self.typ.check_contains(&ctx.env, &typ))
             }
             NodeKind::StructWith { source, current: _, replace } => {
                 wrap!(source.typecheck(ctx))?;
@@ -265,7 +267,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                             match r {
                                 None => bail!("struct has no field named {n}"),
                                 Some((j, typ)) => {
-                                    typ.check_contains(&c.node.typ)?;
+                                    typ.check_contains(&ctx.env, &c.node.typ)?;
                                     *i = j;
                                 }
                             }
@@ -275,11 +277,11 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                     None => bail!("type must be known, annotations needed"),
                     _ => bail!("expected a struct"),
                 }))?;
-                wrap!(self.typ.check_contains(&source.typ))
+                wrap!(self.typ.check_contains(&ctx.env, &source.typ))
             }
             NodeKind::Select(sn) => {
                 let rtype = wrap!(sn.typecheck(ctx))?;
-                wrap!(self.typ.check_contains(&rtype))
+                wrap!(self.typ.check_contains(&ctx.env, &rtype))
             }
             NodeKind::Apply(site) => {
                 for n in site.args.iter_mut() {
@@ -289,11 +291,11 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 for (arg, FnArgType { typ, .. }) in
                     site.args.iter().zip(site.ftype.args.iter())
                 {
-                    wrap!(arg, typ.check_contains(&arg.typ))?;
+                    wrap!(arg, typ.check_contains(&ctx.env, &arg.typ))?;
                 }
-                wrap!(site.ftype.rtype.check_contains(&self.typ))?;
+                wrap!(site.ftype.rtype.check_contains(&ctx.env, &self.typ))?;
                 for (tv, tc) in site.ftype.constraints.read().iter() {
-                    wrap!(tc.check_contains(&Type::TVar(tv.clone())))?
+                    wrap!(tc.check_contains(&ctx.env, &Type::TVar(tv.clone())))?
                 }
                 Ok(())
             }

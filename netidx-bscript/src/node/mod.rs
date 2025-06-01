@@ -3,7 +3,7 @@ use crate::{
     err,
     expr::{Expr, ExprId, ExprKind, ModPath},
     node::pattern::PatternNode,
-    typ::{FnType, NoRefs, Type},
+    typ::{FnType, Type},
     Apply, BindId, Ctx, Event, ExecCtx, LambdaId, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
@@ -14,9 +14,7 @@ use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
-use std::{
-    cell::RefCell, collections::HashMap, fmt, iter, marker::PhantomData, mem, sync::Arc,
-};
+use std::{cell::RefCell, collections::HashMap, fmt, iter, mem, sync::Arc};
 use triomphe::Arc as TArc;
 
 mod compiler;
@@ -73,7 +71,7 @@ impl<C: Ctx, E: UserEvent> Cached<C, E> {
 }
 
 pub struct CallSite<C: Ctx, E: UserEvent> {
-    ftype: TArc<FnType<NoRefs>>,
+    ftype: TArc<FnType>,
     fnode: Node<C, E>,
     args: Vec<Node<C, E>>,
     arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
@@ -288,7 +286,7 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
                 Some(v) => {
                     let typ = Typ::get(v);
                     arms.iter().enumerate().find_map(|(i, (pat, _))| {
-                        if pat.is_match(typ, v) {
+                        if pat.is_match(&ctx.env, typ, v) {
                             Some(i)
                         } else {
                             None
@@ -352,11 +350,11 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
         }
     }
 
-    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<Type<NoRefs>> {
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<Type> {
         self.arg.node.typecheck(ctx)?;
-        let mut rtype = Type::Bottom(PhantomData);
-        let mut mtype = Type::Bottom(PhantomData);
-        let mut itype = Type::Bottom(PhantomData);
+        let mut rtype = Type::Bottom;
+        let mut mtype = Type::Bottom;
+        let mut itype = Type::Bottom;
         for (pat, n) in self.arms.iter_mut() {
             match &mut pat.guard {
                 Some(guard) => guard.node.typecheck(ctx)?,
@@ -367,16 +365,16 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
             rtype = rtype.union(&n.node.typ);
         }
         itype
-            .check_contains(&self.arg.node.typ)
+            .check_contains(&ctx.env, &self.arg.node.typ)
             .map_err(|e| anyhow!("missing match cases {e}"))?;
         mtype
-            .check_contains(&self.arg.node.typ)
+            .check_contains(&ctx.env, &self.arg.node.typ)
             .map_err(|e| anyhow!("missing match cases {e}"))?;
         self.arg.node.typ = self.arg.node.typ.normalize();
         let mut atype = self.arg.node.typ.clone();
         for (pat, _) in self.arms.iter() {
-            let can_match = atype.contains(&pat.type_predicate)
-                || pat.type_predicate.contains(&atype);
+            let can_match = atype.contains(&ctx.env, &pat.type_predicate)?
+                || pat.type_predicate.contains(&ctx.env, &atype)?;
             if !can_match {
                 bail!(
                     "pattern {} will never match {}, unused match cases",
@@ -385,7 +383,7 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
                 )
             }
             if !pat.structure_predicate.is_refutable() && pat.guard.is_none() {
-                atype = atype.diff(&pat.type_predicate);
+                atype = atype.diff(&ctx.env, &pat.type_predicate)?;
             }
         }
         Ok(rtype)
@@ -584,7 +582,7 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
     Lambda(Arc<LambdaDef<C, E>>),
     Qop(BindId, Box<Node<C, E>>),
     TypeCast {
-        target: Type<NoRefs>,
+        target: Type,
         n: Box<Node<C, E>>,
     },
     Any {
@@ -666,7 +664,7 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
 
 pub struct Node<C: Ctx, E: UserEvent> {
     pub spec: Box<Expr>,
-    pub typ: Type<NoRefs>,
+    pub typ: Type,
     pub kind: NodeKind<C, E>,
 }
 
@@ -1098,7 +1096,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 children.into_iter().fold(None, |_, n| n.update(ctx, event))
             }
             NodeKind::TypeCast { target, n } => {
-                n.update(ctx, event).map(|v| target.cast_value(v))
+                n.update(ctx, event).map(|v| target.cast_value(&ctx.env, v))
             }
             NodeKind::Not { node } => node.update(ctx, event).map(|v| !v),
             NodeKind::Eq { lhs, rhs } => binary_op!(==, lhs, rhs),
@@ -1134,7 +1132,7 @@ pub mod genn {
                 ExprKind::Constant(Value::String(literal!("nop")))
                     .to_expr(Default::default()),
             ),
-            typ: Type::Bottom(PhantomData),
+            typ: Type::Bottom,
             kind: NodeKind::Nop,
         }
     }
@@ -1144,7 +1142,7 @@ pub mod genn {
         ctx: &mut ExecCtx<C, E>,
         scope: &ModPath,
         name: &str,
-        typ: Type<NoRefs>,
+        typ: Type,
         top_id: ExprId,
     ) -> (BindId, Node<C, E>) {
         let id = ctx.env.bind_variable(scope, name, typ.clone()).id;
@@ -1161,7 +1159,7 @@ pub mod genn {
     pub fn reference<C: Ctx, E: UserEvent>(
         ctx: &mut ExecCtx<C, E>,
         id: BindId,
-        typ: Type<NoRefs>,
+        typ: Type,
         top_id: ExprId,
     ) -> Node<C, E> {
         ctx.user.ref_var(id, top_id);
@@ -1176,7 +1174,7 @@ pub mod genn {
     pub fn apply<C: Ctx, E: UserEvent>(
         fnode: Node<C, E>,
         args: Vec<Node<C, E>>,
-        typ: TArc<FnType<NoRefs>>,
+        typ: TArc<FnType>,
         top_id: ExprId,
     ) -> Node<C, E> {
         let spec = ExprKind::Apply {

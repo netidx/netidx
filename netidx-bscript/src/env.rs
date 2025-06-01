@@ -1,6 +1,6 @@
 use crate::{
     expr::{Arg, ModPath},
-    typ::{FnType, NoRefs, Type},
+    typ::{FnType, Type},
     BindId, Ctx, InitFn, LambdaId, UserEvent,
 };
 use anyhow::{bail, Result};
@@ -15,8 +15,8 @@ pub struct LambdaDef<C: Ctx, E: UserEvent> {
     pub id: LambdaId,
     pub env: Env<C, E>,
     pub scope: ModPath,
-    pub argspec: Arc<[Arg<NoRefs>]>,
-    pub typ: Arc<FnType<NoRefs>>,
+    pub argspec: Arc<[Arg]>,
+    pub typ: Arc<FnType>,
     pub init: InitFn<C, E>,
 }
 
@@ -29,7 +29,7 @@ impl<C: Ctx, E: UserEvent> fmt::Debug for LambdaDef<C, E> {
 pub struct Bind {
     pub id: BindId,
     pub export: bool,
-    pub typ: Type<NoRefs>,
+    pub typ: Type,
     pub doc: Option<ArcStr>,
     scope: ModPath,
     name: CompactString,
@@ -60,7 +60,7 @@ pub struct Env<C: Ctx, E: UserEvent> {
     pub binds: Map<ModPath, Map<CompactString, BindId>>,
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
     pub modules: Set<ModPath>,
-    pub typedefs: Map<ModPath, Map<CompactString, Type<NoRefs>>>,
+    pub typedefs: Map<ModPath, Map<CompactString, Type>>,
 }
 
 impl<C: Ctx, E: UserEvent> Clone for Env<C, E> {
@@ -204,11 +204,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         })
     }
 
-    pub fn lookup_typedef(
-        &self,
-        scope: &ModPath,
-        name: &ModPath,
-    ) -> Option<&Type<NoRefs>> {
+    pub fn lookup_typedef(&self, scope: &ModPath, name: &ModPath) -> Option<&Type> {
         self.find_visible(scope, name, |scope, name| {
             self.typedefs.get(scope).and_then(|m| m.get(name))
         })
@@ -262,12 +258,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         res
     }
 
-    pub fn deftype(
-        &mut self,
-        scope: &ModPath,
-        name: &str,
-        typ: Type<NoRefs>,
-    ) -> Result<()> {
+    pub fn deftype(&mut self, scope: &ModPath, name: &str, typ: Type) -> Result<()> {
         let defs = self.typedefs.get_or_default_cow(scope.clone());
         if defs.get(name).is_some() {
             bail!("{name} is already defined in scope {scope}")
@@ -288,12 +279,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
 
     // create a new binding. If an existing bind exists in the same
     // scope shadow it.
-    pub fn bind_variable(
-        &mut self,
-        scope: &ModPath,
-        name: &str,
-        typ: Type<NoRefs>,
-    ) -> &mut Bind {
+    pub fn bind_variable(&mut self, scope: &ModPath, name: &str, typ: Type) -> &mut Bind {
         let binds = self.binds.get_or_default_cow(scope.clone());
         let mut existing = true;
         let id = binds.get_or_insert_cow(CompactString::from(name), || {

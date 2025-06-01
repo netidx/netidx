@@ -3,7 +3,7 @@ use crate::{
     env::LambdaDef,
     expr::{Arg, Expr, ExprId, ModPath},
     node::{compiler, pattern::StructPatternNode, Node, NodeKind},
-    typ::{FnArgType, FnType, NoRefs, Refs, TVar, Type},
+    typ::{FnArgType, FnType, TVar, Type},
     Apply, BindId, Ctx, Event, ExecCtx, InitFn, LambdaId, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
@@ -19,7 +19,7 @@ use triomphe::Arc;
 pub(super) struct LambdaCallSite<C: Ctx, E: UserEvent> {
     args: Box<[StructPatternNode]>,
     body: Node<C, E>,
-    typ: Arc<FnType<NoRefs>>,
+    typ: Arc<FnType>,
 }
 
 impl<C: Ctx, E: UserEvent> Apply<C, E> for LambdaCallSite<C, E> {
@@ -55,17 +55,17 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for LambdaCallSite<C, E> {
         self.typ.unbind_tvars();
         for (arg, FnArgType { typ, .. }) in args.iter_mut().zip(self.typ.args.iter()) {
             wrap!(arg, arg.typecheck(ctx))?;
-            wrap!(arg, typ.check_contains(&arg.typ))?;
+            wrap!(arg, typ.check_contains(&ctx.env, &arg.typ))?;
         }
         wrap!(self.body, self.body.typecheck(ctx))?;
-        wrap!(self.body, self.typ.rtype.check_contains(&self.body.typ))?;
+        wrap!(self.body, self.typ.rtype.check_contains(&ctx.env, &self.body.typ))?;
         for (tv, tc) in self.typ.constraints.read().iter() {
-            tc.check_contains(&Type::TVar(tv.clone()))?
+            tc.check_contains(&ctx.env, &Type::TVar(tv.clone()))?
         }
         Ok(())
     }
 
-    fn typ(&self) -> Arc<FnType<NoRefs>> {
+    fn typ(&self) -> Arc<FnType> {
         Arc::clone(&self.typ)
     }
 
@@ -81,8 +81,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for LambdaCallSite<C, E> {
 impl<C: Ctx, E: UserEvent> LambdaCallSite<C, E> {
     pub(super) fn new(
         ctx: &mut ExecCtx<C, E>,
-        typ: Arc<FnType<NoRefs>>,
-        argspec: Arc<[Arg<NoRefs>]>,
+        typ: Arc<FnType>,
+        argspec: Arc<[Arg]>,
         args: &[Node<C, E>],
         scope: &ModPath,
         tid: ExprId,
@@ -108,7 +108,7 @@ impl<C: Ctx, E: UserEvent> LambdaCallSite<C, E> {
 }
 
 pub(super) struct BuiltInCallSite<C: Ctx, E: UserEvent> {
-    typ: Arc<FnType<NoRefs>>,
+    typ: Arc<FnType>,
     apply: Box<dyn Apply<C, E> + Send + Sync + 'static>,
 }
 
@@ -153,17 +153,17 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInCallSite<C, E> {
             } else {
                 self.typ.vargs.as_ref().unwrap()
             };
-            wrap!(args[i], atyp.check_contains(&args[i].typ))?
+            wrap!(args[i], atyp.check_contains(&ctx.env, &args[i].typ))?
         }
         for (tv, tc) in self.typ.constraints.read().iter() {
-            tc.check_contains(&Type::TVar(tv.clone()))?
+            tc.check_contains(&ctx.env, &Type::TVar(tv.clone()))?
         }
         self.apply.typecheck(ctx, args)?;
         self.typ.unbind_tvars();
         Ok(())
     }
 
-    fn typ(&self) -> Arc<FnType<NoRefs>> {
+    fn typ(&self) -> Arc<FnType> {
         Arc::clone(&self.typ)
     }
 
@@ -179,10 +179,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInCallSite<C, E> {
 pub(super) fn compile<C: Ctx, E: UserEvent>(
     ctx: &mut ExecCtx<C, E>,
     spec: Expr,
-    argspec: Arc<[Arg<Refs>]>,
-    vargs: Option<Option<Type<Refs>>>,
-    rtype: Option<Type<Refs>>,
-    constraints: Arc<[(TVar<Refs>, Type<Refs>)]>,
+    argspec: Arc<[Arg]>,
+    vargs: Option<Option<Type>>,
+    rtype: Option<Type>,
+    constraints: Arc<[(TVar, Type)]>,
     scope: &ModPath,
     body: Either<Expr, ArcStr>,
 ) -> Result<Node<C, E>> {
@@ -206,34 +206,30 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
     let vargs = match vargs {
         None => None,
         Some(None) => Some(None),
-        Some(Some(typ)) => Some(Some(typ.resolve_typerefs(&scope, &ctx.env)?)),
+        Some(Some(typ)) => Some(Some(typ.scope_refs(&scope))),
     };
-    let rtype =
-        rtype.as_ref().map(|t| t.resolve_typerefs(&scope, &ctx.env)).transpose()?;
+    let rtype = rtype.as_ref().map(|t| t.scope_refs(&scope));
     let argspec = argspec
         .iter()
         .map(|a| match &a.constraint {
-            None => Ok(Arg {
+            None => Arg {
                 labeled: a.labeled.clone(),
                 pattern: a.pattern.clone(),
                 constraint: None,
-            }),
-            Some(typ) => {
-                let typ = typ.resolve_typerefs(&scope, &ctx.env)?;
-                Ok(Arg {
-                    labeled: a.labeled.clone(),
-                    pattern: a.pattern.clone(),
-                    constraint: Some(typ),
-                })
-            }
+            },
+            Some(typ) => Arg {
+                labeled: a.labeled.clone(),
+                pattern: a.pattern.clone(),
+                constraint: Some(typ.scope_refs(&scope)),
+            },
         })
-        .collect::<Result<SmallVec<[_; 16]>>>()?;
+        .collect::<SmallVec<[_; 16]>>();
     let argspec = Arc::from_iter(argspec);
     let constraints = constraints
         .iter()
         .map(|(tv, tc)| {
-            let tv = tv.resolve_typerefs(&scope, &env)?;
-            let tc = tc.resolve_typerefs(&scope, &env)?;
+            let tv = tv.scope_refs(&scope);
+            let tc = tc.scope_refs(&scope);
             Ok((tv, tc))
         })
         .collect::<Result<SmallVec<[_; 4]>>>()?;
@@ -259,13 +255,11 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         }
         Either::Right(builtin) => match ctx.builtins.get(builtin.as_str()) {
             None => bail!("unknown builtin function {builtin}"),
-            Some((styp, _)) => {
-                Arc::new(styp.clone().resolve_typerefs(&_scope, &ctx.env)?)
-            }
+            Some((styp, _)) => Arc::new(styp.clone().scope_refs(&_scope)),
         },
     };
     thread_local! {
-        static KNOWN: RefCell<FxHashMap<ArcStr, TVar<NoRefs>>> = RefCell::new(HashMap::default());
+        static KNOWN: RefCell<FxHashMap<ArcStr, TVar>> = RefCell::new(HashMap::default());
     }
     KNOWN.with_borrow_mut(|known| {
         known.clear();

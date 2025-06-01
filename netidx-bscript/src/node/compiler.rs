@@ -6,7 +6,7 @@ use crate::{
         pattern::{PatternNode, StructPatternNode},
         ArrayRefNode, ArraySliceNode, Cached, CallSite, Node, NodeKind, SelectNode,
     },
-    typ::{FnType, NoRefs, Type},
+    typ::{FnType, Type},
     Ctx, ExecCtx, UserEvent,
 };
 use anyhow::{bail, Context, Result};
@@ -14,7 +14,7 @@ use arcstr::{literal, ArcStr};
 use compact_str::{format_compact, CompactString};
 use fxhash::FxHashMap;
 use netidx::publisher::{Typ, Value};
-use std::{collections::hash_map::Entry, fmt::Debug, hash::Hash, marker::PhantomData};
+use std::{collections::hash_map::Entry, fmt::Debug, hash::Hash};
 use triomphe::Arc;
 
 atomic_id!(SelectId);
@@ -52,7 +52,7 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
     ctx: &mut ExecCtx<C, E>,
     scope: &ModPath,
     top_id: ExprId,
-    typ: &FnType<NoRefs>,
+    typ: &FnType,
     args: &Arc<[(Option<ArcStr>, Expr)]>,
 ) -> Result<(Vec<Node<C, E>>, FxHashMap<ArcStr, bool>)> {
     macro_rules! compile {
@@ -133,10 +133,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         Expr { kind: ExprKind::Do { exprs }, id, pos: _ } => {
             let scope = ModPath(scope.append(&format_compact!("do{}", id.inner())));
             let exp = subexprs!(scope, exprs, |n| n)?;
-            let typ = exp
-                .last()
-                .map(|n| n.typ.clone())
-                .unwrap_or_else(|| Type::Bottom(PhantomData));
+            let typ = exp.last().map(|n| n.typ.clone()).unwrap_or_else(|| Type::Bottom);
             Ok(Node { kind: NodeKind::Do(Box::from(exp)), spec: Box::new(spec), typ })
         }
         Expr { kind: ExprKind::Array { args }, id: _, pos: _ } => {
@@ -223,14 +220,14 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                         .with_context(|| ori.clone())?;
                     let kind = NodeKind::Module(Box::from(exprs));
                     ctx.env.modules.insert_cow(scope.clone());
-                    let typ = Type::Bottom(PhantomData);
+                    let typ = Type::Bottom;
                     Ok(Node { spec: Box::new(spec), typ, kind })
                 }
                 ModuleKind::Inline(exprs) => {
                     let kind =
                         NodeKind::Module(Box::from(subexprs!(scope, exprs, |n| n)?));
                     ctx.env.modules.insert_cow(scope.clone());
-                    let typ = Type::Bottom(PhantomData);
+                    let typ = Type::Bottom;
                     Ok(Node { spec: Box::new(spec), typ, kind })
                 }
             }
@@ -242,7 +239,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
                 let used = ctx.env.used.get_or_default_cow(scope.clone());
                 Arc::make_mut(used).push(name.clone());
                 let kind = NodeKind::Use { scope: scope.clone(), name: name.clone() };
-                Ok(Node { spec: Box::new(spec), typ: Type::Bottom(PhantomData), kind })
+                Ok(Node { spec: Box::new(spec), typ: Type::Bottom, kind })
             }
         }
         Expr { kind: ExprKind::Connect { name, value }, id: _, pos } => {
@@ -252,7 +249,7 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             };
             let node = compile(ctx, (**value).clone(), scope, top_id)?;
             let kind = NodeKind::Connect(id, Box::new(node));
-            let typ = Type::Bottom(PhantomData);
+            let typ = Type::Bottom;
             Ok(Node { spec: Box::new(spec), typ, kind })
         }
         Expr { kind: ExprKind::Lambda(l), id: _, pos: _ } => {
@@ -294,11 +291,11 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             let expr::Bind { doc, pattern, typ, export: _, value } = &**b;
             let node = compile(ctx, value.clone(), &scope, top_id)?;
             let typ = match typ {
-                Some(typ) => typ.resolve_typerefs(scope, &ctx.env)?,
+                Some(typ) => typ.scope_refs(scope),
                 None => {
                     let typ = node.typ.clone();
                     let ptyp = pattern.infer_type_predicate();
-                    if !ptyp.contains(&typ) {
+                    if !ptyp.contains(&ctx.env, &typ)? {
                         bail!("at {pos} match error {typ} can't be matched by {ptyp}");
                     }
                     typ
@@ -406,11 +403,8 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
         }
         Expr { kind: ExprKind::TypeCast { expr, typ }, id: _, pos } => {
             let n = compile(ctx, (**expr).clone(), scope, top_id)?;
-            let typ = match typ.resolve_typerefs(scope, &ctx.env) {
-                Err(e) => bail!("in cast at {pos} {e}"),
-                Ok(typ) => typ,
-            };
-            if let Err(e) = typ.check_cast() {
+            let typ = typ.scope_refs(scope);
+            if let Err(e) = typ.check_cast(&ctx.env) {
                 bail!("in cast at {pos} {e}");
             }
             let rtyp = typ.union(&Type::Primitive(Typ::Error.into()));
@@ -418,15 +412,13 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             Ok(Node { spec: Box::new(spec), typ: rtyp, kind })
         }
         Expr { kind: ExprKind::TypeDef { name, typ }, id: _, pos } => {
-            let typ = typ
-                .resolve_typerefs(scope, &ctx.env)
-                .with_context(|| format!("in typedef at {pos}"))?;
+            let typ = typ.scope_refs(scope);
             ctx.env
                 .deftype(scope, name, typ)
                 .with_context(|| format!("in typedef at {pos}"))?;
             let name = name.clone();
             let spec = Box::new(spec);
-            let typ = Type::Bottom(PhantomData);
+            let typ = Type::Bottom;
             Ok(Node { spec, typ, kind: NodeKind::TypeDef { scope: scope.clone(), name } })
         }
         Expr { kind: ExprKind::Not { expr }, id: _, pos: _ } => {

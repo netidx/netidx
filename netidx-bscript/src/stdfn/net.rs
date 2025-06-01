@@ -3,7 +3,7 @@ use crate::{
     expr::{Expr, ExprId, ModPath},
     node::{genn, Node},
     stdfn::CachedVals,
-    typ::{FnType, NoRefs, Type},
+    typ::{FnType, Type},
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
@@ -332,7 +332,7 @@ struct Publish<C: Ctx, E: UserEvent> {
     args: CachedVals,
     current: Option<(Path, Val)>,
     top_id: ExprId,
-    mftyp: TArc<FnType<NoRefs>>,
+    mftyp: TArc<FnType>,
     x: BindId,
     pid: BindId,
     on_write: Node<C, E>,
@@ -434,9 +434,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        Type::Fn(self.mftyp.clone()).check_contains(&from[0].typ)?;
-        Type::Primitive(Typ::String.into()).check_contains(&from[1].typ)?;
-        Type::Primitive(Typ::any()).check_contains(&from[2].typ)?;
+        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[0].typ)?;
+        Type::Primitive(Typ::String.into()).check_contains(&ctx.env, &from[1].typ)?;
+        Type::Primitive(Typ::any()).check_contains(&ctx.env, &from[2].typ)?;
         self.on_write.typecheck(ctx)
     }
 
@@ -455,7 +455,7 @@ struct PublishRpc<C: Ctx, E: UserEvent> {
     f: Node<C, E>,
     pid: BindId,
     x: BindId,
-    typ: TArc<FnType<NoRefs>>,
+    typ: TArc<FnType>,
     queue: VecDeque<server::RpcCall>,
     argbuf: SmallVec<[(ArcStr, Value); 6]>,
     ready: bool,
@@ -600,10 +600,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        self.typ.args[0].typ.check_contains(&from[0].typ)?;
-        self.typ.args[1].typ.check_contains(&from[1].typ)?;
-        self.typ.args[2].typ.check_contains(&from[2].typ)?;
-        self.typ.args[3].typ.check_contains(&from[3].typ)?;
+        self.typ.args[0].typ.check_contains(&ctx.env, &from[0].typ)?;
+        self.typ.args[1].typ.check_contains(&ctx.env, &from[1].typ)?;
+        self.typ.args[2].typ.check_contains(&ctx.env, &from[2].typ)?;
+        self.typ.args[3].typ.check_contains(&ctx.env, &from[3].typ)?;
         self.f.typecheck(ctx)
     }
 

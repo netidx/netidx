@@ -13,7 +13,7 @@ use crate::{
     env::Env,
     expr::{self, ExprId, ExprKind, ModPath, ModuleKind, ModuleResolver, Origin},
     node::{Node, NodeKind},
-    typ::{NoRefs, Type},
+    typ::Type,
     BindId, BuiltIn, Ctx, Event, ExecCtx, NoUserEvent,
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -442,7 +442,7 @@ async fn unsubscribe_ready(pending: &VecDeque<(Instant, Dval)>, now: Instant) {
 #[derive(Clone)]
 pub struct CompExp {
     pub id: ExprId,
-    pub typ: Type<NoRefs>,
+    pub typ: Type,
     pub output: bool,
 }
 
