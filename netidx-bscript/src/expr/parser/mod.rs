@@ -1517,3 +1517,12 @@ pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType> {
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{e}")))
 }
+
+pub(super) fn parse_modpath(s: &str) -> anyhow::Result<ModPath> {
+    modpath()
+        .skip(spaces())
+        .skip(eof())
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{e}")))
+}

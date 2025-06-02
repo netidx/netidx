@@ -42,7 +42,7 @@ struct Write {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Write {
     const NAME: &str = "write";
-    deftype!("fn(string, Any) -> _");
+    deftype!("net", "fn(string, Any) -> _");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, from, top_id| {
@@ -132,7 +132,7 @@ struct Subscribe {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Subscribe {
     const NAME: &str = "subscribe";
-    deftype!("fn(string) -> Any");
+    deftype!("net", "fn(string) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, from, top_id| {
@@ -200,7 +200,7 @@ struct RpcCall {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for RpcCall {
     const NAME: &str = "call";
-    deftype!("fn(string, Array<(string, Any)>) -> Any");
+    deftype!("net", "fn(string, Array<(string, Any)>) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, _, _, from, top_id| {
@@ -269,7 +269,7 @@ macro_rules! list {
 
         impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for $name {
             const NAME: &str = $builtin;
-            deftype!($typ);
+            deftype!("net", $typ);
 
             fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
                 Arc::new(|ctx, _, _, from, top_id| {
@@ -340,7 +340,7 @@ struct Publish<C: Ctx, E: UserEvent> {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Publish<C, E> {
     const NAME: &str = "publish";
-    deftype!("fn(?#on_write:fn(Any) -> _, string, Any) -> error");
+    deftype!("net", "fn(?#on_write:fn(Any) -> _, string, Any) -> error");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
@@ -465,6 +465,7 @@ struct PublishRpc<C: Ctx, E: UserEvent> {
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for PublishRpc<C, E> {
     const NAME: &str = "publish_rpc";
     deftype!(
+        "net",
         "fn(#path:string, #doc:string, #spec:Array<ArgSpec>, #f:fn(Array<(string, Any)>) -> Any) -> _"
     );
 

@@ -14,7 +14,7 @@ struct Rand {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Rand {
     const NAME: &str = "rand";
-    deftype!("fn<'a: [Int, Float]>(?#start:'a, ?#end:'a, #trigger:Any) -> 'a");
+    deftype!("rand", "fn<'a: [Int, Float]>(?#start:'a, ?#end:'a, #trigger:Any) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, from, _| Ok(Box::new(Rand { args: CachedVals::new(from) })))
@@ -58,7 +58,7 @@ struct Pick;
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Pick {
     const NAME: &str = "rand_pick";
-    deftype!("fn(Array<'a>) -> 'a");
+    deftype!("rand", "fn(Array<'a>) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, _, _| Ok(Box::new(Pick)))
@@ -85,7 +85,7 @@ struct Shuffle(SmallVec<[Value; 32]>);
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Shuffle {
     const NAME: &str = "rand_shuffle";
-    deftype!("fn(Array<'a>) -> Array<'a>");
+    deftype!("rand", "fn(Array<'a>) -> Array<'a>");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, _, _| Ok(Box::new(Shuffle(smallvec![]))))

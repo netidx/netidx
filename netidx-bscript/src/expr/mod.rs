@@ -1,7 +1,7 @@
 use crate::typ::{TVar, Type};
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
-use combine::{stream::position::SourcePosition, EasyParser};
+use combine::stream::position::SourcePosition;
 use compact_str::{format_compact, CompactString};
 use netidx::{
     path::Path,
@@ -46,10 +46,7 @@ impl FromStr for ModPath {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
-        parser::modpath()
-            .easy_parse(combine::stream::position::Stream::new(s))
-            .map(|(r, _)| r)
-            .map_err(|e| anyhow::anyhow!(format!("{e:?}")))
+        parser::parse_modpath(s)
     }
 }
 

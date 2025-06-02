@@ -191,7 +191,7 @@ pub(super) struct MapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for MapImpl {
     const NAME: &str = "array_map";
-    deftype!("fn(Array<'a>, fn('a) -> 'b) -> Array<'b>");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> 'b) -> Array<'b>");
 
     fn finish(&mut self, slots: &[Slot<C, E>], _: &ValArray) -> Option<Value> {
         Some(Value::Array(ValArray::from_iter_exact(
@@ -207,7 +207,7 @@ pub(super) struct FilterImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FilterImpl {
     const NAME: &str = "array_filter";
-    deftype!("fn(Array<'a>, fn('a) -> bool) -> Array<'a>");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> bool) -> Array<'a>");
 
     fn finish(&mut self, slots: &[Slot<C, E>], a: &ValArray) -> Option<Value> {
         Some(Value::Array(ValArray::from_iter(slots.iter().zip(a.iter()).filter_map(
@@ -226,7 +226,7 @@ pub(super) struct FlatMapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FlatMapImpl {
     const NAME: &str = "array_flat_map";
-    deftype!("fn(Array<'a>, fn('a) -> ['b, Array<'b>]) -> Array<'b>");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> ['b, Array<'b>]) -> Array<'b>");
 
     fn finish(&mut self, slots: &[Slot<C, E>], _: &ValArray) -> Option<Value> {
         Some(Value::Array(ValArray::from_iter(slots.iter().flat_map(|s| {
@@ -245,7 +245,7 @@ pub(super) struct FilterMapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FilterMapImpl {
     const NAME: &str = "array_filter_map";
-    deftype!("fn(Array<'a>, fn('a) -> ['b, null]) -> Array<'b>");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> ['b, null]) -> Array<'b>");
 
     fn finish(&mut self, slots: &[Slot<C, E>], _: &ValArray) -> Option<Value> {
         Some(Value::Array(ValArray::from_iter(slots.iter().filter_map(|s| {
@@ -264,7 +264,7 @@ pub(super) struct FindImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindImpl {
     const NAME: &str = "array_find";
-    deftype!("fn(Array<'a>, fn('a) -> bool) -> ['a, null]");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> bool) -> ['a, null]");
 
     fn finish(&mut self, slots: &[Slot<C, E>], a: &ValArray) -> Option<Value> {
         let r = slots
@@ -287,7 +287,7 @@ pub(super) struct FindMapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindMapImpl {
     const NAME: &str = "array_find_map";
-    deftype!("fn(Array<'a>, fn('a) -> ['b, null]) -> ['b, null]");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> ['b, null]) -> ['b, null]");
 
     fn finish(&mut self, slots: &[Slot<C, E>], _: &ValArray) -> Option<Value> {
         let r = slots
@@ -317,7 +317,7 @@ pub(super) struct Fold<C: Ctx, E: UserEvent> {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Fold<C, E> {
     const NAME: &str = "array_fold";
-    deftype!("fn(Array<'a>, 'b, fn('b, 'a) -> 'b) -> 'b");
+    deftype!("core::array", "fn(Array<'a>, 'b, fn('b, 'a) -> 'b) -> 'b");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_ctx, typ, _, from, top_id| match from {
@@ -453,7 +453,7 @@ pub(super) struct ConcatEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for ConcatEv {
     const NAME: &str = "array_concat";
-    deftype!("fn(Array<'a>, @args: [Array<'a>, 'a]) -> Array<'a>");
+    deftype!("core::array", "fn(Array<'a>, @args: [Array<'a>, 'a]) -> Array<'a>");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut present = true;
@@ -485,7 +485,7 @@ pub(super) struct LenEv;
 
 impl EvalCached for LenEv {
     const NAME: &str = "array_len";
-    deftype!("fn(Array<'a>) -> u64");
+    deftype!("core::array", "fn(Array<'a>) -> u64");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
@@ -502,7 +502,7 @@ pub(super) struct FlattenEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for FlattenEv {
     const NAME: &str = "array_flatten";
-    deftype!("fn(Array<Array<'a>>) -> Array<'a>");
+    deftype!("core::array", "fn(Array<Array<'a>>) -> Array<'a>");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
@@ -528,7 +528,7 @@ pub(super) struct SortEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for SortEv {
     const NAME: &str = "array_sort";
-    deftype!("fn(Array<'a>) -> Array<'a>");
+    deftype!("core::array", "fn(Array<'a>) -> Array<'a>");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::Array(a)) = &from.0[0] {
@@ -556,7 +556,7 @@ pub(super) struct Group<C: Ctx, E: UserEvent> {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
     const NAME: &str = "group";
-    deftype!("fn('a, fn(u64, 'a) -> bool) -> Array<'a>");
+    deftype!("core::array", "fn('a, fn(u64, 'a) -> bool) -> Array<'a>");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
@@ -657,7 +657,7 @@ pub(super) struct Iter(BindId, ExprId);
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Iter {
     const NAME: &str = "iter";
-    deftype!("fn(Array<'a>) -> 'a");
+    deftype!("core::array", "fn(Array<'a>) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, _, _, _, top_id| {
@@ -697,7 +697,7 @@ pub(super) struct IterQ {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for IterQ {
     const NAME: &str = "iterq";
-    deftype!("fn(#trigger:Any, Array<'a>) -> 'a");
+    deftype!("core::array", "fn(#trigger:Any, Array<'a>) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, _, _, _, top_id| {

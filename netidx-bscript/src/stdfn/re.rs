@@ -29,7 +29,7 @@ struct IsMatchEv {
 
 impl EvalCached for IsMatchEv {
     const NAME: &str = "re_is_match";
-    deftype!("fn(#pat:string, string) -> [bool, error]");
+    deftype!("re", "fn(#pat:string, string) -> [bool, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::String(s)) = &from.0[0] {
@@ -55,7 +55,7 @@ struct FindEv {
 
 impl EvalCached for FindEv {
     const NAME: &str = "re_find";
-    deftype!("fn(#pat:string, string) -> [Array<string>, error]");
+    deftype!("re", "fn(#pat:string, string) -> [Array<string>, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::String(s)) = &from.0[0] {
@@ -84,7 +84,7 @@ struct CapturesEv {
 
 impl EvalCached for CapturesEv {
     const NAME: &str = "re_captures";
-    deftype!("fn(#pat:string, string) -> [Array<Array<[null, string]>>, error]");
+    deftype!("re", "fn(#pat:string, string) -> [Array<Array<[null, string]>>, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::String(s)) = &from.0[0] {
@@ -117,7 +117,7 @@ struct SplitEv {
 
 impl EvalCached for SplitEv {
     const NAME: &str = "re_split";
-    deftype!("fn(#pat:string, string) -> [Array<string>, error]");
+    deftype!("re", "fn(#pat:string, string) -> [Array<string>, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::String(s)) = &from.0[0] {
@@ -145,7 +145,7 @@ struct SplitNEv {
 
 impl EvalCached for SplitNEv {
     const NAME: &str = "re_splitn";
-    deftype!("fn(#pat:string, #limit:u64, string) -> [Array<string>, error]");
+    deftype!("re", "fn(#pat:string, #limit:u64, string) -> [Array<string>, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::String(s)) = &from.0[0] {

@@ -21,11 +21,13 @@ pub mod time;
 
 #[macro_export]
 macro_rules! deftype {
-    ($s:literal) => {
+    ($scope:literal, $s:literal) => {
         const TYP: ::std::sync::LazyLock<$crate::typ::FnType> =
             ::std::sync::LazyLock::new(|| {
+                let scope = $crate::expr::ModPath(::netidx::path::Path::from($scope));
                 $crate::expr::parser::parse_fn_type($s)
                     .expect("failed to parse fn type {s}")
+                    .scope_refs(&scope)
             });
     };
 }
