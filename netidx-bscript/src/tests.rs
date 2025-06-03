@@ -975,3 +975,30 @@ run!(late_binding2, LATE_BINDING2, |v: Result<&Value>| match v {
     Ok(Value::I64(1)) => true,
     _ => false,
 });
+
+#[cfg(test)]
+const RECTYPES0: &str = r#"
+{
+  type List = [
+    `Cons(Any, List),
+    `Nil
+  ];
+  let l: List = `Cons(42, `Cons(3, `Nil));
+  l
+}
+"#;
+
+#[cfg(test)]
+run!(rectypes0, RECTYPES0, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::String(s), Value::I64(42), Value::Array(a)] if &**s == "Cons" =>
+            match &a[..] {
+                [Value::String(s0), Value::I64(3), Value::String(s1)]
+                    if &**s0 == "Cons" && s1 == "Nil" =>
+                    true,
+                _ => false,
+            },
+        _ => false,
+    },
+    _ => false,
+});
