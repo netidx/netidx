@@ -81,6 +81,10 @@ impl StructPatternNode {
                 }
             };
         }
+        let type_predicate = match type_predicate {
+            Type::Ref { .. } => &type_predicate.lookup_ref(&ctx.env)?.clone(),
+            t => t,
+        };
         let t = match &spec {
             StructurePattern::Ignore => Self::Ignore,
             StructurePattern::Literal(v) => {
@@ -475,7 +479,7 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         top_id: ExprId,
     ) -> Result<Self> {
         let type_predicate = match &spec.type_predicate {
-            Some(t) => t.scope_refs(scope),
+            Some(t) => t.scope_refs(scope).lookup_ref(&ctx.env)?.clone(),
             None => spec.structure_predicate.infer_type_predicate(),
         };
         match &type_predicate {

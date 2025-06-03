@@ -110,7 +110,7 @@ impl Type {
         }
     }
 
-    fn lookup_ref<'b: 'a, 'a, C: Ctx, E: UserEvent>(
+    pub fn lookup_ref<'b: 'a, 'a, C: Ctx, E: UserEvent>(
         &'b self,
         env: &'a Env<C, E>,
     ) -> Result<&'a Type> {

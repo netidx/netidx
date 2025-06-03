@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     expr::parser::parse_one,
-    typ::{self, FnArgType, FnType, Refs, Type},
+    typ::{self, FnArgType, FnType, Type},
 };
 use bytes::Bytes;
 use chrono::prelude::*;
@@ -13,7 +13,7 @@ use parser::RESERVED;
 use prop::option;
 use proptest::{collection, prelude::*};
 use smallvec::SmallVec;
-use std::{marker::PhantomData, time::Duration};
+use std::time::Duration;
 
 const SLEN: usize = 16;
 
@@ -198,15 +198,15 @@ fn typ() -> impl Strategy<Value = Typ> {
     ]
 }
 
-fn typexp() -> impl Strategy<Value = Type<Refs>> {
+fn typexp() -> impl Strategy<Value = Type> {
     let leaf = prop_oneof![
-        Just(Type::Bottom(PhantomData)),
+        Just(Type::Bottom),
         collection::vec(typ(), (0, 10)).prop_map(|mut prims| {
             prims.sort();
             prims.dedup();
             Type::Primitive(BitFlags::from_iter(prims))
         }),
-        typath().prop_map(Type::Ref),
+        typath().prop_map(|name| Type::Ref { scope: ModPath::root(), name }),
     ];
     leaf.prop_recursive(5, 20, 10, |inner| {
         prop_oneof![
@@ -675,11 +675,11 @@ fn acc_strings<'a>(args: impl IntoIterator<Item = &'a Expr> + 'a) -> Arc<[Expr]>
     Arc::from(v)
 }
 
-fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
+fn check_type(t0: &Type, t1: &Type) -> bool {
     t0.normalize() == t1.normalize()
 }
 
-fn check_type_opt(t0: &Option<Type<Refs>>, t1: &Option<Type<Refs>>) -> bool {
+fn check_type_opt(t0: &Option<Type>, t1: &Option<Type>) -> bool {
     match (t0, t1) {
         (Some(t0), Some(t1)) => check_type(&t0, &t1),
         (None, None) => true,
@@ -800,7 +800,7 @@ fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
         })
 }
 
-fn check_args(args0: &[Arg<Refs>], args1: &[Arg<Refs>]) -> bool {
+fn check_args(args0: &[Arg], args1: &[Arg]) -> bool {
     args0.iter().zip(args1.iter()).fold(true, |r, (a0, a1)| {
         r && dbg!(check_structure_pattern(&a0.pattern, &a1.pattern))
             && dbg!(check_type_opt(&a0.constraint, &a1.constraint))
