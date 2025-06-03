@@ -844,21 +844,21 @@ impl Type {
             Type::Fn(_) => bail!("can't cast a value to a function"),
             Type::Bottom => bail!("can't cast a value to bottom"),
             Type::Set(s) => Ok(for t in s.iter() {
-                t.check_cast(env)?
+                t.check_cast_int(env, hist)?
             }),
             Type::TVar(tv) => match &*tv.read().typ.read() {
-                Some(t) => t.check_cast(env),
+                Some(t) => t.check_cast_int(env, hist),
                 None => bail!("can't cast a value to a free type variable"),
             },
-            Type::Array(et) => et.check_cast(env),
+            Type::Array(et) => et.check_cast_int(env, hist),
             Type::Tuple(ts) => Ok(for t in ts.iter() {
-                t.check_cast(env)?
+                t.check_cast_int(env, hist)?
             }),
             Type::Struct(ts) => Ok(for (_, t) in ts.iter() {
-                t.check_cast(env)?
+                t.check_cast_int(env, hist)?
             }),
             Type::Variant(_, ts) => Ok(for t in ts.iter() {
-                t.check_cast(env)?
+                t.check_cast_int(env, hist)?
             }),
             Type::Ref { .. } => {
                 let t = self.lookup_ref(env)?;
