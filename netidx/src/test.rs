@@ -375,12 +375,15 @@ mod publisher {
     use crate::{
         config::Config as ClientConfig,
         publisher::{
-            BindCfg, DesiredAuth, Event as PEvent, PublishFlags, Publisher, Val,
+            BindCfg, DesiredAuth, Event as PEvent, PublishFlags, Publisher,
+            PublisherBuilder, Val,
         },
         resolver_server::{config::Config as ServerConfig, Server},
-        subscriber::{Event, Subscriber, UpdatesFlags, Value},
+        subscriber::{Event, Subscriber, SubscriberBuilder, UpdatesFlags, Value},
     };
+    use anyhow::Result;
     use futures::{channel::mpsc, channel::oneshot, prelude::*, select_biased};
+    use netidx_core::path::Path;
     use parking_lot::Mutex;
     use std::{
         iter,
@@ -388,7 +391,11 @@ mod publisher {
         sync::Arc,
         time::Duration,
     };
-    use tokio::{runtime::Runtime, task, time};
+    use tokio::{
+        runtime::Runtime,
+        task::{self, JoinHandle},
+        time::{self, Instant},
+    };
 
     #[test]
     fn bindcfg() {
@@ -589,5 +596,84 @@ mod publisher {
             .await;
             drop(server)
         })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slow_consumer() -> Result<()> {
+        let _ = env_logger::try_init();
+        let resolver = {
+            use crate::resolver_server::config::{self, file};
+            let cfg = file::ConfigBuilder::default()
+                .member_servers(vec![file::MemberServerBuilder::default()
+                    .auth(file::Auth::Anonymous)
+                    .addr("127.0.0.1:0".parse()?)
+                    .bind_addr("127.0.0.1".parse()?)
+                    .build()?])
+                .build()?;
+            let cfg = config::Config::from_file(cfg)?;
+            crate::resolver_server::Server::new(cfg, false, 0).await?
+        };
+        let addr = *resolver.local_addr();
+        let cfg = {
+            use crate::config::{self, file, DefaultAuthMech};
+            let cfg = file::ConfigBuilder::default()
+                .addrs(vec![(addr, file::Auth::Anonymous)])
+                .default_auth(DefaultAuthMech::Anonymous)
+                .default_bind_config("local")
+                .build()?;
+            config::Config::from_file(cfg)?
+        };
+        let timeout = Duration::from_secs(10);
+        let _cfg = cfg.clone();
+        let pb: JoinHandle<Result<()>> = task::spawn(async move {
+            let publisher = PublisherBuilder::new(_cfg).slack(3).build().await?;
+            let v = publisher.publish(Path::from("/local/foo"), Value::from(42))?;
+            loop {
+                let mut batch = publisher.start_batch();
+                for i in 0..1000 {
+                    v.update(&mut batch, Value::from(i));
+                }
+                batch.commit(Some(timeout)).await;
+                time::sleep(Duration::from_millis(10)).await;
+                print!(".");
+            }
+        });
+        let _cfg = cfg.clone();
+        let slow_sub: JoinHandle<Result<()>> = task::spawn(async move {
+            use futures::channel::mpsc;
+            let subscriber = SubscriberBuilder::new(_cfg).build()?;
+            let s = subscriber.subscribe(Path::from("/local/foo"));
+            let (tx, rx) = mpsc::channel(3);
+            s.updates(UpdatesFlags::empty(), tx);
+            future::pending::<()>().await;
+            drop(rx);
+            Ok(())
+        });
+        let start = Instant::now();
+        let mut last_update = Instant::now();
+        let subscriber = SubscriberBuilder::new(cfg).build()?;
+        let s = subscriber.subscribe(Path::from("/local/foo"));
+        let mut hb = time::interval(Duration::from_secs(1));
+        let (tx, mut rx) = mpsc::channel(3);
+        s.updates(UpdatesFlags::empty(), tx);
+        loop {
+            tokio::select! {
+                _ = hb.tick() => {
+                    if last_update.elapsed() > timeout {
+                        bail!("updates stopped for longer than timeout!")
+                    }
+                    if start.elapsed() > timeout * 6 {
+                        break
+                    }
+                },
+                _ = rx.select_next_some() => {
+                    last_update = Instant::now();
+                    print!("-");
+                }
+            }
+        }
+        slow_sub.abort();
+        pb.abort();
+        Ok(())
     }
 }
