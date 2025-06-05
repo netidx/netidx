@@ -89,6 +89,5 @@ members = [
     "netidx-container",
     "netidx-derive",
     "netidx-wsproxy",
-    "netidx-browser"
 ]
 exclude = ["cfg/tls/id-win"]
