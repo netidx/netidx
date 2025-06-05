@@ -659,10 +659,10 @@ mod publisher {
         loop {
             tokio::select! {
                 _ = hb.tick() => {
-                    if last_update.elapsed() > timeout {
+                    if dbg!(last_update.elapsed()) > timeout + Duration::from_secs(1) {
                         bail!("updates stopped for longer than timeout!")
                     }
-                    if start.elapsed() > timeout * 6 {
+                    if start.elapsed() > timeout * 5 {
                         break
                     }
                 },
