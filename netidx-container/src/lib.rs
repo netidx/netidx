@@ -61,6 +61,13 @@ pub struct Params {
         help = "require subscribers to consume values before timeout (seconds)"
     )]
     pub timeout: Option<u64>,
+    #[structopt(long = "slack", help = "set the publisher slack (default 3 batches)")]
+    pub slack: Option<usize>,
+    #[structopt(
+        long = "max_clients",
+        help = "set the maximum number of clients (default 768)"
+    )]
+    pub max_clients: Option<usize>,
     #[structopt(long = "api-path", help = "the netidx path of the container api")]
     pub api_path: Option<Path>,
     #[structopt(long = "db", help = "the db file")]
@@ -163,11 +170,15 @@ struct ContainerInner {
 impl ContainerInner {
     async fn new(cfg: Config, auth: DesiredAuth, params: Params) -> Result<Self> {
         let (publish_events_tx, publish_events) = mpsc::unbounded();
-        let publisher = PublisherBuilder::new(cfg.clone())
-            .desired_auth(auth.clone())
-            .bind_cfg(params.bind)
-            .build()
-            .await?;
+        let mut publisher = PublisherBuilder::new(cfg.clone());
+        publisher.desired_auth(auth.clone()).bind_cfg(params.bind);
+        if let Some(n) = params.slack {
+            publisher.slack(n);
+        }
+        if let Some(n) = params.max_clients {
+            publisher.max_clients(n);
+        }
+        let publisher = publisher.build().await?;
         publisher.events(publish_events_tx);
         let (db, db_updates) =
             Db::new(&params, publisher.clone(), params.api_path.clone())?;
