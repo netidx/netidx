@@ -2,7 +2,6 @@ use super::{
     ClId, Client, Event, PublisherInner, PublisherWeak, SendResult, Update, WriteRequest,
     BATCHES,
 };
-use arcstr::literal;
 use crate::{
     channel::{self, Channel, K5CtxWrap, ReadChannel, WriteChannel},
     pack::BoundedBytes,
@@ -19,6 +18,7 @@ use crate::{
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use anyhow::{anyhow, Error, Result};
+use arcstr::literal;
 use bytes::Bytes;
 use cross_krb5::ServerCtx;
 use futures::{
@@ -48,7 +48,8 @@ use std::{
 };
 use tokio::{
     net::{TcpListener, TcpStream},
-    task, time,
+    task,
+    time::{self, Instant},
 };
 
 const MAX_DEFERRED: usize = 1000000;
@@ -268,7 +269,7 @@ fn check_token(
     Ok((valid, permissions))
 }
 
-const HB: Duration = Duration::from_secs(5);
+const HB: Duration = Duration::from_secs(1);
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -289,7 +290,7 @@ struct ClientCtx {
     write_batches:
         FxHashMap<ChanId, (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>)>,
     blocked_writes: FuturesUnordered<BlockedWriteFut>,
-    flushing_updates: bool,
+    flushing_updates: Option<Instant>,
     flush_timeout: Option<Duration>,
     deferred_subs: DeferredSubs,
     deferred_subs_batch: Vec<(Path, Permissions)>,
@@ -318,7 +319,7 @@ impl ClientCtx {
             batch: Vec::new(),
             write_batches: HashMap::default(),
             blocked_writes: FuturesUnordered::new(),
-            flushing_updates: false,
+            flushing_updates: None,
             flush_timeout: None,
             deferred_subs,
             deferred_subs_batch: Vec::new(),
@@ -615,9 +616,11 @@ impl ClientCtx {
             self.handle_batch(con)?;
         }
         if con.bytes_queued() > 0 {
-            self.flushing_updates = true;
-            self.flush_timeout = timeout;
             self.msg_sent = true;
+            self.flush_timeout = timeout;
+            if self.flushing_updates.is_none() {
+                self.flushing_updates = Some(Instant::now());
+            }
         }
         Ok(())
     }
@@ -627,13 +630,9 @@ impl ClientCtx {
         con: TcpStream,
         mut updates: Receiver<(Option<Duration>, Update)>,
     ) -> Result<()> {
-        async fn flush(c: &mut WriteChannel, timeout: Option<Duration>) -> Result<()> {
+        async fn flush(c: &mut WriteChannel) -> Result<()> {
             if c.bytes_queued() > 0 {
-                if let Some(timeout) = timeout {
-                    c.flush_timeout(timeout).await
-                } else {
-                    c.flush().await
-                }
+                c.flush().await
             } else {
                 future::pending().await
             }
@@ -672,9 +671,9 @@ impl ClientCtx {
             time::timeout(HELLO_TIMEOUT, self.hello(con)).await??.split();
         loop {
             select_biased! {
-                r = flush(&mut write_con, self.flush_timeout).fuse() => {
+                r = flush(&mut write_con).fuse() => {
                     r?;
-                    self.flushing_updates = false;
+                    self.flushing_updates = None;
                     self.flush_timeout = None;
                 },
                 _ = hb.tick().fuse() => {
@@ -682,6 +681,11 @@ impl ClientCtx {
                         write_con.queue_send(&publisher::From::Heartbeat)?;
                     }
                     self.msg_sent = false;
+                    if let (Some(ts), Some(timeout)) = (self.flushing_updates, self.flush_timeout) {
+                        if ts.elapsed() > timeout {
+                            bail!("client timed out")
+                        }
+                    }
                 },
                 s = self.deferred_subs.next() =>
                     self.handle_deferred_sub(&mut write_con, s)?,
@@ -697,7 +701,7 @@ impl ClientCtx {
                         self.msg_sent = true;
                     },
                 },
-                u = read_updates(self.flushing_updates, &mut updates).fuse() => {
+                u = read_updates(self.flushing_updates.is_some(), &mut updates).fuse() => {
                     match u {
                         None => break Ok(()),
                         Some(u) => self.handle_updates(&mut write_con, u)?,
