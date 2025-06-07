@@ -635,6 +635,7 @@ fn select1() {
                 type_predicate: Some(Type::Ref {
                     scope: ModPath::root(),
                     name: ["Foo"].into(),
+                    params: Arc::from_iter([]),
                 }),
                 structure_predicate: StructurePattern::Struct {
                     all: None,
@@ -930,7 +931,7 @@ fn apply_typed_lambda() {
                         pattern: StructurePattern::Bind("b".into()),
                         constraint: Some(Type::Set(Arc::from_iter([
                             Type::Primitive(Typ::Null.into()),
-                            Type::Ref { scope: ModPath::root(), name: ["Number"].into() },
+                            Type::Ref { scope: ModPath::root(), name: ["Number"].into(), params: Arc::from_iter([]) },
                         ]))),
                     },
                 ]),
@@ -1031,6 +1032,7 @@ fn labeled_argument_lambda() {
                         typ: Type::Ref {
                             scope: ModPath::root(),
                             name: ["Number"].into(),
+                            params: Arc::from_iter([]),
                         },
                     },
                     FnArgType {
@@ -1039,11 +1041,11 @@ fn labeled_argument_lambda() {
                     },
                     FnArgType {
                         label: Some(("a".into(), false)),
-                        typ: Type::Ref { scope: ModPath::root(), name: ["Any"].into() },
+                        typ: Type::Ref { scope: ModPath::root(), name: ["Any"].into(), params: Arc::from_iter([]) },
                     },
                     FnArgType {
                         label: None,
-                        typ: Type::Ref { scope: ModPath::root(), name: ["Any"].into() },
+                        typ: Type::Ref { scope: ModPath::root(), name: ["Any"].into(), params: Arc::from_iter([]) },
                     },
                 ]),
                 vargs: None,
@@ -1058,6 +1060,7 @@ fn labeled_argument_lambda() {
                         constraint: Some(Type::Ref {
                             scope: ModPath::root(),
                             name: ["Number"].into(),
+                            params: Arc::from_iter([]),
                         }),
                     },
                     Arg {

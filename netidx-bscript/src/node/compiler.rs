@@ -411,10 +411,10 @@ pub(super) fn compile<C: Ctx, E: UserEvent>(
             let kind = NodeKind::TypeCast { target: typ, n: Box::new(n) };
             Ok(Node { spec: Box::new(spec), typ: rtyp, kind })
         }
-        Expr { kind: ExprKind::TypeDef { name, typ }, id: _, pos } => {
+        Expr { kind: ExprKind::TypeDef { name, params, typ }, id: _, pos } => {
             let typ = typ.scope_refs(scope);
             ctx.env
-                .deftype(scope, name, typ)
+                .deftype(scope, name, params.clone(), typ)
                 .with_context(|| format!("in typedef at {pos}"))?;
             let name = name.clone();
             let spec = Box::new(spec);

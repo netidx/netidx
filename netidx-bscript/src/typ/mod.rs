@@ -65,7 +65,7 @@ pub fn format_with_flags<R, F: FnOnce() -> R>(flags: BitFlags<PrintFlag>, f: F) 
 pub enum Type {
     Bottom,
     Primitive(BitFlags<Typ>),
-    Ref { scope: ModPath, name: ModPath },
+    Ref { scope: ModPath, name: ModPath, params: Arc<[Type]> },
     Fn(Arc<FnType>),
     Set(Arc<[Type]>),
     TVar(TVar),
@@ -110,14 +110,38 @@ impl Type {
         }
     }
 
-    pub fn lookup_ref<'b: 'a, 'a, C: Ctx, E: UserEvent>(
-        &'b self,
+    pub fn lookup_ref<'a, C: Ctx, E: UserEvent>(
+        &'a self,
         env: &'a Env<C, E>,
     ) -> Result<&'a Type> {
         match self {
-            Self::Ref { scope, name } => env
-                .lookup_typedef(scope, name)
-                .ok_or_else(|| anyhow!("undefined type {scope}::{name}")),
+            Self::Ref { scope, name, params } => {
+                let def = env
+                    .lookup_typedef(scope, name)
+                    .ok_or_else(|| anyhow!("undefined type {scope}::{name}"))?;
+                if def.params.len() != params.len() {
+                    bail!("{} expects {} type parameters", name, def.params.len());
+                }
+                def.typ.unbind_tvars();
+                for ((_tv, ct), arg) in def.params.iter().zip(params.iter()) {
+                    let def_ct;
+                    let ct = match ct {
+                        Some(t) => t,
+                        None => {
+                            def_ct = Type::Primitive(Typ::any());
+                            &def_ct
+                        }
+                    };
+                    ct.check_contains(env, arg)?;
+                }
+                for ((tv, _), arg) in def.params.iter().zip(params.iter()) {
+                    if tv.would_cycle(arg) {
+                        bail!("recursive type parameter for {name}");
+                    }
+                    *tv.read().typ.write() = Some(arg.clone());
+                }
+                Ok(&def.typ)
+            }
             t => Ok(t),
         }
     }
@@ -143,7 +167,7 @@ impl Type {
         t: &Self,
     ) -> Result<bool> {
         match (self, t) {
-            (Self::Ref { scope: s0, name: n0 }, Self::Ref { scope: s1, name: n1 })
+            (Self::Ref { scope: s0, name: n0, .. }, Self::Ref { scope: s1, name: n1, .. })
                 if s0 == s1 && n0 == n1 =>
             {
                 Ok(true)
@@ -436,7 +460,7 @@ impl Type {
         t: &Self,
     ) -> Result<Self> {
         match (self, t) {
-            (Type::Ref { scope: s0, name: n0 }, Type::Ref { scope: s1, name: n1 })
+            (Type::Ref { scope: s0, name: n0, .. }, Type::Ref { scope: s1, name: n1, .. })
                 if s0 == s1 && n0 == n1 =>
             {
                 Ok(Type::Primitive(BitFlags::empty()))
@@ -451,7 +475,7 @@ impl Type {
                     None => {
                         let r = Type::Primitive(BitFlags::empty());
                         hist.insert((t0_addr, t1_addr), r);
-                        match t0.diff_int(env, hist, t1) {
+                        match t0.diff_int(env, hist, &t1) {
                             Ok(r) => {
                                 hist.insert((t0_addr, t1_addr), r.clone());
                                 Ok(r)
@@ -601,7 +625,11 @@ impl Type {
     pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar>) {
         match self {
             Type::Bottom | Type::Primitive(_) => (),
-            Type::Ref { .. } => (),
+            Type::Ref { params, .. } => {
+                for t in params.iter() {
+                    t.alias_tvars(known);
+                }
+            }
             Type::Array(t) => t.alias_tvars(known),
             Type::Tuple(ts) => {
                 for t in ts.iter() {
@@ -637,7 +665,11 @@ impl Type {
     pub fn collect_tvars(&self, known: &mut FxHashMap<ArcStr, TVar>) {
         match self {
             Type::Bottom | Type::Primitive(_) => (),
-            Type::Ref { .. } => (),
+            Type::Ref { params, .. } => {
+                for t in params.iter() {
+                    t.collect_tvars(known);
+                }
+            }
             Type::Array(t) => t.collect_tvars(known),
             Type::Tuple(ts) => {
                 for t in ts.iter() {
@@ -667,6 +699,26 @@ impl Type {
                     typ.collect_tvars(known)
                 }
             }
+        }
+    }
+
+    pub fn check_tvars_declared(&self, declared: &FxHashSet<ArcStr>) -> Result<()> {
+        match self {
+            Type::Bottom | Type::Primitive(_) => Ok(()),
+            Type::Ref { params, .. } => params.iter().try_for_each(|t| t.check_tvars_declared(declared)),
+            Type::Array(t) => t.check_tvars_declared(declared),
+            Type::Tuple(ts) => ts.iter().try_for_each(|t| t.check_tvars_declared(declared)),
+            Type::Struct(ts) => ts.iter().try_for_each(|(_, t)| t.check_tvars_declared(declared)),
+            Type::Variant(_, ts) => ts.iter().try_for_each(|t| t.check_tvars_declared(declared)),
+            Type::TVar(tv) => {
+                if !declared.contains(&tv.name) {
+                    bail!("undeclared type variable '{}'", tv.name)
+                } else {
+                    Ok(())
+                }
+            }
+            Type::Set(s) => s.iter().try_for_each(|t| t.check_tvars_declared(declared)),
+            Type::Fn(_) => Ok(()),
         }
     }
 
@@ -727,7 +779,11 @@ impl Type {
         match self {
             Type::Bottom => Type::Bottom,
             Type::Primitive(p) => Type::Primitive(*p),
-            Type::Ref { .. } => self.clone(),
+            Type::Ref { scope, name, params } => Type::Ref {
+                scope: scope.clone(),
+                name: name.clone(),
+                params: Arc::from_iter(params.iter().map(|t| t.reset_tvars())),
+            },
             Type::Array(t0) => Type::Array(Arc::new(t0.reset_tvars())),
             Type::Tuple(ts) => {
                 Type::Tuple(Arc::from_iter(ts.iter().map(|t| t.reset_tvars())))
@@ -755,7 +811,11 @@ impl Type {
             },
             Type::Bottom => Type::Bottom,
             Type::Primitive(p) => Type::Primitive(*p),
-            Type::Ref { .. } => self.clone(),
+            Type::Ref { scope, name, params } => Type::Ref {
+                scope: scope.clone(),
+                name: name.clone(),
+                params: Arc::from_iter(params.iter().map(|t| t.replace_tvars(known))),
+            },
             Type::Array(t0) => Type::Array(Arc::new(t0.replace_tvars(known))),
             Type::Tuple(ts) => {
                 Type::Tuple(Arc::from_iter(ts.iter().map(|t| t.replace_tvars(known))))
@@ -1263,9 +1323,12 @@ impl Type {
 
     fn merge(&self, t: &Self) -> Option<Self> {
         match (self, t) {
-            (Type::Ref { scope: s0, name: r0 }, Type::Ref { scope: s1, name: r1 }) => {
-                if s0 == s1 && r0 == r1 {
-                    Some(Type::Ref { scope: s0.clone(), name: r0.clone() })
+            (
+                Type::Ref { scope: s0, name: r0, params: a0 },
+                Type::Ref { scope: s1, name: r1, params: a1 },
+            ) => {
+                if s0 == s1 && r0 == r1 && a0 == a1 {
+                    Some(Type::Ref { scope: s0.clone(), name: r0.clone(), params: a0.clone() })
                 } else {
                     None
                 }
@@ -1400,8 +1463,9 @@ impl Type {
                     Type::TVar(TVar::named(tv.name.clone(), typ))
                 }
             },
-            Type::Ref { scope: _, name } => {
-                Type::Ref { scope: scope.clone(), name: name.clone() }
+            Type::Ref { scope: _, name, params } => {
+                let params = Arc::from_iter(params.iter().map(|t| t.scope_refs(scope)));
+                Type::Ref { scope: scope.clone(), name: name.clone(), params }
             }
             Type::Set(ts) => {
                 Type::Set(Arc::from_iter(ts.iter().map(|t| t.scope_refs(scope))))
@@ -1434,7 +1498,20 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bottom => write!(f, "_"),
-            Self::Ref { scope: _, name } => write!(f, "{name}"),
+            Self::Ref { scope: _, name, params } => {
+                write!(f, "{name}")?;
+                if !params.is_empty() {
+                    write!(f, "<")?;
+                    for (i, t) in params.iter().enumerate() {
+                        write!(f, "{t}")?;
+                        if i < params.len() - 1 {
+                            write!(f, ", ")?;
+                        }
+                    }
+                    write!(f, ">")?;
+                }
+                Ok(())
+            }
             Self::TVar(tv) => write!(f, "{tv}"),
             Self::Fn(t) => write!(f, "{t}"),
             Self::Array(t) => write!(f, "Array<{t}>"),

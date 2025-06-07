@@ -771,7 +771,18 @@ where
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(spstring("Array").with(between(sptoken('<'), sptoken('>'), typexp())))
             .map(|t| Type::Array(Arc::new(t))),
-        attempt(sptypath()).map(|n| Type::Ref { scope: ModPath::root(), name: n }),
+        attempt(
+            (
+                sptypath(),
+                optional(attempt(between(sptoken('<'), sptoken('>'), sep_by1(typexp(), csep())))),
+            )
+        )
+        .map(|(n, params): (ModPath, Option<SmallVec<[Type; 8]>>)| {
+            let params = params
+                .map(|a| Arc::from_iter(a.into_iter()))
+                .unwrap_or_else(|| Arc::from_iter([]));
+            Type::Ref { scope: ModPath::root(), name: n, params }
+        }),
         attempt(typeprim()).map(|typ| Type::Primitive(typ.into())),
         attempt(tvar()).map(|tv| Type::TVar(tv)),
     ))
@@ -1342,8 +1353,25 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (position(), string("type").with(sptypname()), sptoken('=').with(typexp()))
-        .map(|(pos, name, typ)| ExprKind::TypeDef { name, typ }.to_expr(pos))
+    (
+        position(),
+        string("type").with(sptypname()),
+        optional(attempt(between(
+            sptoken('<'),
+            sptoken('>'),
+            sep_by1(
+                (tvar(), optional(attempt(sptoken(':').with(typexp())))),
+                csep(),
+            ),
+        ))),
+        sptoken('=').with(typexp()),
+    )
+        .map(|(pos, name, params, typ)| {
+            let params = params
+                .map(|ps: SmallVec<[(TVar, Option<Type>); 8]>| Arc::from_iter(ps.into_iter()))
+                .unwrap_or_else(|| Arc::<[(TVar, Option<Type>)]>::from(Vec::new()));
+            ExprKind::TypeDef { name, params, typ }.to_expr(pos)
+        })
 }
 
 fn tuple<I>() -> impl Parser<I, Output = Expr>

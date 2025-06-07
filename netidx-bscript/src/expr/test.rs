@@ -124,6 +124,10 @@ fn random_fname() -> impl Strategy<Value = ArcStr> {
     prop_oneof![random_modpart().prop_map(ArcStr::from), valid_fname()]
 }
 
+fn tvar() -> impl Strategy<Value = TVar> {
+    random_fname().prop_map(|n| TVar::empty_named(n))
+}
+
 fn random_modpath() -> impl Strategy<Value = ModPath> {
     collection::vec(random_modpart(), (1, 5)).prop_map(ModPath::from_iter)
 }
@@ -206,7 +210,7 @@ fn typexp() -> impl Strategy<Value = Type> {
             prims.dedup();
             Type::Primitive(BitFlags::from_iter(prims))
         }),
-        typath().prop_map(|name| Type::Ref { scope: ModPath::root(), name }),
+        tvar().prop_map(Type::TVar),
     ];
     leaf.prop_recursive(5, 20, 10, |inner| {
         prop_oneof![
@@ -223,7 +227,12 @@ fn typexp() -> impl Strategy<Value = Type> {
                 }
             ),
             inner.clone().prop_map(|t| Type::Array(Arc::new(t))),
-            random_fname().prop_map(|a| Type::TVar(TVar::empty_named(a))),
+            (
+                typath(),
+                collection::vec(inner.clone(), (0, 8))
+            ).prop_map(|(name, params)| {
+                Type::Ref { scope: ModPath::root(), name, params: Arc::from(params) }
+            }),
             (
                 collection::vec(
                     (option::of(random_fname()), any::<bool>(), inner.clone()),
@@ -338,8 +347,15 @@ fn usestmt() -> impl Strategy<Value = Expr> {
 }
 
 fn typedef() -> impl Strategy<Value = Expr> {
-    (typart(), typexp())
-        .prop_map(|(name, typ)| ExprKind::TypeDef { name, typ }.to_expr_nopos())
+    (
+        typart(),
+        collection::vec((tvar(), option::of(typexp())), 0..4),
+        typexp(),
+    )
+        .prop_map(|(name, params, typ)| {
+            let params = Arc::from_iter(params.into_iter());
+            ExprKind::TypeDef { name, params, typ }.to_expr_nopos()
+        })
 }
 
 macro_rules! structref {
@@ -1101,9 +1117,23 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             )
         }
         (
-            ExprKind::TypeDef { name: name0, typ: typ0 },
-            ExprKind::TypeDef { name: name1, typ: typ1 },
-        ) => dbg!(name0 == name1) && dbg!(check_type(&typ0, &typ1)),
+            ExprKind::TypeDef { name: name0, params: p0, typ: typ0 },
+            ExprKind::TypeDef { name: name1, params: p1, typ: typ1 },
+        ) => {
+            dbg!(name0 == name1)
+                && dbg!(p0.len() == p1.len()
+                    && p0.iter()
+                        .zip(p1.iter())
+                        .all(|((t0, c0), (t1, c1))| {
+                            t0 == t1
+                                && match (c0.as_ref(), c1.as_ref()) {
+                                    (Some(c0), Some(c1)) => check_type(c0, c1),
+                                    (None, None) => true,
+                                    _ => false,
+                                }
+                        }))
+                && dbg!(check_type(&typ0, &typ1))
+        }
         (
             ExprKind::TypeCast { expr: expr0, typ: typ0 },
             ExprKind::TypeCast { expr: expr1, typ: typ1 },
