@@ -1,6 +1,6 @@
 use crate::{
     expr::{Arg, ModPath},
-    typ::{FnType, Type},
+    typ::{FnType, TVar, Type},
     BindId, Ctx, InitFn, LambdaId, UserEvent,
 };
 use anyhow::{bail, Result};
@@ -54,13 +54,19 @@ impl Clone for Bind {
     }
 }
 
+#[derive(Clone)]
+pub struct TypeDef {
+    pub typ: Type,
+    pub params: Arc<[TVar]>,
+}
+
 pub struct Env<C: Ctx, E: UserEvent> {
     pub by_id: Map<BindId, Bind>,
     pub lambdas: Map<LambdaId, Weak<LambdaDef<C, E>>>,
     pub binds: Map<ModPath, Map<CompactString, BindId>>,
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
     pub modules: Set<ModPath>,
-    pub typedefs: Map<ModPath, Map<CompactString, Type>>,
+    pub typedefs: Map<ModPath, Map<CompactString, TypeDef>>,
 }
 
 impl<C: Ctx, E: UserEvent> Clone for Env<C, E> {
@@ -204,7 +210,8 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         })
     }
 
-    pub fn lookup_typedef(&self, scope: &ModPath, name: &ModPath) -> Option<&Type> {
+    /// lookup typedefs in the specified scope
+    pub fn lookup_typedef(&self, scope: &ModPath, name: &ModPath) -> Option<&TypeDef> {
         self.find_visible(scope, name, |scope, name| {
             self.typedefs.get(scope).and_then(|m| m.get(name))
         })

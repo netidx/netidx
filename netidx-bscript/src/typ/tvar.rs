@@ -196,6 +196,12 @@ impl TVar {
         *self.read().typ.write() = None
     }
 
+    pub fn bind(&self, t: Type) {
+        if !self.would_cycle(&t) {
+            *self.read().typ.write() = Some(t);
+        }
+    }
+
     pub(super) fn would_cycle(&self, t: &Type) -> bool {
         let addr = Arc::as_ptr(&self.read().typ).addr();
         would_cycle_inner(addr, t)

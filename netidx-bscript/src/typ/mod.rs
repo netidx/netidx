@@ -65,7 +65,7 @@ pub fn format_with_flags<R, F: FnOnce() -> R>(flags: BitFlags<PrintFlag>, f: F) 
 pub enum Type {
     Bottom,
     Primitive(BitFlags<Typ>),
-    Ref { scope: ModPath, name: ModPath },
+    Ref { scope: ModPath, name: ModPath, params: Arc<[Type]> },
     Fn(Arc<FnType>),
     Set(Arc<[Type]>),
     TVar(TVar),
