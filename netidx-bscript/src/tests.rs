@@ -1002,3 +1002,58 @@ run!(rectypes0, RECTYPES0, |v: Result<&Value>| match v {
     },
     _ => false,
 });
+
+#[cfg(test)]
+const RECTYPES1: &str = r#"
+{
+  type List<'a> = [
+    `Cons('a, List<'a>),
+    `Nil
+  ];
+  let l: List<Any> = `Cons(42, `Cons(3, `Nil));
+  l
+}
+"#;
+
+#[cfg(test)]
+run!(rectypes1, RECTYPES1, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::String(s), Value::I64(42), Value::Array(a)] if &**s == "Cons" =>
+            match &a[..] {
+                [Value::String(s0), Value::I64(3), Value::String(s1)]
+                    if &**s0 == "Cons" && s1 == "Nil" =>
+                    true,
+                _ => false,
+            },
+        _ => false,
+    },
+    _ => false,
+});
+
+#[cfg(test)]
+const TYPEDEF_TVAR_ERR: &str = r#"
+{
+  type T<'a, 'b> = { foo: 'a, bar: 'b, baz: 'c };
+  0
+}
+"#;
+
+#[cfg(test)]
+run!(typedef_tvar_err, TYPEDEF_TVAR_ERR, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+#[cfg(test)]
+const TYPEDEF_TVAR_OK: &str = r#"
+{
+  type T<'a, 'b> = { foo: 'a, bar: 'b, f: fn('a, 'b, 'c) -> 'a };
+  0
+}
+"#;
+
+#[cfg(test)]
+run!(typedef_tvar_ok, TYPEDEF_TVAR_OK, |v: Result<&Value>| match v {
+    Ok(Value::I64(0)) => true,
+    _ => false,
+});

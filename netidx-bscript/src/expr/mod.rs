@@ -451,7 +451,7 @@ pub enum ExprKind {
     ArraySlice { source: Arc<Expr>, start: Option<Arc<Expr>>, end: Option<Arc<Expr>> },
     StructWith { source: Arc<Expr>, replace: Arc<[(ArcStr, Expr)]> },
     Lambda(Arc<Lambda>),
-    TypeDef { name: ArcStr, typ: Type },
+    TypeDef { name: ArcStr, params: Arc<[(TVar, Option<Type>)]>, typ: Type },
     TypeCast { expr: Arc<Expr>, typ: Type },
     Apply { args: Arc<[(Option<ArcStr>, Expr)]>, function: Arc<Expr> },
     Any { args: Arc<[Expr]> },
@@ -965,7 +965,23 @@ impl fmt::Display for ExprKind {
                 }
             }
             ExprKind::TypeCast { expr, typ } => write!(f, "cast<{typ}>({expr})"),
-            ExprKind::TypeDef { name, typ } => write!(f, "type {name} = {typ}"),
+            ExprKind::TypeDef { name, params, typ } => {
+                write!(f, "type {name}")?;
+                if !params.is_empty() {
+                    write!(f, "<")?;
+                    for (i, (tv, ct)) in params.iter().enumerate() {
+                        write!(f, "{tv}")?;
+                        if let Some(ct) = ct {
+                            write!(f, ": {ct}")?;
+                        }
+                        if i < params.len() - 1 {
+                            write!(f, ", ")?;
+                        }
+                    }
+                    write!(f, ">")?;
+                }
+                write!(f, " = {typ}")
+            }
             ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", "; "),
             ExprKind::Lambda(l) => {
                 let Lambda { args, vargs, rtype, constraints, body } = &**l;

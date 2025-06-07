@@ -1,14 +1,15 @@
 use crate::{
     expr::{Arg, ModPath},
-    typ::{FnType, Type},
+    typ::{FnType, TVar, Type},
     BindId, Ctx, InitFn, LambdaId, UserEvent,
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use compact_str::CompactString;
+use fxhash::{FxHashMap, FxHashSet};
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::path::Path;
-use std::{fmt, iter, ops::Bound, sync::Weak};
+use std::{cell::RefCell, fmt, iter, ops::Bound, sync::Weak};
 use triomphe::Arc;
 
 pub struct LambdaDef<C: Ctx, E: UserEvent> {
@@ -54,13 +55,19 @@ impl Clone for Bind {
     }
 }
 
+#[derive(Clone)]
+pub struct TypeDef {
+    pub params: Arc<[(TVar, Option<Type>)]>,
+    pub typ: Type,
+}
+
 pub struct Env<C: Ctx, E: UserEvent> {
     pub by_id: Map<BindId, Bind>,
     pub lambdas: Map<LambdaId, Weak<LambdaDef<C, E>>>,
     pub binds: Map<ModPath, Map<CompactString, BindId>>,
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
     pub modules: Set<ModPath>,
-    pub typedefs: Map<ModPath, Map<CompactString, Type>>,
+    pub typedefs: Map<ModPath, Map<CompactString, TypeDef>>,
 }
 
 impl<C: Ctx, E: UserEvent> Clone for Env<C, E> {
@@ -204,7 +211,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         })
     }
 
-    pub fn lookup_typedef(&self, scope: &ModPath, name: &ModPath) -> Option<&Type> {
+    pub fn lookup_typedef(&self, scope: &ModPath, name: &ModPath) -> Option<&TypeDef> {
         self.find_visible(scope, name, |scope, name| {
             self.typedefs.get(scope).and_then(|m| m.get(name))
         })
@@ -258,12 +265,57 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         res
     }
 
-    pub fn deftype(&mut self, scope: &ModPath, name: &str, typ: Type) -> Result<()> {
+    pub fn deftype(
+        &mut self,
+        scope: &ModPath,
+        name: &str,
+        params: Arc<[(TVar, Option<Type>)]>,
+        typ: Type,
+    ) -> Result<()> {
         let defs = self.typedefs.get_or_default_cow(scope.clone());
         if defs.get(name).is_some() {
             bail!("{name} is already defined in scope {scope}")
         } else {
-            defs.insert_cow(name.into(), typ);
+            thread_local! {
+                static KNOWN: RefCell<FxHashMap<ArcStr, TVar>> = RefCell::new(FxHashMap::default());
+                static DECLARED: RefCell<FxHashSet<ArcStr>> = RefCell::new(FxHashSet::default());
+            }
+            KNOWN.with_borrow_mut(|known| {
+                known.clear();
+                for (tv, tc) in params.iter() {
+                    Type::TVar(tv.clone()).alias_tvars(known);
+                    if let Some(tc) = tc {
+                        tc.alias_tvars(known);
+                    }
+                }
+                typ.alias_tvars(known);
+            });
+            DECLARED.with_borrow_mut(|declared| {
+                declared.clear();
+                for (tv, _) in params.iter() {
+                    if !declared.insert(tv.name.clone()) {
+                        bail!("duplicate type variable {tv} in definition of {name}");
+                    }
+                }
+                typ.check_tvars_declared(declared)?;
+                for (_, t) in params.iter() {
+                    if let Some(t) = t {
+                        t.check_tvars_declared(declared)?;
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            })?;
+            KNOWN.with_borrow(|known| {
+                DECLARED.with_borrow(|declared| {
+                    for dec in declared {
+                        if !known.contains_key(dec) {
+                            bail!("unused type parameter {dec} in definition of {name}")
+                        }
+                    }
+                    Ok(())
+                })
+            })?;
+            defs.insert_cow(name.into(), TypeDef { params, typ });
             Ok(())
         }
     }
