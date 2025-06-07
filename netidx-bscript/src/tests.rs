@@ -1031,6 +1031,24 @@ run!(rectypes1, RECTYPES1, |v: Result<&Value>| match v {
 });
 
 #[cfg(test)]
+const RECTYPES2: &str = r#"
+{
+  type List<'a> = [
+    `Cons('a, List<'a>),
+    `Nil
+  ];
+  let l: List<string> = `Cons(42, `Cons(3, `Nil));
+  l
+}
+"#;
+
+#[cfg(test)]
+run!(rectypes2, RECTYPES2, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+#[cfg(test)]
 const TYPEDEF_TVAR_ERR: &str = r#"
 {
   type T<'a, 'b> = { foo: 'a, bar: 'b, baz: 'c };
