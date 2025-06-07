@@ -127,10 +127,9 @@ impl Type {
                     if let Some(ct) = ct {
                         ct.check_contains(env, arg)?;
                     }
-                    if tv.would_cycle(arg) {
-                        bail!("recursive type parameter for {name}");
+                    if !tv.would_cycle(arg) {
+                        *tv.read().typ.write() = Some(arg.clone());
                     }
-                    *tv.read().typ.write() = Some(arg.clone());
                 }
                 Ok(&def.typ)
             }
