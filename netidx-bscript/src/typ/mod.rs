@@ -123,18 +123,10 @@ impl Type {
                     bail!("{} expects {} type parameters", name, def.params.len());
                 }
                 def.typ.unbind_tvars();
-                for ((_tv, ct), arg) in def.params.iter().zip(params.iter()) {
-                    let def_ct;
-                    let ct = match ct {
-                        Some(t) => t,
-                        None => {
-                            def_ct = Type::Primitive(Typ::any());
-                            &def_ct
-                        }
-                    };
-                    ct.check_contains(env, arg)?;
-                }
-                for ((tv, _), arg) in def.params.iter().zip(params.iter()) {
+                for ((tv, ct), arg) in def.params.iter().zip(params.iter()) {
+                    if let Some(ct) = ct {
+                        ct.check_contains(env, arg)?;
+                    }
                     if tv.would_cycle(arg) {
                         bail!("recursive type parameter for {name}");
                     }
@@ -167,11 +159,10 @@ impl Type {
         t: &Self,
     ) -> Result<bool> {
         match (self, t) {
-            (Self::Ref { scope: s0, name: n0, .. }, Self::Ref { scope: s1, name: n1, .. })
-                if s0 == s1 && n0 == n1 =>
-            {
-                Ok(true)
-            }
+            (
+                Self::Ref { scope: s0, name: n0, .. },
+                Self::Ref { scope: s1, name: n1, .. },
+            ) if s0 == s1 && n0 == n1 => Ok(true),
             (t0 @ Self::Ref { .. }, t1) | (t0, t1 @ Self::Ref { .. }) => {
                 let t0 = t0.lookup_ref(env)?;
                 let t1 = t1.lookup_ref(env)?;
@@ -460,11 +451,10 @@ impl Type {
         t: &Self,
     ) -> Result<Self> {
         match (self, t) {
-            (Type::Ref { scope: s0, name: n0, .. }, Type::Ref { scope: s1, name: n1, .. })
-                if s0 == s1 && n0 == n1 =>
-            {
-                Ok(Type::Primitive(BitFlags::empty()))
-            }
+            (
+                Type::Ref { scope: s0, name: n0, .. },
+                Type::Ref { scope: s1, name: n1, .. },
+            ) if s0 == s1 && n0 == n1 => Ok(Type::Primitive(BitFlags::empty())),
             (t0 @ Type::Ref { .. }, t1) | (t0, t1 @ Type::Ref { .. }) => {
                 let t0 = t0.lookup_ref(env)?;
                 let t1 = t1.lookup_ref(env)?;
@@ -705,11 +695,19 @@ impl Type {
     pub fn check_tvars_declared(&self, declared: &FxHashSet<ArcStr>) -> Result<()> {
         match self {
             Type::Bottom | Type::Primitive(_) => Ok(()),
-            Type::Ref { params, .. } => params.iter().try_for_each(|t| t.check_tvars_declared(declared)),
+            Type::Ref { params, .. } => {
+                params.iter().try_for_each(|t| t.check_tvars_declared(declared))
+            }
             Type::Array(t) => t.check_tvars_declared(declared),
-            Type::Tuple(ts) => ts.iter().try_for_each(|t| t.check_tvars_declared(declared)),
-            Type::Struct(ts) => ts.iter().try_for_each(|(_, t)| t.check_tvars_declared(declared)),
-            Type::Variant(_, ts) => ts.iter().try_for_each(|t| t.check_tvars_declared(declared)),
+            Type::Tuple(ts) => {
+                ts.iter().try_for_each(|t| t.check_tvars_declared(declared))
+            }
+            Type::Struct(ts) => {
+                ts.iter().try_for_each(|(_, t)| t.check_tvars_declared(declared))
+            }
+            Type::Variant(_, ts) => {
+                ts.iter().try_for_each(|t| t.check_tvars_declared(declared))
+            }
             Type::TVar(tv) => {
                 if !declared.contains(&tv.name) {
                     bail!("undeclared type variable '{}'", tv.name)
@@ -1303,7 +1301,11 @@ impl Type {
 
     pub(crate) fn normalize(&self) -> Self {
         match self {
-            Type::Ref { .. } | Type::Bottom | Type::Primitive(_) => self.clone(),
+            Type::Bottom | Type::Primitive(_) => self.clone(),
+            Type::Ref { scope, name, params } => {
+                let params = Arc::from_iter(params.iter().map(|t| t.normalize()));
+                Type::Ref { scope: scope.clone(), name: name.clone(), params }
+            }
             Type::TVar(tv) => Type::TVar(tv.normalize()),
             Type::Set(s) => Self::flatten_set(s.iter().map(|t| t.normalize())),
             Type::Array(t) => Type::Array(Arc::new(t.normalize())),
@@ -1328,7 +1330,11 @@ impl Type {
                 Type::Ref { scope: s1, name: r1, params: a1 },
             ) => {
                 if s0 == s1 && r0 == r1 && a0 == a1 {
-                    Some(Type::Ref { scope: s0.clone(), name: r0.clone(), params: a0.clone() })
+                    Some(Type::Ref {
+                        scope: s0.clone(),
+                        name: r0.clone(),
+                        params: a0.clone(),
+                    })
                 } else {
                     None
                 }

@@ -1,6 +1,6 @@
 use crate::{
     expr::{Arg, ModPath},
-    typ::{FnType, Type, TVar},
+    typ::{FnType, TVar, Type},
     BindId, Ctx, InitFn, LambdaId, UserEvent,
 };
 use anyhow::{bail, Result};
@@ -9,7 +9,7 @@ use compact_str::CompactString;
 use fxhash::{FxHashMap, FxHashSet};
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::path::Path;
-use std::{fmt, iter, ops::Bound, sync::Weak, cell::RefCell};
+use std::{cell::RefCell, fmt, iter, ops::Bound, sync::Weak};
 use triomphe::Arc;
 
 pub struct LambdaDef<C: Ctx, E: UserEvent> {
@@ -304,6 +304,16 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
                     }
                 }
                 Ok::<_, anyhow::Error>(())
+            })?;
+            KNOWN.with_borrow(|known| {
+                DECLARED.with_borrow(|declared| {
+                    for dec in declared {
+                        if !known.contains_key(dec) {
+                            bail!("unused type parameter {dec} in definition of {name}")
+                        }
+                    }
+                    Ok(())
+                })
             })?;
             defs.insert_cow(name.into(), TypeDef { params, typ });
             Ok(())

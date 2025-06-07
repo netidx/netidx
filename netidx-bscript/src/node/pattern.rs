@@ -82,8 +82,8 @@ impl StructPatternNode {
             };
         }
         let type_predicate = match type_predicate {
-            Type::Ref { .. } => type_predicate.lookup_ref(&ctx.env)?.clone(),
-            t => t.clone(),
+            Type::Ref { .. } => &type_predicate.lookup_ref(&ctx.env)?.clone(),
+            t => t,
         };
         let t = match &spec {
             StructurePattern::Ignore => Self::Ignore,
