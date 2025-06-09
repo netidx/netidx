@@ -31,6 +31,18 @@ macro_rules! wrap {
     };
 }
 
+macro_rules! update_args {
+    ($args:expr, $ctx:expr, $event:expr) => {{
+        let mut updated = false;
+        let mut determined = true;
+        for n in $args.iter_mut() {
+            updated |= n.update($ctx, $event);
+            determined &= n.cached.is_some();
+        }
+        (updated, determined)
+    }};
+}
+
 #[derive(Debug)]
 struct Nop;
 
@@ -448,14 +460,14 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for SelectNode<C, E> {
 }
 
 #[derive(Debug)]
-pub struct ArrayRefNode<C: Ctx, E: UserEvent> {
+pub struct ArrayRef<C: Ctx, E: UserEvent> {
     source: Cached<C, E>,
     i: Cached<C, E>,
     spec: Expr,
     typ: Type,
 }
 
-impl<C: Ctx, E: UserEvent> Update<C, E> for ArrayRefNode<C, E> {
+impl<C: Ctx, E: UserEvent> Update<C, E> for ArrayRef<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         let up = self.source.update(ctx, event);
         let up = self.i.update(ctx, event) || up;
@@ -522,7 +534,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArrayRefNode<C, E> {
 }
 
 #[derive(Debug)]
-pub struct ArraySliceNode<C: Ctx, E: UserEvent> {
+pub struct ArraySlice<C: Ctx, E: UserEvent> {
     source: Cached<C, E>,
     start: Option<Cached<C, E>>,
     end: Option<Cached<C, E>>,
@@ -530,7 +542,7 @@ pub struct ArraySliceNode<C: Ctx, E: UserEvent> {
     typ: Type,
 }
 
-impl<C: Ctx, E: UserEvent> Update<C, E> for ArraySliceNode<C, E> {
+impl<C: Ctx, E: UserEvent> Update<C, E> for ArraySlice<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         macro_rules! number {
             ($e:expr) => {
@@ -830,7 +842,11 @@ struct Ref {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Ref {
-    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+    fn update(
+        &mut self,
+        _ctx: &mut ExecCtx<C, E>,
+        event: &mut Event<E>,
+    ) -> Option<Value> {
         event.variables.get(&self.id).map(|v| v.clone())
     }
 
@@ -962,6 +978,110 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TupleRef<C, E> {
         });
         let etyp = wrap!(self, etyp)?;
         wrap!(self, self.typ.check_contains(&ctx.env, &etyp))
+    }
+}
+
+#[derive(Debug)]
+struct StringInterpolate<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    args: SmallVec<[Cached<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        thread_local! {
+            static BUF: RefCell<String> = RefCell::new(String::new());
+        }
+        let (updated, determined) = update_args!(self.args, ctx, event);
+        if updated && determined {
+            BUF.with_borrow_mut(|buf| {
+                buf.clear();
+                for c in &self.args {
+                    match c.cached.as_ref().unwrap() {
+                        Value::String(c) => buf.push_str(c.as_ref()),
+                        v => match v.clone().cast_to::<ArcStr>().ok() {
+                            Some(c) => buf.push_str(c.as_ref()),
+                            None => {
+                                let m = literal!("args must be strings");
+                                return Some(Value::Error(m));
+                            }
+                        },
+                    }
+                }
+                Some(Value::String(buf.as_str().into()))
+            })
+        } else {
+            None
+        }
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        for a in &self.args {
+            a.node.refs(f)
+        }
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        for n in &mut self.args {
+            n.node.delete(ctx)
+        }
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        for a in &mut self.args {
+            wrap!(a.node, a.node.typecheck(ctx))?
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct Connect<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    node: Node<C, E>,
+    id: BindId,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Connect<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        if let Some(v) = self.node.update(ctx, event) {
+            ctx.set_var(self.id, v)
+        }
+        None
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &Type::Bottom
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.node.refs(f)
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.node.delete(ctx)
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.node, self.node.typecheck(ctx))?;
+        let bind = match ctx.env.by_id.get(&self.id) {
+            None => bail!("BUG missing bind {:?}", self.id),
+            Some(bind) => bind,
+        };
+        wrap!(self, bind.typ.check_contains(&ctx.env, self.node.typ()))
     }
 }
 
