@@ -44,7 +44,10 @@ macro_rules! update_args {
 }
 
 #[derive(Debug)]
-struct Nop;
+struct Nop {
+    spec: Expr,
+    typ: Type,
+}
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Nop {
     fn update(
@@ -61,8 +64,12 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Nop {
         Ok(())
     }
 
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
     fn typ(&self) -> &Type {
-        &Type::Bottom
+        &self.typ
     }
 
     fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
@@ -1082,6 +1089,109 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Connect<C, E> {
             Some(bind) => bind,
         };
         wrap!(self, bind.typ.check_contains(&ctx.env, self.node.typ()))
+    }
+}
+
+#[derive(Debug)]
+struct Lambda<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    def: Arc<LambdaDef<C, E>>,
+    typ: Type,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Lambda<C, E> {
+    fn update(
+        &mut self,
+        _ctx: &mut ExecCtx<C, E>,
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        if event.init {
+            Some(Value::U64(self.def.id.0))
+        } else {
+            None
+        }
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.env.lambdas.remove_cow(&self.def.id);
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        let mut faux_args = Box::from_iter(self.def.typ.args.iter().map(|a| {
+            let n: Node<C, E> = Box::new(Nop {
+                spec: ExprKind::Constant(Value::Bool(false)).to_expr(Default::default()),
+                typ: a.typ.clone(),
+            });
+            n
+        }));
+        let mut f = wrap!(self, (self.def.init)(ctx, &faux_args, ExprId::new()))?;
+        let res = wrap!(self, f.typecheck(ctx, &mut faux_args));
+        f.typ().constrain_known();
+        f.typ().unbind_tvars();
+        f.delete(ctx);
+        res
+    }
+}
+
+#[derive(Debug)]
+struct Qop<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    id: BindId,
+    n: Node<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Qop<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        match self.n.update(ctx, event) {
+            None => None,
+            Some(e @ Value::Error(_)) => {
+                ctx.set_var(self.id, e);
+                None
+            }
+            Some(v) => Some(v),
+        }
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.n.refs(f)
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.delete(ctx)
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.n, self.n.typecheck(ctx))?;
+        let bind =
+            ctx.env.by_id.get(&self.id).ok_or_else(|| anyhow!("BUG: missing bind"))?;
+        let err = Type::Primitive(Typ::Error.into());
+        wrap!(self, bind.typ.check_contains(&ctx.env, &err))?;
+        wrap!(self, err.check_contains(&ctx.env, &bind.typ))?;
+        if !self.n.typ().contains(&ctx.env, &err)? {
+            bail!("cannot use the ? operator on a non error type")
+        }
+        let rtyp = self.n.typ().diff(&ctx.env, &err)?;
+        wrap!(self, self.typ.check_contains(&ctx.env, &rtyp))?;
+        Ok(())
     }
 }
 
