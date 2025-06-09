@@ -15,11 +15,11 @@ pub mod typ;
 use crate::{
     env::Env,
     expr::{ExprId, ExprKind, ModPath},
-    node::Node,
     typ::{FnType, Type},
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
+use expr::Expr;
 use fxhash::FxHashMap;
 use netidx::{
     path::Path,
@@ -30,7 +30,7 @@ use netidx_protocols::rpc::server::{ArgSpec, RpcCall};
 use parking_lot::RwLock;
 use std::{
     collections::{hash_map::Entry, HashMap},
-    fmt::Debug,
+    fmt::{Debug, Display},
     sync::{self, LazyLock},
     time::Duration,
 };
@@ -107,6 +107,8 @@ impl<E: UserEvent> Event<E> {
     }
 }
 
+pub type Node<C, E> = Box<dyn Update<C, E>>;
+
 pub type BuiltInInitFn<C, E> = sync::Arc<
     dyn for<'a, 'b, 'c> Fn(
             &'a mut ExecCtx<C, E>,
@@ -114,7 +116,7 @@ pub type BuiltInInitFn<C, E> = sync::Arc<
             &'b ModPath,
             &'c [Node<C, E>],
             ExprId,
-        ) -> Result<Box<dyn Apply<C, E> + Send + Sync>>
+        ) -> Result<Box<dyn Apply<C, E>>>
         + Send
         + Sync,
 >;
@@ -124,12 +126,16 @@ pub type InitFn<C, E> = sync::Arc<
             &'a mut ExecCtx<C, E>,
             &'b [Node<C, E>],
             ExprId,
-        ) -> Result<Box<dyn Apply<C, E> + Send + Sync>>
+        ) -> Result<Box<dyn Apply<C, E>>>
         + Send
         + Sync,
 >;
 
-pub trait Apply<C: Ctx, E: UserEvent> {
+/// Apply is a kind of node that represents a function application. It
+/// does not hold ownership of it's arguments, instead those are held
+/// by a CallSite node. This allows us to change the function called
+/// at runtime without recompiling the arguments.
+pub trait Apply<C: Ctx, E: UserEvent>: Debug + Send + Sync {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -174,6 +180,30 @@ pub trait Apply<C: Ctx, E: UserEvent> {
     fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {
         ()
     }
+}
+
+/// Update represents a regular graph node, as opposed to a function
+/// application represented by Apply. Regular graph nodes are used for
+/// every built in node except for builtin functions.
+pub trait Update<C: Ctx, E: UserEvent>: Debug + Send + Sync {
+    /// update the node with the specified event and return any output
+    /// it might generate
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value>;
+
+    /// delete the node and it's children from the specified context
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>);
+
+    /// type check the node and it's children
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()>;
+
+    /// return the node type
+    fn typ(&self) -> &Type;
+
+    /// record any variables the node references by calling f
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a));
+
+    /// return the original expression used to compile this node
+    fn spec(&self) -> &Expr;
 }
 
 pub trait BuiltIn<C: Ctx, E: UserEvent> {

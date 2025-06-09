@@ -13,17 +13,6 @@ use triomphe::Arc;
 
 impl<C: Ctx, E: UserEvent> Node<C, E> {
     pub fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
-        macro_rules! wrap {
-            ($e:expr) => {
-                wrap!(self.spec, $e)
-            };
-            ($n:expr, $e:expr) => {
-                match $e {
-                    Ok(x) => Ok(x),
-                    Err(e) => Err(anyhow!("in expr: {}, type error: {e}", $n)),
-                }
-            };
-        }
         match &mut self.kind {
             NodeKind::Add { lhs, rhs }
             | NodeKind::Sub { lhs, rhs }
@@ -111,29 +100,10 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 Ok(self.typ.check_contains(&ctx.env, &rtype)?)
             }
             NodeKind::ArraySlice(n) => {
-                wrap!(n.source.node, n.source.node.typecheck(ctx))?;
-                let it = Type::Primitive(Typ::unsigned_integer());
-                let at = Type::Array(Arc::new(Type::empty_tvar()));
-                wrap!(n.source.node, at.check_contains(&ctx.env, &n.source.node.typ))?;
-                if let Some(start) = n.start.as_mut() {
-                    wrap!(start.node, start.node.typecheck(ctx))?;
-                    wrap!(start.node, it.check_contains(&ctx.env, &start.node.typ))?;
-                }
-                if let Some(end) = n.end.as_mut() {
-                    wrap!(end.node, end.node.typecheck(ctx))?;
-                    wrap!(end.node, it.check_contains(&ctx.env, &end.node.typ))?;
-                }
-                wrap!(self.typ.check_contains(&ctx.env, &at))
+                todo!()
             }
             NodeKind::ArrayRef(n) => {
-                wrap!(n.source.node, n.source.node.typecheck(ctx))?;
-                wrap!(n.i.node, n.i.node.typecheck(ctx))?;
-                let et = Type::empty_tvar();
-                let at = Type::Array(Arc::new(et.clone()));
-                wrap!(at.check_contains(&ctx.env, &n.source.node.typ))?;
-                wrap!(Type::Primitive(Typ::integer())
-                    .check_contains(&ctx.env, &n.i.node.typ))?;
-                Ok(wrap!(self.typ.check_contains(&ctx.env, &et))?)
+                todo!()
             }
             NodeKind::StringInterpolate { args } => {
                 for a in args.iter_mut() {
@@ -284,20 +254,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 wrap!(self.typ.check_contains(&ctx.env, &rtype))
             }
             NodeKind::Apply(site) => {
-                for n in site.args.iter_mut() {
-                    wrap!(n, n.typecheck(ctx))?
-                }
-                site.ftype.unbind_tvars();
-                for (arg, FnArgType { typ, .. }) in
-                    site.args.iter().zip(site.ftype.args.iter())
-                {
-                    wrap!(arg, typ.check_contains(&ctx.env, &arg.typ))?;
-                }
-                wrap!(site.ftype.rtype.check_contains(&ctx.env, &self.typ))?;
-                for (tv, tc) in site.ftype.constraints.read().iter() {
-                    wrap!(tc.check_contains(&ctx.env, &Type::TVar(tv.clone())))?
-                }
-                Ok(())
+                todo!()
             }
             NodeKind::Lambda(lds) => {
                 let mut faux_args = Box::from_iter(lds.typ.args.iter().map(|a| {

@@ -3,8 +3,8 @@ use crate::{
     err,
     expr::{Expr, ExprId, ExprKind, ModPath},
     node::pattern::PatternNode,
-    typ::{FnType, Type},
-    Apply, BindId, Ctx, Event, ExecCtx, LambdaId, UserEvent,
+    typ::{FnArgType, FnType, Type},
+    Apply, BindId, Ctx, Event, ExecCtx, LambdaId, Node, Update, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
@@ -22,16 +22,44 @@ mod lambda;
 pub mod pattern;
 mod typecheck;
 
+macro_rules! wrap {
+    ($n:expr, $e:expr) => {
+        match $e {
+            Ok(x) => Ok(x),
+            Err(e) => Err(anyhow!("in expr: {}, type error: {e}", $n.spec())),
+        }
+    };
+}
+
+#[derive(Debug)]
+struct Nop;
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Nop {
+    fn update(
+        &mut self,
+        _ctx: &mut ExecCtx<C, E>,
+        _event: &mut Event<E>,
+    ) -> Option<Value> {
+        None
+    }
+
+    fn delete(&mut self, _ctx: &mut ExecCtx<C, E>) {}
+
+    fn typecheck(&mut self, _ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        Ok(())
+    }
+
+    fn typ(&self) -> &Type {
+        &Type::Bottom
+    }
+
+    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
+}
+
 #[derive(Debug)]
 pub struct Cached<C: Ctx, E: UserEvent> {
     pub cached: Option<Value>,
     pub node: Node<C, E>,
-}
-
-impl<C: Ctx, E: UserEvent> Default for Cached<C, E> {
-    fn default() -> Self {
-        Self { cached: None, node: Default::default() }
-    }
 }
 
 impl<C: Ctx, E: UserEvent> Cached<C, E> {
@@ -71,9 +99,10 @@ impl<C: Ctx, E: UserEvent> Cached<C, E> {
 }
 
 pub struct CallSite<C: Ctx, E: UserEvent> {
+    spec: Expr,
     ftype: TArc<FnType>,
     fnode: Node<C, E>,
-    args: Vec<Node<C, E>>,
+    args: SmallVec<[Node<C, E>; 8]>,
     arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
     function: Option<(LambdaId, Box<dyn Apply<C, E> + Send + Sync>)>,
     top_id: ExprId,
@@ -90,19 +119,6 @@ impl<C: Ctx, E: UserEvent> fmt::Debug for CallSite<C, E> {
             }
         }
         write!(f, "])")
-    }
-}
-
-impl<C: Ctx, E: UserEvent> Default for CallSite<C, E> {
-    fn default() -> Self {
-        Self {
-            ftype: Default::default(),
-            fnode: Default::default(),
-            args: vec![],
-            arg_spec: HashMap::default(),
-            function: None,
-            top_id: ExprId::new(),
-        }
     }
 }
 
@@ -163,7 +179,9 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
         self.function = Some((f.id, rf));
         Ok(())
     }
+}
 
+impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         macro_rules! error {
             ($m:literal) => {{
@@ -212,14 +230,49 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
         }
     }
 
-    fn delete(self, ctx: &mut ExecCtx<C, E>) {
-        let Self { ftype: _, fnode, args, arg_spec: _, function, top_id: _ } = self;
-        if let Some((_, mut f)) = function {
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        let Self { spec: _, ftype: _, fnode, args, arg_spec: _, function, top_id: _ } =
+            self;
+        if let Some((_, f)) = function {
             f.delete(ctx)
         }
         fnode.delete(ctx);
         for n in args {
             n.delete(ctx)
+        }
+    }
+
+    fn typ(&self) -> &Type {
+        &self.ftype.rtype
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        for n in self.args.iter_mut() {
+            wrap!(n, n.typecheck(ctx))?
+        }
+        self.ftype.unbind_tvars();
+        for (arg, FnArgType { typ, .. }) in self.args.iter().zip(self.ftype.args.iter()) {
+            wrap!(arg, typ.check_contains(&ctx.env, &arg.typ()))?;
+        }
+        for (tv, tc) in self.ftype.constraints.read().iter() {
+            wrap!(self, tc.check_contains(&ctx.env, &Type::TVar(tv.clone())))?
+        }
+        Ok(())
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        let Self { spec: _, ftype: _, fnode, args, arg_spec: _, function, top_id: _ } =
+            self;
+        if let Some((_, fun)) = function {
+            fun.refs(f)
+        }
+        fnode.refs(f);
+        for n in args {
+            n.refs(f)
         }
     }
 }
@@ -228,18 +281,14 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
 pub struct SelectNode<C: Ctx, E: UserEvent> {
     selected: Option<usize>,
     arg: Cached<C, E>,
-    arms: Box<[(PatternNode<C, E>, Cached<C, E>)]>,
+    arms: SmallVec<[(PatternNode<C, E>, Cached<C, E>); 8]>,
+    typ: Type,
+    spec: Expr,
 }
 
-impl<C: Ctx, E: UserEvent> Default for SelectNode<C, E> {
-    fn default() -> Self {
-        Self { selected: None, arg: Default::default(), arms: Box::from_iter([]) }
-    }
-}
-
-impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
+impl<C: Ctx, E: UserEvent> Update<C, E> for SelectNode<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
-        let SelectNode { selected, arg, arms } = self;
+        let SelectNode { selected, arg, arms, typ: _, spec: _ } = self;
         let mut val_up: SmallVec<[bool; 64]> = smallvec![];
         let arg_up = arg.update(ctx, event);
         macro_rules! bind {
@@ -322,14 +371,14 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
         }
     }
 
-    fn delete(self, ctx: &mut ExecCtx<C, E>) {
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         let mut ids: SmallVec<[BindId; 8]> = smallvec![];
-        let Self { selected: _, arg, arms } = self;
+        let Self { selected: _, arg, arms, typ: _, spec: _ } = self;
         arg.node.delete(ctx);
         for (pat, arg) in arms {
             arg.node.delete(ctx);
             pat.structure_predicate.ids(&mut |id| ids.push(id));
-            if let Some(n) = pat.guard {
+            if let Some(n) = &mut pat.guard {
                 n.node.delete(ctx);
             }
             for id in ids.drain(..) {
@@ -339,7 +388,7 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
     }
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        let Self { selected: _, arg, arms } = self;
+        let Self { selected: _, arg, arms, typ: _, spec: _ } = self;
         arg.node.refs(f);
         for (pat, arg) in arms {
             arg.node.refs(f);
@@ -350,7 +399,7 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
         }
     }
 
-    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<Type> {
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         self.arg.node.typecheck(ctx)?;
         let mut rtype = Type::Bottom;
         let mut mtype = Type::Bottom;
@@ -362,16 +411,15 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
             }
             itype = itype.union(&pat.type_predicate);
             n.node.typecheck(ctx)?;
-            rtype = rtype.union(&n.node.typ);
+            rtype = rtype.union(&n.node.typ());
         }
         itype
-            .check_contains(&ctx.env, &self.arg.node.typ)
+            .check_contains(&ctx.env, &self.arg.node.typ())
             .map_err(|e| anyhow!("missing match cases {e}"))?;
         mtype
-            .check_contains(&ctx.env, &self.arg.node.typ)
+            .check_contains(&ctx.env, &self.arg.node.typ())
             .map_err(|e| anyhow!("missing match cases {e}"))?;
-        self.arg.node.typ = self.arg.node.typ.normalize();
-        let mut atype = self.arg.node.typ.clone();
+        let mut atype = self.arg.node.typ().clone().normalize();
         for (pat, _) in self.arms.iter() {
             let can_match = atype.contains(&ctx.env, &pat.type_predicate)?
                 || pat.type_predicate.contains(&ctx.env, &atype)?;
@@ -386,23 +434,28 @@ impl<C: Ctx, E: UserEvent> SelectNode<C, E> {
                 atype = atype.diff(&ctx.env, &pat.type_predicate)?;
             }
         }
-        Ok(rtype)
+        self.typ = rtype;
+        Ok(())
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
     }
 }
 
 #[derive(Debug)]
 pub struct ArrayRefNode<C: Ctx, E: UserEvent> {
-    pub source: Cached<C, E>,
-    pub i: Cached<C, E>,
+    source: Cached<C, E>,
+    i: Cached<C, E>,
+    spec: Expr,
+    typ: Type,
 }
 
-impl<C: Ctx, E: UserEvent> Default for ArrayRefNode<C, E> {
-    fn default() -> Self {
-        Self { source: Default::default(), i: Default::default() }
-    }
-}
-
-impl<C: Ctx, E: UserEvent> ArrayRefNode<C, E> {
+impl<C: Ctx, E: UserEvent> Update<C, E> for ArrayRefNode<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         let up = self.source.update(ctx, event);
         let up = self.i.update(ctx, event) || up;
@@ -440,35 +493,44 @@ impl<C: Ctx, E: UserEvent> ArrayRefNode<C, E> {
         }
     }
 
-    pub fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.source.node, self.source.node.typecheck(ctx))?;
+        wrap!(self.i.node, self.i.node.typecheck(ctx))?;
+        let at = Type::Array(TArc::new(self.typ.clone()));
+        wrap!(self, at.check_contains(&ctx.env, self.source.node.typ()))?;
+        let int = Type::Primitive(Typ::integer());
+        wrap!(self.i.node, int.check_contains(&ctx.env, self.i.node.typ()))
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
         self.source.node.refs(f);
         self.i.node.refs(f);
     }
 
-    pub fn delete(self, ctx: &mut ExecCtx<C, E>) {
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.source.node.delete(ctx);
         self.i.node.delete(ctx);
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
     }
 }
 
 #[derive(Debug)]
 pub struct ArraySliceNode<C: Ctx, E: UserEvent> {
-    pub source: Cached<C, E>,
-    pub start: Option<Cached<C, E>>,
-    pub end: Option<Cached<C, E>>,
+    source: Cached<C, E>,
+    start: Option<Cached<C, E>>,
+    end: Option<Cached<C, E>>,
+    spec: Expr,
+    typ: Type,
 }
 
-impl<C: Ctx, E: UserEvent> Default for ArraySliceNode<C, E> {
-    fn default() -> Self {
-        Self {
-            source: Default::default(),
-            start: Default::default(),
-            end: Default::default(),
-        }
-    }
-}
-
-impl<C: Ctx, E: UserEvent> ArraySliceNode<C, E> {
+impl<C: Ctx, E: UserEvent> Update<C, E> for ArraySliceNode<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         macro_rules! number {
             ($e:expr) => {
@@ -520,7 +582,25 @@ impl<C: Ctx, E: UserEvent> ArraySliceNode<C, E> {
         }
     }
 
-    pub fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.source.node, self.source.node.typecheck(ctx))?;
+        let it = Type::Primitive(Typ::unsigned_integer());
+        wrap!(
+            self.source.node,
+            self.typ.check_contains(&ctx.env, &self.source.node.typ())
+        )?;
+        if let Some(start) = self.start.as_mut() {
+            wrap!(start.node, start.node.typecheck(ctx))?;
+            wrap!(start.node, it.check_contains(&ctx.env, &start.node.typ()))?;
+        }
+        if let Some(end) = self.end.as_mut() {
+            wrap!(end.node, end.node.typecheck(ctx))?;
+            wrap!(end.node, it.check_contains(&ctx.env, &end.node.typ()))?;
+        }
+        Ok(())
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
         self.source.node.refs(f);
         if let Some(start) = &self.start {
             start.node.refs(f)
@@ -530,17 +610,50 @@ impl<C: Ctx, E: UserEvent> ArraySliceNode<C, E> {
         }
     }
 
-    pub fn delete(self, ctx: &mut ExecCtx<C, E>) {
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.source.node.delete(ctx);
-        if let Some(start) = self.start {
+        if let Some(start) = &mut self.start {
             start.node.delete(ctx);
         }
-        if let Some(end) = self.end {
+        if let Some(end) = &mut self.end {
             end.node.delete(ctx);
         }
     }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
 }
 
+struct Use {
+    spec: Expr,
+    scope: ModPath,
+    name: ModPath,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Use {
+    fn update(
+        &mut self,
+        _ctx: &mut ExecCtx<C, E>,
+        _event: &mut Event<E>,
+    ) -> Option<Value> {
+        None
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {}
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {}
+}
+
+/*
 #[derive(Debug)]
 pub enum NodeKind<C: Ctx, E: UserEvent> {
     Nop,
@@ -1194,3 +1307,4 @@ pub mod genn {
         Node { spec: Box::new(spec), typ, kind: NodeKind::Apply(site) }
     }
 }
+*/
