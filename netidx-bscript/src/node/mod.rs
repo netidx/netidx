@@ -629,6 +629,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArraySliceNode<C, E> {
     }
 }
 
+#[derive(Debug)]
 struct Use {
     spec: Expr,
     scope: ModPath,
@@ -644,16 +645,326 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Use {
         None
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {}
+    fn typecheck(&mut self, _ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        Ok(())
+    }
+
+    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
 
     fn spec(&self) -> &Expr {
         &self.spec
     }
 
-    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {}
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Some(used) = ctx.env.used.get_mut_cow(&self.scope) {
+            TArc::make_mut(used).retain(|n| n != &self.name);
+            if used.is_empty() {
+                ctx.env.used.remove_cow(&self.scope);
+            }
+        }
+    }
+
+    fn typ(&self) -> &Type {
+        &Type::Bottom
+    }
 }
 
-/*
+#[derive(Debug)]
+struct TypeDef {
+    spec: Expr,
+    scope: ModPath,
+    name: ModPath,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for TypeDef {
+    fn update(
+        &mut self,
+        _ctx: &mut ExecCtx<C, E>,
+        _event: &mut Event<E>,
+    ) -> Option<Value> {
+        None
+    }
+
+    fn typecheck(&mut self, _ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        Ok(())
+    }
+
+    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.env.undeftype(&self.scope, &self.name)
+    }
+
+    fn typ(&self) -> &Type {
+        &Type::Bottom
+    }
+}
+
+#[derive(Debug)]
+struct Constant {
+    spec: Expr,
+    value: Value,
+    typ: Type,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Constant {
+    fn update(
+        &mut self,
+        _ctx: &mut ExecCtx<C, E>,
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        if event.init {
+            Some(self.value.clone())
+        } else {
+            None
+        }
+    }
+
+    fn delete(&mut self, _ctx: &mut ExecCtx<C, E>) {}
+
+    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn typecheck(&mut self, _ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        Ok(())
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+}
+
+// used for both mod and do
+#[derive(Debug)]
+struct Block<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    children: SmallVec<[Node<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Block<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        self.children.iter_mut().fold(None, |_, n| n.update(ctx, event))
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        for n in &mut self.children {
+            n.delete(ctx)
+        }
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        for n in &self.children {
+            n.refs(f)
+        }
+    }
+
+    fn typ(&self) -> &Type {
+        &self.children.last().map(|n| n.typ()).unwrap_or(&Type::Bottom)
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        for n in &mut self.children {
+            wrap!(n, n.typecheck(ctx))?
+        }
+        Ok(())
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+}
+
+#[derive(Debug)]
+struct Bind<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    pattern: StructPatternNode,
+    node: Node<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Bind<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        if let Some(v) = self.node.update(ctx, event) {
+            self.pattern.bind(&v, &mut |id, v| ctx.set_var(id, v))
+        }
+        None
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.pattern.ids(f);
+        self.node.refs(f);
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.node.delete(ctx);
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.node, self.node.typecheck(ctx))?;
+        wrap!(self.node, self.typ.check_contains(&ctx.env, &self.node.typ()))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct Ref {
+    spec: Expr,
+    typ: Type,
+    id: BindId,
+    top_id: ExprId,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Ref {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        event.variables.get(&self.id).map(|v| v.clone())
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        f(self.id)
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id)
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn typecheck(&mut self, _ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct StructRef<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    source: Node<C, E>,
+    field: usize,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for StructRef<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        match self.source.update(ctx, event) {
+            Some(Value::Array(a)) => a.get(self.field).and_then(|v| match v {
+                Value::Array(a) if a.len() == 2 => Some(a[1].clone()),
+                _ => None,
+            }),
+            Some(_) | None => None,
+        }
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.source.refs(f)
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.source.delete(ctx)
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.source, self.source.typecheck(ctx))?;
+        let field = match &self.spec.kind {
+            ExprKind::StructRef { source: _, field } => field.clone(),
+            _ => bail!("BUG: miscompiled struct ref"),
+        };
+        let etyp = self.source.typ().with_deref(|typ| match typ {
+            Some(Type::Struct(flds)) => {
+                let typ = flds.iter().enumerate().find_map(|(i, (n, t))| {
+                    if &field == n {
+                        Some((i, t.clone()))
+                    } else {
+                        None
+                    }
+                });
+                match typ {
+                    Some((i, t)) => Ok((i, t)),
+                    None => bail!("in struct, unknown field {field}"),
+                }
+            }
+            None => bail!("type must be known, annotations needed"),
+            _ => bail!("expected struct"),
+        });
+        let (idx, typ) = wrap!(self, etyp)?;
+        self.field = idx;
+        wrap!(self, self.typ.check_contains(&ctx.env, &typ))
+    }
+}
+
+#[derive(Debug)]
+struct TupleRef<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    source: Node<C, E>,
+    field: usize,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for TupleRef<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        self.source.update(ctx, event).and_then(|v| match v {
+            Value::Array(a) => a.get(self.field).map(|v| v.clone()),
+            _ => None,
+        })
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.source.refs(f)
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.source.delete(ctx)
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.source, self.source.typecheck(ctx))?;
+        let etyp = self.source.typ().with_deref(|typ| match typ {
+            Some(Type::Tuple(flds)) if flds.len() > self.field => {
+                Ok(flds[self.field].clone())
+            }
+            None => bail!("type must be known, annotations needed"),
+            _ => bail!("expected tuple with at least {} elements", self.field),
+        });
+        let etyp = wrap!(self, etyp)?;
+        wrap!(self, self.typ.check_contains(&ctx.env, &etyp))
+    }
+}
+
 #[derive(Debug)]
 pub enum NodeKind<C: Ctx, E: UserEvent> {
     Nop,
@@ -775,11 +1086,13 @@ pub enum NodeKind<C: Ctx, E: UserEvent> {
     },
 }
 
+/*
 pub struct Node<C: Ctx, E: UserEvent> {
     pub spec: Box<Expr>,
     pub typ: Type,
     pub kind: NodeKind<C, E>,
 }
+*/
 
 impl<C: Ctx, E: UserEvent> fmt::Debug for Node<C, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -844,14 +1157,9 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
                 mem::take(&mut rhs.node).delete(ctx);
             }
             NodeKind::Use { scope, name } => {
-                if let Some(used) = ctx.env.used.get_mut_cow(&scope) {
-                    TArc::make_mut(used).retain(|n| n != &name);
-                    if used.is_empty() {
-                        ctx.env.used.remove_cow(&scope);
-                    }
-                }
+                todo!()
             }
-            NodeKind::TypeDef { scope, name } => ctx.env.undeftype(&scope, &name),
+            NodeKind::TypeDef { scope, name } => todo!(),
             NodeKind::Module(nodes)
             | NodeKind::Do(nodes)
             | NodeKind::Any { args: nodes } => {
@@ -1040,11 +1348,7 @@ impl<C: Ctx, E: UserEvent> Node<C, E> {
         }
         match &mut self.kind {
             NodeKind::Constant(v) => {
-                if event.init {
-                    Some(v.clone())
-                } else {
-                    None
-                }
+                todo!()
             }
             NodeKind::StringInterpolate { args } => {
                 thread_local! {
@@ -1307,4 +1611,3 @@ pub mod genn {
         Node { spec: Box::new(spec), typ, kind: NodeKind::Apply(site) }
     }
 }
-*/
