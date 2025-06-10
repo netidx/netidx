@@ -9,6 +9,7 @@ use crate::{
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
+use enumflags2::BitFlags;
 use fxhash::FxHashMap;
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
@@ -1192,6 +1193,129 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Qop<C, E> {
         let rtyp = self.n.typ().diff(&ctx.env, &err)?;
         wrap!(self, self.typ.check_contains(&ctx.env, &rtyp))?;
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct TypeCast<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    target: Type,
+    n: Node<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for TypeCast<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        self.n.update(ctx, event).map(|v| self.target.cast_value(&ctx.env, v))
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.delete(ctx)
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.n.refs(f)
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        Ok(wrap!(self.n, self.n.typecheck(ctx))?)
+    }
+}
+
+#[derive(Debug)]
+struct Any<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    n: SmallVec<[Node<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Any<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        self.n
+            .iter_mut()
+            .filter_map(|s| s.update(ctx, event))
+            .fold(None, |r, v| r.or(Some(v)))
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.iter_mut().for_each(|n| n.delete(ctx))
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.n.iter().for_each(|n| n.refs(f))
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        for n in self.n.iter_mut() {
+            wrap!(n, n.typecheck(ctx))?
+        }
+        let rtyp = Type::Primitive(BitFlags::empty());
+        let rtyp = self.n.iter().fold(rtyp, |rtype, n| n.typ().union(&rtype));
+        Ok(self.typ.check_contains(&ctx.env, &rtyp)?)
+    }
+}
+
+#[derive(Debug)]
+struct Array<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    n: SmallVec<[Cached<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Array<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        if self.n.is_empty() && event.init {
+            return Some(Value::Array(ValArray::from([])));
+        }
+        let (updated, determined) = update_args!(self.n, ctx, event);
+        if updated && determined {
+            let iter = self.n.iter().map(|n| n.cached.clone().unwrap());
+            Some(Value::Array(ValArray::from_iter_exact(iter)))
+        } else {
+            None
+        }
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.iter_mut().for_each(|n| n.node.delete(ctx))
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.n.iter().for_each(|n| n.node.refs(f))
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        for n in &mut self.n {
+            wrap!(n.node, n.node.typecheck(ctx))?
+        }
+        let rtype = Type::Bottom;
+        let rtype = self.n.iter().fold(rtype, |rtype, n| n.node.typ().union(&rtype));
+        let rtype = Type::Array(TArc::new(rtype));
+        Ok(self.typ.check_contains(&ctx.env, &rtype)?)
     }
 }
 
