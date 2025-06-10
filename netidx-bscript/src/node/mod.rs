@@ -15,7 +15,7 @@ use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
-use std::{cell::RefCell, collections::HashMap, fmt, iter, mem, sync::Arc};
+use std::{cell::RefCell, fmt, iter, mem, sync::Arc};
 use triomphe::Arc as TArc;
 
 mod compiler;
@@ -1442,6 +1442,404 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Variant<C, E> {
 }
 
 #[derive(Debug)]
+struct Struct<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    names: SmallVec<[ArcStr; 8]>,
+    n: SmallVec<[Cached<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Struct<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        if self.n.is_empty() && event.init {
+            return Some(Value::Array(ValArray::from([])));
+        }
+        let (updated, determined) = update_args!(self.n, ctx, event);
+        if updated && determined {
+            let iter = self.names.iter().zip(self.n.iter()).map(|(name, n)| {
+                let name = Value::String(name.clone());
+                let v = n.cached.clone().unwrap();
+                Value::Array(ValArray::from_iter_exact([name, v].into_iter()))
+            });
+            Some(Value::Array(ValArray::from_iter_exact(iter)))
+        } else {
+            None
+        }
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.iter_mut().for_each(|n| n.node.delete(ctx))
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.n.iter().for_each(|n| n.node.refs(f))
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        for n in self.n.iter_mut() {
+            wrap!(n.node, n.node.typecheck(ctx))?
+        }
+        match &self.typ {
+            Type::Struct(typs) => {
+                if self.n.len() != typs.len() {
+                    bail!(
+                        "struct length mismatch {} fields expected vs {}",
+                        typs.len(),
+                        self.n.len()
+                    )
+                }
+                for ((_, t), n) in typs.iter().zip(self.n.iter()) {
+                    t.check_contains(&ctx.env, &n.node.typ())?
+                }
+            }
+            _ => bail!("BUG: expected a struct rtype"),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct StructWith<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    source: Node<C, E>,
+    current: Option<ValArray>,
+    replace: SmallVec<[(usize, Cached<C, E>); 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        let mut updated = self
+            .source
+            .update(ctx, event)
+            .map(|v| match v {
+                Value::Array(a) => {
+                    self.current = Some(a.clone());
+                    true
+                }
+                _ => false,
+            })
+            .unwrap_or(false);
+        let mut determined = self.current.is_some();
+        for (_, n) in self.replace.iter_mut() {
+            updated |= n.update(ctx, event);
+            determined &= n.cached.is_some();
+        }
+        if updated && determined {
+            let mut si = 0;
+            let iter =
+                self.current.as_ref().unwrap().iter().enumerate().map(|(i, v)| match v {
+                    Value::Array(v) if v.len() == 2 => {
+                        if si < self.replace.len() && i == self.replace[si].0 {
+                            let r = self.replace[si].1.cached.clone().unwrap();
+                            si += 1;
+                            Value::Array(ValArray::from_iter_exact(
+                                [v[0].clone(), r].into_iter(),
+                            ))
+                        } else {
+                            Value::Array(v.clone())
+                        }
+                    }
+                    _ => v.clone(),
+                });
+            Some(Value::Array(ValArray::from_iter_exact(iter)))
+        } else {
+            None
+        }
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.source.delete(ctx);
+        self.replace.iter_mut().for_each(|(_, n)| n.node.delete(ctx))
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.source.refs(f);
+        self.replace.iter().for_each(|(_, n)| n.node.refs(f))
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.source, self.source.typecheck(ctx))?;
+        let fields = match &self.spec.kind {
+            ExprKind::StructWith { source: _, replace } => {
+                replace.iter().map(|(n, _)| n.clone()).collect::<SmallVec<[ArcStr; 8]>>()
+            }
+            _ => bail!("BUG: miscompiled structwith"),
+        };
+        wrap!(
+            self,
+            self.source.typ().with_deref(|typ| match typ {
+                Some(Type::Struct(flds)) => {
+                    for ((i, c), n) in self.replace.iter_mut().zip(fields.iter()) {
+                        let r = flds.iter().enumerate().find_map(|(i, (field, typ))| {
+                            if field == n {
+                                Some((i, typ))
+                            } else {
+                                None
+                            }
+                        });
+                        match r {
+                            None => bail!("struct has no field named {n}"),
+                            Some((j, typ)) => {
+                                typ.check_contains(&ctx.env, &c.node.typ())?;
+                                *i = j;
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+                None => bail!("type must be known, annotations needed"),
+                _ => bail!("expected a struct"),
+            })
+        )?;
+        wrap!(self, self.typ.check_contains(&ctx.env, self.source.typ()))
+    }
+}
+
+macro_rules! compare_op {
+    ($name:ident, $op:tt) => {
+        #[derive(Debug)]
+        struct $name<C: Ctx, E: UserEvent> {
+            spec: Expr,
+            typ: Type,
+            lhs: Cached<C, E>,
+            rhs: Cached<C, E>,
+        }
+
+        impl<C: Ctx, E: UserEvent> Update<C, E> for $name<C, E> {
+            fn update(
+                &mut self,
+                ctx: &mut ExecCtx<C, E>,
+                event: &mut Event<E>,
+            ) -> Option<Value> {
+                let lhs_up = self.lhs.update(ctx, event);
+                let rhs_up = self.rhs.update(ctx, event);
+                if lhs_up || rhs_up {
+                    return self.lhs.cached.as_ref().and_then(|lhs| {
+                        self.rhs.cached.as_ref().map(|rhs| (lhs $op rhs).into())
+                    })
+                }
+                None
+            }
+
+            fn spec(&self) -> &Expr {
+                &self.spec
+            }
+
+            fn typ(&self) -> &Type {
+                &self.typ
+            }
+
+            fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+                self.lhs.node.refs(f);
+                self.rhs.node.refs(f);
+            }
+
+            fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+                self.lhs.node.delete(ctx);
+                self.rhs.node.delete(ctx)
+            }
+
+            fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+                wrap!(self.lhs.node, self.lhs.node.typecheck(ctx))?;
+                wrap!(self.rhs.node, self.rhs.node.typecheck(ctx))?;
+                wrap!(
+                    self,
+                    self.lhs.node.typ().check_contains(&ctx.env, &self.rhs.node.typ())
+                )?;
+                wrap!(self, self.typ.check_contains(&ctx.env, &Type::boolean()))
+            }
+        }
+    };
+}
+
+compare_op!(Eq, ==);
+compare_op!(Ne, !=);
+compare_op!(Lt, <);
+compare_op!(Gt, >);
+compare_op!(Lte, <=);
+compare_op!(Gte, >=);
+
+macro_rules! bool_op {
+    ($name:ident, $op:tt) => {
+        #[derive(Debug)]
+        struct $name<C: Ctx, E: UserEvent> {
+            spec: Expr,
+            typ: Type,
+            lhs: Cached<C, E>,
+            rhs: Cached<C, E>,
+        }
+
+        impl<C: Ctx, E: UserEvent> Update<C, E> for $name<C, E> {
+            fn update(
+                &mut self,
+                ctx: &mut ExecCtx<C, E>,
+                event: &mut Event<E>,
+            ) -> Option<Value> {
+                let lhs_up = self.lhs.update(ctx, event);
+                let rhs_up = self.rhs.update(ctx, event);
+                if lhs_up || rhs_up {
+                    return match (self.lhs.cached.as_ref(), self.rhs.cached.as_ref()) {
+                        (Some(Value::Bool(b0)), Some(Value::Bool(b1))) => Some(Value::Bool(*b0 $op *b1)),
+                        (_, _) => None
+                    }
+                }
+                None
+            }
+
+            fn spec(&self) -> &Expr {
+                &self.spec
+            }
+
+            fn typ(&self) -> &Type {
+                &self.typ
+            }
+
+            fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+                self.lhs.node.refs(f);
+                self.rhs.node.refs(f);
+            }
+
+            fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+                self.lhs.node.delete(ctx);
+                self.rhs.node.delete(ctx)
+            }
+
+            fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+                wrap!(self.lhs.node, self.lhs.node.typecheck(ctx))?;
+                wrap!(self.rhs.node, self.rhs.node.typecheck(ctx))?;
+                let bt = Type::Primitive(Typ::Bool.into());
+                wrap!(self.lhs.node, bt.check_contains(&ctx.env, self.lhs.node.typ()))?;
+                wrap!(self.rhs.node, bt.check_contains(&ctx.env, self.rhs.node.typ()))?;
+                wrap!(self, self.typ.check_contains(&ctx.env, &Type::boolean()))
+            }
+        }
+    };
+}
+
+bool_op!(And, &&);
+bool_op!(Or, ||);
+
+#[derive(Debug)]
+struct Not<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    n: Cached<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Not<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        if self.n.update(ctx, event) {
+            self.n.cached.as_ref().and_then(|v| match v {
+                Value::Bool(b) => Some(Value::Bool(!*b)),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.n.node.refs(f);
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.node.delete(ctx);
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.n.node, self.n.node.typecheck(ctx))?;
+        let bt = Type::Primitive(Typ::Bool.into());
+        wrap!(self.n.node, bt.check_contains(&ctx.env, self.n.node.typ()))?;
+        wrap!(self, self.typ.check_contains(&ctx.env, &Type::boolean()))
+    }
+}
+
+macro_rules! arith_op {
+    ($name:ident, $op:tt) => {
+        #[derive(Debug)]
+        struct $name<C: Ctx, E: UserEvent> {
+            spec: Expr,
+            typ: Type,
+            lhs: Cached<C, E>,
+            rhs: Cached<C, E>
+        }
+
+        impl<C: Ctx, E: UserEvent> Update<C, E> for $name<C, E> {
+            fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+                let lhs_up = self.lhs.update(ctx, event);
+                let rhs_up = self.rhs.update(ctx, event);
+                if lhs_up || rhs_up {
+                    return self.lhs.cached.as_ref().and_then(|lhs| {
+                        self.rhs.cached.as_ref().map(|rhs| (lhs.clone() $op rhs.clone()).into())
+                    })
+                }
+                None
+            }
+
+            fn spec(&self) -> &Expr {
+                &self.spec
+            }
+
+            fn typ(&self) -> &Type {
+                &self.typ
+            }
+
+            fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+                self.lhs.node.refs(f);
+                self.rhs.node.refs(f);
+            }
+
+            fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+                self.lhs.node.delete(ctx);
+                self.rhs.node.delete(ctx);
+            }
+
+            fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+                wrap!(self.lhs.node, self.lhs.node.typecheck(ctx))?;
+                wrap!(self.rhs.node, self.rhs.node.typecheck(ctx))?;
+                let typ = Type::Primitive(Typ::number());
+                let lhs = self.lhs.node.typ();
+                let rhs = self.rhs.node.typ();
+                wrap!(self.lhs.node, typ.check_contains(&ctx.env, lhs))?;
+                wrap!(self.rhs.node, typ.check_contains(&ctx.env, rhs))?;
+                wrap!(self,self.typ.check_contains(&ctx.env, &lhs.union(rhs)))
+            }
+        }
+    }
+}
+
+arith_op!(Add, +);
+arith_op!(Sub, -);
+arith_op!(Mul, *);
+arith_op!(Div, /);
+
+/*
+#[derive(Debug)]
 pub enum NodeKind<C: Ctx, E: UserEvent> {
     Nop,
     Use {
@@ -2087,3 +2485,4 @@ pub mod genn {
         Node { spec: Box::new(spec), typ, kind: NodeKind::Apply(site) }
     }
 }
+*/
