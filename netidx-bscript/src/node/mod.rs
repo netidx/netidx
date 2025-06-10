@@ -1320,6 +1320,128 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Array<C, E> {
 }
 
 #[derive(Debug)]
+struct Tuple<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    n: SmallVec<[Cached<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Tuple<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        if self.n.is_empty() && event.init {
+            return Some(Value::Array(ValArray::from([])));
+        }
+        let (updated, determined) = update_args!(self.n, ctx, event);
+        if updated && determined {
+            let iter = self.n.iter().map(|n| n.cached.clone().unwrap());
+            Some(Value::Array(ValArray::from_iter_exact(iter)))
+        } else {
+            None
+        }
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.iter_mut().for_each(|n| n.node.delete(ctx))
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.n.iter().for_each(|n| n.node.refs(f))
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        for n in self.n.iter_mut() {
+            wrap!(n.node, n.node.typecheck(ctx))?
+        }
+        match &self.typ {
+            Type::Tuple(typs) => {
+                if self.n.len() != typs.len() {
+                    bail!("tuple arity mismatch {} vs {}", self.n.len(), typs.len())
+                }
+                for (t, n) in typs.iter().zip(self.n.iter()) {
+                    t.check_contains(&ctx.env, &n.node.typ())?
+                }
+            }
+            _ => bail!("BUG: unexpected tuple rtype"),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct Variant<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    tag: ArcStr,
+    n: SmallVec<[Cached<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Variant<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        if self.n.len() == 0 {
+            if event.init {
+                Some(Value::String(self.tag.clone()))
+            } else {
+                None
+            }
+        } else {
+            let (updated, determined) = update_args!(self.n, ctx, event);
+            if updated && determined {
+                let a = iter::once(Value::String(self.tag.clone()))
+                    .chain(self.n.iter().map(|n| n.cached.clone().unwrap()));
+                Some(Value::Array(ValArray::from_iter(a)))
+            } else {
+                None
+            }
+        }
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.iter_mut().for_each(|n| n.node.delete(ctx))
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.n.iter().for_each(|n| n.node.refs(f))
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        for n in self.n.iter_mut() {
+            wrap!(n.node, n.node.typecheck(ctx))?
+        }
+        match &self.typ {
+            Type::Variant(ttag, typs) => {
+                if ttag != &self.tag {
+                    bail!("expected {ttag} not {}", self.tag)
+                }
+                if self.n.len() != typs.len() {
+                    bail!("arity mismatch {} vs {}", self.n.len(), typs.len())
+                }
+                for (t, n) in typs.iter().zip(self.n.iter()) {
+                    wrap!(n.node, t.check_contains(&ctx.env, &n.node.typ()))?
+                }
+            }
+            _ => bail!("BUG: unexpected variant rtype"),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 pub enum NodeKind<C: Ctx, E: UserEvent> {
     Nop,
     Use {
