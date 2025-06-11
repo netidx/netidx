@@ -1,28 +1,26 @@
 use crate::{
-    env::LambdaDef,
+    compile,
+    env::{self, LambdaDef},
     err,
-    expr::{Expr, ExprId, ExprKind, ModPath},
-    node::pattern::PatternNode,
-    typ::{FnArgType, FnType, Type},
-    Apply, BindId, Ctx, Event, ExecCtx, LambdaId, Node, Update, UserEvent,
+    expr::{self, Expr, ExprId, ExprKind, ModPath},
+    pattern::{PatternNode, StructPatternNode},
+    typ::Type,
+    Apply, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
-use compact_str::format_compact;
+use combine::stream::position::SourcePosition;
 use enumflags2::BitFlags;
-use fxhash::FxHashMap;
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
-use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
-use std::{cell::RefCell, fmt, iter, mem, sync::Arc};
+use std::{cell::RefCell, iter, sync::Arc};
 use triomphe::Arc as TArc;
 
-mod compiler;
-mod lambda;
-pub mod pattern;
-mod typecheck;
+pub(crate) mod callsite;
+pub(crate) mod lambda;
 
+#[macro_export]
 macro_rules! wrap {
     ($n:expr, $e:expr) => {
         match $e {
@@ -45,9 +43,19 @@ macro_rules! update_args {
 }
 
 #[derive(Debug)]
-struct Nop {
-    spec: Expr,
-    typ: Type,
+pub(crate) struct Nop {
+    pub spec: Expr,
+    pub typ: Type,
+}
+
+impl Nop {
+    pub(crate) fn new<C: Ctx, E: UserEvent>(typ: Type) -> Node<C, E> {
+        Box::new(Nop {
+            spec: ExprKind::Constant(Value::String(literal!("nop")))
+                .to_expr(Default::default()),
+            typ,
+        })
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Nop {
@@ -77,20 +85,20 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Nop {
 }
 
 #[derive(Debug)]
-pub struct Cached<C: Ctx, E: UserEvent> {
-    pub cached: Option<Value>,
-    pub node: Node<C, E>,
+struct Cached<C: Ctx, E: UserEvent> {
+    cached: Option<Value>,
+    node: Node<C, E>,
 }
 
 impl<C: Ctx, E: UserEvent> Cached<C, E> {
-    pub fn new(node: Node<C, E>) -> Self {
+    fn new(node: Node<C, E>) -> Self {
         Self { cached: None, node }
     }
 
     /// update the node, return whether the node updated. If it did,
     /// the updated value will be stored in the cached field, if not,
     /// the previous value will remain there.
-    pub fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> bool {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> bool {
         match self.node.update(ctx, event) {
             None => false,
             Some(v) => {
@@ -103,196 +111,13 @@ impl<C: Ctx, E: UserEvent> Cached<C, E> {
     /// update the node, return true if the node updated AND the new
     /// value is different from the old value. The cached field will
     /// only be updated if the value changed.
-    pub fn update_changed(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        event: &mut Event<E>,
-    ) -> bool {
+    fn update_changed(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> bool {
         match self.node.update(ctx, event) {
             v @ Some(_) if v != self.cached => {
                 self.cached = v;
                 true
             }
             Some(_) | None => false,
-        }
-    }
-}
-
-pub struct CallSite<C: Ctx, E: UserEvent> {
-    spec: Expr,
-    ftype: TArc<FnType>,
-    fnode: Node<C, E>,
-    args: SmallVec<[Node<C, E>; 8]>,
-    arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
-    function: Option<(LambdaId, Box<dyn Apply<C, E> + Send + Sync>)>,
-    top_id: ExprId,
-}
-
-impl<C: Ctx, E: UserEvent> fmt::Debug for CallSite<C, E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CallSite({:?}, [", self.fnode)?;
-        for (i, n) in self.args.iter().enumerate() {
-            if i < self.args.len() - 1 {
-                write!(f, "{:?}, ", n)?;
-            } else {
-                write!(f, "{:?}", n)?;
-            }
-        }
-        write!(f, "])")
-    }
-}
-
-impl<C: Ctx, E: UserEvent> CallSite<C, E> {
-    fn bind(&mut self, ctx: &mut ExecCtx<C, E>, f: Arc<LambdaDef<C, E>>) -> Result<()> {
-        macro_rules! compile_default {
-            ($i:expr, $f:expr) => {{
-                match &$f.argspec[$i].labeled {
-                    None | Some(None) => bail!("expected default value"),
-                    Some(Some(expr)) => {
-                        let orig_env = ctx.env.restore_lexical_env(&$f.env);
-                        let n =
-                            compiler::compile(ctx, expr.clone(), &$f.scope, self.top_id);
-                        ctx.env = ctx.env.merge_lexical(&orig_env);
-                        n?
-                    }
-                }
-            }};
-        }
-        for (name, map) in self.ftype.map_argpos(&f.typ) {
-            let is_default = *self.arg_spec.get(&name).unwrap_or(&false);
-            match map {
-                (Some(si), Some(oi)) if si == oi => {
-                    if is_default {
-                        self.args[si] = compile_default!(si, f);
-                    }
-                }
-                (Some(si), Some(oi)) if si < oi => {
-                    let mut i = si;
-                    while i < oi {
-                        self.args.swap(i, i + 1);
-                        i += 1;
-                    }
-                    if is_default {
-                        self.args[i] = compile_default!(si, f);
-                    }
-                }
-                (Some(si), Some(oi)) if oi < si => {
-                    let mut i = si;
-                    while i > oi {
-                        self.args.swap(i, i - 1);
-                        i -= 1
-                    }
-                    if is_default {
-                        self.args[i] = compile_default!(i, f);
-                    }
-                }
-                (Some(_), Some(_)) => unreachable!(),
-                (Some(i), None) => {
-                    self.args.remove(i);
-                }
-                (None, Some(i)) => self.args.insert(i, compile_default!(i, f)),
-                (None, None) => bail!("unexpected args"),
-            }
-        }
-        let rf = (f.init)(ctx, &self.args, self.top_id)?;
-        self.ftype = f.typ.clone();
-        self.function = Some((f.id, rf));
-        Ok(())
-    }
-}
-
-impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
-    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
-        macro_rules! error {
-            ($m:literal) => {{
-                let m = format_compact!($m);
-                return Some(Value::Error(m.as_str().into()));
-            }};
-        }
-        let bound = match (&self.function, self.fnode.update(ctx, event)) {
-            (_, None) => false,
-            (Some((cid, _)), Some(Value::U64(id))) if cid.0 == id => false,
-            (_, Some(Value::U64(id))) => match ctx.env.lambdas.get(&LambdaId(id)) {
-                None => error!("no such function {id:?}"),
-                Some(lb) => match lb.upgrade() {
-                    None => error!("function {id:?} is no longer callable"),
-                    Some(lb) => {
-                        if let Err(e) = self.bind(ctx, lb) {
-                            error!("failed to bind to lambda {e}")
-                        }
-                        true
-                    }
-                },
-            },
-            (_, Some(v)) => error!("invalid function {v}"),
-        };
-        match &mut self.function {
-            None => None,
-            Some((_, f)) if !bound => f.update(ctx, &mut self.args, event),
-            Some((_, f)) => {
-                let init = mem::replace(&mut event.init, true);
-                let mut set = vec![];
-                f.refs(&mut |id| {
-                    if !event.variables.contains_key(&id) {
-                        if let Some(v) = ctx.cached.get(&id) {
-                            event.variables.insert(id, v.clone());
-                            set.push(id);
-                        }
-                    }
-                });
-                let res = f.update(ctx, &mut self.args, event);
-                event.init = init;
-                for id in set {
-                    event.variables.remove(&id);
-                }
-                res
-            }
-        }
-    }
-
-    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        let Self { spec: _, ftype: _, fnode, args, arg_spec: _, function, top_id: _ } =
-            self;
-        if let Some((_, f)) = function {
-            f.delete(ctx)
-        }
-        fnode.delete(ctx);
-        for n in args {
-            n.delete(ctx)
-        }
-    }
-
-    fn typ(&self) -> &Type {
-        &self.ftype.rtype
-    }
-
-    fn spec(&self) -> &Expr {
-        &self.spec
-    }
-
-    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
-        for n in self.args.iter_mut() {
-            wrap!(n, n.typecheck(ctx))?
-        }
-        self.ftype.unbind_tvars();
-        for (arg, FnArgType { typ, .. }) in self.args.iter().zip(self.ftype.args.iter()) {
-            wrap!(arg, typ.check_contains(&ctx.env, &arg.typ()))?;
-        }
-        for (tv, tc) in self.ftype.constraints.read().iter() {
-            wrap!(self, tc.check_contains(&ctx.env, &Type::TVar(tv.clone())))?
-        }
-        Ok(())
-    }
-
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        let Self { spec: _, ftype: _, fnode, args, arg_spec: _, function, top_id: _ } =
-            self;
-        if let Some((_, fun)) = function {
-            fun.refs(f)
-        }
-        fnode.refs(f);
-        for n in args {
-            n.refs(f)
         }
     }
 }
@@ -468,11 +293,31 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for SelectNode<C, E> {
 }
 
 #[derive(Debug)]
-pub struct ArrayRef<C: Ctx, E: UserEvent> {
+pub(crate) struct ArrayRef<C: Ctx, E: UserEvent> {
     source: Cached<C, E>,
     i: Cached<C, E>,
     spec: Expr,
     typ: Type,
+}
+
+impl<C: Ctx, E: UserEvent> ArrayRef<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        source: &Expr,
+        i: &Expr,
+    ) -> Result<Node<C, E>> {
+        let source = Cached::new(compile(ctx, source.clone(), scope, top_id)?);
+        let i = Cached::new(compile(ctx, i.clone(), scope, top_id)?);
+        let ert = Type::Primitive(Typ::Error.into());
+        let typ = match &source.typ() {
+            Type::Array(et) => Type::Set(TArc::from_iter([(**et).clone(), ert.clone()])),
+            _ => Type::Set(TArc::from_iter([Type::empty_tvar(), ert.clone()])),
+        };
+        Ok(Box::new(Self { source, i, spec, typ }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for ArrayRef<C, E> {
@@ -542,12 +387,39 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArrayRef<C, E> {
 }
 
 #[derive(Debug)]
-pub struct ArraySlice<C: Ctx, E: UserEvent> {
+pub(crate) struct ArraySlice<C: Ctx, E: UserEvent> {
     source: Cached<C, E>,
     start: Option<Cached<C, E>>,
     end: Option<Cached<C, E>>,
     spec: Expr,
     typ: Type,
+}
+
+impl<C: Ctx, E: UserEvent> ArraySlice<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        source: &Expr,
+        start: &Option<TArc<Expr>>,
+        end: &Option<TArc<Expr>>,
+    ) -> Result<Node<C, E>> {
+        let source = Cached::new(compile(ctx, source.clone(), scope, top_id)?);
+        let start = start
+            .as_ref()
+            .map(|e| compile(ctx, (**e).clone(), scope, top_id).map(Cached::new))
+            .transpose()?;
+        let end = end
+            .as_ref()
+            .map(|e| compile(ctx, (**e).clone(), scope, top_id).map(Cached::new))
+            .transpose()?;
+        let typ = Type::Set(TArc::from_iter([
+            source.node.typ().clone(),
+            Type::Primitive(Typ::Error.into()),
+        ]));
+        Ok(Box::new(Self { spec, typ, source, start, end }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for ArraySlice<C, E> {
@@ -650,10 +522,29 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArraySlice<C, E> {
 }
 
 #[derive(Debug)]
-struct Use {
+pub(crate) struct Use {
     spec: Expr,
     scope: ModPath,
     name: ModPath,
+}
+
+impl Use {
+    pub(crate) fn compile<C: Ctx, E: UserEvent>(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        name: &ModPath,
+        pos: &SourcePosition,
+    ) -> Result<Node<C, E>> {
+        match ctx.env.canonical_modpath(scope, name) {
+            None => bail!("at {pos} no such module {name}"),
+            Some(_) => {
+                let used = ctx.env.used.get_or_default_cow(scope.clone());
+                TArc::make_mut(used).push(name.clone());
+                Ok(Box::new(Self { spec, scope: scope.clone(), name: name.clone() }))
+            }
+        }
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Use {
@@ -725,10 +616,21 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TypeDef {
 }
 
 #[derive(Debug)]
-struct Constant {
+pub(crate) struct Constant {
     spec: Expr,
     value: Value,
     typ: Type,
+}
+
+impl Constant {
+    pub(crate) fn compile<C: Ctx, E: UserEvent>(
+        spec: Expr,
+        value: &Value,
+    ) -> Result<Node<C, E>> {
+        let value = value.clone();
+        let typ = Type::Primitive(Typ::get(&value).into());
+        Ok(Box::new(Self { spec, value, typ }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Constant {
@@ -763,9 +665,25 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Constant {
 
 // used for both mod and do
 #[derive(Debug)]
-struct Block<C: Ctx, E: UserEvent> {
+pub(crate) struct Block<C: Ctx, E: UserEvent> {
     spec: Expr,
     children: SmallVec<[Node<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Block<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        exprs: &TArc<[Expr]>,
+    ) -> Result<Node<C, E>> {
+        let children = exprs
+            .iter()
+            .map(|e| compile(ctx, e.clone(), scope, top_id))
+            .collect::<Result<SmallVec<[Node<C, E>; 8]>>>()?;
+        Ok(Box::new(Self { spec, children }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Block<C, E> {
@@ -990,10 +908,27 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TupleRef<C, E> {
 }
 
 #[derive(Debug)]
-struct StringInterpolate<C: Ctx, E: UserEvent> {
+pub(crate) struct StringInterpolate<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     args: SmallVec<[Cached<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> StringInterpolate<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        args: &[Expr],
+    ) -> Result<Node<C, E>> {
+        let args = args
+            .iter()
+            .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
+            .collect::<Result<_>>()?;
+        let typ = Type::Primitive(Typ::String.into());
+        Ok(Box::new(Self { spec, typ, args }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
@@ -1053,10 +988,29 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
 }
 
 #[derive(Debug)]
-struct Connect<C: Ctx, E: UserEvent> {
+pub(crate) struct Connect<C: Ctx, E: UserEvent> {
     spec: Expr,
     node: Node<C, E>,
     id: BindId,
+}
+
+impl<C: Ctx, E: UserEvent> Connect<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        name: &ModPath,
+        value: &Expr,
+        pos: &SourcePosition,
+    ) -> Result<Node<C, E>> {
+        let id = match ctx.env.lookup_bind(scope, name) {
+            None => bail!("at {pos} {name} is undefined"),
+            Some((_, env::Bind { id, .. })) => *id,
+        };
+        let node = compile(ctx, value.clone(), scope, top_id)?;
+        Ok(Box::new(Self { spec, node, id }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Connect<C, E> {
@@ -1090,57 +1044,6 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Connect<C, E> {
             Some(bind) => bind,
         };
         wrap!(self, bind.typ.check_contains(&ctx.env, self.node.typ()))
-    }
-}
-
-#[derive(Debug)]
-struct Lambda<C: Ctx, E: UserEvent> {
-    spec: Expr,
-    def: Arc<LambdaDef<C, E>>,
-    typ: Type,
-}
-
-impl<C: Ctx, E: UserEvent> Update<C, E> for Lambda<C, E> {
-    fn update(
-        &mut self,
-        _ctx: &mut ExecCtx<C, E>,
-        event: &mut Event<E>,
-    ) -> Option<Value> {
-        if event.init {
-            Some(Value::U64(self.def.id.0))
-        } else {
-            None
-        }
-    }
-
-    fn spec(&self) -> &Expr {
-        &self.spec
-    }
-
-    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
-
-    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        ctx.env.lambdas.remove_cow(&self.def.id);
-    }
-
-    fn typ(&self) -> &Type {
-        &self.typ
-    }
-
-    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
-        let mut faux_args = Box::from_iter(self.def.typ.args.iter().map(|a| {
-            let n: Node<C, E> = Box::new(Nop {
-                spec: ExprKind::Constant(Value::Bool(false)).to_expr(Default::default()),
-                typ: a.typ.clone(),
-            });
-            n
-        }));
-        let mut f = wrap!(self, (self.def.init)(ctx, &faux_args, ExprId::new()))?;
-        let res = wrap!(self, f.typecheck(ctx, &mut faux_args));
-        f.typ().constrain_known();
-        f.typ().unbind_tvars();
-        f.delete(ctx);
-        res
     }
 }
 
@@ -1272,10 +1175,27 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Any<C, E> {
 }
 
 #[derive(Debug)]
-struct Array<C: Ctx, E: UserEvent> {
+pub(crate) struct Array<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     n: SmallVec<[Cached<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Array<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        args: &TArc<[Expr]>,
+    ) -> Result<Node<C, E>> {
+        let n = args
+            .iter()
+            .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
+            .collect::<Result<_>>()?;
+        let typ = Type::Array(TArc::new(Type::empty_tvar()));
+        Ok(Box::new(Self { spec, typ, n }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Array<C, E> {
@@ -1320,10 +1240,27 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Array<C, E> {
 }
 
 #[derive(Debug)]
-struct Tuple<C: Ctx, E: UserEvent> {
+pub(crate) struct Tuple<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     n: SmallVec<[Cached<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Tuple<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        args: &[Expr],
+    ) -> Result<Node<C, E>> {
+        let n = args
+            .iter()
+            .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
+            .collect::<Result<SmallVec<[_; 8]>>>()?;
+        let typ = Type::Tuple(TArc::from_iter(n.iter().map(|n| n.node.typ().clone())));
+        Ok(Box::new(Self { spec, typ, n }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Tuple<C, E> {
@@ -1376,11 +1313,31 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Tuple<C, E> {
 }
 
 #[derive(Debug)]
-struct Variant<C: Ctx, E: UserEvent> {
+pub(crate) struct Variant<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     tag: ArcStr,
     n: SmallVec<[Cached<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Variant<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        tag: &ArcStr,
+        args: &[Expr],
+    ) -> Result<Node<C, E>> {
+        let n = args
+            .iter()
+            .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
+            .collect::<Result<SmallVec<[_; 8]>>>()?;
+        let typs = TArc::from_iter(n.iter().map(|n| n.node.typ().clone()));
+        let typ = Type::Variant(tag.clone(), typs);
+        let tag = tag.clone();
+        Ok(Box::new(Self { spec, typ, tag, n }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Variant<C, E> {
@@ -1442,11 +1399,34 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Variant<C, E> {
 }
 
 #[derive(Debug)]
-struct Struct<C: Ctx, E: UserEvent> {
+pub(crate) struct Struct<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     names: SmallVec<[ArcStr; 8]>,
     n: SmallVec<[Cached<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Struct<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        args: &[(ArcStr, Expr)],
+    ) -> Result<Node<C, E>> {
+        let mut names: SmallVec<[ArcStr; 8]> = smallvec![];
+        let n = args.iter().map(|(n, s)| {
+            names.push(n.clone());
+            s
+        });
+        let n = n
+            .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
+            .collect::<Result<SmallVec<[_; 8]>>>()?;
+        let typs =
+            names.iter().zip(n.iter()).map(|(n, a)| (n.clone(), a.node.typ().clone()));
+        let typ = Type::Struct(TArc::from_iter(typs));
+        Ok(Box::new(Self { spec, typ, names, n }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Struct<C, E> {

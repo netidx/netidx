@@ -5,9 +5,12 @@ extern crate combine;
 #[macro_use]
 extern crate serde_derive;
 
+mod compiler;
 pub mod env;
 pub mod expr;
-pub mod node;
+mod lambda;
+mod node;
+mod pattern;
 pub mod rt;
 pub mod stdfn;
 pub mod typ;
@@ -19,6 +22,7 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
+pub use compiler::compile;
 use expr::Expr;
 use fxhash::FxHashMap;
 use netidx::{
@@ -118,7 +122,8 @@ pub type BuiltInInitFn<C, E> = sync::Arc<
             ExprId,
         ) -> Result<Box<dyn Apply<C, E>>>
         + Send
-        + Sync,
+        + Sync
+        + 'static,
 >;
 
 pub type InitFn<C, E> = sync::Arc<
@@ -128,14 +133,15 @@ pub type InitFn<C, E> = sync::Arc<
             ExprId,
         ) -> Result<Box<dyn Apply<C, E>>>
         + Send
-        + Sync,
+        + Sync
+        + 'static,
 >;
 
 /// Apply is a kind of node that represents a function application. It
 /// does not hold ownership of it's arguments, instead those are held
 /// by a CallSite node. This allows us to change the function called
 /// at runtime without recompiling the arguments.
-pub trait Apply<C: Ctx, E: UserEvent>: Debug + Send + Sync {
+pub trait Apply<C: Ctx, E: UserEvent>: Debug + Send + Sync + 'static {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -185,7 +191,7 @@ pub trait Apply<C: Ctx, E: UserEvent>: Debug + Send + Sync {
 /// Update represents a regular graph node, as opposed to a function
 /// application represented by Apply. Regular graph nodes are used for
 /// every built in node except for builtin functions.
-pub trait Update<C: Ctx, E: UserEvent>: Debug + Send + Sync {
+pub trait Update<C: Ctx, E: UserEvent>: Debug + Send + Sync + 'static {
     /// update the node with the specified event and return any output
     /// it might generate
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value>;
