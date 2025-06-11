@@ -1,21 +1,19 @@
 use crate::{
-    compile,
-    env::{self, LambdaDef},
-    err,
+    compile, env, err,
     expr::{self, Expr, ExprId, ExprKind, ModPath},
     pattern::{PatternNode, StructPatternNode},
     typ::Type,
     Apply, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use arcstr::{literal, ArcStr};
 use combine::stream::position::SourcePosition;
 use enumflags2::BitFlags;
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
-use std::{cell::RefCell, iter, sync::Arc};
-use triomphe::Arc as TArc;
+use std::{cell::RefCell, iter};
+use triomphe::Arc;
 
 pub(crate) mod callsite;
 pub(crate) mod lambda;
@@ -312,9 +310,9 @@ impl<C: Ctx, E: UserEvent> ArrayRef<C, E> {
         let source = Cached::new(compile(ctx, source.clone(), scope, top_id)?);
         let i = Cached::new(compile(ctx, i.clone(), scope, top_id)?);
         let ert = Type::Primitive(Typ::Error.into());
-        let typ = match &source.typ() {
-            Type::Array(et) => Type::Set(TArc::from_iter([(**et).clone(), ert.clone()])),
-            _ => Type::Set(TArc::from_iter([Type::empty_tvar(), ert.clone()])),
+        let typ = match &source.node.typ() {
+            Type::Array(et) => Type::Set(Arc::from_iter([(**et).clone(), ert.clone()])),
+            _ => Type::Set(Arc::from_iter([Type::empty_tvar(), ert.clone()])),
         };
         Ok(Box::new(Self { source, i, spec, typ }))
     }
@@ -361,7 +359,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArrayRef<C, E> {
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         wrap!(self.source.node, self.source.node.typecheck(ctx))?;
         wrap!(self.i.node, self.i.node.typecheck(ctx))?;
-        let at = Type::Array(TArc::new(self.typ.clone()));
+        let at = Type::Array(Arc::new(self.typ.clone()));
         wrap!(self, at.check_contains(&ctx.env, self.source.node.typ()))?;
         let int = Type::Primitive(Typ::integer());
         wrap!(self.i.node, int.check_contains(&ctx.env, self.i.node.typ()))
@@ -402,8 +400,8 @@ impl<C: Ctx, E: UserEvent> ArraySlice<C, E> {
         scope: &ModPath,
         top_id: ExprId,
         source: &Expr,
-        start: &Option<TArc<Expr>>,
-        end: &Option<TArc<Expr>>,
+        start: &Option<Arc<Expr>>,
+        end: &Option<Arc<Expr>>,
     ) -> Result<Node<C, E>> {
         let source = Cached::new(compile(ctx, source.clone(), scope, top_id)?);
         let start = start
@@ -414,7 +412,7 @@ impl<C: Ctx, E: UserEvent> ArraySlice<C, E> {
             .as_ref()
             .map(|e| compile(ctx, (**e).clone(), scope, top_id).map(Cached::new))
             .transpose()?;
-        let typ = Type::Set(TArc::from_iter([
+        let typ = Type::Set(Arc::from_iter([
             source.node.typ().clone(),
             Type::Primitive(Typ::Error.into()),
         ]));
@@ -540,7 +538,7 @@ impl Use {
             None => bail!("at {pos} no such module {name}"),
             Some(_) => {
                 let used = ctx.env.used.get_or_default_cow(scope.clone());
-                TArc::make_mut(used).push(name.clone());
+                Arc::make_mut(used).push(name.clone());
                 Ok(Box::new(Self { spec, scope: scope.clone(), name: name.clone() }))
             }
         }
@@ -568,7 +566,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Use {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         if let Some(used) = ctx.env.used.get_mut_cow(&self.scope) {
-            TArc::make_mut(used).retain(|n| n != &self.name);
+            Arc::make_mut(used).retain(|n| n != &self.name);
             if used.is_empty() {
                 ctx.env.used.remove_cow(&self.scope);
             }
@@ -676,7 +674,7 @@ impl<C: Ctx, E: UserEvent> Block<C, E> {
         spec: Expr,
         scope: &ModPath,
         top_id: ExprId,
-        exprs: &TArc<[Expr]>,
+        exprs: &Arc<[Expr]>,
     ) -> Result<Node<C, E>> {
         let children = exprs
             .iter()
@@ -720,11 +718,49 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Block<C, E> {
 }
 
 #[derive(Debug)]
-struct Bind<C: Ctx, E: UserEvent> {
+pub(crate) struct Bind<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     pattern: StructPatternNode,
     node: Node<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> Bind<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        b: &expr::Bind,
+        pos: &SourcePosition,
+    ) -> Result<Node<C, E>> {
+        let expr::Bind { doc, pattern, typ, export: _, value } = b;
+        let node = compile(ctx, value.clone(), &scope, top_id)?;
+        let typ = match typ {
+            Some(typ) => typ.scope_refs(scope),
+            None => {
+                let typ = node.typ().clone();
+                let ptyp = pattern.infer_type_predicate();
+                if !ptyp.contains(&ctx.env, &typ)? {
+                    bail!("at {pos} match error {typ} can't be matched by {ptyp}");
+                }
+                typ
+            }
+        };
+        let pattern = StructPatternNode::compile(ctx, &typ, pattern, scope)
+            .with_context(|| format!("at {pos}"))?;
+        if pattern.is_refutable() {
+            bail!("at {pos} refutable patterns are not allowed in let");
+        }
+        if let Some(doc) = doc {
+            pattern.ids(&mut |id| {
+                if let Some(b) = ctx.env.by_id.get_mut_cow(&id) {
+                    b.doc = Some(doc.clone());
+                }
+            });
+        }
+        Ok(Box::new(Self { spec, typ, pattern, node }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Bind<C, E> {
@@ -760,11 +796,31 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Bind<C, E> {
 }
 
 #[derive(Debug)]
-struct Ref {
+pub(crate) struct Ref {
     spec: Expr,
     typ: Type,
     id: BindId,
     top_id: ExprId,
+}
+
+impl Ref {
+    pub(crate) fn compile<C: Ctx, E: UserEvent>(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        name: &ModPath,
+        pos: &SourcePosition,
+    ) -> Result<Node<C, E>> {
+        match ctx.env.lookup_bind(scope, name) {
+            None => bail!("at {pos} {name} not defined"),
+            Some((_, bind)) => {
+                ctx.user.ref_var(bind.id, top_id);
+                let typ = bind.typ.clone();
+                Ok(Box::new(Self { spec, typ, id: bind.id, top_id }))
+            }
+        }
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Ref {
@@ -1048,11 +1104,31 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Connect<C, E> {
 }
 
 #[derive(Debug)]
-struct Qop<C: Ctx, E: UserEvent> {
+pub(crate) struct Qop<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     id: BindId,
     n: Node<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> Qop<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        e: &Expr,
+        pos: &SourcePosition,
+    ) -> Result<Node<C, E>> {
+        let n = compile(ctx, e.clone(), scope, top_id)?;
+        match ctx.env.lookup_bind(scope, &ModPath::from(["errors"])) {
+            None => bail!("at {pos} BUG: errors is undefined"),
+            Some((_, bind)) => {
+                let typ = Type::empty_tvar();
+                Ok(Box::new(Self { spec, typ, id: bind.id, n }))
+            }
+        }
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Qop<C, E> {
@@ -1134,10 +1210,28 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TypeCast<C, E> {
 }
 
 #[derive(Debug)]
-struct Any<C: Ctx, E: UserEvent> {
+pub(crate) struct Any<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     n: SmallVec<[Node<C, E>; 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> Any<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        args: &[Expr],
+    ) -> Result<Node<C, E>> {
+        let n = args
+            .iter()
+            .map(|e| compile(ctx, e.clone(), scope, top_id))
+            .collect::<Result<SmallVec<[_; 8]>>>()?;
+        let typ =
+            Type::Set(Arc::from_iter(n.iter().map(|n| n.typ().clone()))).normalize();
+        Ok(Box::new(Self { spec, typ, n }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Any<C, E> {
@@ -1187,13 +1281,13 @@ impl<C: Ctx, E: UserEvent> Array<C, E> {
         spec: Expr,
         scope: &ModPath,
         top_id: ExprId,
-        args: &TArc<[Expr]>,
+        args: &Arc<[Expr]>,
     ) -> Result<Node<C, E>> {
         let n = args
             .iter()
             .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
             .collect::<Result<_>>()?;
-        let typ = Type::Array(TArc::new(Type::empty_tvar()));
+        let typ = Type::Array(Arc::new(Type::empty_tvar()));
         Ok(Box::new(Self { spec, typ, n }))
     }
 }
@@ -1234,7 +1328,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Array<C, E> {
         }
         let rtype = Type::Bottom;
         let rtype = self.n.iter().fold(rtype, |rtype, n| n.node.typ().union(&rtype));
-        let rtype = Type::Array(TArc::new(rtype));
+        let rtype = Type::Array(Arc::new(rtype));
         Ok(self.typ.check_contains(&ctx.env, &rtype)?)
     }
 }
@@ -1258,7 +1352,7 @@ impl<C: Ctx, E: UserEvent> Tuple<C, E> {
             .iter()
             .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
             .collect::<Result<SmallVec<[_; 8]>>>()?;
-        let typ = Type::Tuple(TArc::from_iter(n.iter().map(|n| n.node.typ().clone())));
+        let typ = Type::Tuple(Arc::from_iter(n.iter().map(|n| n.node.typ().clone())));
         Ok(Box::new(Self { spec, typ, n }))
     }
 }
@@ -1333,7 +1427,7 @@ impl<C: Ctx, E: UserEvent> Variant<C, E> {
             .iter()
             .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
             .collect::<Result<SmallVec<[_; 8]>>>()?;
-        let typs = TArc::from_iter(n.iter().map(|n| n.node.typ().clone()));
+        let typs = Arc::from_iter(n.iter().map(|n| n.node.typ().clone()));
         let typ = Type::Variant(tag.clone(), typs);
         let tag = tag.clone();
         Ok(Box::new(Self { spec, typ, tag, n }))
@@ -1424,7 +1518,7 @@ impl<C: Ctx, E: UserEvent> Struct<C, E> {
             .collect::<Result<SmallVec<[_; 8]>>>()?;
         let typs =
             names.iter().zip(n.iter()).map(|(n, a)| (n.clone(), a.node.typ().clone()));
-        let typ = Type::Struct(TArc::from_iter(typs));
+        let typ = Type::Struct(Arc::from_iter(typs));
         Ok(Box::new(Self { spec, typ, names, n }))
     }
 }
@@ -1817,652 +1911,3 @@ arith_op!(Add, +);
 arith_op!(Sub, -);
 arith_op!(Mul, *);
 arith_op!(Div, /);
-
-/*
-#[derive(Debug)]
-pub enum NodeKind<C: Ctx, E: UserEvent> {
-    Nop,
-    Use {
-        scope: ModPath,
-        name: ModPath,
-    },
-    TypeDef {
-        scope: ModPath,
-        name: ArcStr,
-    },
-    Constant(Value),
-    Module(Box<[Node<C, E>]>),
-    Do(Box<[Node<C, E>]>),
-    Bind {
-        pattern: Box<StructPatternNode>,
-        node: Box<Node<C, E>>,
-    },
-    Ref {
-        id: BindId,
-        top_id: ExprId,
-    },
-    StructRef {
-        source: Box<Node<C, E>>,
-        field: usize,
-        top_id: ExprId,
-    },
-    TupleRef {
-        source: Box<Node<C, E>>,
-        field: usize,
-        top_id: ExprId,
-    },
-    ArrayRef(Box<ArrayRefNode<C, E>>),
-    ArraySlice(Box<ArraySliceNode<C, E>>),
-    StringInterpolate {
-        args: Box<[Cached<C, E>]>,
-    },
-    Connect(BindId, Box<Node<C, E>>),
-    Lambda(Arc<LambdaDef<C, E>>),
-    Qop(BindId, Box<Node<C, E>>),
-    TypeCast {
-        target: Type,
-        n: Box<Node<C, E>>,
-    },
-    Any {
-        args: Box<[Node<C, E>]>,
-    },
-    Array {
-        args: Box<[Cached<C, E>]>,
-    },
-    Tuple {
-        args: Box<[Cached<C, E>]>,
-    },
-    Variant {
-        tag: ArcStr,
-        args: Box<[Cached<C, E>]>,
-    },
-    Struct {
-        names: Box<[ArcStr]>,
-        args: Box<[Cached<C, E>]>,
-    },
-    StructWith {
-        source: Box<Node<C, E>>,
-        current: Option<ValArray>,
-        replace: Box<[(usize, Cached<C, E>)]>,
-    },
-    Apply(Box<CallSite<C, E>>),
-    Select(Box<SelectNode<C, E>>),
-    Eq {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-    Ne {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-    Lt {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-    Gt {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-    Lte {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-    Gte {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-    And {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-    Or {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-    Not {
-        node: Box<Node<C, E>>,
-    },
-    Add {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-    Sub {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-    Mul {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-    Div {
-        lhs: Box<Cached<C, E>>,
-        rhs: Box<Cached<C, E>>,
-    },
-}
-
-/*
-pub struct Node<C: Ctx, E: UserEvent> {
-    pub spec: Box<Expr>,
-    pub typ: Type,
-    pub kind: NodeKind<C, E>,
-}
-*/
-
-impl<C: Ctx, E: UserEvent> fmt::Debug for Node<C, E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.kind)
-    }
-}
-
-impl<C: Ctx, E: UserEvent> Default for Node<C, E> {
-    fn default() -> Self {
-        genn::nop()
-    }
-}
-
-impl<C: Ctx, E: UserEvent> fmt::Display for Node<C, E> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", &self.spec)
-    }
-}
-
-impl<C: Ctx, E: UserEvent> Node<C, E> {
-    pub fn compile(ctx: &mut ExecCtx<C, E>, scope: &ModPath, spec: Expr) -> Result<Self> {
-        let top_id = spec.id;
-        let env = ctx.env.clone();
-        let mut node = match compiler::compile(ctx, spec, scope, top_id) {
-            Ok(n) => n,
-            Err(e) => {
-                ctx.env = env;
-                return Err(e);
-            }
-        };
-        if let Err(e) = node.typecheck(ctx) {
-            ctx.env = env;
-            return Err(e);
-        }
-        Ok(node)
-    }
-
-    pub fn delete(self, ctx: &mut ExecCtx<C, E>) {
-        let mut ids: SmallVec<[BindId; 8]> = smallvec![];
-        match self.kind {
-            NodeKind::Constant(_) | NodeKind::Nop => (),
-            NodeKind::Ref { id, top_id } => ctx.user.unref_var(id, top_id),
-            NodeKind::StructRef { mut source, field: _, top_id: _ }
-            | NodeKind::TupleRef { mut source, field: _, top_id: _ } => {
-                mem::take(&mut *source).delete(ctx)
-            }
-            NodeKind::ArrayRef(mut n) => mem::take(&mut *n).delete(ctx),
-            NodeKind::ArraySlice(mut n) => mem::take(&mut *n).delete(ctx),
-            NodeKind::Add { mut lhs, mut rhs }
-            | NodeKind::Sub { mut lhs, mut rhs }
-            | NodeKind::Mul { mut lhs, mut rhs }
-            | NodeKind::Div { mut lhs, mut rhs }
-            | NodeKind::Eq { mut lhs, mut rhs }
-            | NodeKind::Ne { mut lhs, mut rhs }
-            | NodeKind::Lte { mut lhs, mut rhs }
-            | NodeKind::Lt { mut lhs, mut rhs }
-            | NodeKind::Gt { mut lhs, mut rhs }
-            | NodeKind::Gte { mut lhs, mut rhs }
-            | NodeKind::And { mut lhs, mut rhs }
-            | NodeKind::Or { mut lhs, mut rhs } => {
-                mem::take(&mut lhs.node).delete(ctx);
-                mem::take(&mut rhs.node).delete(ctx);
-            }
-            NodeKind::Use { scope, name } => {
-                todo!()
-            }
-            NodeKind::TypeDef { scope, name } => todo!(),
-            NodeKind::Module(nodes)
-            | NodeKind::Do(nodes)
-            | NodeKind::Any { args: nodes } => {
-                for n in nodes {
-                    n.delete(ctx)
-                }
-            }
-            NodeKind::StringInterpolate { args } => {
-                for n in args {
-                    n.node.delete(ctx)
-                }
-            }
-            NodeKind::Connect(_, mut n)
-            | NodeKind::TypeCast { target: _, mut n }
-            | NodeKind::Qop(_, mut n)
-            | NodeKind::Not { node: mut n } => mem::take(&mut *n).delete(ctx),
-            NodeKind::Variant { tag: _, args }
-            | NodeKind::Array { args }
-            | NodeKind::Tuple { args }
-            | NodeKind::Struct { names: _, args } => {
-                for n in args {
-                    n.node.delete(ctx)
-                }
-            }
-            NodeKind::StructWith { mut source, current: _, replace } => {
-                mem::take(&mut *source).delete(ctx);
-                for (_, n) in replace {
-                    n.node.delete(ctx)
-                }
-            }
-            NodeKind::Bind { pattern, node } => {
-                pattern.ids(&mut |id| ids.push(id));
-                node.delete(ctx);
-                for id in ids.drain(..) {
-                    ctx.env.unbind_variable(id)
-                }
-            }
-            NodeKind::Select(sn) => sn.delete(ctx),
-            NodeKind::Lambda(lb) => {
-                ctx.env.lambdas.remove_cow(&lb.id);
-            }
-            NodeKind::Apply(site) => site.delete(ctx),
-        }
-    }
-
-    /// call f with the id of every variable referenced by self
-    pub fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        match &self.kind {
-            NodeKind::Constant(_)
-            | NodeKind::Nop
-            | NodeKind::Use { .. }
-            | NodeKind::TypeDef { .. }
-            | NodeKind::Lambda(_) => (),
-            NodeKind::Ref { id, top_id: _ } => f(*id),
-            NodeKind::StructRef { source, field: _, top_id: _ }
-            | NodeKind::TupleRef { source, field: _, top_id: _ } => {
-                source.refs(f);
-            }
-            NodeKind::ArrayRef(n) => n.refs(f),
-            NodeKind::ArraySlice(n) => n.refs(f),
-            NodeKind::StringInterpolate { args } => {
-                for a in args {
-                    a.node.refs(f)
-                }
-            }
-            NodeKind::Add { lhs, rhs }
-            | NodeKind::Sub { lhs, rhs }
-            | NodeKind::Mul { lhs, rhs }
-            | NodeKind::Div { lhs, rhs }
-            | NodeKind::Eq { lhs, rhs }
-            | NodeKind::Ne { lhs, rhs }
-            | NodeKind::Lte { lhs, rhs }
-            | NodeKind::Lt { lhs, rhs }
-            | NodeKind::Gt { lhs, rhs }
-            | NodeKind::Gte { lhs, rhs }
-            | NodeKind::And { lhs, rhs }
-            | NodeKind::Or { lhs, rhs } => {
-                lhs.node.refs(f);
-                rhs.node.refs(f);
-            }
-            NodeKind::Module(nodes)
-            | NodeKind::Do(nodes)
-            | NodeKind::Any { args: nodes } => {
-                for n in nodes {
-                    n.refs(f)
-                }
-            }
-            NodeKind::Connect(_, n)
-            | NodeKind::TypeCast { target: _, n }
-            | NodeKind::Qop(_, n)
-            | NodeKind::Not { node: n } => n.refs(f),
-            NodeKind::Variant { tag: _, args }
-            | NodeKind::Array { args }
-            | NodeKind::Tuple { args }
-            | NodeKind::Struct { names: _, args } => {
-                for n in args {
-                    n.node.refs(f)
-                }
-            }
-            NodeKind::StructWith { source, current: _, replace } => {
-                source.refs(f);
-                for (_, n) in replace {
-                    n.node.refs(f)
-                }
-            }
-            NodeKind::Bind { pattern, node } => {
-                pattern.ids(f);
-                node.refs(f);
-            }
-            NodeKind::Select(sn) => sn.refs(f),
-            NodeKind::Apply(site) => {
-                let CallSite { ftype: _, fnode, args, arg_spec: _, function, top_id: _ } =
-                    &**site;
-                if let Some((_, fun)) = function {
-                    fun.refs(f)
-                }
-                fnode.refs(f);
-                for n in args {
-                    n.refs(f)
-                }
-            }
-        }
-    }
-
-    pub fn update(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        event: &mut Event<E>,
-    ) -> Option<Value> {
-        macro_rules! binary_op {
-            ($op:tt, $lhs:expr, $rhs:expr) => {{
-                let lhs_up = $lhs.update(ctx, event);
-                let rhs_up = $rhs.update(ctx, event);
-                if lhs_up || rhs_up {
-                    return $lhs.cached.as_ref().and_then(|lhs| {
-                        $rhs.cached.as_ref().map(|rhs| (lhs $op rhs).into())
-                    })
-                }
-                None
-            }}
-        }
-        macro_rules! binary_op_clone {
-            ($op:tt, $lhs:expr, $rhs:expr) => {{
-                let lhs_up = $lhs.update(ctx, event);
-                let rhs_up = $rhs.update(ctx, event);
-                if lhs_up || rhs_up {
-                    return $lhs.cached.as_ref().and_then(|lhs| {
-                        $rhs.cached.as_ref().map(|rhs| (lhs.clone() $op rhs.clone()).into())
-                    })
-                }
-                None
-            }}
-        }
-        macro_rules! cast_bool {
-            ($v:expr) => {
-                match $v.cached.as_ref().map(|v| v.clone().get_as::<bool>()) {
-                    None => return None,
-                    Some(None) => return Some(Value::Error(literal!("expected bool"))),
-                    Some(Some(lhs)) => lhs,
-                }
-            };
-        }
-        macro_rules! binary_boolean_op {
-            ($op:tt, $lhs:expr, $rhs:expr) => {{
-                let lhs_up = $lhs.update(ctx, event);
-                let rhs_up = $rhs.update(ctx, event);
-                if lhs_up || rhs_up {
-                    let lhs = cast_bool!($lhs);
-                    let rhs = cast_bool!($rhs);
-                    Some((lhs $op rhs).into())
-                } else {
-                    None
-                }
-            }}
-        }
-        macro_rules! update_args {
-            ($args:expr) => {{
-                let mut updated = false;
-                let mut determined = true;
-                for n in $args.iter_mut() {
-                    updated |= n.update(ctx, event);
-                    determined &= n.cached.is_some();
-                }
-                (updated, determined)
-            }};
-        }
-        match &mut self.kind {
-            NodeKind::Constant(v) => {
-                todo!()
-            }
-            NodeKind::StringInterpolate { args } => {
-                thread_local! {
-                    static BUF: RefCell<String> = RefCell::new(String::new());
-                }
-                let (updated, determined) = update_args!(args);
-                if updated && determined {
-                    BUF.with_borrow_mut(|buf| {
-                        buf.clear();
-                        for c in args {
-                            match c.cached.as_ref().unwrap() {
-                                Value::String(c) => buf.push_str(c.as_ref()),
-                                v => match v.clone().cast_to::<ArcStr>().ok() {
-                                    Some(c) => buf.push_str(c.as_ref()),
-                                    None => {
-                                        let m = literal!("args must be strings");
-                                        return Some(Value::Error(m));
-                                    }
-                                },
-                            }
-                        }
-                        Some(Value::String(buf.as_str().into()))
-                    })
-                } else {
-                    None
-                }
-            }
-            NodeKind::ArrayRef(n) => n.update(ctx, event),
-            NodeKind::ArraySlice(n) => n.update(ctx, event),
-            NodeKind::Array { args } | NodeKind::Tuple { args } => {
-                if args.is_empty() && event.init {
-                    return Some(Value::Array(ValArray::from([])));
-                }
-                let (updated, determined) = update_args!(args);
-                if updated && determined {
-                    let iter = args.iter().map(|n| n.cached.clone().unwrap());
-                    Some(Value::Array(ValArray::from_iter_exact(iter)))
-                } else {
-                    None
-                }
-            }
-            NodeKind::Variant { tag, args } if args.len() == 0 => {
-                if event.init {
-                    Some(Value::String(tag.clone()))
-                } else {
-                    None
-                }
-            }
-            NodeKind::Variant { tag, args } => {
-                let (updated, determined) = update_args!(args);
-                if updated && determined {
-                    let a = iter::once(Value::String(tag.clone()))
-                        .chain(args.iter().map(|n| n.cached.clone().unwrap()))
-                        .collect::<SmallVec<[_; 8]>>();
-                    Some(Value::Array(ValArray::from_iter_exact(a.into_iter())))
-                } else {
-                    None
-                }
-            }
-            NodeKind::Any { args } => args
-                .iter_mut()
-                .filter_map(|s| s.update(ctx, event))
-                .fold(None, |r, v| r.or(Some(v))),
-            NodeKind::Struct { names, args } => {
-                if args.is_empty() && event.init {
-                    return Some(Value::Array(ValArray::from([])));
-                }
-                let mut updated = false;
-                let mut determined = true;
-                for n in args.iter_mut() {
-                    updated |= n.update(ctx, event);
-                    determined &= n.cached.is_some();
-                }
-                if updated && determined {
-                    let iter = names.iter().zip(args.iter()).map(|(name, n)| {
-                        let name = Value::String(name.clone());
-                        let v = n.cached.clone().unwrap();
-                        Value::Array(ValArray::from_iter_exact([name, v].into_iter()))
-                    });
-                    Some(Value::Array(ValArray::from_iter_exact(iter)))
-                } else {
-                    None
-                }
-            }
-            NodeKind::StructWith { source, current, replace } => {
-                let mut updated = source
-                    .update(ctx, event)
-                    .map(|v| match v {
-                        Value::Array(a) => {
-                            *current = Some(a.clone());
-                            true
-                        }
-                        _ => false,
-                    })
-                    .unwrap_or(false);
-                let mut determined = current.is_some();
-                for (_, n) in replace.iter_mut() {
-                    updated |= n.update(ctx, event);
-                    determined &= n.cached.is_some();
-                }
-                if updated && determined {
-                    let mut si = 0;
-                    let iter = current.as_ref().unwrap().iter().enumerate().map(
-                        |(i, v)| match v {
-                            Value::Array(v) if v.len() == 2 => {
-                                if si < replace.len() && i == replace[si].0 {
-                                    let r = replace[si].1.cached.clone().unwrap();
-                                    si += 1;
-                                    Value::Array(ValArray::from_iter_exact(
-                                        [v[0].clone(), r].into_iter(),
-                                    ))
-                                } else {
-                                    Value::Array(v.clone())
-                                }
-                            }
-                            _ => v.clone(),
-                        },
-                    );
-                    Some(Value::Array(ValArray::from_iter_exact(iter)))
-                } else {
-                    None
-                }
-            }
-            NodeKind::Apply(site) => site.update(ctx, event),
-            NodeKind::Bind { pattern, node } => {
-                if let Some(v) = node.update(ctx, event) {
-                    pattern.bind(&v, &mut |id, v| ctx.set_var(id, v))
-                }
-                None
-            }
-            NodeKind::Connect(id, rhs) => {
-                if let Some(v) = rhs.update(ctx, event) {
-                    ctx.set_var(*id, v)
-                }
-                None
-            }
-            NodeKind::Ref { id: bid, .. } => event.variables.get(bid).map(|v| v.clone()),
-            NodeKind::TupleRef { source, field: i, .. } => {
-                source.update(ctx, event).and_then(|v| match v {
-                    Value::Array(a) => a.get(*i).map(|v| v.clone()),
-                    _ => None,
-                })
-            }
-            NodeKind::StructRef { source, field: i, .. } => {
-                match source.update(ctx, event) {
-                    Some(Value::Array(a)) => a.get(*i).and_then(|v| match v {
-                        Value::Array(a) if a.len() == 2 => Some(a[1].clone()),
-                        _ => None,
-                    }),
-                    Some(_) | None => None,
-                }
-            }
-            NodeKind::Qop(id, n) => match n.update(ctx, event) {
-                None => None,
-                Some(e @ Value::Error(_)) => {
-                    ctx.set_var(*id, e);
-                    None
-                }
-                Some(v) => Some(v),
-            },
-            NodeKind::Module(children) | NodeKind::Do(children) => {
-                children.into_iter().fold(None, |_, n| n.update(ctx, event))
-            }
-            NodeKind::TypeCast { target, n } => {
-                n.update(ctx, event).map(|v| target.cast_value(&ctx.env, v))
-            }
-            NodeKind::Not { node } => node.update(ctx, event).map(|v| !v),
-            NodeKind::Eq { lhs, rhs } => binary_op!(==, lhs, rhs),
-            NodeKind::Ne { lhs, rhs } => binary_op!(!=, lhs, rhs),
-            NodeKind::Lt { lhs, rhs } => binary_op!(<, lhs, rhs),
-            NodeKind::Gt { lhs, rhs } => binary_op!(>, lhs, rhs),
-            NodeKind::Lte { lhs, rhs } => binary_op!(<=, lhs, rhs),
-            NodeKind::Gte { lhs, rhs } => binary_op!(>=, lhs, rhs),
-            NodeKind::And { lhs, rhs } => binary_boolean_op!(&&, lhs, rhs),
-            NodeKind::Or { lhs, rhs } => binary_boolean_op!(||, lhs, rhs),
-            NodeKind::Add { lhs, rhs } => binary_op_clone!(+, lhs, rhs),
-            NodeKind::Sub { lhs, rhs } => binary_op_clone!(-, lhs, rhs),
-            NodeKind::Mul { lhs, rhs } => binary_op_clone!(*, lhs, rhs),
-            NodeKind::Div { lhs, rhs } => binary_op_clone!(/, lhs, rhs),
-            NodeKind::Select(sn) => sn.update(ctx, event),
-            NodeKind::Lambda(lb) if event.init => Some(Value::U64(lb.id.0)),
-            NodeKind::Use { .. }
-            | NodeKind::Lambda(_)
-            | NodeKind::TypeDef { .. }
-            | NodeKind::Nop => None,
-        }
-    }
-}
-
-/// helpers for dynamically generating code in built-in functions. Not used by the compiler
-pub mod genn {
-    use super::*;
-
-    /// return a no op node
-    pub fn nop<C: Ctx, E: UserEvent>() -> Node<C, E> {
-        Node {
-            spec: Box::new(
-                ExprKind::Constant(Value::String(literal!("nop")))
-                    .to_expr(Default::default()),
-            ),
-            typ: Type::Bottom,
-            kind: NodeKind::Nop,
-        }
-    }
-
-    /// bind a variable and return a node referencing it
-    pub fn bind<C: Ctx, E: UserEvent>(
-        ctx: &mut ExecCtx<C, E>,
-        scope: &ModPath,
-        name: &str,
-        typ: Type,
-        top_id: ExprId,
-    ) -> (BindId, Node<C, E>) {
-        let id = ctx.env.bind_variable(scope, name, typ.clone()).id;
-        ctx.user.ref_var(id, top_id);
-        let spec = Box::new(
-            ExprKind::Ref { name: ModPath(scope.0.append(name)) }
-                .to_expr(Default::default()),
-        );
-        let kind = NodeKind::Ref { id, top_id };
-        (id, Node { spec, kind, typ })
-    }
-
-    /// generate a reference to a bind id
-    pub fn reference<C: Ctx, E: UserEvent>(
-        ctx: &mut ExecCtx<C, E>,
-        id: BindId,
-        typ: Type,
-        top_id: ExprId,
-    ) -> Node<C, E> {
-        ctx.user.ref_var(id, top_id);
-        let spec = Box::new(
-            ExprKind::Ref { name: ModPath::from(["x"]) }.to_expr(Default::default()),
-        );
-        let kind = NodeKind::Ref { id, top_id };
-        Node { spec, kind, typ }
-    }
-
-    /// generate and return an apply node for the given lambda
-    pub fn apply<C: Ctx, E: UserEvent>(
-        fnode: Node<C, E>,
-        args: Vec<Node<C, E>>,
-        typ: TArc<FnType>,
-        top_id: ExprId,
-    ) -> Node<C, E> {
-        let spec = ExprKind::Apply {
-            args: TArc::from_iter(args.iter().map(|n| (None, (*n.spec).clone()))),
-            function: TArc::new((*fnode.spec).clone()),
-        }
-        .to_expr(Default::default());
-        let site = Box::new(CallSite {
-            ftype: typ.clone(),
-            args,
-            arg_spec: HashMap::default(),
-            fnode,
-            function: None,
-            top_id,
-        });
-        let typ = typ.rtype.clone();
-        Node { spec: Box::new(spec), typ, kind: NodeKind::Apply(site) }
-    }
-}
-*/

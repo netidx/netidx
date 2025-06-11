@@ -1,10 +1,9 @@
 use crate::{
-    env::Bind,
     expr::{self, Expr, ExprId, ExprKind, ModPath, ModuleKind},
     lambda,
     node::{
-        callsite::CallSite, Array, ArrayRef, ArraySlice, Block, Connect, Constant,
-        Lambda, Nop, StringInterpolate, Struct, Tuple, Use, Variant,
+        callsite::CallSite, Any, Array, ArrayRef, ArraySlice, Bind, Block, Connect,
+        Constant, Lambda, Nop, Qop, Ref, StringInterpolate, Struct, Tuple, Use, Variant,
     },
     pattern::{PatternNode, StructPatternNode},
     typ::{FnType, Type},
@@ -99,63 +98,19 @@ pub fn compile<C: Ctx, E: UserEvent>(
             Lambda::compile(ctx, spec, scope, l)
         }
         Expr { kind: ExprKind::Any { args }, id: _, pos: _ } => {
-            let children = subexprs!(scope, args, |n| n)?;
-            let kind = NodeKind::Any { args: Box::from(children) };
-            Ok(Node { spec: Box::new(spec), typ: Type::empty_tvar(), kind })
+            Any::compile(ctx, spec, scope, top_id, args)
         }
         Expr { kind: ExprKind::Apply { args, function: f }, id: _, pos } => {
             CallSite::compile(ctx, spec, scope, top_id, args, f, pos)
         }
         Expr { kind: ExprKind::Bind(b), id: _, pos } => {
-            let expr::Bind { doc, pattern, typ, export: _, value } = &**b;
-            let node = compile(ctx, value.clone(), &scope, top_id)?;
-            let typ = match typ {
-                Some(typ) => typ.scope_refs(scope),
-                None => {
-                    let typ = node.typ.clone();
-                    let ptyp = pattern.infer_type_predicate();
-                    if !ptyp.contains(&ctx.env, &typ)? {
-                        bail!("at {pos} match error {typ} can't be matched by {ptyp}");
-                    }
-                    typ
-                }
-            };
-            let pn = StructPatternNode::compile(ctx, &typ, pattern, scope)
-                .with_context(|| format!("at {pos}"))?;
-            if pn.is_refutable() {
-                bail!("at {pos} refutable patterns are not allowed in let");
-            }
-            if let Some(doc) = doc {
-                pn.ids(&mut |id| {
-                    if let Some(b) = ctx.env.by_id.get_mut_cow(&id) {
-                        b.doc = Some(doc.clone());
-                    }
-                });
-            }
-            let kind = NodeKind::Bind { pattern: Box::new(pn), node: Box::new(node) };
-            Ok(Node { spec: Box::new(spec), typ, kind })
+            Bind::compile(ctx, spec, scope, top_id, b, pos)
         }
         Expr { kind: ExprKind::Qop(e), id: _, pos } => {
-            let n = compile(ctx, (**e).clone(), scope, top_id)?;
-            match ctx.env.lookup_bind(scope, &ModPath::from(["errors"])) {
-                None => bail!("at {pos} BUG: errors is undefined"),
-                Some((_, bind)) => {
-                    let typ = Type::empty_tvar();
-                    let spec = Box::new(spec);
-                    Ok(Node { spec, typ, kind: NodeKind::Qop(bind.id, Box::new(n)) })
-                }
-            }
+            Qop::compile(ctx, spec, scope, top_id, e, pos)
         }
         Expr { kind: ExprKind::Ref { name }, id: _, pos } => {
-            match ctx.env.lookup_bind(scope, name) {
-                None => bail!("at {pos} {name} not defined"),
-                Some((_, bind)) => {
-                    ctx.user.ref_var(bind.id, top_id);
-                    let typ = bind.typ.clone();
-                    let spec = Box::new(spec);
-                    Ok(Node { spec, typ, kind: NodeKind::Ref { id: bind.id, top_id } })
-                }
-            }
+            Ref::compile(ctx, spec, scope, top_id, name, pos)
         }
         Expr { kind: ExprKind::TupleRef { source, field }, id: _, pos: _ } => {
             let source = compile(ctx, (**source).clone(), scope, top_id)?;
