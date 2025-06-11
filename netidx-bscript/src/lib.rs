@@ -5,12 +5,9 @@ extern crate combine;
 #[macro_use]
 extern crate serde_derive;
 
-mod compiler;
 pub mod env;
 pub mod expr;
-mod lambda;
 mod node;
-mod pattern;
 pub mod rt;
 pub mod stdfn;
 pub mod typ;
@@ -20,10 +17,10 @@ use crate::{
     expr::{ExprId, ExprKind, ModPath},
     typ::{FnType, Type},
 };
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use arcstr::ArcStr;
-pub use compiler::compile;
-use expr::Expr;
+use compact_str::format_compact;
+use expr::{Expr, ModuleKind};
 use fxhash::FxHashMap;
 use netidx::{
     path::Path,
@@ -31,6 +28,7 @@ use netidx::{
     subscriber::{self, Dval, SubId, UpdatesFlags, Value},
 };
 use netidx_protocols::rpc::server::{ArgSpec, RpcCall};
+use node::compiler;
 use parking_lot::RwLock;
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -393,4 +391,27 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         self.cached.insert(id, v.clone());
         self.user.set_var(id, v)
     }
+}
+
+/// compile the specified expression into a node graph in the
+/// specified context and scope.
+pub fn compile<C: Ctx, E: UserEvent>(
+    ctx: &mut ExecCtx<C, E>,
+    scope: &ModPath,
+    spec: Expr,
+) -> Result<Node<C, E>> {
+    let top_id = spec.id;
+    let env = ctx.env.clone();
+    let mut node = match compiler::compile(ctx, spec, scope, top_id) {
+        Ok(n) => n,
+        Err(e) => {
+            ctx.env = env;
+            return Err(e);
+        }
+    };
+    if let Err(e) = node.typecheck(ctx) {
+        ctx.env = env;
+        return Err(e);
+    }
+    Ok(node)
 }

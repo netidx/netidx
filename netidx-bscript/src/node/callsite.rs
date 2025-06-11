@@ -1,5 +1,5 @@
+use super::{compiler::compile, Nop};
 use crate::{
-    compile,
     env::LambdaDef,
     expr::{Expr, ExprId, ModPath},
     typ::{FnArgType, FnType, Type},
@@ -14,8 +14,6 @@ use netidx::subscriber::Value;
 use smallvec::{smallvec, SmallVec};
 use std::{collections::hash_map::Entry, fmt, mem, sync::Arc};
 use triomphe::Arc as TArc;
-
-use super::Nop;
 
 fn check_named_args(
     named: &mut FxHashMap<ArcStr, Expr>,

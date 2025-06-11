@@ -1,13 +1,14 @@
 use crate::{
-    compile, env, err,
+    env, err,
     expr::{self, Expr, ExprId, ExprKind, ModPath},
-    pattern::{PatternNode, StructPatternNode},
-    typ::Type,
+    pattern::StructPatternNode,
+    typ::{TVar, Type},
     Apply, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use arcstr::{literal, ArcStr};
 use combine::stream::position::SourcePosition;
+use compiler::compile;
 use enumflags2::BitFlags;
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
@@ -16,7 +17,9 @@ use std::{cell::RefCell, iter};
 use triomphe::Arc;
 
 pub(crate) mod callsite;
+pub(crate) mod compiler;
 pub(crate) mod lambda;
+pub(crate) mod select;
 
 #[macro_export]
 macro_rules! wrap {
@@ -117,176 +120,6 @@ impl<C: Ctx, E: UserEvent> Cached<C, E> {
             }
             Some(_) | None => false,
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct SelectNode<C: Ctx, E: UserEvent> {
-    selected: Option<usize>,
-    arg: Cached<C, E>,
-    arms: SmallVec<[(PatternNode<C, E>, Cached<C, E>); 8]>,
-    typ: Type,
-    spec: Expr,
-}
-
-impl<C: Ctx, E: UserEvent> Update<C, E> for SelectNode<C, E> {
-    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
-        let SelectNode { selected, arg, arms, typ: _, spec: _ } = self;
-        let mut val_up: SmallVec<[bool; 64]> = smallvec![];
-        let arg_up = arg.update(ctx, event);
-        macro_rules! bind {
-            ($i:expr) => {{
-                if let Some(arg) = arg.cached.as_ref() {
-                    arms[$i].0.bind_event(event, arg);
-                }
-            }};
-        }
-        macro_rules! update {
-            () => {
-                for (_, val) in arms.iter_mut() {
-                    val_up.push(val.update(ctx, event));
-                }
-            };
-        }
-        macro_rules! val {
-            ($i:expr) => {{
-                if val_up[$i] {
-                    arms[$i].1.cached.clone()
-                } else {
-                    None
-                }
-            }};
-        }
-        let mut pat_up = false;
-        for (pat, _) in arms.iter_mut() {
-            if arg_up && pat.guard.is_some() {
-                if let Some(arg) = arg.cached.as_ref() {
-                    pat.bind_event(event, arg);
-                }
-            }
-            pat_up |= pat.update(ctx, event);
-            if arg_up && pat.guard.is_some() {
-                pat.unbind_event(event);
-            }
-        }
-        if !arg_up && !pat_up {
-            update!();
-            selected.and_then(|i| val!(i))
-        } else {
-            let sel = match arg.cached.as_ref() {
-                None => None,
-                Some(v) => {
-                    let typ = Typ::get(v);
-                    arms.iter().enumerate().find_map(|(i, (pat, _))| {
-                        if pat.is_match(&ctx.env, typ, v) {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    })
-                }
-            };
-            match (sel, *selected) {
-                (Some(i), Some(j)) if i == j => {
-                    if arg_up {
-                        bind!(i);
-                    }
-                    update!();
-                    val!(i)
-                }
-                (Some(i), Some(_) | None) => {
-                    bind!(i);
-                    update!();
-                    *selected = Some(i);
-                    val_up[i] = true;
-                    val!(i)
-                }
-                (None, Some(_)) => {
-                    update!();
-                    *selected = None;
-                    None
-                }
-                (None, None) => {
-                    update!();
-                    None
-                }
-            }
-        }
-    }
-
-    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        let mut ids: SmallVec<[BindId; 8]> = smallvec![];
-        let Self { selected: _, arg, arms, typ: _, spec: _ } = self;
-        arg.node.delete(ctx);
-        for (pat, arg) in arms {
-            arg.node.delete(ctx);
-            pat.structure_predicate.ids(&mut |id| ids.push(id));
-            if let Some(n) = &mut pat.guard {
-                n.node.delete(ctx);
-            }
-            for id in ids.drain(..) {
-                ctx.env.unbind_variable(id);
-            }
-        }
-    }
-
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        let Self { selected: _, arg, arms, typ: _, spec: _ } = self;
-        arg.node.refs(f);
-        for (pat, arg) in arms {
-            arg.node.refs(f);
-            pat.structure_predicate.ids(f);
-            if let Some(n) = &pat.guard {
-                n.node.refs(f);
-            }
-        }
-    }
-
-    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
-        self.arg.node.typecheck(ctx)?;
-        let mut rtype = Type::Bottom;
-        let mut mtype = Type::Bottom;
-        let mut itype = Type::Bottom;
-        for (pat, n) in self.arms.iter_mut() {
-            match &mut pat.guard {
-                Some(guard) => guard.node.typecheck(ctx)?,
-                None => mtype = mtype.union(&pat.type_predicate),
-            }
-            itype = itype.union(&pat.type_predicate);
-            n.node.typecheck(ctx)?;
-            rtype = rtype.union(&n.node.typ());
-        }
-        itype
-            .check_contains(&ctx.env, &self.arg.node.typ())
-            .map_err(|e| anyhow!("missing match cases {e}"))?;
-        mtype
-            .check_contains(&ctx.env, &self.arg.node.typ())
-            .map_err(|e| anyhow!("missing match cases {e}"))?;
-        let mut atype = self.arg.node.typ().clone().normalize();
-        for (pat, _) in self.arms.iter() {
-            let can_match = atype.contains(&ctx.env, &pat.type_predicate)?
-                || pat.type_predicate.contains(&ctx.env, &atype)?;
-            if !can_match {
-                bail!(
-                    "pattern {} will never match {}, unused match cases",
-                    pat.type_predicate,
-                    atype
-                )
-            }
-            if !pat.structure_predicate.is_refutable() && pat.guard.is_none() {
-                atype = atype.diff(&ctx.env, &pat.type_predicate)?;
-            }
-        }
-        self.typ = rtype;
-        Ok(())
-    }
-
-    fn typ(&self) -> &Type {
-        &self.typ
-    }
-
-    fn spec(&self) -> &Expr {
-        &self.spec
     }
 }
 
@@ -579,10 +412,30 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Use {
 }
 
 #[derive(Debug)]
-struct TypeDef {
+pub(crate) struct TypeDef {
     spec: Expr,
     scope: ModPath,
-    name: ModPath,
+    name: ArcStr,
+}
+
+impl TypeDef {
+    pub(crate) fn compile<C: Ctx, E: UserEvent>(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        name: &ArcStr,
+        params: &Arc<[(TVar, Option<Type>)]>,
+        typ: &Type,
+        pos: &SourcePosition,
+    ) -> Result<Node<C, E>> {
+        let typ = typ.scope_refs(scope);
+        ctx.env
+            .deftype(scope, name, params.clone(), typ)
+            .with_context(|| format!("in typedef at {pos}"))?;
+        let name = name.clone();
+        let scope = scope.clone();
+        Ok(Box::new(Self { spec, scope, name }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for TypeDef {
@@ -854,11 +707,42 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Ref {
 }
 
 #[derive(Debug)]
-struct StructRef<C: Ctx, E: UserEvent> {
+pub(crate) struct StructRef<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     source: Node<C, E>,
     field: usize,
+}
+
+impl<C: Ctx, E: UserEvent> StructRef<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        source: &Expr,
+        field: &ArcStr,
+    ) -> Result<Node<C, E>> {
+        let source = compile(ctx, source.clone(), scope, top_id)?;
+        let (typ, field) = match &source.typ() {
+            Type::Struct(flds) => flds
+                .iter()
+                .enumerate()
+                .find_map(
+                    |(i, (n, t))| {
+                        if field == n {
+                            Some((t.clone(), i))
+                        } else {
+                            None
+                        }
+                    },
+                )
+                .unwrap_or_else(|| (Type::empty_tvar(), 0)),
+            _ => (Type::empty_tvar(), 0),
+        };
+        // typcheck will resolve the field index if we didn't find it already
+        Ok(Box::new(Self { spec, typ, source, field }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for StructRef<C, E> {
@@ -918,11 +802,32 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructRef<C, E> {
 }
 
 #[derive(Debug)]
-struct TupleRef<C: Ctx, E: UserEvent> {
+pub(crate) struct TupleRef<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     source: Node<C, E>,
     field: usize,
+}
+
+impl<C: Ctx, E: UserEvent> TupleRef<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        source: &Expr,
+        field: &usize,
+    ) -> Result<Node<C, E>> {
+        let source = compile(ctx, source.clone(), scope, top_id)?;
+        let field = *field;
+        let typ = match &source.typ() {
+            Type::Tuple(ts) => {
+                ts.get(field).map(|t| t.clone()).unwrap_or_else(Type::empty_tvar)
+            }
+            _ => Type::empty_tvar(),
+        };
+        Ok(Box::new(Self { spec, typ, source, field }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for TupleRef<C, E> {
@@ -1176,11 +1081,31 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Qop<C, E> {
 }
 
 #[derive(Debug)]
-struct TypeCast<C: Ctx, E: UserEvent> {
+pub(crate) struct TypeCast<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     target: Type,
     n: Node<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> TypeCast<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        expr: &Expr,
+        typ: &Type,
+        pos: &SourcePosition,
+    ) -> Result<Node<C, E>> {
+        let n = compile(ctx, expr.clone(), scope, top_id)?;
+        let target = typ.scope_refs(scope);
+        if let Err(e) = target.check_cast(&ctx.env) {
+            bail!("in cast at {pos} {e}");
+        }
+        let typ = target.union(&Type::Primitive(Typ::Error.into()));
+        Ok(Box::new(Self { spec, typ, target, n }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for TypeCast<C, E> {
@@ -1581,12 +1506,31 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Struct<C, E> {
 }
 
 #[derive(Debug)]
-struct StructWith<C: Ctx, E: UserEvent> {
+pub(crate) struct StructWith<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     source: Node<C, E>,
     current: Option<ValArray>,
     replace: SmallVec<[(usize, Cached<C, E>); 8]>,
+}
+
+impl<C: Ctx, E: UserEvent> StructWith<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        source: &Expr,
+        replace: &[(ArcStr, Expr)],
+    ) -> Result<Node<C, E>> {
+        let source = compile(ctx, source.clone(), scope, top_id)?;
+        let replace = replace
+            .iter()
+            .map(|(_, e)| Ok((0, Cached::new(compile(ctx, e.clone(), scope, top_id)?))))
+            .collect::<Result<SmallVec<[_; 8]>>>()?;
+        let typ = source.typ().clone();
+        Ok(Box::new(Self { spec, typ, source, current: None, replace }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
@@ -1689,11 +1633,27 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
 macro_rules! compare_op {
     ($name:ident, $op:tt) => {
         #[derive(Debug)]
-        struct $name<C: Ctx, E: UserEvent> {
+        pub(crate) struct $name<C: Ctx, E: UserEvent> {
             spec: Expr,
             typ: Type,
             lhs: Cached<C, E>,
             rhs: Cached<C, E>,
+        }
+
+        impl<C: Ctx, E: UserEvent> $name<C, E> {
+            pub(crate) fn compile(
+                ctx: &mut ExecCtx<C, E>,
+                spec: Expr,
+                scope: &ModPath,
+                top_id: ExprId,
+                lhs: &Expr,
+                rhs: &Expr
+            ) -> Result<Node<C, E>> {
+                let lhs = Cached::new(compile(ctx, lhs.clone(), scope, top_id)?);
+                let rhs = Cached::new(compile(ctx, rhs.clone(), scope, top_id)?);
+                let typ = Type::Primitive(Typ::Bool.into());
+                Ok(Box::new(Self { spec, typ, lhs, rhs }))
+            }
         }
 
         impl<C: Ctx, E: UserEvent> Update<C, E> for $name<C, E> {
@@ -1753,11 +1713,27 @@ compare_op!(Gte, >=);
 macro_rules! bool_op {
     ($name:ident, $op:tt) => {
         #[derive(Debug)]
-        struct $name<C: Ctx, E: UserEvent> {
+        pub(crate) struct $name<C: Ctx, E: UserEvent> {
             spec: Expr,
             typ: Type,
             lhs: Cached<C, E>,
             rhs: Cached<C, E>,
+        }
+
+        impl<C: Ctx, E: UserEvent> $name<C, E> {
+            pub(crate) fn compile(
+                ctx: &mut ExecCtx<C, E>,
+                spec: Expr,
+                scope: &ModPath,
+                top_id: ExprId,
+                lhs: &Expr,
+                rhs: &Expr
+            ) -> Result<Node<C, E>> {
+                let lhs = Cached::new(compile(ctx, lhs.clone(), scope, top_id)?);
+                let rhs = Cached::new(compile(ctx, rhs.clone(), scope, top_id)?);
+                let typ = Type::Primitive(Typ::Bool.into());
+                Ok(Box::new(Self { spec, typ, lhs, rhs }))
+            }
         }
 
         impl<C: Ctx, E: UserEvent> Update<C, E> for $name<C, E> {
@@ -1811,10 +1787,24 @@ bool_op!(And, &&);
 bool_op!(Or, ||);
 
 #[derive(Debug)]
-struct Not<C: Ctx, E: UserEvent> {
+pub(crate) struct Not<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     n: Cached<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> Not<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        n: &Expr,
+    ) -> Result<Node<C, E>> {
+        let n = compile(ctx, n.clone(), scope, top_id)?;
+        let typ = Type::Primitive(Typ::Bool.into());
+        Ok(Box::new(Self { spec, typ, n }))
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Not<C, E> {
@@ -1856,11 +1846,27 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Not<C, E> {
 macro_rules! arith_op {
     ($name:ident, $op:tt) => {
         #[derive(Debug)]
-        struct $name<C: Ctx, E: UserEvent> {
+        pub(crate) struct $name<C: Ctx, E: UserEvent> {
             spec: Expr,
             typ: Type,
             lhs: Cached<C, E>,
             rhs: Cached<C, E>
+        }
+
+        impl<C: Ctx, E: UserEvent> $name<C, E> {
+            pub(crate) fn compile(
+                ctx: &mut ExecCtx<C, E>,
+                spec: Expr,
+                scope: &ModPath,
+                top_id: ExprId,
+                lhs: &Expr,
+                rhs: &Expr
+            ) -> Result<Node<C, E>> {
+                let lhs = Cached::new(compile(ctx, lhs.clone(), scope, top_id)?);
+                let rhs = Cached::new(compile(ctx, rhs.clone(), scope, top_id)?);
+                let typ = Type::empty_tvar();
+                Ok(Box::new(Self { spec, typ, lhs, rhs }))
+            }
         }
 
         impl<C: Ctx, E: UserEvent> Update<C, E> for $name<C, E> {

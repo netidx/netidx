@@ -1,5 +1,5 @@
+use super::{compiler::compile, Nop};
 use crate::{
-    compile,
     env::LambdaDef,
     expr::{self, Arg, Expr, ExprId, ExprKind, ModPath},
     pattern::StructPatternNode,
@@ -15,8 +15,6 @@ use parking_lot::RwLock;
 use smallvec::{smallvec, SmallVec};
 use std::{cell::RefCell, collections::HashMap, mem, sync::Arc as SArc};
 use triomphe::Arc;
-
-use super::Nop;
 
 #[derive(Debug)]
 struct BScriptLambda<C: Ctx, E: UserEvent> {
