@@ -53,11 +53,16 @@ pub(crate) fn compile<C: Ctx, E: UserEvent>(
                     bail!("at {} you must resolve external modules", pos)
                 }
                 ModuleKind::Resolved(ori) => {
-                    Block::compile(ctx, spec.clone(), &scope, top_id, &ori.exprs)
-                        .with_context(|| ori.clone())
+                    let res =
+                        Block::compile(ctx, spec.clone(), &scope, top_id, &ori.exprs)
+                            .with_context(|| ori.clone())?;
+                    ctx.env.modules.insert_cow(scope.clone());
+                    Ok(res)
                 }
                 ModuleKind::Inline(exprs) => {
-                    Block::compile(ctx, spec.clone(), &scope, top_id, exprs)
+                    let res = Block::compile(ctx, spec.clone(), &scope, top_id, exprs)?;
+                    ctx.env.modules.insert_cow(scope.clone());
+                    Ok(res)
                 }
             }
         }
