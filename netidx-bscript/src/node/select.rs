@@ -1,9 +1,9 @@
 use super::{compiler::compile, Cached};
 use crate::{
     expr::{Expr, ExprId, ModPath, Pattern},
-    pattern::PatternNode,
+    node::pattern::PatternNode,
     typ::Type,
-    Apply, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
+    BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use combine::stream::position::SourcePosition;

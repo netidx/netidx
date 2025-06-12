@@ -2,7 +2,7 @@ use crate::{
     env, err,
     expr::{self, Expr, ExprId, ExprKind, ModPath},
     typ::{TVar, Type},
-    Apply, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
+    BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use arcstr::{literal, ArcStr};
@@ -108,19 +108,6 @@ impl<C: Ctx, E: UserEvent> Cached<C, E> {
                 self.cached = Some(v);
                 true
             }
-        }
-    }
-
-    /// update the node, return true if the node updated AND the new
-    /// value is different from the old value. The cached field will
-    /// only be updated if the value changed.
-    fn update_changed(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> bool {
-        match self.node.update(ctx, event) {
-            v @ Some(_) if v != self.cached => {
-                self.cached = v;
-                true
-            }
-            Some(_) | None => false,
         }
     }
 }
@@ -1792,7 +1779,7 @@ bool_op!(Or, ||);
 pub(crate) struct Not<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
-    n: Cached<C, E>,
+    n: Node<C, E>,
 }
 
 impl<C: Ctx, E: UserEvent> Not<C, E> {
@@ -1811,14 +1798,10 @@ impl<C: Ctx, E: UserEvent> Not<C, E> {
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Not<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
-        if self.n.update(ctx, event) {
-            self.n.cached.as_ref().and_then(|v| match v {
-                Value::Bool(b) => Some(Value::Bool(!*b)),
-                _ => None,
-            })
-        } else {
-            None
-        }
+        self.n.update(ctx, event).and_then(|v| match v {
+            Value::Bool(b) => Some(Value::Bool(!b)),
+            _ => None,
+        })
     }
 
     fn spec(&self) -> &Expr {
@@ -1830,17 +1813,17 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Not<C, E> {
     }
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.n.node.refs(f);
+        self.n.refs(f);
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        self.n.node.delete(ctx);
+        self.n.delete(ctx);
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
-        wrap!(self.n.node, self.n.node.typecheck(ctx))?;
+        wrap!(self.n, self.n.typecheck(ctx))?;
         let bt = Type::Primitive(Typ::Bool.into());
-        wrap!(self.n.node, bt.check_contains(&ctx.env, self.n.node.typ()))?;
+        wrap!(self.n, bt.check_contains(&ctx.env, self.n.typ()))?;
         wrap!(self, self.typ.check_contains(&ctx.env, &Type::boolean()))
     }
 }

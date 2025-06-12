@@ -12,7 +12,7 @@ use compact_str::{format_compact, CompactString};
 use fxhash::FxHashMap;
 use netidx::subscriber::Value;
 use smallvec::{smallvec, SmallVec};
-use std::{collections::hash_map::Entry, fmt, mem, sync::Arc};
+use std::{collections::hash_map::Entry, mem, sync::Arc};
 use triomphe::Arc as TArc;
 
 fn check_named_args(
@@ -86,13 +86,13 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
 
 #[derive(Debug)]
 pub(crate) struct CallSite<C: Ctx, E: UserEvent> {
-    spec: Expr,
-    ftype: TArc<FnType>,
-    fnode: Node<C, E>,
-    args: SmallVec<[Node<C, E>; 8]>,
-    arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
-    function: Option<(LambdaId, Box<dyn Apply<C, E>>)>,
-    top_id: ExprId,
+    pub(super) spec: Expr,
+    pub(super) ftype: TArc<FnType>,
+    pub(super) fnode: Node<C, E>,
+    pub(super) args: SmallVec<[Node<C, E>; 8]>,
+    pub(super) arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
+    pub(super) function: Option<(LambdaId, Box<dyn Apply<C, E>>)>,
+    pub(super) top_id: ExprId,
 }
 
 impl<C: Ctx, E: UserEvent> CallSite<C, E> {

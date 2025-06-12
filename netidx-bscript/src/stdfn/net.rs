@@ -19,7 +19,7 @@ use netidx_core::utils::Either;
 use netidx_netproto::valarray::ValArray;
 use netidx_protocols::rpc::server::{self, ArgSpec};
 use smallvec::{smallvec, SmallVec};
-use std::{collections::VecDeque, mem, sync::Arc};
+use std::{collections::VecDeque, sync::Arc};
 use triomphe::Arc as TArc;
 
 fn as_path(v: Value) -> Option<Path> {
@@ -362,7 +362,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Publish<C, E> {
                 let (x, xn) =
                     genn::bind(ctx, &scope, "x", Type::Primitive(Typ::any()), top_id);
                 let fnode = genn::reference(ctx, pid, Type::Fn(mftyp.clone()), top_id);
-                let on_write = genn::apply(fnode, vec![xn], mftyp.clone(), top_id);
+                let on_write = genn::apply(fnode, smallvec![xn], mftyp.clone(), top_id);
                 Ok(Box::new(Publish {
                     args: CachedVals::new(from),
                     current: None,
@@ -440,9 +440,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[0].typ)?;
-        Type::Primitive(Typ::String.into()).check_contains(&ctx.env, &from[1].typ)?;
-        Type::Primitive(Typ::any()).check_contains(&ctx.env, &from[2].typ)?;
+        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[0].typ())?;
+        Type::Primitive(Typ::String.into()).check_contains(&ctx.env, &from[1].typ())?;
+        Type::Primitive(Typ::any()).check_contains(&ctx.env, &from[2].typ())?;
         self.on_write.typecheck(ctx)
     }
 
@@ -450,7 +450,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         if let Some((_, val)) = self.current.take() {
             ctx.user.unpublish(val, self.top_id);
         }
-        mem::take(&mut self.on_write).delete(ctx)
+        self.on_write.delete(ctx)
     }
 }
 
@@ -492,7 +492,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for PublishRpc<C, E> {
                 let (x, xn) =
                     genn::bind(ctx, &scope, "x", mftyp.args[0].typ.clone(), top_id);
                 let fnode = genn::reference(ctx, pid, Type::Fn(mftyp.clone()), top_id);
-                let f = genn::apply(fnode, vec![xn], mftyp, top_id);
+                let f = genn::apply(fnode, smallvec![xn], mftyp, top_id);
                 Ok(Box::new(PublishRpc {
                     queue: VecDeque::new(),
                     args: CachedVals::new(from),
@@ -608,10 +608,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        self.typ.args[0].typ.check_contains(&ctx.env, &from[0].typ)?;
-        self.typ.args[1].typ.check_contains(&ctx.env, &from[1].typ)?;
-        self.typ.args[2].typ.check_contains(&ctx.env, &from[2].typ)?;
-        self.typ.args[3].typ.check_contains(&ctx.env, &from[3].typ)?;
+        self.typ.args[0].typ.check_contains(&ctx.env, &from[0].typ())?;
+        self.typ.args[1].typ.check_contains(&ctx.env, &from[1].typ())?;
+        self.typ.args[2].typ.check_contains(&ctx.env, &from[2].typ())?;
+        self.typ.args[3].typ.check_contains(&ctx.env, &from[3].typ())?;
         self.f.typecheck(ctx)
     }
 
@@ -621,7 +621,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
             ctx.user.unpublish_rpc(path);
         }
         ctx.cached.remove(&self.x);
-        mem::take(&mut self.f).delete(ctx);
+        self.f.delete(ctx);
     }
 }
 

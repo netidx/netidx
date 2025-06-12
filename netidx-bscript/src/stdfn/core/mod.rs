@@ -11,6 +11,7 @@ use arcstr::{literal, ArcStr};
 use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
 use netidx::subscriber::Value;
+use smallvec::smallvec;
 use std::{collections::VecDeque, sync::Arc};
 use triomphe::Arc as TArc;
 
@@ -349,11 +350,11 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
             [arg, fnode] => {
-                let (x, xn) = genn::bind(ctx, scope, "x", arg.typ.clone(), top_id);
+                let (x, xn) = genn::bind(ctx, scope, "x", arg.typ().clone(), top_id);
                 let fid = BindId::new();
-                let fnode = genn::reference(ctx, fid, fnode.typ.clone(), top_id);
+                let fnode = genn::reference(ctx, fid, fnode.typ().clone(), top_id);
                 let typ = TArc::new(typ.clone());
-                let pred = genn::apply(fnode, vec![xn], typ.clone(), top_id);
+                let pred = genn::apply(fnode, smallvec![xn], typ.clone(), top_id);
                 let queue = VecDeque::new();
                 let out = BindId::new();
                 ctx.user.ref_var(out, top_id);
@@ -426,8 +427,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        self.typ.args[0].typ.check_contains(&ctx.env, &from[0].typ)?;
-        self.typ.args[1].typ.check_contains(&ctx.env, &from[1].typ)?;
+        self.typ.args[0].typ.check_contains(&ctx.env, &from[0].typ())?;
+        self.typ.args[1].typ.check_contains(&ctx.env, &from[1].typ())?;
         self.pred.typecheck(ctx)
     }
 
@@ -714,7 +715,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Dbg {
     deftype!("core", "fn('a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|_, _, _, from, _| Ok(Box::new(Dbg(from[0].spec.pos))))
+        Arc::new(|_, _, _, from, _| Ok(Box::new(Dbg(from[0].spec().pos))))
     }
 }
 

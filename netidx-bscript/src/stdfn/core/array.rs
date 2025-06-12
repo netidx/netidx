@@ -99,7 +99,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
             Some(Value::Array(a)) if a.len() == self.slots.len() => Some(a),
             Some(Value::Array(a)) if a.len() < self.slots.len() => {
                 while self.slots.len() > a.len() {
-                    if let Some(s) = self.slots.pop() {
+                    if let Some(mut s) = self.slots.pop() {
                         s.pred.delete(ctx);
                         ctx.env.unbind_variable(s.id);
                     }
@@ -110,7 +110,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
                 while self.slots.len() < a.len() {
                     let (id, node) =
                         genn::bind(ctx, &self.scope, "x", self.etyp.clone(), self.top_id);
-                    let fargs = vec![node];
+                    let fargs = smallvec![node];
                     let fnode = genn::reference(
                         ctx,
                         self.predid,
@@ -171,10 +171,10 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
             .get(0)
             .map(|a| a.typ.clone())
             .ok_or_else(|| anyhow!("expected 2 arguments"))?
-            .check_contains(&ctx.env, &from[0].typ)?;
-        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[1].typ)?;
+            .check_contains(&ctx.env, &from[0].typ())?;
+        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[1].typ())?;
         let (_, node) = genn::bind(ctx, &self.scope, "x", self.etyp.clone(), self.top_id);
-        let fargs = vec![node];
+        let fargs = smallvec![node];
         let ft = self.mftyp.clone();
         let fnode = genn::reference(ctx, self.predid, Type::Fn(ft.clone()), self.top_id);
         let mut node = genn::apply(fnode, fargs, ft, self.top_id);
@@ -364,7 +364,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
                 false
             }
             Some(Value::Array(a)) => {
-                if let Some(n) = self.head.take() {
+                if let Some(mut n) = self.head.take() {
                     n.delete(ctx)
                 }
                 while self.binds.len() < a.len() {
@@ -390,7 +390,12 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
                         self.top_id,
                     );
                     // CR estokes: evaluating this is not tail recursive
-                    n = genn::apply(fnode, vec![n, x], self.mftype.clone(), self.top_id);
+                    n = genn::apply(
+                        fnode,
+                        smallvec![n, x],
+                        self.mftype.clone(),
+                        self.top_id,
+                    );
                 }
                 self.head = Some(n);
                 true
@@ -433,14 +438,14 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
             n.typecheck(ctx)?;
         }
         Type::Array(triomphe::Arc::new(self.etyp.clone()))
-            .check_contains(&ctx.env, &from[0].typ)?;
-        self.ityp.check_contains(&ctx.env, &from[1].typ)?;
-        Type::Fn(self.mftype.clone()).check_contains(&ctx.env, &from[2].typ)?;
+            .check_contains(&ctx.env, &from[0].typ())?;
+        self.ityp.check_contains(&ctx.env, &from[1].typ())?;
+        Type::Fn(self.mftype.clone()).check_contains(&ctx.env, &from[2].typ())?;
         let mut n = genn::reference(ctx, self.initid, self.ityp.clone(), self.top_id);
         let x = genn::reference(ctx, BindId::new(), self.etyp.clone(), self.top_id);
         let fnode =
             genn::reference(ctx, self.fid, Type::Fn(self.mftype.clone()), self.top_id);
-        n = genn::apply(fnode, vec![n, x], self.mftype.clone(), self.top_id);
+        n = genn::apply(fnode, smallvec![n, x], self.mftype.clone(), self.top_id);
         let r = n.typecheck(ctx);
         n.delete(ctx);
         r
@@ -571,7 +576,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
                     scope.0.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
                 );
                 let n_typ = Type::Primitive(Typ::U64.into());
-                let etyp = arg.typ.clone();
+                let etyp = arg.typ().clone();
                 let mftyp = match &typ.args[1].typ {
                     Type::Fn(ft) => ft.clone(),
                     t => bail!("expected function not {t}"),
@@ -580,7 +585,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
                 let (xid, x) = genn::bind(ctx, &scope, "x", etyp.clone(), top_id);
                 let pid = BindId::new();
                 let fnode = genn::reference(ctx, pid, Type::Fn(mftyp.clone()), top_id);
-                let pred = genn::apply(fnode, vec![n, x], mftyp.clone(), top_id);
+                let pred = genn::apply(fnode, smallvec![n, x], mftyp.clone(), top_id);
                 Ok(Box::new(Self {
                     queue: VecDeque::new(),
                     buf: smallvec![],
@@ -652,8 +657,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?
         }
-        self.etyp.check_contains(&ctx.env, &from[0].typ)?;
-        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[1].typ)?;
+        self.etyp.check_contains(&ctx.env, &from[0].typ())?;
+        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[1].typ())?;
         self.pred.typecheck(ctx)?;
         Ok(())
     }

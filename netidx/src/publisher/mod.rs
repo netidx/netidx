@@ -474,6 +474,7 @@ impl fmt::Debug for ExtendedAuthWrap {
 
 /// This represents a published value. When it is dropped the value
 /// will be unpublished.
+#[derive(Debug)]
 pub struct Val(Id);
 
 impl Drop for Val {

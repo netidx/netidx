@@ -2,7 +2,7 @@ use super::{compiler::compile, Nop};
 use crate::{
     env::LambdaDef,
     expr::{self, Arg, Expr, ExprId, ExprKind, ModPath},
-    pattern::StructPatternNode,
+    node::pattern::StructPatternNode,
     typ::{FnArgType, FnType, TVar, Type},
     wrap, Apply, BindId, Ctx, Event, ExecCtx, InitFn, LambdaId, Node, Update, UserEvent,
 };

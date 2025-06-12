@@ -7,7 +7,7 @@ extern crate serde_derive;
 
 pub mod env;
 pub mod expr;
-mod node;
+pub mod node;
 pub mod rt;
 pub mod stdfn;
 pub mod typ;
@@ -17,10 +17,9 @@ use crate::{
     expr::{ExprId, ExprKind, ModPath},
     typ::{FnType, Type},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use arcstr::ArcStr;
-use compact_str::format_compact;
-use expr::{Expr, ModuleKind};
+use expr::Expr;
 use fxhash::FxHashMap;
 use netidx::{
     path::Path,
@@ -32,7 +31,7 @@ use node::compiler;
 use parking_lot::RwLock;
 use std::{
     collections::{hash_map::Entry, HashMap},
-    fmt::{Debug, Display},
+    fmt::Debug,
     sync::{self, LazyLock},
     time::Duration,
 };
@@ -335,9 +334,9 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         };
         let core = stdfn::core::register(&mut t);
         let root = ModPath(Path::root());
-        let node = Node::compile(&mut t, &root, core).expect("error compiling core");
+        let node = compile(&mut t, &root, core).expect("error compiling core");
         t.std.push(node);
-        let node = Node::compile(
+        let node = compile(
             &mut t,
             &root,
             ExprKind::Use { name: ModPath::from(["core"]) }.to_expr(Default::default()),
@@ -352,24 +351,20 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         let mut t = Self::new_no_std(user);
         let root = ModPath(Path::root());
         let net = stdfn::net::register(&mut t);
-        let node =
-            Node::compile(&mut t, &root, net).expect("failed to compile the net module");
+        let node = compile(&mut t, &root, net).expect("failed to compile the net module");
         t.std.push(node);
         let str = stdfn::str::register(&mut t);
-        let node =
-            Node::compile(&mut t, &root, str).expect("failed to compile the str module");
+        let node = compile(&mut t, &root, str).expect("failed to compile the str module");
         t.std.push(node);
         let re = stdfn::re::register(&mut t);
-        let node =
-            Node::compile(&mut t, &root, re).expect("failed to compile the re module");
+        let node = compile(&mut t, &root, re).expect("failed to compile the re module");
         t.std.push(node);
         let time = stdfn::time::register(&mut t);
-        let node = Node::compile(&mut t, &root, time)
-            .expect("failed to compile the time module");
+        let node =
+            compile(&mut t, &root, time).expect("failed to compile the time module");
         t.std.push(node);
         let rand = stdfn::rand::register(&mut t);
-        let node =
-            Node::compile(&mut t, &root, rand).expect("failed to compile rand module");
+        let node = compile(&mut t, &root, rand).expect("failed to compile rand module");
         t.std.push(node);
         t
     }

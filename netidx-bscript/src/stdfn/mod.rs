@@ -52,6 +52,7 @@ macro_rules! arity2 {
     };
 }
 
+#[derive(Debug)]
 pub struct CachedVals(pub SmallVec<[Option<Value>; 4]>);
 
 impl CachedVals {
