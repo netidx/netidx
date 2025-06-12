@@ -1,6 +1,6 @@
 use crate::{
-    deftype, expr::Expr, node::Node, stdfn::CachedVals, Apply, BuiltIn, BuiltInInitFn,
-    Ctx, Event, ExecCtx, UserEvent,
+    deftype, expr::Expr, stdfn::CachedVals, Apply, BuiltIn, BuiltInInitFn, Ctx, Event,
+    ExecCtx, Node, UserEvent,
 };
 use netidx::subscriber::Value;
 use netidx_netproto::valarray::ValArray;
@@ -8,6 +8,7 @@ use rand::{seq::SliceRandom, thread_rng, Rng};
 use smallvec::{smallvec, SmallVec};
 use std::sync::Arc;
 
+#[derive(Debug)]
 struct Rand {
     args: CachedVals,
 }
@@ -54,6 +55,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Rand {
     }
 }
 
+#[derive(Debug)]
 struct Pick;
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Pick {
@@ -81,6 +83,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Pick {
     }
 }
 
+#[derive(Debug)]
 struct Shuffle(SmallVec<[Value; 32]>);
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Shuffle {

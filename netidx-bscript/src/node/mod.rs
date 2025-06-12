@@ -1,7 +1,6 @@
 use crate::{
     env, err,
     expr::{self, Expr, ExprId, ExprKind, ModPath},
-    pattern::StructPatternNode,
     typ::{TVar, Type},
     Apply, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
 };
@@ -12,13 +11,16 @@ use compiler::compile;
 use enumflags2::BitFlags;
 use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
+use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
 use std::{cell::RefCell, iter};
 use triomphe::Arc;
 
 pub(crate) mod callsite;
 pub(crate) mod compiler;
+pub mod genn;
 pub(crate) mod lambda;
+pub(crate) mod pattern;
 pub(crate) mod select;
 
 #[macro_export]

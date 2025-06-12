@@ -1,10 +1,11 @@
 use crate::{
     arity1, arity2, deftype, errf,
     expr::{Expr, ExprId, ModPath},
-    node::{genn, Node},
+    node::genn,
     stdfn::CachedVals,
     typ::{FnType, Type},
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, UserEvent,
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, Node,
+    UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
@@ -34,6 +35,7 @@ fn as_path(v: Value) -> Option<Path> {
     }
 }
 
+#[derive(Debug)]
 struct Write {
     args: CachedVals,
     top_id: ExprId,
@@ -124,6 +126,7 @@ impl Write {
     }
 }
 
+#[derive(Debug)]
 struct Subscribe {
     args: CachedVals,
     cur: Option<(Path, Dval)>,
@@ -192,6 +195,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
     }
 }
 
+#[derive(Debug)]
 struct RpcCall {
     args: CachedVals,
     top_id: ExprId,
@@ -260,6 +264,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for RpcCall {
 
 macro_rules! list {
     ($name:ident, $builtin:literal, $method:ident, $typ:literal) => {
+        #[derive(Debug)]
         struct $name {
             args: CachedVals,
             current: Option<Path>,
@@ -328,6 +333,7 @@ macro_rules! list {
 list!(List, "list", list, "fn(?#update:Any, string) -> Array<string>");
 list!(ListTable, "list_table", list_table, "fn(?#update:Any, string) -> Table");
 
+#[derive(Debug)]
 struct Publish<C: Ctx, E: UserEvent> {
     args: CachedVals,
     current: Option<(Path, Val)>,
@@ -448,6 +454,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
     }
 }
 
+#[derive(Debug)]
 struct PublishRpc<C: Ctx, E: UserEvent> {
     args: CachedVals,
     id: BindId,

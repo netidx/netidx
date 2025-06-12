@@ -1,10 +1,11 @@
 use crate::{
     deftype,
     expr::{ExprId, ModPath},
-    node::{genn, Node},
+    node::genn,
     stdfn::{CachedArgs, CachedVals, EvalCached},
     typ::{FnType, Type},
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, UserEvent,
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, Node,
+    UserEvent,
 };
 use anyhow::{anyhow, bail};
 use compact_str::format_compact;
@@ -13,12 +14,13 @@ use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{
     collections::VecDeque,
+    fmt::Debug,
     iter,
     sync::{Arc, LazyLock},
 };
 use triomphe::Arc as TArc;
 
-pub trait MapFn<C: Ctx, E: UserEvent>: Default + Send + Sync + 'static {
+pub trait MapFn<C: Ctx, E: UserEvent>: Debug + Default + Send + Sync + 'static {
     const NAME: &str;
     const TYP: LazyLock<FnType>;
 
@@ -30,12 +32,14 @@ pub trait MapFn<C: Ctx, E: UserEvent>: Default + Send + Sync + 'static {
     fn finish(&mut self, slots: &[Slot<C, E>], a: &ValArray) -> Option<Value>;
 }
 
+#[derive(Debug)]
 pub struct Slot<C: Ctx, E: UserEvent> {
     id: BindId,
     pred: Node<C, E>,
     pub cur: Option<Value>,
 }
 
+#[derive(Debug)]
 pub struct MapQ<C: Ctx, E: UserEvent, T: MapFn<C, E>> {
     scope: ModPath,
     predid: BindId,
@@ -186,7 +190,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct MapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for MapImpl {
@@ -202,7 +206,7 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for MapImpl {
 
 pub(super) type Map<C, E> = MapQ<C, E, MapImpl>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FilterImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FilterImpl {
@@ -221,7 +225,7 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FilterImpl {
 
 pub(super) type Filter<C, E> = MapQ<C, E, FilterImpl>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FlatMapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FlatMapImpl {
@@ -240,7 +244,7 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FlatMapImpl {
 
 pub(super) type FlatMap<C, E> = MapQ<C, E, FlatMapImpl>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FilterMapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FilterMapImpl {
@@ -259,7 +263,7 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FilterMapImpl {
 
 pub(super) type FilterMap<C, E> = MapQ<C, E, FilterMapImpl>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FindImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindImpl {
@@ -282,7 +286,7 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindImpl {
 
 pub(super) type Find<C, E> = MapQ<C, E, FindImpl>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FindMapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindMapImpl {
@@ -303,6 +307,7 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindMapImpl {
 
 pub(super) type FindMap<C, E> = MapQ<C, E, FindMapImpl>;
 
+#[derive(Debug)]
 pub(super) struct Fold<C: Ctx, E: UserEvent> {
     top_id: ExprId,
     fid: BindId,
@@ -448,7 +453,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct ConcatEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for ConcatEv {
@@ -480,7 +485,7 @@ impl EvalCached for ConcatEv {
 
 pub(super) type Concat = CachedArgs<ConcatEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct LenEv;
 
 impl EvalCached for LenEv {
@@ -497,7 +502,7 @@ impl EvalCached for LenEv {
 
 pub(super) type Len = CachedArgs<LenEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FlattenEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for FlattenEv {
@@ -523,7 +528,7 @@ impl EvalCached for FlattenEv {
 
 pub(super) type Flatten = CachedArgs<FlattenEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct SortEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for SortEv {
@@ -542,6 +547,7 @@ impl EvalCached for SortEv {
 
 pub(super) type Sort = CachedArgs<SortEv>;
 
+#[derive(Debug)]
 pub(super) struct Group<C: Ctx, E: UserEvent> {
     queue: VecDeque<Value>,
     buf: SmallVec<[Value; 16]>,
@@ -653,6 +659,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
     }
 }
 
+#[derive(Debug)]
 pub(super) struct Iter(BindId, ExprId);
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Iter {
@@ -688,6 +695,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Iter {
     }
 }
 
+#[derive(Debug)]
 pub(super) struct IterQ {
     triggered: usize,
     queue: VecDeque<(usize, ValArray)>,

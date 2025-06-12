@@ -84,28 +84,15 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
     Ok((nodes, arg_spec))
 }
 
+#[derive(Debug)]
 pub(crate) struct CallSite<C: Ctx, E: UserEvent> {
     spec: Expr,
     ftype: TArc<FnType>,
     fnode: Node<C, E>,
     args: SmallVec<[Node<C, E>; 8]>,
     arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
-    function: Option<(LambdaId, Box<dyn Apply<C, E> + Send + Sync>)>,
+    function: Option<(LambdaId, Box<dyn Apply<C, E>>)>,
     top_id: ExprId,
-}
-
-impl<C: Ctx, E: UserEvent> fmt::Debug for CallSite<C, E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CallSite({:?}, [", self.fnode)?;
-        for (i, n) in self.args.iter().enumerate() {
-            if i < self.args.len() - 1 {
-                write!(f, "{:?}, ", n)?;
-            } else {
-                write!(f, "{:?}", n)?;
-            }
-        }
-        write!(f, "])")
-    }
 }
 
 impl<C: Ctx, E: UserEvent> CallSite<C, E> {

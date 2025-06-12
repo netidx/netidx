@@ -1,3 +1,16 @@
+use super::{
+    callsite::CallSite, lambda::Lambda, select::Select, Add, And, Any, Array, ArrayRef,
+    ArraySlice, Bind, Block, Connect, Constant, Div, Eq, Gt, Gte, Lt, Lte, Mul, Ne, Not,
+    Or, Qop, Ref, StringInterpolate, Struct, StructRef, StructWith, Sub, Tuple, TupleRef,
+    TypeCast, TypeDef, Use, Variant,
+};
+use crate::{
+    expr::{Expr, ExprId, ExprKind, ModPath, ModuleKind},
+    Ctx, ExecCtx, Node, UserEvent,
+};
+use anyhow::{bail, Context, Result};
+use compact_str::format_compact;
+
 pub(crate) fn compile<C: Ctx, E: UserEvent>(
     ctx: &mut ExecCtx<C, E>,
     spec: Expr,

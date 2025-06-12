@@ -1,11 +1,11 @@
 use crate::{
-    node::Node, typ::FnType, Apply, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx,
-    UserEvent,
+    typ::FnType, Apply, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
 };
 use netidx::subscriber::Value;
 use netidx_core::utils::Either;
 use smallvec::SmallVec;
 use std::{
+    fmt::Debug,
     iter,
     sync::{Arc, LazyLock},
 };
@@ -123,13 +123,14 @@ impl CachedVals {
     }
 }
 
-pub trait EvalCached: Default + Send + Sync + 'static {
+pub trait EvalCached: Debug + Default + Send + Sync + 'static {
     const NAME: &str;
     const TYP: LazyLock<FnType>;
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value>;
 }
 
+#[derive(Debug)]
 pub struct CachedArgs<T: EvalCached> {
     cached: CachedVals,
     t: T,

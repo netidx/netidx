@@ -393,7 +393,7 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
     }
 }
 
-/// compile the specified expression into a node graph in the
+/// compile the expression into a node graph in the
 /// specified context and scope.
 pub fn compile<C: Ctx, E: UserEvent>(
     ctx: &mut ExecCtx<C, E>,
