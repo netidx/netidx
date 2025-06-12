@@ -465,10 +465,10 @@ impl StructPatternNode {
 }
 
 #[derive(Debug)]
-pub struct PatternNode<C: Ctx, E: UserEvent> {
-    pub type_predicate: Type,
-    pub structure_predicate: StructPatternNode,
-    pub guard: Option<Cached<C, E>>,
+pub(crate) struct PatternNode<C: Ctx, E: UserEvent> {
+    pub(super) type_predicate: Type,
+    pub(super) structure_predicate: StructPatternNode,
+    pub(super) guard: Option<Cached<C, E>>,
 }
 
 impl<C: Ctx, E: UserEvent> PatternNode<C, E> {

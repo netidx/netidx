@@ -10,11 +10,11 @@
 /// application you can implement your own, see the [Ctx] and
 /// [UserEvent] traits.
 use crate::{
+    compile,
     env::Env,
     expr::{self, ExprId, ExprKind, ModPath, ModuleKind, ModuleResolver, Origin},
-    node::{Node, NodeKind},
     typ::Type,
-    BindId, BuiltIn, Ctx, Event, ExecCtx, NoUserEvent,
+    BindId, BuiltIn, Ctx, Event, ExecCtx, NoUserEvent, Node,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use arcstr::{literal, ArcStr};
@@ -398,13 +398,13 @@ impl Ctx for BSCtx {
 }
 
 fn is_output(n: &Node<BSCtx, NoUserEvent>) -> bool {
-    match &n.kind {
-        NodeKind::Bind { .. }
-        | NodeKind::Lambda(_)
-        | NodeKind::Use { .. }
-        | NodeKind::Connect(_, _)
-        | NodeKind::Module(_)
-        | NodeKind::TypeDef { .. } => false,
+    match &n.spec().kind {
+        ExprKind::Bind { .. }
+        | ExprKind::Lambda { .. }
+        | ExprKind::Use { .. }
+        | ExprKind::Connect { .. }
+        | ExprKind::Module { .. }
+        | ExprKind::TypeDef { .. } => false,
         _ => true,
     }
 }
@@ -646,7 +646,7 @@ impl BS {
         let nodes = ori
             .exprs
             .iter()
-            .map(|e| Node::compile(&mut self.ctx, &scope, e.clone()))
+            .map(|e| compile(&mut self.ctx, &scope, e.clone()))
             .collect::<Result<SmallVec<[_; 4]>>>()
             .with_context(|| ori.clone())?;
         let exprs = ori
@@ -655,7 +655,7 @@ impl BS {
             .zip(nodes.into_iter())
             .map(|(e, n)| {
                 let output = is_output(&n);
-                let typ = n.typ.clone();
+                let typ = n.typ().clone();
                 self.updated.insert(e.id, true);
                 self.nodes.insert(e.id, n);
                 CompExp { id: e.id, output, typ }
@@ -735,10 +735,9 @@ impl BS {
             .await
             .with_context(|| ori.clone())?;
         let top_id = expr.id;
-        let n =
-            Node::compile(&mut self.ctx, &scope, expr).with_context(|| ori.clone())?;
+        let n = compile(&mut self.ctx, &scope, expr).with_context(|| ori.clone())?;
         let has_out = is_output(&n);
-        let typ = n.typ.clone();
+        let typ = n.typ().clone();
         self.nodes.insert(top_id, n);
         self.updated.insert(top_id, true);
         let exprs = smallvec![CompExp { id: top_id, output: has_out, typ }];
@@ -840,7 +839,7 @@ impl BS {
                 }
                 Some(ToRt::Delete { id, res }) => {
                     // CR estokes: Check dependencies
-                    if let Some(n) = self.nodes.shift_remove(&id) {
+                    if let Some(mut n) = self.nodes.shift_remove(&id) {
                         n.delete(&mut self.ctx);
                     }
                     let _ = res.send(Ok(self.ctx.env.clone()));

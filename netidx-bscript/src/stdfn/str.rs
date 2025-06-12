@@ -10,7 +10,7 @@ use netidx_netproto::valarray::ValArray;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StartsWithEv;
 
 impl EvalCached for StartsWithEv {
@@ -34,7 +34,7 @@ impl EvalCached for StartsWithEv {
 
 type StartsWith = CachedArgs<StartsWithEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct EndsWithEv;
 
 impl EvalCached for EndsWithEv {
@@ -58,7 +58,7 @@ impl EvalCached for EndsWithEv {
 
 type EndsWith = CachedArgs<EndsWithEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ContainsEv;
 
 impl EvalCached for ContainsEv {
@@ -82,7 +82,7 @@ impl EvalCached for ContainsEv {
 
 type Contains = CachedArgs<ContainsEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StripPrefixEv;
 
 impl EvalCached for StripPrefixEv {
@@ -103,7 +103,7 @@ impl EvalCached for StripPrefixEv {
 
 type StripPrefix = CachedArgs<StripPrefixEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StripSuffixEv;
 
 impl EvalCached for StripSuffixEv {
@@ -124,7 +124,7 @@ impl EvalCached for StripSuffixEv {
 
 type StripSuffix = CachedArgs<StripSuffixEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct TrimEv;
 
 impl EvalCached for TrimEv {
@@ -142,7 +142,7 @@ impl EvalCached for TrimEv {
 
 type Trim = CachedArgs<TrimEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct TrimStartEv;
 
 impl EvalCached for TrimStartEv {
@@ -160,7 +160,7 @@ impl EvalCached for TrimStartEv {
 
 type TrimStart = CachedArgs<TrimStartEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct TrimEndEv;
 
 impl EvalCached for TrimEndEv {
@@ -178,7 +178,7 @@ impl EvalCached for TrimEndEv {
 
 type TrimEnd = CachedArgs<TrimEndEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ReplaceEv;
 
 impl EvalCached for ReplaceEv {
@@ -200,7 +200,7 @@ impl EvalCached for ReplaceEv {
 
 type Replace = CachedArgs<ReplaceEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct DirnameEv;
 
 impl EvalCached for DirnameEv {
@@ -221,7 +221,7 @@ impl EvalCached for DirnameEv {
 
 type Dirname = CachedArgs<DirnameEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct BasenameEv;
 
 impl EvalCached for BasenameEv {
@@ -242,7 +242,7 @@ impl EvalCached for BasenameEv {
 
 type Basename = CachedArgs<BasenameEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StringJoinEv;
 
 impl EvalCached for StringJoinEv {
@@ -309,7 +309,7 @@ impl EvalCached for StringJoinEv {
 
 type StringJoin = CachedArgs<StringJoinEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StringConcatEv;
 
 impl EvalCached for StringConcatEv {
@@ -354,7 +354,7 @@ impl EvalCached for StringConcatEv {
 
 type StringConcat = CachedArgs<StringConcatEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StringEscapeEv {
     to_escape: SmallVec<[char; 8]>,
 }
@@ -392,7 +392,7 @@ impl EvalCached for StringEscapeEv {
 
 type StringEscape = CachedArgs<StringEscapeEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StringUnescapeEv;
 
 impl EvalCached for StringUnescapeEv {
@@ -419,7 +419,7 @@ impl EvalCached for StringUnescapeEv {
 
 type StringUnescape = CachedArgs<StringUnescapeEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StringSplitEv;
 
 impl EvalCached for StringSplitEv {
@@ -448,7 +448,7 @@ impl EvalCached for StringSplitEv {
 
 type StringSplit = CachedArgs<StringSplitEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StringSplitOnceEv;
 
 impl EvalCached for StringSplitOnceEv {
@@ -481,7 +481,7 @@ impl EvalCached for StringSplitOnceEv {
 
 type StringSplitOnce = CachedArgs<StringSplitOnceEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StringRSplitOnceEv;
 
 impl EvalCached for StringRSplitOnceEv {
@@ -514,7 +514,7 @@ impl EvalCached for StringRSplitOnceEv {
 
 type StringRSplitOnce = CachedArgs<StringRSplitOnceEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StringToLowerEv;
 
 impl EvalCached for StringToLowerEv {
@@ -532,7 +532,7 @@ impl EvalCached for StringToLowerEv {
 
 type StringToLower = CachedArgs<StringToLowerEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StringToUpperEv;
 
 impl EvalCached for StringToUpperEv {

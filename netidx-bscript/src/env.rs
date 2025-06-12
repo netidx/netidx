@@ -265,6 +265,17 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         res
     }
 
+    pub fn canonical_modpath(&self, scope: &ModPath, name: &ModPath) -> Option<ModPath> {
+        self.find_visible(scope, name, |scope, name| {
+            let p = ModPath(Path::from(ArcStr::from(scope)).append(name));
+            if self.modules.contains(&p) {
+                Some(p)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn deftype(
         &mut self,
         scope: &ModPath,

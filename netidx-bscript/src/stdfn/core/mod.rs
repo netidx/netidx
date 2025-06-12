@@ -1,21 +1,23 @@
 use crate::{
     deftype, err, errf,
     expr::{Expr, ExprId},
-    node::{genn, Node},
+    node::genn,
     stdfn::{CachedArgs, CachedVals, EvalCached},
     typ::FnType,
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
 };
 use anyhow::bail;
 use arcstr::{literal, ArcStr};
 use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
 use netidx::subscriber::Value;
+use smallvec::smallvec;
 use std::{collections::VecDeque, sync::Arc};
 use triomphe::Arc as TArc;
 
 pub mod array;
 
+#[derive(Debug)]
 struct IsErr;
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for IsErr {
@@ -41,6 +43,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for IsErr {
     }
 }
 
+#[derive(Debug)]
 struct FilterErr;
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for FilterErr {
@@ -66,6 +69,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for FilterErr {
     }
 }
 
+#[derive(Debug)]
 struct ToError;
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for ToError {
@@ -91,6 +95,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for ToError {
     }
 }
 
+#[derive(Debug)]
 struct Once {
     val: bool,
 }
@@ -125,7 +130,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Once {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct AllEv;
 
 impl EvalCached for AllEv {
@@ -159,7 +164,7 @@ fn add_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct SumEv;
 
 impl EvalCached for SumEv {
@@ -176,7 +181,7 @@ impl EvalCached for SumEv {
 
 type Sum = CachedArgs<SumEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ProductEv;
 
 fn prod_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
@@ -201,7 +206,7 @@ impl EvalCached for ProductEv {
 
 type Product = CachedArgs<ProductEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct DivideEv;
 
 fn div_vals(lhs: Option<Value>, rhs: Option<Value>) -> Option<Value> {
@@ -226,7 +231,7 @@ impl EvalCached for DivideEv {
 
 type Divide = CachedArgs<DivideEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct MinEv;
 
 impl EvalCached for MinEv {
@@ -252,7 +257,7 @@ impl EvalCached for MinEv {
 
 type Min = CachedArgs<MinEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct MaxEv;
 
 impl EvalCached for MaxEv {
@@ -278,7 +283,7 @@ impl EvalCached for MaxEv {
 
 type Max = CachedArgs<MaxEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct AndEv;
 
 impl EvalCached for AndEv {
@@ -302,7 +307,7 @@ impl EvalCached for AndEv {
 
 type And = CachedArgs<AndEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct OrEv;
 
 impl EvalCached for OrEv {
@@ -326,6 +331,7 @@ impl EvalCached for OrEv {
 
 type Or = CachedArgs<OrEv>;
 
+#[derive(Debug)]
 struct Filter<C: Ctx, E: UserEvent> {
     ready: bool,
     queue: VecDeque<Value>,
@@ -344,11 +350,11 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
             [arg, fnode] => {
-                let (x, xn) = genn::bind(ctx, scope, "x", arg.typ.clone(), top_id);
+                let (x, xn) = genn::bind(ctx, scope, "x", arg.typ().clone(), top_id);
                 let fid = BindId::new();
-                let fnode = genn::reference(ctx, fid, fnode.typ.clone(), top_id);
+                let fnode = genn::reference(ctx, fid, fnode.typ().clone(), top_id);
                 let typ = TArc::new(typ.clone());
-                let pred = genn::apply(fnode, vec![xn], typ.clone(), top_id);
+                let pred = genn::apply(fnode, smallvec![xn], typ.clone(), top_id);
                 let queue = VecDeque::new();
                 let out = BindId::new();
                 ctx.user.ref_var(out, top_id);
@@ -421,8 +427,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        self.typ.args[0].typ.check_contains(&ctx.env, &from[0].typ)?;
-        self.typ.args[1].typ.check_contains(&ctx.env, &from[1].typ)?;
+        self.typ.args[0].typ.check_contains(&ctx.env, &from[0].typ())?;
+        self.typ.args[1].typ.check_contains(&ctx.env, &from[1].typ())?;
         self.pred.typecheck(ctx)
     }
 
@@ -431,6 +437,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
     }
 }
 
+#[derive(Debug)]
 struct Queue {
     triggered: usize,
     queue: VecDeque<Value>,
@@ -479,6 +486,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Queue {
     }
 }
 
+#[derive(Debug)]
 struct Seq {
     id: BindId,
     top_id: ExprId,
@@ -520,6 +528,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Seq {
     }
 }
 
+#[derive(Debug)]
 struct Count {
     count: u64,
 }
@@ -549,6 +558,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Count {
     }
 }
 
+#[derive(Debug)]
 struct Sample {
     last: Option<Value>,
     triggered: usize,
@@ -601,7 +611,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Sample {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct MeanEv;
 
 impl EvalCached for MeanEv {
@@ -638,6 +648,7 @@ impl EvalCached for MeanEv {
 
 type Mean = CachedArgs<MeanEv>;
 
+#[derive(Debug)]
 struct Uniq(Option<Value>);
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Uniq {
@@ -670,6 +681,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Uniq {
     }
 }
 
+#[derive(Debug)]
 struct Never;
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Never {
@@ -695,6 +707,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Never {
     }
 }
 
+#[derive(Debug)]
 struct Dbg(SourcePosition);
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Dbg {
@@ -702,7 +715,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Dbg {
     deftype!("core", "fn('a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|_, _, _, from, _| Ok(Box::new(Dbg(from[0].spec.pos))))
+        Arc::new(|_, _, _, from, _| Ok(Box::new(Dbg(from[0].spec().pos))))
     }
 }
 

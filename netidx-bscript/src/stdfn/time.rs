@@ -1,9 +1,8 @@
 use crate::{
     arity2, deftype, err, errf,
     expr::{Expr, ExprId},
-    node::Node,
     stdfn::CachedVals,
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
 };
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
@@ -11,6 +10,7 @@ use compact_str::format_compact;
 use netidx::{publisher::FromValue, subscriber::Value};
 use std::{ops::SubAssign, sync::Arc, time::Duration};
 
+#[derive(Debug)]
 struct AfterIdle {
     args: CachedVals,
     id: Option<BindId>,
@@ -76,7 +76,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for AfterIdle {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Repeat {
     Yes,
     No,
@@ -115,6 +115,7 @@ impl Repeat {
     }
 }
 
+#[derive(Debug)]
 struct Timer {
     args: CachedVals,
     timeout: Option<Duration>,
