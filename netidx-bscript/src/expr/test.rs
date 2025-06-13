@@ -227,6 +227,7 @@ fn typexp() -> impl Strategy<Value = Type> {
                 }
             ),
             inner.clone().prop_map(|t| Type::Array(Arc::new(t))),
+            inner.clone().prop_map(|t| Type::ByRef(Arc::new(t))),
             (typath(), collection::vec(inner.clone(), (0, 8))).prop_map(
                 |(name, params)| {
                     Type::Ref { scope: ModPath::root(), name, params: Arc::from(params) }

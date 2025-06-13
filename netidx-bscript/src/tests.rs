@@ -1104,3 +1104,19 @@ run!(byref_tuple, BYREF_TUPLE, |v: Result<&Value>| match v {
     Ok(Value::I64(3)) => true,
     _ => false,
 });
+
+#[cfg(test)]
+const BYREF_PATTERN: &str = r#"
+{
+  let r = &42;
+  select r as &i64 {
+    _ => 1
+  }
+}
+"#;
+
+#[cfg(test)]
+run!(byref_pattern, BYREF_PATTERN, |v: Result<&Value>| match v {
+    Ok(Value::I64(1)) => true,
+    _ => false,
+});

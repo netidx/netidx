@@ -724,6 +724,7 @@ where
     I::Range: Range,
 {
     choice((
+        attempt(sptoken('&').with(typexp()).map(|t| Type::ByRef(Arc::new(t)))),
         attempt(sptoken('_').map(|_| Type::Bottom)),
         attempt(
             between(sptoken('['), sptoken(']'), sep_by(typexp(), csep()))
