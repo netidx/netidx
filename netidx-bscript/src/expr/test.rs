@@ -1152,6 +1152,8 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (ExprKind::Any { args: a0 }, ExprKind::Any { args: a1 }) => {
             a0.len() == a1.len() && a0.iter().zip(a1.iter()).all(|(a0, a1)| check(a0, a1))
         }
+        (ExprKind::ByRef(e0), ExprKind::ByRef(e1)) => check(e0, e1),
+        (ExprKind::Deref(e0), ExprKind::Deref(e1)) => check(e0, e1),
         (_, _) => false,
     }
 }
