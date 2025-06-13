@@ -380,16 +380,17 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         Ok(())
     }
 
-    /// Built in functions should call this when variables are
-    /// set. This will also call the user ctx set_var.
+    /// Built in functions should call this when variables are set
+    /// unless they are sure the variable does not need to be
+    /// cached. This will also call the user ctx set_var.
     pub fn set_var(&mut self, id: BindId, v: Value) {
         self.cached.insert(id, v.clone());
         self.user.set_var(id, v)
     }
 }
 
-/// compile the expression into a node graph in the
-/// specified context and scope.
+/// compile the expression into a node graph in the specified context
+/// and scope, return the root node or an error if compilation failed.
 pub fn compile<C: Ctx, E: UserEvent>(
     ctx: &mut ExecCtx<C, E>,
     scope: &ModPath,
