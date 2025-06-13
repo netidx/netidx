@@ -341,6 +341,8 @@ where
                         | (Some(Expr { kind: ExprKind::ArrayRef { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::ArraySlice { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::Apply { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::ByRef(_), .. }), _)
+                        | (Some(Expr { kind: ExprKind::Deref(_), .. }), _)
                         | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
                             unreachable!()
                         }
@@ -1482,6 +1484,12 @@ where
         attempt(spaces().with(typedef())),
         attempt(spaces().with(raw_string())),
         attempt(spaces().with(array())),
+        attempt(choice((
+            (position(), sptoken('&').with(expr()))
+                .map(|(pos, expr)| ExprKind::ByRef(Arc::new(expr)).to_expr(pos)),
+            (position(), sptoken('*').with(expr()))
+                .map(|(pos, expr)| ExprKind::Deref(Arc::new(expr)).to_expr(pos)),
+        ))),
         attempt(spaces().with(arith())),
         attempt(spaces().with(tuple())),
         attempt(spaces().with(structure())),

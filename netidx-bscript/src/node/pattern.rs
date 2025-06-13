@@ -489,6 +489,7 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
             | Type::Set(_)
             | Type::TVar(_)
             | Type::Array(_)
+            | Type::ByRef(_)
             | Type::Tuple(_)
             | Type::Variant(_, _)
             | Type::Struct(_)

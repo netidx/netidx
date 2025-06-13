@@ -70,6 +70,7 @@ pub enum Type {
     Set(Arc<[Type]>),
     TVar(TVar),
     Array(Arc<Type>),
+    ByRef(Arc<Type>),
     Tuple(Arc<[Type]>),
     Struct(Arc<[(ArcStr, Type)]>),
     Variant(ArcStr, Arc<[Type]>),
@@ -102,6 +103,7 @@ impl Type {
             | Self::Fn(_)
             | Self::Set(_)
             | Self::Array(_)
+            | Self::ByRef(_)
             | Self::Tuple(_)
             | Self::Struct(_)
             | Self::Variant(_, _) => true,
@@ -228,6 +230,8 @@ impl Type {
                     .map(|(t0, t1)| t0.contains_int(env, hist, t1))
                     .collect::<Result<AndAc>>()?
                     .0),
+            (Self::ByRef(t0), Self::ByRef(t1)) => t0.contains_int(env, hist, t1),
+            (Self::ByRef(_), _) | (_, Self::ByRef(_)) => Ok(false),
             (Self::Tuple(_), Self::Array(_))
             | (Self::Tuple(_), Self::Primitive(_))
             | (Self::Tuple(_), Self::Struct(_))
@@ -373,6 +377,13 @@ impl Type {
                     Type::Set(Arc::from_iter([u.clone(), t.clone()]))
                 }
             }
+            (t @ Type::ByRef(t0), u @ Type::ByRef(t1)) => {
+                if t0 == t1 {
+                    Type::ByRef(t0.clone())
+                } else {
+                    Type::Set(Arc::from_iter([u.clone(), t.clone()]))
+                }
+            }
             (Type::Set(s0), Type::Set(s1)) => {
                 Type::Set(Arc::from_iter(s0.iter().cloned().chain(s1.iter().cloned())))
             }
@@ -432,6 +443,9 @@ impl Type {
             }
             (t0 @ Type::TVar(_), t1) | (t1, t0 @ Type::TVar(_)) => {
                 Type::Set(Arc::from_iter([t0.clone(), t1.clone()]))
+            }
+            (t @ Type::ByRef(_), u) | (u, t @ Type::ByRef(_)) => {
+                Type::Set(Arc::from_iter([t.clone(), u.clone()]))
             }
             (tr @ Type::Ref { .. }, t) | (t, tr @ Type::Ref { .. }) => {
                 Type::Set(Arc::from_iter([tr.clone(), t.clone()]))
@@ -505,6 +519,9 @@ impl Type {
             (Type::Array(t0), Type::Array(t1)) => {
                 Ok(Type::Array(Arc::new(t0.diff_int(env, hist, t1)?)))
             }
+            (Type::ByRef(t0), Type::ByRef(t1)) => {
+                Ok(Type::ByRef(Arc::new(t0.diff_int(env, hist, t1)?)))
+            }
             (Type::Set(s0), Type::Set(s1)) => {
                 let mut s: SmallVec<[Type; 4]> = smallvec![];
                 for i in 0..s0.len() {
@@ -543,6 +560,7 @@ impl Type {
                 }
             }
             (Type::Struct(_), _) | (_, Type::Struct(_)) => Ok(self.clone()),
+            (Type::ByRef(_), _) | (_, Type::ByRef(_)) => Ok(self.clone()),
             (Type::Variant(tg0, t0), Type::Variant(tg1, t1)) => {
                 if tg0 == tg1 && t0.len() == t1.len() && t0 == t1 {
                     Ok(Type::Primitive(BitFlags::empty()))
@@ -620,6 +638,7 @@ impl Type {
                 }
             }
             Type::Array(t) => t.alias_tvars(known),
+            Type::ByRef(t) => t.alias_tvars(known),
             Type::Tuple(ts) => {
                 for t in ts.iter() {
                     t.alias_tvars(known)
@@ -660,6 +679,7 @@ impl Type {
                 }
             }
             Type::Array(t) => t.collect_tvars(known),
+            Type::ByRef(t) => t.collect_tvars(known),
             Type::Tuple(ts) => {
                 for t in ts.iter() {
                     t.collect_tvars(known)
@@ -698,6 +718,7 @@ impl Type {
                 params.iter().try_for_each(|t| t.check_tvars_declared(declared))
             }
             Type::Array(t) => t.check_tvars_declared(declared),
+            Type::ByRef(t) => t.check_tvars_declared(declared),
             Type::Tuple(ts) => {
                 ts.iter().try_for_each(|t| t.check_tvars_declared(declared))
             }
@@ -724,6 +745,7 @@ impl Type {
             Type::Bottom | Type::Primitive(_) => false,
             Type::Ref { .. } => false,
             Type::Array(t0) => t0.has_unbound(),
+            Type::ByRef(t0) => t0.has_unbound(),
             Type::Tuple(ts) => ts.iter().any(|t| t.has_unbound()),
             Type::Struct(ts) => ts.iter().any(|(_, t)| t.has_unbound()),
             Type::Variant(_, ts) => ts.iter().any(|t| t.has_unbound()),
@@ -739,6 +761,7 @@ impl Type {
             Type::Bottom | Type::Primitive(_) => (),
             Type::Ref { .. } => (),
             Type::Array(t0) => t0.bind_as(t),
+            Type::ByRef(t0) => t0.bind_as(t),
             Type::Tuple(ts) => {
                 for elt in ts.iter() {
                     elt.bind_as(t)
@@ -782,6 +805,7 @@ impl Type {
                 params: Arc::from_iter(params.iter().map(|t| t.reset_tvars())),
             },
             Type::Array(t0) => Type::Array(Arc::new(t0.reset_tvars())),
+            Type::ByRef(t0) => Type::ByRef(Arc::new(t0.reset_tvars())),
             Type::Tuple(ts) => {
                 Type::Tuple(Arc::from_iter(ts.iter().map(|t| t.reset_tvars())))
             }
@@ -814,6 +838,7 @@ impl Type {
                 params: Arc::from_iter(params.iter().map(|t| t.replace_tvars(known))),
             },
             Type::Array(t0) => Type::Array(Arc::new(t0.replace_tvars(known))),
+            Type::ByRef(t0) => Type::ByRef(Arc::new(t0.replace_tvars(known))),
             Type::Tuple(ts) => {
                 Type::Tuple(Arc::from_iter(ts.iter().map(|t| t.replace_tvars(known))))
             }
@@ -836,6 +861,7 @@ impl Type {
         match self {
             Type::Bottom | Type::Primitive(_) | Type::Ref { .. } => (),
             Type::Array(t0) => t0.unbind_tvars(),
+            Type::ByRef(t0) => t0.unbind_tvars(),
             Type::Tuple(ts) | Type::Variant(_, ts) | Type::Set(ts) => {
                 for t in ts.iter() {
                     t.unbind_tvars()
@@ -865,7 +891,7 @@ impl Type {
                 tv.read().typ.read().as_ref().and_then(|t| t.first_prim_int(env, hist))
             }
             // array, tuple, and struct casting are handled directly
-            Type::Array(_) | Type::Tuple(_) | Type::Struct(_) | Type::Variant(_, _) => {
+            Type::Array(_) | Type::Tuple(_) | Type::Struct(_) | Type::Variant(_, _) | Type::ByRef(_) => {
                 None
             }
             Type::Ref { .. } => {
@@ -908,6 +934,7 @@ impl Type {
                 None => bail!("can't cast a value to a free type variable"),
             },
             Type::Array(et) => et.check_cast_int(env, hist),
+            Type::ByRef(_) => bail!("can't cast a reference"),
             Type::Tuple(ts) => Ok(for t in ts.iter() {
                 t.check_cast_int(env, hist)?
             }),
@@ -1161,6 +1188,7 @@ impl Type {
                 Value::Array(a) => a.iter().all(|v| et.is_a_int(env, hist, v)),
                 _ => false,
             },
+            Type::ByRef(_) => matches!(v, Value::U64(_) | Value::V64(_)),
             Type::Tuple(ts) => match v {
                 Value::Array(elts) => {
                     elts.len() == ts.len()
@@ -1236,6 +1264,7 @@ impl Type {
             | Type::Ref { .. }
             | Type::Fn(_)
             | Type::Array(_)
+            | Type::ByRef(_)
             | Type::Tuple(_)
             | Type::Struct(_)
             | Type::Variant(_, _)
@@ -1250,6 +1279,7 @@ impl Type {
             | Self::Fn(_)
             | Self::Set(_)
             | Self::Array(_)
+            | Self::ByRef(_)
             | Self::Tuple(_)
             | Self::Struct(_)
             | Self::Variant(_, _)
@@ -1308,6 +1338,7 @@ impl Type {
             Type::TVar(tv) => Type::TVar(tv.normalize()),
             Type::Set(s) => Self::flatten_set(s.iter().map(|t| t.normalize())),
             Type::Array(t) => Type::Array(Arc::new(t.normalize())),
+            Type::ByRef(t) => Type::ByRef(Arc::new(t.normalize())),
             Type::Tuple(t) => {
                 Type::Tuple(Arc::from_iter(t.iter().map(|t| t.normalize())))
             }
@@ -1370,6 +1401,10 @@ impl Type {
                     None
                 }
             }
+            (Type::ByRef(t0), Type::ByRef(t1)) => {
+                t0.merge(t1).map(|t| Type::ByRef(Arc::new(t)))
+            }
+            (Type::ByRef(_), _) | (_, Type::ByRef(_)) => None,
             (Type::Array(_), _) | (_, Type::Array(_)) => None,
             (Type::Set(s0), Type::Set(s1)) => {
                 Some(Self::flatten_set(s0.iter().cloned().chain(s1.iter().cloned())))
@@ -1449,6 +1484,7 @@ impl Type {
             Type::Bottom => Type::Bottom,
             Type::Primitive(s) => Type::Primitive(*s),
             Type::Array(t0) => Type::Array(Arc::new(t0.scope_refs(scope))),
+            Type::ByRef(t) => Type::ByRef(Arc::new(t.scope_refs(scope))),
             Type::Tuple(ts) => {
                 let i = ts.iter().map(|t| t.scope_refs(scope));
                 Type::Tuple(Arc::from_iter(i))
@@ -1520,6 +1556,7 @@ impl fmt::Display for Type {
             Self::TVar(tv) => write!(f, "{tv}"),
             Self::Fn(t) => write!(f, "{t}"),
             Self::Array(t) => write!(f, "Array<{t}>"),
+            Self::ByRef(t) => write!(f, "&{t}"),
             Self::Tuple(ts) => {
                 write!(f, "(")?;
                 for (i, t) in ts.iter().enumerate() {

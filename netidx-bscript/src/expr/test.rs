@@ -586,6 +586,18 @@ macro_rules! structwith {
     };
 }
 
+macro_rules! byref {
+    ($inner:expr) => {
+        $inner.prop_map(|e| ExprKind::ByRef(Arc::new(e)).to_expr_nopos())
+    };
+}
+
+macro_rules! deref {
+    ($inner:expr) => {
+        $inner.prop_map(|e| ExprKind::Deref(Arc::new(e)).to_expr_nopos())
+    };
+}
+
 macro_rules! inlinemodule {
     ($inner:expr) => {
         (any::<bool>(), random_fname(), collection::vec($inner, (0, 10))).prop_map(
@@ -630,6 +642,8 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
             inner
                 .clone()
                 .prop_map(|e0| ExprKind::Not { expr: Arc::new(e0) }.to_expr_nopos()),
+            byref!(inner.clone()),
+            deref!(inner.clone()),
             binop!(inner.clone(), Add),
             binop!(inner.clone(), Sub),
             binop!(inner.clone(), Mul),

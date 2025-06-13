@@ -53,6 +53,7 @@ impl<'a, C: Ctx, E: UserEvent> TVal<'a, C, E> {
                 write!(f, "]")
             }
             (Type::Array(_), v) => write!(f, "{}", NakedValue(v)),
+            (Type::ByRef(_), v) => write!(f, "{}", NakedValue(v)),
             (Type::Struct(flds), Value::Array(a)) => {
                 write!(f, "{{")?;
                 for (i, ((n, et), v)) in flds.iter().zip(a.iter()).enumerate() {

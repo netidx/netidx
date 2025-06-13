@@ -584,7 +584,9 @@ impl<C: Ctx, E: UserEvent> Bind<C, E> {
                 let typ = node.typ().clone();
                 let ptyp = pattern.infer_type_predicate();
                 if !ptyp.contains(&ctx.env, &typ)? {
-                    bail!("at {pos} match error {typ} can't be matched by {ptyp}");
+                    if !matches!(typ, Type::ByRef(_)) {
+                        bail!("at {pos} match error {typ} can't be matched by {ptyp}");
+                    }
                 }
                 typ
             }
@@ -1003,6 +1005,141 @@ pub(crate) struct Qop<C: Ctx, E: UserEvent> {
     typ: Type,
     id: BindId,
     n: Node<C, E>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ByRef<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    child: Node<C, E>,
+    id: BindId,
+}
+
+#[derive(Debug)]
+pub(crate) struct Deref<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    child: Node<C, E>,
+    id: Option<BindId>,
+    top_id: ExprId,
+}
+
+impl<C: Ctx, E: UserEvent> ByRef<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        expr: &Expr,
+    ) -> Result<Node<C, E>> {
+        let child = compile(ctx, expr.clone(), scope, top_id)?;
+        let id = BindId::new();
+        let typ = Type::ByRef(Arc::new(child.typ().clone()));
+        Ok(Box::new(Self { spec, typ, child, id }))
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Deref<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        expr: &Expr,
+    ) -> Result<Node<C, E>> {
+        let child = compile(ctx, expr.clone(), scope, top_id)?;
+        let typ = Type::empty_tvar();
+        Ok(Box::new(Self { spec, typ, child, id: None, top_id }))
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for ByRef<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        if let Some(v) = self.child.update(ctx, event) {
+            ctx.set_var(self.id, v);
+        }
+        if event.init {
+            Some(Value::U64(self.id.inner()))
+        } else {
+            None
+        }
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.child.delete(ctx)
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.child.refs(f)
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.child, self.child.typecheck(ctx))?;
+        let t = Type::ByRef(Arc::new(self.child.typ().clone()));
+        wrap!(self, self.typ.check_contains(&ctx.env, &t))
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Deref<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        if let Some(v) = self.child.update(ctx, event) {
+            match v {
+                Value::U64(i) | Value::V64(i) => {
+                    let new_id = BindId::from_u64(i);
+                    if self.id != Some(new_id) {
+                        if let Some(old) = self.id {
+                            ctx.user.unref_var(old, self.top_id);
+                        }
+                        ctx.user.ref_var(new_id, self.top_id);
+                        self.id = Some(new_id);
+                    }
+                }
+                _ => return err!("expected u64 bind id"),
+            }
+        }
+        self.id.and_then(|id| event.variables.get(&id).cloned())
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Some(id) = self.id.take() {
+            ctx.user.unref_var(id, self.top_id);
+        }
+        self.child.delete(ctx);
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        self.child.refs(f);
+        if let Some(id) = self.id {
+            f(id);
+        }
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.child, self.child.typecheck(ctx))?;
+        let typ = match self.child.typ() {
+            Type::ByRef(t) => (**t).clone(),
+            _ => bail!("expected reference"),
+        };
+        wrap!(self, self.typ.check_contains(&ctx.env, &typ))?;
+        self.typ = typ;
+        Ok(())
+    }
 }
 
 impl<C: Ctx, E: UserEvent> Qop<C, E> {

@@ -1075,3 +1075,32 @@ run!(typedef_tvar_ok, TYPEDEF_TVAR_OK, |v: Result<&Value>| match v {
     Ok(Value::I64(0)) => true,
     _ => false,
 });
+
+#[cfg(test)]
+const BYREF_DEREF: &str = r#"
+{
+  let x = &42;
+  *x
+}
+"#;
+
+#[cfg(test)]
+run!(byref_deref, BYREF_DEREF, |v: Result<&Value>| match v {
+    Ok(Value::I64(42)) => true,
+    _ => false,
+});
+
+#[cfg(test)]
+const BYREF_TUPLE: &str = r#"
+{
+  let r = &(1, 2);
+  let t = *r;
+  t.0 + t.1
+}
+"#;
+
+#[cfg(test)]
+run!(byref_tuple, BYREF_TUPLE, |v: Result<&Value>| match v {
+    Ok(Value::I64(3)) => true,
+    _ => false,
+});
