@@ -826,17 +826,13 @@ impl ExprKind {
             }
             ExprKind::ByRef(e) => {
                 try_single_line!(true);
-                writeln!(buf, "&(")?;
-                e.kind.pretty_print(indent + 2, limit, true, buf)?;
-                push_indent(indent, buf);
-                writeln!(buf, ")")
+                write!(buf, "&")?;
+                e.kind.pretty_print(indent + 2, limit, false, buf)
             }
             ExprKind::Deref(e) => {
                 try_single_line!(true);
-                writeln!(buf, "*(")?;
-                e.kind.pretty_print(indent + 2, limit, true, buf)?;
-                push_indent(indent, buf);
-                writeln!(buf, ")")
+                write!(buf, "*")?;
+                e.kind.pretty_print(indent + 2, limit, false, buf)
             }
             ExprKind::Select { arg, arms } => {
                 try_single_line!(true);
@@ -1687,11 +1683,19 @@ impl Expr {
             }),
             ExprKind::ByRef(e) => Box::pin(async move {
                 let e = e.resolve_modules(scope, resolvers).await?;
-                Ok(Expr { id: self.id, pos: self.pos, kind: ExprKind::ByRef(Arc::new(e)) })
+                Ok(Expr {
+                    id: self.id,
+                    pos: self.pos,
+                    kind: ExprKind::ByRef(Arc::new(e)),
+                })
             }),
             ExprKind::Deref(e) => Box::pin(async move {
                 let e = e.resolve_modules(scope, resolvers).await?;
-                Ok(Expr { id: self.id, pos: self.pos, kind: ExprKind::Deref(Arc::new(e)) })
+                Ok(Expr {
+                    id: self.id,
+                    pos: self.pos,
+                    kind: ExprKind::Deref(Arc::new(e)),
+                })
             }),
             ExprKind::Not { expr: e } => Box::pin(async move {
                 let e = e.resolve_modules(scope, resolvers).await?;
