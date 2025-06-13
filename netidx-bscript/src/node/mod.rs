@@ -1000,28 +1000,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Connect<C, E> {
 }
 
 #[derive(Debug)]
-pub(crate) struct Qop<C: Ctx, E: UserEvent> {
-    spec: Expr,
-    typ: Type,
-    id: BindId,
-    n: Node<C, E>,
-}
-
-#[derive(Debug)]
 pub(crate) struct ByRef<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     child: Node<C, E>,
     id: BindId,
-}
-
-#[derive(Debug)]
-pub(crate) struct Deref<C: Ctx, E: UserEvent> {
-    spec: Expr,
-    typ: Type,
-    child: Node<C, E>,
-    id: Option<BindId>,
-    top_id: ExprId,
 }
 
 impl<C: Ctx, E: UserEvent> ByRef<C, E> {
@@ -1036,20 +1019,6 @@ impl<C: Ctx, E: UserEvent> ByRef<C, E> {
         let id = BindId::new();
         let typ = Type::ByRef(Arc::new(child.typ().clone()));
         Ok(Box::new(Self { spec, typ, child, id }))
-    }
-}
-
-impl<C: Ctx, E: UserEvent> Deref<C, E> {
-    pub(crate) fn compile(
-        ctx: &mut ExecCtx<C, E>,
-        spec: Expr,
-        scope: &ModPath,
-        top_id: ExprId,
-        expr: &Expr,
-    ) -> Result<Node<C, E>> {
-        let child = compile(ctx, expr.clone(), scope, top_id)?;
-        let typ = Type::empty_tvar();
-        Ok(Box::new(Self { spec, typ, child, id: None, top_id }))
     }
 }
 
@@ -1085,6 +1054,29 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ByRef<C, E> {
         wrap!(self.child, self.child.typecheck(ctx))?;
         let t = Type::ByRef(Arc::new(self.child.typ().clone()));
         wrap!(self, self.typ.check_contains(&ctx.env, &t))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Deref<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    child: Node<C, E>,
+    id: Option<BindId>,
+    top_id: ExprId,
+}
+
+impl<C: Ctx, E: UserEvent> Deref<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        expr: &Expr,
+    ) -> Result<Node<C, E>> {
+        let child = compile(ctx, expr.clone(), scope, top_id)?;
+        let typ = Type::empty_tvar();
+        Ok(Box::new(Self { spec, typ, child, id: None, top_id }))
     }
 }
 
@@ -1137,9 +1129,16 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Deref<C, E> {
             _ => bail!("expected reference"),
         };
         wrap!(self, self.typ.check_contains(&ctx.env, &typ))?;
-        self.typ = typ;
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct Qop<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    typ: Type,
+    id: BindId,
+    n: Node<C, E>,
 }
 
 impl<C: Ctx, E: UserEvent> Qop<C, E> {

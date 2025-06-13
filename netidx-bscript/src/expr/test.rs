@@ -227,12 +227,11 @@ fn typexp() -> impl Strategy<Value = Type> {
                 }
             ),
             inner.clone().prop_map(|t| Type::Array(Arc::new(t))),
-            (
-                typath(),
-                collection::vec(inner.clone(), (0, 8))
-            ).prop_map(|(name, params)| {
-                Type::Ref { scope: ModPath::root(), name, params: Arc::from(params) }
-            }),
+            (typath(), collection::vec(inner.clone(), (0, 8))).prop_map(
+                |(name, params)| {
+                    Type::Ref { scope: ModPath::root(), name, params: Arc::from(params) }
+                }
+            ),
             (
                 collection::vec(
                     (option::of(random_fname()), any::<bool>(), inner.clone()),
@@ -347,15 +346,12 @@ fn usestmt() -> impl Strategy<Value = Expr> {
 }
 
 fn typedef() -> impl Strategy<Value = Expr> {
-    (
-        typart(),
-        collection::vec((tvar(), option::of(typexp())), 0..4),
-        typexp(),
-    )
-        .prop_map(|(name, params, typ)| {
+    (typart(), collection::vec((tvar(), option::of(typexp())), 0..4), typexp()).prop_map(
+        |(name, params, typ)| {
             let params = Arc::from_iter(params.into_iter());
             ExprKind::TypeDef { name, params, typ }.to_expr_nopos()
-        })
+        },
+    )
 }
 
 macro_rules! structref {
@@ -642,8 +638,6 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
             inner
                 .clone()
                 .prop_map(|e0| ExprKind::Not { expr: Arc::new(e0) }.to_expr_nopos()),
-            byref!(inner.clone()),
-            deref!(inner.clone()),
             binop!(inner.clone(), Add),
             binop!(inner.clone(), Sub),
             binop!(inner.clone(), Mul),
@@ -661,6 +655,8 @@ fn expr() -> impl Strategy<Value = Expr> {
             arrayslice!(inner.clone()),
             qop!(inner.clone()),
             arithexpr(),
+            byref!(inner.clone()),
+            deref!(inner.clone()),
             structref!(inner.clone()),
             tupleref!(inner.clone()),
             any!(inner.clone()),
@@ -1135,17 +1131,17 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::TypeDef { name: name1, params: p1, typ: typ1 },
         ) => {
             dbg!(name0 == name1)
-                && dbg!(p0.len() == p1.len()
-                    && p0.iter()
-                        .zip(p1.iter())
-                        .all(|((t0, c0), (t1, c1))| {
+                && dbg!(
+                    p0.len() == p1.len()
+                        && p0.iter().zip(p1.iter()).all(|((t0, c0), (t1, c1))| {
                             t0 == t1
                                 && match (c0.as_ref(), c1.as_ref()) {
                                     (Some(c0), Some(c1)) => check_type(c0, c1),
                                     (None, None) => true,
                                     _ => false,
                                 }
-                        }))
+                        })
+                )
                 && dbg!(check_type(&typ0, &typ1))
         }
         (

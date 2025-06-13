@@ -773,12 +773,14 @@ where
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(spstring("Array").with(between(sptoken('<'), sptoken('>'), typexp())))
             .map(|t| Type::Array(Arc::new(t))),
-        attempt(
-            (
-                sptypath(),
-                optional(attempt(between(sptoken('<'), sptoken('>'), sep_by1(typexp(), csep())))),
-            )
-        )
+        attempt((
+            sptypath(),
+            optional(attempt(between(
+                sptoken('<'),
+                sptoken('>'),
+                sep_by1(typexp(), csep()),
+            ))),
+        ))
         .map(|(n, params): (ModPath, Option<SmallVec<[Type; 8]>>)| {
             let params = params
                 .map(|a| Arc::from_iter(a.into_iter()))
@@ -1361,16 +1363,15 @@ where
         optional(attempt(between(
             sptoken('<'),
             sptoken('>'),
-            sep_by1(
-                (tvar(), optional(attempt(sptoken(':').with(typexp())))),
-                csep(),
-            ),
+            sep_by1((tvar(), optional(attempt(sptoken(':').with(typexp())))), csep()),
         ))),
         sptoken('=').with(typexp()),
     )
         .map(|(pos, name, params, typ)| {
             let params = params
-                .map(|ps: SmallVec<[(TVar, Option<Type>); 8]>| Arc::from_iter(ps.into_iter()))
+                .map(|ps: SmallVec<[(TVar, Option<Type>); 8]>| {
+                    Arc::from_iter(ps.into_iter())
+                })
                 .unwrap_or_else(|| Arc::<[(TVar, Option<Type>)]>::from(Vec::new()));
             ExprKind::TypeDef { name, params, typ }.to_expr(pos)
         })
@@ -1472,6 +1473,26 @@ where
         )
 }
 
+fn byref<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char, Position = SourcePosition>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (position(), token('&').with(expr()))
+        .map(|(pos, expr)| ExprKind::ByRef(Arc::new(expr)).to_expr(pos))
+}
+
+fn deref<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char, Position = SourcePosition>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (position(), token('*').with(expr()))
+        .map(|(pos, expr)| ExprKind::Deref(Arc::new(expr)).to_expr(pos))
+}
+
 fn expr_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char, Position = SourcePosition>,
@@ -1479,17 +1500,16 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(spaces().with(module())),
-        attempt(spaces().with(use_module())),
-        attempt(spaces().with(typedef())),
-        attempt(spaces().with(raw_string())),
-        attempt(spaces().with(array())),
+        // nested due to limits on choice size
         attempt(choice((
-            (position(), sptoken('&').with(expr()))
-                .map(|(pos, expr)| ExprKind::ByRef(Arc::new(expr)).to_expr(pos)),
-            (position(), sptoken('*').with(expr()))
-                .map(|(pos, expr)| ExprKind::Deref(Arc::new(expr)).to_expr(pos)),
+            attempt(spaces().with(module())),
+            attempt(spaces().with(use_module())),
+            attempt(spaces().with(typedef())),
+            attempt(spaces().with(raw_string())),
+            attempt(spaces().with(array()))
         ))),
+        attempt(spaces().with(byref())),
+        attempt(spaces().with(deref())),
         attempt(spaces().with(arith())),
         attempt(spaces().with(tuple())),
         attempt(spaces().with(structure())),
@@ -1508,7 +1528,7 @@ where
         attempt(spaces().with(qop(any()))),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
-        attempt(spaces().with(qop(reference()))),
+        attempt(spaces().with(qop(reference())))
     ))
 }
 
