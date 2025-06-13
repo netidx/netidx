@@ -461,6 +461,8 @@ pub enum ExprKind {
     Struct { args: Arc<[(ArcStr, Expr)]> },
     Select { arg: Arc<Expr>, arms: Arc<[(Pattern, Expr)]> },
     Qop(Arc<Expr>),
+    ByRef(Arc<Expr>),
+    Deref(Arc<Expr>),
     Eq { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Ne { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Lt { lhs: Arc<Expr>, rhs: Arc<Expr> },
@@ -822,6 +824,16 @@ impl ExprKind {
                     }
                 }
             }
+            ExprKind::ByRef(e) => {
+                try_single_line!(true);
+                write!(buf, "&")?;
+                e.kind.pretty_print(indent + 2, limit, false, buf)
+            }
+            ExprKind::Deref(e) => {
+                try_single_line!(true);
+                write!(buf, "*")?;
+                e.kind.pretty_print(indent + 2, limit, false, buf)
+            }
             ExprKind::Select { arg, arms } => {
                 try_single_line!(true);
                 write!(buf, "select ")?;
@@ -1141,6 +1153,8 @@ impl fmt::Display for ExprKind {
             ExprKind::Sub { lhs, rhs } => write_binop(f, "-", lhs, rhs),
             ExprKind::Mul { lhs, rhs } => write_binop(f, "*", lhs, rhs),
             ExprKind::Div { lhs, rhs } => write_binop(f, "/", lhs, rhs),
+            ExprKind::ByRef(e) => write!(f, "&{e}"),
+            ExprKind::Deref(e) => write!(f, "*{e}"),
             ExprKind::Not { expr } => {
                 write!(f, "(!{expr})")
             }
@@ -1331,7 +1345,10 @@ impl Expr {
                     e.fold(init, f)
                 })
             }
-            ExprKind::Qop(e) | ExprKind::Not { expr: e } => e.fold(init, f),
+            ExprKind::Qop(e)
+            | ExprKind::ByRef(e)
+            | ExprKind::Deref(e)
+            | ExprKind::Not { expr: e } => e.fold(init, f),
             ExprKind::Add { lhs, rhs }
             | ExprKind::Sub { lhs, rhs }
             | ExprKind::Mul { lhs, rhs }
@@ -1663,6 +1680,22 @@ impl Expr {
             ExprKind::Qop(e) => Box::pin(async move {
                 let e = e.resolve_modules(scope, resolvers).await?;
                 Ok(Expr { id: self.id, pos: self.pos, kind: ExprKind::Qop(Arc::new(e)) })
+            }),
+            ExprKind::ByRef(e) => Box::pin(async move {
+                let e = e.resolve_modules(scope, resolvers).await?;
+                Ok(Expr {
+                    id: self.id,
+                    pos: self.pos,
+                    kind: ExprKind::ByRef(Arc::new(e)),
+                })
+            }),
+            ExprKind::Deref(e) => Box::pin(async move {
+                let e = e.resolve_modules(scope, resolvers).await?;
+                Ok(Expr {
+                    id: self.id,
+                    pos: self.pos,
+                    kind: ExprKind::Deref(Arc::new(e)),
+                })
             }),
             ExprKind::Not { expr: e } => Box::pin(async move {
                 let e = e.resolve_modules(scope, resolvers).await?;

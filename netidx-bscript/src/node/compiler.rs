@@ -2,7 +2,7 @@ use super::{
     callsite::CallSite, lambda::Lambda, select::Select, Add, And, Any, Array, ArrayRef,
     ArraySlice, Bind, Block, Connect, Constant, Div, Eq, Gt, Gte, Lt, Lte, Mul, Ne, Not,
     Or, Qop, Ref, StringInterpolate, Struct, StructRef, StructWith, Sub, Tuple, TupleRef,
-    TypeCast, TypeDef, Use, Variant,
+    TypeCast, TypeDef, Use, Variant, ByRef, Deref,
 };
 use crate::{
     expr::{Expr, ExprId, ExprKind, ModPath, ModuleKind},
@@ -86,6 +86,12 @@ pub(crate) fn compile<C: Ctx, E: UserEvent>(
         }
         Expr { kind: ExprKind::Qop(e), id: _, pos } => {
             Qop::compile(ctx, spec.clone(), scope, top_id, e, pos)
+        }
+        Expr { kind: ExprKind::ByRef(e), id: _, pos: _ } => {
+            ByRef::compile(ctx, spec.clone(), scope, top_id, e)
+        }
+        Expr { kind: ExprKind::Deref(e), id: _, pos: _ } => {
+            Deref::compile(ctx, spec.clone(), scope, top_id, e)
         }
         Expr { kind: ExprKind::Ref { name }, id: _, pos } => {
             Ref::compile(ctx, spec.clone(), scope, top_id, name, pos)

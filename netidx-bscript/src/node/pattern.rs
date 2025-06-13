@@ -489,6 +489,7 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
             | Type::Set(_)
             | Type::TVar(_)
             | Type::Array(_)
+            | Type::ByRef(_)
             | Type::Tuple(_)
             | Type::Variant(_, _)
             | Type::Struct(_)
@@ -538,6 +539,7 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
             | (Type::Tuple(_), Typ::Array)
             | (Type::Struct(_), Typ::Array)
             | (Type::Variant(_, _), Typ::Array | Typ::String) => true,
+            (Type::ByRef(_), Typ::U64) => true,
             _ => self
                 .type_predicate
                 .contains(env, &Type::Primitive(typ.into()))

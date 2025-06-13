@@ -44,6 +44,12 @@ mod tests;
 atomic_id!(BindId);
 atomic_id!(LambdaId);
 
+impl BindId {
+    pub(crate) fn from_u64(v: u64) -> Self {
+        BindId(v)
+    }
+}
+
 #[macro_export]
 macro_rules! errf {
     ($pat:expr, $($arg:expr),*) => {
