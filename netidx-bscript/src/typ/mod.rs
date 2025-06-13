@@ -231,7 +231,6 @@ impl Type {
                     .collect::<Result<AndAc>>()?
                     .0),
             (Self::ByRef(t0), Self::ByRef(t1)) => t0.contains_int(env, hist, t1),
-            (Self::ByRef(_), _) | (_, Self::ByRef(_)) => Ok(false),
             (Self::Tuple(_), Self::Array(_))
             | (Self::Tuple(_), Self::Primitive(_))
             | (Self::Tuple(_), Self::Struct(_))
@@ -297,7 +296,7 @@ impl Type {
                 if let Some(t0) = &*t0.read().typ.read() {
                     return t0.contains_int(env, hist, t1);
                 }
-                *t0.read().typ.write() = Some(t1.clone());
+                *t0.read().typ.write() = Some(dbg!(t1.clone()));
                 Ok(true)
             }
             (t0, Self::TVar(t1)) if !t1.would_cycle(t0) => {
@@ -329,6 +328,8 @@ impl Type {
             (_, Self::TVar(_))
             | (Self::TVar(_), _)
             | (Self::Fn(_), _)
+            | (Self::ByRef(_), _)
+            | (_, Self::ByRef(_))
             | (_, Self::Fn(_)) => Ok(false),
         }
     }
@@ -891,9 +892,11 @@ impl Type {
                 tv.read().typ.read().as_ref().and_then(|t| t.first_prim_int(env, hist))
             }
             // array, tuple, and struct casting are handled directly
-            Type::Array(_) | Type::Tuple(_) | Type::Struct(_) | Type::Variant(_, _) | Type::ByRef(_) => {
-                None
-            }
+            Type::Array(_)
+            | Type::Tuple(_)
+            | Type::Struct(_)
+            | Type::Variant(_, _)
+            | Type::ByRef(_) => None,
             Type::Ref { .. } => {
                 let t = self.lookup_ref(env).ok()?;
                 let t_addr = (t as *const Type).addr();

@@ -1,7 +1,7 @@
 use crate::{
     env, err,
     expr::{self, Expr, ExprId, ExprKind, ModPath},
-    typ::{TVar, Type},
+    typ::{self, TVar, Type},
     BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -584,9 +584,9 @@ impl<C: Ctx, E: UserEvent> Bind<C, E> {
                 let typ = node.typ().clone();
                 let ptyp = pattern.infer_type_predicate();
                 if !ptyp.contains(&ctx.env, &typ)? {
-                    if !matches!(typ, Type::ByRef(_)) {
-                        bail!("at {pos} match error {typ} can't be matched by {ptyp}");
-                    }
+                    typ::format_with_flags(typ::PrintFlag::DerefTVars.into(), || {
+                        bail!("at {pos} match error {typ} can't be matched by {ptyp}")
+                    })?
                 }
                 typ
             }
