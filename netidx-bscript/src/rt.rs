@@ -569,7 +569,7 @@ impl BS {
         }
         if let Some(mut updates) = updates {
             for (id, v) in updates.drain(..) {
-                push_event!(id, v, netidx, subscribed, net_updates)
+                push_event!(dbg!(id), v, netidx, subscribed, net_updates)
             }
         }
         for _ in 0..self.ctx.user.net_writes.len() {

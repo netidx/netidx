@@ -296,7 +296,7 @@ impl Type {
                 if let Some(t0) = &*t0.read().typ.read() {
                     return t0.contains_int(env, hist, t1);
                 }
-                *t0.read().typ.write() = Some(dbg!(t1.clone()));
+                *t0.read().typ.write() = Some(t1.clone());
                 Ok(true)
             }
             (t0, Self::TVar(t1)) if !t1.would_cycle(t0) => {
