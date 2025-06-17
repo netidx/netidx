@@ -18,7 +18,6 @@ use std::{
     iter,
     sync::{Arc, LazyLock},
 };
-use tokio::time::Instant;
 use triomphe::Arc as TArc;
 
 pub trait MapFn<C: Ctx, E: UserEvent>: Debug + Default + Send + Sync + 'static {
@@ -358,7 +357,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
     ) -> Option<Value> {
         let init = match from[0].update(ctx, event) {
             None => false,
-            Some(Value::Array(a)) if dbg!(a.len() == self.binds.len()) => {
+            Some(Value::Array(a)) if a.len() == self.binds.len() => {
                 for (id, v) in self.binds.iter().zip(a.iter()) {
                     event.variables.insert(*id, v.clone());
                 }
@@ -425,9 +424,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
                 }
             }
         }
-        let tm = Instant::now();
         let r = self.head.as_mut().and_then(|n| n.update(ctx, event));
-        dbg!((tm.elapsed(), event.netidx.len()));
         event.init = old_init;
         r
     }
