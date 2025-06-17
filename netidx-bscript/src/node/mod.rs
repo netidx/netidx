@@ -13,7 +13,7 @@ use netidx::{publisher::Typ, subscriber::Value};
 use netidx_netproto::valarray::ValArray;
 use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
-use std::{cell::RefCell, iter};
+use std::{cell::RefCell, iter, sync::LazyLock};
 use triomphe::Arc;
 
 pub(crate) mod callsite;
@@ -45,19 +45,20 @@ macro_rules! update_args {
     }};
 }
 
+static NOP: LazyLock<Arc<Expr>> = LazyLock::new(|| {
+    Arc::new(
+        ExprKind::Constant(Value::String(literal!("nop"))).to_expr(Default::default()),
+    )
+});
+
 #[derive(Debug)]
 pub(crate) struct Nop {
-    pub spec: Expr,
     pub typ: Type,
 }
 
 impl Nop {
     pub(crate) fn new<C: Ctx, E: UserEvent>(typ: Type) -> Node<C, E> {
-        Box::new(Nop {
-            spec: ExprKind::Constant(Value::String(literal!("nop")))
-                .to_expr(Default::default()),
-            typ,
-        })
+        Box::new(Nop { typ })
     }
 }
 
@@ -77,7 +78,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Nop {
     }
 
     fn spec(&self) -> &Expr {
-        &self.spec
+        &NOP
     }
 
     fn typ(&self) -> &Type {
@@ -507,7 +508,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Constant {
 #[derive(Debug)]
 pub(crate) struct Block<C: Ctx, E: UserEvent> {
     spec: Expr,
-    children: SmallVec<[Node<C, E>; 8]>,
+    children: Box<[Node<C, E>]>,
 }
 
 impl<C: Ctx, E: UserEvent> Block<C, E> {
@@ -521,7 +522,7 @@ impl<C: Ctx, E: UserEvent> Block<C, E> {
         let children = exprs
             .iter()
             .map(|e| compile(ctx, e.clone(), scope, top_id))
-            .collect::<Result<SmallVec<[Node<C, E>; 8]>>>()?;
+            .collect::<Result<Box<[Node<C, E>]>>>()?;
         Ok(Box::new(Self { spec, children }))
     }
 }
@@ -641,7 +642,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Bind<C, E> {
 
 #[derive(Debug)]
 pub(crate) struct Ref {
-    spec: Expr,
+    spec: Arc<Expr>,
     typ: Type,
     id: BindId,
     top_id: ExprId,
@@ -661,6 +662,7 @@ impl Ref {
             Some((_, bind)) => {
                 ctx.user.ref_var(bind.id, top_id);
                 let typ = bind.typ.clone();
+                let spec = Arc::new(spec);
                 Ok(Box::new(Self { spec, typ, id: bind.id, top_id }))
             }
         }
@@ -863,7 +865,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TupleRef<C, E> {
 pub(crate) struct StringInterpolate<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
-    args: SmallVec<[Cached<C, E>; 8]>,
+    args: Box<[Cached<C, E>]>,
 }
 
 impl<C: Ctx, E: UserEvent> StringInterpolate<C, E> {
@@ -1263,7 +1265,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TypeCast<C, E> {
 pub(crate) struct Any<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
-    n: SmallVec<[Node<C, E>; 8]>,
+    n: Box<[Node<C, E>]>,
 }
 
 impl<C: Ctx, E: UserEvent> Any<C, E> {
@@ -1277,7 +1279,7 @@ impl<C: Ctx, E: UserEvent> Any<C, E> {
         let n = args
             .iter()
             .map(|e| compile(ctx, e.clone(), scope, top_id))
-            .collect::<Result<SmallVec<[_; 8]>>>()?;
+            .collect::<Result<Box<[_]>>>()?;
         let typ =
             Type::Set(Arc::from_iter(n.iter().map(|n| n.typ().clone()))).normalize();
         Ok(Box::new(Self { spec, typ, n }))
@@ -1322,7 +1324,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Any<C, E> {
 pub(crate) struct Array<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
-    n: SmallVec<[Cached<C, E>; 8]>,
+    n: Box<[Cached<C, E>]>,
 }
 
 impl<C: Ctx, E: UserEvent> Array<C, E> {
@@ -1387,7 +1389,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Array<C, E> {
 pub(crate) struct Tuple<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
-    n: SmallVec<[Cached<C, E>; 8]>,
+    n: Box<[Cached<C, E>]>,
 }
 
 impl<C: Ctx, E: UserEvent> Tuple<C, E> {
@@ -1401,7 +1403,7 @@ impl<C: Ctx, E: UserEvent> Tuple<C, E> {
         let n = args
             .iter()
             .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
-            .collect::<Result<SmallVec<[_; 8]>>>()?;
+            .collect::<Result<Box<[_]>>>()?;
         let typ = Type::Tuple(Arc::from_iter(n.iter().map(|n| n.node.typ().clone())));
         Ok(Box::new(Self { spec, typ, n }))
     }
@@ -1461,7 +1463,7 @@ pub(crate) struct Variant<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     tag: ArcStr,
-    n: SmallVec<[Cached<C, E>; 8]>,
+    n: Box<[Cached<C, E>]>,
 }
 
 impl<C: Ctx, E: UserEvent> Variant<C, E> {
@@ -1476,7 +1478,7 @@ impl<C: Ctx, E: UserEvent> Variant<C, E> {
         let n = args
             .iter()
             .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
-            .collect::<Result<SmallVec<[_; 8]>>>()?;
+            .collect::<Result<Box<[_]>>>()?;
         let typs = Arc::from_iter(n.iter().map(|n| n.node.typ().clone()));
         let typ = Type::Variant(tag.clone(), typs);
         let tag = tag.clone();
@@ -1546,8 +1548,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Variant<C, E> {
 pub(crate) struct Struct<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
-    names: SmallVec<[ArcStr; 8]>,
-    n: SmallVec<[Cached<C, E>; 8]>,
+    names: Box<[ArcStr]>,
+    n: Box<[Cached<C, E>]>,
 }
 
 impl<C: Ctx, E: UserEvent> Struct<C, E> {
@@ -1565,7 +1567,8 @@ impl<C: Ctx, E: UserEvent> Struct<C, E> {
         });
         let n = n
             .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
-            .collect::<Result<SmallVec<[_; 8]>>>()?;
+            .collect::<Result<Box<[_]>>>()?;
+        let names = Box::from_iter(names);
         let typs =
             names.iter().zip(n.iter()).map(|(n, a)| (n.clone(), a.node.typ().clone()));
         let typ = Type::Struct(Arc::from_iter(typs));
@@ -1636,7 +1639,7 @@ pub(crate) struct StructWith<C: Ctx, E: UserEvent> {
     typ: Type,
     source: Node<C, E>,
     current: Option<ValArray>,
-    replace: SmallVec<[(usize, Cached<C, E>); 8]>,
+    replace: Box<[(usize, Cached<C, E>)]>,
 }
 
 impl<C: Ctx, E: UserEvent> StructWith<C, E> {
@@ -1652,7 +1655,7 @@ impl<C: Ctx, E: UserEvent> StructWith<C, E> {
         let replace = replace
             .iter()
             .map(|(_, e)| Ok((0, Cached::new(compile(ctx, e.clone(), scope, top_id)?))))
-            .collect::<Result<SmallVec<[_; 8]>>>()?;
+            .collect::<Result<Box<[_]>>>()?;
         let typ = source.typ().clone();
         Ok(Box::new(Self { spec, typ, source, current: None, replace }))
     }

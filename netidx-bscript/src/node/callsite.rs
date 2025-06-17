@@ -11,7 +11,6 @@ use combine::stream::position::SourcePosition;
 use compact_str::{format_compact, CompactString};
 use fxhash::FxHashMap;
 use netidx::subscriber::Value;
-use smallvec::{smallvec, SmallVec};
 use std::{collections::hash_map::Entry, mem, sync::Arc};
 use triomphe::Arc as TArc;
 
@@ -50,9 +49,9 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
     top_id: ExprId,
     typ: &FnType,
     args: &TArc<[(Option<ArcStr>, Expr)]>,
-) -> Result<(SmallVec<[Node<C, E>; 8]>, FxHashMap<ArcStr, bool>)> {
+) -> Result<(Vec<Node<C, E>>, FxHashMap<ArcStr, bool>)> {
     let mut named = FxHashMap::default();
-    let mut nodes: SmallVec<[Node<C, E>; 8]> = smallvec![];
+    let mut nodes: Vec<Node<C, E>> = vec![];
     let mut arg_spec: FxHashMap<ArcStr, bool> = FxHashMap::default();
     named.clear();
     check_named_args(&mut named, args)?;
@@ -86,10 +85,10 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
 
 #[derive(Debug)]
 pub(crate) struct CallSite<C: Ctx, E: UserEvent> {
-    pub(super) spec: Expr,
+    pub(super) spec: TArc<Expr>,
     pub(super) ftype: TArc<FnType>,
     pub(super) fnode: Node<C, E>,
-    pub(super) args: SmallVec<[Node<C, E>; 8]>,
+    pub(super) args: Vec<Node<C, E>>,
     pub(super) arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
     pub(super) function: Option<(LambdaId, Box<dyn Apply<C, E>>)>,
     pub(super) top_id: ExprId,
@@ -112,6 +111,7 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
         };
         let (args, arg_spec) = compile_apply_args(ctx, scope, top_id, &ftype, &args)
             .with_context(|| format!("in apply at {pos}"))?;
+        let spec = TArc::new(spec);
         let site = Self { spec, ftype, args, arg_spec, fnode, function: None, top_id };
         Ok(Box::new(site))
     }

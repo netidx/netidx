@@ -11,7 +11,6 @@ use arcstr::{literal, ArcStr};
 use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
 use netidx::subscriber::Value;
-use smallvec::smallvec;
 use std::{collections::VecDeque, sync::Arc};
 use triomphe::Arc as TArc;
 
@@ -354,7 +353,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
                 let fid = BindId::new();
                 let fnode = genn::reference(ctx, fid, fnode.typ().clone(), top_id);
                 let typ = TArc::new(typ.clone());
-                let pred = genn::apply(fnode, smallvec![xn], typ.clone(), top_id);
+                let pred = genn::apply(fnode, vec![xn], typ.clone(), top_id);
                 let queue = VecDeque::new();
                 let out = BindId::new();
                 ctx.user.ref_var(out, top_id);

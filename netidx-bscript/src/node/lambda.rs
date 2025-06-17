@@ -1,7 +1,7 @@
 use super::{compiler::compile, Nop};
 use crate::{
     env::LambdaDef,
-    expr::{self, Arg, Expr, ExprId, ExprKind, ModPath},
+    expr::{self, Arg, Expr, ExprId, ModPath},
     node::pattern::StructPatternNode,
     typ::{FnArgType, FnType, TVar, Type},
     wrap, Apply, BindId, Ctx, Event, ExecCtx, InitFn, LambdaId, Node, Update, UserEvent,
@@ -346,10 +346,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Lambda<C, E> {
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         let mut faux_args = Box::from_iter(self.def.typ.args.iter().map(|a| {
-            let n: Node<C, E> = Box::new(Nop {
-                spec: ExprKind::Constant(Value::Bool(false)).to_expr(Default::default()),
-                typ: a.typ.clone(),
-            });
+            let n: Node<C, E> = Box::new(Nop { typ: a.typ.clone() });
             n
         }));
         let mut f = wrap!(self, (self.def.init)(ctx, &faux_args, ExprId::new()))?;

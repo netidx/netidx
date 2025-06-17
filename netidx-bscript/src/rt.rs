@@ -757,8 +757,11 @@ impl BS {
             macro_rules! peek {
                 (updates) => {
                     if self.ctx.user.net_updates.is_empty() {
-                        if let Ok(Some(up)) = self.ctx.user.updates.try_next() {
-                            updates = Some(up);
+                        while let Ok(Some(mut up)) = self.ctx.user.updates.try_next() {
+                            match &mut updates {
+                                None => updates = Some(up),
+                                Some(prev) => prev.extend(up.drain(..)),
+                            }
                         }
                     }
                 };
@@ -796,7 +799,7 @@ impl BS {
                 },
                 up = maybe_next(self.ctx.user.net_updates.is_empty(), &mut self.ctx.user.updates) => {
                     updates = Some(up);
-                    peek!(writes, tasks, rpcs);
+                    peek!(updates, writes, tasks, rpcs);
                 },
                 up = self.ctx.user.tasks.join_next() => {
                     if let Some(Ok(up)) = up {

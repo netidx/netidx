@@ -53,7 +53,7 @@ macro_rules! arity2 {
 }
 
 #[derive(Debug)]
-pub struct CachedVals(pub SmallVec<[Option<Value>; 4]>);
+pub struct CachedVals(pub Box<[Option<Value>]>);
 
 impl CachedVals {
     pub fn new<C: Ctx, E: UserEvent>(from: &[Node<C, E>]) -> CachedVals {
