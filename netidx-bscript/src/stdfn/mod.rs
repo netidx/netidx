@@ -3,7 +3,6 @@ use crate::{
 };
 use netidx::subscriber::Value;
 use netidx_core::utils::Either;
-use smallvec::SmallVec;
 use std::{
     fmt::Debug,
     iter,
@@ -81,39 +80,20 @@ impl CachedVals {
     /// instead of a consolidated bool
     pub fn update_diff<C: Ctx, E: UserEvent>(
         &mut self,
+        up: &mut [bool],
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
-    ) -> SmallVec<[bool; 4]> {
-        from.into_iter()
-            .enumerate()
-            .map(|(i, src)| match src.update(ctx, event) {
-                None => false,
-                v @ Some(_) => {
+    ) {
+        for (i, n) in from.iter_mut().enumerate() {
+            match n.update(ctx, event) {
+                None => (),
+                v => {
                     self.0[i] = v;
-                    true
+                    up[i] = true
                 }
-            })
-            .collect()
-    }
-
-    /// Only update if the value changes, return the indexes of nodes that updated
-    pub fn update_changed<C: Ctx, E: UserEvent>(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
-        event: &mut Event<E>,
-    ) -> SmallVec<[bool; 4]> {
-        from.into_iter()
-            .enumerate()
-            .map(|(i, src)| match src.update(ctx, event) {
-                v @ Some(_) if self.0[i] != v => {
-                    self.0[i] = v;
-                    true
-                }
-                Some(_) | None => false,
-            })
-            .collect()
+            }
+        }
     }
 
     pub fn flat_iter<'a>(&'a self) -> impl Iterator<Item = Option<Value>> + 'a {

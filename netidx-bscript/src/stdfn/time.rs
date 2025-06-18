@@ -35,8 +35,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for AfterIdle {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        let up = self.args.update_diff(ctx, from, event);
-        let ((timeout, val), (timeout_up, val_up)) = arity2!(self.args.0, up);
+        let mut up = [false; 2];
+        self.args.update_diff(&mut up, ctx, from, event);
+        let ((timeout, val), (timeout_up, val_up)) = arity2!(self.args.0, &up);
         match ((timeout, val), (timeout_up, val_up)) {
             ((Some(secs), _), (true, _)) | ((Some(secs), _), (_, true)) => match secs
                 .clone()
@@ -164,8 +165,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
                 ctx.user.set_timer(id, $dur);
             }};
         }
-        let up = self.args.update_diff(ctx, from, event);
-        let ((timeout, repeat), (timeout_up, repeat_up)) = arity2!(self.args.0, up);
+        let mut up = [false; 2];
+        self.args.update_diff(&mut up, ctx, from, event);
+        let ((timeout, repeat), (timeout_up, repeat_up)) = arity2!(self.args.0, &up);
         match ((timeout, repeat), (timeout_up, repeat_up)) {
             ((None, Some(r)), (true, true)) | ((_, Some(r)), (false, true)) => {
                 match r.clone().cast_to::<Repeat>() {

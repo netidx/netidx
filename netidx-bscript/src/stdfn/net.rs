@@ -72,8 +72,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Write {
                 }
             }
         }
-        let up = self.args.update_diff(ctx, from, event);
-        let ((path, value), (path_up, value_up)) = arity2!(self.args.0, up);
+        let mut up = [false; 2];
+        self.args.update_diff(&mut up, ctx, from, event);
+        let ((path, value), (path_up, value_up)) = arity2!(self.args.0, &up);
         match ((path, value), (path_up, value_up)) {
             ((_, _), (false, false)) => (),
             ((_, Some(val)), (false, true)) => set(&mut self.dv, val),
@@ -151,8 +152,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        let up = self.args.update_diff(ctx, from, event);
-        let (path, path_up) = arity1!(self.args.0, up);
+        let mut up = [false; 1];
+        self.args.update_diff(&mut up, ctx, from, event);
+        let (path, path_up) = arity1!(self.args.0, &up);
         match (path, path_up) {
             (Some(_), false) | (None, false) => (),
             (None, true) => {
@@ -244,8 +246,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for RpcCall {
             };
             Ok((path, args))
         }
-        let up = self.args.update_diff(ctx, from, event);
-        let ((path, args), (path_up, args_up)) = arity2!(self.args.0, up);
+        let mut up = [false; 2];
+        self.args.update_diff(&mut up, ctx, from, event);
+        let ((path, args), (path_up, args_up)) = arity2!(self.args.0, &up);
         match ((path, args), (path_up, args_up)) {
             ((Some(path), Some(args)), (_, true))
             | ((Some(path), Some(args)), (true, _)) => match parse_args(path, args) {
@@ -297,8 +300,9 @@ macro_rules! list {
                 from: &mut [Node<C, E>],
                 event: &mut Event<E>,
             ) -> Option<Value> {
-                let up = self.args.update_diff(ctx, from, event);
-                let ((_, path), (trigger_up, path_up)) = arity2!(self.args.0, up);
+                let mut up = [false; 2];
+                self.args.update_diff(&mut up, ctx, from, event);
+                let ((_, path), (trigger_up, path_up)) = arity2!(self.args.0, &up);
                 match (path, path_up, trigger_up) {
                     (Some(Value::String(path)), true, _)
                         if self
@@ -396,7 +400,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
                 }
             }};
         }
-        let up = self.args.update_diff(ctx, from, event);
+        let mut up = [false; 3];
+        self.args.update_diff(&mut up, ctx, from, event);
         if up[0] {
             if let Some(v) = self.args.0[0].clone() {
                 event.variables.insert(self.pid, v);
@@ -527,7 +532,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
                 }
             };
         }
-        let changed = self.args.update_diff(ctx, from, event);
+        let mut changed = [false; 4];
+        self.args.update_diff(&mut changed, ctx, from, event);
         if changed[3] {
             if let Some(v) = self.args.0[3].clone() {
                 event.variables.insert(self.pid, v);
