@@ -313,7 +313,8 @@ pub(super) struct Fold<C: Ctx, E: UserEvent> {
     fid: BindId,
     initid: BindId,
     binds: Vec<BindId>,
-    head: Option<Node<C, E>>,
+    nodes: Vec<Node<C, E>>,
+    inits: Vec<Option<Value>>,
     mftype: TArc<FnType>,
     etyp: Type,
     ityp: Type,
@@ -329,7 +330,8 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Fold<C, E> {
             [_, _, _] => Ok(Box::new(Self {
                 top_id,
                 binds: vec![],
-                head: None,
+                nodes: vec![],
+                inits: vec![],
                 fid: BindId::new(),
                 initid: BindId::new(),
                 etyp: match &typ.args[0].typ {
@@ -356,46 +358,59 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
         event: &mut Event<E>,
     ) -> Option<Value> {
         let init = match from[0].update(ctx, event) {
-            None => false,
+            None => self.nodes.len(),
             Some(Value::Array(a)) if a.len() == self.binds.len() => {
                 for (id, v) in self.binds.iter().zip(a.iter()) {
                     event.variables.insert(*id, v.clone());
                 }
-                false
+                self.nodes.len()
             }
             Some(Value::Array(a)) => {
-                if let Some(mut n) = self.head.take() {
-                    n.delete(ctx)
-                }
                 while self.binds.len() < a.len() {
                     self.binds.push(BindId::new());
+                    self.inits.push(None);
                 }
                 while a.len() < self.binds.len() {
                     self.binds.pop();
+                    self.inits.pop();
+                    if let Some(mut n) = self.nodes.pop() {
+                        n.delete(ctx);
+                    }
                 }
-                let mut n =
-                    genn::reference(ctx, self.initid, self.ityp.clone(), self.top_id);
+                let init = self.nodes.len();
                 for i in 0..self.binds.len() {
                     event.variables.insert(self.binds[i], a[i].clone());
-                    let x = genn::reference(
-                        ctx,
-                        self.binds[i],
-                        self.etyp.clone(),
-                        self.top_id,
-                    );
-                    let fnode = genn::reference(
-                        ctx,
-                        self.fid,
-                        Type::Fn(self.mftype.clone()),
-                        self.top_id,
-                    );
-                    // CR estokes: evaluating this is not tail recursive
-                    n = genn::apply(fnode, vec![n, x], self.mftype.clone(), self.top_id);
+                    if i >= self.nodes.len() {
+                        let n = genn::reference(
+                            ctx,
+                            self.initid,
+                            self.ityp.clone(),
+                            self.top_id,
+                        );
+                        let x = genn::reference(
+                            ctx,
+                            self.binds[i],
+                            self.etyp.clone(),
+                            self.top_id,
+                        );
+                        let fnode = genn::reference(
+                            ctx,
+                            self.fid,
+                            Type::Fn(self.mftype.clone()),
+                            self.top_id,
+                        );
+                        let node = genn::apply(
+                            fnode,
+                            vec![n, x],
+                            self.mftype.clone(),
+                            self.top_id,
+                        );
+                        self.nodes.push(node);
+                    }
                 }
-                self.head = Some(n);
-                true
+                init
             }
-            _ => false,
+            _ => self.nodes.len(),
         };
         if let Some(v) = from[1].update(ctx, event) {
             event.variables.insert(self.initid, v.clone());
@@ -406,22 +421,39 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
             event.variables.insert(self.fid, v);
         }
         let old_init = event.init;
-        if init {
-            event.init = true;
-            if let Some(v) = ctx.cached.get(&self.fid) {
-                if !event.variables.contains_key(&self.fid) {
-                    event.variables.insert(self.fid, v.clone());
+        for i in 0..self.nodes.len() {
+            if i == init {
+                event.init = true;
+                if let Some(v) = ctx.cached.get(&self.fid) {
+                    if !event.variables.contains_key(&self.fid) {
+                        event.variables.insert(self.fid, v.clone());
+                    }
+                }
+                if i == 0 {
+                    if !event.variables.contains_key(&self.initid) {
+                        if let Some(v) = self.init.as_ref() {
+                            event.variables.insert(self.initid, v.clone());
+                        }
+                    }
+                } else {
+                    if let Some(v) = self.inits[i - 1].clone() {
+                        event.variables.insert(self.initid, v);
+                    }
                 }
             }
-            if let Some(v) = self.init.as_ref() {
-                if !event.variables.contains_key(&self.initid) {
+            match self.nodes[i].update(ctx, event) {
+                Some(v) => {
                     event.variables.insert(self.initid, v.clone());
+                    self.inits[i] = Some(v);
+                }
+                None => {
+                    event.variables.remove(&self.initid);
+                    self.inits[i] = None;
                 }
             }
         }
-        let r = self.head.as_mut().and_then(|n| n.update(ctx, event));
         event.init = old_init;
-        r
+        self.inits.last().and_then(|v| v.clone())
     }
 
     fn typecheck(
@@ -447,7 +479,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
     }
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        if let Some(n) = self.head.as_ref() {
+        for n in &self.nodes {
             n.refs(f)
         }
     }

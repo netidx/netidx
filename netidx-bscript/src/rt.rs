@@ -100,7 +100,7 @@ pub struct BSCtx {
 
 impl BSCtx {
     fn new(publisher: Publisher, subscriber: Subscriber) -> Self {
-        let (updates_tx, updates) = mpsc::channel(3);
+        let (updates_tx, updates) = mpsc::channel(100);
         let (writes_tx, writes) = mpsc::channel(100);
         let (rpcs_tx, rpcs) = mpsc::channel(100);
         let batch = publisher.start_batch();

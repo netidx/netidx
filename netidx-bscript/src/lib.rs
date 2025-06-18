@@ -356,9 +356,6 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
     pub fn new(user: C) -> Self {
         let mut t = Self::new_no_std(user);
         let root = ModPath(Path::root());
-        let net = stdfn::net::register(&mut t);
-        let node = compile(&mut t, &root, net).expect("failed to compile the net module");
-        t.std.push(node);
         let str = stdfn::str::register(&mut t);
         let node = compile(&mut t, &root, str).expect("failed to compile the str module");
         t.std.push(node);
@@ -371,6 +368,9 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         t.std.push(node);
         let rand = stdfn::rand::register(&mut t);
         let node = compile(&mut t, &root, rand).expect("failed to compile rand module");
+        t.std.push(node);
+        let net = stdfn::net::register(&mut t);
+        let node = compile(&mut t, &root, net).expect("failed to compile the net module");
         t.std.push(node);
         t
     }

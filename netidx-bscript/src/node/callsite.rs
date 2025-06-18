@@ -122,9 +122,9 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
                 match &$f.argspec[$i].labeled {
                     None | Some(None) => bail!("expected default value"),
                     Some(Some(expr)) => {
-                        let orig_env = ctx.env.restore_lexical_env(&$f.env);
+                        let orig_env = ctx.env.restore_lexical_env($f.env.clone());
                         let n = compile(ctx, expr.clone(), &$f.scope, self.top_id);
-                        ctx.env = ctx.env.merge_lexical(&orig_env);
+                        ctx.env = ctx.env.restore_lexical_env(orig_env);
                         n?
                     }
                 }

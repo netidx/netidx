@@ -277,7 +277,7 @@ impl<C: Ctx, E: UserEvent> Lambda<C, E> {
         let init: InitFn<C, E> = SArc::new(move |ctx, args, tid| {
             // restore the lexical environment to the state it was in
             // when the closure was created
-            let snap = ctx.env.restore_lexical_env(&_env);
+            let snap = ctx.env.restore_lexical_env(_env.clone());
             let orig_env = mem::replace(&mut ctx.env, snap);
             let res = match body.clone() {
                 Either::Left(body) => {
@@ -307,7 +307,7 @@ impl<C: Ctx, E: UserEvent> Lambda<C, E> {
                     }
                 },
             };
-            ctx.env = ctx.env.merge_lexical(&orig_env);
+            ctx.env = ctx.env.restore_lexical_env(orig_env);
             res
         });
         let def =

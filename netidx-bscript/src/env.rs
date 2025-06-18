@@ -108,58 +108,12 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
     // restore the lexical environment to the state it was in at the
     // snapshot `other`, but leave the bind and type environment
     // alone.
-    pub(super) fn restore_lexical_env(&self, other: &Self) -> Self {
+    pub(super) fn restore_lexical_env(&self, other: Self) -> Self {
         Self {
-            binds: other.binds.clone(),
-            used: other.used.clone(),
-            modules: other.modules.clone(),
-            typedefs: other.typedefs.clone(),
-            by_id: self.by_id.clone(),
-            lambdas: self.lambdas.clone(),
-        }
-    }
-
-    // merge two lexical environments, with the `orig` environment
-    // taking prescidence in case of conflicts. The type and binding
-    // environment is not altered
-    pub(super) fn merge_lexical(&self, orig: &Self) -> Self {
-        let Self { by_id: _, lambdas: _, binds, used, modules, typedefs } = self;
-        let binds = binds.update_many(
-            orig.binds.into_iter().map(|(s, m)| (s.clone(), m)),
-            |k, v, kv| match kv {
-                None => Some((k, v.clone())),
-                Some((_, m)) => {
-                    let v = m.update_many(
-                        v.into_iter().map(|(k, v)| (k.clone(), *v)),
-                        |k, v, _| Some((k, v)),
-                    );
-                    Some((k, v))
-                }
-            },
-        );
-        let used = used.update_many(
-            orig.used.into_iter().map(|(k, v)| (k.clone(), v.clone())),
-            |k, v, _| Some((k, v)),
-        );
-        let modules = modules.union(&orig.modules);
-        let typedefs = typedefs.update_many(
-            orig.typedefs.into_iter().map(|(k, v)| (k.clone(), v)),
-            |k, v, kv| match kv {
-                None => Some((k, v.clone())),
-                Some((_, m)) => {
-                    let v = m.update_many(
-                        v.into_iter().map(|(k, v)| (k.clone(), v.clone())),
-                        |k, v, _| Some((k, v)),
-                    );
-                    Some((k, v))
-                }
-            },
-        );
-        Self {
-            binds,
-            used,
-            modules,
-            typedefs,
+            binds: other.binds,
+            used: other.used,
+            modules: other.modules,
+            typedefs: other.typedefs,
             by_id: self.by_id.clone(),
             lambdas: self.lambdas.clone(),
         }
