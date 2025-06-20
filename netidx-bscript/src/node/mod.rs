@@ -458,7 +458,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TypeDef {
 
 #[derive(Debug)]
 pub(crate) struct Constant {
-    spec: Expr,
+    spec: Arc<Expr>,
     value: Value,
     typ: Type,
 }
@@ -468,6 +468,7 @@ impl Constant {
         spec: Expr,
         value: &Value,
     ) -> Result<Node<C, E>> {
+        let spec = Arc::new(spec);
         let value = value.clone();
         let typ = Type::Primitive(Typ::get(&value).into());
         Ok(Box::new(Self { spec, value, typ }))

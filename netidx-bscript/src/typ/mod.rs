@@ -20,9 +20,12 @@ use std::{
 use triomphe::Arc;
 
 mod fntyp;
+mod map;
 mod tval;
 mod tvar;
+
 pub use fntyp::{FnArgType, FnType};
+pub use map::BSType;
 pub use tval::TVal;
 use tvar::would_cycle_inner;
 pub use tvar::TVar;

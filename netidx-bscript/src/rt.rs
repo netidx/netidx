@@ -13,8 +13,9 @@ use crate::{
     compile,
     env::Env,
     expr::{self, ExprId, ExprKind, ModPath, ModuleKind, ModuleResolver, Origin},
-    typ::Type,
-    BindId, BuiltIn, Ctx, Event, ExecCtx, NoUserEvent, Node,
+    node::genn,
+    typ::{FnType, Type},
+    BindId, BuiltIn, Ctx, Event, ExecCtx, LambdaId, NoUserEvent, Node,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use arcstr::{literal, ArcStr};
@@ -45,6 +46,7 @@ use std::{
     future, mem,
     os::unix::ffi::OsStrExt,
     path::{Component, PathBuf},
+    sync::Weak,
     time::Duration,
 };
 use tokio::{
@@ -457,12 +459,62 @@ pub enum RtEvent {
     Updated(ExprId, Value),
 }
 
+atomic_id!(CallableId);
+
+pub struct Callable {
+    rt: BSHandle,
+    id: CallableId,
+    env: Env<BSCtx, NoUserEvent>,
+    pub typ: FnType,
+    pub expr: ExprId,
+}
+
+impl Drop for Callable {
+    fn drop(&mut self) {
+        let _ = self.rt.0.unbounded_send(ToRt::DeleteCallable { id: self.id });
+    }
+}
+
+impl Callable {
+    /// Call the lambda with args. Argument types and arity will be
+    /// checked and an error will be returned if they are wrong.
+    pub async fn call(&self, args: ValArray) -> Result<()> {
+        if self.typ.args.len() != args.len() {
+            bail!("expected {} args", self.typ.args.len())
+        }
+        for (i, (a, v)) in self.typ.args.iter().zip(args.iter()).enumerate() {
+            if !a.typ.is_a(&self.env, v) {
+                bail!("type mismatch arg {i} expected {}", a.typ)
+            }
+        }
+        self.call_unchecked(args).await
+    }
+
+    /// Call the lambda with args. Argument types and arity will NOT
+    /// be checked. This can result in a runtime panic, invalid
+    /// results, and probably other bad things.
+    pub async fn call_unchecked(&self, args: ValArray) -> Result<()> {
+        self.rt
+            .0
+            .unbounded_send(ToRt::Call { id: self.id, args })
+            .map_err(|_| anyhow!("runtime is dead"))
+    }
+}
+
 enum ToRt {
     GetEnv { res: oneshot::Sender<Env<BSCtx, NoUserEvent>> },
     Delete { id: ExprId, res: oneshot::Sender<Result<Env<BSCtx, NoUserEvent>>> },
     Load { path: PathBuf, res: oneshot::Sender<Result<CompRes>> },
     Compile { text: ArcStr, res: oneshot::Sender<Result<CompRes>> },
+    CompileCallable { id: Value, rt: BSHandle, res: oneshot::Sender<Result<Callable>> },
+    Call { id: CallableId, args: ValArray },
+    DeleteCallable { id: CallableId },
     Subscribe { ch: mpsc::Sender<RtEvent> },
+}
+
+struct CallableInt {
+    expr: ExprId,
+    args: Box<[BindId]>,
 }
 
 // setting expectations is one of the most under rated skills in
@@ -472,6 +524,7 @@ struct BS {
     event: Event<NoUserEvent>,
     updated: FxHashMap<ExprId, bool>,
     nodes: IndexMap<ExprId, Node<BSCtx, NoUserEvent>, FxBuildHasher>,
+    callables: FxHashMap<CallableId, CallableInt>,
     subs: Vec<mpsc::Sender<RtEvent>>,
     resolvers: Vec<ModuleResolver>,
     publish_timeout: Option<Duration>,
@@ -518,6 +571,7 @@ impl BS {
             event,
             updated: HashMap::default(),
             nodes: IndexMap::default(),
+            callables: HashMap::default(),
             subs: vec![],
             resolvers,
             publish_timeout: rt.publish_timeout,
@@ -744,6 +798,63 @@ impl BS {
         Ok(CompRes { exprs, env: self.ctx.env.clone() })
     }
 
+    fn compile_callable(&mut self, id: Value, rt: BSHandle) -> Result<Callable> {
+        let id = match id {
+            Value::U64(id) => LambdaId(id),
+            v => bail!("invalid lambda id {v}"),
+        };
+        let lb = self.ctx.env.lambdas.get(&id).and_then(Weak::upgrade);
+        let lb = lb.ok_or_else(|| anyhow!("unknown lambda {id:?}"))?;
+        let args = lb.typ.args.iter();
+        let args = args
+            .map(|a| {
+                if a.label.as_ref().map(|(_, opt)| *opt).unwrap_or(false) {
+                    bail!("can't call lambda with an optional argument from rust")
+                } else {
+                    Ok(BindId::new())
+                }
+            })
+            .collect::<Result<Box<[_]>>>()?;
+        let eid = ExprId::new();
+        let argn = lb.typ.args.iter().zip(args.iter());
+        let argn = argn
+            .map(|(arg, id)| {
+                genn::reference(&mut self.ctx, *id, arg.typ.clone(), ExprId::new())
+            })
+            .collect::<Vec<_>>();
+        let fnode = genn::constant(Value::U64(id.0));
+        let n = genn::apply(fnode, argn, lb.typ.clone(), eid);
+        let cid = CallableId::new();
+        self.callables.insert(cid, CallableInt { expr: eid, args });
+        self.nodes.insert(eid, n);
+        let env = self.ctx.env.clone();
+        Ok(Callable { expr: eid, rt, env, id: cid, typ: (*lb.typ).clone() })
+    }
+
+    fn call_callable(
+        &mut self,
+        id: CallableId,
+        args: ValArray,
+        tasks: &mut Vec<(BindId, Value)>,
+    ) -> Result<()> {
+        let c =
+            self.callables.get(&id).ok_or_else(|| anyhow!("unknown callable {id:?}"))?;
+        if args.len() != c.args.len() {
+            bail!("expected {} arguments", c.args.len());
+        }
+        let a = c.args.iter().zip(args.iter()).map(|(id, v)| (*id, v.clone()));
+        tasks.extend(a);
+        Ok(())
+    }
+
+    fn delete_callable(&mut self, id: CallableId) {
+        if let Some(c) = self.callables.remove(&id) {
+            if let Some(mut n) = self.nodes.shift_remove(&c.expr) {
+                n.delete(&mut self.ctx)
+            }
+        }
+    }
+
     async fn run(mut self, mut to_rt: mpsc::UnboundedReceiver<ToRt>) -> Result<()> {
         let mut tasks = vec![];
         let mut rpcs = vec![];
@@ -847,6 +958,15 @@ impl BS {
                     }
                     let _ = res.send(Ok(self.ctx.env.clone()));
                 }
+                Some(ToRt::CompileCallable { id, rt, res }) => {
+                    let _ = res.send(self.compile_callable(id, rt));
+                }
+                Some(ToRt::DeleteCallable { id }) => self.delete_callable(id),
+                Some(ToRt::Call { id, args }) => {
+                    if let Err(e) = self.call_callable(id, args, &mut tasks) {
+                        error!("calling callable {id:?} failed with {e:?}")
+                    }
+                }
             }
             self.do_cycle(updates, writes, &mut tasks, &mut rpcs).await;
             if !self.ctx.user.rpc_clients.is_empty() {
@@ -861,6 +981,7 @@ impl BS {
 
 /// A handle to a running BS instance. Drop the handle to shutdown the
 /// associated background tasks.
+#[derive(Clone)]
 pub struct BSHandle(mpsc::UnboundedSender<ToRt>);
 
 impl BSHandle {
@@ -895,6 +1016,14 @@ impl BSHandle {
     /// Delete the specified expression
     pub async fn delete(&self, id: ExprId) -> Result<Env<BSCtx, NoUserEvent>> {
         Ok(self.exec(|tx| ToRt::Delete { id, res: tx }).await??)
+    }
+
+    /// Compile a callable interface to the specified lambda id. This
+    /// is how you call a lambda directly from rust.
+    pub async fn compile_callable(&self, id: Value) -> Result<Callable> {
+        Ok(self
+            .exec(|tx| ToRt::CompileCallable { id, rt: self.clone(), res: tx })
+            .await??)
     }
 
     /// The specified channel will receive events generated by all

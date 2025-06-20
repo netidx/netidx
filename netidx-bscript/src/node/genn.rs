@@ -1,9 +1,10 @@
-use super::{callsite::CallSite, Nop, Ref, NOP};
+use super::{callsite::CallSite, Constant, Nop, Ref, NOP};
 use crate::{
     expr::{ExprId, ModPath},
     typ::{FnType, Type},
     BindId, Ctx, ExecCtx, Node, UserEvent,
 };
+use netidx::publisher::{Typ, Value};
 use std::collections::HashMap;
 use triomphe::Arc;
 
@@ -34,6 +35,14 @@ pub fn reference<C: Ctx, E: UserEvent>(
 ) -> Node<C, E> {
     ctx.user.ref_var(id, top_id);
     Box::new(Ref { spec: NOP.clone(), typ, id, top_id })
+}
+
+pub fn constant<C: Ctx, E: UserEvent>(v: Value) -> Node<C, E> {
+    Box::new(Constant {
+        spec: NOP.clone(),
+        typ: Type::Primitive(Typ::get(&v).into()),
+        value: v,
+    })
 }
 
 /// generate and return an apply node for the given lambda
