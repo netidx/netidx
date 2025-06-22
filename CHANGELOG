@@ -1,5 +1,7 @@
 * 0.28.2
 
+- Update all dependencies
+
 - Fix new subscriptions to the same publisher initial values did not
   batch properly causing an excessive number of batches on large
   initial subscriptions
