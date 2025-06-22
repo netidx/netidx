@@ -213,9 +213,7 @@ const SELECT: &str = r#"
 run!(select, SELECT, |v: Result<&Value>| match v {
     Ok(Value::Array(a)) => match &**a {
         [Value::String(a), Value::String(b), Value::String(c)]
-            if &**a == "first i64:1"
-                && &**b == "second i64:2"
-                && &**c == "third i64:3" =>
+            if &**a == "first 1" && &**b == "second 2" && &**c == "third 3" =>
             true,
         _ => false,
     },
@@ -885,10 +883,10 @@ const ANY1: &str = r#"
 run!(any1, ANY1, |v: Result<&Value>| match v {
     Ok(Value::Array(a)) => match &a[..] {
         [Value::I64(1), Value::String(s), Value::Array(a)] => {
-            &**s == "i64:1 + 1"
+            &**s == "1 + 1"
                 && match &a[..] {
                     [Value::String(s0), Value::String(s1)] => {
-                        (&**s0 == &**s1) && &**s0 == "i64:1 + 1"
+                        (&**s0 == &**s1) && &**s0 == "1 + 1"
                     }
                     _ => false,
                 }
