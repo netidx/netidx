@@ -55,6 +55,7 @@ netidx-protocols = { path = "../netidx-protocols", version = "0.28.0", default-f
 netidx-tools-core = { path = "../netidx-tools-core", version = "0.28.0", default-features = false }
 netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.28.0", default-features = false }
 parking_lot = { workspace = true }
+ratatui = { workspace = true }
 reedline = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }

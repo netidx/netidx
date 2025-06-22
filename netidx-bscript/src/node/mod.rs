@@ -9,8 +9,10 @@ use arcstr::{literal, ArcStr};
 use combine::stream::position::SourcePosition;
 use compiler::compile;
 use enumflags2::BitFlags;
-use netidx::{publisher::Typ, subscriber::Value};
-use netidx_netproto::valarray::ValArray;
+use netidx_netproto::{
+    valarray::ValArray,
+    value::{NakedValue, Typ, Value},
+};
 use pattern::StructPatternNode;
 use smallvec::{smallvec, SmallVec};
 use std::{cell::RefCell, iter, sync::LazyLock};
@@ -888,6 +890,7 @@ impl<C: Ctx, E: UserEvent> StringInterpolate<C, E> {
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        use std::fmt::Write;
         thread_local! {
             static BUF: RefCell<String> = RefCell::new(String::new());
         }
@@ -896,16 +899,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
             BUF.with_borrow_mut(|buf| {
                 buf.clear();
                 for c in &self.args {
-                    match c.cached.as_ref().unwrap() {
-                        Value::String(c) => buf.push_str(c.as_ref()),
-                        v => match v.clone().cast_to::<ArcStr>().ok() {
-                            Some(c) => buf.push_str(c.as_ref()),
-                            None => {
-                                let m = literal!("args must be strings");
-                                return Some(Value::Error(m));
-                            }
-                        },
-                    }
+                    write!(buf, "{}", NakedValue(c.cached.as_ref().unwrap())).unwrap();
                 }
                 Some(Value::String(buf.as_str().into()))
             })
