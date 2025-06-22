@@ -6,7 +6,7 @@ use crate::{
 };
 use bytes::Bytes;
 use fxhash::FxHashMap;
-use rand::{self, thread_rng, Rng};
+use rand::{self, rng, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
@@ -40,7 +40,7 @@ fn test_resolver_store() {
             target_auth: TargetAuth::Anonymous,
             user_info: None,
         });
-        if thread_rng().gen() {
+        if rng().random() {
             let path = Path::from(String::from(Path::dirname(&parsed[0]).unwrap()));
             default.push((path.clone(), publisher.clone()));
             store.publish(path, &publisher, true, None);
@@ -55,7 +55,7 @@ fn test_resolver_store() {
             {
                 panic!()
             }
-            if thread_rng().gen() {
+            if rng().random() {
                 // check that this is idempotent
                 store.publish(path.clone(), &publisher, false, None);
             }
@@ -123,7 +123,7 @@ fn test_resolver_store() {
         {
             panic!()
         }
-        if rand::thread_rng().gen_bool(0.5) {
+        if rand::rng().random_bool(0.5) {
             // check that this is idempotent
             store.unpublish(&publisher, false, path.clone());
         }

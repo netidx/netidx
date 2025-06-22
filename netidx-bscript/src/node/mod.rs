@@ -899,7 +899,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
             BUF.with_borrow_mut(|buf| {
                 buf.clear();
                 for c in &self.args {
-                    write!(buf, "{}", NakedValue(c.cached.as_ref().unwrap())).unwrap();
+                    match c.cached.as_ref().unwrap() {
+                        Value::String(s) => write!(buf, "{s}"),
+                        v => write!(buf, "{}", NakedValue(v)),
+                    }
+                    .unwrap()
                 }
                 Some(Value::String(buf.as_str().into()))
             })

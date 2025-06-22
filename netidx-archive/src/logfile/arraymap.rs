@@ -117,15 +117,15 @@ where
         match bound {
             Bound::Unbounded => match dir {
                 Dir::Fwd => 0,
-		        Dir::Bwd => self.keys.len().saturating_sub(1),
-	        },
+                Dir::Bwd => self.keys.len().saturating_sub(1),
+            },
             Bound::Excluded(k) => {
                 match self.keys.binary_search_by(|key| key.borrow().cmp(k)) {
                     Err(i) => i,
                     Ok(i) => match dir {
                         Dir::Fwd => i + 1,
                         Dir::Bwd => i - 1,
-		            },
+                    },
                 }
             }
             Bound::Included(k) => {
@@ -227,16 +227,16 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use rand::{seq::SliceRandom, thread_rng, Rng};
+    use rand::{rng, seq::SliceRandom, Rng};
     use std::collections::BTreeMap;
 
     #[test]
     fn test_insert_lookup_remove() {
         let mut model: BTreeMap<u32, u32> = BTreeMap::new();
         let mut index: ArrayMap<u32, u32> = ArrayMap::new();
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for _ in 0..10_000 {
-            let kv = rng.gen();
+            let kv = rng.random();
             model.insert(kv, kv);
             index.insert(kv, kv);
             for (k, v) in model.iter() {
@@ -265,9 +265,9 @@ mod test {
         let mut model: BTreeMap<u32, u32> = BTreeMap::new();
         let mut index: ArrayMap<u32, u32> = ArrayMap::new();
         let mut keys = vec![];
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for _ in 0..10_000 {
-            let kv = rng.gen();
+            let kv = rng.random();
             model.insert(kv, kv);
             index.insert(kv, kv);
             keys.push(kv);
@@ -275,21 +275,21 @@ mod test {
         keys.sort();
         while keys.len() > 0 {
             let mid = keys.len() / 2;
-            let li = rng.gen_range(0..=mid);
-            let ui = rng.gen_range(mid..keys.len());
+            let li = rng.random_range(0..=mid);
+            let ui = rng.random_range(mid..keys.len());
             let mut le = false;
-            let lower = if rng.gen_bool(0.1) {
+            let lower = if rng.random_bool(0.1) {
                 Bound::Unbounded
-            } else if rng.gen_bool(0.5) {
+            } else if rng.random_bool(0.5) {
                 Bound::Included(keys.remove(li))
             } else {
                 le = true;
                 Bound::Excluded(keys.remove(li))
             };
-            let upper = if rng.gen_bool(0.1) {
+            let upper = if rng.random_bool(0.1) {
                 Bound::Unbounded
             } else {
-                let c = if le || rng.gen_bool(0.5) {
+                let c = if le || rng.random_bool(0.5) {
                     Bound::Included
                 } else {
                     Bound::Excluded
@@ -304,21 +304,21 @@ mod test {
                 }
             };
             let mut irange = index.range((lower, upper));
-	    let mut mrange = model.range((lower, upper));
-	    loop {
-		let (mval, ival) = if rng.gen_bool(0.1) {
-		    match mrange.next_back() {
-			Some(mval) => (Some(mval), irange.next_back()),
-			None => break,
-		    }
-		} else {
-		    match mrange.next() {
-			Some(mval) => (Some(mval), irange.next()),
-			None => break,
-		    }
-		};
-		assert_eq!(mval, ival)
-	    }
+            let mut mrange = model.range((lower, upper));
+            loop {
+                let (mval, ival) = if rng.random_bool(0.1) {
+                    match mrange.next_back() {
+                        Some(mval) => (Some(mval), irange.next_back()),
+                        None => break,
+                    }
+                } else {
+                    match mrange.next() {
+                        Some(mval) => (Some(mval), irange.next()),
+                        None => break,
+                    }
+                };
+                assert_eq!(mval, ival)
+            }
             assert_eq!(irange.next(), None);
         }
     }
