@@ -128,7 +128,7 @@ pub(crate) mod local_auth {
     use netidx_core::utils::{make_sha3_token, pack};
     use netidx_netproto::resolver::HashMethod;
     use parking_lot::Mutex;
-    use rand::{thread_rng, Rng};
+    use rand::{rng, Rng};
     use std::{
         collections::{hash_map::Entry, HashMap},
         fs::Permissions,
@@ -166,7 +166,7 @@ pub(crate) mod local_auth {
             debug!("got user {}", user);
             let salt = loop {
                 let ts = Instant::now();
-                let salt = thread_rng().gen::<u128>();
+                let salt = rng().random::<u128>();
                 let mut issued = issued.lock();
                 if let Entry::Vacant(e) = issued.entry(salt) {
                     e.insert(ts);
@@ -245,7 +245,7 @@ pub(crate) mod local_auth {
             let mapper = Mapper::new(cfg, member).await?;
             let issued =
                 Arc::new(Mutex::new(HashMap::with_hasher(FxBuildHasher::default())));
-            let secret = thread_rng().gen::<u128>();
+            let secret = rng().random::<u128>();
             let (tx, rx) = oneshot::channel();
             spawn(Self::run(mapper, listener, secret, issued.clone(), rx));
             Ok(AuthServer { secret, _stop: tx, issued })
@@ -299,7 +299,7 @@ pub(crate) mod local_auth {
                         if tries >= 2 {
                             return Err(e);
                         } else {
-                            let delay = Duration::from_secs(thread_rng().gen_range(0..3));
+                            let delay = Duration::from_secs(rng().random_range(0..3));
                             sleep(delay).await
                         }
                     }

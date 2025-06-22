@@ -3,7 +3,6 @@ use super::{
     secctx::{SecCtx, SecCtxDataReadGuard},
     store::{self, COLS_POOL, MAX_READ_BATCH, MAX_WRITE_BATCH, PATH_POOL, REF_POOL},
 };
-use chrono::prelude::*;
 use crate::{
     channel::Channel,
     pack::Z64,
@@ -18,6 +17,7 @@ use crate::{
     },
 };
 use anyhow::Result;
+use chrono::prelude::*;
 use futures::{
     channel::{
         mpsc::{unbounded, UnboundedSender},
@@ -98,14 +98,14 @@ impl Shard {
         let mut write_rx = write_rx.fuse();
         let t = Shard { read, write, internal };
         task::spawn(async move {
-	    let mut last_shrink = Utc::now();
+            let mut last_shrink = Utc::now();
             let mut store = store::Store::new(parent, children);
             loop {
                 select! {
                     batch = read_rx.next() => match batch {
                         None => break,
                         Some((req, reply)) => {
-			    let secctx = secctx.read().await;
+                let secctx = secctx.read().await;
                             let r = Shard::process_read_batch(
                                 shard,
                                 &mut store,
@@ -119,7 +119,7 @@ impl Shard {
                     batch = write_rx.next() => match batch {
                         None => break,
                         Some((req, reply)) => {
-			    let secctx = secctx.read().await;
+                let secctx = secctx.read().await;
                             let r = Shard::process_write_batch(
                                 &mut store,
                                 &secctx,
@@ -135,11 +135,11 @@ impl Shard {
                         }
                     }
                 }
-		let now = Utc::now();
-		if now - last_shrink > chrono::Duration::hours(1) {
-		    last_shrink = now;
-		    store.shrink_to_fit()
-		}
+                let now = Utc::now();
+                if now - last_shrink > chrono::Duration::hours(1) {
+                    last_shrink = now;
+                    store.shrink_to_fit()
+                }
             }
             info!("shard loop finished")
         });
@@ -162,144 +162,144 @@ impl Shard {
         };
         let uifo = req.uifo;
         let pmap = secctx.pmap();
-	let mut n = 0;
-	for (id, m) in req.batch.drain(..) {
-	    if n > 10_000 {
-		n = 0;
-		task::yield_now().await
-	    }
-	    resp.batch.push_back(match m {
-		ToRead::Resolve(path) => {
-		    n += 1;
+        let mut n = 0;
+        for (id, m) in req.batch.drain(..) {
+            if n > 10_000 {
+                n = 0;
+                task::yield_now().await
+            }
+            resp.batch.push_back(match m {
+                ToRead::Resolve(path) => {
+                    n += 1;
                     if let Some(r) = store.check_referral(&path) {
-			(id, FromRead::Referral(r))
+                        (id, FromRead::Referral(r))
                     } else {
-			match pmap {
+                        match pmap {
                             None => {
-				let (flags, publishers) =
+                                let (flags, publishers) =
                                     store.resolve(&mut resp.publishers, &path);
-				let a = Resolved {
+                                let a = Resolved {
                                     resolver,
                                     publishers,
                                     timestamp: now,
                                     permissions: Permissions::all().bits(),
                                     flags,
-				};
-				(id, FromRead::Resolved(a))
+                                };
+                                (id, FromRead::Resolved(a))
                             }
                             Some(pmap) => {
-				let perm = pmap.permissions(&*path, &*uifo);
-				if !perm.contains(Permissions::SUBSCRIBE) {
+                                let perm = pmap.permissions(&*path, &*uifo);
+                                if !perm.contains(Permissions::SUBSCRIBE) {
                                     (id, FromRead::Denied)
-				} else {
+                                } else {
                                     let (flags, publishers) = store.resolve_and_sign(
-					&mut resp.publishers,
-					&secctx,
-					&uifo,
-					now,
-					perm,
-					&path,
+                                        &mut resp.publishers,
+                                        &secctx,
+                                        &uifo,
+                                        now,
+                                        perm,
+                                        &path,
                                     );
                                     let a = Resolved {
-					resolver,
-					publishers,
-					timestamp: now,
-					permissions: perm.bits(),
-					flags,
+                                        resolver,
+                                        publishers,
+                                        timestamp: now,
+                                        permissions: perm.bits(),
+                                        flags,
                                     };
                                     (id, FromRead::Resolved(a))
-				}
+                                }
                             }
-			}
+                        }
                     }
-		}
-		ToRead::List(path) => {
-		    n += 10;
+                }
+                ToRead::List(path) => {
+                    n += 10;
                     if let Some(r) = store.check_referral(&path) {
-			(id, FromRead::Referral(r))
+                        (id, FromRead::Referral(r))
                     } else {
-			let allowed = pmap
+                        let allowed = pmap
                             .map(|pmap| pmap.allowed(&*path, Permissions::LIST, &*uifo))
                             .unwrap_or(true);
-			if allowed {
+                        if allowed {
                             (id, FromRead::List(store.list(&path)))
-			} else {
+                        } else {
                             (id, FromRead::Denied)
-			}
+                        }
                     }
-		}
-		ToRead::ListMatching(set) => {
-		    n += 1000;
+                }
+                ToRead::ListMatching(set) => {
+                    n += 1000;
                     let mut referrals = REF_POOL.take();
                     if shard == 0 {
-			for glob in set.iter() {
+                        for glob in set.iter() {
                             store.referrals_in_scope(
-				&mut *referrals,
-				glob.base(),
-				glob.scope(),
+                                &mut *referrals,
+                                glob.base(),
+                                glob.scope(),
                             )
-			}
+                        }
                     }
                     let allowed = pmap
-			.map(|pmap| {
+                        .map(|pmap| {
                             set.iter().all(|g| {
-				pmap.allowed_in_scope(
+                                pmap.allowed_in_scope(
                                     g.base(),
                                     g.scope(),
                                     Permissions::LIST,
                                     &*uifo,
-				)
+                                )
                             })
-			})
-			.unwrap_or(true);
+                        })
+                        .unwrap_or(true);
                     if !allowed {
-			let lm = ListMatching { referrals, matched: PATH_BPOOL.take() };
-			(id, FromRead::ListMatching(lm))
+                        let lm = ListMatching { referrals, matched: PATH_BPOOL.take() };
+                        (id, FromRead::ListMatching(lm))
                     } else {
-			let mut matched = PATH_BPOOL.take();
-			matched.push(store.list_matching(&set));
-			let lm = ListMatching { referrals, matched };
-			(id, FromRead::ListMatching(lm))
+                        let mut matched = PATH_BPOOL.take();
+                        matched.push(store.list_matching(&set));
+                        let lm = ListMatching { referrals, matched };
+                        (id, FromRead::ListMatching(lm))
                     }
-		}
-		ToRead::GetChangeNr(path) => {
-		    n += 1;
+                }
+                ToRead::GetChangeNr(path) => {
+                    n += 1;
                     let mut referrals = REF_POOL.take();
                     if shard == 0 {
-			store.referrals_in_scope(&mut referrals, &*path, &Scope::Subtree);
+                        store.referrals_in_scope(&mut referrals, &*path, &Scope::Subtree);
                     }
                     let allowed = pmap
-			.map(|pmap| pmap.allowed(&*path, Permissions::LIST, &*uifo))
-			.unwrap_or(true);
+                        .map(|pmap| pmap.allowed(&*path, Permissions::LIST, &*uifo))
+                        .unwrap_or(true);
                     if !allowed {
-			let change_number = Z64(0);
-			let cn = GetChangeNr { change_number, referrals, resolver };
-			(id, FromRead::GetChangeNr(cn))
+                        let change_number = Z64(0);
+                        let cn = GetChangeNr { change_number, referrals, resolver };
+                        (id, FromRead::GetChangeNr(cn))
                     } else {
-			let change_number = store.get_change_nr(&path);
-			let cn = GetChangeNr { change_number, referrals, resolver };
-			(id, FromRead::GetChangeNr(cn))
+                        let change_number = store.get_change_nr(&path);
+                        let cn = GetChangeNr { change_number, referrals, resolver };
+                        (id, FromRead::GetChangeNr(cn))
                     }
-		}
-		ToRead::Table(path) => {
-		    n += 10;
+                }
+                ToRead::Table(path) => {
+                    n += 10;
                     if let Some(r) = store.check_referral(&path) {
-			(id, FromRead::Referral(r))
+                        (id, FromRead::Referral(r))
                     } else {
-			let allowed = pmap
+                        let allowed = pmap
                             .map(|pmap| pmap.allowed(&*path, Permissions::LIST, &*uifo))
                             .unwrap_or(true);
-			if !allowed {
+                        if !allowed {
                             (id, FromRead::Denied)
-			} else {
+                        } else {
                             let rows = store.list(&path);
                             let cols = store.columns(&path);
                             (id, FromRead::Table(Table { rows, cols }))
-			}
+                        }
                     }
-		}
+                }
             })
-	}
+        }
         resp
     }
 
@@ -335,59 +335,59 @@ impl Shard {
             }
         };
         let mut resp = FROM_WRITE_POOL.take();
-	let mut n = 0;
-	for (id, m) in req.batch.drain(..) {
-	    if n > 5_000 {
-		n = 0;
-		task::yield_now().await;
-	    }
-	    resp.push_back(match m {
-		ToWrite::Heartbeat => unreachable!(),
-		ToWrite::Clear => {
-		    n += 1000;
+        let mut n = 0;
+        for (id, m) in req.batch.drain(..) {
+            if n > 5_000 {
+                n = 0;
+                task::yield_now().await;
+            }
+            resp.push_back(match m {
+                ToWrite::Heartbeat => unreachable!(),
+                ToWrite::Clear => {
+                    n += 1000;
                     store.clear(&publisher);
                     (id, FromWrite::Unpublished)
-		}
-		ToWrite::Publish(path) => {
-		    n += 1;
-		    (id, publish(store, path, false, None))
-		},
-		ToWrite::PublishDefault(path) => {
-		    n += 1;
-		    (id, publish(store, path, true, None))
-		},
-		ToWrite::PublishWithFlags(path, flags) => {
-		    n += 1;
+                }
+                ToWrite::Publish(path) => {
+                    n += 1;
+                    (id, publish(store, path, false, None))
+                }
+                ToWrite::PublishDefault(path) => {
+                    n += 1;
+                    (id, publish(store, path, true, None))
+                }
+                ToWrite::PublishWithFlags(path, flags) => {
+                    n += 1;
                     (id, publish(store, path, false, Some(flags)))
-		}
-		ToWrite::PublishDefaultWithFlags(path, flags) => {
-		    n += 1;
+                }
+                ToWrite::PublishDefaultWithFlags(path, flags) => {
+                    n += 1;
                     (id, publish(store, path, true, Some(flags)))
-		}
-		ToWrite::Unpublish(path) => {
-		    n += 5;
+                }
+                ToWrite::Unpublish(path) => {
+                    n += 5;
                     if !Path::is_absolute(&*path) {
-			(id, FromWrite::Error("absolute paths required".into()))
+                        (id, FromWrite::Error("absolute paths required".into()))
                     } else if let Some(r) = store.check_referral(&path) {
-			(id, FromWrite::Referral(r))
+                        (id, FromWrite::Referral(r))
                     } else {
-			store.unpublish(&publisher, false, path);
-			(id, FromWrite::Unpublished)
+                        store.unpublish(&publisher, false, path);
+                        (id, FromWrite::Unpublished)
                     }
-		}
-		ToWrite::UnpublishDefault(path) => {
-		    n += 5;
+                }
+                ToWrite::UnpublishDefault(path) => {
+                    n += 5;
                     if !Path::is_absolute(&*path) {
-			(id, FromWrite::Error("absolute paths required".into()))
+                        (id, FromWrite::Error("absolute paths required".into()))
                     } else if let Some(r) = store.check_referral(&path) {
-			(id, FromWrite::Referral(r))
+                        (id, FromWrite::Referral(r))
                     } else {
-			store.unpublish(&publisher, true, path);
-			(id, FromWrite::Unpublished)
+                        store.unpublish(&publisher, true, path);
+                        (id, FromWrite::Unpublished)
                     }
-		}
+                }
             })
-	}
+        }
         resp
     }
 }
@@ -650,7 +650,7 @@ impl Store {
         publisher: Arc<Publisher>,
         mut msgs: impl Iterator<Item = ToWrite>,
     ) -> Result<()> {
-	trace!("handling write from {:?}", &publisher);
+        trace!("handling write from {:?}", &publisher);
         let mut finished = false;
         loop {
             let mut n = 0;
@@ -700,7 +700,7 @@ impl Store {
                 }
                 n += 1;
             }
-	    trace!("handle_write_batch dispatching {} messages to shards", n);
+            trace!("handle_write_batch dispatching {} messages to shards", n);
             if by_shard.iter().all(|v| v.is_empty()) {
                 assert!(finished);
                 break Ok(());
@@ -716,7 +716,7 @@ impl Store {
                 .await
                 .into_iter()
                 .collect::<result::Result<Vec<Pooled<WriteR>>, Canceled>>()?;
-	    trace!("handle_write_batch {} shards replied", replies.len());
+            trace!("handle_write_batch {} shards replied", replies.len());
             if let Some(ref mut c) = con {
                 for i in 0..n {
                     if replies.len() == 1
@@ -757,9 +757,9 @@ impl Store {
                 }
                 c.flush().await?;
             }
-	    trace!("handle_write_batch processed replies");
+            trace!("handle_write_batch processed replies");
             if finished {
-		trace!("handle_write_batch finished");
+                trace!("handle_write_batch finished");
                 break Ok(());
             }
         }
@@ -770,8 +770,8 @@ impl Store {
         uifo: Arc<UserInfo>,
         publisher: Arc<Publisher>,
     ) -> Result<()> {
-        use rand::prelude::*;
-	trace!("clearing publisher {:?}", &publisher);
+        use rand::{rng, seq::SliceRandom};
+        trace!("clearing publisher {:?}", &publisher);
         let mut published_paths = join_all(self.shards.iter().map(|shard| {
             let (tx, rx) = oneshot::channel();
             let _ = shard.internal.unbounded_send((publisher.id, tx));
@@ -781,7 +781,7 @@ impl Store {
         .into_iter()
         .flat_map(|s| s.unwrap().into_iter().map(ToWrite::Unpublish))
         .collect::<Vec<_>>();
-        published_paths.shuffle(&mut thread_rng());
+        published_paths.shuffle(&mut rng());
         let iter = published_paths.into_iter();
         // clear the vast majority of published paths using resources fairly
         self.handle_batch_write(None, uifo.clone(), publisher.clone(), iter).await?;

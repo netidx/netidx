@@ -13,7 +13,7 @@ use crate::{
     tls, utils,
 };
 use anyhow::{Context, Result};
-use arcstr::{ArcStr, literal};
+use arcstr::{literal, ArcStr};
 use auth::{UserInfo, ANONYMOUS};
 use config::{Config, MemberServer};
 use cross_krb5::{AcceptFlags, K5ServerCtx, ServerCtx, Step};
@@ -22,7 +22,7 @@ use fxhash::FxHashMap;
 use log::{debug, error, info, trace, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use parking_lot::Mutex as SyncMutex;
-use rand::{thread_rng, Rng};
+use rand::{rng, Rng};
 use secctx::{K5SecData, LocalSecData, SecCtx, TlsSecData};
 use shard_store::Store;
 use std::{
@@ -49,8 +49,10 @@ mod store;
 #[cfg(test)]
 mod test;
 
-static WRITE_BATCHES: LazyLock<Pool<Vec<ToWrite>>> = LazyLock::new(|| Pool::new(100, 10_000));
-static READ_BATCHES: LazyLock<Pool<Vec<ToRead>>> = LazyLock::new(|| Pool::new(100, 10_000));
+static WRITE_BATCHES: LazyLock<Pool<Vec<ToWrite>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+static READ_BATCHES: LazyLock<Pool<Vec<ToRead>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
 
 atomic_id!(CId);
 
@@ -399,7 +401,7 @@ async fn challenge_auth(
     con: &mut Channel,
     secret: u128,
 ) -> Result<()> {
-    let n = thread_rng().gen::<u128>();
+    let n = rng().random::<u128>();
     let answer = make_sha3_token([&n.to_be_bytes()[..], &secret.to_be_bytes()[..]]);
     let challenge = AuthChallenge { hash_method: HashMethod::Sha3_512, challenge: n };
     time::timeout(cfg.hello_timeout, con.send_one(&challenge)).await??;
@@ -416,7 +418,7 @@ async fn ownership_check(
     con: &mut Channel,
     write_addr: SocketAddr,
 ) -> Result<u128> {
-    let secret = thread_rng().gen::<u128>();
+    let secret = rng().random::<u128>();
     let timeout = ctx.cfg.hello_timeout;
     time::timeout(timeout, con.send_one(&Secret(secret))).await??;
     let _: ReadyForOwnershipCheck = time::timeout(timeout, con.receive()).await??;
@@ -428,7 +430,7 @@ async fn ownership_check(
         bail!("incompatible protocol version")
     }
     use publisher::Hello as PHello;
-    let n = thread_rng().gen::<u128>();
+    let n = rng().random::<u128>();
     let answer =
         utils::make_sha3_token([&n.to_be_bytes()[..], &secret.to_be_bytes()[..]]);
     time::timeout(timeout, con.send_one(&PHello::ResolverAuthenticate(ctx.id))).await??;
@@ -614,7 +616,8 @@ async fn get_tls_uifo(
                 .await
                 .users
                 .ifo(id, names.as_ref().map(|names| names.cn.as_str()))
-                .await.context("getting user info")?)
+                .await
+                .context("getting user info")?)
         }
         Some(_) | None => bail!("tls handshake should be complete by now"),
     }
@@ -797,13 +800,15 @@ async fn hello_client_read(
         AuthRead::Tls => match &ctx.secctx {
             SecCtx::Tls(a) => {
                 let tls = a.0.accept(con).await.context("accepting tls connection")?;
-                let uifo = get_tls_uifo(ctx.id, &tls, a).await.context("getting tls info")?;
+                let uifo =
+                    get_tls_uifo(ctx.id, &tls, a).await.context("getting tls info")?;
                 let mut con = Channel::new::<
                     ServerCtx,
                     tokio_rustls::server::TlsStream<TcpStream>,
                 >(None, tls);
                 time::timeout(ctx.cfg.hello_timeout, con.send_one(&AuthRead::Tls))
-                    .await.context("saying hello")??;
+                    .await
+                    .context("saying hello")??;
                 (con, uifo)
             }
             SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Krb5(_) => bail!(NO),
@@ -884,7 +889,7 @@ async fn server_loop(
     loop {
         select_biased! {
             _ = stop => {
-		debug!("server loop stop requested");
+        debug!("server loop stop requested");
                 for cl in client_stops.drain(..) {
                     let _ = cl.send(());
                 }
@@ -945,10 +950,10 @@ impl Server {
             }
             res
         });
-	let local_addr = match recv_ready.await {
-	    Err(_) => bail!("resolver server shutdown"),
-	    Ok(addr) => addr,
-	};
+        let local_addr = match recv_ready.await {
+            Err(_) => bail!("resolver server shutdown"),
+            Ok(addr) => addr,
+        };
         Ok(Server { stop: Some(send_stop), local_addr })
     }
 

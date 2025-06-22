@@ -1032,8 +1032,8 @@ impl PublisherWeak {
 }
 
 fn rand_port(current: u16) -> u16 {
-    let mut rng = rand::thread_rng();
-    current + rng.gen_range(0u16..10u16)
+    let mut rng = rand::rng();
+    current + rng.random_range(0u16..10u16)
 }
 
 #[derive(Debug)]

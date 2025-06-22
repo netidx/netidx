@@ -4,7 +4,7 @@ use crate::{
 };
 use netidx::subscriber::Value;
 use netidx_netproto::valarray::ValArray;
-use rand::{seq::SliceRandom, thread_rng, Rng};
+use rand::{rng, seq::SliceRandom, Rng};
 use smallvec::{smallvec, SmallVec};
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Rand {
                 match ($start, $end) {
                     $(
                         (Value::$typ(start), Value::$typ(end)) if start < end => {
-                            Some(Value::$typ(thread_rng().gen_range(*start..*end)))
+                            Some(Value::$typ(rng().random_range(*start..*end)))
                         }
                     ),+
                     _ => None
@@ -76,7 +76,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Pick {
     ) -> Option<Value> {
         from[0].update(ctx, event).and_then(|a| match a {
             Value::Array(a) if a.len() > 0 => {
-                Some(a[thread_rng().gen_range(0..a.len())].clone())
+                Some(a[rng().random_range(0..a.len())].clone())
             }
             _ => None,
         })
@@ -105,7 +105,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Shuffle {
         from[0].update(ctx, event).and_then(|a| match a {
             Value::Array(a) => {
                 self.0.extend(a.iter().cloned());
-                self.0.shuffle(&mut thread_rng());
+                self.0.shuffle(&mut rng());
                 Some(Value::Array(ValArray::from_iter_exact(self.0.drain(..))))
             }
             _ => None,

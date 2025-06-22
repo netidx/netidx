@@ -473,8 +473,8 @@ enum SubStatus {
 const REMEBER_FAILED: Duration = Duration::from_secs(60);
 
 fn pick(n: usize) -> usize {
-    let mut rng = rand::thread_rng();
-    rng.gen_range(0..n)
+    let mut rng = rand::rng();
+    rng.random_range(0..n)
 }
 
 #[derive(Debug)]
@@ -555,7 +555,7 @@ impl SubscriberInner {
                     .filter(|pb| !self.recently_failed.contains_key(&pb.addr))
                     .map(|pb| (pref, pb))
             })
-            .choose(&mut rand::thread_rng())
+            .choose(&mut rand::rng())
             .map(|(pref, pb)| Chosen {
                 addr: pb.addr,
                 target_auth: pb.target_auth.clone(),
@@ -570,7 +570,7 @@ impl SubscriberInner {
                 .publishers
                 .iter()
                 .filter_map(|pref| publishers.get(&pref.id).map(|pb| (pref, pb)))
-                .choose(&mut rand::thread_rng())
+                .choose(&mut rand::rng())
                 .map(|(pref, pb)| Chosen {
                     addr: pb.addr,
                     target_auth: pb.target_auth.clone(),
