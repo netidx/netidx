@@ -22,14 +22,14 @@ fn maybe_compile(s: &str, re: &mut Option<Regex>) -> Result<()> {
     Ok(())
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct IsMatchEv {
     re: Option<Regex>,
 }
 
 impl EvalCached for IsMatchEv {
     const NAME: &str = "re_is_match";
-    deftype!("fn(#pat:string, string) -> [bool, error]");
+    deftype!("re", "fn(#pat:string, string) -> [bool, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::String(s)) = &from.0[0] {
@@ -48,14 +48,14 @@ impl EvalCached for IsMatchEv {
 
 type IsMatch = CachedArgs<IsMatchEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct FindEv {
     re: Option<Regex>,
 }
 
 impl EvalCached for FindEv {
     const NAME: &str = "re_find";
-    deftype!("fn(#pat:string, string) -> [Array<string>, error]");
+    deftype!("re", "fn(#pat:string, string) -> [Array<string>, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::String(s)) = &from.0[0] {
@@ -77,14 +77,14 @@ impl EvalCached for FindEv {
 
 type Find = CachedArgs<FindEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct CapturesEv {
     re: Option<Regex>,
 }
 
 impl EvalCached for CapturesEv {
     const NAME: &str = "re_captures";
-    deftype!("fn(#pat:string, string) -> [Array<Array<[null, string]>>, error]");
+    deftype!("re", "fn(#pat:string, string) -> [Array<Array<[null, string]>>, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::String(s)) = &from.0[0] {
@@ -110,14 +110,14 @@ impl EvalCached for CapturesEv {
 
 type Captures = CachedArgs<CapturesEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct SplitEv {
     re: Option<Regex>,
 }
 
 impl EvalCached for SplitEv {
     const NAME: &str = "re_split";
-    deftype!("fn(#pat:string, string) -> [Array<string>, error]");
+    deftype!("re", "fn(#pat:string, string) -> [Array<string>, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::String(s)) = &from.0[0] {
@@ -137,7 +137,7 @@ impl EvalCached for SplitEv {
 
 type Split = CachedArgs<SplitEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct SplitNEv {
     re: Option<Regex>,
     lim: Option<usize>,
@@ -145,7 +145,7 @@ struct SplitNEv {
 
 impl EvalCached for SplitNEv {
     const NAME: &str = "re_splitn";
-    deftype!("fn(#pat:string, #limit:u64, string) -> [Array<string>, error]");
+    deftype!("re", "fn(#pat:string, #limit:u64, string) -> [Array<string>, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::String(s)) = &from.0[0] {

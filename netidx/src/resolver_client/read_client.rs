@@ -20,7 +20,7 @@ use futures::{
 };
 use fxhash::FxHashSet;
 use log::{info, warn};
-use rand::{seq::SliceRandom, thread_rng, Rng};
+use rand::{rng, seq::SliceRandom, Rng};
 use std::{
     cmp::max, collections::HashSet, fmt::Debug, net::SocketAddr, sync::Arc,
     time::Duration,
@@ -45,7 +45,7 @@ async fn connect(
     tls: &Option<tls::CachedConnector>,
 ) -> Result<Channel> {
     let mut addrs = resolver.addrs.clone();
-    addrs.as_mut_slice().shuffle(&mut thread_rng());
+    addrs.as_mut_slice().shuffle(&mut rng());
     let mut n = 0;
     loop {
         let (addr, auth) = &addrs[n % addrs.len()];
@@ -60,7 +60,7 @@ async fn connect(
             bad_addrs.clear()
         }
         if n % addrs.len() == 0 && tries > 0 {
-            let wait = thread_rng().gen_range(1..12);
+            let wait = rng().random_range(1..12);
             time::sleep(Duration::from_secs(wait)).await;
         }
         n += 1;
@@ -205,7 +205,7 @@ async fn connection(
                         break;
                     }
                     if tries > 1 {
-                        let wait = thread_rng().gen_range(1..12);
+                        let wait = rng().random_range(1..12);
                         time::sleep(Duration::from_secs(wait)).await
                     }
                     tries += 1;

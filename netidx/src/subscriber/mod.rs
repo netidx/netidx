@@ -132,7 +132,7 @@ struct SubscribeValRequest {
 enum ToCon {
     Subscribe(SubscribeValRequest),
     Unsubscribe(Id),
-    Stream { id: Id, sub_id: SubId, tx: WUpdateChan, flags: UpdatesFlags },
+    Stream { id: Id, tx: WUpdateChan, flags: UpdatesFlags },
     Write(Id, Value, WriteId, Option<oneshot::Sender<Value>>),
     Flush(oneshot::Sender<()>),
 }
@@ -220,12 +220,7 @@ impl Val {
     /// will get an update with the current state, even though the
     /// channel registration will be ignored.
     pub fn updates(&self, flags: UpdatesFlags, tx: UpdateChan) {
-        let m = ToCon::Stream {
-            tx: ChanWrap(tx),
-            sub_id: self.0.sub_id,
-            id: self.0.id,
-            flags,
-        };
+        let m = ToCon::Stream { tx: ChanWrap(tx), id: self.0.id, flags };
         self.0.connection.send(m);
     }
 
@@ -375,7 +370,7 @@ impl Dval {
             t.streams.push((flags, tx.clone()));
         }
         if let DvState::Subscribed(ref sub) = t.sub {
-            let m = ToCon::Stream { tx, sub_id: t.sub_id, id: sub.0.id, flags };
+            let m = ToCon::Stream { tx, id: sub.0.id, flags };
             sub.0.connection.send(m);
         }
     }
@@ -478,8 +473,8 @@ enum SubStatus {
 const REMEBER_FAILED: Duration = Duration::from_secs(60);
 
 fn pick(n: usize) -> usize {
-    let mut rng = rand::thread_rng();
-    rng.gen_range(0..n)
+    let mut rng = rand::rng();
+    rng.random_range(0..n)
 }
 
 #[derive(Debug)]
@@ -560,7 +555,7 @@ impl SubscriberInner {
                     .filter(|pb| !self.recently_failed.contains_key(&pb.addr))
                     .map(|pb| (pref, pb))
             })
-            .choose(&mut rand::thread_rng())
+            .choose(&mut rand::rng())
             .map(|(pref, pb)| Chosen {
                 addr: pb.addr,
                 target_auth: pb.target_auth.clone(),
@@ -575,7 +570,7 @@ impl SubscriberInner {
                 .publishers
                 .iter()
                 .filter_map(|pref| publishers.get(&pref.id).map(|pb| (pref, pb)))
-                .choose(&mut rand::thread_rng())
+                .choose(&mut rand::rng())
                 .map(|(pref, pb)| Chosen {
                     addr: pb.addr,
                     target_auth: pb.target_auth.clone(),
@@ -953,7 +948,6 @@ impl Subscriber {
                                 for (f, tx) in &dv.streams {
                                     sub.0.connection.send(ToCon::Stream {
                                         tx: tx.clone(),
-                                        sub_id: dv.sub_id,
                                         id: sub.0.id,
                                         flags: *f
                                             | UpdatesFlags::BEGIN_WITH_LAST
@@ -1319,7 +1313,6 @@ impl Subscriber {
                         let m = ToCon::Stream {
                             tx,
                             flags: f | UpdatesFlags::BEGIN_WITH_LAST,
-                            sub_id: raw.0.sub_id,
                             id: raw.0.id,
                         };
                         raw.0.connection.send(m);
@@ -1346,12 +1339,7 @@ impl Subscriber {
                     Ok(Err(e)) => (path, Err(e)),
                     Ok(Ok(raw)) => {
                         for (f, tx) in streams {
-                            let m = ToCon::Stream {
-                                tx,
-                                flags: f,
-                                sub_id: raw.0.sub_id,
-                                id: raw.0.id,
-                            };
+                            let m = ToCon::Stream { tx, flags: f, id: raw.0.id };
                             raw.0.connection.send(m);
                         }
                         (path, Ok(raw))

@@ -24,7 +24,7 @@ path = "src/main.rs"
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
-nix = { version = "0.29", features = ["process", "signal"] }
+nix = { version = "0.30", features = ["process", "signal"] }
 
 [features]
 default = []
@@ -55,6 +55,7 @@ netidx-protocols = { path = "../netidx-protocols", version = "0.28.0", default-f
 netidx-tools-core = { path = "../netidx-tools-core", version = "0.28.0", default-features = false }
 netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.28.0", default-features = false }
 parking_lot = { workspace = true }
+ratatui = { workspace = true }
 reedline = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }

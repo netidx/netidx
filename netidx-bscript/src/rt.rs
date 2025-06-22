@@ -10,11 +10,12 @@
 /// application you can implement your own, see the [Ctx] and
 /// [UserEvent] traits.
 use crate::{
+    compile,
     env::Env,
     expr::{self, ExprId, ExprKind, ModPath, ModuleKind, ModuleResolver, Origin},
-    node::{Node, NodeKind},
-    typ::{NoRefs, Type},
-    BindId, BuiltIn, Ctx, Event, ExecCtx, NoUserEvent,
+    node::genn,
+    typ::{FnType, Type},
+    BindId, BuiltIn, Ctx, Event, ExecCtx, LambdaId, NoUserEvent, Node,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use arcstr::{literal, ArcStr};
@@ -31,7 +32,7 @@ use netidx::{
     path::Path,
     pool::Pooled,
     protocol::valarray::ValArray,
-    publisher::{self, Id, PublishFlags, Publisher, Val, Value, WriteRequest},
+    publisher::{self, Id, PublishFlags, Publisher, Typ, Val, Value, WriteRequest},
     resolver_client::ChangeTracker,
     subscriber::{self, Dval, SubId, Subscriber, UpdatesFlags},
 };
@@ -45,6 +46,7 @@ use std::{
     future, mem,
     os::unix::ffi::OsStrExt,
     path::{Component, PathBuf},
+    sync::Weak,
     time::Duration,
 };
 use tokio::{
@@ -100,7 +102,7 @@ pub struct BSCtx {
 
 impl BSCtx {
     fn new(publisher: Publisher, subscriber: Subscriber) -> Self {
-        let (updates_tx, updates) = mpsc::channel(3);
+        let (updates_tx, updates) = mpsc::channel(100);
         let (writes_tx, writes) = mpsc::channel(100);
         let (rpcs_tx, rpcs) = mpsc::channel(100);
         let batch = publisher.start_batch();
@@ -398,13 +400,13 @@ impl Ctx for BSCtx {
 }
 
 fn is_output(n: &Node<BSCtx, NoUserEvent>) -> bool {
-    match &n.kind {
-        NodeKind::Bind { .. }
-        | NodeKind::Lambda(_)
-        | NodeKind::Use { .. }
-        | NodeKind::Connect(_, _)
-        | NodeKind::Module(_)
-        | NodeKind::TypeDef { .. } => false,
+    match &n.spec().kind {
+        ExprKind::Bind { .. }
+        | ExprKind::Lambda { .. }
+        | ExprKind::Use { .. }
+        | ExprKind::Connect { .. }
+        | ExprKind::Module { .. }
+        | ExprKind::TypeDef { .. } => false,
         _ => true,
     }
 }
@@ -442,7 +444,7 @@ async fn unsubscribe_ready(pending: &VecDeque<(Instant, Dval)>, now: Instant) {
 #[derive(Clone)]
 pub struct CompExp {
     pub id: ExprId,
-    pub typ: Type<NoRefs>,
+    pub typ: Type,
     pub output: bool,
 }
 
@@ -457,12 +459,63 @@ pub enum RtEvent {
     Updated(ExprId, Value),
 }
 
+atomic_id!(CallableId);
+
+pub struct Callable {
+    rt: BSHandle,
+    id: CallableId,
+    env: Env<BSCtx, NoUserEvent>,
+    pub typ: FnType,
+    pub expr: ExprId,
+}
+
+impl Drop for Callable {
+    fn drop(&mut self) {
+        let _ = self.rt.0.unbounded_send(ToRt::DeleteCallable { id: self.id });
+    }
+}
+
+impl Callable {
+    /// Call the lambda with args. Argument types and arity will be
+    /// checked and an error will be returned if they are wrong.
+    pub async fn call(&self, args: ValArray) -> Result<()> {
+        if self.typ.args.len() != args.len() {
+            bail!("expected {} args", self.typ.args.len())
+        }
+        for (i, (a, v)) in self.typ.args.iter().zip(args.iter()).enumerate() {
+            if !a.typ.is_a(&self.env, v) {
+                bail!("type mismatch arg {i} expected {}", a.typ)
+            }
+        }
+        self.call_unchecked(args).await
+    }
+
+    /// Call the lambda with args. Argument types and arity will NOT
+    /// be checked. This can result in a runtime panic, invalid
+    /// results, and probably other bad things.
+    pub async fn call_unchecked(&self, args: ValArray) -> Result<()> {
+        self.rt
+            .0
+            .unbounded_send(ToRt::Call { id: self.id, args })
+            .map_err(|_| anyhow!("runtime is dead"))
+    }
+}
+
 enum ToRt {
     GetEnv { res: oneshot::Sender<Env<BSCtx, NoUserEvent>> },
     Delete { id: ExprId, res: oneshot::Sender<Result<Env<BSCtx, NoUserEvent>>> },
     Load { path: PathBuf, res: oneshot::Sender<Result<CompRes>> },
     Compile { text: ArcStr, res: oneshot::Sender<Result<CompRes>> },
+    CompileCallable { id: Value, rt: BSHandle, res: oneshot::Sender<Result<Callable>> },
+    CompileRef { id: Value, res: oneshot::Sender<Result<ExprId>> },
+    Call { id: CallableId, args: ValArray },
+    DeleteCallable { id: CallableId },
     Subscribe { ch: mpsc::Sender<RtEvent> },
+}
+
+struct CallableInt {
+    expr: ExprId,
+    args: Box<[BindId]>,
 }
 
 // setting expectations is one of the most under rated skills in
@@ -472,6 +525,7 @@ struct BS {
     event: Event<NoUserEvent>,
     updated: FxHashMap<ExprId, bool>,
     nodes: IndexMap<ExprId, Node<BSCtx, NoUserEvent>, FxBuildHasher>,
+    callables: FxHashMap<CallableId, CallableInt>,
     subs: Vec<mpsc::Sender<RtEvent>>,
     resolvers: Vec<ModuleResolver>,
     publish_timeout: Option<Duration>,
@@ -518,6 +572,7 @@ impl BS {
             event,
             updated: HashMap::default(),
             nodes: IndexMap::default(),
+            callables: HashMap::default(),
             subs: vec![],
             resolvers,
             publish_timeout: rt.publish_timeout,
@@ -646,7 +701,7 @@ impl BS {
         let nodes = ori
             .exprs
             .iter()
-            .map(|e| Node::compile(&mut self.ctx, &scope, e.clone()))
+            .map(|e| compile(&mut self.ctx, &scope, e.clone()))
             .collect::<Result<SmallVec<[_; 4]>>>()
             .with_context(|| ori.clone())?;
         let exprs = ori
@@ -655,7 +710,7 @@ impl BS {
             .zip(nodes.into_iter())
             .map(|(e, n)| {
                 let output = is_output(&n);
-                let typ = n.typ.clone();
+                let typ = n.typ().clone();
                 self.updated.insert(e.id, true);
                 self.nodes.insert(e.id, n);
                 CompExp { id: e.id, output, typ }
@@ -735,14 +790,82 @@ impl BS {
             .await
             .with_context(|| ori.clone())?;
         let top_id = expr.id;
-        let n =
-            Node::compile(&mut self.ctx, &scope, expr).with_context(|| ori.clone())?;
+        let n = compile(&mut self.ctx, &scope, expr).with_context(|| ori.clone())?;
         let has_out = is_output(&n);
-        let typ = n.typ.clone();
+        let typ = n.typ().clone();
         self.nodes.insert(top_id, n);
         self.updated.insert(top_id, true);
         let exprs = smallvec![CompExp { id: top_id, output: has_out, typ }];
         Ok(CompRes { exprs, env: self.ctx.env.clone() })
+    }
+
+    fn compile_callable(&mut self, id: Value, rt: BSHandle) -> Result<Callable> {
+        let id = match id {
+            Value::U64(id) => LambdaId(id),
+            v => bail!("invalid lambda id {v}"),
+        };
+        let lb = self.ctx.env.lambdas.get(&id).and_then(Weak::upgrade);
+        let lb = lb.ok_or_else(|| anyhow!("unknown lambda {id:?}"))?;
+        let args = lb.typ.args.iter();
+        let args = args
+            .map(|a| {
+                if a.label.as_ref().map(|(_, opt)| *opt).unwrap_or(false) {
+                    bail!("can't call lambda with an optional argument from rust")
+                } else {
+                    Ok(BindId::new())
+                }
+            })
+            .collect::<Result<Box<[_]>>>()?;
+        let eid = ExprId::new();
+        let argn = lb.typ.args.iter().zip(args.iter());
+        let argn = argn
+            .map(|(arg, id)| {
+                genn::reference(&mut self.ctx, *id, arg.typ.clone(), ExprId::new())
+            })
+            .collect::<Vec<_>>();
+        let fnode = genn::constant(Value::U64(id.0));
+        let n = genn::apply(fnode, argn, lb.typ.clone(), eid);
+        let cid = CallableId::new();
+        self.callables.insert(cid, CallableInt { expr: eid, args });
+        self.nodes.insert(eid, n);
+        let env = self.ctx.env.clone();
+        Ok(Callable { expr: eid, rt, env, id: cid, typ: (*lb.typ).clone() })
+    }
+
+    fn compile_ref(&mut self, id: Value) -> Result<ExprId> {
+        let id = match id {
+            Value::U64(id) => BindId(id),
+            v => bail!("invalid bind id {v}"),
+        };
+        let eid = ExprId::new();
+        let typ = Type::Primitive(Typ::any());
+        let n = genn::reference(&mut self.ctx, id, typ, eid);
+        self.nodes.insert(eid, n);
+        Ok(eid)
+    }
+
+    fn call_callable(
+        &mut self,
+        id: CallableId,
+        args: ValArray,
+        tasks: &mut Vec<(BindId, Value)>,
+    ) -> Result<()> {
+        let c =
+            self.callables.get(&id).ok_or_else(|| anyhow!("unknown callable {id:?}"))?;
+        if args.len() != c.args.len() {
+            bail!("expected {} arguments", c.args.len());
+        }
+        let a = c.args.iter().zip(args.iter()).map(|(id, v)| (*id, v.clone()));
+        tasks.extend(a);
+        Ok(())
+    }
+
+    fn delete_callable(&mut self, id: CallableId) {
+        if let Some(c) = self.callables.remove(&id) {
+            if let Some(mut n) = self.nodes.shift_remove(&c.expr) {
+                n.delete(&mut self.ctx)
+            }
+        }
     }
 
     async fn run(mut self, mut to_rt: mpsc::UnboundedReceiver<ToRt>) -> Result<()> {
@@ -758,8 +881,11 @@ impl BS {
             macro_rules! peek {
                 (updates) => {
                     if self.ctx.user.net_updates.is_empty() {
-                        if let Ok(Some(up)) = self.ctx.user.updates.try_next() {
-                            updates = Some(up);
+                        while let Ok(Some(mut up)) = self.ctx.user.updates.try_next() {
+                            match &mut updates {
+                                None => updates = Some(up),
+                                Some(prev) => prev.extend(up.drain(..)),
+                            }
                         }
                     }
                 };
@@ -797,7 +923,7 @@ impl BS {
                 },
                 up = maybe_next(self.ctx.user.net_updates.is_empty(), &mut self.ctx.user.updates) => {
                     updates = Some(up);
-                    peek!(writes, tasks, rpcs);
+                    peek!(updates, writes, tasks, rpcs);
                 },
                 up = self.ctx.user.tasks.join_next() => {
                     if let Some(Ok(up)) = up {
@@ -840,10 +966,22 @@ impl BS {
                 }
                 Some(ToRt::Delete { id, res }) => {
                     // CR estokes: Check dependencies
-                    if let Some(n) = self.nodes.shift_remove(&id) {
+                    if let Some(mut n) = self.nodes.shift_remove(&id) {
                         n.delete(&mut self.ctx);
                     }
                     let _ = res.send(Ok(self.ctx.env.clone()));
+                }
+                Some(ToRt::CompileCallable { id, rt, res }) => {
+                    let _ = res.send(self.compile_callable(id, rt));
+                }
+                Some(ToRt::CompileRef { id, res }) => {
+                    let _ = res.send(self.compile_ref(id));
+                }
+                Some(ToRt::DeleteCallable { id }) => self.delete_callable(id),
+                Some(ToRt::Call { id, args }) => {
+                    if let Err(e) = self.call_callable(id, args, &mut tasks) {
+                        error!("calling callable {id:?} failed with {e:?}")
+                    }
                 }
             }
             self.do_cycle(updates, writes, &mut tasks, &mut rpcs).await;
@@ -859,6 +997,7 @@ impl BS {
 
 /// A handle to a running BS instance. Drop the handle to shutdown the
 /// associated background tasks.
+#[derive(Clone)]
 pub struct BSHandle(mpsc::UnboundedSender<ToRt>);
 
 impl BSHandle {
@@ -893,6 +1032,21 @@ impl BSHandle {
     /// Delete the specified expression
     pub async fn delete(&self, id: ExprId) -> Result<Env<BSCtx, NoUserEvent>> {
         Ok(self.exec(|tx| ToRt::Delete { id, res: tx }).await??)
+    }
+
+    /// Compile a callable interface to the specified lambda id. This
+    /// is how you call a lambda directly from rust.
+    pub async fn compile_callable(&self, id: Value) -> Result<Callable> {
+        Ok(self
+            .exec(|tx| ToRt::CompileCallable { id, rt: self.clone(), res: tx })
+            .await??)
+    }
+
+    /// Compile an expression that will output the value of the ref
+    /// specifed by id. This is the same as the deref (*) operator in
+    /// bscript.
+    pub async fn compile_ref(&self, id: Value) -> Result<ExprId> {
+        Ok(self.exec(|tx| ToRt::CompileRef { id, res: tx }).await??)
     }
 
     /// The specified channel will receive events generated by all

@@ -3,7 +3,7 @@ use crate::{
         Arg, Bind, Expr, ExprId, ExprKind, Lambda, ModPath, ModuleKind, Pattern,
         StructurePattern,
     },
-    typ::{FnArgType, FnType, Refs, TVar, Type},
+    typ::{FnArgType, FnType, TVar, Type},
 };
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
@@ -34,7 +34,7 @@ use netidx_netproto::value_parser::{
 };
 use parking_lot::RwLock;
 use smallvec::{smallvec, SmallVec};
-use std::{marker::PhantomData, sync::LazyLock};
+use std::sync::LazyLock;
 use triomphe::Arc;
 
 use super::Origin;
@@ -341,6 +341,8 @@ where
                         | (Some(Expr { kind: ExprKind::ArrayRef { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::ArraySlice { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::Apply { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::ByRef(_), .. }), _)
+                        | (Some(Expr { kind: ExprKind::Deref(_), .. }), _)
                         | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
                             unreachable!()
                         }
@@ -615,7 +617,7 @@ where
     .skip(not_followed_by(choice((alpha_num(), token('_')))))
 }
 
-fn fntype<I>() -> impl Parser<I, Output = FnType<Refs>>
+fn fntype<I>() -> impl Parser<I, Output = FnType>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -628,11 +630,9 @@ where
                 sptoken('>'),
                 sep_by1((tvar().skip(sptoken(':')), typexp()), csep()),
             )))
-            .map(|cs: Option<SmallVec<[(TVar<Refs>, Type<Refs>); 4]>>| {
-                match cs {
-                    Some(cs) => Arc::new(RwLock::new(cs.into_iter().collect())),
-                    None => Arc::new(RwLock::new(vec![])),
-                }
+            .map(|cs: Option<SmallVec<[(TVar, Type); 4]>>| match cs {
+                Some(cs) => Arc::new(RwLock::new(cs.into_iter().collect())),
+                None => Arc::new(RwLock::new(vec![])),
             }),
             between(
                 token('('),
@@ -671,9 +671,9 @@ where
         ))
         .then(
             |(constraints, mut args, rtype): (
-                Arc<RwLock<Vec<(TVar<Refs>, Type<Refs>)>>>,
-                Vec<Either<FnArgType<Refs>, Type<Refs>>>,
-                Type<Refs>,
+                Arc<RwLock<Vec<(TVar, Type)>>>,
+                Vec<Either<FnArgType, Type>>,
+                Type,
             )| {
                 let vargs = match args.pop() {
                     None => None,
@@ -708,7 +708,7 @@ where
         )
 }
 
-fn tvar<I>() -> impl Parser<I, Output = TVar<Refs>>
+fn tvar<I>() -> impl Parser<I, Output = TVar>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -717,20 +717,21 @@ where
     sptoken('\'').with(fname()).map(TVar::empty_named)
 }
 
-fn typexp_<I>() -> impl Parser<I, Output = Type<Refs>>
+fn typexp_<I>() -> impl Parser<I, Output = Type>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     choice((
-        attempt(sptoken('_').map(|_| Type::Bottom(PhantomData))),
+        attempt(sptoken('&').with(typexp()).map(|t| Type::ByRef(Arc::new(t)))),
+        attempt(sptoken('_').map(|_| Type::Bottom)),
         attempt(
             between(sptoken('['), sptoken(']'), sep_by(typexp(), csep()))
-                .map(|ts: SmallVec<[Type<Refs>; 16]>| Type::flatten_set(ts)),
+                .map(|ts: SmallVec<[Type; 16]>| Type::flatten_set(ts)),
         ),
         attempt(between(sptoken('('), sptoken(')'), sep_by1(typexp(), csep())).then(
-            |exps: SmallVec<[Type<Refs>; 16]>| {
+            |exps: SmallVec<[Type; 16]>| {
                 if exps.len() < 2 {
                     unexpected_any("tuples must have at least 2 elements").left()
                 } else {
@@ -744,7 +745,7 @@ where
                 sptoken('}'),
                 sep_by1((spfname().skip(sptoken(':')), typexp()), csep()),
             )
-            .then(|mut exps: SmallVec<[(ArcStr, Type<Refs>); 16]>| {
+            .then(|mut exps: SmallVec<[(ArcStr, Type); 16]>| {
                 let s = exps.iter().map(|(n, _)| n).collect::<FxHashSet<_>>();
                 if s.len() < exps.len() {
                     return unexpected_any("struct field names must be unique").left();
@@ -762,35 +763,45 @@ where
                     sep_by1(typexp(), csep()),
                 ))),
             )
-                .map(
-                    |(tag, typs): (ArcStr, Option<SmallVec<[Type<Refs>; 5]>>)| {
-                        let t = match typs {
-                            None => smallvec![],
-                            Some(v) => v,
-                        };
-                        Type::Variant(tag.clone(), Arc::from_iter(t))
-                    },
-                ),
+                .map(|(tag, typs): (ArcStr, Option<SmallVec<[Type; 5]>>)| {
+                    let t = match typs {
+                        None => smallvec![],
+                        Some(v) => v,
+                    };
+                    Type::Variant(tag.clone(), Arc::from_iter(t))
+                }),
         ),
         attempt(fntype().map(|f| Type::Fn(Arc::new(f)))),
         attempt(spstring("Array").with(between(sptoken('<'), sptoken('>'), typexp())))
             .map(|t| Type::Array(Arc::new(t))),
-        attempt(sptypath()).map(|n| Type::Ref(n)),
+        attempt((
+            sptypath(),
+            optional(attempt(between(
+                sptoken('<'),
+                sptoken('>'),
+                sep_by1(typexp(), csep()),
+            ))),
+        ))
+        .map(|(n, params): (ModPath, Option<SmallVec<[Type; 8]>>)| {
+            let params = params
+                .map(|a| Arc::from_iter(a.into_iter()))
+                .unwrap_or_else(|| Arc::from_iter([]));
+            Type::Ref { scope: ModPath::root(), name: n, params }
+        }),
         attempt(typeprim()).map(|typ| Type::Primitive(typ.into())),
         attempt(tvar()).map(|tv| Type::TVar(tv)),
     ))
 }
 
 parser! {
-    fn typexp[I]()(I) -> Type<Refs>
+    fn typexp[I]()(I) -> Type
     where [I: RangeStream<Token = char>, I::Range: Range]
     {
         typexp_()
     }
 }
 
-fn lambda_args<I>(
-) -> impl Parser<I, Output = (Vec<Arg<Refs>>, Option<Option<Type<Refs>>>)>
+fn lambda_args<I>() -> impl Parser<I, Output = (Vec<Arg>, Option<Option<Type>>)>
 where
     I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -810,7 +821,7 @@ where
         ),
         csep(),
     )
-    .then(|v: Vec<((bool, StructurePattern), Option<Type<Refs>>, Option<Expr>)>| {
+    .then(|v: Vec<((bool, StructurePattern), Option<Type>, Option<Expr>)>| {
         let args = v
             .into_iter()
             .map(|((labeled, pattern), constraint, default)| {
@@ -829,7 +840,7 @@ where
         }
     })
     // @args must be last
-    .then(|mut v: Vec<Arg<Refs>>| {
+    .then(|mut v: Vec<Arg>| {
         match v.iter().enumerate().find(|(_, a)| match &a.pattern {
             StructurePattern::Bind(n) if n == "@args" => true,
             _ => false,
@@ -846,7 +857,7 @@ where
         }
     })
     // labeled before anonymous args
-    .then(|(v, vargs): (Vec<Arg<Refs>>, Option<Option<Type<Refs>>>)| {
+    .then(|(v, vargs): (Vec<Arg>, Option<Option<Type>>)| {
         let mut anon = false;
         for a in &v {
             if a.labeled.is_some() && anon {
@@ -867,7 +878,7 @@ where
     (
         position(),
         attempt(sep_by((tvar().skip(sptoken(':')), typexp()), csep()))
-            .map(|tvs: SmallVec<[(TVar<Refs>, Type<Refs>); 4]>| Arc::from_iter(tvs)),
+            .map(|tvs: SmallVec<[(TVar, Type); 4]>| Arc::from_iter(tvs)),
         between(sptoken('|'), sptoken('|'), lambda_args()),
         optional(attempt(spstring("->").with(typexp()).skip(space()))),
         choice((
@@ -1298,7 +1309,7 @@ where
     )
         .map(
             |(type_predicate, structure_predicate, guard): (
-                Option<Type<Refs>>,
+                Option<Type>,
                 StructurePattern,
                 Option<Expr>,
             )| { Pattern { type_predicate, structure_predicate, guard } },
@@ -1347,8 +1358,24 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (position(), string("type").with(sptypname()), sptoken('=').with(typexp()))
-        .map(|(pos, name, typ)| ExprKind::TypeDef { name, typ }.to_expr(pos))
+    (
+        position(),
+        string("type").with(sptypname()),
+        optional(attempt(between(
+            sptoken('<'),
+            sptoken('>'),
+            sep_by1((tvar(), optional(attempt(sptoken(':').with(typexp())))), csep()),
+        ))),
+        sptoken('=').with(typexp()),
+    )
+        .map(|(pos, name, params, typ)| {
+            let params = params
+                .map(|ps: SmallVec<[(TVar, Option<Type>); 8]>| {
+                    Arc::from_iter(ps.into_iter())
+                })
+                .unwrap_or_else(|| Arc::<[(TVar, Option<Type>)]>::from(Vec::new()));
+            ExprKind::TypeDef { name, params, typ }.to_expr(pos)
+        })
 }
 
 fn tuple<I>() -> impl Parser<I, Output = Expr>
@@ -1447,6 +1474,26 @@ where
         )
 }
 
+fn byref<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char, Position = SourcePosition>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (position(), token('&').with(expr()))
+        .map(|(pos, expr)| ExprKind::ByRef(Arc::new(expr)).to_expr(pos))
+}
+
+fn deref<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char, Position = SourcePosition>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (position(), token('*').with(expr()))
+        .map(|(pos, expr)| ExprKind::Deref(Arc::new(expr)).to_expr(pos))
+}
+
 fn expr_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char, Position = SourcePosition>,
@@ -1454,11 +1501,16 @@ where
     I::Range: Range,
 {
     choice((
-        attempt(spaces().with(module())),
-        attempt(spaces().with(use_module())),
-        attempt(spaces().with(typedef())),
-        attempt(spaces().with(raw_string())),
-        attempt(spaces().with(array())),
+        // nested due to limits on choice size
+        attempt(choice((
+            attempt(spaces().with(module())),
+            attempt(spaces().with(use_module())),
+            attempt(spaces().with(typedef())),
+            attempt(spaces().with(raw_string())),
+            attempt(spaces().with(array()))
+        ))),
+        attempt(spaces().with(byref())),
+        attempt(spaces().with(deref())),
         attempt(spaces().with(arith())),
         attempt(spaces().with(tuple())),
         attempt(spaces().with(structure())),
@@ -1477,7 +1529,7 @@ where
         attempt(spaces().with(qop(any()))),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
-        attempt(spaces().with(qop(reference()))),
+        attempt(spaces().with(qop(reference())))
     ))
 }
 
@@ -1514,8 +1566,17 @@ pub fn parse_one(s: &str) -> anyhow::Result<Expr> {
 }
 
 /// Parse a fntype
-pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType<Refs>> {
+pub fn parse_fn_type(s: &str) -> anyhow::Result<FnType> {
     fntype()
+        .skip(spaces())
+        .skip(eof())
+        .easy_parse(position::Stream::new(s))
+        .map(|(r, _)| r)
+        .map_err(|e| anyhow::anyhow!(format!("{e}")))
+}
+
+pub(super) fn parse_modpath(s: &str) -> anyhow::Result<ModPath> {
+    modpath()
         .skip(spaces())
         .skip(eof())
         .easy_parse(position::Stream::new(s))

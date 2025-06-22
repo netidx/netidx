@@ -1,10 +1,11 @@
 use crate::{
     arity1, arity2, deftype, errf,
     expr::{Expr, ExprId, ModPath},
-    node::{genn, Node},
+    node::genn,
     stdfn::CachedVals,
-    typ::{FnType, NoRefs, Type},
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, UserEvent,
+    typ::{FnType, Type},
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, Node,
+    UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
@@ -18,7 +19,7 @@ use netidx_core::utils::Either;
 use netidx_netproto::valarray::ValArray;
 use netidx_protocols::rpc::server::{self, ArgSpec};
 use smallvec::{smallvec, SmallVec};
-use std::{collections::VecDeque, mem, sync::Arc};
+use std::{collections::VecDeque, sync::Arc};
 use triomphe::Arc as TArc;
 
 fn as_path(v: Value) -> Option<Path> {
@@ -34,6 +35,7 @@ fn as_path(v: Value) -> Option<Path> {
     }
 }
 
+#[derive(Debug)]
 struct Write {
     args: CachedVals,
     top_id: ExprId,
@@ -42,7 +44,7 @@ struct Write {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Write {
     const NAME: &str = "write";
-    deftype!("fn(string, Any) -> _");
+    deftype!("net", "fn(string, Any) -> _");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, from, top_id| {
@@ -70,8 +72,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Write {
                 }
             }
         }
-        let up = self.args.update_diff(ctx, from, event);
-        let ((path, value), (path_up, value_up)) = arity2!(self.args.0, up);
+        let mut up = [false; 2];
+        self.args.update_diff(&mut up, ctx, from, event);
+        let ((path, value), (path_up, value_up)) = arity2!(self.args.0, &up);
         match ((path, value), (path_up, value_up)) {
             ((_, _), (false, false)) => (),
             ((_, Some(val)), (false, true)) => set(&mut self.dv, val),
@@ -124,6 +127,7 @@ impl Write {
     }
 }
 
+#[derive(Debug)]
 struct Subscribe {
     args: CachedVals,
     cur: Option<(Path, Dval)>,
@@ -132,7 +136,7 @@ struct Subscribe {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Subscribe {
     const NAME: &str = "subscribe";
-    deftype!("fn(string) -> Any");
+    deftype!("net", "fn(string) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, from, top_id| {
@@ -148,8 +152,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        let up = self.args.update_diff(ctx, from, event);
-        let (path, path_up) = arity1!(self.args.0, up);
+        let mut up = [false; 1];
+        self.args.update_diff(&mut up, ctx, from, event);
+        let (path, path_up) = arity1!(self.args.0, &up);
         match (path, path_up) {
             (Some(_), false) | (None, false) => (),
             (None, true) => {
@@ -192,6 +197,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
     }
 }
 
+#[derive(Debug)]
 struct RpcCall {
     args: CachedVals,
     top_id: ExprId,
@@ -200,7 +206,7 @@ struct RpcCall {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for RpcCall {
     const NAME: &str = "call";
-    deftype!("fn(string, Array<(string, Any)>) -> Any");
+    deftype!("net", "fn(string, Array<(string, Any)>) -> Any");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, _, _, from, top_id| {
@@ -240,8 +246,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for RpcCall {
             };
             Ok((path, args))
         }
-        let up = self.args.update_diff(ctx, from, event);
-        let ((path, args), (path_up, args_up)) = arity2!(self.args.0, up);
+        let mut up = [false; 2];
+        self.args.update_diff(&mut up, ctx, from, event);
+        let ((path, args), (path_up, args_up)) = arity2!(self.args.0, &up);
         match ((path, args), (path_up, args_up)) {
             ((Some(path), Some(args)), (_, true))
             | ((Some(path), Some(args)), (true, _)) => match parse_args(path, args) {
@@ -260,6 +267,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for RpcCall {
 
 macro_rules! list {
     ($name:ident, $builtin:literal, $method:ident, $typ:literal) => {
+        #[derive(Debug)]
         struct $name {
             args: CachedVals,
             current: Option<Path>,
@@ -269,7 +277,7 @@ macro_rules! list {
 
         impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for $name {
             const NAME: &str = $builtin;
-            deftype!($typ);
+            deftype!("net", $typ);
 
             fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
                 Arc::new(|ctx, _, _, from, top_id| {
@@ -292,8 +300,9 @@ macro_rules! list {
                 from: &mut [Node<C, E>],
                 event: &mut Event<E>,
             ) -> Option<Value> {
-                let up = self.args.update_diff(ctx, from, event);
-                let ((_, path), (trigger_up, path_up)) = arity2!(self.args.0, up);
+                let mut up = [false; 2];
+                self.args.update_diff(&mut up, ctx, from, event);
+                let ((_, path), (trigger_up, path_up)) = arity2!(self.args.0, &up);
                 match (path, path_up, trigger_up) {
                     (Some(Value::String(path)), true, _)
                         if self
@@ -328,11 +337,12 @@ macro_rules! list {
 list!(List, "list", list, "fn(?#update:Any, string) -> Array<string>");
 list!(ListTable, "list_table", list_table, "fn(?#update:Any, string) -> Table");
 
+#[derive(Debug)]
 struct Publish<C: Ctx, E: UserEvent> {
     args: CachedVals,
     current: Option<(Path, Val)>,
     top_id: ExprId,
-    mftyp: TArc<FnType<NoRefs>>,
+    mftyp: TArc<FnType>,
     x: BindId,
     pid: BindId,
     on_write: Node<C, E>,
@@ -340,7 +350,7 @@ struct Publish<C: Ctx, E: UserEvent> {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Publish<C, E> {
     const NAME: &str = "publish";
-    deftype!("fn(?#on_write:fn(Any) -> _, string, Any) -> error");
+    deftype!("net", "fn(?#on_write:fn(Any) -> _, string, Any) -> error");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
@@ -390,7 +400,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
                 }
             }};
         }
-        let up = self.args.update_diff(ctx, from, event);
+        let mut up = [false; 3];
+        self.args.update_diff(&mut up, ctx, from, event);
         if up[0] {
             if let Some(v) = self.args.0[0].clone() {
                 event.variables.insert(self.pid, v);
@@ -434,9 +445,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        Type::Fn(self.mftyp.clone()).check_contains(&from[0].typ)?;
-        Type::Primitive(Typ::String.into()).check_contains(&from[1].typ)?;
-        Type::Primitive(Typ::any()).check_contains(&from[2].typ)?;
+        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[0].typ())?;
+        Type::Primitive(Typ::String.into()).check_contains(&ctx.env, &from[1].typ())?;
+        Type::Primitive(Typ::any()).check_contains(&ctx.env, &from[2].typ())?;
         self.on_write.typecheck(ctx)
     }
 
@@ -444,10 +455,11 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         if let Some((_, val)) = self.current.take() {
             ctx.user.unpublish(val, self.top_id);
         }
-        mem::take(&mut self.on_write).delete(ctx)
+        self.on_write.delete(ctx)
     }
 }
 
+#[derive(Debug)]
 struct PublishRpc<C: Ctx, E: UserEvent> {
     args: CachedVals,
     id: BindId,
@@ -455,7 +467,7 @@ struct PublishRpc<C: Ctx, E: UserEvent> {
     f: Node<C, E>,
     pid: BindId,
     x: BindId,
-    typ: TArc<FnType<NoRefs>>,
+    typ: TArc<FnType>,
     queue: VecDeque<server::RpcCall>,
     argbuf: SmallVec<[(ArcStr, Value); 6]>,
     ready: bool,
@@ -465,6 +477,7 @@ struct PublishRpc<C: Ctx, E: UserEvent> {
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for PublishRpc<C, E> {
     const NAME: &str = "publish_rpc";
     deftype!(
+        "net",
         "fn(#path:string, #doc:string, #spec:Array<ArgSpec>, #f:fn(Array<(string, Any)>) -> Any) -> _"
     );
 
@@ -519,7 +532,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
                 }
             };
         }
-        let changed = self.args.update_diff(ctx, from, event);
+        let mut changed = [false; 4];
+        self.args.update_diff(&mut changed, ctx, from, event);
         if changed[3] {
             if let Some(v) = self.args.0[3].clone() {
                 event.variables.insert(self.pid, v);
@@ -600,10 +614,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?;
         }
-        self.typ.args[0].typ.check_contains(&from[0].typ)?;
-        self.typ.args[1].typ.check_contains(&from[1].typ)?;
-        self.typ.args[2].typ.check_contains(&from[2].typ)?;
-        self.typ.args[3].typ.check_contains(&from[3].typ)?;
+        self.typ.args[0].typ.check_contains(&ctx.env, &from[0].typ())?;
+        self.typ.args[1].typ.check_contains(&ctx.env, &from[1].typ())?;
+        self.typ.args[2].typ.check_contains(&ctx.env, &from[2].typ())?;
+        self.typ.args[3].typ.check_contains(&ctx.env, &from[3].typ())?;
         self.f.typecheck(ctx)
     }
 
@@ -613,7 +627,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
             ctx.user.unpublish_rpc(path);
         }
         ctx.cached.remove(&self.x);
-        mem::take(&mut self.f).delete(ctx);
+        self.f.delete(ctx);
     }
 }
 

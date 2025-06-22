@@ -1,22 +1,23 @@
 use crate::{
     expr::{Arg, ModPath},
-    typ::{FnType, NoRefs, Type},
+    typ::{FnType, TVar, Type},
     BindId, Ctx, InitFn, LambdaId, UserEvent,
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use compact_str::CompactString;
+use fxhash::{FxHashMap, FxHashSet};
 use immutable_chunkmap::{map::MapS as Map, set::SetS as Set};
 use netidx::path::Path;
-use std::{fmt, iter, ops::Bound, sync::Weak};
+use std::{cell::RefCell, fmt, iter, ops::Bound, sync::Weak};
 use triomphe::Arc;
 
 pub struct LambdaDef<C: Ctx, E: UserEvent> {
     pub id: LambdaId,
     pub env: Env<C, E>,
     pub scope: ModPath,
-    pub argspec: Arc<[Arg<NoRefs>]>,
-    pub typ: Arc<FnType<NoRefs>>,
+    pub argspec: Arc<[Arg]>,
+    pub typ: Arc<FnType>,
     pub init: InitFn<C, E>,
 }
 
@@ -29,7 +30,7 @@ impl<C: Ctx, E: UserEvent> fmt::Debug for LambdaDef<C, E> {
 pub struct Bind {
     pub id: BindId,
     pub export: bool,
-    pub typ: Type<NoRefs>,
+    pub typ: Type,
     pub doc: Option<ArcStr>,
     scope: ModPath,
     name: CompactString,
@@ -54,13 +55,19 @@ impl Clone for Bind {
     }
 }
 
+#[derive(Clone)]
+pub struct TypeDef {
+    pub params: Arc<[(TVar, Option<Type>)]>,
+    pub typ: Type,
+}
+
 pub struct Env<C: Ctx, E: UserEvent> {
     pub by_id: Map<BindId, Bind>,
     pub lambdas: Map<LambdaId, Weak<LambdaDef<C, E>>>,
     pub binds: Map<ModPath, Map<CompactString, BindId>>,
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
     pub modules: Set<ModPath>,
-    pub typedefs: Map<ModPath, Map<CompactString, Type<NoRefs>>>,
+    pub typedefs: Map<ModPath, Map<CompactString, TypeDef>>,
 }
 
 impl<C: Ctx, E: UserEvent> Clone for Env<C, E> {
@@ -101,58 +108,12 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
     // restore the lexical environment to the state it was in at the
     // snapshot `other`, but leave the bind and type environment
     // alone.
-    pub(super) fn restore_lexical_env(&self, other: &Self) -> Self {
+    pub(super) fn restore_lexical_env(&self, other: Self) -> Self {
         Self {
-            binds: other.binds.clone(),
-            used: other.used.clone(),
-            modules: other.modules.clone(),
-            typedefs: other.typedefs.clone(),
-            by_id: self.by_id.clone(),
-            lambdas: self.lambdas.clone(),
-        }
-    }
-
-    // merge two lexical environments, with the `orig` environment
-    // taking prescidence in case of conflicts. The type and binding
-    // environment is not altered
-    pub(super) fn merge_lexical(&self, orig: &Self) -> Self {
-        let Self { by_id: _, lambdas: _, binds, used, modules, typedefs } = self;
-        let binds = binds.update_many(
-            orig.binds.into_iter().map(|(s, m)| (s.clone(), m)),
-            |k, v, kv| match kv {
-                None => Some((k, v.clone())),
-                Some((_, m)) => {
-                    let v = m.update_many(
-                        v.into_iter().map(|(k, v)| (k.clone(), *v)),
-                        |k, v, _| Some((k, v)),
-                    );
-                    Some((k, v))
-                }
-            },
-        );
-        let used = used.update_many(
-            orig.used.into_iter().map(|(k, v)| (k.clone(), v.clone())),
-            |k, v, _| Some((k, v)),
-        );
-        let modules = modules.union(&orig.modules);
-        let typedefs = typedefs.update_many(
-            orig.typedefs.into_iter().map(|(k, v)| (k.clone(), v)),
-            |k, v, kv| match kv {
-                None => Some((k, v.clone())),
-                Some((_, m)) => {
-                    let v = m.update_many(
-                        v.into_iter().map(|(k, v)| (k.clone(), v.clone())),
-                        |k, v, _| Some((k, v)),
-                    );
-                    Some((k, v))
-                }
-            },
-        );
-        Self {
-            binds,
-            used,
-            modules,
-            typedefs,
+            binds: other.binds,
+            used: other.used,
+            modules: other.modules,
+            typedefs: other.typedefs,
             by_id: self.by_id.clone(),
             lambdas: self.lambdas.clone(),
         }
@@ -204,6 +165,12 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         })
     }
 
+    pub fn lookup_typedef(&self, scope: &ModPath, name: &ModPath) -> Option<&TypeDef> {
+        self.find_visible(scope, name, |scope, name| {
+            self.typedefs.get(scope).and_then(|m| m.get(name))
+        })
+    }
+
     /// lookup binds in scope that match the specified partial
     /// name. This is intended to be used for IDEs and interactive
     /// shells, and is not used by the compiler.
@@ -252,17 +219,68 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         res
     }
 
+    pub fn canonical_modpath(&self, scope: &ModPath, name: &ModPath) -> Option<ModPath> {
+        self.find_visible(scope, name, |scope, name| {
+            let p = ModPath(Path::from(ArcStr::from(scope)).append(name));
+            if self.modules.contains(&p) {
+                Some(p)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn deftype(
         &mut self,
         scope: &ModPath,
         name: &str,
-        typ: Type<NoRefs>,
+        params: Arc<[(TVar, Option<Type>)]>,
+        typ: Type,
     ) -> Result<()> {
         let defs = self.typedefs.get_or_default_cow(scope.clone());
         if defs.get(name).is_some() {
             bail!("{name} is already defined in scope {scope}")
         } else {
-            defs.insert_cow(name.into(), typ);
+            thread_local! {
+                static KNOWN: RefCell<FxHashMap<ArcStr, TVar>> = RefCell::new(FxHashMap::default());
+                static DECLARED: RefCell<FxHashSet<ArcStr>> = RefCell::new(FxHashSet::default());
+            }
+            KNOWN.with_borrow_mut(|known| {
+                known.clear();
+                for (tv, tc) in params.iter() {
+                    Type::TVar(tv.clone()).alias_tvars(known);
+                    if let Some(tc) = tc {
+                        tc.alias_tvars(known);
+                    }
+                }
+                typ.alias_tvars(known);
+            });
+            DECLARED.with_borrow_mut(|declared| {
+                declared.clear();
+                for (tv, _) in params.iter() {
+                    if !declared.insert(tv.name.clone()) {
+                        bail!("duplicate type variable {tv} in definition of {name}");
+                    }
+                }
+                typ.check_tvars_declared(declared)?;
+                for (_, t) in params.iter() {
+                    if let Some(t) = t {
+                        t.check_tvars_declared(declared)?;
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            })?;
+            KNOWN.with_borrow(|known| {
+                DECLARED.with_borrow(|declared| {
+                    for dec in declared {
+                        if !known.contains_key(dec) {
+                            bail!("unused type parameter {dec} in definition of {name}")
+                        }
+                    }
+                    Ok(())
+                })
+            })?;
+            defs.insert_cow(name.into(), TypeDef { params, typ });
             Ok(())
         }
     }
@@ -278,12 +296,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
 
     // create a new binding. If an existing bind exists in the same
     // scope shadow it.
-    pub fn bind_variable(
-        &mut self,
-        scope: &ModPath,
-        name: &str,
-        typ: Type<NoRefs>,
-    ) -> &mut Bind {
+    pub fn bind_variable(&mut self, scope: &ModPath, name: &str, typ: Type) -> &mut Bind {
         let binds = self.binds.get_or_default_cow(scope.clone());
         let mut existing = true;
         let id = binds.get_or_insert_cow(CompactString::from(name), || {

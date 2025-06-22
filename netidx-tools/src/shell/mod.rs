@@ -167,23 +167,33 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     let (tx, mut output) = mpsc::channel(3);
     bs.subscribe(tx).context("subscribing to rt output")?;
     let mut output_expr: Option<CompExp> = None;
+    let mut env;
     let mut newenv = if let Some(file) = p.file.as_ref() {
         let mut r = bs.load(file.clone()).await?;
         if let Some(e) = r.exprs.pop() {
             output_expr = Some(e);
         }
+        env = bs.get_env().await?;
         None
     } else if !p.no_init {
         match bs.compile("mod init;".into()).await {
-            Ok(res) => Some(res.env),
-            Err(e) if e.is::<CouldNotResolve>() => Some(bs.get_env().await?),
+            Ok(res) => {
+                env = res.env;
+                Some(env.clone())
+            }
+            Err(e) if e.is::<CouldNotResolve>() => {
+                env = bs.get_env().await?;
+                Some(env.clone())
+            }
             Err(e) => {
                 eprintln!("error in init module: {e:?}");
-                Some(bs.get_env().await?)
+                env = bs.get_env().await?;
+                Some(env.clone())
             }
         }
     } else {
-        Some(bs.get_env().await?)
+        env = bs.get_env().await?;
+        Some(env.clone())
     };
     if !script {
         println!("Welcome to the bscript shell");
@@ -194,7 +204,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
             RtEvent::Updated(id, v) = output.select_next_some() => {
                 if let Some(e) = &output_expr {
                     if e.id == id {
-                        println!("{}", TVal(&e.typ, &v))
+                        println!("{}", TVal { env: &env, typ: &e.typ, v: &v })
                     }
                 }
             },
@@ -206,7 +216,10 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                         if let Some(e) = output_expr.take() {
                             match bs.delete(e.id).await {
                                 Err(e) => eprintln!("could not delete node {e:?}"),
-                                Ok(env) => newenv = Some(env),
+                                Ok(e) => {
+                                    env = e;
+                                    newenv = Some(env.clone())
+                                },
                             }
                         }
                     }
@@ -215,7 +228,8 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                         match bs.compile(ArcStr::from(line)).await {
                             Err(e) => eprintln!("error: {e:?}"),
                             Ok(mut res) => {
-                                newenv = Some(res.env);
+                                env = res.env;
+                                newenv = Some(env.clone());
                                 if let Some(e) = res.exprs.pop() {
                                     let typ = e.typ
                                         .with_deref(|t| t.cloned())

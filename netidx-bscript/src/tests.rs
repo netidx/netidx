@@ -213,9 +213,7 @@ const SELECT: &str = r#"
 run!(select, SELECT, |v: Result<&Value>| match v {
     Ok(Value::Array(a)) => match &**a {
         [Value::String(a), Value::String(b), Value::String(c)]
-            if &**a == "first i64:1"
-                && &**b == "second i64:2"
-                && &**c == "third i64:3" =>
+            if &**a == "first 1" && &**b == "second 2" && &**c == "third 3" =>
             true,
         _ => false,
     },
@@ -885,10 +883,10 @@ const ANY1: &str = r#"
 run!(any1, ANY1, |v: Result<&Value>| match v {
     Ok(Value::Array(a)) => match &a[..] {
         [Value::I64(1), Value::String(s), Value::Array(a)] => {
-            &**s == "i64:1 + 1"
+            &**s == "1 + 1"
                 && match &a[..] {
                     [Value::String(s0), Value::String(s1)] => {
-                        (&**s0 == &**s1) && &**s0 == "i64:1 + 1"
+                        (&**s0 == &**s1) && &**s0 == "1 + 1"
                     }
                     _ => false,
                 }
@@ -973,5 +971,150 @@ const LATE_BINDING2: &str = r#"
 #[cfg(test)]
 run!(late_binding2, LATE_BINDING2, |v: Result<&Value>| match v {
     Ok(Value::I64(1)) => true,
+    _ => false,
+});
+
+#[cfg(test)]
+const RECTYPES0: &str = r#"
+{
+  type List = [
+    `Cons(Any, List),
+    `Nil
+  ];
+  let l: List = `Cons(42, `Cons(3, `Nil));
+  l
+}
+"#;
+
+#[cfg(test)]
+run!(rectypes0, RECTYPES0, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::String(s), Value::I64(42), Value::Array(a)] if &**s == "Cons" =>
+            match &a[..] {
+                [Value::String(s0), Value::I64(3), Value::String(s1)]
+                    if &**s0 == "Cons" && s1 == "Nil" =>
+                    true,
+                _ => false,
+            },
+        _ => false,
+    },
+    _ => false,
+});
+
+#[cfg(test)]
+const RECTYPES1: &str = r#"
+{
+  type List<'a> = [
+    `Cons('a, List<'a>),
+    `Nil
+  ];
+  let l: List<Any> = `Cons(42, `Cons(3, `Nil));
+  l
+}
+"#;
+
+#[cfg(test)]
+run!(rectypes1, RECTYPES1, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::String(s), Value::I64(42), Value::Array(a)] if &**s == "Cons" =>
+            match &a[..] {
+                [Value::String(s0), Value::I64(3), Value::String(s1)]
+                    if &**s0 == "Cons" && s1 == "Nil" =>
+                    true,
+                _ => false,
+            },
+        _ => false,
+    },
+    _ => false,
+});
+
+#[cfg(test)]
+const RECTYPES2: &str = r#"
+{
+  type List<'a> = [
+    `Cons('a, List<'a>),
+    `Nil
+  ];
+  let l: List<string> = `Cons(42, `Cons(3, `Nil));
+  l
+}
+"#;
+
+#[cfg(test)]
+run!(rectypes2, RECTYPES2, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+#[cfg(test)]
+const TYPEDEF_TVAR_ERR: &str = r#"
+{
+  type T<'a, 'b> = { foo: 'a, bar: 'b, baz: 'c };
+  0
+}
+"#;
+
+#[cfg(test)]
+run!(typedef_tvar_err, TYPEDEF_TVAR_ERR, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+#[cfg(test)]
+const TYPEDEF_TVAR_OK: &str = r#"
+{
+  type T<'a, 'b> = { foo: 'a, bar: 'b, f: fn('a, 'b, 'c) -> 'a };
+  0
+}
+"#;
+
+#[cfg(test)]
+run!(typedef_tvar_ok, TYPEDEF_TVAR_OK, |v: Result<&Value>| match v {
+    Ok(Value::I64(0)) => true,
+    _ => false,
+});
+
+#[cfg(test)]
+const BYREF_DEREF: &str = r#"
+{
+  let x = &42;
+  *x
+}
+"#;
+
+#[cfg(test)]
+run!(byref_deref, BYREF_DEREF, |v: Result<&Value>| match v {
+    Ok(Value::I64(42)) => true,
+    _ => false,
+});
+
+#[cfg(test)]
+const BYREF_TUPLE: &str = r#"
+{
+  let r = &(1, 2);
+  let t = *r;
+  t.0 + t.1
+}
+"#;
+
+#[cfg(test)]
+run!(byref_tuple, BYREF_TUPLE, |v: Result<&Value>| match v {
+    Ok(Value::I64(3)) => true,
+    _ => false,
+});
+
+#[cfg(test)]
+const BYREF_PATTERN: &str = r#"
+{
+  let r = &42;
+  select r {
+    &i64 as v => *v
+  }
+}
+"#;
+
+#[cfg(test)]
+run!(byref_pattern, BYREF_PATTERN, |v: Result<&Value>| match v {
+    Ok(Value::I64(42)) => true,
     _ => false,
 });

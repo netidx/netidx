@@ -15,11 +15,11 @@ pub mod typ;
 use crate::{
     env::Env,
     expr::{ExprId, ExprKind, ModPath},
-    node::Node,
-    typ::{FnType, NoRefs, Refs, Type},
+    typ::{FnType, Type},
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
+use expr::Expr;
 use fxhash::FxHashMap;
 use netidx::{
     path::Path,
@@ -27,11 +27,11 @@ use netidx::{
     subscriber::{self, Dval, SubId, UpdatesFlags, Value},
 };
 use netidx_protocols::rpc::server::{ArgSpec, RpcCall};
+use node::compiler;
 use parking_lot::RwLock;
 use std::{
     collections::{hash_map::Entry, HashMap},
     fmt::Debug,
-    marker::PhantomData,
     sync::{self, LazyLock},
     time::Duration,
 };
@@ -43,6 +43,12 @@ mod tests;
 
 atomic_id!(BindId);
 atomic_id!(LambdaId);
+
+impl BindId {
+    pub(crate) fn from_u64(v: u64) -> Self {
+        BindId(v)
+    }
+}
 
 #[macro_export]
 macro_rules! errf {
@@ -108,16 +114,19 @@ impl<E: UserEvent> Event<E> {
     }
 }
 
+pub type Node<C, E> = Box<dyn Update<C, E>>;
+
 pub type BuiltInInitFn<C, E> = sync::Arc<
     dyn for<'a, 'b, 'c> Fn(
             &'a mut ExecCtx<C, E>,
-            &'a FnType<NoRefs>,
+            &'a FnType,
             &'b ModPath,
             &'c [Node<C, E>],
             ExprId,
-        ) -> Result<Box<dyn Apply<C, E> + Send + Sync>>
+        ) -> Result<Box<dyn Apply<C, E>>>
         + Send
-        + Sync,
+        + Sync
+        + 'static,
 >;
 
 pub type InitFn<C, E> = sync::Arc<
@@ -125,12 +134,17 @@ pub type InitFn<C, E> = sync::Arc<
             &'a mut ExecCtx<C, E>,
             &'b [Node<C, E>],
             ExprId,
-        ) -> Result<Box<dyn Apply<C, E> + Send + Sync>>
+        ) -> Result<Box<dyn Apply<C, E>>>
         + Send
-        + Sync,
+        + Sync
+        + 'static,
 >;
 
-pub trait Apply<C: Ctx, E: UserEvent> {
+/// Apply is a kind of node that represents a function application. It
+/// does not hold ownership of it's arguments, instead those are held
+/// by a CallSite node. This allows us to change the function called
+/// at runtime without recompiling the arguments.
+pub trait Apply<C: Ctx, E: UserEvent>: Debug + Send + Sync + 'static {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -156,12 +170,12 @@ pub trait Apply<C: Ctx, E: UserEvent> {
 
     /// return the lambdas type, builtins do not need to implement
     /// this, it is implemented by the BuiltIn wrapper
-    fn typ(&self) -> Arc<FnType<NoRefs>> {
-        const EMPTY: LazyLock<Arc<FnType<NoRefs>>> = LazyLock::new(|| {
+    fn typ(&self) -> Arc<FnType> {
+        const EMPTY: LazyLock<Arc<FnType>> = LazyLock::new(|| {
             Arc::new(FnType {
                 args: Arc::from_iter([]),
                 constraints: Arc::new(RwLock::new(vec![])),
-                rtype: Type::Bottom(PhantomData),
+                rtype: Type::Bottom,
                 vargs: None,
             })
         });
@@ -177,9 +191,33 @@ pub trait Apply<C: Ctx, E: UserEvent> {
     }
 }
 
+/// Update represents a regular graph node, as opposed to a function
+/// application represented by Apply. Regular graph nodes are used for
+/// every built in node except for builtin functions.
+pub trait Update<C: Ctx, E: UserEvent>: Debug + Send + Sync + 'static {
+    /// update the node with the specified event and return any output
+    /// it might generate
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value>;
+
+    /// delete the node and it's children from the specified context
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>);
+
+    /// type check the node and it's children
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()>;
+
+    /// return the node type
+    fn typ(&self) -> &Type;
+
+    /// record any variables the node references by calling f
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a));
+
+    /// return the original expression used to compile this node
+    fn spec(&self) -> &Expr;
+}
+
 pub trait BuiltIn<C: Ctx, E: UserEvent> {
     const NAME: &str;
-    const TYP: LazyLock<FnType<Refs>>;
+    const TYP: LazyLock<FnType>;
 
     fn init(ctx: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E>;
 }
@@ -278,7 +316,7 @@ pub trait Ctx: Debug + 'static {
 }
 
 pub struct ExecCtx<C: Ctx, E: UserEvent> {
-    builtins: FxHashMap<&'static str, (FnType<Refs>, BuiltInInitFn<C, E>)>,
+    builtins: FxHashMap<&'static str, (FnType, BuiltInInitFn<C, E>)>,
     std: Vec<Node<C, E>>,
     pub env: Env<C, E>,
     pub cached: FxHashMap<BindId, Value>,
@@ -302,9 +340,9 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         };
         let core = stdfn::core::register(&mut t);
         let root = ModPath(Path::root());
-        let node = Node::compile(&mut t, &root, core).expect("error compiling core");
+        let node = compile(&mut t, &root, core).expect("error compiling core");
         t.std.push(node);
-        let node = Node::compile(
+        let node = compile(
             &mut t,
             &root,
             ExprKind::Use { name: ModPath::from(["core"]) }.to_expr(Default::default()),
@@ -318,25 +356,21 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
     pub fn new(user: C) -> Self {
         let mut t = Self::new_no_std(user);
         let root = ModPath(Path::root());
-        let net = stdfn::net::register(&mut t);
-        let node =
-            Node::compile(&mut t, &root, net).expect("failed to compile the net module");
-        t.std.push(node);
         let str = stdfn::str::register(&mut t);
-        let node =
-            Node::compile(&mut t, &root, str).expect("failed to compile the str module");
+        let node = compile(&mut t, &root, str).expect("failed to compile the str module");
         t.std.push(node);
         let re = stdfn::re::register(&mut t);
-        let node =
-            Node::compile(&mut t, &root, re).expect("failed to compile the re module");
+        let node = compile(&mut t, &root, re).expect("failed to compile the re module");
         t.std.push(node);
         let time = stdfn::time::register(&mut t);
-        let node = Node::compile(&mut t, &root, time)
-            .expect("failed to compile the time module");
+        let node =
+            compile(&mut t, &root, time).expect("failed to compile the time module");
         t.std.push(node);
         let rand = stdfn::rand::register(&mut t);
-        let node =
-            Node::compile(&mut t, &root, rand).expect("failed to compile rand module");
+        let node = compile(&mut t, &root, rand).expect("failed to compile rand module");
+        t.std.push(node);
+        let net = stdfn::net::register(&mut t);
+        let node = compile(&mut t, &root, net).expect("failed to compile the net module");
         t.std.push(node);
         t
     }
@@ -352,10 +386,34 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         Ok(())
     }
 
-    /// Built in functions should call this when variables are
-    /// set. This will also call the user ctx set_var.
+    /// Built in functions should call this when variables are set
+    /// unless they are sure the variable does not need to be
+    /// cached. This will also call the user ctx set_var.
     pub fn set_var(&mut self, id: BindId, v: Value) {
         self.cached.insert(id, v.clone());
         self.user.set_var(id, v)
     }
+}
+
+/// compile the expression into a node graph in the specified context
+/// and scope, return the root node or an error if compilation failed.
+pub fn compile<C: Ctx, E: UserEvent>(
+    ctx: &mut ExecCtx<C, E>,
+    scope: &ModPath,
+    spec: Expr,
+) -> Result<Node<C, E>> {
+    let top_id = spec.id;
+    let env = ctx.env.clone();
+    let mut node = match compiler::compile(ctx, spec, scope, top_id) {
+        Ok(n) => n,
+        Err(e) => {
+            ctx.env = env;
+            return Err(e);
+        }
+    };
+    if let Err(e) = node.typecheck(ctx) {
+        ctx.env = env;
+        return Err(e);
+    }
+    Ok(node)
 }

@@ -1,12 +1,10 @@
 use crate::{
-    node::Node,
-    typ::{FnType, Refs},
-    Apply, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
+    typ::FnType, Apply, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
 };
 use netidx::subscriber::Value;
 use netidx_core::utils::Either;
-use smallvec::SmallVec;
 use std::{
+    fmt::Debug,
     iter,
     sync::{Arc, LazyLock},
 };
@@ -22,11 +20,13 @@ pub mod time;
 
 #[macro_export]
 macro_rules! deftype {
-    ($s:literal) => {
-        const TYP: ::std::sync::LazyLock<$crate::typ::FnType<$crate::typ::Refs>> =
+    ($scope:literal, $s:literal) => {
+        const TYP: ::std::sync::LazyLock<$crate::typ::FnType> =
             ::std::sync::LazyLock::new(|| {
+                let scope = $crate::expr::ModPath(::netidx::path::Path::from($scope));
                 $crate::expr::parser::parse_fn_type($s)
                     .expect("failed to parse fn type {s}")
+                    .scope_refs(&scope)
             });
     };
 }
@@ -51,7 +51,8 @@ macro_rules! arity2 {
     };
 }
 
-pub struct CachedVals(pub SmallVec<[Option<Value>; 4]>);
+#[derive(Debug)]
+pub struct CachedVals(pub Box<[Option<Value>]>);
 
 impl CachedVals {
     pub fn new<C: Ctx, E: UserEvent>(from: &[Node<C, E>]) -> CachedVals {
@@ -79,39 +80,20 @@ impl CachedVals {
     /// instead of a consolidated bool
     pub fn update_diff<C: Ctx, E: UserEvent>(
         &mut self,
+        up: &mut [bool],
         ctx: &mut ExecCtx<C, E>,
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
-    ) -> SmallVec<[bool; 4]> {
-        from.into_iter()
-            .enumerate()
-            .map(|(i, src)| match src.update(ctx, event) {
-                None => false,
-                v @ Some(_) => {
+    ) {
+        for (i, n) in from.iter_mut().enumerate() {
+            match n.update(ctx, event) {
+                None => (),
+                v => {
                     self.0[i] = v;
-                    true
+                    up[i] = true
                 }
-            })
-            .collect()
-    }
-
-    /// Only update if the value changes, return the indexes of nodes that updated
-    pub fn update_changed<C: Ctx, E: UserEvent>(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
-        event: &mut Event<E>,
-    ) -> SmallVec<[bool; 4]> {
-        from.into_iter()
-            .enumerate()
-            .map(|(i, src)| match src.update(ctx, event) {
-                v @ Some(_) if self.0[i] != v => {
-                    self.0[i] = v;
-                    true
-                }
-                Some(_) | None => false,
-            })
-            .collect()
+            }
+        }
     }
 
     pub fn flat_iter<'a>(&'a self) -> impl Iterator<Item = Option<Value>> + 'a {
@@ -122,13 +104,14 @@ impl CachedVals {
     }
 }
 
-pub trait EvalCached: Default + Send + Sync + 'static {
+pub trait EvalCached: Debug + Default + Send + Sync + 'static {
     const NAME: &str;
-    const TYP: LazyLock<FnType<Refs>>;
+    const TYP: LazyLock<FnType>;
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value>;
 }
 
+#[derive(Debug)]
 pub struct CachedArgs<T: EvalCached> {
     cached: CachedVals,
     t: T,
@@ -136,7 +119,7 @@ pub struct CachedArgs<T: EvalCached> {
 
 impl<C: Ctx, E: UserEvent, T: EvalCached> BuiltIn<C, E> for CachedArgs<T> {
     const NAME: &str = T::NAME;
-    const TYP: LazyLock<FnType<Refs>> = T::TYP;
+    const TYP: LazyLock<FnType> = T::TYP;
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, from, _| {

@@ -9,7 +9,7 @@ mod resolver {
     };
     use arcstr::literal;
     use netidx_netproto::resolver::TargetAuth;
-    use rand::{thread_rng, Rng};
+    use rand::{rng, Rng};
     use std::{iter, net::SocketAddr, time::Duration};
     use tokio::{runtime::Runtime, time};
 
@@ -102,7 +102,7 @@ mod resolver {
 
     impl Ctx {
         fn random_server(&self) -> ClientConfig {
-            match thread_rng().gen_range(0. ..=1.) {
+            match rng().random_range(0. ..=1.) {
                 n if n >= 0. && n <= 0.20 => self.cfg_root.clone(),
                 n if n > 0.20 && n <= 0.40 => self.cfg_huge0.clone(),
                 n if n > 0.40 && n <= 0.60 => self.cfg_huge1.clone(),

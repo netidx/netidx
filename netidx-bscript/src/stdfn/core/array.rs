@@ -1,10 +1,11 @@
 use crate::{
     deftype,
     expr::{ExprId, ModPath},
-    node::{genn, Node},
+    node::genn,
     stdfn::{CachedArgs, CachedVals, EvalCached},
-    typ::{FnType, NoRefs, Refs, Type},
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, UserEvent,
+    typ::{FnType, Type},
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, Node,
+    UserEvent,
 };
 use anyhow::{anyhow, bail};
 use compact_str::format_compact;
@@ -13,14 +14,15 @@ use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{
     collections::VecDeque,
+    fmt::Debug,
     iter,
     sync::{Arc, LazyLock},
 };
 use triomphe::Arc as TArc;
 
-pub trait MapFn<C: Ctx, E: UserEvent>: Default + Send + Sync + 'static {
+pub trait MapFn<C: Ctx, E: UserEvent>: Debug + Default + Send + Sync + 'static {
     const NAME: &str;
-    const TYP: LazyLock<FnType<Refs>>;
+    const TYP: LazyLock<FnType>;
 
     /// finish will be called when every lambda instance has produced
     /// a value for the updated array. Out contains the output of the
@@ -30,19 +32,21 @@ pub trait MapFn<C: Ctx, E: UserEvent>: Default + Send + Sync + 'static {
     fn finish(&mut self, slots: &[Slot<C, E>], a: &ValArray) -> Option<Value>;
 }
 
+#[derive(Debug)]
 pub struct Slot<C: Ctx, E: UserEvent> {
     id: BindId,
     pred: Node<C, E>,
     pub cur: Option<Value>,
 }
 
+#[derive(Debug)]
 pub struct MapQ<C: Ctx, E: UserEvent, T: MapFn<C, E>> {
     scope: ModPath,
     predid: BindId,
     top_id: ExprId,
-    ftyp: TArc<FnType<NoRefs>>,
-    mftyp: TArc<FnType<NoRefs>>,
-    etyp: Type<NoRefs>,
+    ftyp: TArc<FnType>,
+    mftyp: TArc<FnType>,
+    etyp: Type,
     slots: Vec<Slot<C, E>>,
     cur: ValArray,
     t: T,
@@ -50,7 +54,7 @@ pub struct MapQ<C: Ctx, E: UserEvent, T: MapFn<C, E>> {
 
 impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> BuiltIn<C, E> for MapQ<C, E, T> {
     const NAME: &str = T::NAME;
-    const TYP: LazyLock<FnType<Refs>> = T::TYP;
+    const TYP: LazyLock<FnType> = T::TYP;
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_ctx, typ, scope, from, top_id| match from {
@@ -95,7 +99,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
             Some(Value::Array(a)) if a.len() == self.slots.len() => Some(a),
             Some(Value::Array(a)) if a.len() < self.slots.len() => {
                 while self.slots.len() > a.len() {
-                    if let Some(s) = self.slots.pop() {
+                    if let Some(mut s) = self.slots.pop() {
                         s.pred.delete(ctx);
                         ctx.env.unbind_variable(s.id);
                     }
@@ -167,8 +171,8 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
             .get(0)
             .map(|a| a.typ.clone())
             .ok_or_else(|| anyhow!("expected 2 arguments"))?
-            .check_contains(&from[0].typ)?;
-        Type::Fn(self.mftyp.clone()).check_contains(&from[1].typ)?;
+            .check_contains(&ctx.env, &from[0].typ())?;
+        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[1].typ())?;
         let (_, node) = genn::bind(ctx, &self.scope, "x", self.etyp.clone(), self.top_id);
         let fargs = vec![node];
         let ft = self.mftyp.clone();
@@ -186,12 +190,12 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct MapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for MapImpl {
     const NAME: &str = "array_map";
-    deftype!("fn(Array<'a>, fn('a) -> 'b) -> Array<'b>");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> 'b) -> Array<'b>");
 
     fn finish(&mut self, slots: &[Slot<C, E>], _: &ValArray) -> Option<Value> {
         Some(Value::Array(ValArray::from_iter_exact(
@@ -202,12 +206,12 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for MapImpl {
 
 pub(super) type Map<C, E> = MapQ<C, E, MapImpl>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FilterImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FilterImpl {
     const NAME: &str = "array_filter";
-    deftype!("fn(Array<'a>, fn('a) -> bool) -> Array<'a>");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> bool) -> Array<'a>");
 
     fn finish(&mut self, slots: &[Slot<C, E>], a: &ValArray) -> Option<Value> {
         Some(Value::Array(ValArray::from_iter(slots.iter().zip(a.iter()).filter_map(
@@ -221,12 +225,12 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FilterImpl {
 
 pub(super) type Filter<C, E> = MapQ<C, E, FilterImpl>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FlatMapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FlatMapImpl {
     const NAME: &str = "array_flat_map";
-    deftype!("fn(Array<'a>, fn('a) -> ['b, Array<'b>]) -> Array<'b>");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> ['b, Array<'b>]) -> Array<'b>");
 
     fn finish(&mut self, slots: &[Slot<C, E>], _: &ValArray) -> Option<Value> {
         Some(Value::Array(ValArray::from_iter(slots.iter().flat_map(|s| {
@@ -240,12 +244,12 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FlatMapImpl {
 
 pub(super) type FlatMap<C, E> = MapQ<C, E, FlatMapImpl>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FilterMapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FilterMapImpl {
     const NAME: &str = "array_filter_map";
-    deftype!("fn(Array<'a>, fn('a) -> ['b, null]) -> Array<'b>");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> ['b, null]) -> Array<'b>");
 
     fn finish(&mut self, slots: &[Slot<C, E>], _: &ValArray) -> Option<Value> {
         Some(Value::Array(ValArray::from_iter(slots.iter().filter_map(|s| {
@@ -259,12 +263,12 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FilterMapImpl {
 
 pub(super) type FilterMap<C, E> = MapQ<C, E, FilterMapImpl>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FindImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindImpl {
     const NAME: &str = "array_find";
-    deftype!("fn(Array<'a>, fn('a) -> bool) -> ['a, null]");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> bool) -> ['a, null]");
 
     fn finish(&mut self, slots: &[Slot<C, E>], a: &ValArray) -> Option<Value> {
         let r = slots
@@ -282,12 +286,12 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindImpl {
 
 pub(super) type Find<C, E> = MapQ<C, E, FindImpl>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FindMapImpl;
 
 impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindMapImpl {
     const NAME: &str = "array_find_map";
-    deftype!("fn(Array<'a>, fn('a) -> ['b, null]) -> ['b, null]");
+    deftype!("core::array", "fn(Array<'a>, fn('a) -> ['b, null]) -> ['b, null]");
 
     fn finish(&mut self, slots: &[Slot<C, E>], _: &ValArray) -> Option<Value> {
         let r = slots
@@ -303,28 +307,31 @@ impl<C: Ctx, E: UserEvent> MapFn<C, E> for FindMapImpl {
 
 pub(super) type FindMap<C, E> = MapQ<C, E, FindMapImpl>;
 
+#[derive(Debug)]
 pub(super) struct Fold<C: Ctx, E: UserEvent> {
     top_id: ExprId,
     fid: BindId,
     initid: BindId,
     binds: Vec<BindId>,
-    head: Option<Node<C, E>>,
-    mftype: TArc<FnType<NoRefs>>,
-    etyp: Type<NoRefs>,
-    ityp: Type<NoRefs>,
+    nodes: Vec<Node<C, E>>,
+    inits: Vec<Option<Value>>,
+    mftype: TArc<FnType>,
+    etyp: Type,
+    ityp: Type,
     init: Option<Value>,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Fold<C, E> {
     const NAME: &str = "array_fold";
-    deftype!("fn(Array<'a>, 'b, fn('b, 'a) -> 'b) -> 'b");
+    deftype!("core::array", "fn(Array<'a>, 'b, fn('b, 'a) -> 'b) -> 'b");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_ctx, typ, _, from, top_id| match from {
             [_, _, _] => Ok(Box::new(Self {
                 top_id,
                 binds: vec![],
-                head: None,
+                nodes: vec![],
+                inits: vec![],
                 fid: BindId::new(),
                 initid: BindId::new(),
                 etyp: match &typ.args[0].typ {
@@ -351,46 +358,59 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
         event: &mut Event<E>,
     ) -> Option<Value> {
         let init = match from[0].update(ctx, event) {
-            None => false,
+            None => self.nodes.len(),
             Some(Value::Array(a)) if a.len() == self.binds.len() => {
                 for (id, v) in self.binds.iter().zip(a.iter()) {
                     event.variables.insert(*id, v.clone());
                 }
-                false
+                self.nodes.len()
             }
             Some(Value::Array(a)) => {
-                if let Some(n) = self.head.take() {
-                    n.delete(ctx)
-                }
                 while self.binds.len() < a.len() {
                     self.binds.push(BindId::new());
+                    self.inits.push(None);
                 }
                 while a.len() < self.binds.len() {
                     self.binds.pop();
+                    self.inits.pop();
+                    if let Some(mut n) = self.nodes.pop() {
+                        n.delete(ctx);
+                    }
                 }
-                let mut n =
-                    genn::reference(ctx, self.initid, self.ityp.clone(), self.top_id);
+                let init = self.nodes.len();
                 for i in 0..self.binds.len() {
                     event.variables.insert(self.binds[i], a[i].clone());
-                    let x = genn::reference(
-                        ctx,
-                        self.binds[i],
-                        self.etyp.clone(),
-                        self.top_id,
-                    );
-                    let fnode = genn::reference(
-                        ctx,
-                        self.fid,
-                        Type::Fn(self.mftype.clone()),
-                        self.top_id,
-                    );
-                    // CR estokes: evaluating this is not tail recursive
-                    n = genn::apply(fnode, vec![n, x], self.mftype.clone(), self.top_id);
+                    if i >= self.nodes.len() {
+                        let n = genn::reference(
+                            ctx,
+                            self.initid,
+                            self.ityp.clone(),
+                            self.top_id,
+                        );
+                        let x = genn::reference(
+                            ctx,
+                            self.binds[i],
+                            self.etyp.clone(),
+                            self.top_id,
+                        );
+                        let fnode = genn::reference(
+                            ctx,
+                            self.fid,
+                            Type::Fn(self.mftype.clone()),
+                            self.top_id,
+                        );
+                        let node = genn::apply(
+                            fnode,
+                            vec![n, x],
+                            self.mftype.clone(),
+                            self.top_id,
+                        );
+                        self.nodes.push(node);
+                    }
                 }
-                self.head = Some(n);
-                true
+                init
             }
-            _ => false,
+            _ => self.nodes.len(),
         };
         if let Some(v) = from[1].update(ctx, event) {
             event.variables.insert(self.initid, v.clone());
@@ -401,22 +421,39 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
             event.variables.insert(self.fid, v);
         }
         let old_init = event.init;
-        if init {
-            event.init = true;
-            if let Some(v) = ctx.cached.get(&self.fid) {
-                if !event.variables.contains_key(&self.fid) {
-                    event.variables.insert(self.fid, v.clone());
+        for i in 0..self.nodes.len() {
+            if i == init {
+                event.init = true;
+                if let Some(v) = ctx.cached.get(&self.fid) {
+                    if !event.variables.contains_key(&self.fid) {
+                        event.variables.insert(self.fid, v.clone());
+                    }
+                }
+                if i == 0 {
+                    if !event.variables.contains_key(&self.initid) {
+                        if let Some(v) = self.init.as_ref() {
+                            event.variables.insert(self.initid, v.clone());
+                        }
+                    }
+                } else {
+                    if let Some(v) = self.inits[i - 1].clone() {
+                        event.variables.insert(self.initid, v);
+                    }
                 }
             }
-            if let Some(v) = self.init.as_ref() {
-                if !event.variables.contains_key(&self.initid) {
+            match self.nodes[i].update(ctx, event) {
+                Some(v) => {
                     event.variables.insert(self.initid, v.clone());
+                    self.inits[i] = Some(v);
+                }
+                None => {
+                    event.variables.remove(&self.initid);
+                    self.inits[i] = None;
                 }
             }
         }
-        let r = self.head.as_mut().and_then(|n| n.update(ctx, event));
         event.init = old_init;
-        r
+        self.inits.last().and_then(|v| v.clone())
     }
 
     fn typecheck(
@@ -428,9 +465,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
             n.typecheck(ctx)?;
         }
         Type::Array(triomphe::Arc::new(self.etyp.clone()))
-            .check_contains(&from[0].typ)?;
-        self.ityp.check_contains(&from[1].typ)?;
-        Type::Fn(self.mftype.clone()).check_contains(&from[2].typ)?;
+            .check_contains(&ctx.env, &from[0].typ())?;
+        self.ityp.check_contains(&ctx.env, &from[1].typ())?;
+        Type::Fn(self.mftype.clone()).check_contains(&ctx.env, &from[2].typ())?;
         let mut n = genn::reference(ctx, self.initid, self.ityp.clone(), self.top_id);
         let x = genn::reference(ctx, BindId::new(), self.etyp.clone(), self.top_id);
         let fnode =
@@ -442,18 +479,18 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
     }
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        if let Some(n) = self.head.as_ref() {
+        for n in &self.nodes {
             n.refs(f)
         }
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct ConcatEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for ConcatEv {
     const NAME: &str = "array_concat";
-    deftype!("fn(Array<'a>, @args: [Array<'a>, 'a]) -> Array<'a>");
+    deftype!("core::array", "fn(Array<'a>, @args: [Array<'a>, 'a]) -> Array<'a>");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut present = true;
@@ -480,12 +517,12 @@ impl EvalCached for ConcatEv {
 
 pub(super) type Concat = CachedArgs<ConcatEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct LenEv;
 
 impl EvalCached for LenEv {
     const NAME: &str = "array_len";
-    deftype!("fn(Array<'a>) -> u64");
+    deftype!("core::array", "fn(Array<'a>) -> u64");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
@@ -497,12 +534,12 @@ impl EvalCached for LenEv {
 
 pub(super) type Len = CachedArgs<LenEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct FlattenEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for FlattenEv {
     const NAME: &str = "array_flatten";
-    deftype!("fn(Array<Array<'a>>) -> Array<'a>");
+    deftype!("core::array", "fn(Array<Array<'a>>) -> Array<'a>");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
@@ -523,12 +560,12 @@ impl EvalCached for FlattenEv {
 
 pub(super) type Flatten = CachedArgs<FlattenEv>;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct SortEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for SortEv {
     const NAME: &str = "array_sort";
-    deftype!("fn(Array<'a>) -> Array<'a>");
+    deftype!("core::array", "fn(Array<'a>) -> Array<'a>");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::Array(a)) = &from.0[0] {
@@ -542,12 +579,13 @@ impl EvalCached for SortEv {
 
 pub(super) type Sort = CachedArgs<SortEv>;
 
+#[derive(Debug)]
 pub(super) struct Group<C: Ctx, E: UserEvent> {
     queue: VecDeque<Value>,
     buf: SmallVec<[Value; 16]>,
     pred: Node<C, E>,
-    mftyp: TArc<FnType<NoRefs>>,
-    etyp: Type<NoRefs>,
+    mftyp: TArc<FnType>,
+    etyp: Type,
     ready: bool,
     pid: BindId,
     nid: BindId,
@@ -556,7 +594,7 @@ pub(super) struct Group<C: Ctx, E: UserEvent> {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
     const NAME: &str = "group";
-    deftype!("fn('a, fn(u64, 'a) -> bool) -> Array<'a>");
+    deftype!("core::array", "fn('a, fn(u64, 'a) -> bool) -> Array<'a>");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
@@ -565,7 +603,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
                     scope.0.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
                 );
                 let n_typ = Type::Primitive(Typ::U64.into());
-                let etyp = arg.typ.clone();
+                let etyp = arg.typ().clone();
                 let mftyp = match &typ.args[1].typ {
                     Type::Fn(ft) => ft.clone(),
                     t => bail!("expected function not {t}"),
@@ -646,18 +684,19 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
         for n in from.iter_mut() {
             n.typecheck(ctx)?
         }
-        self.etyp.check_contains(&from[0].typ)?;
-        Type::Fn(self.mftyp.clone()).check_contains(&from[1].typ)?;
+        self.etyp.check_contains(&ctx.env, &from[0].typ())?;
+        Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[1].typ())?;
         self.pred.typecheck(ctx)?;
         Ok(())
     }
 }
 
+#[derive(Debug)]
 pub(super) struct Iter(BindId, ExprId);
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Iter {
     const NAME: &str = "iter";
-    deftype!("fn(Array<'a>) -> 'a");
+    deftype!("core::array", "fn(Array<'a>) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, _, _, _, top_id| {
@@ -688,6 +727,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Iter {
     }
 }
 
+#[derive(Debug)]
 pub(super) struct IterQ {
     triggered: usize,
     queue: VecDeque<(usize, ValArray)>,
@@ -697,7 +737,7 @@ pub(super) struct IterQ {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for IterQ {
     const NAME: &str = "iterq";
-    deftype!("fn(#trigger:Any, Array<'a>) -> 'a");
+    deftype!("core::array", "fn(#trigger:Any, Array<'a>) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, _, _, _, top_id| {

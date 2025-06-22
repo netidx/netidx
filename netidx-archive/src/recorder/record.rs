@@ -89,11 +89,11 @@ async fn list_task(
     resolver: ResolverRead,
     spec: GlobSet,
 ) -> Result<()> {
-    use rand::{thread_rng, Rng};
+    use rand::{rng, Rng};
     let mut cts = CTS::new(&spec);
     let max_jitter = interval.as_secs_f64() * 0.1;
     while let Some(reply) = rx.next().await {
-        let wait = thread_rng().gen_range(0. ..max_jitter);
+        let wait = rng().random_range(0. ..max_jitter);
         time::sleep(Duration::from_secs_f64(wait)).await;
         match cts.changed(&resolver).await {
             Ok(true) => match resolver.list_matching(&spec).await {

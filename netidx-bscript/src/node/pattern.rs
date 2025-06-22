@@ -1,7 +1,8 @@
 use crate::{
+    env::Env,
     expr::{ExprId, ModPath, Pattern, StructurePattern},
     node::{compiler, Cached},
-    typ::{NoRefs, Type},
+    typ::Type,
     BindId, Ctx, Event, ExecCtx, UserEvent,
 };
 use anyhow::{anyhow, bail, Result};
@@ -44,7 +45,7 @@ pub enum StructPatternNode {
 impl StructPatternNode {
     pub fn compile<C: Ctx, E: UserEvent>(
         ctx: &mut ExecCtx<C, E>,
-        type_predicate: &Type<NoRefs>,
+        type_predicate: &Type,
         spec: &StructurePattern,
         scope: &ModPath,
     ) -> Result<Self> {
@@ -56,7 +57,7 @@ impl StructPatternNode {
 
     fn compile_int<C: Ctx, E: UserEvent>(
         ctx: &mut ExecCtx<C, E>,
-        type_predicate: &Type<NoRefs>,
+        type_predicate: &Type,
         spec: &StructurePattern,
         scope: &ModPath,
     ) -> Result<Self> {
@@ -80,10 +81,15 @@ impl StructPatternNode {
                 }
             };
         }
+        let type_predicate = match type_predicate {
+            Type::Ref { .. } => &type_predicate.lookup_ref(&ctx.env)?.clone(),
+            t => t,
+        };
         let t = match &spec {
             StructurePattern::Ignore => Self::Ignore,
             StructurePattern::Literal(v) => {
-                type_predicate.check_contains(&Type::Primitive(Typ::get(v).into()))?;
+                type_predicate
+                    .check_contains(&ctx.env, &Type::Primitive(Typ::get(v).into()))?;
                 Self::Literal(v.clone())
             }
             StructurePattern::Bind(name) => {
@@ -153,7 +159,7 @@ impl StructPatternNode {
                     name: ArcStr,
                     index: usize,
                     pattern: StructurePattern,
-                    typ: Type<NoRefs>,
+                    typ: Type,
                 }
                 match &type_predicate {
                     Type::Struct(elts) => {
@@ -459,10 +465,10 @@ impl StructPatternNode {
 }
 
 #[derive(Debug)]
-pub struct PatternNode<C: Ctx, E: UserEvent> {
-    pub type_predicate: Type<NoRefs>,
-    pub structure_predicate: StructPatternNode,
-    pub guard: Option<Cached<C, E>>,
+pub(crate) struct PatternNode<C: Ctx, E: UserEvent> {
+    pub(super) type_predicate: Type,
+    pub(super) structure_predicate: StructPatternNode,
+    pub(super) guard: Option<Cached<C, E>>,
 }
 
 impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
@@ -473,20 +479,21 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         top_id: ExprId,
     ) -> Result<Self> {
         let type_predicate = match &spec.type_predicate {
-            Some(t) => t.resolve_typerefs(scope, &ctx.env)?,
+            Some(t) => t.scope_refs(scope).lookup_ref(&ctx.env)?.clone(),
             None => spec.structure_predicate.infer_type_predicate(),
         };
         match &type_predicate {
             Type::Fn(_) => bail!("can't match on Fn type"),
-            Type::Bottom(_)
+            Type::Bottom
             | Type::Primitive(_)
             | Type::Set(_)
             | Type::TVar(_)
             | Type::Array(_)
+            | Type::ByRef(_)
             | Type::Tuple(_)
             | Type::Variant(_, _)
-            | Type::Struct(_) => (),
-            Type::Ref(_) => unreachable!(),
+            | Type::Struct(_)
+            | Type::Ref { .. } => (),
         }
         let structure_predicate = StructPatternNode::compile(
             ctx,
@@ -526,13 +533,17 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         }
     }
 
-    pub(super) fn is_match(&self, typ: Typ, v: &Value) -> bool {
+    pub(super) fn is_match(&self, env: &Env<C, E>, typ: Typ, v: &Value) -> bool {
         let tmatch = match (&self.type_predicate, typ) {
             (Type::Array(_), Typ::Array)
             | (Type::Tuple(_), Typ::Array)
             | (Type::Struct(_), Typ::Array)
             | (Type::Variant(_, _), Typ::Array | Typ::String) => true,
-            _ => self.type_predicate.contains(&Type::Primitive(typ.into())),
+            (Type::ByRef(_), Typ::U64) => true,
+            _ => self
+                .type_predicate
+                .contains(env, &Type::Primitive(typ.into()))
+                .unwrap_or(false),
         };
         tmatch
             && self.structure_predicate.is_match(v)

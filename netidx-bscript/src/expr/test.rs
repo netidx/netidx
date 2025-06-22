@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     expr::parser::parse_one,
-    typ::{self, FnArgType, FnType, Refs, Type},
+    typ::{self, FnArgType, FnType, Type},
 };
 use bytes::Bytes;
 use chrono::prelude::*;
@@ -13,7 +13,7 @@ use parser::RESERVED;
 use prop::option;
 use proptest::{collection, prelude::*};
 use smallvec::SmallVec;
-use std::{marker::PhantomData, time::Duration};
+use std::time::Duration;
 
 const SLEN: usize = 16;
 
@@ -124,6 +124,10 @@ fn random_fname() -> impl Strategy<Value = ArcStr> {
     prop_oneof![random_modpart().prop_map(ArcStr::from), valid_fname()]
 }
 
+fn tvar() -> impl Strategy<Value = TVar> {
+    random_fname().prop_map(|n| TVar::empty_named(n))
+}
+
 fn random_modpath() -> impl Strategy<Value = ModPath> {
     collection::vec(random_modpart(), (1, 5)).prop_map(ModPath::from_iter)
 }
@@ -198,15 +202,15 @@ fn typ() -> impl Strategy<Value = Typ> {
     ]
 }
 
-fn typexp() -> impl Strategy<Value = Type<Refs>> {
+fn typexp() -> impl Strategy<Value = Type> {
     let leaf = prop_oneof![
-        Just(Type::Bottom(PhantomData)),
+        Just(Type::Bottom),
         collection::vec(typ(), (0, 10)).prop_map(|mut prims| {
             prims.sort();
             prims.dedup();
             Type::Primitive(BitFlags::from_iter(prims))
         }),
-        typath().prop_map(Type::Ref),
+        tvar().prop_map(Type::TVar),
     ];
     leaf.prop_recursive(5, 20, 10, |inner| {
         prop_oneof![
@@ -223,7 +227,12 @@ fn typexp() -> impl Strategy<Value = Type<Refs>> {
                 }
             ),
             inner.clone().prop_map(|t| Type::Array(Arc::new(t))),
-            random_fname().prop_map(|a| Type::TVar(TVar::empty_named(a))),
+            inner.clone().prop_map(|t| Type::ByRef(Arc::new(t))),
+            (typath(), collection::vec(inner.clone(), (0, 8))).prop_map(
+                |(name, params)| {
+                    Type::Ref { scope: ModPath::root(), name, params: Arc::from(params) }
+                }
+            ),
             (
                 collection::vec(
                     (option::of(random_fname()), any::<bool>(), inner.clone()),
@@ -338,8 +347,12 @@ fn usestmt() -> impl Strategy<Value = Expr> {
 }
 
 fn typedef() -> impl Strategy<Value = Expr> {
-    (typart(), typexp())
-        .prop_map(|(name, typ)| ExprKind::TypeDef { name, typ }.to_expr_nopos())
+    (typart(), collection::vec((tvar(), option::of(typexp())), 0..4), typexp()).prop_map(
+        |(name, params, typ)| {
+            let params = Arc::from_iter(params.into_iter());
+            ExprKind::TypeDef { name, params, typ }.to_expr_nopos()
+        },
+    )
 }
 
 macro_rules! structref {
@@ -570,6 +583,18 @@ macro_rules! structwith {
     };
 }
 
+macro_rules! byref {
+    ($inner:expr) => {
+        $inner.prop_map(|e| ExprKind::ByRef(Arc::new(e)).to_expr_nopos())
+    };
+}
+
+macro_rules! deref {
+    ($inner:expr) => {
+        $inner.prop_map(|e| ExprKind::Deref(Arc::new(e)).to_expr_nopos())
+    };
+}
+
 macro_rules! inlinemodule {
     ($inner:expr) => {
         (any::<bool>(), random_fname(), collection::vec($inner, (0, 10))).prop_map(
@@ -631,6 +656,8 @@ fn expr() -> impl Strategy<Value = Expr> {
             arrayslice!(inner.clone()),
             qop!(inner.clone()),
             arithexpr(),
+            byref!(inner.clone()),
+            deref!(inner.clone()),
             structref!(inner.clone()),
             tupleref!(inner.clone()),
             any!(inner.clone()),
@@ -675,11 +702,11 @@ fn acc_strings<'a>(args: impl IntoIterator<Item = &'a Expr> + 'a) -> Arc<[Expr]>
     Arc::from(v)
 }
 
-fn check_type(t0: &Type<Refs>, t1: &Type<Refs>) -> bool {
+fn check_type(t0: &Type, t1: &Type) -> bool {
     t0.normalize() == t1.normalize()
 }
 
-fn check_type_opt(t0: &Option<Type<Refs>>, t1: &Option<Type<Refs>>) -> bool {
+fn check_type_opt(t0: &Option<Type>, t1: &Option<Type>) -> bool {
     match (t0, t1) {
         (Some(t0), Some(t1)) => check_type(&t0, &t1),
         (None, None) => true,
@@ -800,7 +827,7 @@ fn check_pattern(pat0: &Pattern, pat1: &Pattern) -> bool {
         })
 }
 
-fn check_args(args0: &[Arg<Refs>], args1: &[Arg<Refs>]) -> bool {
+fn check_args(args0: &[Arg], args1: &[Arg]) -> bool {
     args0.iter().zip(args1.iter()).fold(true, |r, (a0, a1)| {
         r && dbg!(check_structure_pattern(&a0.pattern, &a1.pattern))
             && dbg!(check_type_opt(&a0.constraint, &a1.constraint))
@@ -1101,9 +1128,23 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             )
         }
         (
-            ExprKind::TypeDef { name: name0, typ: typ0 },
-            ExprKind::TypeDef { name: name1, typ: typ1 },
-        ) => dbg!(name0 == name1) && dbg!(check_type(&typ0, &typ1)),
+            ExprKind::TypeDef { name: name0, params: p0, typ: typ0 },
+            ExprKind::TypeDef { name: name1, params: p1, typ: typ1 },
+        ) => {
+            dbg!(name0 == name1)
+                && dbg!(
+                    p0.len() == p1.len()
+                        && p0.iter().zip(p1.iter()).all(|((t0, c0), (t1, c1))| {
+                            t0 == t1
+                                && match (c0.as_ref(), c1.as_ref()) {
+                                    (Some(c0), Some(c1)) => check_type(c0, c1),
+                                    (None, None) => true,
+                                    _ => false,
+                                }
+                        })
+                )
+                && dbg!(check_type(&typ0, &typ1))
+        }
         (
             ExprKind::TypeCast { expr: expr0, typ: typ0 },
             ExprKind::TypeCast { expr: expr1, typ: typ1 },
@@ -1111,6 +1152,8 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         (ExprKind::Any { args: a0 }, ExprKind::Any { args: a1 }) => {
             a0.len() == a1.len() && a0.iter().zip(a1.iter()).all(|(a0, a1)| check(a0, a1))
         }
+        (ExprKind::ByRef(e0), ExprKind::ByRef(e1)) => check(e0, e1),
+        (ExprKind::Deref(e0), ExprKind::Deref(e1)) => check(e0, e1),
         (_, _) => false,
     }
 }

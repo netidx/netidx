@@ -27,7 +27,7 @@ use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
 use log::{debug, info, warn};
 use parking_lot::{Mutex, RwLock};
-use rand::{thread_rng, Rng};
+use rand::{rng, Rng};
 use std::{cmp::max, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     net::TcpStream,
@@ -415,7 +415,7 @@ impl Connection {
                     Ok(()) => break,
                     Err(e) => {
                         self.handle_failed_connect(e);
-                        let wait = thread_rng().gen_range(1..12);
+                        let wait = rng().random_range(1..12);
                         time::sleep(Duration::from_secs(wait)).await;
                     }
                 },

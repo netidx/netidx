@@ -1,7 +1,7 @@
-use crate::typ::{NoRefs, Refs, TVar, Type, TypeMark};
+use crate::typ::{TVar, Type};
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
-use combine::{stream::position::SourcePosition, EasyParser};
+use combine::stream::position::SourcePosition;
 use compact_str::{format_compact, CompactString};
 use netidx::{
     path::Path,
@@ -20,7 +20,6 @@ use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
     fmt::{self, Display, Write},
     future::Future,
-    marker::PhantomData,
     ops::Deref,
     path::PathBuf,
     pin::Pin,
@@ -47,10 +46,7 @@ impl FromStr for ModPath {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
-        parser::modpath()
-            .easy_parse(combine::stream::position::Stream::new(s))
-            .map(|(r, _)| r)
-            .map_err(|e| anyhow::anyhow!(format!("{e:?}")))
+        parser::parse_modpath(s)
     }
 }
 
@@ -277,7 +273,7 @@ impl StructurePattern {
         names.len() == len
     }
 
-    pub fn infer_type_predicate(&self) -> Type<NoRefs> {
+    pub fn infer_type_predicate(&self) -> Type {
         match self {
             Self::Bind(_) | Self::Ignore => Type::empty_tvar(),
             Self::Literal(v) => Type::Primitive(Typ::get(v).into()),
@@ -292,16 +288,16 @@ impl StructurePattern {
             Self::Slice { all: _, binds }
             | Self::SlicePrefix { all: _, prefix: binds, tail: _ }
             | Self::SliceSuffix { all: _, head: _, suffix: binds } => {
-                let t = binds.iter().fold(Type::Bottom(PhantomData), |t, p| {
-                    t.union(&p.infer_type_predicate())
-                });
+                let t = binds
+                    .iter()
+                    .fold(Type::Bottom, |t, p| t.union(&p.infer_type_predicate()));
                 Type::Array(Arc::new(t))
             }
             Self::Struct { all: _, exhaustive: _, binds } => {
                 let mut typs = binds
                     .iter()
                     .map(|(n, p)| (n.clone(), p.infer_type_predicate()))
-                    .collect::<SmallVec<[(ArcStr, Type<NoRefs>); 8]>>();
+                    .collect::<SmallVec<[(ArcStr, Type); 8]>>();
                 typs.sort_by_key(|(n, _)| n.clone());
                 Type::Struct(Arc::from_iter(typs.into_iter()))
             }
@@ -402,16 +398,16 @@ impl fmt::Display for StructurePattern {
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Pattern {
-    pub type_predicate: Option<Type<Refs>>,
+    pub type_predicate: Option<Type>,
     pub structure_predicate: StructurePattern,
     pub guard: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
-pub struct Arg<T: TypeMark> {
+pub struct Arg {
     pub labeled: Option<Option<Expr>>,
     pub pattern: StructurePattern,
-    pub constraint: Option<Type<T>>,
+    pub constraint: Option<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
@@ -425,17 +421,17 @@ pub enum ModuleKind {
 pub struct Bind {
     pub doc: Option<ArcStr>,
     pub pattern: StructurePattern,
-    pub typ: Option<Type<Refs>>,
+    pub typ: Option<Type>,
     pub export: bool,
     pub value: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Lambda {
-    pub args: Arc<[Arg<Refs>]>,
-    pub vargs: Option<Option<Type<Refs>>>,
-    pub rtype: Option<Type<Refs>>,
-    pub constraints: Arc<[(TVar<Refs>, Type<Refs>)]>,
+    pub args: Arc<[Arg]>,
+    pub vargs: Option<Option<Type>>,
+    pub rtype: Option<Type>,
+    pub constraints: Arc<[(TVar, Type)]>,
     pub body: Either<Expr, ArcStr>,
 }
 
@@ -455,8 +451,8 @@ pub enum ExprKind {
     ArraySlice { source: Arc<Expr>, start: Option<Arc<Expr>>, end: Option<Arc<Expr>> },
     StructWith { source: Arc<Expr>, replace: Arc<[(ArcStr, Expr)]> },
     Lambda(Arc<Lambda>),
-    TypeDef { name: ArcStr, typ: Type<Refs> },
-    TypeCast { expr: Arc<Expr>, typ: Type<Refs> },
+    TypeDef { name: ArcStr, params: Arc<[(TVar, Option<Type>)]>, typ: Type },
+    TypeCast { expr: Arc<Expr>, typ: Type },
     Apply { args: Arc<[(Option<ArcStr>, Expr)]>, function: Arc<Expr> },
     Any { args: Arc<[Expr]> },
     Array { args: Arc<[Expr]> },
@@ -465,6 +461,8 @@ pub enum ExprKind {
     Struct { args: Arc<[(ArcStr, Expr)]> },
     Select { arg: Arc<Expr>, arms: Arc<[(Pattern, Expr)]> },
     Qop(Arc<Expr>),
+    ByRef(Arc<Expr>),
+    Deref(Arc<Expr>),
     Eq { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Ne { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Lt { lhs: Arc<Expr>, rhs: Arc<Expr> },
@@ -826,6 +824,16 @@ impl ExprKind {
                     }
                 }
             }
+            ExprKind::ByRef(e) => {
+                try_single_line!(true);
+                write!(buf, "&")?;
+                e.kind.pretty_print(indent + 2, limit, false, buf)
+            }
+            ExprKind::Deref(e) => {
+                try_single_line!(true);
+                write!(buf, "*")?;
+                e.kind.pretty_print(indent + 2, limit, false, buf)
+            }
             ExprKind::Select { arg, arms } => {
                 try_single_line!(true);
                 write!(buf, "select ")?;
@@ -969,7 +977,23 @@ impl fmt::Display for ExprKind {
                 }
             }
             ExprKind::TypeCast { expr, typ } => write!(f, "cast<{typ}>({expr})"),
-            ExprKind::TypeDef { name, typ } => write!(f, "type {name} = {typ}"),
+            ExprKind::TypeDef { name, params, typ } => {
+                write!(f, "type {name}")?;
+                if !params.is_empty() {
+                    write!(f, "<")?;
+                    for (i, (tv, ct)) in params.iter().enumerate() {
+                        write!(f, "{tv}")?;
+                        if let Some(ct) = ct {
+                            write!(f, ": {ct}")?;
+                        }
+                        if i < params.len() - 1 {
+                            write!(f, ", ")?;
+                        }
+                    }
+                    write!(f, ">")?;
+                }
+                write!(f, " = {typ}")
+            }
             ExprKind::Do { exprs } => print_exprs(f, &**exprs, "{", "}", "; "),
             ExprKind::Lambda(l) => {
                 let Lambda { args, vargs, rtype, constraints, body } = &**l;
@@ -1129,6 +1153,8 @@ impl fmt::Display for ExprKind {
             ExprKind::Sub { lhs, rhs } => write_binop(f, "-", lhs, rhs),
             ExprKind::Mul { lhs, rhs } => write_binop(f, "*", lhs, rhs),
             ExprKind::Div { lhs, rhs } => write_binop(f, "/", lhs, rhs),
+            ExprKind::ByRef(e) => write!(f, "&{e}"),
+            ExprKind::Deref(e) => write!(f, "*{e}"),
             ExprKind::Not { expr } => {
                 write!(f, "(!{expr})")
             }
@@ -1319,7 +1345,10 @@ impl Expr {
                     e.fold(init, f)
                 })
             }
-            ExprKind::Qop(e) | ExprKind::Not { expr: e } => e.fold(init, f),
+            ExprKind::Qop(e)
+            | ExprKind::ByRef(e)
+            | ExprKind::Deref(e)
+            | ExprKind::Not { expr: e } => e.fold(init, f),
             ExprKind::Add { lhs, rhs }
             | ExprKind::Sub { lhs, rhs }
             | ExprKind::Mul { lhs, rhs }
@@ -1651,6 +1680,22 @@ impl Expr {
             ExprKind::Qop(e) => Box::pin(async move {
                 let e = e.resolve_modules(scope, resolvers).await?;
                 Ok(Expr { id: self.id, pos: self.pos, kind: ExprKind::Qop(Arc::new(e)) })
+            }),
+            ExprKind::ByRef(e) => Box::pin(async move {
+                let e = e.resolve_modules(scope, resolvers).await?;
+                Ok(Expr {
+                    id: self.id,
+                    pos: self.pos,
+                    kind: ExprKind::ByRef(Arc::new(e)),
+                })
+            }),
+            ExprKind::Deref(e) => Box::pin(async move {
+                let e = e.resolve_modules(scope, resolvers).await?;
+                Ok(Expr {
+                    id: self.id,
+                    pos: self.pos,
+                    kind: ExprKind::Deref(Arc::new(e)),
+                })
             }),
             ExprKind::Not { expr: e } => Box::pin(async move {
                 let e = e.resolve_modules(scope, resolvers).await?;

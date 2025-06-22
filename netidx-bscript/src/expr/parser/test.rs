@@ -1,9 +1,9 @@
 use super::*;
-use crate::typ::{Refs, Type};
+use crate::typ::Type;
 use arcstr::literal;
 
 #[allow(unused)]
-fn parse_typexpr(s: &str) -> anyhow::Result<Type<Refs>> {
+fn parse_typexpr(s: &str) -> anyhow::Result<Type> {
     typexp()
         .skip(spaces())
         .skip(eof())
@@ -632,7 +632,11 @@ fn select1() {
         ),
         (
             Pattern {
-                type_predicate: Some(Type::Ref(["Foo"].into())),
+                type_predicate: Some(Type::Ref {
+                    scope: ModPath::root(),
+                    name: ["Foo"].into(),
+                    params: Arc::from_iter([]),
+                }),
                 structure_predicate: StructurePattern::Struct {
                     all: None,
                     exhaustive: false,
@@ -927,12 +931,12 @@ fn apply_typed_lambda() {
                         pattern: StructurePattern::Bind("b".into()),
                         constraint: Some(Type::Set(Arc::from_iter([
                             Type::Primitive(Typ::Null.into()),
-                            Type::Ref(["Number"].into()),
+                            Type::Ref { scope: ModPath::root(), name: ["Number"].into(), params: Arc::from_iter([]) },
                         ]))),
                     },
                 ]),
                 vargs: Some(Some(Type::Primitive(Typ::String.into()))),
-                rtype: Some(Type::Bottom(PhantomData)),
+                rtype: Some(Type::Bottom),
                 constraints: Arc::from_iter([]),
                 body: Either::Right("a".into()),
             }))
@@ -1025,7 +1029,11 @@ fn labeled_argument_lambda() {
                 args: Arc::from_iter([
                     FnArgType {
                         label: Some(("foo".into(), true)),
-                        typ: Type::Ref(["Number"].into()),
+                        typ: Type::Ref {
+                            scope: ModPath::root(),
+                            name: ["Number"].into(),
+                            params: Arc::from_iter([]),
+                        },
                     },
                     FnArgType {
                         label: Some(("bar".into(), true)),
@@ -1033,9 +1041,12 @@ fn labeled_argument_lambda() {
                     },
                     FnArgType {
                         label: Some(("a".into(), false)),
-                        typ: Type::Ref(["Any"].into()),
+                        typ: Type::Ref { scope: ModPath::root(), name: ["Any"].into(), params: Arc::from_iter([]) },
                     },
-                    FnArgType { label: None, typ: Type::Ref(["Any"].into()) },
+                    FnArgType {
+                        label: None,
+                        typ: Type::Ref { scope: ModPath::root(), name: ["Any"].into(), params: Arc::from_iter([]) },
+                    },
                 ]),
                 vargs: None,
                 rtype: Type::Primitive(Typ::String.into()),
@@ -1046,7 +1057,11 @@ fn labeled_argument_lambda() {
                     Arg {
                         pattern: StructurePattern::Bind("foo".into()),
                         labeled: Some(Some(ExprKind::Constant(3.into()).to_expr_nopos())),
-                        constraint: Some(Type::Ref(["Number"].into())),
+                        constraint: Some(Type::Ref {
+                            scope: ModPath::root(),
+                            name: ["Number"].into(),
+                            params: Arc::from_iter([]),
+                        }),
                     },
                     Arg {
                         pattern: StructurePattern::Bind("bar".into()),

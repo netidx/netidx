@@ -1,7 +1,7 @@
 use crate::pack::{self, Pack};
 use bytes::Buf;
 use chrono::prelude::*;
-use rand::{thread_rng, Rng};
+use rand::{rng, Rng};
 
 #[test]
 fn test_naive_date_pack() {
@@ -52,12 +52,12 @@ fn test_varint_pack_short() {
 #[test]
 fn test_varint_pack() {
     let mut buf = [0u8; 16];
-    let mut rng = thread_rng();
+    let mut rng = rng();
     for d in 0..1000000000 {
         check_encode_decode(&mut buf, d)
     }
     for _ in 0..1000000000 {
-        let d = rng.gen::<u64>();
+        let d = rng.random::<u64>();
         check_encode_decode(&mut buf, d)
     }
 }

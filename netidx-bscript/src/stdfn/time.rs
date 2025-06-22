@@ -1,9 +1,8 @@
 use crate::{
     arity2, deftype, err, errf,
     expr::{Expr, ExprId},
-    node::Node,
     stdfn::CachedVals,
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, UserEvent,
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
 };
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
@@ -11,6 +10,7 @@ use compact_str::format_compact;
 use netidx::{publisher::FromValue, subscriber::Value};
 use std::{ops::SubAssign, sync::Arc, time::Duration};
 
+#[derive(Debug)]
 struct AfterIdle {
     args: CachedVals,
     id: Option<BindId>,
@@ -19,7 +19,7 @@ struct AfterIdle {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for AfterIdle {
     const NAME: &str = "after_idle";
-    deftype!("fn([duration, Number], 'a) -> 'a");
+    deftype!("time", "fn([duration, Number], 'a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, from, eid| {
@@ -35,8 +35,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for AfterIdle {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        let up = self.args.update_diff(ctx, from, event);
-        let ((timeout, val), (timeout_up, val_up)) = arity2!(self.args.0, up);
+        let mut up = [false; 2];
+        self.args.update_diff(&mut up, ctx, from, event);
+        let ((timeout, val), (timeout_up, val_up)) = arity2!(self.args.0, &up);
         match ((timeout, val), (timeout_up, val_up)) {
             ((Some(secs), _), (true, _)) | ((Some(secs), _), (_, true)) => match secs
                 .clone()
@@ -76,7 +77,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for AfterIdle {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Repeat {
     Yes,
     No,
@@ -115,6 +116,7 @@ impl Repeat {
     }
 }
 
+#[derive(Debug)]
 struct Timer {
     args: CachedVals,
     timeout: Option<Duration>,
@@ -125,7 +127,7 @@ struct Timer {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Timer {
     const NAME: &str = "timer";
-    deftype!("fn([duration, Number], [bool, Number]) -> datetime");
+    deftype!("time", "fn([duration, Number], [bool, Number]) -> datetime");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, from, eid| {
@@ -163,8 +165,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
                 ctx.user.set_timer(id, $dur);
             }};
         }
-        let up = self.args.update_diff(ctx, from, event);
-        let ((timeout, repeat), (timeout_up, repeat_up)) = arity2!(self.args.0, up);
+        let mut up = [false; 2];
+        self.args.update_diff(&mut up, ctx, from, event);
+        let ((timeout, repeat), (timeout_up, repeat_up)) = arity2!(self.args.0, &up);
         match ((timeout, repeat), (timeout_up, repeat_up)) {
             ((None, Some(r)), (true, true)) | ((_, Some(r)), (false, true)) => {
                 match r.clone().cast_to::<Repeat>() {

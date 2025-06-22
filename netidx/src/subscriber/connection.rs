@@ -320,9 +320,9 @@ impl ConnectionCtx {
 
     fn handle_connect_stream(
         &mut self,
+        stream_batch: &mut Vec<From>,
         id: Id,
-        sub_id: SubId,
-        mut tx: WUpdateChan,
+        tx: WUpdateChan,
         flags: UpdatesFlags,
     ) -> Result<()> {
         if let Some(sub) = self.subscriptions.get_mut(&id) {
@@ -342,22 +342,8 @@ impl ConnectionCtx {
                 && !(already_have && flags.contains(UpdatesFlags::NO_SPURIOUS))
             {
                 if let Some(last) = &sub.last {
-                    let m = last.lock().clone();
-                    let mut b = BATCHES.take();
-                    trace!("pushing {:?} to new stream", m);
-                    b.push((sub_id, m));
-                    if let Err(e) = tx.0.try_send(b) {
-                        if e.is_disconnected() {
-                            trace!("channel closed while sending last");
-                            return Ok(());
-                        } else if e.is_full() {
-                            trace!("no slack in channel for last adding to blocked");
-                            let b = e.into_inner();
-                            let mut tx = tx.clone();
-                            self.blocked_channels.push(Box::pin(async move {
-                                let _ = tx.0.send(b).await;
-                            }))
-                        }
+                    if let Event::Update(v) = last.lock().clone() {
+                        stream_batch.push(From::Update(id, v.clone()));
                     }
                 }
             }
@@ -379,6 +365,7 @@ impl ConnectionCtx {
         write_con: &mut WriteChannel,
         mut batch: Pooled<Vec<ToCon>>,
     ) -> Result<()> {
+        let mut stream_batch = DECODE_BATCHES.take();
         for msg in batch.drain(..) {
             match msg {
                 ToCon::Subscribe(req) => {
@@ -400,8 +387,8 @@ impl ConnectionCtx {
                     info!("unsubscribe {:?}", id);
                     write_con.queue_send(&To::Unsubscribe(id))?
                 }
-                ToCon::Stream { id, sub_id, tx, flags } => {
-                    self.handle_connect_stream(id, sub_id, tx, flags)?
+                ToCon::Stream { id, tx, flags } => {
+                    self.handle_connect_stream(&mut stream_batch, id, tx, flags)?
                 }
                 ToCon::Write(id, v, wid, tx) => {
                     write_con.queue_send(&To::Write(id, tx.is_some(), v, wid))?;
@@ -415,6 +402,9 @@ impl ConnectionCtx {
                 ToCon::Flush(tx) => self.pending_flushes.push(tx),
             }
         }
+        if stream_batch.len() > 0 {
+            self.process_updates_batch(stream_batch)
+        }
         Ok(())
     }
 
@@ -424,6 +414,7 @@ impl ConnectionCtx {
         con: &mut WriteChannel,
         subscriber: &Subscriber,
     ) -> Result<()> {
+        let mut stream_batch = DECODE_BATCHES.take();
         for m in batch.drain(..) {
             match m {
                 From::Update(i, m) => match self.subscriptions.get(&i) {
@@ -483,8 +474,8 @@ impl ConnectionCtx {
                                     // we ignore last in this case because we already have it
                                     for (f, c) in req.streams {
                                         self.handle_connect_stream(
+                                            &mut stream_batch,
                                             id,
-                                            req.sub_id,
                                             c,
                                             f | UpdatesFlags::BEGIN_WITH_LAST,
                                         )?
@@ -530,8 +521,8 @@ impl ConnectionCtx {
                                 trace!("connecting {} streams", req.streams.len());
                                 for (f, c) in req.streams {
                                     self.handle_connect_stream(
+                                        &mut stream_batch,
                                         id,
-                                        req.sub_id,
                                         c,
                                         f | UpdatesFlags::BEGIN_WITH_LAST,
                                     )?
@@ -542,7 +533,11 @@ impl ConnectionCtx {
                 }
             }
         }
-        self.send_updates();
+        if stream_batch.len() > 0 {
+            self.process_updates_batch(stream_batch)
+        } else {
+            self.send_updates();
+        }
         Ok(())
     }
 
