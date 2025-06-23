@@ -1,0 +1,6 @@
+mod gui {
+  /// The type of a gui, return this type from a shell expression to draw a gui
+  type Gui = [
+    `Text({ text: &Any })
+  ];
+}

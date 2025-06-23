@@ -40,8 +40,8 @@ impl FromIterator<bool> for AndAc {
 #[bitflags]
 #[repr(u64)]
 pub enum PrintFlag {
-    /// Dereference type variables and print both the tvar name and
-    /// the bound type or "unbound".
+    /// Dereference type variables and print both the tvar name and the bound
+    /// type or "unbound".
     DerefTVars,
     /// Replace common primitives with shorter type names as defined
     /// in core. e.g. Any, instead of the set of every primitive type.

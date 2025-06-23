@@ -507,7 +507,7 @@ enum ToRt {
     Load { path: PathBuf, res: oneshot::Sender<Result<CompRes>> },
     Compile { text: ArcStr, res: oneshot::Sender<Result<CompRes>> },
     CompileCallable { id: Value, rt: BSHandle, res: oneshot::Sender<Result<Callable>> },
-    CompileRef { id: Value, res: oneshot::Sender<Result<ExprId>> },
+    CompileRef { id: Value, res: oneshot::Sender<Result<(ExprId, Option<Value>)>> },
     Call { id: CallableId, args: ValArray },
     DeleteCallable { id: CallableId },
     Subscribe { ch: mpsc::Sender<RtEvent> },
@@ -832,7 +832,7 @@ impl BS {
         Ok(Callable { expr: eid, rt, env, id: cid, typ: (*lb.typ).clone() })
     }
 
-    fn compile_ref(&mut self, id: Value) -> Result<ExprId> {
+    fn compile_ref(&mut self, id: Value) -> Result<(ExprId, Option<Value>)> {
         let id = match id {
             Value::U64(id) => BindId(id),
             v => bail!("invalid bind id {v}"),
@@ -841,7 +841,7 @@ impl BS {
         let typ = Type::Primitive(Typ::any());
         let n = genn::reference(&mut self.ctx, id, typ, eid);
         self.nodes.insert(eid, n);
-        Ok(eid)
+        Ok((eid, self.ctx.cached.get(&id).cloned()))
     }
 
     fn call_callable(
@@ -1045,7 +1045,7 @@ impl BSHandle {
     /// Compile an expression that will output the value of the ref
     /// specifed by id. This is the same as the deref (*) operator in
     /// bscript.
-    pub async fn compile_ref(&self, id: Value) -> Result<ExprId> {
+    pub async fn compile_ref(&self, id: Value) -> Result<(ExprId, Option<Value>)> {
         Ok(self.exec(|tx| ToRt::CompileRef { id, res: tx }).await??)
     }
 
