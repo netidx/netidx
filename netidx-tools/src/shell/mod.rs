@@ -197,7 +197,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     let mut newenv = None;
     let mut env = load_initial_env(&bs, &p, &mut newenv, &mut output).await?;
     if !script {
-        println!("Welcome to the bscript shell");
+        println!("Welcome to the netidx shell");
         println!("Press ctrl-c to cancel, ctrl-d to exit, and tab for help")
     }
     loop {
