@@ -121,13 +121,6 @@ impl Output {
         }
     }
 
-    fn is_some(&self) -> bool {
-        match self {
-            Self::None => false,
-            Self::Gui(_) | Self::Text(_) => true,
-        }
-    }
-
     async fn clear(&mut self, bs: &BSHandle, env: &mut Env, newenv: &mut Option<Env>) {
         match self {
             Self::None => (),
@@ -212,7 +205,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
             RtEvent::Updated(id, v) = from_bs.select_next_some() => {
                 output.process_update(&env, id, v).await;
             },
-            input = input.read_line(output.is_some(), newenv.take()) => {
+            input = input.read_line(&mut output, newenv.take()) => {
                 match input {
                     Err(e) => eprintln!("error reading line {e:?}"),
                     Ok(Signal::CtrlC) if script => break Ok(()),

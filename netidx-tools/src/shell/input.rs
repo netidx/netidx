@@ -1,4 +1,4 @@
-use super::{completion::BComplete, Env};
+use super::{completion::BComplete, Env, Output};
 use anyhow::{Error, Result};
 use futures::{channel::mpsc, StreamExt};
 use reedline::{
@@ -65,21 +65,25 @@ impl InputReader {
 
     pub(super) async fn read_line(
         &mut self,
-        output: bool,
+        output: &mut Output,
         env: Option<Env>,
     ) -> Result<Signal> {
-        if output {
-            tokio::signal::ctrl_c().await?;
-            Ok(Signal::CtrlC)
-        } else {
-            if let Some(tx) = self.go.take() {
-                let _ = tx.send(env);
+        match output {
+            Output::Gui(gui) => Ok(gui.wait_signal().await),
+            Output::Text(_) => {
+                tokio::signal::ctrl_c().await?;
+                Ok(Signal::CtrlC)
             }
-            match self.recv.next().await {
-                None => bail!("input stream ended"),
-                Some((go, sig)) => {
-                    self.go = Some(go);
-                    sig
+            Output::None => {
+                if let Some(tx) = self.go.take() {
+                    let _ = tx.send(env);
+                }
+                match self.recv.next().await {
+                    None => bail!("input stream ended"),
+                    Some((go, sig)) => {
+                        self.go = Some(go);
+                        sig
+                    }
                 }
             }
         }
