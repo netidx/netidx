@@ -3,32 +3,17 @@ use arcstr::ArcStr;
 use async_trait::async_trait;
 use compact_str::CompactString;
 use crossterm::event::{Event, EventStream};
-use futures::{channel::mpsc, StreamExt};
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use log::error;
 use netidx::{protocol::value::NakedValue, publisher::Value};
 use netidx_bscript::{expr::ExprId, rt::BSHandle};
-use ratatui::{prelude::CrosstermBackend, text::Text, DefaultTerminal, Frame, Terminal};
+use ratatui::{text::Text, Frame};
 use smallvec::SmallVec;
 use tokio::{select, sync::oneshot, task};
 
 enum ToGui {
     Update(ExprId, Value),
     Stop(oneshot::Sender<()>),
-}
-
-pub(super) struct Gui(mpsc::Sender<ToGui>);
-
-impl Gui {
-    pub(super) fn start(bs: &BSHandle, root: ExprId) -> Gui {
-        let bs = bs.clone();
-        let (tx, rx) = mpsc::channel(3);
-        task::spawn(async move {
-            if let Err(e) = run(bs, root, rx).await {
-                error!("gui::run returned {e:?}")
-            }
-        });
-        Self(tx)
-    }
 }
 
 #[async_trait]
@@ -69,7 +54,7 @@ struct TextW {
 }
 
 impl TextW {
-    async fn new(bs: &BSHandle, source: Value) -> Result<Self> {
+    async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
         let id = match &source.cast_to::<SmallVec<[(ArcStr, u64); 1]>>()?[..] {
             [(s, id)] if &*s == "text" => *id,
             _ => bail!("expected struct {{ text: &Any }}"),
@@ -79,7 +64,7 @@ impl TextW {
         if let Some(v) = current {
             t.set(v)
         }
-        Ok(t)
+        Ok(Box::new(t))
     }
 
     fn set(&mut self, v: Value) {
@@ -115,8 +100,38 @@ impl GuiWidget for TextW {
     }
 }
 
-async fn compile(bs: BSHandle, root: Value) -> Result<GuiW> {
-    todo!()
+async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
+    match source.cast_to::<(ArcStr, Value)>()? {
+        (s, v) if &s == "Text" => TextW::compile(bs, v).await,
+        (s, v) => bail!("invalid widget type `{s}({v})"),
+    }
+}
+
+pub(super) struct Gui(mpsc::Sender<ToGui>);
+
+impl Gui {
+    pub(super) fn start(bs: &BSHandle, root: ExprId) -> Gui {
+        let bs = bs.clone();
+        let (tx, rx) = mpsc::channel(3);
+        task::spawn(async move {
+            if let Err(e) = run(bs, root, rx).await {
+                error!("gui::run returned {e:?}")
+            }
+        });
+        Self(tx)
+    }
+
+    pub(super) async fn stop(&mut self) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.0.send(ToGui::Stop(tx)).await;
+        let _ = rx.await;
+    }
+
+    pub(super) async fn update(&mut self, id: ExprId, v: Value) {
+        if let Err(_) = self.0.send(ToGui::Update(id, v)).await {
+            error!("could not send update because gui task died")
+        }
+    }
 }
 
 async fn run(
@@ -127,20 +142,36 @@ async fn run(
     let mut terminal = ratatui::init();
     let mut events = EventStream::new().fuse();
     let mut root: GuiW = Box::new(EmptyW);
-    loop {
+    let notify = loop {
         terminal.draw(|f| root.draw(f))?;
         select! {
             m = rx.next() => match m {
-                None | Some(ToGui::Stop(_)) => break,
+                None => break oneshot::channel().0,
+                Some(ToGui::Stop(tx)) => break tx,
                 Some(ToGui::Update(id, v)) => {
                     if id == root_expr {
-
+                        match compile(&bs, v).await {
+                            Err(e) => error!("invalid widget specification {e:?}"),
+                            Ok(w) => {
+                                root.delete().await;
+                                root = w
+                            },
+                        }
+                    } else {
+                        root.handle_update(id, v).await
                     }
                 },
             },
-            e = events.select_next_some() => todo!()
+            e = events.select_next_some() => match e {
+                Ok(e) => root.handle_event(e).await,
+                Err(e) => {
+                    error!("error reading event from terminal {e:?}");
+                    break oneshot::channel().0
+                }
+            }
         }
-    }
+    };
     ratatui::restore();
+    let _ = notify.send(());
     Ok(())
 }

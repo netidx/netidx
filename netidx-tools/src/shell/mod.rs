@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use flexi_logger::{FileSpec, Logger};
 use futures::{channel::mpsc, StreamExt};
+use gui::Gui;
 use log::info;
 use netidx::{
     config::Config,
@@ -100,21 +101,21 @@ async fn bs_init(cfg: Config, auth: DesiredAuth, p: &Params) -> Result<BSHandle>
 
 enum Output {
     None,
-    Gui(CompExp),
+    Gui(Gui),
     Text(CompExp),
 }
 
 impl Output {
-    fn from_expr(env: &Env, e: CompExp) -> Self {
+    fn from_expr(bs: &BSHandle, env: &Env, e: CompExp) -> Self {
         if !e.output {
             return Self::None;
         }
-        Self::from_output_expr(env, e)
+        Self::from_output_expr(bs, env, e)
     }
 
-    fn from_output_expr(env: &Env, e: CompExp) -> Self {
+    fn from_output_expr(bs: &BSHandle, env: &Env, e: CompExp) -> Self {
         if GUITYP.contains(env, &e.typ).unwrap() {
-            Self::Gui(e)
+            Self::Gui(Gui::start(bs, e.id))
         } else {
             Self::Text(e)
         }
@@ -130,6 +131,7 @@ impl Output {
     async fn clear(&mut self, bs: &BSHandle, env: &mut Env, newenv: &mut Option<Env>) {
         match self {
             Self::None => (),
+            Self::Gui(gui) => gui.stop().await,
             Self::Text(e) => match bs.delete(e.id).await {
                 Err(e) => eprintln!("could not delete node {e:?}"),
                 Ok(e) => {
@@ -137,20 +139,19 @@ impl Output {
                     *newenv = Some(env.clone())
                 }
             },
-            Self::Gui(_) => (),
         }
         *self = Self::None
     }
 
-    fn process_update(&mut self, bs: &BSHandle, env: &Env, id: ExprId, v: Value) {
+    async fn process_update(&mut self, env: &Env, id: ExprId, v: Value) {
         match self {
             Self::None => (),
+            Self::Gui(gui) => gui.update(id, v).await,
             Self::Text(e) => {
                 if e.id == id {
                     println!("{}", TVal { env: &env, typ: &e.typ, v: &v })
                 }
             }
-            Self::Gui(_) => (),
         }
     }
 }
@@ -167,7 +168,7 @@ async fn load_initial_env(
         let mut r = bs.load(file.clone()).await?;
         env = bs.get_env().await?;
         if let Some(e) = r.exprs.pop() {
-            *output = Output::from_output_expr(&env, e);
+            *output = Output::from_output_expr(&bs, &env, e);
         }
         None
     } else if !p.no_init {
@@ -209,7 +210,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     loop {
         select! {
             RtEvent::Updated(id, v) = from_bs.select_next_some() => {
-                output.process_update(&bs, &env, id, v);
+                output.process_update(&env, id, v).await;
             },
             input = input.read_line(output.is_some(), newenv.take()) => {
                 match input {
@@ -231,7 +232,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                                         PrintFlag::DerefTVars | PrintFlag::ReplacePrims,
                                         || println!("-: {}", typ)
                                     );
-                                    output = Output::from_expr(&env, e);
+                                    output = Output::from_expr(&bs, &env, e);
                                 }
                             }
                         }
