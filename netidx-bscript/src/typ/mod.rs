@@ -971,65 +971,35 @@ impl Type {
         })
     }
 
-    fn check_array<C: Ctx, E: UserEvent>(
-        &self,
-        env: &Env<C, E>,
-        a: &ValArray,
-    ) -> Result<bool> {
-        Ok(a.iter()
-            .map(|elt| match elt {
-                Value::Array(elts) => match self {
-                    Type::Array(et) => et.check_array(env, elts),
-                    _ => Ok(false),
-                },
-                v => self.contains(env, &Type::Primitive(Typ::get(v).into())),
-            })
-            .collect::<Result<AndAc>>()?
-            .0)
-    }
-
     fn cast_value_int<C: Ctx, E: UserEvent>(
         &self,
         env: &Env<C, E>,
+        hist: &mut FxHashSet<usize>,
         v: Value,
     ) -> Result<Value> {
-        if self.contains(env, &Type::Primitive(Typ::get(&v).into()))? {
+        if self.is_a_int(env, hist, &v) {
             return Ok(v);
         }
         match self {
             Type::Array(et) => match v {
                 Value::Array(elts) => {
-                    if et.check_array(env, &elts)? {
-                        return Ok(Value::Array(elts));
-                    }
                     let va = elts
                         .iter()
-                        .map(|el| et.cast_value_int(env, el.clone()))
+                        .map(|el| et.cast_value_int(env, hist, el.clone()))
                         .collect::<Result<SmallVec<[Value; 8]>>>()?;
                     Ok(Value::Array(ValArray::from_iter_exact(va.into_iter())))
                 }
-                v => Ok(Value::Array([et.cast_value_int(env, v)?].into())),
+                v => Ok(Value::Array([et.cast_value_int(env, hist, v)?].into())),
             },
             Type::Tuple(ts) => match v {
                 Value::Array(elts) => {
                     if elts.len() != ts.len() {
                         bail!("tuple size mismatch {self} with {}", Value::Array(elts))
                     }
-                    let ok = ts
-                        .iter()
-                        .zip(elts.iter())
-                        .map(|(t, v)| {
-                            t.contains(env, &Type::Primitive(Typ::get(v).into()))
-                        })
-                        .collect::<Result<AndAc>>()?
-                        .0;
-                    if ok {
-                        return Ok(Value::Array(elts));
-                    }
                     let a = ts
                         .iter()
                         .zip(elts.iter())
-                        .map(|(t, el)| t.cast_value_int(env, el.clone()))
+                        .map(|(t, el)| t.cast_value_int(env, hist, el.clone()))
                         .collect::<Result<SmallVec<[Value; 8]>>>()?;
                     Ok(Value::Array(ValArray::from_iter_exact(a.into_iter())))
                 }
@@ -1090,7 +1060,7 @@ impl Type {
                                 Value::Array(a) => {
                                     let a = [
                                         Value::String(n.clone()),
-                                        t.cast_value_int(env, a[1].clone())?,
+                                        t.cast_value_int(env, hist, a[1].clone())?,
                                     ];
                                     Ok(Value::Array(ValArray::from_iter_exact(
                                         a.into_iter(),
@@ -1118,31 +1088,17 @@ impl Type {
                             Value::String(s) if s == tag => (),
                             v => bail!("variant tag mismatch expected {tag} got {v}"),
                         }
-                        let ok = iter::once(&Type::Primitive(Typ::String.into()))
+                        let a = iter::once(&Type::Primitive(Typ::String.into()))
                             .chain(ts.iter())
                             .zip(elts.iter())
-                            .fold(Ok(true), |ok: Result<_>, (t, v)| {
-                                Ok(ok?
-                                    && t.contains(
-                                        env,
-                                        &Type::Primitive(Typ::get(v).into()),
-                                    )?)
-                            })?;
-                        if ok {
-                            Ok(v)
-                        } else {
-                            let a = iter::once(&Type::Primitive(Typ::String.into()))
-                                .chain(ts.iter())
-                                .zip(elts.iter())
-                                .map(|(t, v)| t.cast_value_int(env, v.clone()))
-                                .collect::<Result<SmallVec<[Value; 8]>>>()?;
-                            Ok(Value::Array(ValArray::from_iter_exact(a.into_iter())))
-                        }
+                            .map(|(t, v)| t.cast_value_int(env, hist, v.clone()))
+                            .collect::<Result<SmallVec<[Value; 8]>>>()?;
+                        Ok(Value::Array(ValArray::from_iter_exact(a.into_iter())))
                     } else if ts.len() == elts.len() {
                         let mut a = ts
                             .iter()
                             .zip(elts.iter())
-                            .map(|(t, v)| t.cast_value_int(env, v.clone()))
+                            .map(|(t, v)| t.cast_value_int(env, hist, v.clone()))
                             .collect::<Result<SmallVec<[Value; 8]>>>()?;
                         a.insert(0, Value::String(tag.clone()));
                         Ok(Value::Array(ValArray::from_iter_exact(a.into_iter())))
@@ -1152,7 +1108,7 @@ impl Type {
                 }
                 v => bail!("can't cast {v} to {self}"),
             },
-            Type::Ref { .. } => self.lookup_ref(env)?.cast_value_int(env, v),
+            Type::Ref { .. } => self.lookup_ref(env)?.cast_value_int(env, hist, v),
             t => match t.first_prim(env) {
                 None => bail!("empty or non primitive cast"),
                 Some(t) => Ok(v
@@ -1164,10 +1120,16 @@ impl Type {
     }
 
     pub fn cast_value<C: Ctx, E: UserEvent>(&self, env: &Env<C, E>, v: Value) -> Value {
-        match self.cast_value_int(env, v) {
-            Ok(v) => v,
-            Err(e) => Value::Error(e.to_string().into()),
+        thread_local! {
+            static HIST: RefCell<FxHashSet<usize>> = RefCell::new(HashSet::default());
         }
+        HIST.with_borrow_mut(|hist| {
+            hist.clear();
+            match self.cast_value_int(env, hist, v) {
+                Ok(v) => v,
+                Err(e) => Value::Error(e.to_string().into()),
+            }
+        })
     }
 
     fn is_a_int<C: Ctx, E: UserEvent>(
