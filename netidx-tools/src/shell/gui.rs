@@ -1,16 +1,10 @@
-use std::borrow::Cow;
-
 use anyhow::Result;
 use arcstr::ArcStr;
 use async_trait::async_trait;
-use compact_str::CompactString;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures::{channel::mpsc, future, SinkExt, StreamExt};
 use log::error;
-use netidx::{
-    protocol::value::NakedValue,
-    publisher::{FromValue, Value},
-};
+use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{expr::ExprId, rt::BSHandle};
 use ratatui::{
     layout::Alignment,
@@ -20,6 +14,7 @@ use ratatui::{
 };
 use reedline::Signal;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use tokio::{select, sync::oneshot, task};
 
 struct AlignmentV(Alignment);
@@ -82,7 +77,7 @@ struct ModifierV(Modifier);
 impl FromValue for ModifierV {
     fn from_value(v: Value) -> Result<Self> {
         let mut m = Modifier::empty();
-        for o in v.cast_to::<Option<SmallVec<[ArcStr; 2]>>>()? {
+        if let Some(o) = v.cast_to::<Option<SmallVec<[ArcStr; 2]>>>()? {
             for s in o {
                 match &*s {
                     "Bold" => m |= Modifier::BOLD,
@@ -125,11 +120,16 @@ struct LineV(Line<'static>);
 
 impl FromValue for LineV {
     fn from_value(v: Value) -> Result<Self> {
-        let flds = v.cast_to::<(ArcStr, Value); 3>()?;
+        let flds = v.cast_to::<[(ArcStr, Value); 3]>()?;
         let alignment = flds[0].1.clone().cast_to::<Option<AlignmentV>>()?.map(|a| a.0);
         let spans = match &flds[1].1 {
-            Value::String(s) => vec![Span::raw(s)],
-            v => v.clone().cast_to::<Vec<SpanV>>()?.into_iter().map(|s| s.0).collect::<Vec<_>>()
+            Value::String(s) => vec![Span::raw(String::from(&**s))],
+            v => v
+                .clone()
+                .cast_to::<Vec<SpanV>>()?
+                .into_iter()
+                .map(|s| s.0)
+                .collect::<Vec<_>>(),
         };
         let style = flds[2].1.clone().cast_to::<StyleV>()?.0;
         Ok(Self(Line { style, alignment, spans }))
@@ -138,9 +138,9 @@ impl FromValue for LineV {
 
 #[async_trait]
 trait GuiWidget {
-    async fn handle_event(&mut self, e: Event);
-    async fn handle_update(&mut self, id: ExprId, v: Value);
-    fn draw(&mut self, frame: &mut Frame);
+    async fn handle_event(&mut self, e: Event) -> Result<()>;
+    async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()>;
+    fn draw(&mut self, frame: &mut Frame) -> Result<()>;
     async fn delete(&mut self);
 }
 
@@ -150,31 +150,27 @@ struct EmptyW;
 
 #[async_trait]
 impl GuiWidget for EmptyW {
-    async fn delete(&mut self) {
-        ()
+    async fn delete(&mut self) {}
+
+    async fn handle_event(&mut self, _e: Event) -> Result<()> {
+        Ok(())
     }
 
-    async fn handle_event(&mut self, _e: Event) {
-        ()
+    async fn handle_update(&mut self, _id: ExprId, _v: Value) -> Result<()> {
+        Ok(())
     }
 
-    async fn handle_update(&mut self, _id: ExprId, _v: Value) {
-        ()
-    }
-
-    fn draw(&mut self, _frame: &mut Frame) {
-        ()
+    fn draw(&mut self, _frame: &mut Frame) -> Result<()> {
+        Ok(())
     }
 }
 
 struct TextW {
     bs: BSHandle,
-    alignment: Value,
-    alignment_id: ExprId,
-    lines: Value,
-    lines_id: ExprId,
-    style: Value,
-    style_id: ExprId,
+    alignment: ExprId,
+    lines: ExprId,
+    style: ExprId,
+    text: Text<'static>,
 }
 
 impl TextW {
@@ -191,57 +187,75 @@ impl TextW {
         let (alignment_id, alignment) = bs.compile_ref(Value::U64(alignment_id)).await?;
         let (lines_id, lines) = bs.compile_ref(Value::U64(lines_id)).await?;
         let (style_id, style) = bs.compile_ref(Value::U64(style_id)).await?;
-        Ok(Box::new(Self {
+        let mut t = Self {
             bs: bs.clone(),
-            alignment: alignment.unwrap_or(Value::Null),
-            alignment_id,
-            lines: lines.unwrap_or(Value::Null),
-            lines_id,
-            style: style.unwrap_or(Value::Null),
-            style_id,
-        }))
+            alignment: alignment_id,
+            lines: lines_id,
+            style: style_id,
+            text: Text { alignment: None, style: Style::new(), lines: vec![] },
+        };
+        if let Some(v) = alignment {
+            t.set_alignment(v)?
+        }
+        if let Some(v) = style {
+            t.set_style(v)?
+        }
+        if let Some(v) = lines {
+            t.set_lines(v)?
+        }
+        Ok(Box::new(t))
+    }
+
+    fn set_alignment(&mut self, v: Value) -> Result<()> {
+        self.text.alignment = v.cast_to::<Option<AlignmentV>>()?.map(|a| a.0);
+        Ok(())
+    }
+
+    fn set_style(&mut self, v: Value) -> Result<()> {
+        self.text.style = v.cast_to::<StyleV>()?.0;
+        Ok(())
+    }
+
+    fn set_lines(&mut self, v: Value) -> Result<()> {
+        self.text.lines = match v {
+            Value::String(s) => vec![Line::from(String::from(&*s))],
+            v => v.cast_to::<Vec<LineV>>()?.into_iter().map(|l| l.0).collect(),
+        };
+        Ok(())
     }
 }
 
 #[async_trait]
 impl GuiWidget for TextW {
     async fn delete(&mut self) {
-        let Self {
-            bs,
-            alignment: _,
-            alignment_id,
-            lines: _,
-            lines_id,
-            style: _,
-            style_id,
-        } = self;
+        let Self { bs, alignment, lines, style, text: _ } = self;
         let _ = future::join_all([
-            bs.delete(*alignment_id),
-            bs.delete(*lines_id),
-            bs.delete(*style_id),
+            bs.delete(*alignment),
+            bs.delete(*lines),
+            bs.delete(*style),
         ])
         .await;
     }
 
-    fn draw(&mut self, frame: &mut Frame) {
-        let text = Text::raw(&self.text);
-        frame.render_widget(text, frame.area());
+    fn draw(&mut self, frame: &mut Frame) -> Result<()> {
+        frame.render_widget(&self.text, frame.area());
+        todo!()
     }
 
-    async fn handle_event(&mut self, _: Event) {
-        ()
+    async fn handle_event(&mut self, _: Event) -> Result<()> {
+        Ok(())
     }
 
-    async fn handle_update(&mut self, id: ExprId, v: Value) {
-        let Self { bs: _, alignment, alignment_id, lines, lines_id, style, style_id } =
-            self;
-        if id == *alignment_id {
-            *alignment = v;
-        } else if id == *lines_id {
-            *lines = v;
-        } else if id == *style_id {
-            *style = v;
+    async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
+        let Self { bs: _, alignment, lines, style, text: _ } = self;
+        if id == *alignment {
+            self.set_alignment(v)?;
+        } else if id == *lines {
+            self.set_lines(v)?
+        } else if id == *style {
+            self.set_style(v)?
         }
+        Ok(())
     }
 }
 
@@ -318,7 +332,11 @@ async fn run(
     let mut events = EventStream::new().fuse();
     let mut root: GuiW = Box::new(EmptyW);
     let notify = loop {
-        terminal.draw(|f| root.draw(f))?;
+        terminal.draw(|f| {
+            if let Err(e) = root.draw(f) {
+                error!("error drawing {e:?}")
+            }
+        })?;
         select! {
             m = to_rx.next() => match m {
                 None => break oneshot::channel().0,
@@ -333,7 +351,9 @@ async fn run(
                             },
                         }
                     } else {
-                        root.handle_update(id, v).await
+                        if let Err(e) = root.handle_update(id, v).await {
+                            error!("error handling update {e:?}")
+                        }
                     }
                 },
             },
@@ -344,7 +364,9 @@ async fn run(
                         break oneshot::channel().0
                     }
                 }
-                Ok(e) => root.handle_event(e).await,
+                Ok(e) => if let Err(e) = root.handle_event(e).await {
+                    error!("error handling event {e:?}")
+                },
                 Err(e) => {
                     error!("error reading event from terminal {e:?}");
                     break oneshot::channel().0
