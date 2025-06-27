@@ -99,6 +99,18 @@ macro_rules! run {
     };
 }
 
+const MOD0: &str = r#"
+{
+  let v = 8;
+  v % 10
+}
+"#;
+
+run!(mod0, MOD0, |v: Result<&Value>| match v {
+    Ok(&Value::I64(8)) => true,
+    _ => false,
+});
+
 const SCOPE: &str = r#"
 {
   let v = (((1 + 1) * 2) / 2) - 1;

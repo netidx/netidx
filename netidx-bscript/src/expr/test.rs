@@ -955,6 +955,10 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             ExprKind::Div { lhs: lhs1, rhs: rhs1 },
         ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
         (
+            ExprKind::Mod { lhs: lhs0, rhs: rhs0 },
+            ExprKind::Mod { lhs: lhs1, rhs: rhs1 },
+        ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
+        (
             ExprKind::Eq { lhs: lhs0, rhs: rhs0 },
             ExprKind::Eq { lhs: lhs1, rhs: rhs1 },
         ) => dbg!(dbg!(check(lhs0, lhs1)) && dbg!(check(rhs0, rhs1))),
