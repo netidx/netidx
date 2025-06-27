@@ -690,8 +690,18 @@ impl ExprKind {
                 writeln!(buf, "{{")?;
                 for (i, (n, e)) in args.iter().enumerate() {
                     push_indent(indent + 2, buf);
-                    write!(buf, "{n}: ")?;
-                    e.kind.pretty_print(indent + 2, limit, false, buf)?;
+                    match &e.kind {
+                        ExprKind::Ref { name }
+                            if Path::dirname(&**name).is_none()
+                                && Path::basename(&**name) == Some(&**n) =>
+                        {
+                            write!(buf, "{n}")?
+                        }
+                        _ => {
+                            write!(buf, "{n}: ")?;
+                            e.kind.pretty_print(indent + 2, limit, false, buf)?;
+                        }
+                    }
                     if i < args.len() - 1 {
                         kill_newline!(buf);
                         writeln!(buf, ", ")?
@@ -1050,7 +1060,15 @@ impl fmt::Display for ExprKind {
             ExprKind::Struct { args } => {
                 write!(f, "{{ ")?;
                 for (i, (n, e)) in args.iter().enumerate() {
-                    write!(f, "{n}: {e}")?;
+                    match &e.kind {
+                        ExprKind::Ref { name }
+                            if Path::dirname(&**name).is_none()
+                                && Path::basename(&**name) == Some(&**n) =>
+                        {
+                            write!(f, "{n}")?
+                        }
+                        _ => write!(f, "{n}: {e}")?,
+                    }
                     if i < args.len() - 1 {
                         write!(f, ", ")?
                     }

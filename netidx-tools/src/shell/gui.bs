@@ -65,7 +65,7 @@ mod gui {
   };
 
   let line = {
-    style: style,
+    style,
     alignment: null,
     spans: []
   };

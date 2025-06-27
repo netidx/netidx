@@ -1407,16 +1407,24 @@ where
         between(
             token('{'),
             sptoken('}'),
-            sep_by1((spfname().skip(sptoken(':')), expr()), csep()),
+            sep_by1((spfname(), optional(attempt(sptoken(':')).with(expr()))), csep()),
         ),
     )
-        .then(|(pos, mut exprs): (_, SmallVec<[(ArcStr, Expr); 8]>)| {
+        .then(|(pos, mut exprs): (_, SmallVec<[(ArcStr, Option<Expr>); 8]>)| {
             let s = exprs.iter().map(|(n, _)| n).collect::<FxHashSet<_>>();
             if s.len() < exprs.len() {
                 return unexpected_any("struct fields must be unique").left();
             }
             exprs.sort_by_key(|(n, _)| n.clone());
-            value(ExprKind::Struct { args: Arc::from_iter(exprs) }.to_expr(pos)).right()
+            let args = exprs.into_iter().map(|(n, e)| match e {
+                Some(e) => (n, e),
+                None => {
+                    let e =
+                        ExprKind::Ref { name: ModPath::from([n.clone()]) }.to_expr(pos);
+                    (n, e)
+                }
+            });
+            value(ExprKind::Struct { args: Arc::from_iter(args) }.to_expr(pos)).right()
         })
 }
 
@@ -1507,7 +1515,7 @@ where
             attempt(spaces().with(use_module())),
             attempt(spaces().with(typedef())),
             attempt(spaces().with(raw_string())),
-            attempt(spaces().with(array()))
+            attempt(spaces().with(array())),
         ))),
         attempt(spaces().with(byref())),
         attempt(spaces().with(deref())),
@@ -1529,7 +1537,7 @@ where
         attempt(spaces().with(qop(any()))),
         attempt(spaces().with(interpolated())),
         attempt(spaces().with(literal())),
-        attempt(spaces().with(qop(reference())))
+        attempt(spaces().with(qop(reference()))),
     ))
 }
 
