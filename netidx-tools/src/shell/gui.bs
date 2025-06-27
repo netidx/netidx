@@ -86,7 +86,7 @@ mod gui {
     #style: &Style = &style(),
     #alignment: &[Alignment, null] = &null,
     lines: &[Array<Line>, string]
-  | -> Text { style, alignment, lines };
+  | -> Gui `Text({ style, alignment, lines });
 
   type Paragraph = {
     style: &Style,
@@ -102,7 +102,7 @@ mod gui {
     #scroll: &{x: u32, y: u32} = &{x: u32:0, y: u32:0},
     #trim: &bool = &true,
     lines: &[Array<Line>, string]
-  | -> Paragraph { style, alignment, scroll, trim, lines };
+  | -> Gui `Paragraph({ style, alignment, scroll, trim, lines });
 
   // The type of a gui, return this type from a shell expression to draw a gui
   type Gui = [

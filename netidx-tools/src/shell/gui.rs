@@ -239,7 +239,7 @@ impl GuiWidget for TextW {
 
     fn draw(&mut self, frame: &mut Frame) -> Result<()> {
         frame.render_widget(&self.text, frame.area());
-        todo!()
+        Ok(())
     }
 
     async fn handle_event(&mut self, _: Event) -> Result<()> {
