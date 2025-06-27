@@ -36,7 +36,7 @@ mod gui {
     fg: [Color, null],
     bg: [Color, null],
     underline_color: [Color, null],
-    add_modifier: [Modifier, null]
+    add_modifier: [Modifier, null],
     sub_modifier: [Modifier, null]
   };
 

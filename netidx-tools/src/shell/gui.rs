@@ -3,11 +3,16 @@ use arcstr::ArcStr;
 use async_trait::async_trait;
 use compact_str::CompactString;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use futures::{channel::mpsc, future, SinkExt, StreamExt};
 use log::error;
 use netidx::{protocol::value::NakedValue, publisher::Value};
 use netidx_bscript::{expr::ExprId, rt::BSHandle};
-use ratatui::{text::Text, Frame};
+use ratatui::{
+    layout::Alignment,
+    style::Style,
+    text::{Line, Text},
+    Frame,
+};
 use reedline::Signal;
 use smallvec::SmallVec;
 use tokio::{select, sync::oneshot, task};
@@ -45,39 +50,58 @@ impl GuiWidget for EmptyW {
 
 struct TextW {
     bs: BSHandle,
-    text: CompactString,
-    source: ExprId,
+    alignment: Value,
+    alignment_id: ExprId,
+    lines: Value,
+    lines_id: ExprId,
+    style: Value,
+    style_id: ExprId,
 }
 
 impl TextW {
     async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
-        let id = match &source.cast_to::<SmallVec<[(ArcStr, u64); 1]>>()?[..] {
-            [(s, id)] if &*s == "text" => *id,
-            _ => bail!("expected struct {{ text: &Any }}"),
-        };
-        let (source, current) = bs.compile_ref(Value::U64(id)).await?;
-        let mut t = Self { bs: bs.clone(), text: CompactString::from(""), source };
-        if let Some(v) = current {
-            t.set(v)
-        }
-        Ok(Box::new(t))
-    }
-
-    fn set(&mut self, v: Value) {
-        use std::fmt::Write;
-        self.text.clear();
-        match &v {
-            Value::String(s) => write!(self.text, "{s}"),
-            v => write!(self.text, "{}", NakedValue(v)),
-        }
-        .unwrap()
+        let (alignment_id, lines_id, style_id) =
+            match &source.cast_to::<SmallVec<[(ArcStr, u64); 3]>>()?[..] {
+                [(s0, id0), (s1, id1), (s2, id2)]
+                    if &*s0 == "alignment" && &*s1 == "lines" && &*s2 == "style" =>
+                {
+                    (*id0, *id1, *id2)
+                }
+                _ => bail!("expected struct Text"),
+            };
+        let (alignment_id, alignment) = bs.compile_ref(Value::U64(alignment_id)).await?;
+        let (lines_id, lines) = bs.compile_ref(Value::U64(lines_id)).await?;
+        let (style_id, style) = bs.compile_ref(Value::U64(style_id)).await?;
+        Ok(Box::new(Self {
+            bs: bs.clone(),
+            alignment: alignment.unwrap_or(Value::Null),
+            alignment_id,
+            lines: lines.unwrap_or(Value::Null),
+            lines_id,
+            style: style.unwrap_or(Value::Null),
+            style_id,
+        }))
     }
 }
 
 #[async_trait]
 impl GuiWidget for TextW {
     async fn delete(&mut self) {
-        let _ = self.bs.delete(self.source).await;
+        let Self {
+            bs,
+            alignment: _,
+            alignment_id,
+            lines: _,
+            lines_id,
+            style: _,
+            style_id,
+        } = self;
+        let _ = future::join_all([
+            bs.delete(*alignment_id),
+            bs.delete(*lines_id),
+            bs.delete(*style_id),
+        ])
+        .await;
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -90,8 +114,14 @@ impl GuiWidget for TextW {
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) {
-        if id == self.source {
-            self.set(v)
+        let Self { bs: _, alignment, alignment_id, lines, lines_id, style, style_id } =
+            self;
+        if id == *alignment_id {
+            *alignment = v;
+        } else if id == *lines_id {
+            *lines = v;
+        } else if id == *style_id {
+            *style = v;
         }
     }
 }
