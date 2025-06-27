@@ -36,16 +36,16 @@ mod gui {
     fg: [Color, null],
     bg: [Color, null],
     underline_color: [Color, null],
-    add_modifier: [Modifier, null],
-    sub_modifier: [Modifier, null]
+    add_modifier: [Array<Modifier>, null],
+    sub_modifier: [Array<Modifier>, null]
   };
 
   let style = |
     #fg: [Color, null] = null,
     #bg: [Color, null] = null,
     #underline_color: [Color, null] = null,
-    #add_modifier: [Modifier, null] = null,
-    #sub_modifier: [Modifier, null] = null
+    #add_modifier: [Array<Modifier>, null] = null,
+    #sub_modifier: [Array<Modifier>, null] = null
   | -> Style {
     fg,
     bg,

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use anyhow::Result;
 use arcstr::ArcStr;
 use async_trait::async_trait;
@@ -5,17 +7,134 @@ use compact_str::CompactString;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures::{channel::mpsc, future, SinkExt, StreamExt};
 use log::error;
-use netidx::{protocol::value::NakedValue, publisher::Value};
+use netidx::{
+    protocol::value::NakedValue,
+    publisher::{FromValue, Value},
+};
 use netidx_bscript::{expr::ExprId, rt::BSHandle};
 use ratatui::{
     layout::Alignment,
-    style::Style,
-    text::{Line, Text},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
     Frame,
 };
 use reedline::Signal;
 use smallvec::SmallVec;
 use tokio::{select, sync::oneshot, task};
+
+struct AlignmentV(Alignment);
+
+impl FromValue for AlignmentV {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::String(s) => match &*s {
+                "Left" => Ok(AlignmentV(Alignment::Left)),
+                "Right" => Ok(AlignmentV(Alignment::Right)),
+                "Center" => Ok(AlignmentV(Alignment::Center)),
+                s => bail!("invalid alignment {s}"),
+            },
+            v => bail!("invalid alignment {v}"),
+        }
+    }
+}
+
+struct ColorV(Color);
+
+impl FromValue for ColorV {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::String(s) => match &*s {
+                "Reset" => Ok(Self(Color::Reset)),
+                "Black" => Ok(Self(Color::Black)),
+                "Red" => Ok(Self(Color::Red)),
+                "Green" => Ok(Self(Color::Green)),
+                "Yellow" => Ok(Self(Color::Yellow)),
+                "Blue" => Ok(Self(Color::Blue)),
+                "Magenta" => Ok(Self(Color::Magenta)),
+                "Cyan" => Ok(Self(Color::Cyan)),
+                "Gray" => Ok(Self(Color::Gray)),
+                "DarkGray" => Ok(Self(Color::DarkGray)),
+                "LightRed" => Ok(Self(Color::LightRed)),
+                "LightGreen" => Ok(Self(Color::LightGreen)),
+                "LightYellow" => Ok(Self(Color::LightYellow)),
+                "LightBlue" => Ok(Self(Color::LightBlue)),
+                "LightMagenta" => Ok(Self(Color::LightMagenta)),
+                "LightCyan" => Ok(Self(Color::LightCyan)),
+                "White" => Ok(Self(Color::White)),
+                s => bail!("invalid color name {s}"),
+            },
+            v => match v.cast_to::<(ArcStr, Value)>()? {
+                (s, v) if &*s == "Rgb" => {
+                    let v = v.cast_to::<[(ArcStr, u8); 3]>()?;
+                    Ok(Self(Color::Rgb(v[2].1, v[1].1, v[0].1)))
+                }
+                (s, v) if &*s == "Indexed" => {
+                    Ok(Self(Color::Indexed(v.cast_to::<u8>()?)))
+                }
+                (s, v) => bail!("invalid color ({s} {v})"),
+            },
+        }
+    }
+}
+
+struct ModifierV(Modifier);
+
+impl FromValue for ModifierV {
+    fn from_value(v: Value) -> Result<Self> {
+        let mut m = Modifier::empty();
+        for o in v.cast_to::<Option<SmallVec<[ArcStr; 2]>>>()? {
+            for s in o {
+                match &*s {
+                    "Bold" => m |= Modifier::BOLD,
+                    "Italic" => m |= Modifier::ITALIC,
+                    s => bail!("invalid modifier {s}"),
+                }
+            }
+        }
+        Ok(Self(m))
+    }
+}
+
+struct StyleV(Style);
+
+impl FromValue for StyleV {
+    fn from_value(v: Value) -> Result<Self> {
+        let flds = v.cast_to::<[(ArcStr, Value); 5]>()?;
+        let add_modifier = flds[0].1.clone().cast_to::<ModifierV>()?.0;
+        let bg = flds[1].1.clone().cast_to::<Option<ColorV>>()?.map(|c| c.0);
+        let fg = flds[2].1.clone().cast_to::<Option<ColorV>>()?.map(|c| c.0);
+        let sub_modifier = flds[3].1.clone().cast_to::<ModifierV>()?.0;
+        let underline_color = flds[4].1.clone().cast_to::<Option<ColorV>>()?.map(|c| c.0);
+        Ok(Self(Style { fg, bg, underline_color, add_modifier, sub_modifier }))
+    }
+}
+
+struct SpanV(Span<'static>);
+
+impl FromValue for SpanV {
+    fn from_value(v: Value) -> Result<Self> {
+        let flds = v.cast_to::<[(ArcStr, Value); 2]>()?;
+        Ok(Self(Span {
+            content: Cow::Owned(flds[0].1.clone().cast_to::<String>()?),
+            style: flds[1].1.clone().cast_to::<StyleV>()?.0,
+        }))
+    }
+}
+
+struct LineV(Line<'static>);
+
+impl FromValue for LineV {
+    fn from_value(v: Value) -> Result<Self> {
+        let flds = v.cast_to::<(ArcStr, Value); 3>()?;
+        let alignment = flds[0].1.clone().cast_to::<Option<AlignmentV>>()?.map(|a| a.0);
+        let spans = match &flds[1].1 {
+            Value::String(s) => vec![Span::raw(s)],
+            v => v.clone().cast_to::<Vec<SpanV>>()?.into_iter().map(|s| s.0).collect::<Vec<_>>()
+        };
+        let style = flds[2].1.clone().cast_to::<StyleV>()?.0;
+        Ok(Self(Line { style, alignment, spans }))
+    }
+}
 
 #[async_trait]
 trait GuiWidget {
