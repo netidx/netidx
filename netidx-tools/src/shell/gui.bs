@@ -40,38 +40,73 @@ mod gui {
     sub_modifier: [Modifier, null]
   };
 
-  let style: Style = {
-    fg: null,
-    bg: null,
-    underline_color: null,
-    add_modifier: null,
-    sub_modifier: null
+  let style = |
+    #fg: [Color, null] = null,
+    #bg: [Color, null] = null,
+    #underline_color: [Color, null] = null,
+    #add_modifier: [Modifier, null] = null,
+    #sub_modifier: [Modifier, null] = null
+  | -> Style {
+    fg,
+    bg,
+    underline_color,
+    add_modifier,
+    sub_modifier
   };
 
   type Span = {
     style: Style,
-    content: Any
+    content: string
   };
 
-  let span: Span = {
-    style: style,
-    content: ""
+  let span = |#style: Style = style(), content: string| -> Span {
+    style,
+    content
   };
 
   type Line = {
     style: Style,
     alignment: [Alignment, null],
-    spans: Array<Span>
+    spans: [Array<Span>, string]
   };
 
-  let line = {
-    style,
-    alignment: null,
-    spans: []
+  let line = |
+    #style: Style = style(),
+    #alignment: [Alignment, null] = null,
+    spans: [Array<Span>, string]
+  | -> Line { style, alignment, spans };
+
+  type Text = {
+    style: &Style,
+    alignment: &[Alignment, null],
+    lines: &[Array<Line>, string]
   };
+
+  let text = |
+    #style: &Style = &style(),
+    #alignment: &[Alignment, null] = &null,
+    lines: &[Array<Line>, string]
+  | -> Text { style, alignment, lines };
+
+  type Paragraph = {
+    style: &Style,
+    alignment: &[Alignment, null],
+    scroll: &{ x: u32, y: u32 }, // y is in lines, x is in chars
+    trim: &bool, // trim leading whitespace when wrapping
+    lines: &[Array<Line>, string]
+  };
+
+  let paragraph = |
+    #style: &Style = &style(),
+    #alignment: &[Alignment, null] = &null,
+    #scroll: &{x: u32, y: u32} = &{x: u32:0, y: u32:0},
+    #trim: &bool = &true,
+    lines: &[Array<Line>, string]
+  | -> Paragraph { style, alignment, scroll, trim, lines };
 
   // The type of a gui, return this type from a shell expression to draw a gui
   type Gui = [
-    `Text({ lines: &[Array<Line>, string] })
+    `Text(Text),
+    `Paragraph(Paragraph)
   ]
 }
