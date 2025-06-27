@@ -1419,8 +1419,7 @@ where
             let args = exprs.into_iter().map(|(n, e)| match e {
                 Some(e) => (n, e),
                 None => {
-                    let e =
-                        ExprKind::Ref { name: ModPath::from([n.clone()]) }.to_expr(pos);
+                    let e = ExprKind::Ref { name: [n.clone()].into() }.to_expr(pos);
                     (n, e)
                 }
             });

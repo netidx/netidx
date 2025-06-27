@@ -931,7 +931,11 @@ fn apply_typed_lambda() {
                         pattern: StructurePattern::Bind("b".into()),
                         constraint: Some(Type::Set(Arc::from_iter([
                             Type::Primitive(Typ::Null.into()),
-                            Type::Ref { scope: ModPath::root(), name: ["Number"].into(), params: Arc::from_iter([]) },
+                            Type::Ref {
+                                scope: ModPath::root(),
+                                name: ["Number"].into(),
+                                params: Arc::from_iter([]),
+                            },
                         ]))),
                     },
                 ]),
@@ -1041,11 +1045,19 @@ fn labeled_argument_lambda() {
                     },
                     FnArgType {
                         label: Some(("a".into(), false)),
-                        typ: Type::Ref { scope: ModPath::root(), name: ["Any"].into(), params: Arc::from_iter([]) },
+                        typ: Type::Ref {
+                            scope: ModPath::root(),
+                            name: ["Any"].into(),
+                            params: Arc::from_iter([]),
+                        },
                     },
                     FnArgType {
                         label: None,
-                        typ: Type::Ref { scope: ModPath::root(), name: ["Any"].into(), params: Arc::from_iter([]) },
+                        typ: Type::Ref {
+                            scope: ModPath::root(),
+                            name: ["Any"].into(),
+                            params: Arc::from_iter([]),
+                        },
                     },
                 ]),
                 vargs: None,
@@ -1286,12 +1298,13 @@ fn struct0() {
                     .to_expr_nopos(),
                 ),
                 ("foo".into(), ExprKind::Constant(Value::I64(42)).to_expr_nopos()),
+                ("test".into(), ExprKind::Ref { name: ["test"].into() }.to_expr_nopos()),
             ]),
         }
         .to_expr_nopos(),
     }))
     .to_expr_nopos();
-    let s = "let a = { foo: 42, bar: a, baz: f(b) }";
+    let s = "let a = { foo: 42, bar: a, baz: f(b), test }";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
