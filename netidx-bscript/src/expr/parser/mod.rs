@@ -335,6 +335,7 @@ where
                         | (Some(Expr { kind: ExprKind::Sub { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::Mul { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::Div { .. }, .. }), _)
+                        | (Some(Expr { kind: ExprKind::Mod { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::Select { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::TypeCast { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::TypeDef { .. }, .. }), _)
@@ -1000,6 +1001,7 @@ where
                 attempt(spstring("-")),
                 attempt(spstring("*")),
                 attempt(spstring("/")),
+                attempt(spstring("%")),
                 attempt(spstring("==")),
                 attempt(spstring("!=")),
                 attempt(spstring(">=")),
@@ -1025,6 +1027,10 @@ where
                 "/" => |lhs: Expr, rhs: Expr| {
                     let pos = lhs.pos;
                     ExprKind::Div { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
+                },
+                "%" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Mod { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
                 },
                 "==" => |lhs: Expr, rhs: Expr| {
                     let pos = lhs.pos;

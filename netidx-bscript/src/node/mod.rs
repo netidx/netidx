@@ -2040,3 +2040,4 @@ arith_op!(Add, +);
 arith_op!(Sub, -);
 arith_op!(Mul, *);
 arith_op!(Div, /);
+arith_op!(Mod, %);

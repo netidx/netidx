@@ -643,6 +643,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
             binop!(inner.clone(), Sub),
             binop!(inner.clone(), Mul),
             binop!(inner.clone(), Div),
+            binop!(inner.clone(), Mod),
         ]
     })
 }

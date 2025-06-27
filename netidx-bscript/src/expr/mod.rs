@@ -476,6 +476,7 @@ pub enum ExprKind {
     Sub { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Mul { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Div { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Mod { lhs: Arc<Expr>, rhs: Arc<Expr> },
 }
 
 impl ExprKind {
@@ -820,6 +821,7 @@ impl ExprKind {
             ExprKind::Sub { lhs, rhs } => binop!("-", lhs, rhs),
             ExprKind::Mul { lhs, rhs } => binop!("*", lhs, rhs),
             ExprKind::Div { lhs, rhs } => binop!("/", lhs, rhs),
+            ExprKind::Mod { lhs, rhs } => binop!("%", lhs, rhs),
             ExprKind::Not { expr } => {
                 try_single_line!(true);
                 match &expr.kind {
@@ -1171,6 +1173,7 @@ impl fmt::Display for ExprKind {
             ExprKind::Sub { lhs, rhs } => write_binop(f, "-", lhs, rhs),
             ExprKind::Mul { lhs, rhs } => write_binop(f, "*", lhs, rhs),
             ExprKind::Div { lhs, rhs } => write_binop(f, "/", lhs, rhs),
+            ExprKind::Mod { lhs, rhs } => write_binop(f, "%", lhs, rhs),
             ExprKind::ByRef(e) => write!(f, "&{e}"),
             ExprKind::Deref(e) => write!(f, "*{e}"),
             ExprKind::Not { expr } => {
@@ -1371,6 +1374,7 @@ impl Expr {
             | ExprKind::Sub { lhs, rhs }
             | ExprKind::Mul { lhs, rhs }
             | ExprKind::Div { lhs, rhs }
+            | ExprKind::Mod { lhs, rhs }
             | ExprKind::And { lhs, rhs }
             | ExprKind::Or { lhs, rhs }
             | ExprKind::Eq { lhs, rhs }
@@ -1727,6 +1731,7 @@ impl Expr {
             ExprKind::Sub { lhs, rhs } => bin_op!(Sub, lhs, rhs),
             ExprKind::Mul { lhs, rhs } => bin_op!(Mul, lhs, rhs),
             ExprKind::Div { lhs, rhs } => bin_op!(Div, lhs, rhs),
+            ExprKind::Mod { lhs, rhs } => bin_op!(Mul, lhs, rhs),
             ExprKind::And { lhs, rhs } => bin_op!(And, lhs, rhs),
             ExprKind::Or { lhs, rhs } => bin_op!(Or, lhs, rhs),
             ExprKind::Eq { lhs, rhs } => bin_op!(Eq, lhs, rhs),

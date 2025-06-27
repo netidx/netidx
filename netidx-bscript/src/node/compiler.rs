@@ -1,8 +1,8 @@
 use super::{
     callsite::CallSite, lambda::Lambda, select::Select, Add, And, Any, Array, ArrayRef,
-    ArraySlice, Bind, Block, Connect, Constant, Div, Eq, Gt, Gte, Lt, Lte, Mul, Ne, Not,
-    Or, Qop, Ref, StringInterpolate, Struct, StructRef, StructWith, Sub, Tuple, TupleRef,
-    TypeCast, TypeDef, Use, Variant, ByRef, Deref,
+    ArraySlice, Bind, Block, ByRef, Connect, Constant, Deref, Div, Eq, Gt, Gte, Lt, Lte,
+    Mod, Mul, Ne, Not, Or, Qop, Ref, StringInterpolate, Struct, StructRef, StructWith,
+    Sub, Tuple, TupleRef, TypeCast, TypeDef, Use, Variant,
 };
 use crate::{
     expr::{Expr, ExprId, ExprKind, ModPath, ModuleKind},
@@ -152,6 +152,9 @@ pub(crate) fn compile<C: Ctx, E: UserEvent>(
         }
         Expr { kind: ExprKind::Div { lhs, rhs }, id: _, pos: _ } => {
             Div::compile(ctx, spec.clone(), scope, top_id, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Mod { lhs, rhs }, id: _, pos: _ } => {
+            Mod::compile(ctx, spec.clone(), scope, top_id, lhs, rhs)
         }
     }
 }

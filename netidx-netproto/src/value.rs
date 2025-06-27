@@ -26,7 +26,7 @@ use std::{
     hint::unreachable_unchecked,
     iter, mem,
     num::Wrapping,
-    ops::{Add, Deref, Div, Mul, Not, Sub},
+    ops::{Add, Deref, Div, Mul, Not, Rem, Sub},
     panic::{catch_unwind, AssertUnwindSafe},
     ptr, result,
     str::FromStr,
@@ -836,7 +836,7 @@ impl Sub for Value {
                 | (_, Value::Duration(_))
                 | (_, Value::DateTime(_))
                 | (Value::DateTime(_), _) => {
-                    Value::Error(literal!("can't add to datetime/duration"))
+                    Value::Error(literal!("can't sub datetime/duration"))
                 }
         )
     }
@@ -852,7 +852,7 @@ impl Mul for Value {
                 | (_, Value::Duration(_))
                 | (_, Value::DateTime(_))
                 | (Value::DateTime(_), _) => {
-                    Value::Error(literal!("can't add to datetime/duration"))
+                    Value::Error(literal!("can't mul datetime/duration"))
                 }
         )
     }
@@ -873,7 +873,29 @@ impl Div for Value {
                     | (_, Value::Duration(_))
                     | (_, Value::DateTime(_))
                     | (Value::DateTime(_), _) => {
-                        Value::Error(literal!("can't add to datetime/duration"))
+                        Value::Error(literal!("can't div datetime/duration"))
+                    }
+            )
+        }));
+        match res {
+            Ok(r) => r,
+            Err(_) => Value::Error(literal!("can't divide by zero")),
+        }
+    }
+}
+
+impl Rem for Value {
+    type Output = Value;
+
+    fn rem(self, rhs: Self) -> Self::Output {
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            apply_op!(
+                self, rhs, 1., %,
+                (Value::Duration(_), _)
+                    | (_, Value::Duration(_))
+                    | (_, Value::DateTime(_))
+                    | (Value::DateTime(_), _) => {
+                        Value::Error(literal!("can't mod datetime/duration"))
                     }
             )
         }));
