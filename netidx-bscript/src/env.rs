@@ -55,12 +55,13 @@ impl Clone for Bind {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TypeDef {
     pub params: Arc<[(TVar, Option<Type>)]>,
     pub typ: Type,
 }
 
+#[derive(Debug)]
 pub struct Env<C: Ctx, E: UserEvent> {
     pub by_id: Map<BindId, Bind>,
     pub lambdas: Map<LambdaId, Weak<LambdaDef<C, E>>>,

@@ -99,6 +99,7 @@ async fn bs_init(cfg: Config, auth: DesiredAuth, p: &Params) -> Result<BSHandle>
     Ok(bs.build().context("building rt config")?.start())
 }
 
+#[derive(Debug)]
 enum Output {
     None,
     Gui(Gui),

@@ -275,6 +275,7 @@ enum FromGui {
     CtrlC,
 }
 
+#[derive(Debug)]
 pub(super) struct Gui {
     to: mpsc::Sender<ToGui>,
     from: mpsc::UnboundedReceiver<FromGui>,

@@ -441,7 +441,7 @@ async fn unsubscribe_ready(pending: &VecDeque<(Instant, Dval)>, now: Instant) {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct CompExp {
     pub id: ExprId,
     pub typ: Type,
