@@ -121,7 +121,7 @@ impl Type {
             Self::Ref { scope, name, params } => {
                 let def = env
                     .lookup_typedef(scope, name)
-                    .ok_or_else(|| anyhow!("undefined type {scope}::{name}"))?;
+                    .ok_or_else(|| anyhow!("undefined type {name} in {scope}"))?;
                 if def.params.len() != params.len() {
                     bail!("{} expects {} type parameters", name, def.params.len());
                 }

@@ -90,10 +90,10 @@ mod gui {
 
   type Paragraph = {
     alignment: &[Alignment, null],
-    lines: &[Array<Line>, string]
+    lines: &[Array<Line>, string],
     scroll: &{ x: u32, y: u32 }, // y is in lines, x is in chars
     style: &Style,
-    trim: &bool, // trim leading whitespace when wrapping
+    trim: &bool // trim leading whitespace when wrapping
   };
 
   let paragraph = |
@@ -104,9 +104,81 @@ mod gui {
     lines: &[Array<Line>, string]
   | -> Gui `Paragraph({ style, alignment, scroll, trim, lines });
 
+  type Border = [
+    `Top,
+    `Right,
+    `Bottom,
+    `Left
+  ];
+
+  type BorderType = [
+    `Plain,
+    `Rounded,
+    `Double,
+    `Thick,
+    `QuadrantInside,
+    `QuadrantOutside
+  ];
+
+  type Padding = {
+    left: u32,
+    right: u32,
+    top: u32,
+    bottom: u32
+  };
+
+  type Position = [
+    `Top,
+    `Bottom
+  ];
+
+  type Block = {
+    border: &[Array<Border>, `All, `None, null],
+    border_type: &[BorderType, null],
+    border_style: &[Style, null],
+    padding: &[Padding, null],
+    style: &[Style, null],
+    title: &[Line, null],
+    title_top: &[Line, null],
+    title_bottom: &[Line, null],
+    title_style: &[Style, null],
+    title_position: &[Position, null],
+    title_alignment: &[Alignment, null],
+    child: Gui
+  };
+
+  let block = |
+    #border: &[Array<Border>, `All, `None, null] = null,
+    #border_type: &[BorderType, null] = null,
+    #border_style: &[Style, null] = null,
+    #padding: &[Padding, null] = null,
+    #style: &[Style, null] = null,
+    #title: &[Line, null] = null,
+    #title_top: &[Line, null] = null,
+    #title_bottom: &[Line, null] = null,
+    #title_style: &[Style, null] = null,
+    #title_position: &[Position, null] = null,
+    #title_alignment: &[Alignment, null] = null,
+    child: Gui
+  | -> Gui `Block({
+    border,
+    border_type,
+    border_style,
+    padding,
+    style,
+    title,
+    title_top,
+    title_bottom,
+    title_style,
+    title_position,
+    title_alignment,
+    child
+  });
+
   // The type of a gui, return this type from a shell expression to draw a gui
   type Gui = [
     `Text(Text),
-    `Paragraph(Paragraph)
+    `Paragraph(Paragraph),
+    `Block(Block)
   ]
 }
