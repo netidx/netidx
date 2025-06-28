@@ -61,9 +61,11 @@ async fn bind_ref_arith() -> Result<()> {
 "#;
     let (tx, mut rx) = mpsc::channel(10);
     bs.subscribe(tx)?;
-    let eid = bs.compile(ArcStr::from(e)).await?.exprs[0].id;
+    let e = bs.compile(ArcStr::from(e)).await?;
+    let eid = e.exprs[0].id;
     match rx.next().await {
         None => bail!("runtime died"),
+        Some(RtEvent::Env(_)) => (),
         Some(RtEvent::Updated(id, v)) => {
             assert_eq!(id, eid);
             assert_eq!(v, Value::I64(1))
@@ -81,12 +83,14 @@ macro_rules! run {
             let bs = ctx.rt;
             let (tx, mut rx) = futures::channel::mpsc::channel(10);
             bs.subscribe(tx)?;
-            match bs.compile(arcstr::ArcStr::from($code)).await.map(|r| r.exprs[0].id) {
+            match bs.compile(arcstr::ArcStr::from($code)).await {
                 Err(e) => assert!($pred(dbg!(Err(e)))),
-                Ok(eid) => {
+                Ok(e) => {
                     dbg!("compilation succeeded");
+                    let eid = e.exprs[0].id;
                     match futures::StreamExt::next(&mut rx).await {
                         None => bail!("runtime died"),
+                        Some($crate::rt::RtEvent::Env(_)) => (),
                         Some($crate::rt::RtEvent::Updated(id, v)) => {
                             assert_eq!(id, eid);
                             assert!($pred(dbg!(Ok(&v))))

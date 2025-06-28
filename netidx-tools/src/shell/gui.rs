@@ -2,12 +2,15 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
-use futures::{channel::mpsc, future, SinkExt, StreamExt};
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use log::error;
 use netidx::publisher::{FromValue, Value};
-use netidx_bscript::{expr::ExprId, rt::BSHandle};
+use netidx_bscript::{
+    expr::ExprId,
+    rt::{BSHandle, Ref},
+};
 use ratatui::{
-    layout::Alignment,
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Paragraph, Wrap},
@@ -18,6 +21,7 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use tokio::{select, sync::oneshot, task};
 
+#[derive(Clone, Copy)]
 struct AlignmentV(Alignment);
 
 impl FromValue for AlignmentV {
@@ -34,6 +38,7 @@ impl FromValue for AlignmentV {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ColorV(Color);
 
 impl FromValue for ColorV {
@@ -73,6 +78,7 @@ impl FromValue for ColorV {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ModifierV(Modifier);
 
 impl FromValue for ModifierV {
@@ -91,6 +97,7 @@ impl FromValue for ModifierV {
     }
 }
 
+#[derive(Clone, Copy)]
 struct StyleV(Style);
 
 impl FromValue for StyleV {
@@ -137,6 +144,16 @@ impl FromValue for LineV {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ScrollV((u16, u16));
+
+impl FromValue for ScrollV {
+    fn from_value(v: Value) -> Result<Self> {
+        let ((_, x), (_, y)) = v.cast_to::<((ArcStr, u16), (ArcStr, u16))>()?;
+        Ok(Self((y, x)))
+    }
+}
+
 fn into_borrowed_lines<'a>(lines: &'a [Line<'static>]) -> Vec<Line<'a>> {
     lines
         .iter()
@@ -157,12 +174,33 @@ fn into_borrowed_lines<'a>(lines: &'a [Line<'static>]) -> Vec<Line<'a>> {
         .collect::<Vec<_>>()
 }
 
+struct TRef<T: FromValue> {
+    r: Ref,
+    t: Option<T>,
+}
+
+impl<T: FromValue> TRef<T> {
+    fn new(mut r: Ref) -> Result<Self> {
+        let t = r.last.take().map(|v| v.cast_to()).transpose()?;
+        Ok(TRef { r, t })
+    }
+
+    fn update(&mut self, id: ExprId, v: &Value) -> Result<Option<&mut T>> {
+        if self.r.id == id {
+            let v = v.clone().cast_to()?;
+            self.t = Some(v);
+            Ok(self.t.as_mut())
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 #[async_trait]
 trait GuiWidget {
     async fn handle_event(&mut self, e: Event) -> Result<()>;
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()>;
-    fn draw(&mut self, frame: &mut Frame) -> Result<()>;
-    async fn delete(&mut self);
+    fn draw(&mut self, frame: &mut Frame, rect: Rect) -> Result<()>;
 }
 
 type GuiW = Box<dyn GuiWidget + Send + Sync + 'static>;
@@ -171,8 +209,6 @@ struct EmptyW;
 
 #[async_trait]
 impl GuiWidget for EmptyW {
-    async fn delete(&mut self) {}
-
     async fn handle_event(&mut self, _e: Event) -> Result<()> {
         Ok(())
     }
@@ -181,77 +217,41 @@ impl GuiWidget for EmptyW {
         Ok(())
     }
 
-    fn draw(&mut self, _frame: &mut Frame) -> Result<()> {
+    fn draw(&mut self, _frame: &mut Frame, _rect: Rect) -> Result<()> {
         Ok(())
     }
 }
 
 struct TextW {
-    bs: BSHandle,
-    alignment: ExprId,
-    lines: ExprId,
-    style: ExprId,
+    alignment: TRef<AlignmentV>,
+    lines: TRef<Vec<LineV>>,
+    style: TRef<StyleV>,
     text: Text<'static>,
 }
 
 impl TextW {
     async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
         let flds = source.cast_to::<[(ArcStr, u64); 3]>()?;
-        let (alignment_id, alignment) = bs.compile_ref(Value::U64(flds[0].1)).await?;
-        let (lines_id, lines) = bs.compile_ref(Value::U64(flds[1].1)).await?;
-        let (style_id, style) = bs.compile_ref(Value::U64(flds[2].1)).await?;
-        let mut t = Self {
-            bs: bs.clone(),
-            alignment: alignment_id,
-            lines: lines_id,
-            style: style_id,
-            text: Text { alignment: None, style: Style::new(), lines: vec![] },
+        let alignment = TRef::<AlignmentV>::new(bs.compile_ref(flds[0].1).await?)?;
+        let mut lines = TRef::<Vec<LineV>>::new(bs.compile_ref(flds[1].1).await?)?;
+        let style = TRef::<StyleV>::new(bs.compile_ref(flds[2].1).await?)?;
+        let text = Text {
+            alignment: alignment.t.as_ref().map(|a| a.0),
+            style: style.t.as_ref().map(|s| s.0).unwrap_or(Style::new()),
+            lines: lines
+                .t
+                .take()
+                .map(|l| l.into_iter().map(|l| l.0).collect())
+                .unwrap_or(vec![]),
         };
-        if let Some(v) = alignment {
-            t.set_alignment(v)?
-        }
-        if let Some(v) = style {
-            t.set_style(v)?
-        }
-        if let Some(v) = lines {
-            t.set_lines(v)?
-        }
-        Ok(Box::new(t))
-    }
-
-    fn set_alignment(&mut self, v: Value) -> Result<()> {
-        self.text.alignment = v.cast_to::<Option<AlignmentV>>()?.map(|a| a.0);
-        Ok(())
-    }
-
-    fn set_style(&mut self, v: Value) -> Result<()> {
-        self.text.style = v.cast_to::<StyleV>()?.0;
-        Ok(())
-    }
-
-    fn set_lines(&mut self, v: Value) -> Result<()> {
-        self.text.lines = match v {
-            Value::String(s) => vec![Line::from(String::from(&*s))],
-            v => v.cast_to::<Vec<LineV>>()?.into_iter().map(|l| l.0).collect(),
-        };
-        Ok(())
+        Ok(Box::new(Self { alignment, lines, style, text }))
     }
 }
 
 #[async_trait]
 impl GuiWidget for TextW {
-    async fn delete(&mut self) {
-        let Self { bs, alignment, lines, style, text: _ } = self;
-        let _ = future::join_all([
-            bs.delete(*alignment),
-            bs.delete(*lines),
-            bs.delete(*style),
-        ])
-        .await;
-    }
-
-    fn draw(&mut self, frame: &mut Frame) -> Result<()> {
-        frame.render_widget(&self.text, frame.area());
+    fn draw(&mut self, frame: &mut Frame, rect: Rect) -> Result<()> {
+        frame.render_widget(&self.text, rect);
         Ok(())
     }
 
@@ -260,135 +260,60 @@ impl GuiWidget for TextW {
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
-        let Self { bs: _, alignment, lines, style, text: _ } = self;
-        if id == *alignment {
-            self.set_alignment(v)?;
-        } else if id == *lines {
-            self.set_lines(v)?
-        } else if id == *style {
-            self.set_style(v)?
+        let Self { alignment, lines, style, text } = self;
+        if let Some(a) = alignment.update(id, &v)? {
+            text.alignment = Some(a.0);
+        }
+        if let Some(l) = lines.update(id, &v)? {
+            text.lines = l.drain(..).map(|l| l.0).collect();
+        }
+        if let Some(s) = style.update(id, &v)? {
+            text.style = s.0;
         }
         Ok(())
     }
 }
 
 struct ParagraphW {
-    bs: BSHandle,
-    alignment: Alignment,
-    alignment_id: ExprId,
-    lines: Vec<Line<'static>>,
-    lines_id: ExprId,
-    scroll: (u16, u16),
-    scroll_id: ExprId,
-    style: Style,
-    style_id: ExprId,
-    trim: bool,
-    trim_id: ExprId,
+    alignment: TRef<Option<AlignmentV>>,
+    lines: TRef<Vec<LineV>>,
+    scroll: TRef<ScrollV>,
+    style: TRef<StyleV>,
+    trim: TRef<bool>,
+    text: Vec<Line<'static>>,
 }
 
 impl ParagraphW {
     async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
         let flds = source.cast_to::<[(ArcStr, u64); 5]>()?;
-        let (alignment_id, alignment) = bs.compile_ref(Value::U64(flds[0].1)).await?;
-        let (lines_id, lines) = bs.compile_ref(Value::U64(flds[1].1)).await?;
-        let (scroll_id, scroll) = bs.compile_ref(Value::U64(flds[2].1)).await?;
-        let (style_id, style) = bs.compile_ref(Value::U64(flds[3].1)).await?;
-        let (trim_id, trim) = bs.compile_ref(Value::U64(flds[4].1)).await?;
-        let mut t = Self {
-            bs: bs.clone(),
-            alignment: Alignment::Left,
-            alignment_id,
-            lines: vec![],
-            lines_id,
-            scroll: (0, 0),
-            scroll_id,
-            style: Style::default(),
-            style_id,
-            trim: false,
-            trim_id,
-        };
-        if let Some(v) = trim {
-            t.set_trim(v)?
-        }
-        if let Some(v) = scroll {
-            t.set_scroll(v)?
-        }
-        if let Some(v) = alignment {
-            t.set_alignment(v)?
-        }
-        if let Some(v) = style {
-            t.set_style(v)?
-        }
-        if let Some(v) = lines {
-            t.set_lines(v)?
-        }
-        Ok(Box::new(t))
-    }
-
-    fn set_trim(&mut self, v: Value) -> Result<()> {
-        self.trim = v.cast_to::<bool>()?;
-        Ok(())
-    }
-
-    fn set_scroll(&mut self, v: Value) -> Result<()> {
-        let flds = v.cast_to::<[(ArcStr, u16); 2]>()?;
-        self.scroll = (flds[1].1, flds[0].1);
-        Ok(())
-    }
-
-    fn set_alignment(&mut self, v: Value) -> Result<()> {
-        self.alignment =
-            v.cast_to::<Option<AlignmentV>>()?.map(|a| a.0).unwrap_or(Alignment::Left);
-        Ok(())
-    }
-
-    fn set_style(&mut self, v: Value) -> Result<()> {
-        self.style = v.cast_to::<StyleV>()?.0;
-        Ok(())
-    }
-
-    fn set_lines(&mut self, v: Value) -> Result<()> {
-        self.lines = match v {
-            Value::String(s) => vec![Line::from(String::from(&*s))],
-            v => v.cast_to::<Vec<LineV>>()?.into_iter().map(|l| l.0).collect(),
-        };
-        Ok(())
+        let alignment: TRef<Option<AlignmentV>> =
+            TRef::new(bs.compile_ref(flds[0].1).await?)?;
+        let lines: TRef<Vec<LineV>> = TRef::new(bs.compile_ref(flds[1].1).await?)?;
+        let scroll: TRef<ScrollV> = TRef::new(bs.compile_ref(flds[2].1).await?)?;
+        let style: TRef<StyleV> = TRef::new(bs.compile_ref(flds[3].1).await?)?;
+        let trim: TRef<bool> = TRef::new(bs.compile_ref(flds[4].1).await?)?;
+        let text = vec![];
+        Ok(Box::new(Self { alignment, lines, scroll, style, trim, text }))
     }
 }
 
 #[async_trait]
 impl GuiWidget for ParagraphW {
-    async fn delete(&mut self) {
-        let Self {
-            bs,
-            alignment: _,
-            alignment_id,
-            lines: _,
-            lines_id,
-            scroll: _,
-            scroll_id,
-            style: _,
-            style_id,
-            trim: _,
-            trim_id,
-        } = self;
-        let _ = future::join_all([
-            bs.delete(*trim_id),
-            bs.delete(*scroll_id),
-            bs.delete(*alignment_id),
-            bs.delete(*lines_id),
-            bs.delete(*style_id),
-        ])
-        .await;
-    }
-
-    fn draw(&mut self, frame: &mut Frame) -> Result<()> {
-        let p = Paragraph::new(into_borrowed_lines(&self.lines))
-            .alignment(self.alignment)
-            .style(self.style)
-            .wrap(Wrap { trim: self.trim })
-            .scroll(self.scroll);
-        frame.render_widget(p, frame.area());
+    fn draw(&mut self, frame: &mut Frame, rect: Rect) -> Result<()> {
+        let mut p = Paragraph::new(into_borrowed_lines(&self.text));
+        if let Some(Some(a)) = self.alignment.t {
+            p = p.alignment(a.0);
+        }
+        if let Some(s) = self.style.t {
+            p = p.style(s.0);
+        }
+        if let Some(trim) = self.trim.t {
+            p = p.wrap(Wrap { trim });
+        }
+        if let Some(s) = self.scroll.t {
+            p = p.scroll(s.0)
+        }
+        frame.render_widget(p, rect);
         Ok(())
     }
 
@@ -397,38 +322,45 @@ impl GuiWidget for ParagraphW {
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
-        let Self {
-            bs: _,
-            alignment: _,
-            alignment_id,
-            lines: _,
-            lines_id,
-            scroll: _,
-            scroll_id,
-            style: _,
-            style_id,
-            trim: _,
-            trim_id,
-        } = self;
-        if id == *alignment_id {
-            self.set_alignment(v)?;
-        } else if id == *lines_id {
-            self.set_lines(v)?
-        } else if id == *style_id {
-            self.set_style(v)?
-        } else if id == *trim_id {
-            self.set_trim(v)?
-        } else if id == *scroll_id {
-            self.set_scroll(v)?
+        let Self { alignment, lines, scroll, style, trim, text } = self;
+        let _ = alignment.update(id, &v)?;
+        if let Some(l) = lines.update(id, &v)? {
+            text.clear();
+            text.extend(l.drain(..).map(|l| l.0))
         }
+        let _ = scroll.update(id, &v)?;
+        let _ = style.update(id, &v)?;
+        let _ = trim.update(id, &v)?;
         Ok(())
     }
 }
+
+/*
+struct BlockW {
+    border_id: ExprId,
+    border: Option<Borders>,
+    border_type_id: ExprId,
+    border_type: Option<BorderType>,
+    border_style_id: ExprId,
+    border_style: Option<Style>,
+    padding_id: ExprId,
+    padding: Option<Padding>,
+    sytle_id: ExprId,
+    style: Option<Style>,
+    title: Option<Line<'static>>,
+    title_id: ExprId,
+    title_alignment_id: ExprId,
+    title_alignment: Option<Alignment>,
+    title_bottom_id: ExprId,
+    title_bottom: Option<Line<'static>>,
+}
+*/
 
 async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
     match source.cast_to::<(ArcStr, Value)>()? {
         (s, v) if &s == "Text" => TextW::compile(bs, v).await,
         (s, v) if &s == "Paragraph" => ParagraphW::compile(bs, v).await,
+        //        (s, v) if &s == "Block" => BlockW::compile(bs, v).await,
         (s, v) => bail!("invalid widget type `{s}({v})"),
     }
 }
@@ -501,7 +433,7 @@ async fn run(
     let mut root: GuiW = Box::new(EmptyW);
     let notify = loop {
         terminal.draw(|f| {
-            if let Err(e) = root.draw(f) {
+            if let Err(e) = root.draw(f, f.area()) {
                 error!("error drawing {e:?}")
             }
         })?;
@@ -513,10 +445,7 @@ async fn run(
                     if id == root_expr {
                         match compile(&bs, v).await {
                             Err(e) => error!("invalid widget specification {e:?}"),
-                            Ok(w) => {
-                                root.delete().await;
-                                root = w
-                            },
+                            Ok(w) => root = w,
                         }
                     } else {
                         if let Err(e) = root.handle_update(id, v).await {

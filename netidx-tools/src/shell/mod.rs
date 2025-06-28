@@ -99,7 +99,6 @@ async fn bs_init(cfg: Config, auth: DesiredAuth, p: &Params) -> Result<BSHandle>
     Ok(bs.build().context("building rt config")?.start())
 }
 
-#[derive(Debug)]
 enum Output {
     None,
     Gui(Gui),
@@ -108,13 +107,6 @@ enum Output {
 
 impl Output {
     fn from_expr(bs: &BSHandle, env: &Env, e: CompExp) -> Self {
-        if !e.output {
-            return Self::None;
-        }
-        Self::from_output_expr(bs, env, e)
-    }
-
-    fn from_output_expr(bs: &BSHandle, env: &Env, e: CompExp) -> Self {
         if GUITYP.contains(env, &e.typ).unwrap() {
             Self::Gui(Gui::start(bs, e.id))
         } else {
@@ -122,17 +114,10 @@ impl Output {
         }
     }
 
-    async fn clear(&mut self, bs: &BSHandle, env: &mut Env, newenv: &mut Option<Env>) {
+    async fn clear(&mut self) {
         match self {
-            Self::None => (),
+            Self::None | Self::Text(_) => (),
             Self::Gui(gui) => gui.stop().await,
-            Self::Text(e) => match bs.delete(e.id).await {
-                Err(e) => eprintln!("could not delete node {e:?}"),
-                Ok(e) => {
-                    *env = e;
-                    *newenv = Some(env.clone())
-                }
-            },
         }
         *self = Self::None
     }
@@ -155,20 +140,23 @@ async fn load_initial_env(
     p: &Params,
     newenv: &mut Option<Env>,
     output: &mut Output,
+    exprs: &mut Vec<CompExp>,
 ) -> Result<Env> {
     let env;
-    bs.compile(ArcStr::from(GUI)).await?;
+    exprs.extend(bs.compile(ArcStr::from(GUI)).await?.exprs);
     *newenv = if let Some(file) = p.file.as_ref() {
-        let mut r = bs.load(file.clone()).await?;
+        let r = bs.load(file.clone()).await?;
+        exprs.extend(r.exprs);
         env = bs.get_env().await?;
-        if let Some(e) = r.exprs.pop() {
-            *output = Output::from_output_expr(&bs, &env, e);
+        if let Some(e) = exprs.pop() {
+            *output = Output::from_expr(&bs, &env, e);
         }
         None
     } else if !p.no_init {
         match bs.compile("mod init;".into()).await {
             Ok(res) => {
                 env = res.env;
+                exprs.extend(res.exprs);
                 Some(env.clone())
             }
             Err(e) if e.is::<CouldNotResolve>() => {
@@ -196,29 +184,36 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     bs.subscribe(tx).context("subscribing to rt output")?;
     let mut output = Output::None;
     let mut newenv = None;
-    let mut env = load_initial_env(&bs, &p, &mut newenv, &mut output).await?;
+    let mut exprs = vec![];
+    let mut env = load_initial_env(&bs, &p, &mut newenv, &mut output, &mut exprs).await?;
     if !script {
         println!("Welcome to the netidx shell");
         println!("Press ctrl-c to cancel, ctrl-d to exit, and tab for help")
     }
     loop {
         select! {
-            RtEvent::Updated(id, v) = from_bs.select_next_some() => {
-                output.process_update(&env, id, v).await;
+            e = from_bs.select_next_some() => match e {
+                RtEvent::Updated(id, v) => output.process_update(&env, id, v).await,
+                RtEvent::Env(e) => {
+                    env = e;
+                    newenv = Some(env.clone());
+                }
             },
             input = input.read_line(&mut output, newenv.take()) => {
                 match input {
                     Err(e) => eprintln!("error reading line {e:?}"),
                     Ok(Signal::CtrlC) if script => break Ok(()),
-                    Ok(Signal::CtrlC) => output.clear(&bs, &mut env, &mut newenv).await,
+                    Ok(Signal::CtrlC) => output.clear().await,
                     Ok(Signal::CtrlD) => break Ok(()),
                     Ok(Signal::Success(line)) => {
                         match bs.compile(ArcStr::from(line)).await {
                             Err(e) => eprintln!("error: {e:?}"),
-                            Ok(mut res) => {
+                            Ok(res) => {
                                 env = res.env;
                                 newenv = Some(env.clone());
-                                if let Some(e) = res.exprs.pop() {
+                                exprs.extend(res.exprs);
+                                if exprs.last().map(|e| e.output).unwrap_or(false) {
+                                    let e = exprs.pop().unwrap();
                                     let typ = e.typ
                                         .with_deref(|t| t.cloned())
                                         .unwrap_or_else(|| e.typ.clone());
@@ -227,6 +222,8 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                                         || println!("-: {}", typ)
                                     );
                                     output = Output::from_expr(&bs, &env, e);
+                                } else {
+                                    output.clear().await
                                 }
                             }
                         }

@@ -134,17 +134,17 @@ mod gui {
 
   type Block = {
     border: &[Array<Border>, `All, `None, null],
-    border_type: &[BorderType, null],
     border_style: &[Style, null],
+    border_type: &[BorderType, null],
+    child: &Gui,
     padding: &[Padding, null],
     style: &[Style, null],
     title: &[Line, null],
-    title_top: &[Line, null],
-    title_bottom: &[Line, null],
-    title_style: &[Style, null],
-    title_position: &[Position, null],
     title_alignment: &[Alignment, null],
-    child: Gui
+    title_bottom: &[Line, null],
+    title_position: &[Position, null],
+    title_style: &[Style, null],
+    title_top: &[Line, null]
   };
 
   let block = |
@@ -159,7 +159,7 @@ mod gui {
     #title_style: &[Style, null] = null,
     #title_position: &[Position, null] = null,
     #title_alignment: &[Alignment, null] = null,
-    child: Gui
+    child: &Gui
   | -> Gui `Block({
     border,
     border_type,

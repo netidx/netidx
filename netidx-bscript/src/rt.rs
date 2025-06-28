@@ -441,14 +441,19 @@ async fn unsubscribe_ready(pending: &VecDeque<(Instant, Dval)>, now: Instant) {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct CompExp {
     pub id: ExprId,
     pub typ: Type,
     pub output: bool,
+    rt: BSHandle,
 }
 
-#[derive(Clone)]
+impl Drop for CompExp {
+    fn drop(&mut self) {
+        let _ = self.rt.0.unbounded_send(ToRt::Delete { id: self.id });
+    }
+}
+
 pub struct CompRes {
     pub exprs: SmallVec<[CompExp; 1]>,
     pub env: Env<BSCtx, NoUserEvent>,
@@ -457,6 +462,19 @@ pub struct CompRes {
 #[derive(Clone)]
 pub enum RtEvent {
     Updated(ExprId, Value),
+    Env(Env<BSCtx, NoUserEvent>),
+}
+
+pub struct Ref {
+    pub id: ExprId,
+    pub last: Option<Value>,
+    rt: BSHandle,
+}
+
+impl Drop for Ref {
+    fn drop(&mut self) {
+        let _ = self.rt.0.unbounded_send(ToRt::Delete { id: self.id });
+    }
 }
 
 atomic_id!(CallableId);
@@ -501,13 +519,23 @@ impl Callable {
     }
 }
 
+async fn send_event(subs: &mut Vec<mpsc::Sender<RtEvent>>, e: RtEvent) {
+    let mut i = 0;
+    while i < subs.len() {
+        if let Err(_) = subs[i].send(e.clone()).await {
+            subs.remove(i);
+        }
+        i += 1;
+    }
+}
+
 enum ToRt {
     GetEnv { res: oneshot::Sender<Env<BSCtx, NoUserEvent>> },
-    Delete { id: ExprId, res: oneshot::Sender<Result<Env<BSCtx, NoUserEvent>>> },
-    Load { path: PathBuf, res: oneshot::Sender<Result<CompRes>> },
-    Compile { text: ArcStr, res: oneshot::Sender<Result<CompRes>> },
+    Delete { id: ExprId },
+    Load { path: PathBuf, rt: BSHandle, res: oneshot::Sender<Result<CompRes>> },
+    Compile { text: ArcStr, rt: BSHandle, res: oneshot::Sender<Result<CompRes>> },
     CompileCallable { id: Value, rt: BSHandle, res: oneshot::Sender<Result<Callable>> },
-    CompileRef { id: Value, res: oneshot::Sender<Result<(ExprId, Option<Value>)>> },
+    CompileRef { id: BindId, rt: BSHandle, res: oneshot::Sender<Result<Ref>> },
     Call { id: CallableId, args: ValArray },
     DeleteCallable { id: CallableId },
     Subscribe { ch: mpsc::Sender<RtEvent> },
@@ -656,15 +684,7 @@ impl BS {
                     self.event.variables.remove(&id);
                 }
                 if let Some(v) = res {
-                    let mut i = 0;
-                    while i < self.subs.len() {
-                        if let Err(_) =
-                            self.subs[i].send(RtEvent::Updated(*id, v.clone())).await
-                        {
-                            self.subs.remove(i);
-                        }
-                        i += 1;
-                    }
+                    send_event(&mut self.subs, RtEvent::Updated(*id, v.clone())).await;
                 }
             }
         }
@@ -687,7 +707,7 @@ impl BS {
             || self.ctx.user.rpc_overflow.len() > 0
     }
 
-    async fn compile(&mut self, text: ArcStr) -> Result<CompRes> {
+    async fn compile(&mut self, rt: BSHandle, text: ArcStr) -> Result<CompRes> {
         let scope = ModPath::root();
         let ori = expr::parser::parse(None, text.clone())?;
         let exprs = join_all(
@@ -713,13 +733,13 @@ impl BS {
                 let typ = n.typ().clone();
                 self.updated.insert(e.id, true);
                 self.nodes.insert(e.id, n);
-                CompExp { id: e.id, output, typ }
+                CompExp { id: e.id, output, typ, rt: rt.clone() }
             })
             .collect::<SmallVec<[_; 1]>>();
         Ok(CompRes { exprs, env: self.ctx.env.clone() })
     }
 
-    async fn load(&mut self, file: &PathBuf) -> Result<CompRes> {
+    async fn load(&mut self, rt: BSHandle, file: &PathBuf) -> Result<CompRes> {
         let scope = ModPath::root();
         let (scope, ori) = match file.extension() {
             Some(e) if e.as_bytes() == b"bs" => {
@@ -795,7 +815,7 @@ impl BS {
         let typ = n.typ().clone();
         self.nodes.insert(top_id, n);
         self.updated.insert(top_id, true);
-        let exprs = smallvec![CompExp { id: top_id, output: has_out, typ }];
+        let exprs = smallvec![CompExp { id: top_id, output: has_out, typ, rt }];
         Ok(CompRes { exprs, env: self.ctx.env.clone() })
     }
 
@@ -832,16 +852,12 @@ impl BS {
         Ok(Callable { expr: eid, rt, env, id: cid, typ: (*lb.typ).clone() })
     }
 
-    fn compile_ref(&mut self, id: Value) -> Result<(ExprId, Option<Value>)> {
-        let id = match id {
-            Value::U64(id) => BindId(id),
-            v => bail!("invalid bind id {v}"),
-        };
+    fn compile_ref(&mut self, rt: BSHandle, id: BindId) -> Result<Ref> {
         let eid = ExprId::new();
         let typ = Type::Primitive(Typ::any());
         let n = genn::reference(&mut self.ctx, id, typ, eid);
         self.nodes.insert(eid, n);
-        Ok((eid, self.ctx.cached.get(&id).cloned()))
+        Ok(Ref { id: eid, last: self.ctx.cached.get(&id).cloned(), rt })
     }
 
     fn call_callable(
@@ -955,27 +971,26 @@ impl BS {
                 Some(ToRt::GetEnv { res }) => {
                     let _ = res.send(self.ctx.env.clone());
                 }
-                Some(ToRt::Compile { text, res }) => {
-                    let _ = res.send(self.compile(text).await);
+                Some(ToRt::Compile { text, rt, res }) => {
+                    let _ = res.send(self.compile(rt, text).await);
                 }
-                Some(ToRt::Load { path, res }) => {
-                    let _ = res.send(self.load(&path).await);
+                Some(ToRt::Load { path, rt, res }) => {
+                    let _ = res.send(self.load(rt, &path).await);
                 }
                 Some(ToRt::Subscribe { ch }) => {
                     self.subs.push(ch);
                 }
-                Some(ToRt::Delete { id, res }) => {
-                    // CR estokes: Check dependencies
+                Some(ToRt::Delete { id }) => {
                     if let Some(mut n) = self.nodes.shift_remove(&id) {
                         n.delete(&mut self.ctx);
                     }
-                    let _ = res.send(Ok(self.ctx.env.clone()));
+                    send_event(&mut self.subs, RtEvent::Env(self.ctx.env.clone())).await
                 }
                 Some(ToRt::CompileCallable { id, rt, res }) => {
                     let _ = res.send(self.compile_callable(id, rt));
                 }
-                Some(ToRt::CompileRef { id, res }) => {
-                    let _ = res.send(self.compile_ref(id));
+                Some(ToRt::CompileRef { id, rt, res }) => {
+                    let _ = res.send(self.compile_ref(rt, id));
                 }
                 Some(ToRt::DeleteCallable { id }) => self.delete_callable(id),
                 Some(ToRt::Call { id, args }) => {
@@ -1012,41 +1027,42 @@ impl BSHandle {
         self.exec(|res| ToRt::GetEnv { res }).await
     }
 
-    /// Compile and execute the specified bscript expression. It can
-    /// either be a module expression or a single expression. If it
-    /// generates results, they will be sent to all the channels that
-    /// are subscribed.
+    /// Compile and execute the specified bscript expression. If it generates
+    /// results, they will be sent to all the channels that are subscribed. When
+    /// the `CompExp` objects contained in the `CompRes` are dropped their
+    /// corresponding expressions will be deleted. Therefore, you can stop
+    /// execution of the whole expression by dropping the returned `CompRes`.
     pub async fn compile(&self, text: ArcStr) -> Result<CompRes> {
-        Ok(self.exec(|tx| ToRt::Compile { text, res: tx }).await??)
+        Ok(self.exec(|tx| ToRt::Compile { text, res: tx, rt: self.clone() }).await??)
     }
 
-    /// Load and execute the specified bscript module. The path may
-    /// have one of two forms. If it is the path to a file with
-    /// extension .bs then the rt will load the file directly. If it
-    /// is a modpath (e.g. foo::bar::baz) then the module resolver
-    /// will look for a matching module in the modpath.
+    /// Load and execute the specified bscript module. The path may have one of
+    /// two forms. If it is the path to a file with extension .bs then the rt
+    /// will load the file directly. If it is a modpath (e.g. foo::bar::baz)
+    /// then the module resolver will look for a matching module in the modpath.
+    /// When the `CompExp` objects contained in the `CompRes` are dropped their
+    /// corresponding expressions will be deleted. Therefore, you can stop
+    /// execution of the whole file by dropping the returned `CompRes`.
     pub async fn load(&self, path: PathBuf) -> Result<CompRes> {
-        Ok(self.exec(|tx| ToRt::Load { path, res: tx }).await??)
+        Ok(self.exec(|tx| ToRt::Load { path, res: tx, rt: self.clone() }).await??)
     }
 
-    /// Delete the specified expression
-    pub async fn delete(&self, id: ExprId) -> Result<Env<BSCtx, NoUserEvent>> {
-        Ok(self.exec(|tx| ToRt::Delete { id, res: tx }).await??)
-    }
-
-    /// Compile a callable interface to the specified lambda id. This
-    /// is how you call a lambda directly from rust.
+    /// Compile a callable interface to the specified lambda id. This is how you
+    /// call a lambda directly from rust. When the returned `Callable` is
+    /// dropped the associated callsite will be delete.
     pub async fn compile_callable(&self, id: Value) -> Result<Callable> {
         Ok(self
             .exec(|tx| ToRt::CompileCallable { id, rt: self.clone(), res: tx })
             .await??)
     }
 
-    /// Compile an expression that will output the value of the ref
-    /// specifed by id. This is the same as the deref (*) operator in
-    /// bscript.
-    pub async fn compile_ref(&self, id: Value) -> Result<(ExprId, Option<Value>)> {
-        Ok(self.exec(|tx| ToRt::CompileRef { id, res: tx }).await??)
+    /// Compile an expression that will output the value of the ref specifed by
+    /// id. This is the same as the deref (*) operator in bscript. When the
+    /// returned `Ref` is dropped the compiled code will be deleted.
+    pub async fn compile_ref(&self, id: impl Into<BindId>) -> Result<Ref> {
+        Ok(self
+            .exec(|tx| ToRt::CompileRef { id: id.into(), res: tx, rt: self.clone() })
+            .await??)
     }
 
     /// The specified channel will receive events generated by all

@@ -1086,7 +1086,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Deref<C, E> {
         if let Some(v) = self.child.update(ctx, event) {
             match v {
                 Value::U64(i) | Value::V64(i) => {
-                    let new_id = BindId::from_u64(i);
+                    let new_id = BindId::from(i);
                     if self.id != Some(new_id) {
                         if let Some(old) = self.id {
                             ctx.user.unref_var(old, self.top_id);

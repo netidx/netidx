@@ -44,9 +44,20 @@ mod tests;
 atomic_id!(BindId);
 atomic_id!(LambdaId);
 
-impl BindId {
-    pub(crate) fn from_u64(v: u64) -> Self {
+impl From<u64> for BindId {
+    fn from(v: u64) -> Self {
         BindId(v)
+    }
+}
+
+impl TryFrom<Value> for BindId {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::U64(id) => Ok(BindId(id)),
+            v => bail!("invalid bind id {v}"),
+        }
     }
 }
 
