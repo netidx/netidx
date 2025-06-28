@@ -10,6 +10,7 @@ use ratatui::{
     layout::Alignment,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 use reedline::Signal;
@@ -136,6 +137,26 @@ impl FromValue for LineV {
     }
 }
 
+fn into_borrowed_lines<'a>(lines: &'a [Line<'static>]) -> Vec<Line<'a>> {
+    lines
+        .iter()
+        .map(|l| {
+            let spans = l
+                .spans
+                .iter()
+                .map(|s| {
+                    let content = match &s.content {
+                        Cow::Owned(s) => Cow::Borrowed(s.as_str()),
+                        Cow::Borrowed(s) => Cow::Borrowed(*s),
+                    };
+                    Span { content, style: s.style }
+                })
+                .collect();
+            Line { alignment: l.alignment, style: l.style, spans }
+        })
+        .collect::<Vec<_>>()
+}
+
 #[async_trait]
 trait GuiWidget {
     async fn handle_event(&mut self, e: Event) -> Result<()>;
@@ -175,18 +196,10 @@ struct TextW {
 
 impl TextW {
     async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
-        let (alignment_id, lines_id, style_id) =
-            match &source.cast_to::<SmallVec<[(ArcStr, u64); 3]>>()?[..] {
-                [(s0, id0), (s1, id1), (s2, id2)]
-                    if &*s0 == "alignment" && &*s1 == "lines" && &*s2 == "style" =>
-                {
-                    (*id0, *id1, *id2)
-                }
-                _ => bail!("expected struct Text"),
-            };
-        let (alignment_id, alignment) = bs.compile_ref(Value::U64(alignment_id)).await?;
-        let (lines_id, lines) = bs.compile_ref(Value::U64(lines_id)).await?;
-        let (style_id, style) = bs.compile_ref(Value::U64(style_id)).await?;
+        let flds = source.cast_to::<[(ArcStr, u64); 3]>()?;
+        let (alignment_id, alignment) = bs.compile_ref(Value::U64(flds[0].1)).await?;
+        let (lines_id, lines) = bs.compile_ref(Value::U64(flds[1].1)).await?;
+        let (style_id, style) = bs.compile_ref(Value::U64(flds[2].1)).await?;
         let mut t = Self {
             bs: bs.clone(),
             alignment: alignment_id,
@@ -259,9 +272,163 @@ impl GuiWidget for TextW {
     }
 }
 
+struct ParagraphW {
+    bs: BSHandle,
+    alignment: Alignment,
+    alignment_id: ExprId,
+    lines: Vec<Line<'static>>,
+    lines_id: ExprId,
+    scroll: (u16, u16),
+    scroll_id: ExprId,
+    style: Style,
+    style_id: ExprId,
+    trim: bool,
+    trim_id: ExprId,
+}
+
+impl ParagraphW {
+    async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
+        let flds = source.cast_to::<[(ArcStr, u64); 5]>()?;
+        let (alignment_id, alignment) = bs.compile_ref(Value::U64(flds[0].1)).await?;
+        let (lines_id, lines) = bs.compile_ref(Value::U64(flds[1].1)).await?;
+        let (scroll_id, scroll) = bs.compile_ref(Value::U64(flds[2].1)).await?;
+        let (style_id, style) = bs.compile_ref(Value::U64(flds[3].1)).await?;
+        let (trim_id, trim) = bs.compile_ref(Value::U64(flds[4].1)).await?;
+        let mut t = Self {
+            bs: bs.clone(),
+            alignment: Alignment::Left,
+            alignment_id,
+            lines: vec![],
+            lines_id,
+            scroll: (0, 0),
+            scroll_id,
+            style: Style::default(),
+            style_id,
+            trim: false,
+            trim_id,
+        };
+        if let Some(v) = trim {
+            t.set_trim(v)?
+        }
+        if let Some(v) = scroll {
+            t.set_scroll(v)?
+        }
+        if let Some(v) = alignment {
+            t.set_alignment(v)?
+        }
+        if let Some(v) = style {
+            t.set_style(v)?
+        }
+        if let Some(v) = lines {
+            t.set_lines(v)?
+        }
+        Ok(Box::new(t))
+    }
+
+    fn set_trim(&mut self, v: Value) -> Result<()> {
+        self.trim = v.cast_to::<bool>()?;
+        Ok(())
+    }
+
+    fn set_scroll(&mut self, v: Value) -> Result<()> {
+        let flds = v.cast_to::<[(ArcStr, u16); 2]>()?;
+        self.scroll = (flds[1].1, flds[0].1);
+        Ok(())
+    }
+
+    fn set_alignment(&mut self, v: Value) -> Result<()> {
+        self.alignment =
+            v.cast_to::<Option<AlignmentV>>()?.map(|a| a.0).unwrap_or(Alignment::Left);
+        Ok(())
+    }
+
+    fn set_style(&mut self, v: Value) -> Result<()> {
+        self.style = v.cast_to::<StyleV>()?.0;
+        Ok(())
+    }
+
+    fn set_lines(&mut self, v: Value) -> Result<()> {
+        self.lines = match v {
+            Value::String(s) => vec![Line::from(String::from(&*s))],
+            v => v.cast_to::<Vec<LineV>>()?.into_iter().map(|l| l.0).collect(),
+        };
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl GuiWidget for ParagraphW {
+    async fn delete(&mut self) {
+        let Self {
+            bs,
+            alignment: _,
+            alignment_id,
+            lines: _,
+            lines_id,
+            scroll: _,
+            scroll_id,
+            style: _,
+            style_id,
+            trim: _,
+            trim_id,
+        } = self;
+        let _ = future::join_all([
+            bs.delete(*trim_id),
+            bs.delete(*scroll_id),
+            bs.delete(*alignment_id),
+            bs.delete(*lines_id),
+            bs.delete(*style_id),
+        ])
+        .await;
+    }
+
+    fn draw(&mut self, frame: &mut Frame) -> Result<()> {
+        let p = Paragraph::new(into_borrowed_lines(&self.lines))
+            .alignment(self.alignment)
+            .style(self.style)
+            .wrap(Wrap { trim: self.trim })
+            .scroll(self.scroll);
+        frame.render_widget(p, frame.area());
+        Ok(())
+    }
+
+    async fn handle_event(&mut self, _: Event) -> Result<()> {
+        Ok(())
+    }
+
+    async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
+        let Self {
+            bs: _,
+            alignment: _,
+            alignment_id,
+            lines: _,
+            lines_id,
+            scroll: _,
+            scroll_id,
+            style: _,
+            style_id,
+            trim: _,
+            trim_id,
+        } = self;
+        if id == *alignment_id {
+            self.set_alignment(v)?;
+        } else if id == *lines_id {
+            self.set_lines(v)?
+        } else if id == *style_id {
+            self.set_style(v)?
+        } else if id == *trim_id {
+            self.set_trim(v)?
+        } else if id == *scroll_id {
+            self.set_scroll(v)?
+        }
+        Ok(())
+    }
+}
+
 async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
     match source.cast_to::<(ArcStr, Value)>()? {
         (s, v) if &s == "Text" => TextW::compile(bs, v).await,
+        (s, v) if &s == "Paragraph" => ParagraphW::compile(bs, v).await,
         (s, v) => bail!("invalid widget type `{s}({v})"),
     }
 }

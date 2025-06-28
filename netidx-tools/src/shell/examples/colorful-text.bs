@@ -1,0 +1,23 @@
+use gui;
+let colors = [
+   `Red,
+   `Green,
+   `Yellow,
+   `Blue,
+   `Magenta,
+   `Cyan,
+   `Gray,
+   `DarkGray,
+   `LightRed,
+   `LightGreen,
+   `LightYellow,
+   `LightBlue,
+   `LightMagenta,
+   `LightCyan
+];
+let trigger = time::timer(1, true);
+let style = gui::style(#fg: rand::pick(sample(#trigger, colors)));
+let hello = span(#style, "Hello");
+let style = gui::style(#fg: rand::pick(sample(#trigger, colors)));
+let world = span(#style, " World!");
+text(&[line([hello, world])])

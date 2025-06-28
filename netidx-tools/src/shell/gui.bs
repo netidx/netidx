@@ -89,11 +89,11 @@ mod gui {
   | -> Gui `Text({ style, alignment, lines });
 
   type Paragraph = {
-    style: &Style,
     alignment: &[Alignment, null],
-    scroll: &{ x: u32, y: u32 }, // y is in lines, x is in chars
-    trim: &bool, // trim leading whitespace when wrapping
     lines: &[Array<Line>, string]
+    scroll: &{ x: u32, y: u32 }, // y is in lines, x is in chars
+    style: &Style,
+    trim: &bool, // trim leading whitespace when wrapping
   };
 
   let paragraph = |
