@@ -13,12 +13,12 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Paragraph, Wrap},
+    widgets::{block::Position, Block, BorderType, Borders, Padding, Paragraph, Wrap},
     Frame,
 };
 use reedline::Signal;
 use smallvec::SmallVec;
-use std::{borrow::Cow, mem};
+use std::{borrow::Cow, future::Future, mem, pin::Pin};
 use tokio::{select, sync::oneshot, task};
 
 #[derive(Clone, Copy)]
@@ -66,8 +66,8 @@ impl FromValue for ColorV {
             },
             v => match v.cast_to::<(ArcStr, Value)>()? {
                 (s, v) if &*s == "Rgb" => {
-                    let v = v.cast_to::<[(ArcStr, u8); 3]>()?;
-                    Ok(Self(Color::Rgb(v[2].1, v[1].1, v[0].1)))
+                    let [(_, b), (_, g), (_, r)] = v.cast_to::<[(ArcStr, u8); 3]>()?;
+                    Ok(Self(Color::Rgb(r, g, b)))
                 }
                 (s, v) if &*s == "Indexed" => {
                     Ok(Self(Color::Indexed(v.cast_to::<u8>()?)))
@@ -102,12 +102,13 @@ struct StyleV(Style);
 
 impl FromValue for StyleV {
     fn from_value(v: Value) -> Result<Self> {
-        let flds = v.cast_to::<[(ArcStr, Value); 5]>()?;
-        let add_modifier = flds[0].1.clone().cast_to::<ModifierV>()?.0;
-        let bg = flds[1].1.clone().cast_to::<Option<ColorV>>()?.map(|c| c.0);
-        let fg = flds[2].1.clone().cast_to::<Option<ColorV>>()?.map(|c| c.0);
-        let sub_modifier = flds[3].1.clone().cast_to::<ModifierV>()?.0;
-        let underline_color = flds[4].1.clone().cast_to::<Option<ColorV>>()?.map(|c| c.0);
+        let [(_, add_modifier), (_, bg), (_, fg), (_, sub_modifier), (_, underline_color)] =
+            v.cast_to::<[(ArcStr, Value); 5]>()?;
+        let add_modifier = add_modifier.cast_to::<ModifierV>()?.0;
+        let bg = bg.cast_to::<Option<ColorV>>()?.map(|c| c.0);
+        let fg = fg.cast_to::<Option<ColorV>>()?.map(|c| c.0);
+        let sub_modifier = sub_modifier.cast_to::<ModifierV>()?.0;
+        let underline_color = underline_color.cast_to::<Option<ColorV>>()?.map(|c| c.0);
         Ok(Self(Style { fg, bg, underline_color, add_modifier, sub_modifier }))
     }
 }
@@ -116,10 +117,10 @@ struct SpanV(Span<'static>);
 
 impl FromValue for SpanV {
     fn from_value(v: Value) -> Result<Self> {
-        let flds = v.cast_to::<[(ArcStr, Value); 2]>()?;
+        let [(_, content), (_, style)] = v.cast_to::<[(ArcStr, Value); 2]>()?;
         Ok(Self(Span {
-            content: Cow::Owned(flds[0].1.clone().cast_to::<String>()?),
-            style: flds[1].1.clone().cast_to::<StyleV>()?.0,
+            content: Cow::Owned(content.cast_to::<String>()?),
+            style: style.cast_to::<StyleV>()?.0,
         }))
     }
 }
@@ -128,10 +129,11 @@ struct LineV(Line<'static>);
 
 impl FromValue for LineV {
     fn from_value(v: Value) -> Result<Self> {
-        let flds = v.cast_to::<[(ArcStr, Value); 3]>()?;
-        let alignment = flds[0].1.clone().cast_to::<Option<AlignmentV>>()?.map(|a| a.0);
-        let spans = match &flds[1].1 {
-            Value::String(s) => vec![Span::raw(String::from(&**s))],
+        let [(_, alignment), (_, spans), (_, style)] =
+            v.cast_to::<[(ArcStr, Value); 3]>()?;
+        let alignment = alignment.cast_to::<Option<AlignmentV>>()?.map(|a| a.0);
+        let spans = match spans {
+            Value::String(s) => vec![Span::raw(String::from(&*s))],
             v => v
                 .clone()
                 .cast_to::<Vec<SpanV>>()?
@@ -139,7 +141,7 @@ impl FromValue for LineV {
                 .map(|s| s.0)
                 .collect::<Vec<_>>(),
         };
-        let style = flds[2].1.clone().cast_to::<StyleV>()?.0;
+        let style = style.cast_to::<StyleV>()?.0;
         Ok(Self(Line { style, alignment, spans }))
     }
 }
@@ -160,29 +162,97 @@ struct ScrollV((u16, u16));
 
 impl FromValue for ScrollV {
     fn from_value(v: Value) -> Result<Self> {
-        let ((_, x), (_, y)) = v.cast_to::<((ArcStr, u16), (ArcStr, u16))>()?;
+        let [(_, x), (_, y)] = v.cast_to::<[(ArcStr, u16); 2]>()?;
         Ok(Self((y, x)))
     }
 }
 
-fn into_borrowed_lines<'a>(lines: &'a [Line<'static>]) -> Vec<Line<'a>> {
-    lines
+#[derive(Clone, Copy)]
+struct BordersV(Borders);
+
+impl FromValue for BordersV {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::String(s) => match &*s {
+                "All" => Ok(Self(Borders::all())),
+                "None" => Ok(Self(Borders::empty())),
+                s => bail!("invalid borders {s}"),
+            },
+            v => {
+                let mut res = Borders::empty();
+                for b in v.cast_to::<SmallVec<[ArcStr; 4]>>()? {
+                    match &*b {
+                        "Top" => res.insert(Borders::TOP),
+                        "Right" => res.insert(Borders::RIGHT),
+                        "Bottom" => res.insert(Borders::BOTTOM),
+                        "Left" => res.insert(Borders::LEFT),
+                        s => bail!("invalid border {s}"),
+                    }
+                }
+                Ok(Self(res))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BorderTypeV(BorderType);
+
+impl FromValue for BorderTypeV {
+    fn from_value(v: Value) -> Result<Self> {
+        match &*v.cast_to::<ArcStr>()? {
+            "Plain" => Ok(Self(BorderType::Plain)),
+            "Rounded" => Ok(Self(BorderType::Rounded)),
+            "Double" => Ok(Self(BorderType::Double)),
+            "Thick" => Ok(Self(BorderType::Thick)),
+            "QuadrantInside" => Ok(Self(BorderType::QuadrantInside)),
+            "QuadrantOutside" => Ok(Self(BorderType::QuadrantOutside)),
+            s => bail!("invalid border type {s}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PaddingV(Padding);
+
+impl FromValue for PaddingV {
+    fn from_value(v: Value) -> Result<Self> {
+        let [(_, bottom), (_, left), (_, right), (_, top)] =
+            v.cast_to::<[(ArcStr, u16); 4]>()?;
+        Ok(Self(Padding { bottom, left, right, top }))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PositionV(Position);
+
+impl FromValue for PositionV {
+    fn from_value(v: Value) -> Result<Self> {
+        match &*v.cast_to::<ArcStr>()? {
+            "Top" => Ok(Self(Position::Top)),
+            "Bottom" => Ok(Self(Position::Bottom)),
+            s => bail!("invalid position {s}"),
+        }
+    }
+}
+
+fn into_borrowed_line<'a>(line: &'a Line<'static>) -> Line<'a> {
+    let spans = line
+        .spans
         .iter()
-        .map(|l| {
-            let spans = l
-                .spans
-                .iter()
-                .map(|s| {
-                    let content = match &s.content {
-                        Cow::Owned(s) => Cow::Borrowed(s.as_str()),
-                        Cow::Borrowed(s) => Cow::Borrowed(*s),
-                    };
-                    Span { content, style: s.style }
-                })
-                .collect();
-            Line { alignment: l.alignment, style: l.style, spans }
+        .map(|s| {
+            let content = match &s.content {
+                Cow::Owned(s) => Cow::Borrowed(s.as_str()),
+                Cow::Borrowed(s) => Cow::Borrowed(*s),
+            };
+            Span { content, style: s.style }
         })
-        .collect::<Vec<_>>()
+        .collect();
+    Line { alignment: line.alignment, style: line.style, spans }
+}
+
+fn into_borrowed_lines<'a>(lines: &'a [Line<'static>]) -> Vec<Line<'a>> {
+    lines.iter().map(|l| into_borrowed_line(l)).collect::<Vec<_>>()
 }
 
 struct TRef<T: FromValue> {
@@ -215,6 +285,7 @@ trait GuiWidget {
 }
 
 type GuiW = Box<dyn GuiWidget + Send + Sync + 'static>;
+type CompRes = Pin<Box<dyn Future<Output = Result<GuiW>> + Send + Sync + 'static>>;
 
 struct EmptyW;
 
@@ -241,13 +312,14 @@ struct TextW {
 }
 
 impl TextW {
-    async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
-        let flds = source.cast_to::<[(ArcStr, u64); 3]>().context("text flds")?;
-        let alignment = TRef::<Option<AlignmentV>>::new(bs.compile_ref(flds[0].1).await?)
+    async fn compile(bs: BSHandle, source: Value) -> Result<GuiW> {
+        let [(_, alignment), (_, lines), (_, style)] =
+            source.cast_to::<[(ArcStr, u64); 3]>().context("text flds")?;
+        let alignment = TRef::<Option<AlignmentV>>::new(bs.compile_ref(alignment).await?)
             .context("text tref alignment")?;
-        let mut lines = TRef::<LinesV>::new(bs.compile_ref(flds[1].1).await?)
+        let mut lines = TRef::<LinesV>::new(bs.compile_ref(lines).await?)
             .context("text tref lines")?;
-        let style = TRef::<StyleV>::new(bs.compile_ref(flds[2].1).await?)
+        let style = TRef::<StyleV>::new(bs.compile_ref(style).await?)
             .context("text tref style")?;
         let text = Text {
             alignment: alignment.t.as_ref().and_then(|a| a.map(|a| a.0)),
@@ -293,19 +365,20 @@ struct ParagraphW {
 }
 
 impl ParagraphW {
-    async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
-        let flds = source.cast_to::<[(ArcStr, u64); 5]>().context("paragraph flds")?;
+    async fn compile(bs: BSHandle, source: Value) -> Result<GuiW> {
+        let [(_, alignment), (_, lines), (_, scroll), (_, style), (_, trim)] =
+            source.cast_to::<[(ArcStr, u64); 5]>().context("paragraph flds")?;
         let alignment: TRef<Option<AlignmentV>> =
-            TRef::new(bs.compile_ref(flds[0].1).await?)
+            TRef::new(bs.compile_ref(alignment).await?)
                 .context("paragraph tref alignment")?;
-        let lines: TRef<LinesV> = TRef::new(bs.compile_ref(flds[1].1).await?)
-            .context("paragraph tref lines")?;
-        let scroll: TRef<ScrollV> = TRef::new(bs.compile_ref(flds[2].1).await?)
-            .context("paragraph tref scroll")?;
-        let style: TRef<StyleV> = TRef::new(bs.compile_ref(flds[3].1).await?)
-            .context("paragraph tref style")?;
+        let lines: TRef<LinesV> =
+            TRef::new(bs.compile_ref(lines).await?).context("paragraph tref lines")?;
+        let scroll: TRef<ScrollV> =
+            TRef::new(bs.compile_ref(scroll).await?).context("paragraph tref scroll")?;
+        let style: TRef<StyleV> =
+            TRef::new(bs.compile_ref(style).await?).context("paragraph tref style")?;
         let trim: TRef<bool> =
-            TRef::new(bs.compile_ref(flds[4].1).await?).context("paragraph tref trim")?;
+            TRef::new(bs.compile_ref(trim).await?).context("paragraph tref trim")?;
         Ok(Box::new(Self { alignment, lines, scroll, style, trim }))
     }
 }
@@ -346,34 +419,188 @@ impl GuiWidget for ParagraphW {
     }
 }
 
-/*
 struct BlockW {
-    border_id: ExprId,
-    border: Option<Borders>,
-    border_type_id: ExprId,
-    border_type: Option<BorderType>,
-    border_style_id: ExprId,
-    border_style: Option<Style>,
-    padding_id: ExprId,
-    padding: Option<Padding>,
-    sytle_id: ExprId,
-    style: Option<Style>,
-    title: Option<Line<'static>>,
-    title_id: ExprId,
-    title_alignment_id: ExprId,
-    title_alignment: Option<Alignment>,
-    title_bottom_id: ExprId,
-    title_bottom: Option<Line<'static>>,
+    bs: BSHandle,
+    border: TRef<Option<BordersV>>,
+    border_style: TRef<Option<StyleV>>,
+    border_type: TRef<Option<BorderTypeV>>,
+    child_ref: Ref,
+    child: GuiW,
+    padding: TRef<Option<PaddingV>>,
+    style: TRef<Option<StyleV>>,
+    title: TRef<Option<LineV>>,
+    title_alignment: TRef<Option<AlignmentV>>,
+    title_bottom: TRef<Option<LineV>>,
+    title_position: TRef<Option<PositionV>>,
+    title_style: TRef<Option<StyleV>>,
+    title_top: TRef<Option<LineV>>,
 }
-*/
 
-async fn compile(bs: &BSHandle, source: Value) -> Result<GuiW> {
-    match source.cast_to::<(ArcStr, Value)>()? {
-        (s, v) if &s == "Text" => TextW::compile(bs, v).await,
-        (s, v) if &s == "Paragraph" => ParagraphW::compile(bs, v).await,
-        //        (s, v) if &s == "Block" => BlockW::compile(bs, v).await,
-        (s, v) => bail!("invalid widget type `{s}({v})"),
+impl BlockW {
+    async fn compile(bs: BSHandle, v: Value) -> Result<GuiW> {
+        let [(_, border), (_, border_style), (_, border_type), (_, child), (_, padding), (_, style), (_, title), (_, title_alignment), (_, title_bottom), (_, title_position), (_, title_style), (_, title_top)] =
+            v.cast_to::<[(ArcStr, u64); 12]>().context("block flds")?;
+        let border = TRef::<Option<BordersV>>::new(bs.compile_ref(border).await?)
+            .context("block tref border")?;
+        let border_style =
+            TRef::<Option<StyleV>>::new(bs.compile_ref(border_style).await?)
+                .context("block tref border_style")?;
+        let border_type =
+            TRef::<Option<BorderTypeV>>::new(bs.compile_ref(border_type).await?)
+                .context("block tref border_type")?;
+        let padding = TRef::<Option<PaddingV>>::new(bs.compile_ref(padding).await?)
+            .context("block tref padding")?;
+        let style = TRef::<Option<StyleV>>::new(bs.compile_ref(style).await?)
+            .context("block tref style")?;
+        let title = TRef::<Option<LineV>>::new(bs.compile_ref(title).await?)
+            .context("block tref title")?;
+        let title_alignment =
+            TRef::<Option<AlignmentV>>::new(bs.compile_ref(title_alignment).await?)
+                .context("block tref title_alignment")?;
+        let title_bottom =
+            TRef::<Option<LineV>>::new(bs.compile_ref(title_bottom).await?)
+                .context("block tref title_bottom")?;
+        let title_position =
+            TRef::<Option<PositionV>>::new(bs.compile_ref(title_position).await?)
+                .context("block tref title_position")?;
+        let title_style = TRef::<Option<StyleV>>::new(bs.compile_ref(title_style).await?)
+            .context("block tref title_style")?;
+        let title_top = TRef::<Option<LineV>>::new(bs.compile_ref(title_top).await?)
+            .context("block tref title_top")?;
+        let mut child_ref = bs.compile_ref(child).await?;
+        let child = match child_ref.last.take() {
+            None => Box::new(EmptyW),
+            Some(v) => compile(bs.clone(), v).await.context("block compile child")?,
+        };
+        let t = Self {
+            bs,
+            border,
+            border_style,
+            border_type,
+            padding,
+            style,
+            title,
+            title_alignment,
+            title_bottom,
+            title_position,
+            title_style,
+            title_top,
+            child_ref,
+            child,
+        };
+        Ok(Box::new(t))
     }
+}
+
+#[async_trait]
+impl GuiWidget for BlockW {
+    async fn handle_event(&mut self, e: Event) -> Result<()> {
+        self.child.handle_event(e).await
+    }
+
+    async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
+        let Self {
+            bs,
+            border,
+            border_style,
+            border_type,
+            child_ref,
+            child,
+            padding,
+            style,
+            title,
+            title_alignment,
+            title_bottom,
+            title_position,
+            title_style,
+            title_top,
+        } = self;
+        let _ = border.update(id, &v).context("block border update")?;
+        let _ = border_style.update(id, &v).context("block border_style update")?;
+        let _ = border_type.update(id, &v).context("block border_type update")?;
+        let _ = padding.update(id, &v).context("block padding update")?;
+        let _ = style.update(id, &v).context("block style update")?;
+        let _ = title.update(id, &v).context("block title update")?;
+        let _ = title_alignment.update(id, &v).context("block title_alignment update")?;
+        let _ = title_bottom.update(id, &v).context("block title_bottom update")?;
+        let _ = title_position.update(id, &v).context("block title_position update")?;
+        let _ = title_style.update(id, &v).context("block title_style update")?;
+        let _ = title_top.update(id, &v).context("block title_top update")?;
+        if id == child_ref.id {
+            *child =
+                compile(bs.clone(), v.clone()).await.context("block child compile")?;
+        }
+        child.handle_update(id, v).await?;
+        Ok(())
+    }
+
+    fn draw(&mut self, frame: &mut Frame, rect: Rect) -> Result<()> {
+        let Self {
+            bs: _,
+            border,
+            border_style,
+            border_type,
+            child_ref: _,
+            child,
+            padding,
+            style,
+            title,
+            title_alignment,
+            title_bottom,
+            title_position,
+            title_style,
+            title_top,
+        } = self;
+        let mut block = Block::new();
+        if let Some(Some(b)) = border.t {
+            block = block.borders(b.0);
+        }
+        if let Some(Some(s)) = border_style.t {
+            block = block.border_style(s.0);
+        }
+        if let Some(Some(t)) = border_type.t {
+            block = block.border_type(t.0);
+        }
+        if let Some(Some(p)) = padding.t {
+            block = block.padding(p.0);
+        }
+        if let Some(Some(s)) = style.t {
+            block = block.style(s.0);
+        }
+        if let Some(Some(LineV(l))) = &title.t {
+            block = block.title(into_borrowed_line(l));
+        }
+        if let Some(Some(a)) = title_alignment.t {
+            block = block.title_alignment(a.0);
+        }
+        if let Some(Some(LineV(l))) = &title_bottom.t {
+            block = block.title_bottom(into_borrowed_line(l));
+        }
+        if let Some(Some(p)) = title_position.t {
+            block = block.title_position(p.0);
+        }
+        if let Some(Some(s)) = title_style.t {
+            block = block.title_style(s.0);
+        }
+        if let Some(Some(LineV(l))) = &title_top.t {
+            block = block.title_top(into_borrowed_line(l));
+        }
+        let child_rect = block.inner(rect);
+        frame.render_widget(block, rect);
+        child.draw(frame, child_rect)?;
+        Ok(())
+    }
+}
+
+fn compile(bs: BSHandle, source: Value) -> CompRes {
+    Box::pin(async move {
+        match source.cast_to::<(ArcStr, Value)>()? {
+            (s, v) if &s == "Text" => TextW::compile(bs, v).await,
+            (s, v) if &s == "Paragraph" => ParagraphW::compile(bs, v).await,
+            (s, v) if &s == "Block" => BlockW::compile(bs, v).await,
+            (s, v) => bail!("invalid widget type `{s}({v})"),
+        }
+    })
 }
 
 enum ToGui {
@@ -454,7 +681,7 @@ async fn run(
                 Some(ToGui::Stop(tx)) => break tx,
                 Some(ToGui::Update(id, v)) => {
                     if id == root_exp.id {
-                        match compile(&bs, v).await {
+                        match compile(bs.clone(), v).await {
                             Err(e) => error!("invalid widget specification {e:?}"),
                             Ok(w) => root = w,
                         }
