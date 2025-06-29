@@ -13,7 +13,7 @@ use fxhash::FxHashMap;
 use netidx::{subscriber::Value, utils::Either};
 use parking_lot::RwLock;
 use smallvec::{smallvec, SmallVec};
-use std::{cell::RefCell, collections::HashMap, mem, sync::Arc as SArc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc as SArc};
 use triomphe::Arc;
 
 #[derive(Debug)]
@@ -180,6 +180,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInLambda<C, E> {
 
 #[derive(Debug)]
 pub(crate) struct Lambda<C: Ctx, E: UserEvent> {
+    top_id: ExprId,
     spec: Expr,
     def: SArc<LambdaDef<C, E>>,
     typ: Type,
@@ -191,6 +192,7 @@ impl<C: Ctx, E: UserEvent> Lambda<C, E> {
         spec: Expr,
         scope: &ModPath,
         l: &expr::Lambda,
+        top_id: ExprId,
     ) -> Result<Node<C, E>> {
         let mut s: SmallVec<[&ArcStr; 16]> = smallvec![];
         for a in l.args.iter() {
@@ -277,9 +279,7 @@ impl<C: Ctx, E: UserEvent> Lambda<C, E> {
         let init: InitFn<C, E> = SArc::new(move |ctx, args, tid| {
             // restore the lexical environment to the state it was in
             // when the closure was created
-            let snap = ctx.env.restore_lexical_env(_env.clone());
-            let orig_env = mem::replace(&mut ctx.env, snap);
-            let res = match body.clone() {
+            ctx.with_restored(_env.clone(), |ctx| match body.clone() {
                 Either::Left(body) => {
                     let apply = BScriptLambda::new(
                         ctx,
@@ -306,14 +306,12 @@ impl<C: Ctx, E: UserEvent> Lambda<C, E> {
                         })
                     }
                 },
-            };
-            ctx.env = ctx.env.restore_lexical_env(orig_env);
-            res
+            })
         });
         let def =
             SArc::new(LambdaDef { id, typ: typ.clone(), env, argspec, init, scope });
         ctx.env.lambdas.insert_cow(id, SArc::downgrade(&def));
-        Ok(Box::new(Self { spec, def, typ: Type::Fn(typ) }))
+        Ok(Box::new(Self { spec, def, typ: Type::Fn(typ), top_id }))
     }
 }
 
@@ -345,10 +343,21 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Lambda<C, E> {
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
-        let mut faux_args = Box::from_iter(self.def.typ.args.iter().map(|a| {
-            let n: Node<C, E> = Box::new(Nop { typ: a.typ.clone() });
-            n
-        }));
+        let mut faux_args: Vec<Node<C, E>> = self
+            .def
+            .argspec
+            .iter()
+            .zip(self.def.typ.args.iter())
+            .map(|(a, at)| match &a.labeled {
+                Some(Some(e)) => ctx.with_restored(self.def.env.clone(), |ctx| {
+                    compile(ctx, e.clone(), &self.def.scope, self.top_id)
+                }),
+                Some(None) | None => {
+                    let n: Node<C, E> = Box::new(Nop { typ: at.typ.clone() });
+                    Ok(n)
+                }
+            })
+            .collect::<Result<_>>()?;
         let mut f = wrap!(self, (self.def.init)(ctx, &faux_args, ExprId::new()))?;
         let res = wrap!(self, f.typecheck(ctx, &mut faux_args));
         f.typ().constrain_known();

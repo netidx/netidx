@@ -155,17 +155,17 @@ mod gui {
   };
 
   let block = |
-    #border: &[Array<Border>, `All, `None, null] = null,
-    #border_type: &[BorderType, null] = null,
-    #border_style: &[Style, null] = null,
-    #padding: &[Padding, null] = null,
-    #style: &[Style, null] = null,
-    #title: &[Line, null] = null,
-    #title_top: &[Line, null] = null,
-    #title_bottom: &[Line, null] = null,
-    #title_style: &[Style, null] = null,
-    #title_position: &[Position, null] = null,
-    #title_alignment: &[Alignment, null] = null,
+    #border: &[Array<Border>, `All, `None, null] = &null,
+    #border_type: &[BorderType, null] = &null,
+    #border_style: &[Style, null] = &null,
+    #padding: &[Padding, null] = &null,
+    #style: &[Style, null] = &null,
+    #title: &[Line, null] = &null,
+    #title_top: &[Line, null] = &null,
+    #title_bottom: &[Line, null] = &null,
+    #title_style: &[Style, null] = &null,
+    #title_position: &[Position, null] = &null,
+    #title_alignment: &[Alignment, null] = &null,
     child: &Gui
   | -> Gui `Block({
     border,

@@ -73,7 +73,7 @@ pub(crate) fn compile<C: Ctx, E: UserEvent>(
             Connect::compile(ctx, spec.clone(), scope, top_id, name, value, pos)
         }
         Expr { kind: ExprKind::Lambda(l), id: _, pos: _ } => {
-            Lambda::compile(ctx, spec.clone(), scope, l)
+            Lambda::compile(ctx, spec.clone(), scope, l, top_id)
         }
         Expr { kind: ExprKind::Any { args }, id: _, pos: _ } => {
             Any::compile(ctx, spec.clone(), scope, top_id, args)

@@ -32,6 +32,7 @@ use parking_lot::RwLock;
 use std::{
     collections::{hash_map::Entry, HashMap},
     fmt::Debug,
+    mem,
     sync::{self, LazyLock},
     time::Duration,
 };
@@ -403,6 +404,22 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
     pub fn set_var(&mut self, id: BindId, v: Value) {
         self.cached.insert(id, v.clone());
         self.user.set_var(id, v)
+    }
+
+    /// Restore the lexical environment to the snapshot `env` for the
+    /// duration of `f` restoring it to it's original value
+    /// afterwords. `by_id` and `lambdas` defined by the closure will
+    /// be retained.
+    pub fn with_restored<R, F: FnOnce(&mut Self) -> R>(
+        &mut self,
+        env: Env<C, E>,
+        f: F,
+    ) -> R {
+        let snap = self.env.restore_lexical_env(env);
+        let orig = mem::replace(&mut self.env, snap);
+        let r = f(self);
+        self.env = self.env.restore_lexical_env(orig);
+        r
     }
 }
 

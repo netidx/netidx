@@ -53,7 +53,6 @@ fn compile_apply_args<C: Ctx, E: UserEvent>(
     let mut named = FxHashMap::default();
     let mut nodes: Vec<Node<C, E>> = vec![];
     let mut arg_spec: FxHashMap<ArcStr, bool> = FxHashMap::default();
-    named.clear();
     check_named_args(&mut named, args)?;
     for a in typ.args.iter() {
         match &a.label {
@@ -121,13 +120,9 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
             ($i:expr, $f:expr) => {{
                 match &$f.argspec[$i].labeled {
                     None | Some(None) => bail!("expected default value"),
-                    Some(Some(expr)) => {
-                        let snap = ctx.env.restore_lexical_env($f.env.clone());
-                        let orig_env = mem::replace(&mut ctx.env, snap);
-                        let n = compile(ctx, expr.clone(), &$f.scope, self.top_id);
-                        ctx.env = ctx.env.restore_lexical_env(orig_env);
-                        n?
-                    }
+                    Some(Some(expr)) => ctx.with_restored($f.env.clone(), |ctx| {
+                        compile(ctx, expr.clone(), &$f.scope, self.top_id)
+                    })?,
                 }
             }};
         }
