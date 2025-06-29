@@ -108,7 +108,7 @@ enum Output {
 impl Output {
     fn from_expr(bs: &BSHandle, env: &Env, e: CompExp) -> Self {
         if GUITYP.contains(env, &e.typ).unwrap() {
-            Self::Gui(Gui::start(bs, e.id))
+            Self::Gui(Gui::start(bs, e))
         } else {
             Self::Text(e)
         }

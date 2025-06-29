@@ -1349,6 +1349,7 @@ impl Value {
             Value::String(s) => match typ {
                 Typ::String => Some(Value::String(s)),
                 Typ::Error => Some(Value::Error(s)),
+                Typ::Array => Some(Value::Array([Value::String(s)].into())),
                 _ => s.parse::<Value>().ok().and_then(|v| v.cast(typ)),
             },
             v if typ == Typ::String => {

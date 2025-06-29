@@ -1,4 +1,11 @@
 mod gui {
+  // The type of a gui, return this type from a shell expression to draw a gui
+  type Gui = [
+    `Text(Text),
+    `Paragraph(Paragraph),
+    `Block(Block)
+  ];
+
   type Color = [
     `Reset,
     `Black,
@@ -173,12 +180,5 @@ mod gui {
     title_position,
     title_alignment,
     child
-  });
-
-  // The type of a gui, return this type from a shell expression to draw a gui
-  type Gui = [
-    `Text(Text),
-    `Paragraph(Paragraph),
-    `Block(Block)
-  ]
+  })
 }

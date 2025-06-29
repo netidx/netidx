@@ -27,7 +27,7 @@ use derive_builder::Builder;
 use futures::{channel::mpsc, future::join_all, FutureExt, SinkExt, StreamExt};
 use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
-use log::error;
+use log::{debug, error};
 use netidx::{
     path::Path,
     pool::Pooled,
@@ -984,6 +984,7 @@ impl BS {
                     if let Some(mut n) = self.nodes.shift_remove(&id) {
                         n.delete(&mut self.ctx);
                     }
+                    debug!("delete {id:?}");
                     send_event(&mut self.subs, RtEvent::Env(self.ctx.env.clone())).await
                 }
                 Some(ToRt::CompileCallable { id, rt, res }) => {
