@@ -1,8 +1,9 @@
 use super::{
-    callsite::CallSite, lambda::Lambda, select::Select, Add, And, Any, Array, ArrayRef,
-    ArraySlice, Bind, Block, ByRef, Connect, ConnectDeref, Constant, Deref, Div, Eq, Gt,
-    Gte, Lt, Lte, Mod, Mul, Ne, Not, Or, Qop, Ref, StringInterpolate, Struct, StructRef,
-    StructWith, Sub, Tuple, TupleRef, TypeCast, TypeDef, Use, Variant,
+    array::Array, array::ArrayRef, array::ArraySlice, callsite::CallSite, data::Struct,
+    data::StructRef, data::StructWith, data::Tuple, data::TupleRef, data::Variant,
+    lambda::Lambda, select::Select, Add, And, Any, Bind, Block, ByRef, Connect,
+    ConnectDeref, Constant, Deref, Div, Eq, Gt, Gte, Lt, Lte, Mod, Mul, Ne, Not, Or, Qop,
+    Ref, StringInterpolate, Sub, TypeCast, TypeDef, Use,
 };
 use crate::{
     expr::{Expr, ExprId, ExprKind, ModPath, ModuleKind},

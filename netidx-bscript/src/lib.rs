@@ -226,8 +226,6 @@ pub trait Update<C: Ctx, E: UserEvent>: Debug + Send + Sync + Any + 'static {
 
     /// return the original expression used to compile this node
     fn spec(&self) -> &Expr;
-
-    fn as_any(&self) -> &dyn Any;
 }
 
 pub trait BuiltIn<C: Ctx, E: UserEvent> {

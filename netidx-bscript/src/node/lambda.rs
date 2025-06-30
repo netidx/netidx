@@ -316,10 +316,6 @@ impl<C: Ctx, E: UserEvent> Lambda<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Lambda<C, E> {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn update(
         &mut self,
         _ctx: &mut ExecCtx<C, E>,

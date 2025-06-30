@@ -5,7 +5,7 @@ use crate::{
     typ::{FnArgType, FnType, Type},
     wrap, Apply, BindId, Ctx, Event, ExecCtx, LambdaId, Node, Update, UserEvent,
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use arcstr::ArcStr;
 use combine::stream::position::SourcePosition;
 use compact_str::{format_compact, CompactString};
@@ -170,10 +170,6 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         macro_rules! error {
             ($m:literal) => {{
