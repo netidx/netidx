@@ -51,6 +51,10 @@ impl<C: Ctx, E: UserEvent> Select<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         let Self { selected, arg, arms, typ: _, spec: _ } = self;
         let mut val_up: SmallVec<[bool; 64]> = smallvec![];

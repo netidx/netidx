@@ -1,8 +1,8 @@
 use super::{
     callsite::CallSite, lambda::Lambda, select::Select, Add, And, Any, Array, ArrayRef,
-    ArraySlice, Bind, Block, ByRef, Connect, Constant, Deref, Div, Eq, Gt, Gte, Lt, Lte,
-    Mod, Mul, Ne, Not, Or, Qop, Ref, StringInterpolate, Struct, StructRef, StructWith,
-    Sub, Tuple, TupleRef, TypeCast, TypeDef, Use, Variant,
+    ArraySlice, Bind, Block, ByRef, Connect, ConnectDeref, Constant, Deref, Div, Eq, Gt,
+    Gte, Lt, Lte, Mod, Mul, Ne, Not, Or, Qop, Ref, StringInterpolate, Struct, StructRef,
+    StructWith, Sub, Tuple, TupleRef, TypeCast, TypeDef, Use, Variant,
 };
 use crate::{
     expr::{Expr, ExprId, ExprKind, ModPath, ModuleKind},
@@ -69,7 +69,10 @@ pub(crate) fn compile<C: Ctx, E: UserEvent>(
         Expr { kind: ExprKind::Use { name }, id: _, pos } => {
             Use::compile(ctx, spec.clone(), scope, name, pos)
         }
-        Expr { kind: ExprKind::Connect { name, value }, id: _, pos } => {
+        Expr { kind: ExprKind::Connect { name, value, deref: true }, id: _, pos } => {
+            ConnectDeref::compile(ctx, spec.clone(), scope, top_id, name, value, pos)
+        }
+        Expr { kind: ExprKind::Connect { name, value, deref: false }, id: _, pos } => {
             Connect::compile(ctx, spec.clone(), scope, top_id, name, value, pos)
         }
         Expr { kind: ExprKind::Lambda(l), id: _, pos: _ } => {

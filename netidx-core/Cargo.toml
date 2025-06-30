@@ -2,7 +2,7 @@
 name = "netidx-core"
 version = "0.28.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "netidx core libraries"
 homepage = "https://netidx.github.io/netidx-book/"

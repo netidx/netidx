@@ -48,7 +48,7 @@ pub const RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
         "true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn",
         "cast", "if", "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32",
         "f64", "decimal", "datetime", "duration", "bool", "string", "bytes", "result",
-        "null", "_", "?", "fn", "Array", "any",
+        "null", "_", "?", "fn", "Array", "any", "use",
     ])
 });
 
@@ -398,9 +398,16 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (position(), between(token('{'), sptoken('}'), sep_by(expr(), attempt(sptoken(';')))))
-        .map(|(pos, args): (_, Vec<Expr>)| {
-            ExprKind::Do { exprs: Arc::from(args) }.to_expr(pos)
+    (
+        position(),
+        between(token('{'), sptoken('}'), sep_by1(expr(), attempt(sptoken(';')))),
+    )
+        .then(|(pos, args): (_, Vec<Expr>)| {
+            if args.len() < 2 {
+                unexpected_any("do must contain at least 2 expressions").left()
+            } else {
+                value(ExprKind::Do { exprs: Arc::from(args) }.to_expr(pos)).right()
+            }
         })
 }
 
@@ -923,8 +930,12 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (position(), modpath().skip(spstring("<-")), expr())
-        .map(|(pos, name, e)| ExprKind::Connect { name, value: Arc::new(e) }.to_expr(pos))
+    (position(), optional(token('*')), spmodpath().skip(spstring("<-")), expr()).map(
+        |(pos, deref, name, e)| {
+            ExprKind::Connect { name, value: Arc::new(e), deref: deref.is_some() }
+                .to_expr(pos)
+        },
+    )
 }
 
 fn literal<I>() -> impl Parser<I, Output = Expr>
@@ -946,6 +957,25 @@ where
     (position(), modpath()).map(|(pos, name)| ExprKind::Ref { name }.to_expr(pos))
 }
 
+fn deref_reference<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char, Position = SourcePosition>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (
+        position(),
+        token('*').with(modpath()).skip(not_followed_by(choice((
+            attempt(sptoken('.')),
+            attempt(sptoken('[')),
+            attempt(sptoken('(')),
+        )))),
+    )
+        .map(|(pos, name)| {
+            ExprKind::Deref(Arc::new(ExprKind::Ref { name }.to_expr(pos))).to_expr(pos)
+        })
+}
+
 fn qop<I, P: Parser<I, Output = Expr>>(p: P) -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char, Position = SourcePosition>,
@@ -965,6 +995,8 @@ where
     I::Range: Range,
 {
     choice((
+        attempt(spaces().with(qop(deref_reference()))),
+        attempt(spaces().with(qop(deref()))),
         attempt(spaces().with(raw_string())),
         attempt(spaces().with(array())),
         attempt(spaces().with(qop(arrayref()))),
@@ -1523,9 +1555,11 @@ where
             attempt(spaces().with(array())),
         ))),
         attempt(spaces().with(byref())),
-        attempt(spaces().with(deref())),
+        attempt(spaces().with(connect())),
         attempt(spaces().with(arith())),
+        attempt(spaces().with(qop(deref()))),
         attempt(spaces().with(tuple())),
+        attempt(spaces().with(between(token('('), sptoken(')'), expr()))),
         attempt(spaces().with(structure())),
         attempt(spaces().with(variant())),
         attempt(spaces().with(structwith())),
@@ -1536,7 +1570,6 @@ where
         attempt(spaces().with(qop(do_block()))),
         attempt(spaces().with(lambda())),
         attempt(spaces().with(letbind())),
-        attempt(spaces().with(connect())),
         attempt(spaces().with(qop(select()))),
         attempt(spaces().with(qop(cast()))),
         attempt(spaces().with(qop(any()))),

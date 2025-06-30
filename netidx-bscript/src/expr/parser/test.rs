@@ -708,6 +708,7 @@ fn connect() {
             }
             .to_expr_nopos(),
         ),
+        deref: false,
     }
     .to_expr_nopos();
     let s = r#"m::foo <- (a + 1)"#;

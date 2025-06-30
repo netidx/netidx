@@ -3,7 +3,8 @@ mod gui {
   type Gui = [
     `Text(Text),
     `Paragraph(Paragraph),
-    `Block(Block)
+    `Block(Block),
+    `Scrollbar(Scrollbar)
   ];
 
   type Color = [
@@ -179,6 +180,57 @@ mod gui {
     title_style,
     title_position,
     title_alignment,
+    child
+  });
+
+  type ScrollbarOrientation = [
+    `VerticalRight,
+    `VerticalLeft,
+    `HorizontalBottom,
+    `HorizontalTop
+  ];
+
+  type Scrollbar = {
+    begin_style: &[Style, null],
+    begin_symbol: &[string, null],
+    child: &Gui,
+    end_style: &[Style, null],
+    end_symbol: &[string, null],
+    orientation: &[ScrollbarOrientation, null],
+    position: &[u32, null],
+    style: &[Style, null],
+    thumb_style: &[Style, null],
+    thumb_symbol: &[string, null],
+    track_style: &[Style, null],
+    track_symbol: &[string, null],
+  };
+
+  let scrollbar = |
+    #begin_style: &[Style, null] = &null,
+    #begin_symbol: &[string, null] = &null,
+    #end_style: &[Style, null] = &null,
+    #end_symbol: &[string, null] = &null,
+    #orientation: &[ScrollbarOrientation, null] = null,
+    #position: &[u32, null] = null,
+    #style: &[Style, null] = null,
+    #thumb_style: &[Style, null] = null,
+    #thumb_symbol: &[string, null] = null,
+    #track_style: &[Style, null] = null,
+    #track_symbol: &[string, null] = null,
+    child: &Gui
+  | -> Gui `Scrollbar({
+    begin_style,
+    begin_symbol,
+    end_style,
+    end_symbol,
+    on_scroll,
+    orientation,
+    position,
+    style,
+    thumb_style,
+    thumb_symbol,
+    track_style,
+    track_symbol,
     child
   })
 }

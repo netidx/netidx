@@ -2,7 +2,7 @@
 name = "netidx"
 version = "0.28.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "Secure, fast, pub/sub messaging"
 homepage = "https://netidx.github.io/netidx-book/"

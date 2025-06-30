@@ -170,6 +170,10 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         macro_rules! error {
             ($m:literal) => {{

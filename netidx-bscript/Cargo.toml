@@ -2,7 +2,7 @@
 name = "netidx-bscript"
 version = "0.28.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
-edition = "2021"
+edition = "2024"
 homepage = "https://netidx.github.io/netidx-book/"
 repository = "https://github.com/estokes/netidx"
 description = "An incremental scripting language for netidx"

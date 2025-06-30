@@ -1093,7 +1093,8 @@ run!(typedef_tvar_ok, TYPEDEF_TVAR_OK, |v: Result<&Value>| match v {
 #[cfg(test)]
 const BYREF_DEREF: &str = r#"
 {
-  let x = &42;
+  let a = 42;
+  let x = &a;
   *x
 }
 "#;
@@ -1132,5 +1133,24 @@ const BYREF_PATTERN: &str = r#"
 #[cfg(test)]
 run!(byref_pattern, BYREF_PATTERN, |v: Result<&Value>| match v {
     Ok(Value::I64(42)) => true,
+    _ => false,
+});
+
+#[cfg(test)]
+const CONNECT_DEREF: &str = r#"
+{
+  let v = 41;
+  let r = &v;
+  *r <- *r + 1;
+  array::group(v, |n, _| n == u64:2)
+}
+"#;
+
+#[cfg(test)]
+run!(connect_deref, CONNECT_DEREF, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::I64(41), Value::I64(42)] => true,
+        _ => false,
+    },
     _ => false,
 });

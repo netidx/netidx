@@ -13,7 +13,10 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{block::Position, Block, BorderType, Borders, Padding, Paragraph, Wrap},
+    widgets::{
+        block::Position, Block, BorderType, Borders, Padding, Paragraph,
+        ScrollbarOrientation, Wrap,
+    },
     Frame,
 };
 use reedline::Signal;
@@ -249,6 +252,22 @@ fn into_borrowed_line<'a>(line: &'a Line<'static>) -> Line<'a> {
         })
         .collect();
     Line { alignment: line.alignment, style: line.style, spans }
+}
+
+#[derive(Clone)]
+struct ScrollbarOrientationV(ScrollbarOrientation);
+
+impl FromValue for ScrollbarOrientationV {
+    fn from_value(v: Value) -> Result<Self> {
+        let v = match &*v.cast_to::<ArcStr>()? {
+            "VerticalRight" => ScrollbarOrientation::VerticalRight,
+            "VerticalLeft" => ScrollbarOrientation::VerticalLeft,
+            "HorizontalBottom" => ScrollbarOrientation::HorizontalBottom,
+            "HorizontalTop" => ScrollbarOrientation::HorizontalTop,
+            s => bail!("invalid ScrollBarOrientation {s}"),
+        };
+        Ok(Self(v))
+    }
 }
 
 fn into_borrowed_lines<'a>(lines: &'a [Line<'static>]) -> Vec<Line<'a>> {
@@ -590,6 +609,23 @@ impl GuiWidget for BlockW {
         child.draw(frame, child_rect)?;
         Ok(())
     }
+}
+
+struct ScrollbarW {
+    begin_style: TRef<Option<StyleV>>,
+    begin_symbol: TRef<Option<ArcStr>>,
+    child: GuiW,
+    child_ref: Ref,
+    end_style: TRef<Option<StyleV>>,
+    end_symbol: TRef<Option<ArcStr>>,
+    on_scroll_id: Ref,
+    orientation: TRef<Option<ScrollbarOrientationV>>,
+    position: TRef<Option<u16>>,
+    style: TRef<Option<StyleV>>,
+    thumb_style: TRef<Option<StyleV>>,
+    thumb_symbol: TRef<Option<ArcStr>>,
+    track_style: TRef<Option<StyleV>>,
+    track_symbol: TRef<Option<ArcStr>>,
 }
 
 fn compile(bs: BSHandle, source: Value) -> CompRes {

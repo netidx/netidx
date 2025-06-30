@@ -443,7 +443,7 @@ pub enum ExprKind {
     Use { name: ModPath },
     Bind(Arc<Bind>),
     Ref { name: ModPath },
-    Connect { name: ModPath, value: Arc<Expr> },
+    Connect { name: ModPath, value: Arc<Expr>, deref: bool },
     StringInterpolate { args: Arc<[Expr]> },
     StructRef { source: Arc<Expr>, field: ArcStr },
     TupleRef { source: Arc<Expr>, field: usize },
@@ -651,9 +651,10 @@ impl ExprKind {
                 try_single_line!(true);
                 pretty_print_exprs(indent, limit, buf, exprs, "{", "}", ";")
             }
-            ExprKind::Connect { name, value } => {
+            ExprKind::Connect { name, value, deref } => {
                 try_single_line!(true);
-                writeln!(buf, "{name} <- ")?;
+                let deref = if *deref { "*" } else { "" };
+                writeln!(buf, "{deref}{name} <- ")?;
                 value.kind.pretty_print(indent + 2, limit, false, buf)
             }
             ExprKind::TypeCast { expr, typ } => {
@@ -841,11 +842,19 @@ impl ExprKind {
                 write!(buf, "&")?;
                 e.kind.pretty_print(indent + 2, limit, false, buf)
             }
-            ExprKind::Deref(e) => {
-                try_single_line!(true);
-                write!(buf, "*")?;
-                e.kind.pretty_print(indent + 2, limit, false, buf)
-            }
+            ExprKind::Deref(e) => match &e.kind {
+                ExprKind::Connect { .. } | ExprKind::Qop(_) => {
+                    try_single_line!(true);
+                    writeln!(buf, "*(")?;
+                    e.kind.pretty_print(indent + 2, limit, newline, buf)?;
+                    writeln!(buf, ")")
+                }
+                _ => {
+                    try_single_line!(true);
+                    write!(buf, "*")?;
+                    e.kind.pretty_print(indent + 2, limit, false, buf)
+                }
+            },
             ExprKind::Select { arg, arms } => {
                 try_single_line!(true);
                 write!(buf, "select ")?;
@@ -962,7 +971,10 @@ impl fmt::Display for ExprKind {
                 }
                 write!(f, " }}")
             }
-            ExprKind::Connect { name, value } => write!(f, "{name} <- {value}"),
+            ExprKind::Connect { name, value, deref } => {
+                let deref = if *deref { "*" } else { "" };
+                write!(f, "{deref}{name} <- {value}")
+            }
             ExprKind::Use { name } => {
                 write!(f, "use {name}")
             }
@@ -1175,7 +1187,11 @@ impl fmt::Display for ExprKind {
             ExprKind::Div { lhs, rhs } => write_binop(f, "/", lhs, rhs),
             ExprKind::Mod { lhs, rhs } => write_binop(f, "%", lhs, rhs),
             ExprKind::ByRef(e) => write!(f, "&{e}"),
-            ExprKind::Deref(e) => write!(f, "*{e}"),
+            ExprKind::Deref(e) => match &e.kind {
+                ExprKind::Qop(e) => write!(f, "*({e}?)"),
+                ExprKind::Connect { .. } => write!(f, "*({e})"),
+                _ => write!(f, "*{e}"),
+            },
             ExprKind::Not { expr } => {
                 write!(f, "(!{expr})")
             }
@@ -1593,12 +1609,12 @@ impl Expr {
                     },
                 })
             }),
-            ExprKind::Connect { name, value } => Box::pin(async move {
+            ExprKind::Connect { name, value, deref } => Box::pin(async move {
                 let value = value.resolve_modules(scope, resolvers).await?;
                 Ok(Expr {
                     id: self.id,
                     pos: self.pos,
-                    kind: ExprKind::Connect { name, value: Arc::new(value) },
+                    kind: ExprKind::Connect { name, value: Arc::new(value), deref },
                 })
             }),
             ExprKind::Lambda(l) => Box::pin(async move {

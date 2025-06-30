@@ -400,7 +400,7 @@ impl Dval {
     pub fn write(&self, v: Value) -> bool {
         let mut t = self.0.lock();
         match &mut t.sub {
-            DvState::Subscribed(ref val) => {
+            DvState::Subscribed(val) => {
                 val.write(v);
                 true
             }
@@ -427,7 +427,7 @@ impl Dval {
         let (tx, rx) = oneshot::channel();
         let mut t = self.0.lock();
         match &mut t.sub {
-            DvState::Subscribed(ref sub) => {
+            DvState::Subscribed(sub) => {
                 sub.0.connection.send(ToCon::Write(
                     sub.0.id,
                     v,
@@ -858,7 +858,8 @@ impl Subscriber {
         async fn do_resub(
             subscriber: &SubscriberWeak,
             retry: &mut Option<Instant>,
-        ) -> Option<FuturesUnordered<impl Future<Output = (Path, Result<Val>)>>> {
+        ) -> Option<FuturesUnordered<impl Future<Output = (Path, Result<Val>)> + use<>>>
+        {
             let subscriber = subscriber.upgrade()?;
             info!("doing resubscriptions");
             let now = Instant::now();
@@ -1156,7 +1157,7 @@ impl Subscriber {
         &self,
         batch: I,
         timeout: Option<Duration>,
-    ) -> FuturesUnordered<impl Future<Output = (Path, Result<Val>)>>
+    ) -> FuturesUnordered<impl Future<Output = (Path, Result<Val>)> + use<I, CI>>
     where
         I: IntoIterator<Item = (Path, CI)>,
         CI: IntoIterator<Item = (UpdatesFlags, WUpdateChan)>,

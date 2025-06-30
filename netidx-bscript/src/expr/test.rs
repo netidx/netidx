@@ -446,7 +446,7 @@ macro_rules! any {
 
 macro_rules! do_block {
     ($inner:expr) => {
-        collection::vec(prop_oneof![typedef(), usestmt(), $inner], (1, 10))
+        collection::vec(prop_oneof![typedef(), usestmt(), $inner], (2, 10))
             .prop_map(|e| ExprKind::Do { exprs: Arc::from(e) }.to_expr_nopos())
     };
 }
@@ -524,8 +524,8 @@ macro_rules! variant {
 
 macro_rules! connect {
     ($inner:expr) => {
-        ($inner, modpath()).prop_map(|(e, n)| {
-            ExprKind::Connect { name: n, value: Arc::new(e) }.to_expr_nopos()
+        ($inner, any::<bool>(), modpath()).prop_map(|(e, deref, n)| {
+            ExprKind::Connect { name: n, value: Arc::new(e), deref }.to_expr_nopos()
         })
     };
 }
@@ -1048,9 +1048,9 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
             )
         }
         (
-            ExprKind::Connect { name: name0, value: value0 },
-            ExprKind::Connect { name: name1, value: value1 },
-        ) => dbg!(dbg!(name0 == name1) && dbg!(check(value0, value1))),
+            ExprKind::Connect { name: name0, value: value0, deref: d0 },
+            ExprKind::Connect { name: name1, value: value1, deref: d1 },
+        ) => dbg!(dbg!(d0 == d1) && dbg!(name0 == name1) && dbg!(check(value0, value1))),
         (ExprKind::Qop(e0), ExprKind::Qop(e1)) => check(e0, e1),
         (ExprKind::Ref { name: name0 }, ExprKind::Ref { name: name1 }) => {
             dbg!(name0 == name1)

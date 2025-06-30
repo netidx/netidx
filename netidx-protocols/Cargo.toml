@@ -2,7 +2,7 @@
 name = "netidx-protocols"
 version = "0.28.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
-edition = "2021"
+edition = "2024"
 homepage = "https://netidx.github.io/netidx-book/"
 repository = "https://github.com/estokes/netidx"
 description = "Protocols built on top of netidx"
@@ -16,7 +16,7 @@ krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
 netidx = { path = "../netidx", version = "0.28.0", default-features = false }
-netidx-core = {path = "../netidx-core", version = "0.28.0", default-features = false }
+netidx-core = { path = "../netidx-core", version = "0.28.0", default-features = false }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

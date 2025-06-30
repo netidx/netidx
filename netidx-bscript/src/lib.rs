@@ -30,6 +30,7 @@ use netidx_protocols::rpc::server::{ArgSpec, RpcCall};
 use node::compiler;
 use parking_lot::RwLock;
 use std::{
+    any::Any,
     collections::{hash_map::Entry, HashMap},
     fmt::Debug,
     mem,
@@ -77,7 +78,7 @@ macro_rules! err {
     };
 }
 
-pub trait UserEvent: Clone + Debug + 'static {
+pub trait UserEvent: Clone + Debug + Any {
     fn clear(&mut self);
 }
 
@@ -156,7 +157,7 @@ pub type InitFn<C, E> = sync::Arc<
 /// does not hold ownership of it's arguments, instead those are held
 /// by a CallSite node. This allows us to change the function called
 /// at runtime without recompiling the arguments.
-pub trait Apply<C: Ctx, E: UserEvent>: Debug + Send + Sync + 'static {
+pub trait Apply<C: Ctx, E: UserEvent>: Debug + Send + Sync + Any {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -206,7 +207,7 @@ pub trait Apply<C: Ctx, E: UserEvent>: Debug + Send + Sync + 'static {
 /// Update represents a regular graph node, as opposed to a function
 /// application represented by Apply. Regular graph nodes are used for
 /// every built in node except for builtin functions.
-pub trait Update<C: Ctx, E: UserEvent>: Debug + Send + Sync + 'static {
+pub trait Update<C: Ctx, E: UserEvent>: Debug + Send + Sync + Any + 'static {
     /// update the node with the specified event and return any output
     /// it might generate
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value>;
@@ -225,6 +226,8 @@ pub trait Update<C: Ctx, E: UserEvent>: Debug + Send + Sync + 'static {
 
     /// return the original expression used to compile this node
     fn spec(&self) -> &Expr;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub trait BuiltIn<C: Ctx, E: UserEvent> {

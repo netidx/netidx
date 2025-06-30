@@ -262,7 +262,7 @@ async fn client_loop_write(
         batch: &mut Vec<ToWrite>,
     ) -> Result<()> {
         match con {
-            Some(ref mut con) => {
+            Some(con) => {
                 trace!("receiving batch");
                 con.receive_batch(batch).await
             }

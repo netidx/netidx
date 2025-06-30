@@ -65,6 +65,10 @@ impl Nop {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Nop {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(
         &mut self,
         _ctx: &mut ExecCtx<C, E>,
@@ -144,6 +148,10 @@ impl<C: Ctx, E: UserEvent> ArrayRef<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for ArrayRef<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         let up = self.source.update(ctx, event);
         let up = self.i.update(ctx, event) || up;
@@ -246,6 +254,10 @@ impl<C: Ctx, E: UserEvent> ArraySlice<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for ArraySlice<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         macro_rules! number {
             ($e:expr) => {
@@ -371,6 +383,10 @@ impl Use {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Use {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(
         &mut self,
         _ctx: &mut ExecCtx<C, E>,
@@ -431,6 +447,10 @@ impl TypeDef {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for TypeDef {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(
         &mut self,
         _ctx: &mut ExecCtx<C, E>,
@@ -478,6 +498,10 @@ impl Constant {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Constant {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(
         &mut self,
         _ctx: &mut ExecCtx<C, E>,
@@ -531,6 +555,10 @@ impl<C: Ctx, E: UserEvent> Block<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Block<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         self.children.iter_mut().fold(None, |_, n| n.update(ctx, event))
     }
@@ -612,6 +640,10 @@ impl<C: Ctx, E: UserEvent> Bind<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Bind<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         if let Some(v) = self.node.update(ctx, event) {
             self.pattern.bind(&v, &mut |id, v| ctx.set_var(id, v))
@@ -673,6 +705,10 @@ impl Ref {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Ref {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(
         &mut self,
         _ctx: &mut ExecCtx<C, E>,
@@ -742,6 +778,10 @@ impl<C: Ctx, E: UserEvent> StructRef<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for StructRef<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         match self.source.update(ctx, event) {
             Some(Value::Array(a)) => a.get(self.field).and_then(|v| match v {
@@ -827,6 +867,10 @@ impl<C: Ctx, E: UserEvent> TupleRef<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for TupleRef<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         self.source.update(ctx, event).and_then(|v| match v {
             Value::Array(a) => a.get(self.field).map(|v| v.clone()),
@@ -889,6 +933,10 @@ impl<C: Ctx, E: UserEvent> StringInterpolate<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         use std::fmt::Write;
         thread_local! {
@@ -967,6 +1015,10 @@ impl<C: Ctx, E: UserEvent> Connect<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Connect<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         if let Some(v) = self.node.update(ctx, event) {
             ctx.set_var(self.id, v)
@@ -1001,6 +1053,86 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Connect<C, E> {
 }
 
 #[derive(Debug)]
+pub(crate) struct ConnectDeref<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    rhs: Cached<C, E>,
+    src_id: BindId,
+    target_id: Option<BindId>,
+    top_id: ExprId,
+}
+
+impl<C: Ctx, E: UserEvent> ConnectDeref<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        name: &ModPath,
+        value: &Expr,
+        pos: &SourcePosition,
+    ) -> Result<Node<C, E>> {
+        let src_id = match ctx.env.lookup_bind(scope, name) {
+            None => bail!("at {pos} {name} is undefined"),
+            Some((_, env::Bind { id, .. })) => *id,
+        };
+        ctx.user.ref_var(src_id, top_id);
+        let rhs = Cached::new(compile(ctx, value.clone(), scope, top_id)?);
+        Ok(Box::new(Self { spec, rhs, src_id, target_id: None, top_id }))
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for ConnectDeref<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        let mut up = self.rhs.update(ctx, event);
+        if let Some(Value::U64(id)) = dbg!(event.variables.get(&self.src_id))
+            && let Some(target_id) = dbg!(ctx.env.byref_chain.get(&BindId::from(*id)))
+        {
+            self.target_id = Some(dbg!(*target_id));
+            up = true;
+        }
+        if up
+            && let Some(v) = &self.rhs.cached
+            && let Some(id) = self.target_id
+        {
+            ctx.set_var(id, v.clone())
+        }
+        None
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &Type::Bottom
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        f(self.src_id);
+        self.rhs.node.refs(f)
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.src_id, self.top_id);
+        self.rhs.node.delete(ctx)
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.rhs.node, self.rhs.node.typecheck(ctx))?;
+        let bind = match ctx.env.by_id.get(&self.src_id) {
+            None => bail!("BUG missing bind {:?}", self.src_id),
+            Some(bind) => bind,
+        };
+        let typ = Type::ByRef(Arc::new(self.rhs.node.typ().clone()));
+        wrap!(self, bind.typ.check_contains(&ctx.env, &typ))
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct ByRef<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
@@ -1018,12 +1150,19 @@ impl<C: Ctx, E: UserEvent> ByRef<C, E> {
     ) -> Result<Node<C, E>> {
         let child = compile(ctx, expr.clone(), scope, top_id)?;
         let id = BindId::new();
+        if let Some(c) = child.as_any().downcast_ref::<Ref>() {
+            ctx.env.byref_chain.insert_cow(dbg!(id), dbg!(c.id));
+        }
         let typ = Type::ByRef(Arc::new(child.typ().clone()));
         Ok(Box::new(Self { spec, typ, child, id }))
     }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for ByRef<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         if let Some(v) = self.child.update(ctx, event) {
             ctx.set_var(self.id, v);
@@ -1036,6 +1175,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ByRef<C, E> {
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.env.byref_chain.remove_cow(&self.id);
         self.child.delete(ctx)
     }
 
@@ -1082,6 +1222,10 @@ impl<C: Ctx, E: UserEvent> Deref<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Deref<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         if let Some(v) = self.child.update(ctx, event) {
             match v {
@@ -1163,6 +1307,10 @@ impl<C: Ctx, E: UserEvent> Qop<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Qop<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         match self.n.update(ctx, event) {
             None => None,
@@ -1235,6 +1383,10 @@ impl<C: Ctx, E: UserEvent> TypeCast<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for TypeCast<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         self.n.update(ctx, event).map(|v| self.target.cast_value(&ctx.env, v))
     }
@@ -1286,6 +1438,10 @@ impl<C: Ctx, E: UserEvent> Any<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Any<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         self.n
             .iter_mut()
@@ -1344,6 +1500,10 @@ impl<C: Ctx, E: UserEvent> Array<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Array<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         if self.n.is_empty() && event.init {
             return Some(Value::Array(ValArray::from([])));
@@ -1409,6 +1569,10 @@ impl<C: Ctx, E: UserEvent> Tuple<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Tuple<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         if self.n.is_empty() && event.init {
             return Some(Value::Array(ValArray::from([])));
@@ -1486,6 +1650,10 @@ impl<C: Ctx, E: UserEvent> Variant<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Variant<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         if self.n.len() == 0 {
             if event.init {
@@ -1576,6 +1744,10 @@ impl<C: Ctx, E: UserEvent> Struct<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Struct<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         if self.n.is_empty() && event.init {
             return Some(Value::Array(ValArray::from([])));
@@ -1661,6 +1833,10 @@ impl<C: Ctx, E: UserEvent> StructWith<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         let mut updated = self
             .source
@@ -1784,6 +1960,10 @@ macro_rules! compare_op {
         }
 
         impl<C: Ctx, E: UserEvent> Update<C, E> for $name<C, E> {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
             fn update(
                 &mut self,
                 ctx: &mut ExecCtx<C, E>,
@@ -1864,6 +2044,10 @@ macro_rules! bool_op {
         }
 
         impl<C: Ctx, E: UserEvent> Update<C, E> for $name<C, E> {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
             fn update(
                 &mut self,
                 ctx: &mut ExecCtx<C, E>,
@@ -1935,6 +2119,10 @@ impl<C: Ctx, E: UserEvent> Not<C, E> {
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Not<C, E> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         self.n.update(ctx, event).and_then(|v| match v {
             Value::Bool(b) => Some(Value::Bool(!b)),
@@ -1993,6 +2181,10 @@ macro_rules! arith_op {
         }
 
         impl<C: Ctx, E: UserEvent> Update<C, E> for $name<C, E> {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
             fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
                 let lhs_up = self.lhs.update(ctx, event);
                 let rhs_up = self.rhs.update(ctx, event);

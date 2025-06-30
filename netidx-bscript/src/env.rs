@@ -65,6 +65,7 @@ pub struct TypeDef {
 pub struct Env<C: Ctx, E: UserEvent> {
     pub by_id: Map<BindId, Bind>,
     pub lambdas: Map<LambdaId, Weak<LambdaDef<C, E>>>,
+    pub byref_chain: Map<BindId, BindId>,
     pub binds: Map<ModPath, Map<CompactString, BindId>>,
     pub used: Map<ModPath, Arc<Vec<ModPath>>>,
     pub modules: Set<ModPath>,
@@ -76,6 +77,7 @@ impl<C: Ctx, E: UserEvent> Clone for Env<C, E> {
         Self {
             by_id: self.by_id.clone(),
             binds: self.binds.clone(),
+            byref_chain: self.byref_chain.clone(),
             used: self.used.clone(),
             modules: self.modules.clone(),
             typedefs: self.typedefs.clone(),
@@ -89,6 +91,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
         Self {
             by_id: Map::new(),
             binds: Map::new(),
+            byref_chain: Map::new(),
             used: Map::new(),
             modules: Set::new(),
             typedefs: Map::new(),
@@ -97,9 +100,10 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
     }
 
     pub(super) fn clear(&mut self) {
-        let Self { by_id, binds, used, modules, typedefs, lambdas } = self;
+        let Self { by_id, binds, byref_chain, used, modules, typedefs, lambdas } = self;
         *by_id = Map::new();
         *binds = Map::new();
+        *byref_chain = Map::new();
         *used = Map::new();
         *modules = Set::new();
         *typedefs = Map::new();
@@ -117,6 +121,7 @@ impl<C: Ctx, E: UserEvent> Env<C, E> {
             typedefs: other.typedefs,
             by_id: self.by_id.clone(),
             lambdas: self.lambdas.clone(),
+            byref_chain: self.byref_chain.clone(),
         }
     }
 
