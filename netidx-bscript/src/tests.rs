@@ -1137,7 +1137,7 @@ run!(byref_pattern, BYREF_PATTERN, |v: Result<&Value>| match v {
 });
 
 #[cfg(test)]
-const CONNECT_DEREF: &str = r#"
+const CONNECT_DEREF0: &str = r#"
 {
   let v = 41;
   let r = &v;
@@ -1147,7 +1147,26 @@ const CONNECT_DEREF: &str = r#"
 "#;
 
 #[cfg(test)]
-run!(connect_deref, CONNECT_DEREF, |v: Result<&Value>| match v {
+run!(connect_deref0, CONNECT_DEREF0, |v: Result<&Value>| match v {
+    Ok(Value::Array(a)) => match &a[..] {
+        [Value::I64(41), Value::I64(42)] => true,
+        _ => false,
+    },
+    _ => false,
+});
+
+#[cfg(test)]
+const CONNECT_DEREF1: &str = r#"
+{
+  let f = |x: &i64| *x <- *x + 1;
+  let v = 41;
+  f(&v);
+  array::group(v, |n, _| n == u64:2)
+}
+"#;
+
+#[cfg(test)]
+run!(connect_deref1, CONNECT_DEREF1, |v: Result<&Value>| match v {
     Ok(Value::Array(a)) => match &a[..] {
         [Value::I64(41), Value::I64(42)] => true,
         _ => false,

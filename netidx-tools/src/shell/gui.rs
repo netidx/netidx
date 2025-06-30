@@ -8,6 +8,7 @@ use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
     expr::ExprId,
     rt::{BSHandle, CompExp, Ref},
+    BindId,
 };
 use ratatui::{
     layout::{Alignment, Rect},
@@ -612,6 +613,7 @@ impl GuiWidget for BlockW {
 }
 
 struct ScrollbarW {
+    bs: BSHandle,
     begin_style: TRef<Option<StyleV>>,
     begin_symbol: TRef<Option<ArcStr>>,
     child: GuiW,
@@ -621,11 +623,18 @@ struct ScrollbarW {
     on_scroll_id: Ref,
     orientation: TRef<Option<ScrollbarOrientationV>>,
     position: TRef<Option<u16>>,
+    position_id: Option<BindId>,
     style: TRef<Option<StyleV>>,
     thumb_style: TRef<Option<StyleV>>,
     thumb_symbol: TRef<Option<ArcStr>>,
     track_style: TRef<Option<StyleV>>,
     track_symbol: TRef<Option<ArcStr>>,
+}
+
+impl ScrollbarW {
+    async fn compile(bs: BSHandle, v: Value) -> Result<GuiW> {
+        todo!()
+    }
 }
 
 fn compile(bs: BSHandle, source: Value) -> CompRes {

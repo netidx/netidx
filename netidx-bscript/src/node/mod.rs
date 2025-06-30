@@ -641,8 +641,8 @@ impl<C: Ctx, E: UserEvent> ConnectDeref<C, E> {
 impl<C: Ctx, E: UserEvent> Update<C, E> for ConnectDeref<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         let mut up = self.rhs.update(ctx, event);
-        if let Some(Value::U64(id)) = dbg!(event.variables.get(&self.src_id))
-            && let Some(target_id) = dbg!(ctx.env.byref_chain.get(&BindId::from(*id)))
+        if let Some(Value::U64(id)) = event.variables.get(&self.src_id)
+            && let Some(target_id) = ctx.env.byref_chain.get(&BindId::from(*id))
         {
             self.target_id = Some(dbg!(*target_id));
             up = true;
