@@ -1150,7 +1150,7 @@ impl<C: Ctx, E: UserEvent> ByRef<C, E> {
     ) -> Result<Node<C, E>> {
         let child = compile(ctx, expr.clone(), scope, top_id)?;
         let id = BindId::new();
-        if let Some(c) = child.as_any().downcast_ref::<Ref>() {
+        if let Some(c) = (&*child as &dyn std::any::Any).downcast_ref::<Ref>() {
             ctx.env.byref_chain.insert_cow(dbg!(id), dbg!(c.id));
         }
         let typ = Type::ByRef(Arc::new(child.typ().clone()));

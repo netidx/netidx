@@ -103,12 +103,9 @@ fn interpolated0() {
 
 #[test]
 fn interpolated1() {
-    let s = r#"{"[true]"}"#;
-    let p = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::StringInterpolate {
-            args: Arc::from_iter([ExprKind::Constant(Value::Bool(true)).to_expr_nopos()]),
-        }
-        .to_expr_nopos()]),
+    let s = r#""[true]""#;
+    let p = ExprKind::StringInterpolate {
+        args: Arc::from_iter([ExprKind::Constant(Value::Bool(true)).to_expr_nopos()]),
     }
     .to_expr_nopos();
     assert_eq!(p, parse_one(s).unwrap());
@@ -768,29 +765,26 @@ fn usemodule() {
 
 #[test]
 fn array() {
-    let exp = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::Array {
-            args: Arc::from_iter([
-                ExprKind::Array {
-                    args: Arc::from_iter([
-                        ExprKind::Constant(Value::from("foo")).to_expr_nopos(),
-                        ExprKind::Constant(Value::from(42)).to_expr_nopos(),
-                    ]),
-                }
-                .to_expr_nopos(),
-                ExprKind::Array {
-                    args: Arc::from_iter([
-                        ExprKind::Constant(Value::from("bar")).to_expr_nopos(),
-                        ExprKind::Constant(Value::from(42)).to_expr_nopos(),
-                    ]),
-                }
-                .to_expr_nopos(),
-            ]),
-        }
-        .to_expr_nopos()]),
+    let exp = ExprKind::Array {
+        args: Arc::from_iter([
+            ExprKind::Array {
+                args: Arc::from_iter([
+                    ExprKind::Constant(Value::from("foo")).to_expr_nopos(),
+                    ExprKind::Constant(Value::from(42)).to_expr_nopos(),
+                ]),
+            }
+            .to_expr_nopos(),
+            ExprKind::Array {
+                args: Arc::from_iter([
+                    ExprKind::Constant(Value::from("bar")).to_expr_nopos(),
+                    ExprKind::Constant(Value::from(42)).to_expr_nopos(),
+                ]),
+            }
+            .to_expr_nopos(),
+        ]),
     }
     .to_expr_nopos();
-    let s = r#"{[["foo", 42], ["bar", 42]]}"#;
+    let s = r#"[["foo", 42], ["bar", 42]]"#;
     assert_eq!(exp, parse_one(s).unwrap());
 }
 
@@ -960,279 +954,232 @@ fn mod_interpolate() {
     let e = ExprKind::Module {
         name: literal!("a"),
         export: false,
-        value: ModuleKind::Inline(Arc::from_iter([ExprKind::Do {
-            exprs: Arc::from_iter([ExprKind::StringInterpolate {
-                args: Arc::from_iter([
-                    ExprKind::Constant(Value::from("foo_")).to_expr_nopos(),
-                    ExprKind::Constant(Value::I64(42)).to_expr_nopos(),
-                ]),
-            }
-            .to_expr_nopos()]),
+        value: ModuleKind::Inline(Arc::from_iter([ExprKind::StringInterpolate {
+            args: Arc::from_iter([
+                ExprKind::Constant(Value::from("foo_")).to_expr_nopos(),
+                ExprKind::Constant(Value::I64(42)).to_expr_nopos(),
+            ]),
         }
         .to_expr_nopos()])),
     }
     .to_expr_nopos();
-    let s = "mod a{{\"foo_[42]\"}}";
-    let pe = parse_one(s).unwrap();
-    assert_eq!(e, pe)
-}
-
-#[test]
-fn multi_line_do() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::Mul {
-            lhs: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
-            rhs: Arc::new(ExprKind::Constant(Value::U64(1)).to_expr_nopos()),
-        }
-        .to_expr_nopos()]),
-    }
-    .to_expr_nopos();
-    let s = "{\n  (a *\n  u64:1\n)}\n";
+    let s = "mod a{\"foo_[42]\"}";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
 #[test]
 fn typed_array() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::Bind(Arc::new(Bind {
-            doc: None,
-            export: false,
-            pattern: StructurePattern::Bind(literal!("f")),
-            typ: None,
-            value: ExprKind::Lambda(Arc::new(Lambda {
-                args: Arc::from_iter([Arg {
-                    labeled: None,
-                    pattern: StructurePattern::Bind("a".into()),
-                    constraint: Some(Type::Array(Arc::new(Type::TVar(
-                        TVar::empty_named("a".into()),
-                    )))),
-                }]),
-                vargs: None,
-                constraints: Arc::from_iter([]),
-                rtype: Some(Type::TVar(TVar::empty_named("a".into()))),
-                body: Either::Left(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
-            }))
-            .to_expr_nopos(),
+    let e = ExprKind::Bind(Arc::new(Bind {
+        doc: None,
+        export: false,
+        pattern: StructurePattern::Bind(literal!("f")),
+        typ: None,
+        value: ExprKind::Lambda(Arc::new(Lambda {
+            args: Arc::from_iter([Arg {
+                labeled: None,
+                pattern: StructurePattern::Bind("a".into()),
+                constraint: Some(Type::Array(Arc::new(Type::TVar(TVar::empty_named(
+                    "a".into(),
+                ))))),
+            }]),
+            vargs: None,
+            constraints: Arc::from_iter([]),
+            rtype: Some(Type::TVar(TVar::empty_named("a".into()))),
+            body: Either::Left(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
         }))
-        .to_expr_nopos()]),
-    }
+        .to_expr_nopos(),
+    }))
     .to_expr_nopos();
-    let s = "{let f = |a: Array<'a>| -> 'a a}";
+    let s = "let f = |a: Array<'a>| -> 'a a";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
 #[test]
 fn labeled_argument_lambda() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::Bind(Arc::new(Bind {
-            doc: None,
-            export: false,
-            pattern: StructurePattern::Bind(literal!("a")),
-            typ: Some(Type::Fn(Arc::new(FnType {
-                args: Arc::from_iter([
-                    FnArgType {
-                        label: Some(("foo".into(), true)),
-                        typ: Type::Ref {
-                            scope: ModPath::root(),
-                            name: ["Number"].into(),
-                            params: Arc::from_iter([]),
-                        },
+    let e = ExprKind::Bind(Arc::new(Bind {
+        doc: None,
+        export: false,
+        pattern: StructurePattern::Bind(literal!("a")),
+        typ: Some(Type::Fn(Arc::new(FnType {
+            args: Arc::from_iter([
+                FnArgType {
+                    label: Some(("foo".into(), true)),
+                    typ: Type::Ref {
+                        scope: ModPath::root(),
+                        name: ["Number"].into(),
+                        params: Arc::from_iter([]),
                     },
-                    FnArgType {
-                        label: Some(("bar".into(), true)),
-                        typ: Type::Primitive(Typ::String.into()),
+                },
+                FnArgType {
+                    label: Some(("bar".into(), true)),
+                    typ: Type::Primitive(Typ::String.into()),
+                },
+                FnArgType {
+                    label: Some(("a".into(), false)),
+                    typ: Type::Ref {
+                        scope: ModPath::root(),
+                        name: ["Any"].into(),
+                        params: Arc::from_iter([]),
                     },
-                    FnArgType {
-                        label: Some(("a".into(), false)),
-                        typ: Type::Ref {
-                            scope: ModPath::root(),
-                            name: ["Any"].into(),
-                            params: Arc::from_iter([]),
-                        },
+                },
+                FnArgType {
+                    label: None,
+                    typ: Type::Ref {
+                        scope: ModPath::root(),
+                        name: ["Any"].into(),
+                        params: Arc::from_iter([]),
                     },
-                    FnArgType {
-                        label: None,
-                        typ: Type::Ref {
-                            scope: ModPath::root(),
-                            name: ["Any"].into(),
-                            params: Arc::from_iter([]),
-                        },
-                    },
-                ]),
-                vargs: None,
-                rtype: Type::Primitive(Typ::String.into()),
-                constraints: Arc::new(RwLock::new(vec![])),
-            }))),
-            value: ExprKind::Lambda(Arc::new(Lambda {
-                args: Arc::from_iter([
-                    Arg {
-                        pattern: StructurePattern::Bind("foo".into()),
-                        labeled: Some(Some(ExprKind::Constant(3.into()).to_expr_nopos())),
-                        constraint: Some(Type::Ref {
-                            scope: ModPath::root(),
-                            name: ["Number"].into(),
-                            params: Arc::from_iter([]),
-                        }),
-                    },
-                    Arg {
-                        pattern: StructurePattern::Bind("bar".into()),
-                        labeled: Some(Some(
-                            ExprKind::Constant("hello".into()).to_expr_nopos(),
-                        )),
-                        constraint: None,
-                    },
-                    Arg {
-                        pattern: StructurePattern::Bind("a".into()),
-                        labeled: Some(None),
-                        constraint: None,
-                    },
-                    Arg {
-                        pattern: StructurePattern::Bind("baz".into()),
-                        labeled: None,
-                        constraint: None,
-                    },
-                ]),
-                vargs: None,
-                rtype: None,
-                constraints: Arc::from_iter([]),
-                body: Either::Right("foo".into()),
-            }))
-            .to_expr_nopos(),
+                },
+            ]),
+            vargs: None,
+            rtype: Type::Primitive(Typ::String.into()),
+            constraints: Arc::new(RwLock::new(vec![])),
+        }))),
+        value: ExprKind::Lambda(Arc::new(Lambda {
+            args: Arc::from_iter([
+                Arg {
+                    pattern: StructurePattern::Bind("foo".into()),
+                    labeled: Some(Some(ExprKind::Constant(3.into()).to_expr_nopos())),
+                    constraint: Some(Type::Ref {
+                        scope: ModPath::root(),
+                        name: ["Number"].into(),
+                        params: Arc::from_iter([]),
+                    }),
+                },
+                Arg {
+                    pattern: StructurePattern::Bind("bar".into()),
+                    labeled: Some(Some(
+                        ExprKind::Constant("hello".into()).to_expr_nopos(),
+                    )),
+                    constraint: None,
+                },
+                Arg {
+                    pattern: StructurePattern::Bind("a".into()),
+                    labeled: Some(None),
+                    constraint: None,
+                },
+                Arg {
+                    pattern: StructurePattern::Bind("baz".into()),
+                    labeled: None,
+                    constraint: None,
+                },
+            ]),
+            vargs: None,
+            rtype: None,
+            constraints: Arc::from_iter([]),
+            body: Either::Right("foo".into()),
         }))
-        .to_expr_nopos()]),
-    }
+        .to_expr_nopos(),
+    }))
     .to_expr_nopos();
-    let s = r#"{
+    let s = r#"
 let a: fn(?#foo: Number, ?#bar: string, #a: Any, Any) -> string =
   |#foo: Number = 3, #bar = "hello", #a, baz| 'foo
-}"#;
+"#;
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
 #[test]
 fn arrayref0() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::ArrayRef {
-            source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
-            i: Arc::new(ExprKind::Constant(Value::I64(3)).to_expr_nopos()),
-        }
-        .to_expr_nopos()]),
+    let e = ExprKind::ArrayRef {
+        source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
+        i: Arc::new(ExprKind::Constant(Value::I64(3)).to_expr_nopos()),
     }
     .to_expr_nopos();
-    let s = "{foo[3]}";
+    let s = "foo[3]";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
 #[test]
 fn arrayref1() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::ArraySlice {
-            source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
-            start: None,
-            end: None,
-        }
-        .to_expr_nopos()]),
+    let e = ExprKind::ArraySlice {
+        source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
+        start: None,
+        end: None,
     }
     .to_expr_nopos();
-    let s = "{foo[..]}";
+    let s = "foo[..]";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
 #[test]
 fn arrayref2() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::ArraySlice {
-            source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
-            start: Some(Arc::new(ExprKind::Constant(Value::U64(1)).to_expr_nopos())),
-            end: None,
-        }
-        .to_expr_nopos()]),
+    let e = ExprKind::ArraySlice {
+        source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
+        start: Some(Arc::new(ExprKind::Constant(Value::U64(1)).to_expr_nopos())),
+        end: None,
     }
     .to_expr_nopos();
-    let s = "{foo[1..]}";
+    let s = "foo[1..]";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
 #[test]
 fn arrayref3() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::ArraySlice {
-            source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
-            start: None,
-            end: Some(Arc::new(ExprKind::Constant(Value::U64(1)).to_expr_nopos())),
-        }
-        .to_expr_nopos()]),
+    let e = ExprKind::ArraySlice {
+        source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
+        start: None,
+        end: Some(Arc::new(ExprKind::Constant(Value::U64(1)).to_expr_nopos())),
     }
     .to_expr_nopos();
-    let s = "{foo[..1]}";
+    let s = "foo[..1]";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
 #[test]
 fn arrayref4() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::ArraySlice {
-            source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
-            start: Some(Arc::new(ExprKind::Constant(Value::U64(1)).to_expr_nopos())),
-            end: Some(Arc::new(ExprKind::Constant(Value::U64(10)).to_expr_nopos())),
-        }
-        .to_expr_nopos()]),
+    let e = ExprKind::ArraySlice {
+        source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
+        start: Some(Arc::new(ExprKind::Constant(Value::U64(1)).to_expr_nopos())),
+        end: Some(Arc::new(ExprKind::Constant(Value::U64(10)).to_expr_nopos())),
     }
     .to_expr_nopos();
-    let s = "{foo[1..10]}";
+    let s = "foo[1..10]";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
 #[test]
 fn qop() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::Qop(Arc::new(
-            ExprKind::ArraySlice {
-                source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
-                start: Some(Arc::new(ExprKind::Constant(Value::U64(1)).to_expr_nopos())),
-                end: Some(Arc::new(ExprKind::Constant(Value::U64(10)).to_expr_nopos())),
-            }
-            .to_expr_nopos(),
-        ))
-        .to_expr_nopos()]),
-    }
+    let e = ExprKind::Qop(Arc::new(
+        ExprKind::ArraySlice {
+            source: Arc::new(ExprKind::Ref { name: ["foo"].into() }.to_expr_nopos()),
+            start: Some(Arc::new(ExprKind::Constant(Value::U64(1)).to_expr_nopos())),
+            end: Some(Arc::new(ExprKind::Constant(Value::U64(10)).to_expr_nopos())),
+        }
+        .to_expr_nopos(),
+    ))
     .to_expr_nopos();
-    let s = "{foo[1..10]?}";
+    let s = "foo[1..10]?";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
 #[test]
 fn tuple0() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::Tuple {
-            args: Arc::from_iter([
-                ExprKind::Constant(Value::I64(42)).to_expr_nopos(),
-                ExprKind::Ref { name: ["a"].into() }.to_expr_nopos(),
-                ExprKind::Apply {
-                    function: Arc::new(
-                        ExprKind::Ref { name: ["f"].into() }.to_expr_nopos(),
-                    ),
-                    args: Arc::from_iter([(
-                        None,
-                        ExprKind::Ref { name: ["b"].into() }.to_expr_nopos(),
-                    )]),
-                }
-                .to_expr_nopos(),
-            ]),
-        }
-        .to_expr_nopos()]),
+    let e = ExprKind::Tuple {
+        args: Arc::from_iter([
+            ExprKind::Constant(Value::I64(42)).to_expr_nopos(),
+            ExprKind::Ref { name: ["a"].into() }.to_expr_nopos(),
+            ExprKind::Apply {
+                function: Arc::new(ExprKind::Ref { name: ["f"].into() }.to_expr_nopos()),
+                args: Arc::from_iter([(
+                    None,
+                    ExprKind::Ref { name: ["b"].into() }.to_expr_nopos(),
+                )]),
+            }
+            .to_expr_nopos(),
+        ]),
     }
     .to_expr_nopos();
-    let s = "{(42, a, f(b))}";
+    let s = "(42, a, f(b))";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
@@ -1354,30 +1301,24 @@ fn bindstruct() {
 
 #[test]
 fn structref() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::StructRef {
-            source: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
-            field: literal!("foo"),
-        }
-        .to_expr_nopos()]),
+    let e = ExprKind::StructRef {
+        source: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
+        field: literal!("foo"),
     }
     .to_expr_nopos();
-    let s = "{ a.foo }";
+    let s = "a.foo";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
 
 #[test]
 fn tupleref() {
-    let e = ExprKind::Do {
-        exprs: Arc::from_iter([ExprKind::TupleRef {
-            source: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
-            field: 2,
-        }
-        .to_expr_nopos()]),
+    let e = ExprKind::TupleRef {
+        source: Arc::new(ExprKind::Ref { name: ["a"].into() }.to_expr_nopos()),
+        field: 2,
     }
     .to_expr_nopos();
-    let s = "{ a.2 }";
+    let s = "a.2";
     let pe = parse_one(s).unwrap();
     assert_eq!(e, pe)
 }
@@ -1385,9 +1326,7 @@ fn tupleref() {
 #[test]
 fn prop0() {
     let s = r#"
-{
   re::split(#pat:r'\\s*', r'foo, bar, baz')
-}
 "#;
     dbg!(parse_one(s).unwrap());
 }

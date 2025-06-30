@@ -34,9 +34,7 @@ run!(filter_err, FILTER_ERR, |v: Result<&Value>| match v {
 
 #[cfg(test)]
 const ERROR: &str = r#"
-{
   error("foo")
-}
 "#;
 
 #[cfg(test)]
@@ -119,9 +117,7 @@ run!(divide, DIVIDE, |v: Result<&Value>| match v {
 
 #[cfg(test)]
 const MIN: &str = r#"
-{
    min(1, 2, 3, 4, 5, 6, 0)
-}
 "#;
 
 #[cfg(test)]
@@ -132,9 +128,7 @@ run!(min, MIN, |v: Result<&Value>| match v {
 
 #[cfg(test)]
 const MAX: &str = r#"
-{
    max(1, 2, 3, 4, 5, 6, 0)
-}
 "#;
 
 #[cfg(test)]
@@ -161,9 +155,7 @@ run!(and, AND, |v: Result<&Value>| match v {
 
 #[cfg(test)]
 const OR: &str = r#"
-{
   or(false, false, true)
-}
 "#;
 
 #[cfg(test)]
@@ -307,9 +299,7 @@ run!(uniq, UNIQ, |v: Result<&Value>| {
 
 #[cfg(test)]
 const SEQ: &str = r#"
-{
   array::group(seq(u64:4), |n, _| n == u64:4)
-}
 "#;
 
 #[cfg(test)]
@@ -480,9 +470,7 @@ run!(array_find_map, ARRAY_FIND_MAP, |v: Result<&Value>| {
 
 #[cfg(test)]
 const ARRAY_ITER: &str = r#"
-{
    filter(array::iter([1, 2, 3, 4]), |x| x == 4)
-}
 "#;
 
 #[cfg(test)]
@@ -531,9 +519,7 @@ run!(array_fold, ARRAY_FOLD, |v: Result<&Value>| {
 
 #[cfg(test)]
 const ARRAY_CONCAT: &str = r#"
-{
   array::concat([1, 2, 3], [4, 5], [6])
-}
 "#;
 
 #[cfg(test)]
@@ -567,9 +553,7 @@ run!(array_len, ARRAY_LEN, |v: Result<&Value>| {
 
 #[cfg(test)]
 const ARRAY_FLATTEN: &str = r#"
-{
   array::flatten([[1, 2, 3], [4, 5], [6]])
-}
 "#;
 
 #[cfg(test)]
@@ -629,9 +613,7 @@ run!(array_sort, ARRAY_SORT, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_STARTS_WITH: &str = r#"
-{
   str::starts_with(#pfx:"foo", "foobarbaz")
-}
 "#;
 
 #[cfg(test)]
@@ -644,9 +626,7 @@ run!(str_starts_with, STR_STARTS_WITH, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_ENDS_WITH: &str = r#"
-{
   str::ends_with(#sfx:"baz", "foobarbaz")
-}
 "#;
 
 #[cfg(test)]
@@ -659,9 +639,7 @@ run!(str_ends_with, STR_ENDS_WITH, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_CONTAINS: &str = r#"
-{
   str::contains(#part:"bar", "foobarbaz")
-}
 "#;
 
 #[cfg(test)]
@@ -674,9 +652,7 @@ run!(str_contains, STR_CONTAINS, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_STRIP_PREFIX: &str = r#"
-{
   str::strip_prefix(#pfx:"foo", "foobarbaz")
-}
 "#;
 
 #[cfg(test)]
@@ -689,9 +665,7 @@ run!(str_strip_prefix, STR_STRIP_PREFIX, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_STRIP_SUFFIX: &str = r#"
-{
   str::strip_suffix(#sfx:"baz", "foobarbaz")
-}
 "#;
 
 #[cfg(test)]
@@ -704,9 +678,7 @@ run!(str_strip_suffix, STR_STRIP_SUFFIX, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_TRIM: &str = r#"
-{
   str::trim(" foobarbaz ")
-}
 "#;
 
 #[cfg(test)]
@@ -719,9 +691,7 @@ run!(str_trim, STR_TRIM, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_TRIM_START: &str = r#"
-{
   str::trim_start(" foobarbaz ")
-}
 "#;
 
 #[cfg(test)]
@@ -734,9 +704,7 @@ run!(str_trim_start, STR_TRIM_START, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_TRIM_END: &str = r#"
-{
   str::trim_end(" foobarbaz ")
-}
 "#;
 
 #[cfg(test)]
@@ -749,9 +717,7 @@ run!(str_trim_end, STR_TRIM_END, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_REPLACE: &str = r#"
-{
   str::replace(#pat:"foo", #rep:"baz", "foobarbazfoo")
-}
 "#;
 
 #[cfg(test)]
@@ -764,9 +730,7 @@ run!(str_replace, STR_REPLACE, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_DIRNAME: &str = r#"
-{
   str::dirname("/foo/bar/baz")
-}
 "#;
 
 #[cfg(test)]
@@ -779,9 +743,7 @@ run!(str_dirname, STR_DIRNAME, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_BASENAME: &str = r#"
-{
   str::basename("/foo/bar/baz")
-}
 "#;
 
 #[cfg(test)]
@@ -794,9 +756,7 @@ run!(str_basename, STR_BASENAME, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_JOIN: &str = r#"
-{
   str::join(#sep:"/", "/foo", "bar", ["baz", "zam"])
-}
 "#;
 
 #[cfg(test)]
@@ -809,9 +769,7 @@ run!(str_join, STR_JOIN, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_CONCAT: &str = r#"
-{
   str::concat("foo", "bar", ["baz", "zam"])
-}
 "#;
 
 #[cfg(test)]
@@ -824,9 +782,7 @@ run!(str_concat, STR_CONCAT, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_ESCAPE: &str = r#"
-{
   str::escape("/foo/bar")
-}
 "#;
 
 #[cfg(test)]
@@ -839,9 +795,7 @@ run!(str_escape, STR_ESCAPE, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_UNESCAPE: &str = r#"
-{
   str::unescape("\\/foo\\/bar")
-}
 "#;
 
 #[cfg(test)]
@@ -875,9 +829,7 @@ run!(str_split, STR_SPLIT, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_SPLIT_ONCE: &str = r#"
-{
   str::split_once(#pat:", ", "foo, bar, baz")
-}
 "#;
 
 #[cfg(test)]
@@ -893,9 +845,7 @@ run!(str_split_once, STR_SPLIT_ONCE, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_RSPLIT_ONCE: &str = r#"
-{
   str::rsplit_once(#pat:", ", "foo, bar, baz")
-}
 "#;
 
 #[cfg(test)]
@@ -911,9 +861,7 @@ run!(str_rsplit_once, STR_RSPLIT_ONCE, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_TO_LOWER: &str = r#"
-{
   str::to_lower("FOO")
-}
 "#;
 
 #[cfg(test)]
@@ -926,9 +874,7 @@ run!(str_to_lower, STR_TO_LOWER, |v: Result<&Value>| {
 
 #[cfg(test)]
 const STR_TO_UPPER: &str = r#"
-{
   str::to_upper("foo")
-}
 "#;
 
 #[cfg(test)]
@@ -941,9 +887,7 @@ run!(str_to_upper, STR_TO_UPPER, |v: Result<&Value>| {
 
 #[cfg(test)]
 const RE_IS_MATCH: &str = r#"
-{
   re::is_match(#pat:r'[\\[\\]0-9]+', r'foo[0]')
-}
 "#;
 
 #[cfg(test)]
@@ -956,9 +900,7 @@ run!(re_is_match, RE_IS_MATCH, |v: Result<&Value>| {
 
 #[cfg(test)]
 const RE_FIND: &str = r#"
-{
   re::find(#pat:r'foo', r'foobarfoobazfoo')
-}
 "#;
 
 #[cfg(test)]
@@ -976,9 +918,7 @@ run!(re_find, RE_FIND, |v: Result<&Value>| {
 
 #[cfg(test)]
 const RE_CAPTURES: &str = r#"
-{
   re::captures(#pat:r'(fo)ob', r'foobarfoobazfoo')
-}
 "#;
 
 #[cfg(test)]
@@ -1000,9 +940,7 @@ run!(re_captures, RE_CAPTURES, |v: Result<&Value>| {
 
 #[cfg(test)]
 const RE_SPLIT: &str = r#"
-{
   re::split(#pat:r',\\s*', r'foo, bar, baz')
-}
 "#;
 
 #[cfg(test)]
@@ -1020,9 +958,7 @@ run!(re_split, RE_SPLIT, |v: Result<&Value>| {
 
 #[cfg(test)]
 const RE_SPLITN: &str = r#"
-{
   re::splitn(#pat:r',\\s*', #limit:u64:2, r'foo, bar, baz')
-}
 "#;
 
 #[cfg(test)]
@@ -1158,9 +1094,7 @@ run!(net_rpc, NET_RPC, |v: Result<&Value>| {
 
 #[cfg(test)]
 const RAND: &str = r#"
-{
   rand::rand(#trigger:null)
-}
 "#;
 
 #[cfg(test)]
@@ -1173,9 +1107,7 @@ run!(rand, RAND, |v: Result<&Value>| {
 
 #[cfg(test)]
 const RAND_PICK: &str = r#"
-{
   rand::pick(["Chicken is coming", "Grape", "Pilot!"])
-}
 "#;
 
 #[cfg(test)]
@@ -1188,9 +1120,7 @@ run!(rand_pick, RAND_PICK, |v: Result<&Value>| {
 
 #[cfg(test)]
 const RAND_SHUFFLE: &str = r#"
-{
   rand::shuffle(["Chicken is coming", "Grape", "Pilot!"])
-}
 "#;
 
 #[cfg(test)]
