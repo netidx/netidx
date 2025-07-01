@@ -644,7 +644,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ConnectDeref<C, E> {
         if let Some(Value::U64(id)) = event.variables.get(&self.src_id)
             && let Some(target_id) = ctx.env.byref_chain.get(&BindId::from(*id))
         {
-            self.target_id = Some(dbg!(*target_id));
+            self.target_id = Some(*target_id);
             up = true;
         }
         if up
@@ -704,7 +704,7 @@ impl<C: Ctx, E: UserEvent> ByRef<C, E> {
         let child = compile(ctx, expr.clone(), scope, top_id)?;
         let id = BindId::new();
         if let Some(c) = (&*child as &dyn std::any::Any).downcast_ref::<Ref>() {
-            ctx.env.byref_chain.insert_cow(dbg!(id), dbg!(c.id));
+            ctx.env.byref_chain.insert_cow(id, c.id);
         }
         let typ = Type::ByRef(Arc::new(child.typ().clone()));
         Ok(Box::new(Self { spec, typ, child, id }))

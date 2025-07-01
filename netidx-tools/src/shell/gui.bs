@@ -194,6 +194,7 @@ mod gui {
     begin_style: &[Style, null],
     begin_symbol: &[string, null],
     child: &Gui,
+    content_length: &[u32, null],
     end_style: &[Style, null],
     end_symbol: &[string, null],
     orientation: &[ScrollbarOrientation, null],
@@ -203,27 +204,29 @@ mod gui {
     thumb_symbol: &[string, null],
     track_style: &[Style, null],
     track_symbol: &[string, null],
+    viewport_length: &[u32, null]
   };
 
   let scrollbar = |
     #begin_style: &[Style, null] = &null,
     #begin_symbol: &[string, null] = &null,
+    #content_length: &[u32, null] = &null,
     #end_style: &[Style, null] = &null,
     #end_symbol: &[string, null] = &null,
-    #orientation: &[ScrollbarOrientation, null] = null,
-    #position: &[u32, null] = null,
-    #style: &[Style, null] = null,
-    #thumb_style: &[Style, null] = null,
-    #thumb_symbol: &[string, null] = null,
-    #track_style: &[Style, null] = null,
-    #track_symbol: &[string, null] = null,
+    #orientation: &[ScrollbarOrientation, null] = &null,
+    #position: &[u32, null] = &null,
+    #style: &[Style, null] = &null,
+    #thumb_style: &[Style, null] = &null,
+    #thumb_symbol: &[string, null] = &null,
+    #track_style: &[Style, null] = &null,
+    #track_symbol: &[string, null] = &null,
+    #viewport_length: &[u32, null] = &null,
     child: &Gui
   | -> Gui `Scrollbar({
     begin_style,
     begin_symbol,
     end_style,
     end_symbol,
-    on_scroll,
     orientation,
     position,
     style,
@@ -231,6 +234,8 @@ mod gui {
     thumb_symbol,
     track_style,
     track_symbol,
+    content_length,
+    viewport_length,
     child
   })
 }

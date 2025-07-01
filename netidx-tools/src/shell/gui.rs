@@ -8,15 +8,14 @@ use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
     expr::ExprId,
     rt::{BSHandle, CompExp, Ref},
-    BindId,
 };
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
-        block::Position, Block, BorderType, Borders, Padding, Paragraph,
-        ScrollbarOrientation, Wrap,
+        block::Position, Block, BorderType, Borders, Padding, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
     },
     Frame,
 };
@@ -161,7 +160,7 @@ impl FromValue for LinesV {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct ScrollV((u16, u16));
 
 impl FromValue for ScrollV {
@@ -297,6 +296,27 @@ impl<T: FromValue> TRef<T> {
     }
 }
 
+impl<T: Into<Value> + FromValue + Clone> TRef<T> {
+    #[allow(dead_code)]
+    fn set(&mut self, t: T) -> Result<()> {
+        self.t = Some(t.clone());
+        self.r.set(t.into())
+    }
+
+    #[allow(dead_code)]
+    fn set_deref(&mut self, t: T) -> Result<()> {
+        self.t = Some(t.clone());
+        self.r.set_deref(t.into())
+    }
+}
+
+/*
+    // in chars
+    fn hlen(&self) -> usize;
+
+    // in lines or items
+    fn vlen(&self) -> usize;
+*/
 #[async_trait]
 trait GuiWidget {
     async fn handle_event(&mut self, e: Event) -> Result<()>;
@@ -403,6 +423,24 @@ impl ParagraphW {
     }
 }
 
+/*
+    fn hlen(&self) -> usize {
+        self.lines
+            .t
+            .as_ref()
+            .and_then(|l| {
+                l.0.iter()
+                    .map(|l| l.spans.iter().fold(0, |acc, s| acc + s.content.len()))
+                    .max()
+            })
+            .unwrap_or(0)
+    }
+
+    fn vlen(&self) -> usize {
+        self.lines.t.as_ref().map(|l| l.0.len()).unwrap_or(0)
+    }
+*/
+
 #[async_trait]
 impl GuiWidget for ParagraphW {
     fn draw(&mut self, frame: &mut Frame, rect: Rect) -> Result<()> {
@@ -430,11 +468,11 @@ impl GuiWidget for ParagraphW {
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
         let Self { alignment, lines, scroll, style, trim } = self;
-        let _ = alignment.update(id, &v).context("paragraph update alignment")?;
-        let _ = lines.update(id, &v).context("paragraph update lines")?;
-        let _ = scroll.update(id, &v).context("paragraph update scroll")?;
-        let _ = style.update(id, &v).context("paragraph update style")?;
-        let _ = trim.update(id, &v).context("paragraph update trim")?;
+        alignment.update(id, &v).context("paragraph update alignment")?;
+        lines.update(id, &v).context("paragraph update lines")?;
+        scroll.update(id, &v).context("paragraph update scroll")?;
+        style.update(id, &v).context("paragraph update style")?;
+        trim.update(id, &v).context("paragraph update trim")?;
         Ok(())
     }
 }
@@ -535,17 +573,17 @@ impl GuiWidget for BlockW {
             title_style,
             title_top,
         } = self;
-        let _ = border.update(id, &v).context("block border update")?;
-        let _ = border_style.update(id, &v).context("block border_style update")?;
-        let _ = border_type.update(id, &v).context("block border_type update")?;
-        let _ = padding.update(id, &v).context("block padding update")?;
-        let _ = style.update(id, &v).context("block style update")?;
-        let _ = title.update(id, &v).context("block title update")?;
-        let _ = title_alignment.update(id, &v).context("block title_alignment update")?;
-        let _ = title_bottom.update(id, &v).context("block title_bottom update")?;
-        let _ = title_position.update(id, &v).context("block title_position update")?;
-        let _ = title_style.update(id, &v).context("block title_style update")?;
-        let _ = title_top.update(id, &v).context("block title_top update")?;
+        border.update(id, &v).context("block border update")?;
+        border_style.update(id, &v).context("block border_style update")?;
+        border_type.update(id, &v).context("block border_type update")?;
+        padding.update(id, &v).context("block padding update")?;
+        style.update(id, &v).context("block style update")?;
+        title.update(id, &v).context("block title update")?;
+        title_alignment.update(id, &v).context("block title_alignment update")?;
+        title_bottom.update(id, &v).context("block title_bottom update")?;
+        title_position.update(id, &v).context("block title_position update")?;
+        title_style.update(id, &v).context("block title_style update")?;
+        title_top.update(id, &v).context("block title_top update")?;
         if id == child_ref.id {
             *child =
                 compile(bs.clone(), v.clone()).await.context("block child compile")?;
@@ -618,22 +656,253 @@ struct ScrollbarW {
     begin_symbol: TRef<Option<ArcStr>>,
     child: GuiW,
     child_ref: Ref,
+    content_length: TRef<Option<usize>>,
+    viewport_length: TRef<Option<usize>>,
     end_style: TRef<Option<StyleV>>,
     end_symbol: TRef<Option<ArcStr>>,
-    on_scroll_id: Ref,
     orientation: TRef<Option<ScrollbarOrientationV>>,
     position: TRef<Option<u16>>,
-    position_id: Option<BindId>,
     style: TRef<Option<StyleV>>,
     thumb_style: TRef<Option<StyleV>>,
     thumb_symbol: TRef<Option<ArcStr>>,
     track_style: TRef<Option<StyleV>>,
     track_symbol: TRef<Option<ArcStr>>,
+    state: ScrollbarState,
 }
 
 impl ScrollbarW {
     async fn compile(bs: BSHandle, v: Value) -> Result<GuiW> {
-        todo!()
+        let [(_, begin_style), (_, begin_symbol), (_, child), (_, content_length), (_, end_style), (_, end_symbol), (_, orientation), (_, position), (_, style), (_, thumb_style), (_, thumb_symbol), (_, track_style), (_, track_symbol), (_, viewport_length)] =
+            v.cast_to::<[(ArcStr, u64); 14]>().context("scrollbar flds")?;
+        let begin_style = TRef::<Option<StyleV>>::new(bs.compile_ref(begin_style).await?)
+            .context("scrollbar tref begin_style")?;
+        let begin_symbol =
+            TRef::<Option<ArcStr>>::new(bs.compile_ref(begin_symbol).await?)
+                .context("scrollbar tref begin_symbol")?;
+        let mut child_ref = bs.compile_ref(child).await?;
+        let child = match child_ref.last.take() {
+            Some(v) => compile(bs.clone(), v).await?,
+            None => Box::new(EmptyW),
+        };
+        let content_length =
+            TRef::<Option<usize>>::new(bs.compile_ref(content_length).await?)
+                .context("scrollbar tref content_length")?;
+        let end_style = TRef::<Option<StyleV>>::new(bs.compile_ref(end_style).await?)
+            .context("scrollbar tref end_style")?;
+        let end_symbol = TRef::<Option<ArcStr>>::new(bs.compile_ref(end_symbol).await?)
+            .context("scrollbar tref end_symbol")?;
+        let orientation = TRef::<Option<ScrollbarOrientationV>>::new(
+            bs.compile_ref(orientation).await?,
+        )
+        .context("scrollbar tref orientation")?;
+        let position = TRef::<Option<u16>>::new(bs.compile_ref(position).await?)
+            .context("scrollbar tref position")?;
+        let style = TRef::<Option<StyleV>>::new(bs.compile_ref(style).await?)
+            .context("scrollbar tref style")?;
+        let thumb_style = TRef::<Option<StyleV>>::new(bs.compile_ref(thumb_style).await?)
+            .context("scrollbar tref thumb_style")?;
+        let thumb_symbol =
+            TRef::<Option<ArcStr>>::new(bs.compile_ref(thumb_symbol).await?)
+                .context("scrollbar tref thumb_symbol")?;
+        let track_style = TRef::<Option<StyleV>>::new(bs.compile_ref(track_style).await?)
+            .context("scrollbar tref track_style")?;
+        let track_symbol =
+            TRef::<Option<ArcStr>>::new(bs.compile_ref(track_symbol).await?)
+                .context("scrollbar tref track_symbol")?;
+        let viewport_length =
+            TRef::<Option<usize>>::new(bs.compile_ref(viewport_length).await?)
+                .context("scrollbar tref viewport_length")?;
+        let state = ScrollbarState::new(content_length.t.and_then(|t| t).unwrap_or(50));
+        Ok(Box::new(Self {
+            begin_style,
+            begin_symbol,
+            child_ref,
+            child,
+            content_length,
+            end_style,
+            end_symbol,
+            orientation,
+            position,
+            style,
+            thumb_symbol,
+            thumb_style,
+            bs,
+            track_style,
+            track_symbol,
+            viewport_length,
+            state,
+        }))
+    }
+}
+
+#[async_trait]
+impl GuiWidget for ScrollbarW {
+    async fn handle_event(&mut self, e: Event) -> Result<()> {
+        enum Act {
+            Inc,
+            Dec,
+        }
+        if let Some(e) = e.as_key_event() {
+            let o = self
+                .orientation
+                .t
+                .as_ref()
+                .and_then(|o| o.as_ref().map(|o| o.0.clone()))
+                .unwrap_or(ScrollbarOrientation::VerticalRight);
+            let action = match o {
+                ScrollbarOrientation::HorizontalBottom
+                | ScrollbarOrientation::HorizontalTop => match e.code {
+                    KeyCode::Left => Some(Act::Dec),
+                    KeyCode::Right => Some(Act::Inc),
+                    _ => None,
+                },
+                ScrollbarOrientation::VerticalLeft
+                | ScrollbarOrientation::VerticalRight => match e.code {
+                    KeyCode::Up | KeyCode::PageUp => Some(Act::Dec),
+                    KeyCode::Down | KeyCode::PageDown => Some(Act::Inc),
+                    _ => None,
+                },
+            };
+            let pos = self.position.t.and_then(|v| v).unwrap_or(0);
+            match action {
+                None => (),
+                Some(Act::Inc) if pos < u16::MAX => {
+                    self.position.set_deref(Some(pos + 1))?
+                }
+                Some(Act::Dec) if pos > 0 => self.position.set_deref(Some(pos - 1))?,
+                Some(Act::Inc) | Some(Act::Dec) => (),
+            }
+        }
+        self.child.handle_event(e).await
+    }
+
+    async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
+        let Self {
+            bs,
+            begin_style,
+            begin_symbol,
+            child,
+            child_ref,
+            content_length,
+            end_style,
+            end_symbol,
+            orientation,
+            position,
+            style,
+            thumb_style,
+            thumb_symbol,
+            track_style,
+            track_symbol,
+            viewport_length,
+            state: _,
+        } = self;
+        begin_style.update(id, &v).context("scrollbar update begin_style")?;
+        begin_symbol.update(id, &v).context("scrollbar update begin_symbol")?;
+        if child_ref.id == id {
+            *child = compile(bs.clone(), v.clone()).await?;
+        }
+        end_style.update(id, &v).context("scrollbar update end_style")?;
+        end_symbol.update(id, &v).context("scrollbar update end_symbol")?;
+        orientation.update(id, &v).context("scrollbar update orientation")?;
+        position.update(id, &v).context("scrollbar update position")?;
+        style.update(id, &v).context("scrollbar update style")?;
+        thumb_style.update(id, &v).context("scrollbar update thumb_style")?;
+        thumb_symbol.update(id, &v).context("scrollbar update thumb_symbol")?;
+        track_style.update(id, &v).context("scrollbar update track_style")?;
+        track_symbol.update(id, &v).context("scrollbar update track_symbol")?;
+        content_length.update(id, &v).context("scrollbar update content_length")?;
+        viewport_length.update(id, &v).context("scrollbar update viewport_length")?;
+        child.handle_update(id, v).await
+    }
+
+    fn draw(&mut self, frame: &mut Frame, mut rect: Rect) -> Result<()> {
+        let Self {
+            bs: _,
+            begin_style,
+            begin_symbol,
+            child,
+            child_ref: _,
+            content_length,
+            end_style,
+            end_symbol,
+            orientation,
+            position,
+            style,
+            thumb_style,
+            thumb_symbol,
+            track_style,
+            track_symbol,
+            viewport_length,
+            state,
+        } = self;
+        let orientation = orientation
+            .t
+            .as_ref()
+            .and_then(|t| t.as_ref().map(|t| t.0.clone()))
+            .unwrap_or(ScrollbarOrientation::VerticalRight);
+        let mut bar = Scrollbar::new(orientation.clone());
+        if let Some(Some(s)) = begin_style.t {
+            bar = bar.begin_style(s.0);
+        }
+        if let Some(s) = &begin_symbol.t {
+            bar = bar.begin_symbol(s.as_ref().map(|s| s.as_str()));
+        }
+        if let Some(Some(s)) = end_style.t {
+            bar = bar.end_style(s.0);
+        }
+        if let Some(s) = &end_symbol.t {
+            bar = bar.end_symbol(s.as_ref().map(|s| s.as_str()));
+        }
+        if let Some(Some(p)) = position.t {
+            *state = state.position(p as usize);
+        }
+        if let Some(Some(s)) = style.t {
+            bar = bar.style(s.0);
+        }
+        if let Some(Some(s)) = thumb_style.t {
+            bar = bar.thumb_style(s.0);
+        }
+        if let Some(Some(s)) = &thumb_symbol.t {
+            bar = bar.thumb_symbol(s);
+        }
+        if let Some(Some(s)) = track_style.t {
+            bar = bar.track_style(s.0);
+        }
+        if let Some(s) = &track_symbol.t {
+            bar = bar.track_symbol(s.as_ref().map(|s| s.as_str()));
+        }
+        if let Some(Some(l)) = content_length.t.take() {
+            *state = state.content_length(l);
+        }
+        if let Some(Some(l)) = viewport_length.t.take() {
+            *state = state.viewport_content_length(l);
+        }
+        frame.render_stateful_widget(bar, rect, state);
+        match orientation {
+            ScrollbarOrientation::HorizontalBottom => {
+                if rect.height > 0 {
+                    rect.height -= 1
+                }
+            }
+            ScrollbarOrientation::HorizontalTop => {
+                if rect.height > 0 && rect.y < u16::MAX {
+                    rect.height -= 1;
+                    rect.y += 1
+                }
+            }
+            ScrollbarOrientation::VerticalLeft => {
+                if rect.width > 0 && rect.x < u16::MAX {
+                    rect.width -= 1;
+                    rect.x += 1
+                }
+            }
+            ScrollbarOrientation::VerticalRight => {
+                if rect.width > 0 {
+                    rect.width -= 1
+                }
+            }
+        };
+        child.draw(frame, rect)
     }
 }
 
@@ -643,6 +912,7 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) if &s == "Text" => TextW::compile(bs, v).await,
             (s, v) if &s == "Paragraph" => ParagraphW::compile(bs, v).await,
             (s, v) if &s == "Block" => BlockW::compile(bs, v).await,
+            (s, v) if &s == "Scrollbar" => ScrollbarW::compile(bs, v).await,
             (s, v) => bail!("invalid widget type `{s}({v})"),
         }
     })

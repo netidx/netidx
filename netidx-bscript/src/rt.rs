@@ -468,12 +468,27 @@ pub enum RtEvent {
 pub struct Ref {
     pub id: ExprId,
     pub last: Option<Value>,
+    pub bid: BindId,
+    pub target_bid: Option<BindId>,
     rt: BSHandle,
 }
 
 impl Drop for Ref {
     fn drop(&mut self) {
         let _ = self.rt.0.unbounded_send(ToRt::Delete { id: self.id });
+    }
+}
+
+impl Ref {
+    pub fn set(&self, v: Value) -> Result<()> {
+        self.rt.set(self.bid, v)
+    }
+
+    pub fn set_deref(&self, v: Value) -> Result<()> {
+        if let Some(id) = self.target_bid {
+            self.rt.set(id, v)?
+        }
+        Ok(())
     }
 }
 
@@ -858,7 +873,14 @@ impl BS {
         let typ = Type::Primitive(Typ::any());
         let n = genn::reference(&mut self.ctx, id, typ, eid);
         self.nodes.insert(eid, n);
-        Ok(Ref { id: eid, last: self.ctx.cached.get(&id).cloned(), rt })
+        let target_bid = self.ctx.env.byref_chain.get(&id).copied();
+        Ok(Ref {
+            id: eid,
+            bid: id,
+            target_bid,
+            last: self.ctx.cached.get(&id).cloned(),
+            rt,
+        })
     }
 
     fn call_callable(
