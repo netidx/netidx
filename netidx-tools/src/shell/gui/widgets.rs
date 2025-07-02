@@ -8,6 +8,7 @@ use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::{Event, KeyCode};
 use futures::future;
+use log::debug;
 use netidx::publisher::Value;
 use netidx_bscript::{
     expr::ExprId,
@@ -154,7 +155,7 @@ impl GuiWidget for ParagraphW {
         let Self { alignment, lines, scroll, style, trim } = self;
         alignment.update(id, &v).context("paragraph update alignment")?;
         lines.update(id, &v).context("paragraph update lines")?;
-        scroll.update(id, &v).context("paragraph update scroll")?;
+        debug!("scroll: {:?}", scroll.update(id, &v).context("paragraph update scroll")?);
         style.update(id, &v).context("paragraph update style")?;
         trim.update(id, &v).context("paragraph update trim")?;
         Ok(())
@@ -741,6 +742,9 @@ impl GuiWidget for LayoutW {
         vertical_margin.update(id, &v).context("layout vertical_margin update")?;
         if children_ref.id == id {
             self.set_children(v.clone()).await?;
+        }
+        for (_, c) in &mut self.children {
+            c.handle_update(id, v.clone()).await?
         }
         Ok(())
     }

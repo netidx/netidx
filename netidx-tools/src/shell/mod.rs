@@ -180,7 +180,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     let bs = bs_init(cfg, auth, &p).await?;
     let script = p.file.is_some();
     let mut input = InputReader::new();
-    let (tx, mut from_bs) = mpsc::channel(3);
+    let (tx, mut from_bs) = mpsc::channel(100);
     bs.subscribe(tx).context("subscribing to rt output")?;
     let mut output = Output::None;
     let mut newenv = None;
