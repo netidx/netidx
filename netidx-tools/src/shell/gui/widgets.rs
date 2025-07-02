@@ -155,7 +155,7 @@ impl GuiWidget for ParagraphW {
         let Self { alignment, lines, scroll, style, trim } = self;
         alignment.update(id, &v).context("paragraph update alignment")?;
         lines.update(id, &v).context("paragraph update lines")?;
-        debug!("scroll: {:?}", scroll.update(id, &v).context("paragraph update scroll")?);
+        scroll.update(id, &v).context("paragraph update scroll")?;
         style.update(id, &v).context("paragraph update style")?;
         trim.update(id, &v).context("paragraph update trim")?;
         Ok(())
