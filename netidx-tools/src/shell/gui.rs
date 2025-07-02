@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use futures::{channel::mpsc, future, SinkExt, StreamExt};
 use log::error;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
@@ -10,7 +10,7 @@ use netidx_bscript::{
     rt::{BSHandle, CompExp, Ref},
 };
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::{Alignment, Constraint, Direction, Flex, Layout, Rect, Spacing},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
@@ -22,7 +22,7 @@ use ratatui::{
 use reedline::Signal;
 use smallvec::SmallVec;
 use std::{borrow::Cow, future::Future, mem, pin::Pin};
-use tokio::{select, sync::oneshot, task};
+use tokio::{join, select, sync::oneshot, task, try_join};
 
 #[derive(Clone, Copy)]
 struct AlignmentV(Alignment);
@@ -239,21 +239,6 @@ impl FromValue for PositionV {
     }
 }
 
-fn into_borrowed_line<'a>(line: &'a Line<'static>) -> Line<'a> {
-    let spans = line
-        .spans
-        .iter()
-        .map(|s| {
-            let content = match &s.content {
-                Cow::Owned(s) => Cow::Borrowed(s.as_str()),
-                Cow::Borrowed(s) => Cow::Borrowed(*s),
-            };
-            Span { content, style: s.style }
-        })
-        .collect();
-    Line { alignment: line.alignment, style: line.style, spans }
-}
-
 #[derive(Clone)]
 struct ScrollbarOrientationV(ScrollbarOrientation);
 
@@ -268,6 +253,88 @@ impl FromValue for ScrollbarOrientationV {
         };
         Ok(Self(v))
     }
+}
+
+#[derive(Clone, Copy)]
+struct ConstraintV(Constraint);
+
+impl FromValue for ConstraintV {
+    fn from_value(v: Value) -> Result<Self> {
+        let t = match &v.cast_to::<SmallVec<[Value; 3]>>()?[..] {
+            [Value::String(s), Value::U32(p)] => match &**s {
+                "Min" => Constraint::Min(*p as u16),
+                "Max" => Constraint::Max(*p as u16),
+                "Percentage" => Constraint::Percentage(*p as u16),
+                "Fill" => Constraint::Fill(*p as u16),
+                s => bail!("invalid constraint tag {s}"),
+            },
+            [Value::String(s), Value::U32(n), Value::U32(d)] if &**s == "Ratio" => {
+                Constraint::Ratio(*n, *d)
+            }
+            v => bail!("invalid constraint {v:?}"),
+        };
+        Ok(Self(t))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DirectionV(Direction);
+
+impl FromValue for DirectionV {
+    fn from_value(v: Value) -> Result<Self> {
+        let t = match &*v.cast_to::<ArcStr>()? {
+            "Horizontal" => Direction::Horizontal,
+            "Vertical" => Direction::Vertical,
+            s => bail!("invalid direction tag {s}"),
+        };
+        Ok(Self(t))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FlexV(Flex);
+
+impl FromValue for FlexV {
+    fn from_value(v: Value) -> Result<Self> {
+        let t = match &*v.cast_to::<ArcStr>()? {
+            "Legacy" => Flex::Legacy,
+            "Start" => Flex::Start,
+            "End" => Flex::End,
+            "Center" => Flex::Center,
+            "SpaceBetween" => Flex::SpaceBetween,
+            "SpaceAround" => Flex::SpaceAround,
+        };
+        Ok(Self(t))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SpacingV(Spacing);
+
+impl FromValue for SpacingV {
+    fn from_value(v: Value) -> Result<Self> {
+        let t = match v.cast_to::<(ArcStr, u16)>()? {
+            (s, p) if &*s == "Space" => Spacing::Space(p),
+            (s, p) if &*s == "Overlap" => Spacing::Overlap(p),
+            (s, _) => bail!("invalid spacing tag {s}"),
+        };
+        Ok(Self(t))
+    }
+}
+
+fn into_borrowed_line<'a>(line: &'a Line<'static>) -> Line<'a> {
+    let spans = line
+        .spans
+        .iter()
+        .map(|s| {
+            let content = match &s.content {
+                Cow::Owned(s) => Cow::Borrowed(s.as_str()),
+                Cow::Borrowed(s) => Cow::Borrowed(*s),
+            };
+            Span { content, style: s.style }
+        })
+        .collect();
+    Line { alignment: line.alignment, style: line.style, spans }
 }
 
 fn into_borrowed_lines<'a>(lines: &'a [Line<'static>]) -> Vec<Line<'a>> {
@@ -310,13 +377,6 @@ impl<T: Into<Value> + FromValue + Clone> TRef<T> {
     }
 }
 
-/*
-    // in chars
-    fn hlen(&self) -> usize;
-
-    // in lines or items
-    fn vlen(&self) -> usize;
-*/
 #[async_trait]
 trait GuiWidget {
     async fn handle_event(&mut self, e: Event) -> Result<()>;
@@ -355,12 +415,15 @@ impl TextW {
     async fn compile(bs: BSHandle, source: Value) -> Result<GuiW> {
         let [(_, alignment), (_, lines), (_, style)] =
             source.cast_to::<[(ArcStr, u64); 3]>().context("text flds")?;
-        let alignment = TRef::<Option<AlignmentV>>::new(bs.compile_ref(alignment).await?)
-            .context("text tref alignment")?;
-        let mut lines = TRef::<LinesV>::new(bs.compile_ref(lines).await?)
-            .context("text tref lines")?;
-        let style = TRef::<StyleV>::new(bs.compile_ref(style).await?)
-            .context("text tref style")?;
+        let (alignment, lines, style) = try_join! {
+            bs.compile_ref(alignment),
+            bs.compile_ref(lines),
+            bs.compile_ref(style)
+        }?;
+        let alignment =
+            TRef::<Option<AlignmentV>>::new(alignment).context("text tref alignment")?;
+        let mut lines = TRef::<LinesV>::new(lines).context("text tref lines")?;
+        let style = TRef::<StyleV>::new(style).context("text tref style")?;
         let text = Text {
             alignment: alignment.t.as_ref().and_then(|a| a.map(|a| a.0)),
             style: style.t.as_ref().map(|s| s.0).unwrap_or(Style::new()),
@@ -408,38 +471,22 @@ impl ParagraphW {
     async fn compile(bs: BSHandle, source: Value) -> Result<GuiW> {
         let [(_, alignment), (_, lines), (_, scroll), (_, style), (_, trim)] =
             source.cast_to::<[(ArcStr, u64); 5]>().context("paragraph flds")?;
+        let (alignment, lines, scroll, style, trim) = try_join! {
+            bs.compile_ref(alignment),
+            bs.compile_ref(lines),
+            bs.compile_ref(scroll),
+            bs.compile_ref(style),
+            bs.compile_ref(trim)
+        }?;
         let alignment: TRef<Option<AlignmentV>> =
-            TRef::new(bs.compile_ref(alignment).await?)
-                .context("paragraph tref alignment")?;
-        let lines: TRef<LinesV> =
-            TRef::new(bs.compile_ref(lines).await?).context("paragraph tref lines")?;
-        let scroll: TRef<ScrollV> =
-            TRef::new(bs.compile_ref(scroll).await?).context("paragraph tref scroll")?;
-        let style: TRef<StyleV> =
-            TRef::new(bs.compile_ref(style).await?).context("paragraph tref style")?;
-        let trim: TRef<bool> =
-            TRef::new(bs.compile_ref(trim).await?).context("paragraph tref trim")?;
+            TRef::new(alignment).context("paragraph tref alignment")?;
+        let lines: TRef<LinesV> = TRef::new(lines).context("paragraph tref lines")?;
+        let scroll: TRef<ScrollV> = TRef::new(scroll).context("paragraph tref scroll")?;
+        let style: TRef<StyleV> = TRef::new(style).context("paragraph tref style")?;
+        let trim: TRef<bool> = TRef::new(trim).context("paragraph tref trim")?;
         Ok(Box::new(Self { alignment, lines, scroll, style, trim }))
     }
 }
-
-/*
-    fn hlen(&self) -> usize {
-        self.lines
-            .t
-            .as_ref()
-            .and_then(|l| {
-                l.0.iter()
-                    .map(|l| l.spans.iter().fold(0, |acc, s| acc + s.content.len()))
-                    .max()
-            })
-            .unwrap_or(0)
-    }
-
-    fn vlen(&self) -> usize {
-        self.lines.t.as_ref().map(|l| l.0.len()).unwrap_or(0)
-    }
-*/
 
 #[async_trait]
 impl GuiWidget for ParagraphW {
@@ -498,34 +545,53 @@ impl BlockW {
     async fn compile(bs: BSHandle, v: Value) -> Result<GuiW> {
         let [(_, border), (_, border_style), (_, border_type), (_, child), (_, padding), (_, style), (_, title), (_, title_alignment), (_, title_bottom), (_, title_position), (_, title_style), (_, title_top)] =
             v.cast_to::<[(ArcStr, u64); 12]>().context("block flds")?;
-        let border = TRef::<Option<BordersV>>::new(bs.compile_ref(border).await?)
-            .context("block tref border")?;
-        let border_style =
-            TRef::<Option<StyleV>>::new(bs.compile_ref(border_style).await?)
-                .context("block tref border_style")?;
-        let border_type =
-            TRef::<Option<BorderTypeV>>::new(bs.compile_ref(border_type).await?)
-                .context("block tref border_type")?;
-        let padding = TRef::<Option<PaddingV>>::new(bs.compile_ref(padding).await?)
-            .context("block tref padding")?;
-        let style = TRef::<Option<StyleV>>::new(bs.compile_ref(style).await?)
-            .context("block tref style")?;
-        let title = TRef::<Option<LineV>>::new(bs.compile_ref(title).await?)
-            .context("block tref title")?;
-        let title_alignment =
-            TRef::<Option<AlignmentV>>::new(bs.compile_ref(title_alignment).await?)
-                .context("block tref title_alignment")?;
-        let title_bottom =
-            TRef::<Option<LineV>>::new(bs.compile_ref(title_bottom).await?)
-                .context("block tref title_bottom")?;
-        let title_position =
-            TRef::<Option<PositionV>>::new(bs.compile_ref(title_position).await?)
-                .context("block tref title_position")?;
-        let title_style = TRef::<Option<StyleV>>::new(bs.compile_ref(title_style).await?)
-            .context("block tref title_style")?;
-        let title_top = TRef::<Option<LineV>>::new(bs.compile_ref(title_top).await?)
-            .context("block tref title_top")?;
-        let mut child_ref = bs.compile_ref(child).await?;
+        let (
+            border,
+            border_style,
+            border_type,
+            child_ref,
+            padding,
+            style,
+            title,
+            title_alignment,
+            title_bottom,
+            title_position,
+            title_style,
+            title_top,
+        ) = try_join! {
+            bs.compile_ref(border),
+            bs.compile_ref(border_style),
+            bs.compile_ref(border_type),
+            bs.compile_ref(child),
+            bs.compile_ref(padding),
+            bs.compile_ref(style),
+            bs.compile_ref(title),
+            bs.compile_ref(title_alignment),
+            bs.compile_ref(title_bottom),
+            bs.compile_ref(title_position),
+            bs.compile_ref(title_style),
+            bs.compile_ref(title_top),
+        }?;
+        let border =
+            TRef::<Option<BordersV>>::new(border).context("block tref border")?;
+        let border_style = TRef::<Option<StyleV>>::new(border_style)
+            .context("block tref border_style")?;
+        let border_type = TRef::<Option<BorderTypeV>>::new(border_type)
+            .context("block tref border_type")?;
+        let padding =
+            TRef::<Option<PaddingV>>::new(padding).context("block tref padding")?;
+        let style = TRef::<Option<StyleV>>::new(style).context("block tref style")?;
+        let title = TRef::<Option<LineV>>::new(title).context("block tref title")?;
+        let title_alignment = TRef::<Option<AlignmentV>>::new(title_alignment)
+            .context("block tref title_alignment")?;
+        let title_bottom = TRef::<Option<LineV>>::new(title_bottom)
+            .context("block tref title_bottom")?;
+        let title_position = TRef::<Option<PositionV>>::new(title_position)
+            .context("block tref title_position")?;
+        let title_style =
+            TRef::<Option<StyleV>>::new(title_style).context("block tref title_style")?;
+        let title_top =
+            TRef::<Option<LineV>>::new(title_top).context("block tref title_top")?;
         let child = match child_ref.last.take() {
             None => Box::new(EmptyW),
             Some(v) => compile(bs.clone(), v).await.context("block compile child")?,
@@ -674,44 +740,66 @@ impl ScrollbarW {
     async fn compile(bs: BSHandle, v: Value) -> Result<GuiW> {
         let [(_, begin_style), (_, begin_symbol), (_, child), (_, content_length), (_, end_style), (_, end_symbol), (_, orientation), (_, position), (_, style), (_, thumb_style), (_, thumb_symbol), (_, track_style), (_, track_symbol), (_, viewport_length)] =
             v.cast_to::<[(ArcStr, u64); 14]>().context("scrollbar flds")?;
-        let begin_style = TRef::<Option<StyleV>>::new(bs.compile_ref(begin_style).await?)
+        let (
+            begin_style,
+            begin_symbol,
+            child_ref,
+            content_length,
+            end_style,
+            end_symbol,
+            orientation,
+            position,
+            style,
+            thumb_style,
+            thumb_symbol,
+            track_style,
+            track_symbol,
+            viewport_length,
+        ) = try_join! {
+            bs.compile_ref(begin_style),
+            bs.compile_ref(begin_symbol),
+            bs.compile_ref(child),
+            bs.compile_ref(content_length),
+            bs.compile_ref(end_style),
+            bs.compile_ref(end_symbol),
+            bs.compile_ref(orientation),
+            bs.compile_ref(position),
+            bs.compile_ref(style),
+            bs.compile_ref(thumb_style),
+            bs.compile_ref(thumb_symbol),
+            bs.compile_ref(track_style),
+            bs.compile_ref(track_symbol),
+            bs.compile_ref(viewport_length)
+        }?;
+        let begin_style = TRef::<Option<StyleV>>::new(begin_style)
             .context("scrollbar tref begin_style")?;
-        let begin_symbol =
-            TRef::<Option<ArcStr>>::new(bs.compile_ref(begin_symbol).await?)
-                .context("scrollbar tref begin_symbol")?;
-        let mut child_ref = bs.compile_ref(child).await?;
+        let begin_symbol = TRef::<Option<ArcStr>>::new(begin_symbol)
+            .context("scrollbar tref begin_symbol")?;
         let child = match child_ref.last.take() {
             Some(v) => compile(bs.clone(), v).await?,
             None => Box::new(EmptyW),
         };
-        let content_length =
-            TRef::<Option<usize>>::new(bs.compile_ref(content_length).await?)
-                .context("scrollbar tref content_length")?;
-        let end_style = TRef::<Option<StyleV>>::new(bs.compile_ref(end_style).await?)
-            .context("scrollbar tref end_style")?;
-        let end_symbol = TRef::<Option<ArcStr>>::new(bs.compile_ref(end_symbol).await?)
+        let content_length = TRef::<Option<usize>>::new(content_length)
+            .context("scrollbar tref content_length")?;
+        let end_style =
+            TRef::<Option<StyleV>>::new(end_style).context("scrollbar tref end_style")?;
+        let end_symbol = TRef::<Option<ArcStr>>::new(end_symbol)
             .context("scrollbar tref end_symbol")?;
-        let orientation = TRef::<Option<ScrollbarOrientationV>>::new(
-            bs.compile_ref(orientation).await?,
-        )
-        .context("scrollbar tref orientation")?;
-        let position = TRef::<Option<u16>>::new(bs.compile_ref(position).await?)
-            .context("scrollbar tref position")?;
-        let style = TRef::<Option<StyleV>>::new(bs.compile_ref(style).await?)
-            .context("scrollbar tref style")?;
-        let thumb_style = TRef::<Option<StyleV>>::new(bs.compile_ref(thumb_style).await?)
+        let orientation = TRef::<Option<ScrollbarOrientationV>>::new(orientation)
+            .context("scrollbar tref orientation")?;
+        let position =
+            TRef::<Option<u16>>::new(position).context("scrollbar tref position")?;
+        let style = TRef::<Option<StyleV>>::new(style).context("scrollbar tref style")?;
+        let thumb_style = TRef::<Option<StyleV>>::new(thumb_style)
             .context("scrollbar tref thumb_style")?;
-        let thumb_symbol =
-            TRef::<Option<ArcStr>>::new(bs.compile_ref(thumb_symbol).await?)
-                .context("scrollbar tref thumb_symbol")?;
-        let track_style = TRef::<Option<StyleV>>::new(bs.compile_ref(track_style).await?)
+        let thumb_symbol = TRef::<Option<ArcStr>>::new(thumb_symbol)
+            .context("scrollbar tref thumb_symbol")?;
+        let track_style = TRef::<Option<StyleV>>::new(track_style)
             .context("scrollbar tref track_style")?;
-        let track_symbol =
-            TRef::<Option<ArcStr>>::new(bs.compile_ref(track_symbol).await?)
-                .context("scrollbar tref track_symbol")?;
-        let viewport_length =
-            TRef::<Option<usize>>::new(bs.compile_ref(viewport_length).await?)
-                .context("scrollbar tref viewport_length")?;
+        let track_symbol = TRef::<Option<ArcStr>>::new(track_symbol)
+            .context("scrollbar tref track_symbol")?;
+        let viewport_length = TRef::<Option<usize>>::new(viewport_length)
+            .context("scrollbar tref viewport_length")?;
         let state = ScrollbarState::new(content_length.t.and_then(|t| t).unwrap_or(50));
         Ok(Box::new(Self {
             begin_style,
@@ -903,6 +991,83 @@ impl GuiWidget for ScrollbarW {
             }
         };
         child.draw(frame, rect)
+    }
+}
+
+struct LayoutW {
+    bs: BSHandle,
+    layout: Layout,
+    children: Vec<(Constraint, GuiW)>,
+    children_ref: Ref,
+    direction: TRef<Option<DirectionV>>,
+    flex: TRef<Option<FlexV>>,
+    horizontal_margin: TRef<Option<u16>>,
+    margin: TRef<Option<u16>>,
+    spacing: TRef<Option<SpacingV>>,
+    vertical_margin: TRef<Option<u16>>,
+}
+
+impl LayoutW {
+    async fn compile(bs: BSHandle, source: Value) -> Result<GuiW> {
+        let [(_, children), (_, direction), (_, flex), (_, horizontal_margin), (_, margin), (_, spacing), (_, vertical_margin)] =
+            v.cast_to::<[(ArcStr, u64); 7]>().context("layout fields")?;
+        let (
+            children_ref,
+            direction,
+            flex,
+            horizontal_margin,
+            margin,
+            spacing,
+            vertical_margin,
+        ) = try_join! {
+            bs.compile_ref(children),
+            bs.compile_ref(direction),
+            bs.compile_ref(flex),
+            bs.compile_ref(horizontal_margin),
+            bs.compile_ref(margin),
+            bs.compile_ref(spacing),
+            bs.compile_ref(vertical_margin)
+        }?;
+        let direction = TRef::<Option<DirectionV>>::new(direction)
+            .context("layout tref direction")?;
+        let flex = TRef::<Option<FlexV>>::new(flex).context("layout tref flex")?;
+        let horizontal_margin = TRef::<Option<u16>>::new(horizontal_margin)
+            .context("layout tref horizontal_margin")?;
+        let margin = TRef::<Option<u16>>::new(margin).context("layout tref margin")?;
+        let spacing =
+            TRef::<Option<SpacingV>>::new(spacing).context("layout tref spacing")?;
+        let vertical_margin = TRef::<Option<u16>>::new(vertical_margin)
+            .context("layout tref vertical_margin")?;
+        let mut t = Self {
+            bs,
+            layout: Layout::default(),
+            children: vec![],
+            children_ref,
+            direction,
+            flex,
+            horizontal_margin,
+            margin,
+            spacing,
+            vertical_margin,
+        };
+        t.maybe_set_children().await?;
+        Ok(t)
+    }
+
+    async fn maybe_set_children(&mut self) -> Result<()> {
+        if let Some(v) = self.children_ref.last.take() {
+            self.children = future::join_all(
+                v.cast_to::<SmallVec<[(ConstraintV, Value); 8]>>()?.into_iter().map(
+                    |(c, v)| async {
+                        let child = compile(self.bs.clone(), v).await?;
+                        Ok((c.0, child))
+                    },
+                ),
+            )
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        }
     }
 }
 
