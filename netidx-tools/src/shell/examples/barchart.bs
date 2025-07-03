@@ -22,12 +22,23 @@ let group1 = [
   )
 ];
 
-gui::bar_chart(
+let chart = gui::bar_chart(
   #bar_gap: &u32:2,
   #bar_width: &u32:8,
   #max: &u64:150,
   &[
      gui::bar_group(#label: gui::line("group0"), group0),
      gui::bar_group(#label: gui::line("group1"), group1)
-  ]
+   ]
+);
+
+let layout = gui::layout(
+  #horizontal_margin: &u32:20,
+  &[(`Percentage(u32:100), chart)]
+);
+
+gui::block(
+  #border: &`All,
+  #title: &gui::line("Production"),
+  &layout
 )
