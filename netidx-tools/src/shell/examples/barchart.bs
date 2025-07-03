@@ -1,44 +1,52 @@
+use gui;
+use rand;
 let trigger = time::timer(duration:0.7s, true);
 
 let group0 = [
-  gui::bar(
-    #label: &gui::line("stuff"),
-    &rand::rand(#start:u64:0, #end:u64:100, #trigger)
+  bar(
+    #style: &style(#fg: `Red),
+    #label: &line("stuff"),
+    &rand(#start:u64:0, #end:u64:100, #trigger)
   ),
-  gui::bar(
-    #label: &gui::line("things"),
-    &rand::rand(#start:u64:25, #end:u64:200, #trigger)
+  bar(
+    #style: &style(#fg: `Yellow),
+    #label: &line("things"),
+    &rand(#start:u64:25, #end:u64:200, #trigger)
   )
 ];
 
 let group1 = [
-  gui::bar(
-    #label: &gui::line("widget"),
-    &rand::rand(#start:u64:0, #end:u64:50, #trigger)
+  bar(
+    #style: &style(#fg: `Cyan),
+    #label: &line("widget"),
+    &rand(#start:u64:0, #end:u64:50, #trigger)
   ),
-  gui::bar(
-    #label: &gui::line("wojet"),
-    &rand::rand(#start:u64:1, #end:u64:25, #trigger)
+  bar(
+    #style: &style(#fg: `Magenta),
+    #label: &line("wojet"),
+    &rand(#start:u64:1, #end:u64:25, #trigger)
   )
 ];
 
-let chart = gui::bar_chart(
+let chart = bar_chart(
   #bar_gap: &u32:2,
   #bar_width: &u32:8,
-  #max: &u64:150,
+  #max: &u64:200,
   &[
-     gui::bar_group(#label: gui::line("group0"), group0),
-     gui::bar_group(#label: gui::line("group1"), group1)
+     bar_group(#label: line("group0"), group0),
+     bar_group(#label: line("group1"), group1)
    ]
 );
 
-let layout = gui::layout(
-  #horizontal_margin: &u32:20,
-  &[(`Percentage(u32:100), chart)]
+let layout = layout(
+  #direction:&`Horizontal,
+  #flex: &`Center,
+  &[(`Max(u32:40), chart)]
 );
 
-gui::block(
+block(
   #border: &`All,
-  #title: &gui::line("Production"),
+  #style: &style(#fg: `Green),
+  #title: &line("Production"),
   &layout
 )
