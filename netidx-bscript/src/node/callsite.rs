@@ -115,13 +115,28 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
         Ok(Box::new(site))
     }
 
-    fn bind(&mut self, ctx: &mut ExecCtx<C, E>, f: Arc<LambdaDef<C, E>>) -> Result<()> {
+    fn bind(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        f: Arc<LambdaDef<C, E>>,
+        event: &mut Event<E>,
+        set: &mut Vec<BindId>,
+    ) -> Result<()> {
         macro_rules! compile_default {
             ($i:expr, $f:expr) => {{
                 match &$f.argspec[$i].labeled {
                     None | Some(None) => bail!("expected default value"),
                     Some(Some(expr)) => ctx.with_restored($f.env.clone(), |ctx| {
-                        compile(ctx, expr.clone(), &$f.scope, self.top_id)
+                        let n = compile(ctx, expr.clone(), &$f.scope, self.top_id)?;
+                        n.refs(&mut |id| {
+                            if let Some(v) = ctx.cached.get(&id)
+                                && let Entry::Vacant(e) = event.variables.entry(id)
+                            {
+                                e.insert(v.clone());
+                                set.push(id);
+                            }
+                        });
+                        Ok::<_, anyhow::Error>(n)
                     })?,
                 }
             }};
@@ -177,6 +192,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
                 return Some(Value::Error(m.as_str().into()));
             }};
         }
+        let mut set = vec![];
         let bound = match (&self.function, self.fnode.update(ctx, event)) {
             (_, None) => false,
             (Some((cid, _)), Some(Value::U64(id))) if cid.0 == id => false,
@@ -185,7 +201,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
                 Some(lb) => match lb.upgrade() {
                     None => error!("function {id:?} is no longer callable"),
                     Some(lb) => {
-                        if let Err(e) = self.bind(ctx, lb) {
+                        if let Err(e) = self.bind(ctx, lb, event, &mut set) {
                             error!("failed to bind to lambda {e}")
                         }
                         true
@@ -199,7 +215,6 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
             Some((_, f)) if !bound => f.update(ctx, &mut self.args, event),
             Some((_, f)) => {
                 let init = mem::replace(&mut event.init, true);
-                let mut set = vec![];
                 f.refs(&mut |id| {
                     if !event.variables.contains_key(&id) {
                         if let Some(v) = ctx.cached.get(&id) {

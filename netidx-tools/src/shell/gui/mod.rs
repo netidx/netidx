@@ -1,6 +1,7 @@
 use anyhow::Result;
 use arcstr::ArcStr;
 use async_trait::async_trait;
+use barchart::BarChartW;
 use block::BlockW;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -21,18 +22,17 @@ use ratatui::{
 };
 use reedline::Signal;
 use scrollbar::ScrollbarW;
-use barchart::BarChartW;
 use smallvec::SmallVec;
 use std::{borrow::Cow, future::Future, pin::Pin};
 use text::TextW;
 use tokio::{select, sync::oneshot, task};
 
+mod barchart;
 mod block;
 mod layout;
 mod paragraph;
 mod scrollbar;
 mod text;
-mod barchart;
 
 #[derive(Clone, Copy)]
 struct AlignmentV(Alignment);
@@ -110,7 +110,7 @@ impl FromValue for ModifierV {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct StyleV(Style);
 
 impl FromValue for StyleV {
@@ -138,6 +138,7 @@ impl FromValue for SpanV {
     }
 }
 
+#[derive(Debug)]
 struct LineV(Line<'static>);
 
 impl FromValue for LineV {

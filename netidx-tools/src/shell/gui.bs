@@ -430,10 +430,10 @@ mod gui {
   };
 
   let bar = |
-    #label: [Line, null] = &null,
-    #style: [Style, null] = &null,
-    #text_value: [string, null] = &null,
-    #value_style: [Style, null] = &null,
+    #label: &[Line, null] = &null,
+    #style: &[Style, null] = &null,
+    #text_value: &[string, null] = &null,
+    #value_style: &[Style, null] = &null,
     value: &u64
   | -> Bar {
     label,
@@ -444,11 +444,14 @@ mod gui {
   };
 
   type BarGroup = {
-    label: [Line, null],
-    bars: Array<Bar>
+    bars: Array<Bar>,
+    label: [Line, null]
   };
 
-  let bar_group = |#label: [Line, null] = null, bars: Array<Bar>| -> BarGroup { label, bars };
+  let bar_group = |
+    #label: [Line, null] = null,
+    bars: Array<Bar>
+  | -> BarGroup { label, bars };
 
   type BarChart = {
     bar_gap: &[u32, null],
@@ -474,7 +477,7 @@ mod gui {
     #style: &[Style, null] = &null,
     #value_style: &[Style, null] = &null,
     data: &Array<BarGroup>
-  | -> Gui `BarChart {
+  | -> Gui `BarChart({
     bar_gap,
     bar_style,
     bar_width,
@@ -485,5 +488,5 @@ mod gui {
     max,
     style,
     value_style
-  }
+  })
 }

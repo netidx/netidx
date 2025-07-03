@@ -1,0 +1,33 @@
+let trigger = time::timer(duration:0.7s, true);
+
+let group0 = [
+  gui::bar(
+    #label: &gui::line("stuff"),
+    &rand::rand(#start:u64:0, #end:u64:100, #trigger)
+  ),
+  gui::bar(
+    #label: &gui::line("things"),
+    &rand::rand(#start:u64:25, #end:u64:200, #trigger)
+  )
+];
+
+let group1 = [
+  gui::bar(
+    #label: &gui::line("widget"),
+    &rand::rand(#start:u64:0, #end:u64:50, #trigger)
+  ),
+  gui::bar(
+    #label: &gui::line("wojet"),
+    &rand::rand(#start:u64:1, #end:u64:25, #trigger)
+  )
+];
+
+gui::bar_chart(
+  #bar_gap: &u32:2,
+  #bar_width: &u32:8,
+  #max: &u64:150,
+  &[
+     gui::bar_group(#label: gui::line("group0"), group0),
+     gui::bar_group(#label: gui::line("group1"), group1)
+  ]
+)

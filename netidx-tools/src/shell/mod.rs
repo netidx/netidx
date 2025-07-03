@@ -181,7 +181,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     let script = p.file.is_some();
     let mut input = InputReader::new();
     let (tx, mut from_bs) = mpsc::channel(100);
-    bs.subscribe(tx).context("subscribing to rt output")?;
+    bs.subscribe(tx).await.context("subscribing to rt output")?;
     let mut output = Output::None;
     let mut newenv = None;
     let mut exprs = vec![];

@@ -3,8 +3,9 @@ use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::Event;
-use futures::future;
-use netidx::publisher::{FromValue, Value};
+use futures::future::{self, try_join_all};
+use log::debug;
+use netidx::publisher::Value;
 use netidx_bscript::{
     expr::ExprId,
     rt::{BSHandle, Ref},
@@ -14,7 +15,7 @@ use ratatui::{
     widgets::{Bar, BarChart, BarGroup},
     Frame,
 };
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use tokio::try_join;
 
 struct BarW {
@@ -75,20 +76,19 @@ impl BarW {
 struct BarGroupW {
     label: Option<LineV>,
     bars: Vec<BarW>,
-    built: Vec<Bar<'static>>,
 }
 
 impl BarGroupW {
     async fn compile(bs: &BSHandle, v: Value) -> Result<Self> {
-        let [(_, label), (_, bars)] = v.cast_to::<[(ArcStr, Value); 2]>()?;
+        let [(_, bars), (_, label)] =
+            v.cast_to::<[(ArcStr, Value); 2]>().context("bargroup fields")?;
         let label = label.cast_to::<Option<LineV>>()?;
-        let bars = future::try_join_all(
-            bars.cast_to::<SmallVec<[Value; 8]>>()?
-                .into_iter()
-                .map(|b| BarW::compile(bs, b)),
-        )
-        .await?;
-        Ok(Self { label, bars, built: Vec::new() })
+        let bars = bars
+            .cast_to::<SmallVec<[Value; 8]>>()?
+            .into_iter()
+            .map(|b| BarW::compile(bs, b));
+        let bars = future::try_join_all(bars).await?;
+        Ok(Self { label, bars })
     }
 }
 
@@ -109,13 +109,15 @@ pub(super) struct BarChartW {
 
 impl BarChartW {
     pub(super) async fn compile(bs: BSHandle, v: Value) -> Result<GuiW> {
+        let flds = v.cast_to::<[(ArcStr, u64); 10]>().context("barchart fields")?;
+        debug!("compile fields {flds:?}");
         let [(_, bar_gap), (_, bar_style), (_, bar_width), (_, data), (_, direction), (_, group_gap), (_, label_style), (_, max), (_, style), (_, value_style)] =
-            v.cast_to::<[(ArcStr, u64); 10]>().context("barchart fields")?;
+            flds;
         let (
             bar_gap,
             bar_style,
             bar_width,
-            mut data_ref,
+            data_ref,
             direction,
             group_gap,
             label_style,
@@ -165,19 +167,18 @@ impl BarChartW {
             value_style,
         };
         if let Some(v) = t.data_ref.last.take() {
+            debug!("data init {v}");
             t.set_data(v).await?;
         }
         Ok(Box::new(t))
     }
 
     async fn set_data(&mut self, v: Value) -> Result<()> {
-        let groups_v = v.cast_to::<SmallVec<[Value; 8]>>()?;
-        let groups = future::try_join_all(
-            groups_v.into_iter().map(|g| BarGroupW::compile(&self.bs, g)),
-        )
-        .await?;
-        self.data = groups;
-        Ok(())
+        let groups = v
+            .cast_to::<SmallVec<[Value; 8]>>()?
+            .into_iter()
+            .map(|g| BarGroupW::compile(&self.bs, g));
+        Ok(self.data = try_join_all(groups).await?)
     }
 }
 
@@ -188,10 +189,11 @@ impl GuiWidget for BarChartW {
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
+        debug!("handle update {:?}", (id, &v));
         let Self {
             bs: _,
             data_ref,
-            data,
+            data: _,
             bar_gap,
             bar_style,
             bar_width,
@@ -212,9 +214,10 @@ impl GuiWidget for BarChartW {
         style.update(id, &v).context("barchart update style")?;
         value_style.update(id, &v).context("barchart update value_style")?;
         if data_ref.id == id {
-            self.set_data(v).await?;
+            debug!("update data {}", v);
+            self.set_data(v.clone()).await?;
         }
-        for g in data.iter_mut() {
+        for g in self.data.iter_mut() {
             for b in &mut g.bars {
                 b.update(id, &v)?;
             }
@@ -265,16 +268,17 @@ impl GuiWidget for BarChartW {
         if let Some(Some(gap)) = group_gap.t {
             chart = chart.group_gap(gap);
         }
+        debug!("draw data length: {}", data.len());
         for group in data.iter_mut() {
+            let mut bars: SmallVec<[Bar; 8]> = smallvec![];
             let mut g = BarGroup::default();
             if let Some(LineV(l)) = &group.label {
                 g = g.label(into_borrowed_line(l));
             }
-            group.built.clear();
             for bar in &group.bars {
-                group.built.push(bar.build());
+                bars.push(bar.build());
             }
-            let g = g.bars(&group.built);
+            let g = g.bars(&bars);
             chart = chart.data(g);
         }
         frame.render_widget(chart, rect);
