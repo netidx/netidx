@@ -5,7 +5,8 @@ mod gui {
     `Paragraph(Paragraph),
     `Block(Block),
     `Scrollbar(Scrollbar),
-    `Layout(Layout)
+    `Layout(Layout),
+    `BarChart(BarChart)
   ];
 
   type MediaKeyCode = [
@@ -418,5 +419,71 @@ mod gui {
     spacing,
     vertical_margin,
     children
-  })
+  });
+
+  type Bar = {
+    label: &[Line, null],
+    style: &[Style, null],
+    text_value: &[string, null],
+    value: &u64,
+    value_style: &[Style, null]
+  };
+
+  let bar = |
+    #label: [Line, null] = &null,
+    #style: [Style, null] = &null,
+    #text_value: [string, null] = &null,
+    #value_style: [Style, null] = &null,
+    value: &u64
+  | -> Bar {
+    label,
+    style,
+    text_value,
+    value_style,
+    value
+  };
+
+  type BarGroup = {
+    label: [Line, null],
+    bars: Array<Bar>
+  };
+
+  let bar_group = |#label: [Line, null] = null, bars: Array<Bar>| -> BarGroup { label, bars };
+
+  type BarChart = {
+    bar_gap: &[u32, null],
+    bar_style: &[Style, null],
+    bar_width: &[u32, null],
+    data: &Array<BarGroup>,
+    direction: &[Direction, null],
+    group_gap: &[u32, null],
+    label_style: &[Style, null],
+    max: &[u64, null],
+    style: &[Style, null],
+    value_style: &[Style, null]
+  };
+
+  let bar_chart = |
+    #bar_gap: &[u32, null] = &null,
+    #bar_style: &[Style, null] = &null,
+    #bar_width: &[u32, null] = &null,
+    #direction: &[Direction, null] = &null,
+    #group_gap: &[u32, null] = &null,
+    #label_style: &[Style, null] = &null,
+    #max: &[u64, null] = &null,
+    #style: &[Style, null] = &null,
+    #value_style: &[Style, null] = &null,
+    data: &Array<BarGroup>
+  | -> Gui `BarChart {
+    bar_gap,
+    bar_style,
+    bar_width,
+    data,
+    direction,
+    group_gap,
+    label_style,
+    max,
+    style,
+    value_style
+  }
 }

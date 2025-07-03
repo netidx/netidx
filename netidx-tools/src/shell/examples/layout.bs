@@ -31,7 +31,7 @@ let block2rem = block(
      let position = u32:0;
      scrollbar(
        #position: &position,
-       #content_length:&u32:200,
+       #content_length:&u32:150,
        &paragraph(#scroll: &{x: u32:0, y: position}, &long_text)
      )
   }

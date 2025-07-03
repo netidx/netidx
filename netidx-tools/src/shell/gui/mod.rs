@@ -1,28 +1,36 @@
 use anyhow::Result;
 use arcstr::ArcStr;
 use async_trait::async_trait;
+use block::BlockW;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures::{channel::mpsc, SinkExt, StreamExt};
+use layout::LayoutW;
 use log::error;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
     expr::ExprId,
     rt::{BSHandle, CompExp, Ref},
 };
+use paragraph::ParagraphW;
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Flex, Rect, Spacing},
+    layout::{Alignment, Direction, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{block::Position, BorderType, Borders, Padding, ScrollbarOrientation},
+    widgets::block::Position,
     Frame,
 };
 use reedline::Signal;
+use scrollbar::ScrollbarW;
 use smallvec::SmallVec;
 use std::{borrow::Cow, future::Future, pin::Pin};
+use text::TextW;
 use tokio::{select, sync::oneshot, task};
-use widgets::{BlockW, EmptyW, LayoutW, ParagraphW, ScrollbarW, TextW};
 
-mod widgets;
+mod block;
+mod layout;
+mod paragraph;
+mod scrollbar;
+mod text;
 
 #[derive(Clone, Copy)]
 struct AlignmentV(Alignment);
@@ -171,62 +179,6 @@ impl FromValue for ScrollV {
 }
 
 #[derive(Clone, Copy)]
-struct BordersV(Borders);
-
-impl FromValue for BordersV {
-    fn from_value(v: Value) -> Result<Self> {
-        match v {
-            Value::String(s) => match &*s {
-                "All" => Ok(Self(Borders::all())),
-                "None" => Ok(Self(Borders::empty())),
-                s => bail!("invalid borders {s}"),
-            },
-            v => {
-                let mut res = Borders::empty();
-                for b in v.cast_to::<SmallVec<[ArcStr; 4]>>()? {
-                    match &*b {
-                        "Top" => res.insert(Borders::TOP),
-                        "Right" => res.insert(Borders::RIGHT),
-                        "Bottom" => res.insert(Borders::BOTTOM),
-                        "Left" => res.insert(Borders::LEFT),
-                        s => bail!("invalid border {s}"),
-                    }
-                }
-                Ok(Self(res))
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct BorderTypeV(BorderType);
-
-impl FromValue for BorderTypeV {
-    fn from_value(v: Value) -> Result<Self> {
-        match &*v.cast_to::<ArcStr>()? {
-            "Plain" => Ok(Self(BorderType::Plain)),
-            "Rounded" => Ok(Self(BorderType::Rounded)),
-            "Double" => Ok(Self(BorderType::Double)),
-            "Thick" => Ok(Self(BorderType::Thick)),
-            "QuadrantInside" => Ok(Self(BorderType::QuadrantInside)),
-            "QuadrantOutside" => Ok(Self(BorderType::QuadrantOutside)),
-            s => bail!("invalid border type {s}"),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct PaddingV(Padding);
-
-impl FromValue for PaddingV {
-    fn from_value(v: Value) -> Result<Self> {
-        let [(_, bottom), (_, left), (_, right), (_, top)] =
-            v.cast_to::<[(ArcStr, u16); 4]>()?;
-        Ok(Self(Padding { bottom, left, right, top }))
-    }
-}
-
-#[derive(Clone, Copy)]
 struct PositionV(Position);
 
 impl FromValue for PositionV {
@@ -239,44 +191,6 @@ impl FromValue for PositionV {
     }
 }
 
-#[derive(Clone)]
-struct ScrollbarOrientationV(ScrollbarOrientation);
-
-impl FromValue for ScrollbarOrientationV {
-    fn from_value(v: Value) -> Result<Self> {
-        let v = match &*v.cast_to::<ArcStr>()? {
-            "VerticalRight" => ScrollbarOrientation::VerticalRight,
-            "VerticalLeft" => ScrollbarOrientation::VerticalLeft,
-            "HorizontalBottom" => ScrollbarOrientation::HorizontalBottom,
-            "HorizontalTop" => ScrollbarOrientation::HorizontalTop,
-            s => bail!("invalid ScrollBarOrientation {s}"),
-        };
-        Ok(Self(v))
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ConstraintV(Constraint);
-
-impl FromValue for ConstraintV {
-    fn from_value(v: Value) -> Result<Self> {
-        let t = match &v.cast_to::<SmallVec<[Value; 3]>>()?[..] {
-            [Value::String(s), Value::U32(p)] => match &**s {
-                "Min" => Constraint::Min(*p as u16),
-                "Max" => Constraint::Max(*p as u16),
-                "Percentage" => Constraint::Percentage(*p as u16),
-                "Fill" => Constraint::Fill(*p as u16),
-                s => bail!("invalid constraint tag {s}"),
-            },
-            [Value::String(s), Value::U32(n), Value::U32(d)] if &**s == "Ratio" => {
-                Constraint::Ratio(*n, *d)
-            }
-            v => bail!("invalid constraint {v:?}"),
-        };
-        Ok(Self(t))
-    }
-}
-
 #[derive(Clone, Copy)]
 struct DirectionV(Direction);
 
@@ -286,38 +200,6 @@ impl FromValue for DirectionV {
             "Horizontal" => Direction::Horizontal,
             "Vertical" => Direction::Vertical,
             s => bail!("invalid direction tag {s}"),
-        };
-        Ok(Self(t))
-    }
-}
-
-#[derive(Clone, Copy)]
-struct FlexV(Flex);
-
-impl FromValue for FlexV {
-    fn from_value(v: Value) -> Result<Self> {
-        let t = match &*v.cast_to::<ArcStr>()? {
-            "Legacy" => Flex::Legacy,
-            "Start" => Flex::Start,
-            "End" => Flex::End,
-            "Center" => Flex::Center,
-            "SpaceBetween" => Flex::SpaceBetween,
-            "SpaceAround" => Flex::SpaceAround,
-            s => bail!("invalid flex {s}"),
-        };
-        Ok(Self(t))
-    }
-}
-
-#[derive(Clone)]
-struct SpacingV(Spacing);
-
-impl FromValue for SpacingV {
-    fn from_value(v: Value) -> Result<Self> {
-        let t = match v.cast_to::<(ArcStr, u16)>()? {
-            (s, p) if &*s == "Space" => Spacing::Space(p),
-            (s, p) if &*s == "Overlap" => Spacing::Overlap(p),
-            (s, _) => bail!("invalid spacing tag {s}"),
         };
         Ok(Self(t))
     }
@@ -399,6 +281,23 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) => bail!("invalid widget type `{s}({v})"),
         }
     })
+}
+
+pub(super) struct EmptyW;
+
+#[async_trait]
+impl GuiWidget for EmptyW {
+    async fn handle_event(&mut self, _e: Event) -> Result<()> {
+        Ok(())
+    }
+
+    async fn handle_update(&mut self, _id: ExprId, _v: Value) -> Result<()> {
+        Ok(())
+    }
+
+    fn draw(&mut self, _frame: &mut Frame, _rect: Rect) -> Result<()> {
+        Ok(())
+    }
 }
 
 enum ToGui {
