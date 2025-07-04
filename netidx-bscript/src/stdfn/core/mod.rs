@@ -794,14 +794,23 @@ pub mod core {
         /// returns the length of a
         pub let len = |a| 'array_len;
 
-        /// returns the concatenation of two or more arrays
+        /// returns the concatenation of two or more arrays. O(N) where
+        /// N is the size of the final array.
         pub let concat = |x, @args| 'array_concat;
 
-        /// return an array with the args added to the end
+        /// return an array with the args added to the end. O(N)
+        /// where N is the size of the final array
         pub let push = |a, @args| 'array_push_back;
 
-        /// return an array with the args added to the front
+        /// return an array with the args added to the front. O(N)
+        /// where N is the size of the final array
         pub let push_front = |a, @args| 'array_push_front;
+
+        /// return an array no larger than #window with the args
+        /// added to the back. If pushing the args would cause the
+        /// array to become bigger than #window, remove values from the
+        /// front. O(N) where N is the window size.
+        pub let window = |#window, a, @args| 'array_window;
 
         /// flatten takes an array with two levels of nesting and produces a flat array
         /// with all the nested elements concatenated together.
@@ -901,6 +910,7 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Divide>().unwrap();
     ctx.register_builtin::<Filter<C, E>>().unwrap();
     ctx.register_builtin::<array::Concat>().unwrap();
+    ctx.register_builtin::<array::Window>().unwrap();
     ctx.register_builtin::<array::PushFront>().unwrap();
     ctx.register_builtin::<array::PushBack>().unwrap();
     ctx.register_builtin::<array::Len>().unwrap();

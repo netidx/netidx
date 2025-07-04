@@ -584,6 +584,60 @@ impl EvalCached for PushFrontEv {
 pub(super) type PushFront = CachedArgs<PushFrontEv>;
 
 #[derive(Debug, Default)]
+pub(super) struct WindowEv(SmallVec<[Value; 32]>);
+
+impl EvalCached for WindowEv {
+    const NAME: &str = "array_window";
+    deftype!("core::array", "fn(#window:u64, Array<'a>, @args: 'a) -> Array<'a>");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        let mut present = true;
+        match &from.0[..] {
+            [Some(Value::U64(window)), Some(Value::Array(a)), tl @ ..] => {
+                let window = *window as usize;
+                let total = a.len() + tl.len();
+                if total <= window {
+                    self.0.extend(a.iter().cloned());
+                    for v in tl {
+                        match v {
+                            Some(v) => self.0.push(v.clone()),
+                            None => present = false,
+                        }
+                    }
+                } else if a.len() >= (total - window) {
+                    self.0.extend(a[(total - window)..].iter().cloned());
+                    for v in tl {
+                        match v {
+                            Some(v) => self.0.push(v.clone()),
+                            None => present = false,
+                        }
+                    }
+                } else {
+                    for v in &tl[tl.len() - window..] {
+                        match v {
+                            Some(v) => self.0.push(v.clone()),
+                            None => present = false,
+                        }
+                    }
+                }
+            }
+            [] | [_] | [_, None, ..] | [None, _, ..] | [Some(_), Some(_), ..] => {
+                present = false
+            }
+        }
+        if present {
+            let a = ValArray::from_iter_exact(self.0.drain(..));
+            Some(Value::Array(a))
+        } else {
+            self.0.clear();
+            None
+        }
+    }
+}
+
+pub(super) type Window = CachedArgs<WindowEv>;
+
+#[derive(Debug, Default)]
 pub(super) struct LenEv;
 
 impl EvalCached for LenEv {

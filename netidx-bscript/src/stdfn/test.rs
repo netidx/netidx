@@ -562,6 +562,45 @@ run!(array_push_front, ARRAY_PUSH_FRONT, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
+const ARRAY_WINDOW0: &str = r#"
+  array::window(#window:u64:1, [(1, 2), (3, 4)], (5, 6))
+"#;
+
+#[cfg(test)]
+run!(array_window0, ARRAY_WINDOW0, |v: Result<&Value>| {
+    match v.and_then(|v| v.clone().cast_to::<[(u64, u64); 1]>()) {
+        Ok([(5, 6)]) => true,
+        Ok(_) | Err(_) => false,
+    }
+});
+
+#[cfg(test)]
+const ARRAY_WINDOW1: &str = r#"
+  array::window(#window:u64:2, [(1, 2), (3, 4)], (5, 6))
+"#;
+
+#[cfg(test)]
+run!(array_window1, ARRAY_WINDOW1, |v: Result<&Value>| {
+    match v.and_then(|v| v.clone().cast_to::<[(u64, u64); 2]>()) {
+        Ok([(3, 4), (5, 6)]) => true,
+        Ok(_) | Err(_) => false,
+    }
+});
+
+#[cfg(test)]
+const ARRAY_WINDOW2: &str = r#"
+  array::window(#window:u64:3, [(1, 2), (3, 4)], (5, 6))
+"#;
+
+#[cfg(test)]
+run!(array_window2, ARRAY_WINDOW2, |v: Result<&Value>| {
+    match v.and_then(|v| v.clone().cast_to::<[(u64, u64); 3]>()) {
+        Ok([(1, 2), (3, 4), (5, 6)]) => true,
+        Ok(_) | Err(_) => false,
+    }
+});
+
+#[cfg(test)]
 const ARRAY_LEN: &str = r#"
 {
   use core::array;
