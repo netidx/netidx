@@ -40,6 +40,7 @@ mod paragraph;
 mod scrollbar;
 mod sparkline;
 mod line_gauge;
+mod tabs;
 mod text;
 
 #[derive(Clone, Copy)]
@@ -294,6 +295,7 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) if &s == "Sparkline" => SparklineW::compile(bs, v).await,
             (s, v) if &s == "LineGauge" => LineGaugeW::compile(bs, v).await,
             (s, v) if &s == "Gauge" => GaugeW::compile(bs, v).await,
+            (s, v) if &s == "Tabs" => tabs::TabsW::compile(bs, v).await,
             (s, v) => bail!("invalid widget type `{s}({v})"),
         }
     })
