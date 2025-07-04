@@ -2,10 +2,11 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use async_trait::async_trait;
 use barchart::BarChartW;
-use chart::ChartW;
 use block::BlockW;
+use chart::ChartW;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures::{channel::mpsc, SinkExt, StreamExt};
+use gauge::GaugeW;
 use layout::LayoutW;
 use log::error;
 use netidx::publisher::{FromValue, Value};
@@ -23,8 +24,8 @@ use ratatui::{
 };
 use reedline::Signal;
 use scrollbar::ScrollbarW;
-use sparkline::SparklineW;
 use smallvec::SmallVec;
+use sparkline::SparklineW;
 use std::{borrow::Cow, future::Future, pin::Pin};
 use text::TextW;
 use tokio::{select, sync::oneshot, task};
@@ -32,11 +33,12 @@ use tokio::{select, sync::oneshot, task};
 mod barchart;
 mod block;
 mod chart;
+mod gauge;
 mod layout;
 mod paragraph;
 mod scrollbar;
-mod text;
 mod sparkline;
+mod text;
 
 #[derive(Clone, Copy)]
 struct AlignmentV(Alignment);
@@ -288,6 +290,7 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) if &s == "BarChart" => BarChartW::compile(bs, v).await,
             (s, v) if &s == "Chart" => ChartW::compile(bs, v).await,
             (s, v) if &s == "Sparkline" => SparklineW::compile(bs, v).await,
+            (s, v) if &s == "Gauge" => GaugeW::compile(bs, v).await,
             (s, v) => bail!("invalid widget type `{s}({v})"),
         }
     })

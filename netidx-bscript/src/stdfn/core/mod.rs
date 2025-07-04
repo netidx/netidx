@@ -235,7 +235,7 @@ struct MinEv;
 
 impl EvalCached for MinEv {
     const NAME: &str = "min";
-    deftype!("core", "fn(@args: Any) -> Any");
+    deftype!("core", "fn('a, @args:'a) -> 'a");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut res = None;
@@ -261,7 +261,7 @@ struct MaxEv;
 
 impl EvalCached for MaxEv {
     const NAME: &str = "max";
-    deftype!("core", "fn(@args: Any) -> Any");
+    deftype!("core", "fn('a, @args: 'a) -> 'a");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut res = None;
@@ -852,13 +852,13 @@ pub mod core {
     pub let error = |e| 'error;
 
     /// return the maximum value of any argument
-    pub let max = |@args| 'max;
+    pub let max = |a, @args| 'max;
 
     /// return the mean of the passed in arguments
     pub let mean = |v, @args| 'mean;
 
     /// return the minimum value of any argument
-    pub let min = |@args| 'min;
+    pub let min = |a, @args| 'min;
 
     /// return v only once, subsuquent updates to v will be ignored
     /// and once will return nothing
