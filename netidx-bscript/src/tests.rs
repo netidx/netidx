@@ -60,7 +60,7 @@ async fn bind_ref_arith() -> Result<()> {
 }
 "#;
     let (tx, mut rx) = mpsc::channel(10);
-    bs.subscribe(tx)?;
+    bs.subscribe(tx).await?;
     let e = bs.compile(ArcStr::from(e)).await?;
     let eid = e.exprs[0].id;
     match rx.next().await {
@@ -82,7 +82,7 @@ macro_rules! run {
             let ctx = $crate::tests::init().await?;
             let bs = ctx.rt;
             let (tx, mut rx) = futures::channel::mpsc::channel(10);
-            bs.subscribe(tx)?;
+            bs.subscribe(tx).await?;
             match bs.compile(arcstr::ArcStr::from($code)).await {
                 Err(e) => assert!($pred(dbg!(Err(e)))),
                 Ok(e) => {

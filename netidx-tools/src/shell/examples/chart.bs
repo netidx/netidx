@@ -1,0 +1,32 @@
+let data: Array<(f64, f64)> = {
+  let a = [];
+  select array::len(a) {
+    u64 as x if x > u64:32 => a <- a[(x - u64:32) .. x]?,
+    _ => never()
+  };
+  let trigger = time::timer(duration:0.5s, true);
+  let x = 0.0;
+  x <- sample(#trigger, x + 1.0);
+  let y = rand::rand(#trigger, #start: f64:0., #end: f64:100.);
+  a <- array::push(sample(#trigger, a), (x, y));
+  a
+};
+
+let ds = gui::dataset(
+  #graph_type: &`Line,
+  #marker: &`Block,
+  #name: &gui::line("stuff"),
+  &data
+);
+
+gui::chart(
+  #x_axis:&gui::axis(
+    #title: gui::line("Cycle(n)"),
+    {min: (data[0]?).0, max: (data[-1]?).0}
+  ),
+  #y_axis:&gui::axis(
+    #title: gui::line("Stuff"),
+    {min: 0.0, max: 100.0}
+  ),
+  &[ds]
+)

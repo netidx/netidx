@@ -794,9 +794,14 @@ pub mod core {
         /// returns the length of a
         pub let len = |a| 'array_len;
 
-        /// concatenates the first array with the scalar values or arrays subsuquently passed.
-        /// returns an array containing all the values of all it's arguments
+        /// returns the concatenation of two or more arrays
         pub let concat = |x, @args| 'array_concat;
+
+        /// return an array with the args added to the end
+        pub let push = |a, @args| 'array_push_back;
+
+        /// return an array with the args added to the front
+        pub let push_front = |a, @args| 'array_push_front;
 
         /// flatten takes an array with two levels of nesting and produces a flat array
         /// with all the nested elements concatenated together.
@@ -896,6 +901,8 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Divide>().unwrap();
     ctx.register_builtin::<Filter<C, E>>().unwrap();
     ctx.register_builtin::<array::Concat>().unwrap();
+    ctx.register_builtin::<array::PushFront>().unwrap();
+    ctx.register_builtin::<array::PushBack>().unwrap();
     ctx.register_builtin::<array::Len>().unwrap();
     ctx.register_builtin::<array::Flatten>().unwrap();
     ctx.register_builtin::<array::Filter<C, E>>().unwrap();

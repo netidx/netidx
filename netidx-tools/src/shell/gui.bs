@@ -489,7 +489,7 @@ mod gui {
     max,
     style,
     value_style
-  })
+  });
 
   type Marker = [
     `Dot,

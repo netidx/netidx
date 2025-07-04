@@ -7,6 +7,7 @@ use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::Event;
 use futures::future::try_join_all;
+use log::debug;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
     expr::ExprId,
@@ -80,7 +81,7 @@ impl FromValue for AxisV {
     fn from_value(v: Value) -> Result<Self> {
         let [(_, bounds), (_, labels), (_, labels_alignment), (_, style), (_, title)] =
             v.cast_to::<[(ArcStr, Value); 5]>()?;
-        let [(_, min), (_, max)] = bounds.cast_to::<[(ArcStr, f64); 2]>()?;
+        let [(_, max), (_, min)] = bounds.cast_to::<[(ArcStr, f64); 2]>()?;
         let mut axis = Axis::default().bounds([min, max]);
         if let Some(lbls) = labels.cast_to::<Option<Vec<LineV>>>()? {
             let lbls = lbls.into_iter().map(|l| l.0).collect::<Vec<_>>();
@@ -147,6 +148,7 @@ impl DatasetW {
 
     fn set_data(&mut self, v: &Value) -> Result<()> {
         self.data.clear();
+        debug!("dataset: {}", v);
         match v {
             Value::Array(a) => {
                 for v in a {
@@ -290,6 +292,7 @@ impl GuiWidget for ChartW {
             x_axis,
             y_axis,
         } = self;
+        debug!("drawing datasets: {}", datasets.len());
         let mut chart = Chart::new(datasets.iter().map(|d| d.build()).collect());
         if let Some(Some(h)) = &hidden_legend_constraints.t {
             chart = chart.hidden_legend_constraints(h.0);
