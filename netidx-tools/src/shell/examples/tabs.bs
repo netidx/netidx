@@ -1,12 +1,16 @@
 use gui;
 
+let trigger = time::timer(duration:1.0s, true);
+let selected = u32:0;
+selected <- sample(#trigger, (selected + u32:1) % u32:3);
+
 let tab1 = paragraph(&"This is tab 1");
 let tab2 = paragraph(&"This is tab 2");
 let tab3 = paragraph(&"This is tab 3");
 
 tabs(
   #highlight_style: &style(#fg:`Yellow),
-  #selected: &u32:0,
+  #selected: &selected,
   &[
     (line("One"), tab1),
     (line("Two"), tab2),
