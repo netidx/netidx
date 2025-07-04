@@ -1,6 +1,6 @@
 use gui;
 
-let trigger = time::timer(duration:1.0s, true);
+let trigger = time::timer(duration:0.5s, true);
 let power = 0.0;
 power <- sample(#trigger, min(1.0, power + 0.01));
 
