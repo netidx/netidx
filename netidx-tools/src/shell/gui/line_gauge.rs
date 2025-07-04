@@ -4,13 +4,8 @@ use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::Event;
 use netidx::publisher::{FromValue, Value};
-use netidx_bscript::{expr::ExprId, rt::{BSHandle, Ref}};
-use ratatui::{
-    layout::Rect,
-    symbols,
-    widgets::LineGauge,
-    Frame,
-};
+use netidx_bscript::{expr::ExprId, rt::BSHandle};
+use ratatui::{layout::Rect, symbols, widgets::LineGauge, Frame};
 use tokio::try_join;
 
 #[derive(Clone, Copy)]
@@ -51,12 +46,14 @@ impl LineGaugeW {
             bs.compile_ref(unfilled_style)
         }?;
         Ok(Box::new(Self {
-            filled_style: TRef::new(filled_style).context("line_gauge tref filled_style")?,
+            filled_style: TRef::new(filled_style)
+                .context("line_gauge tref filled_style")?,
             label: TRef::new(label).context("line_gauge tref label")?,
             line_set: TRef::new(line_set).context("line_gauge tref line_set")?,
             ratio: TRef::new(ratio).context("line_gauge tref ratio")?,
             style: TRef::new(style).context("line_gauge tref style")?,
-            unfilled_style: TRef::new(unfilled_style).context("line_gauge tref unfilled_style")?,
+            unfilled_style: TRef::new(unfilled_style)
+                .context("line_gauge tref unfilled_style")?,
         }))
     }
 }
@@ -68,38 +65,32 @@ impl GuiWidget for LineGaugeW {
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
-        self.filled_style
-            .update(id, &v)
-            .context("line_gauge update filled_style")?;
-        self.label
-            .update(id, &v)
-            .context("line_gauge update label")?;
-        self.line_set
-            .update(id, &v)
-            .context("line_gauge update line_set")?;
-        self.ratio.update(id, &v).context("line_gauge update ratio")?;
-        self.style.update(id, &v).context("line_gauge update style")?;
-        self.unfilled_style
-            .update(id, &v)
-            .context("line_gauge update unfilled_style")?;
+        let Self { filled_style, label, line_set, ratio, style, unfilled_style } = self;
+        filled_style.update(id, &v).context("line_gauge update filled_style")?;
+        label.update(id, &v).context("line_gauge update label")?;
+        line_set.update(id, &v).context("line_gauge update line_set")?;
+        ratio.update(id, &v).context("line_gauge update ratio")?;
+        style.update(id, &v).context("line_gauge update style")?;
+        unfilled_style.update(id, &v).context("line_gauge update unfilled_style")?;
         Ok(())
     }
 
     fn draw(&mut self, frame: &mut Frame, rect: Rect) -> Result<()> {
-        let mut g = LineGauge::default().ratio(self.ratio.t.unwrap_or(0.0));
-        if let Some(Some(LineV(l))) = &self.label.t {
+        let Self { filled_style, label, line_set, ratio, style, unfilled_style } = self;
+        let mut g = LineGauge::default().ratio(ratio.t.unwrap_or(0.0));
+        if let Some(Some(LineV(l))) = &label.t {
             g = g.label(into_borrowed_line(l));
         }
-        if let Some(Some(ls)) = self.line_set.t {
+        if let Some(Some(ls)) = line_set.t {
             g = g.line_set(ls.0);
         }
-        if let Some(Some(s)) = &self.style.t {
+        if let Some(Some(s)) = &style.t {
             g = g.style(s.0);
         }
-        if let Some(Some(s)) = &self.filled_style.t {
+        if let Some(Some(s)) = &filled_style.t {
             g = g.filled_style(s.0);
         }
-        if let Some(Some(s)) = &self.unfilled_style.t {
+        if let Some(Some(s)) = &unfilled_style.t {
             g = g.unfilled_style(s.0);
         }
         frame.render_widget(g, rect);
