@@ -4,7 +4,8 @@ use rand;
 let data: Array<[SparklineBar, f64]> = {
   let trigger = time::timer(duration:0.3s, true);
   let v = select rand::rand(#trigger, #start: f64:0., #end: f64:100.) {
-    x if x > 50. => sparkline_bar(#style: style(#fg:`Red), x),
+    x if (x > 50.) && (x < 75.) => sparkline_bar(#style: style(#fg:`Yellow), x),
+    x if x > 75. => sparkline_bar(#style: style(#fg:`Red), x),
     x => x
   };
   let d = [];
@@ -16,9 +17,13 @@ let data: Array<[SparklineBar, f64]> = {
   d
 };
 
-sparkline(
-  #style: &style(#fg: `Cyan),
-  #max: &u64:100,
-  #direction: &`LeftToRight,
-  &data
+block(
+  #border:&`All,
+  #title:&line("Rate"),
+  &sparkline(
+    #style: &style(#fg: `Green),
+    #max: &u64:100,
+    #direction: &`LeftToRight,
+    &data
+  )
 )
