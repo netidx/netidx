@@ -1,0 +1,20 @@
+use gui;
+use rand;
+
+let data: Array<f64> = {
+  let trigger = time::timer(duration:0.3s, true);
+  let v = rand::rand(#trigger, #start: f64:0., #end: f64:100.);
+  let d = [];
+  d <- array::push(sample(#trigger, d), v);
+  select array::len(d) {
+    u64 as len if len > u64:30 => d <- d[(len - u64:30) .. len]?,
+    _ => never()
+  };
+  d
+};
+
+sparkline(
+  #max: &u64:100,
+  #direction: &`LeftToRight,
+  &data
+)
