@@ -9,11 +9,7 @@ let data: Array<[SparklineBar, f64]> = {
     x => x
   };
   let d = [];
-  d <- array::push(sample(#trigger, d), v);
-  select array::len(d) {
-    u64 as len if len > u64:80 => d <- d[(len - u64:80) .. len]?,
-    _ => never()
-  };
+  d <- array::window(#window: u64:80, sample(#trigger, d), v);
   d
 };
 

@@ -1,16 +1,12 @@
 use gui;
 
 let data: Array<(f64, f64)> = {
-  let a = [];
-  select array::len(a) {
-    u64 as x if x > u64:32 => a <- a[(x - u64:32) .. x]?,
-    _ => never()
-  };
   let trigger = time::timer(duration:0.5s, true);
   let x = 0.0;
   x <- sample(#trigger, x + 1.0);
   let y = rand::rand(#trigger, #start: f64:0., #end: f64:100.);
-  a <- array::push(sample(#trigger, a), (x, y));
+  let a = [];
+  a <- array::window(#window: u64:32, sample(#trigger, a), (x, y));
   a
 };
 
