@@ -26,6 +26,7 @@ use reedline::Signal;
 use scrollbar::ScrollbarW;
 use smallvec::SmallVec;
 use sparkline::SparklineW;
+use line_gauge::LineGaugeW;
 use std::{borrow::Cow, future::Future, pin::Pin};
 use text::TextW;
 use tokio::{select, sync::oneshot, task};
@@ -38,6 +39,7 @@ mod layout;
 mod paragraph;
 mod scrollbar;
 mod sparkline;
+mod line_gauge;
 mod text;
 
 #[derive(Clone, Copy)]
@@ -290,6 +292,7 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) if &s == "BarChart" => BarChartW::compile(bs, v).await,
             (s, v) if &s == "Chart" => ChartW::compile(bs, v).await,
             (s, v) if &s == "Sparkline" => SparklineW::compile(bs, v).await,
+            (s, v) if &s == "LineGauge" => LineGaugeW::compile(bs, v).await,
             (s, v) if &s == "Gauge" => GaugeW::compile(bs, v).await,
             (s, v) => bail!("invalid widget type `{s}({v})"),
         }
