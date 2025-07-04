@@ -15,17 +15,18 @@ let data: Array<(f64, f64)> = {
 };
 
 let ds = dataset(
-  #style: &style(#fg: `Green),
+  #style: &style(#fg: `Cyan),
   #graph_type: &`Line,
   #marker: &`Dot,
   #name: &line("stuff"),
   &data
 );
 
-let label_style = style(#fg: `Cyan);
-let axis_style = style(#fg: `Yellow);
+let label_style = style(#fg: `Yellow);
+let axis_style = style(#fg: `Magenta);
 
 chart(
+  #style: &style(#bg: `Rgb({r: u32:20, g: u32:20, b: u32:20})),
   #x_axis:&axis(
     #title: line(#style: label_style, "Cycle(n)"),
     #style: axis_style,
@@ -40,10 +41,8 @@ chart(
     #title: line(#style: label_style, "Stuff"),
     #style: axis_style,
     #labels: [
-      line(#style: label_style, "0"),
-      line(#style: label_style, "25"),
-      line(#style: label_style, "50"),
-      line(#style: label_style, "75"),
+      line(#style: label_style, "0"), line(#style: label_style, "25"),
+      line(#style: label_style, "50"), line(#style: label_style, "75"),
       line(#style: label_style, "100")
     ],
     {min: 0.0, max: 100.0}
