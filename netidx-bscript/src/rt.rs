@@ -697,11 +697,11 @@ impl BS {
                 self.event.init = *init;
                 if self.event.init {
                     n.refs(&mut |id| {
-                        if let Some(v) = self.ctx.cached.get(&id)
-                            && let Entry::Vacant(e) = self.event.variables.entry(id)
-                        {
-                            e.insert(v.clone());
-                            clear.push(id);
+                        if let Some(v) = self.ctx.cached.get(&id) {
+                            if let Entry::Vacant(e) = self.event.variables.entry(id) {
+                                e.insert(v.clone());
+                                clear.push(id);
+                            }
                         }
                     });
                 }

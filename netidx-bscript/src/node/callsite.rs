@@ -129,11 +129,11 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
                     Some(Some(expr)) => ctx.with_restored($f.env.clone(), |ctx| {
                         let n = compile(ctx, expr.clone(), &$f.scope, self.top_id)?;
                         n.refs(&mut |id| {
-                            if let Some(v) = ctx.cached.get(&id)
-                                && let Entry::Vacant(e) = event.variables.entry(id)
-                            {
-                                e.insert(v.clone());
-                                set.push(id);
+                            if let Some(v) = ctx.cached.get(&id) {
+                                if let Entry::Vacant(e) = event.variables.entry(id) {
+                                    e.insert(v.clone());
+                                    set.push(id);
+                                }
                             }
                         });
                         Ok::<_, anyhow::Error>(n)

@@ -6,6 +6,7 @@ mod gui {
     `Block(Block),
     `Scrollbar(Scrollbar),
     `Layout(Layout),
+    `Tabs(Tabs),
     `BarChart(BarChart),
     `Chart(Chart),
     `Sparkline(Sparkline),
@@ -423,6 +424,34 @@ mod gui {
     spacing,
     vertical_margin,
     children
+  });
+
+  type Tabs = {
+    divider: &[Span, null],
+    highlight_style: &[Style, null],
+    padding_left: &[Line, null],
+    padding_right: &[Line, null],
+    selected: &[u32, null],
+    style: &[Style, null],
+    tabs: &Array<(Line, Gui)>
+  };
+
+  let tabs = |
+    #divider: &[Span, null] = &null,
+    #highlight_style: &[Style, null] = &null,
+    #padding_left: &[Line, null] = &null,
+    #padding_right: &[Line, null] = &null,
+    #selected: &[u32, null] = &null,
+    #style: &[Style, null] = &null,
+    tabs: &Array<(Line, Gui)>
+  | -> Gui `Tabs({
+    divider,
+    highlight_style,
+    padding_left,
+    padding_right,
+    selected,
+    style,
+    tabs
   });
 
   type Bar = {
