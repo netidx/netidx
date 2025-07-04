@@ -49,6 +49,8 @@ impl FromValue for SparklineBarV {
 }
 
 pub(super) struct SparklineW {
+    absent_value_style: TRef<Option<StyleV>>,
+    absent_value_symbol: TRef<Option<ArcStr>>,
     data_ref: Ref,
     data: Vec<SparklineBar>,
     direction: TRef<Option<RenderDirectionV>>,
@@ -58,20 +60,27 @@ pub(super) struct SparklineW {
 
 impl SparklineW {
     pub(super) async fn compile(bs: BSHandle, v: Value) -> Result<GuiW> {
-        let [(_, data), (_, direction), (_, max), (_, style)] =
-            v.cast_to::<[(ArcStr, u64); 4]>()?;
-        let (data_ref, direction, max, style) = try_join! {
-            bs.compile_ref(data),
-            bs.compile_ref(direction),
-            bs.compile_ref(max),
-            bs.compile_ref(style),
-        }?;
+        let [(_, absent_value_style), (_, absent_value_symbol), (_, data), (_, direction), (_, max), (_, style)] =
+            v.cast_to::<[(ArcStr, u64); 6]>()?;
+        let (absent_value_style, absent_value_symbol, data_ref, direction, max, style) =
+            try_join! {
+                bs.compile_ref(absent_value_style),
+                bs.compile_ref(absent_value_symbol),
+                bs.compile_ref(data),
+                bs.compile_ref(direction),
+                bs.compile_ref(max),
+                bs.compile_ref(style),
+            }?;
         let mut t = Self {
+            absent_value_style: TRef::new(absent_value_style)
+                .context("sparkline tref absent_value_style")?,
+            absent_value_symbol: TRef::new(absent_value_symbol)
+                .context("sparkline tref absent_value_symbol")?,
             data_ref,
             data: vec![],
-            direction: TRef::new(direction)?,
-            max: TRef::new(max)?,
-            style: TRef::new(style)?,
+            direction: TRef::new(direction).context("sparkline tref direction")?,
+            max: TRef::new(max).context("sparkline tref max")?,
+            style: TRef::new(style).context("sparkline tref style")?,
         };
         if let Some(v) = t.data_ref.last.take() {
             t.set_data(&v)?;
@@ -100,7 +109,21 @@ impl GuiWidget for SparklineW {
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
-        let Self { data_ref, data: _, direction, max, style } = self;
+        let Self {
+            absent_value_style,
+            absent_value_symbol,
+            data_ref,
+            data: _,
+            direction,
+            max,
+            style,
+        } = self;
+        absent_value_style
+            .update(id, &v)
+            .context("sparkline update absent_value_style")?;
+        absent_value_symbol
+            .update(id, &v)
+            .context("sparkline update absent_value_symbol")?;
         direction.update(id, &v).context("sparkline update direction")?;
         max.update(id, &v).context("sparkline update max")?;
         style.update(id, &v).context("sparkline update style")?;
@@ -111,8 +134,22 @@ impl GuiWidget for SparklineW {
     }
 
     fn draw(&mut self, frame: &mut Frame, rect: Rect) -> Result<()> {
-        let Self { data_ref: _, data, direction, max, style } = self;
+        let Self {
+            absent_value_style,
+            absent_value_symbol,
+            data_ref: _,
+            data,
+            direction,
+            max,
+            style,
+        } = self;
         let mut spark = Sparkline::default().data(data.iter().map(|b| b.clone()));
+        if let Some(Some(s)) = &absent_value_style.t {
+            spark = spark.absent_value_style(s.0);
+        }
+        if let Some(Some(s)) = &absent_value_symbol.t {
+            spark = spark.absent_value_symbol(s.to_string());
+        }
         if let Some(Some(m)) = max.t {
             spark = spark.max(m);
         }

@@ -595,6 +595,8 @@ mod gui {
   | -> SparklineBar { style, value };
 
   type Sparkline = {
+    absent_value_style: &[Style, null],
+    absent_value_symbol: &[string, null],
     data: &Array<[SparklineBar, f64, null]>,
     direction: &[RenderDirection, null],
     max: &[u64, null],
@@ -602,9 +604,18 @@ mod gui {
   };
 
   let sparkline = |
+    #absent_value_style: &[Style, null],
+    #absent_value_symbol: &[string, null],
     #direction: &[RenderDirection, null] = &null,
     #max: &[u64, null] = &null,
     #style: &[Style, null] = &null,
     data: &Array<[SparklineBar, f64, null]>
-  | -> Gui `Sparkline({ data, direction, max, style })
+  | -> Gui `Sparkline({
+    absent_value_symbo,
+    absent_value_style,
+    data,
+    direction,
+    max,
+    style
+  })
 }
