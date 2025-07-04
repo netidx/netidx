@@ -533,10 +533,10 @@ mod gui {
   | -> Axis { bounds, labels, labels_alignment, style, title };
 
   type Dataset = {
-    name: &[Line, null],
     data: &Array<(f64, f64)>,
-    marker: &[Marker, null],
     graph_type: &[GraphType, null],
+    marker: &[Marker, null],
+    name: &[Line, null],
     style: &[Style, null]
   };
 

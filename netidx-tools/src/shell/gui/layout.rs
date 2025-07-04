@@ -17,7 +17,7 @@ use smallvec::SmallVec;
 use tokio::try_join;
 
 #[derive(Clone, Copy)]
-pub(super) struct ConstraintV(Constraint);
+pub(super) struct ConstraintV(pub Constraint);
 
 impl FromValue for ConstraintV {
     fn from_value(v: Value) -> Result<Self> {

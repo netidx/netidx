@@ -20,7 +20,7 @@ use smallvec::SmallVec;
 use tokio::try_join;
 
 #[derive(Clone, Copy)]
-pub(super) struct BordersV(Borders);
+struct BordersV(Borders);
 
 impl FromValue for BordersV {
     fn from_value(v: Value) -> Result<Self> {
@@ -48,7 +48,7 @@ impl FromValue for BordersV {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct BorderTypeV(BorderType);
+struct BorderTypeV(BorderType);
 
 impl FromValue for BorderTypeV {
     fn from_value(v: Value) -> Result<Self> {
@@ -65,7 +65,7 @@ impl FromValue for BorderTypeV {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct PaddingV(Padding);
+struct PaddingV(Padding);
 
 impl FromValue for PaddingV {
     fn from_value(v: Value) -> Result<Self> {
