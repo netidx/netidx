@@ -143,8 +143,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInLambda<C, E> {
             let vargs = if self.typ.vargs.is_some() { "at least " } else { "" };
             bail!(
                 "expected {}{} arguments got {}",
-                self.typ.args.len(),
                 vargs,
+                self.typ.args.len(),
                 args.len()
             )
         }
