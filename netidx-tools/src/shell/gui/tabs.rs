@@ -4,7 +4,7 @@ use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::Event;
 use futures::future;
-use netidx::publisher::{FromValue, Value};
+use netidx::publisher::Value;
 use netidx_bscript::{expr::ExprId, rt::{BSHandle, Ref}};
 use ratatui::{layout::Rect, widgets::Tabs, Frame};
 use smallvec::SmallVec;
@@ -67,20 +67,17 @@ impl TabsW {
     }
 
     async fn set_tabs(&mut self, v: Value) -> Result<()> {
-        self.tabs = future::join_all(
-            v.cast_to::<SmallVec<[(LineV, Value); 8]>>()?
-                .into_iter()
-                .map(|(l, v)| {
-                    let bs = self.bs.clone();
-                    async move {
-                        let w = compile(bs, v).await?;
-                        Ok((l, w))
-                    }
-                }),
+        let arr = v.cast_to::<SmallVec<[(LineV, Value); 8]>>()?;
+        self.tabs = future::try_join_all(
+            arr.into_iter().map(|(l, v)| {
+                let bs = self.bs.clone();
+                async move {
+                    let w = compile(bs, v).await?;
+                    Ok::<(LineV, GuiW), anyhow::Error>((l, w))
+                }
+            }),
         )
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+        .await?;
         Ok(())
     }
 }
@@ -96,27 +93,22 @@ impl GuiWidget for TabsW {
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
-        let Self {
-            bs: _,
-            tabs,
-            tabs_ref,
-            divider,
-            highlight_style,
-            padding_left,
-            padding_right,
-            selected,
-            style,
-        } = self;
-        divider.update(id, &v).context("tabs divider update")?;
-        highlight_style.update(id, &v).context("tabs highlight_style update")?;
-        padding_left.update(id, &v).context("tabs padding_left update")?;
-        padding_right.update(id, &v).context("tabs padding_right update")?;
-        selected.update(id, &v).context("tabs selected update")?;
-        style.update(id, &v).context("tabs style update")?;
-        if tabs_ref.id == id {
+        self.divider.update(id, &v).context("tabs divider update")?;
+        self.highlight_style
+            .update(id, &v)
+            .context("tabs highlight_style update")?;
+        self.padding_left
+            .update(id, &v)
+            .context("tabs padding_left update")?;
+        self.padding_right
+            .update(id, &v)
+            .context("tabs padding_right update")?;
+        self.selected.update(id, &v).context("tabs selected update")?;
+        self.style.update(id, &v).context("tabs style update")?;
+        if self.tabs_ref.id == id {
             self.set_tabs(v.clone()).await?;
         }
-        for (_, c) in tabs {
+        for (_, c) in &mut self.tabs {
             c.handle_update(id, v.clone()).await?;
         }
         Ok(())
@@ -152,7 +144,7 @@ impl GuiWidget for TabsW {
             t = t.padding_right(into_borrowed_line(&r.0));
         }
         if let Some(Some(s)) = selected.t {
-            t = t.select(*s as usize);
+            t = t.select(s as usize);
         }
         let mut bar_rect = rect;
         if bar_rect.height > 0 {

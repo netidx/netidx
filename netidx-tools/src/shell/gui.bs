@@ -432,8 +432,8 @@ mod gui {
     padding_left: &[Line, null],
     padding_right: &[Line, null],
     selected: &[u32, null],
-    tabs: &Array<(Line, Gui)>,
-    style: &[Style, null]
+    style: &[Style, null],
+    tabs: &Array<(Line, Gui)>
   };
 
   let tabs = |
