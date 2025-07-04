@@ -23,6 +23,7 @@ use ratatui::{
 };
 use reedline::Signal;
 use scrollbar::ScrollbarW;
+use sparkline::SparklineW;
 use smallvec::SmallVec;
 use std::{borrow::Cow, future::Future, pin::Pin};
 use text::TextW;
@@ -35,6 +36,7 @@ mod layout;
 mod paragraph;
 mod scrollbar;
 mod text;
+mod sparkline;
 
 #[derive(Clone, Copy)]
 struct AlignmentV(Alignment);
@@ -285,6 +287,7 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) if &s == "Layout" => LayoutW::compile(bs, v).await,
             (s, v) if &s == "BarChart" => BarChartW::compile(bs, v).await,
             (s, v) if &s == "Chart" => ChartW::compile(bs, v).await,
+            (s, v) if &s == "Sparkline" => SparklineW::compile(bs, v).await,
             (s, v) => bail!("invalid widget type `{s}({v})"),
         }
     })
