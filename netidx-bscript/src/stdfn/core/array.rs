@@ -490,7 +490,7 @@ pub(super) struct ConcatEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for ConcatEv {
     const NAME: &str = "array_concat";
-    deftype!("core::array", "fn(Array<'a>, @args: [Array<'a>, 'a]) -> Array<'a>");
+    deftype!("core::array", "fn(Array<'a>, @args: Array<'a>) -> Array<'a>");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut present = true;
@@ -516,6 +516,72 @@ impl EvalCached for ConcatEv {
 }
 
 pub(super) type Concat = CachedArgs<ConcatEv>;
+
+#[derive(Debug, Default)]
+pub(super) struct PushBackEv(SmallVec<[Value; 32]>);
+
+impl EvalCached for PushBackEv {
+    const NAME: &str = "array_push_back";
+    deftype!("core::array", "fn(Array<'a>, @args: 'a) -> Array<'a>");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        let mut present = true;
+        match &from.0[..] {
+            [Some(Value::Array(a)), tl @ ..] => {
+                self.0.extend(a.iter().map(|v| v.clone()));
+                for v in tl {
+                    match v {
+                        Some(v) => self.0.push(v.clone()),
+                        None => present = false,
+                    }
+                }
+            }
+            [] | [None, ..] | [Some(_), ..] => present = false,
+        }
+        if present {
+            let a = ValArray::from_iter_exact(self.0.drain(..));
+            Some(Value::Array(a))
+        } else {
+            self.0.clear();
+            None
+        }
+    }
+}
+
+pub(super) type PushBack = CachedArgs<PushBackEv>;
+
+#[derive(Debug, Default)]
+pub(super) struct PushFrontEv(SmallVec<[Value; 32]>);
+
+impl EvalCached for PushFrontEv {
+    const NAME: &str = "array_push_front";
+    deftype!("core::array", "fn(Array<'a>, @args: 'a) -> Array<'a>");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        let mut present = true;
+        match &from.0[..] {
+            [Some(Value::Array(a)), tl @ ..] => {
+                for v in tl {
+                    match v {
+                        Some(v) => self.0.push(v.clone()),
+                        None => present = false,
+                    }
+                }
+                self.0.extend(a.iter().map(|v| v.clone()));
+            }
+            [] | [None, ..] | [Some(_), ..] => present = false,
+        }
+        if present {
+            let a = ValArray::from_iter_exact(self.0.drain(..));
+            Some(Value::Array(a))
+        } else {
+            self.0.clear();
+            None
+        }
+    }
+}
+
+pub(super) type PushFront = CachedArgs<PushFrontEv>;
 
 #[derive(Debug, Default)]
 pub(super) struct LenEv;

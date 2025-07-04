@@ -2,6 +2,7 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use async_trait::async_trait;
 use barchart::BarChartW;
+use chart::ChartW;
 use block::BlockW;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -29,6 +30,7 @@ use tokio::{select, sync::oneshot, task};
 
 mod barchart;
 mod block;
+mod chart;
 mod layout;
 mod paragraph;
 mod scrollbar;
@@ -282,6 +284,7 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) if &s == "Scrollbar" => ScrollbarW::compile(bs, v).await,
             (s, v) if &s == "Layout" => LayoutW::compile(bs, v).await,
             (s, v) if &s == "BarChart" => BarChartW::compile(bs, v).await,
+            (s, v) if &s == "Chart" => ChartW::compile(bs, v).await,
             (s, v) => bail!("invalid widget type `{s}({v})"),
         }
     })

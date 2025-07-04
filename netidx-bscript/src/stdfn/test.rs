@@ -536,6 +536,32 @@ run!(array_concat, ARRAY_CONCAT, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
+const ARRAY_PUSH: &str = r#"
+  array::push([(1, 2), (3, 4)], (5, 6))
+"#;
+
+#[cfg(test)]
+run!(array_push, ARRAY_PUSH, |v: Result<&Value>| {
+    match v.and_then(|v| v.clone().cast_to::<[(u64, u64); 3]>()) {
+        Ok([(1, 2), (3, 4), (5, 6)]) => true,
+        Ok(_) | Err(_) => false,
+    }
+});
+
+#[cfg(test)]
+const ARRAY_PUSH_FRONT: &str = r#"
+  array::push_front([(1, 2), (3, 4)], (5, 6))
+"#;
+
+#[cfg(test)]
+run!(array_push_front, ARRAY_PUSH_FRONT, |v: Result<&Value>| {
+    match v.and_then(|v| v.clone().cast_to::<[(u64, u64); 3]>()) {
+        Ok([(5, 6), (1, 2), (3, 4)]) => true,
+        Ok(_) | Err(_) => false,
+    }
+});
+
+#[cfg(test)]
 const ARRAY_LEN: &str = r#"
 {
   use core::array;

@@ -1,0 +1,52 @@
+use gui;
+
+let data: Array<(f64, f64)> = {
+  let a = [];
+  select array::len(a) {
+    u64 as x if x > u64:32 => a <- a[(x - u64:32) .. x]?,
+    _ => never()
+  };
+  let trigger = time::timer(duration:0.5s, true);
+  let x = 0.0;
+  x <- sample(#trigger, x + 1.0);
+  let y = rand::rand(#trigger, #start: f64:0., #end: f64:100.);
+  a <- array::push(sample(#trigger, a), (x, y));
+  a
+};
+
+let ds = dataset(
+  #style: &style(#fg: `Green),
+  #graph_type: &`Line,
+  #marker: &`Dot,
+  #name: &line("stuff"),
+  &data
+);
+
+let label_style = style(#fg: `Cyan);
+let axis_style = style(#fg: `Yellow);
+
+chart(
+  #x_axis:&axis(
+    #title: line(#style: label_style, "Cycle(n)"),
+    #style: axis_style,
+    #labels: [
+      line(#style: label_style, "[(data[0]?).0]"),
+      line(#style: label_style, "[(data[array::len(data)/u64:2]?).0]"),
+      line(#style: label_style, "[(data[-1]?).0]")
+    ],
+    {min: (data[0]?).0, max: (data[-1]?).0}
+  ),
+  #y_axis:&axis(
+    #title: line(#style: label_style, "Stuff"),
+    #style: axis_style,
+    #labels: [
+      line(#style: label_style, "0"),
+      line(#style: label_style, "25"),
+      line(#style: label_style, "50"),
+      line(#style: label_style, "75"),
+      line(#style: label_style, "100")
+    ],
+    {min: 0.0, max: 100.0}
+  ),
+  &[ds]
+)
