@@ -1,3 +1,5 @@
+use gui;
+
 let data: Array<(f64, f64)> = {
   let a = [];
   select array::len(a) {
@@ -12,20 +14,38 @@ let data: Array<(f64, f64)> = {
   a
 };
 
-let ds = gui::dataset(
+let ds = dataset(
+  #style: &style(#fg: `Green),
   #graph_type: &`Line,
-  #marker: &`Block,
-  #name: &gui::line("stuff"),
+  #marker: &`Dot,
+  #name: &line("stuff"),
   &data
 );
 
-gui::chart(
-  #x_axis:&gui::axis(
-    #title: gui::line("Cycle(n)"),
+let label_style = style(#fg: `Cyan);
+let axis_style = style(#fg: `Yellow);
+
+chart(
+  #x_axis:&axis(
+    #title: line(#style: label_style, "Cycle(n)"),
+    #style: axis_style,
+    #labels: [
+      line(#style: label_style, "[(data[0]?).0]"),
+      line(#style: label_style, "[(data[array::len(data)/u64:2]?).0]"),
+      line(#style: label_style, "[(data[-1]?).0]")
+    ],
     {min: (data[0]?).0, max: (data[-1]?).0}
   ),
-  #y_axis:&gui::axis(
-    #title: gui::line("Stuff"),
+  #y_axis:&axis(
+    #title: line(#style: label_style, "Stuff"),
+    #style: axis_style,
+    #labels: [
+      line(#style: label_style, "0"),
+      line(#style: label_style, "25"),
+      line(#style: label_style, "50"),
+      line(#style: label_style, "75"),
+      line(#style: label_style, "100")
+    ],
     {min: 0.0, max: 100.0}
   ),
   &[ds]
