@@ -1,19 +1,23 @@
 use gui;
 use rand;
 
-let data: Array<f64> = {
+let data: Array<[SparklineBar, f64]> = {
   let trigger = time::timer(duration:0.3s, true);
-  let v = rand::rand(#trigger, #start: f64:0., #end: f64:100.);
+  let v = select rand::rand(#trigger, #start: f64:0., #end: f64:100.) {
+    x if x > 50. => sparkline_bar(#style: style(#fg:`Red), x),
+    x => x
+  };
   let d = [];
   d <- array::push(sample(#trigger, d), v);
   select array::len(d) {
-    u64 as len if len > u64:30 => d <- d[(len - u64:30) .. len]?,
+    u64 as len if len > u64:80 => d <- d[(len - u64:80) .. len]?,
     _ => never()
   };
   d
 };
 
 sparkline(
+  #style: &style(#fg: `Cyan),
   #max: &u64:100,
   #direction: &`LeftToRight,
   &data

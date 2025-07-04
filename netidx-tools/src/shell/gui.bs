@@ -577,7 +577,7 @@ mod gui {
     style,
     x_axis,
     y_axis
-  })
+  });
 
   type RenderDirection = [
     `LeftToRight,
@@ -604,14 +604,14 @@ mod gui {
   };
 
   let sparkline = |
-    #absent_value_style: &[Style, null],
-    #absent_value_symbol: &[string, null],
+    #absent_value_style: &[Style, null] = &null,
+    #absent_value_symbol: &[string, null] = &null,
     #direction: &[RenderDirection, null] = &null,
     #max: &[u64, null] = &null,
     #style: &[Style, null] = &null,
     data: &Array<[SparklineBar, f64, null]>
   | -> Gui `Sparkline({
-    absent_value_symbo,
+    absent_value_symbol,
     absent_value_style,
     data,
     direction,
