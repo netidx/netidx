@@ -2,7 +2,7 @@ use super::{compile, EmptyW, GuiW, GuiWidget, StyleV, TRef};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use async_trait::async_trait;
-use crossterm::event::{Event, KeyCode};
+use crossterm::event::Event;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
     expr::ExprId,
@@ -138,44 +138,47 @@ impl ScrollbarW {
     }
 }
 
+/*
+enum Act {
+    Inc,
+    Dec,
+}
+if let Some(e) = e.as_key_event() {
+    let o = self
+        .orientation
+        .t
+        .as_ref()
+        .and_then(|o| o.as_ref().map(|o| o.0.clone()))
+        .unwrap_or(ScrollbarOrientation::VerticalRight);
+    let action = match o {
+        ScrollbarOrientation::HorizontalBottom
+        | ScrollbarOrientation::HorizontalTop => match e.code {
+            KeyCode::Left => Some(Act::Dec),
+            KeyCode::Right => Some(Act::Inc),
+            _ => None,
+        },
+        ScrollbarOrientation::VerticalLeft
+        | ScrollbarOrientation::VerticalRight => match e.code {
+            KeyCode::Up | KeyCode::PageUp => Some(Act::Dec),
+            KeyCode::Down | KeyCode::PageDown => Some(Act::Inc),
+            _ => None,
+        },
+    };
+    let pos = self.position.t.and_then(|v| v).unwrap_or(0);
+    match action {
+        None => (),
+        Some(Act::Inc) if pos < u16::MAX => {
+            self.position.set_deref(Some(pos + 1))?
+        }
+        Some(Act::Dec) if pos > 0 => self.position.set_deref(Some(pos - 1))?,
+        Some(Act::Inc) | Some(Act::Dec) => (),
+    }
+}
+ */
+
 #[async_trait]
 impl GuiWidget for ScrollbarW {
     async fn handle_event(&mut self, e: Event) -> Result<()> {
-        enum Act {
-            Inc,
-            Dec,
-        }
-        if let Some(e) = e.as_key_event() {
-            let o = self
-                .orientation
-                .t
-                .as_ref()
-                .and_then(|o| o.as_ref().map(|o| o.0.clone()))
-                .unwrap_or(ScrollbarOrientation::VerticalRight);
-            let action = match o {
-                ScrollbarOrientation::HorizontalBottom
-                | ScrollbarOrientation::HorizontalTop => match e.code {
-                    KeyCode::Left => Some(Act::Dec),
-                    KeyCode::Right => Some(Act::Inc),
-                    _ => None,
-                },
-                ScrollbarOrientation::VerticalLeft
-                | ScrollbarOrientation::VerticalRight => match e.code {
-                    KeyCode::Up | KeyCode::PageUp => Some(Act::Dec),
-                    KeyCode::Down | KeyCode::PageDown => Some(Act::Inc),
-                    _ => None,
-                },
-            };
-            let pos = self.position.t.and_then(|v| v).unwrap_or(0);
-            match action {
-                None => (),
-                Some(Act::Inc) if pos < u16::MAX => {
-                    self.position.set_deref(Some(pos + 1))?
-                }
-                Some(Act::Dec) if pos > 0 => self.position.set_deref(Some(pos - 1))?,
-                Some(Act::Inc) | Some(Act::Dec) => (),
-            }
-        }
         self.child.handle_event(e).await
     }
 

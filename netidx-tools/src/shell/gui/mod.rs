@@ -7,7 +7,9 @@ use chart::ChartW;
 use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use gauge::GaugeW;
+use input_handler::InputHandlerW;
 use layout::LayoutW;
+use line_gauge::LineGaugeW;
 use log::error;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
@@ -26,7 +28,6 @@ use reedline::Signal;
 use scrollbar::ScrollbarW;
 use smallvec::SmallVec;
 use sparkline::SparklineW;
-use line_gauge::LineGaugeW;
 use std::{borrow::Cow, future::Future, pin::Pin};
 use text::TextW;
 use tokio::{select, sync::oneshot, task};
@@ -35,11 +36,12 @@ mod barchart;
 mod block;
 mod chart;
 mod gauge;
+mod input_handler;
 mod layout;
+mod line_gauge;
 mod paragraph;
 mod scrollbar;
 mod sparkline;
-mod line_gauge;
 mod tabs;
 mod text;
 
@@ -296,6 +298,7 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) if &s == "LineGauge" => LineGaugeW::compile(bs, v).await,
             (s, v) if &s == "Gauge" => GaugeW::compile(bs, v).await,
             (s, v) if &s == "Tabs" => tabs::TabsW::compile(bs, v).await,
+            (s, v) if &s == "InputHandler" => InputHandlerW::compile(bs, v).await,
             (s, v) => bail!("invalid widget type `{s}({v})"),
         }
     })

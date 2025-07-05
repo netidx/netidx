@@ -11,7 +11,8 @@ mod gui {
     `Chart(Chart),
     `Sparkline(Sparkline),
     `LineGauge(LineGauge),
-    `Gauge(Gauge)
+    `Gauge(Gauge),
+    `InputHandler(InputHandler)
   ];
 
   type MediaKeyCode = [
@@ -100,8 +101,8 @@ mod gui {
 
   type KeyEvent = {
     code: KeyCode,
-    modifiers: Array<KeyModifier>,
     kind: KeyEventKind,
+    modifiers: Array<KeyModifier>,
     state: Array<KeyEventState>
   };
 
@@ -123,10 +124,10 @@ mod gui {
   ];
 
   type MouseEvent = {
-    kind: MouseEventKind,
     column: u32,
-    row: u32,
+    kind: MouseEventKind,
     modifiers: Array<KeyModifier>
+    row: u32,
   };
 
   type Event = [
@@ -137,6 +138,18 @@ mod gui {
     `Paste(string),
     `Resize(u32, u32)
   ];
+
+  type InputHandler = {
+    child: &Gui,
+    enabled: &[bool, null],
+    handle: fn(Event) -> [`Stop, `Continue],
+  }
+
+  let input_handler = |
+    #enabled: &[bool, null] = &null,
+    #handle: fn(Event) -> [`Stop, `Continue],
+    child: &Gui
+  | -> Gui `InputHandler(InputHandler)
 
   type Color = [
     `Reset,
