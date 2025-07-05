@@ -126,8 +126,8 @@ mod gui {
   type MouseEvent = {
     column: u32,
     kind: MouseEventKind,
-    modifiers: Array<KeyModifier>
-    row: u32,
+    modifiers: Array<KeyModifier>,
+    row: u32
   };
 
   type Event = [
@@ -142,14 +142,14 @@ mod gui {
   type InputHandler = {
     child: &Gui,
     enabled: &[bool, null],
-    handle: fn(Event) -> [`Stop, `Continue],
-  }
+    handle: fn(Event) -> [`Stop, `Continue]
+  };
 
   let input_handler = |
     #enabled: &[bool, null] = &null,
     #handle: fn(Event) -> [`Stop, `Continue],
     child: &Gui
-  | -> Gui `InputHandler(InputHandler)
+  | -> Gui `InputHandler({ child, enabled, handle });
 
   type Color = [
     `Reset,

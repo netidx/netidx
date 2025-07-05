@@ -38,7 +38,7 @@ impl<C: Ctx, E: UserEvent> Select<C, E> {
             .map(|(pat, spec)| {
                 let scope =
                     ModPath(scope.append(&format_compact!("sel{}", SelectId::new().0)));
-                let pat = PatternNode::compile(ctx, pat, &scope, top_id)
+                let pat = PatternNode::compile(ctx, arg.node.typ(), pat, &scope, top_id)
                     .with_context(|| format!("in select at {pos}"))?;
                 let n = Cached::new(compile(ctx, spec.clone(), &scope, top_id)?);
                 Ok((pat, n))

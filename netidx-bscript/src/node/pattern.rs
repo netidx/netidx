@@ -474,13 +474,18 @@ pub(crate) struct PatternNode<C: Ctx, E: UserEvent> {
 impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
     pub(super) fn compile(
         ctx: &mut ExecCtx<C, E>,
+        arg_type: &Type,
         spec: &Pattern,
         scope: &ModPath,
         top_id: ExprId,
     ) -> Result<Self> {
         let type_predicate = match &spec.type_predicate {
             Some(t) => t.scope_refs(scope).lookup_ref(&ctx.env)?.clone(),
-            None => spec.structure_predicate.infer_type_predicate(),
+            None => {
+                let typ = spec.structure_predicate.infer_type_predicate();
+                arg_type.contains(&ctx.env, &typ)?;
+                typ
+            }
         };
         match &type_predicate {
             Type::Fn(_) => bail!("can't match on Fn type"),

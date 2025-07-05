@@ -49,7 +49,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BScriptLambda<C, E> {
             ($n:expr, $e:expr) => {
                 match $e {
                     Ok(()) => Ok(()),
-                    Err(e) => Err(anyhow!("in expr: {}, type error: {e}", $n.spec())),
+                    Err(e) => Err(anyhow!("in expr: {}, type error: {e:?}", $n.spec())),
                 }
             };
         }
@@ -133,7 +133,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInLambda<C, E> {
             ($n:expr, $e:expr) => {
                 match $e {
                     Ok(()) => Ok(()),
-                    Err(e) => Err(anyhow!("in expr: {}, type error: {e}", $n.spec())),
+                    Err(e) => Err(anyhow!("in expr: {}, type error: {e:?}", $n.spec())),
                 }
             };
         }

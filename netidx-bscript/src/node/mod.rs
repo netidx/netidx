@@ -29,7 +29,7 @@ macro_rules! wrap {
     ($n:expr, $e:expr) => {
         match $e {
             Ok(x) => Ok(x),
-            Err(e) => Err(anyhow::anyhow!("in expr: {}, type error: {e}", $n.spec())),
+            Err(e) => Err(anyhow::anyhow!("in expr: {}, type error: {e:?}", $n.spec())),
         }
     };
 }
