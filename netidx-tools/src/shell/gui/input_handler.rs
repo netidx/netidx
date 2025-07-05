@@ -7,6 +7,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MediaKeyCode,
     ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
 };
+use log::debug;
 use netidx::{protocol::valarray::ValArray, publisher::Value};
 use netidx_bscript::{
     expr::ExprId,
@@ -399,14 +400,19 @@ impl InputHandlerW {
             && let Some(e) = self.queued.front()
             && let Some(h) = &self.handle
         {
-            h.call(ValArray::from_iter_exact([event_to_value(e)].into_iter())).await?;
+            let v = event_to_value(e);
+            debug!("Sending event: {}", v);
+            h.call(ValArray::from_iter_exact([v].into_iter())).await?;
             self.pending = true
         }
         Ok(())
     }
 
     async fn set_handle(&mut self, v: Value) -> Result<()> {
-        self.handle = Some(self.bs.compile_callable(v).await?);
+        debug!("Setting handle to: {}", v);
+        let handle = self.bs.compile_callable(v).await?;
+        debug!("handle exprid: {:?}", handle.expr);
+        self.handle = Some(handle);
         self.maybe_send_queued().await?;
         Ok(())
     }
@@ -423,6 +429,7 @@ impl GuiWidget for InputHandlerW {
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
+        debug!("update id: {id:?}, v: {v}");
         let Self {
             bs: _,
             enabled,
@@ -458,7 +465,7 @@ impl GuiWidget for InputHandlerW {
         if id == self.handle_ref.id {
             self.set_handle(v.clone()).await?;
         }
-        Ok(())
+        self.child.handle_update(id, v).await
     }
 
     fn draw(&mut self, frame: &mut Frame, rect: Rect) -> Result<()> {

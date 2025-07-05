@@ -45,6 +45,7 @@ use std::{
     collections::{hash_map::Entry, HashMap, VecDeque},
     future, mem,
     os::unix::ffi::OsStrExt,
+    panic::{catch_unwind, AssertUnwindSafe},
     path::{Component, PathBuf},
     result,
     sync::Weak,
@@ -705,12 +706,21 @@ impl BS {
                         }
                     });
                 }
-                let res = n.update(&mut self.ctx, &mut self.event);
+                let res = catch_unwind(AssertUnwindSafe(|| {
+                    n.update(&mut self.ctx, &mut self.event)
+                }));
                 for id in clear {
                     self.event.variables.remove(&id);
                 }
-                if let Some(v) = res {
-                    send_event(&mut self.subs, RtEvent::Updated(*id, v.clone())).await;
+                match res {
+                    Ok(None) => (),
+                    Ok(Some(v)) => {
+                        send_event(&mut self.subs, RtEvent::Updated(*id, v.clone()))
+                            .await;
+                    }
+                    Err(e) => {
+                        error!("could not update exprid: {id:?}, panic: {e:?}")
+                    }
                 }
             }
         }
@@ -865,12 +875,13 @@ impl BS {
         let eid = ExprId::new();
         let argn = lb.typ.args.iter().zip(args.iter());
         let argn = argn
-            .map(|(arg, id)| {
-                genn::reference(&mut self.ctx, *id, arg.typ.clone(), ExprId::new())
-            })
+            .map(|(arg, id)| genn::reference(&mut self.ctx, *id, arg.typ.clone(), eid))
             .collect::<Vec<_>>();
         let fnode = genn::constant(Value::U64(id.0));
-        let n = genn::apply(fnode, argn, lb.typ.clone(), eid);
+        let mut n = genn::apply(fnode, argn, lb.typ.clone(), eid);
+        self.event.init = true;
+        n.update(&mut self.ctx, &mut self.event);
+        self.event.clear();
         let cid = CallableId::new();
         self.callables.insert(cid, CallableInt { expr: eid, args });
         self.nodes.insert(eid, n);
