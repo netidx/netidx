@@ -959,23 +959,14 @@ where
     (position(), modpath()).map(|(pos, name)| ExprKind::Ref { name }.to_expr(pos))
 }
 
-fn deref_reference<I>() -> impl Parser<I, Output = Expr>
+fn deref_arith<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (
-        position(),
-        token('*').with(modpath()).skip(not_followed_by(choice((
-            attempt(sptoken('.')),
-            attempt(sptoken('[')),
-            attempt(sptoken('(')),
-        )))),
-    )
-        .map(|(pos, name)| {
-            ExprKind::Deref(Arc::new(ExprKind::Ref { name }.to_expr(pos))).to_expr(pos)
-        })
+    (position(), token('*').with(arith_term()))
+        .map(|(pos, expr)| ExprKind::Deref(Arc::new(expr)).to_expr(pos))
 }
 
 fn qop<I, P: Parser<I, Output = Expr>>(p: P) -> impl Parser<I, Output = Expr>
@@ -990,17 +981,21 @@ where
     })
 }
 
-fn arith_term<I>() -> impl Parser<I, Output = Expr>
+fn arith_term_<I>() -> impl Parser<I, Output = Expr>
 where
     I: RangeStream<Token = char, Position = SourcePosition>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
     choice((
-        attempt(spaces().with(qop(deref_reference()))),
-        attempt(spaces().with(qop(deref()))),
+        attempt(spaces().with(qop(deref_arith()))),
         attempt(spaces().with(raw_string())),
         attempt(spaces().with(array())),
+        attempt(spaces().with(byref_arith())),
+        attempt(spaces().with(tuple())),
+        attempt(spaces().with(structure())),
+        attempt(spaces().with(variant())),
+        attempt(spaces().with(structwith())),
         attempt(spaces().with(qop(arrayref()))),
         attempt(spaces().with(qop(tupleref()))),
         attempt(spaces().with(qop(structref()))),
@@ -1019,6 +1014,14 @@ where
         attempt(between(sptoken('('), sptoken(')'), arith())),
     ))
     .skip(spaces())
+}
+
+parser! {
+    fn arith_term[I]()(I) -> Expr
+    where [I: RangeStream<Token = char, Position = SourcePosition>, I::Range: Range]
+    {
+        arith_term_()
+    }
 }
 
 fn arith_<I>() -> impl Parser<I, Output = Expr>
@@ -1534,6 +1537,16 @@ where
     I::Range: Range,
 {
     (position(), token('&').with(expr()))
+        .map(|(pos, expr)| ExprKind::ByRef(Arc::new(expr)).to_expr(pos))
+}
+
+fn byref_arith<I>() -> impl Parser<I, Output = Expr>
+where
+    I: RangeStream<Token = char, Position = SourcePosition>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    (position(), token('&').with(arith_term()))
         .map(|(pos, expr)| ExprKind::ByRef(Arc::new(expr)).to_expr(pos))
 }
 

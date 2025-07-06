@@ -1,17 +1,17 @@
 use gui;
 use rand;
-let trigger = time::timer(duration:0.7s, true);
+let clock = time::timer(duration:0.7s, true);
 
 let group0 = [
   bar(
     #style: &style(#fg: `Red),
     #label: &line("stuff"),
-    &rand(#start:u64:0, #end:u64:100, #trigger)
+    &rand(#start:u64:0, #end:u64:100, #clock)
   ),
   bar(
     #style: &style(#fg: `Yellow),
     #label: &line("things"),
-    &rand(#start:u64:25, #end:u64:200, #trigger)
+    &rand(#start:u64:25, #end:u64:200, #clock)
   )
 ];
 
@@ -19,12 +19,12 @@ let group1 = [
   bar(
     #style: &style(#fg: `Cyan),
     #label: &line("widget"),
-    &rand(#start:u64:0, #end:u64:50, #trigger)
+    &rand(#start:u64:0, #end:u64:50, #clock)
   ),
   bar(
     #style: &style(#fg: `Magenta),
     #label: &line("wojet"),
-    &rand(#start:u64:1, #end:u64:25, #trigger)
+    &rand(#start:u64:1, #end:u64:25, #clock)
   )
 ];
 
