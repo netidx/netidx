@@ -28,55 +28,47 @@ let items = [
   line("Zucchini")
 ];
 
+let last = cast<u32>(array::len(items))? - u32:1;
 let visible = u32:12;
 let selected = u32:0;
 let scroll_pos = u32:0;
+scroll_pos <- select selected {
+    s if s < scroll_pos => s,
+    s if s > (scroll_pos + visible) => s - visible,
+    _ => never()
+};
 
 let handle_key = |k: gui::KeyCode| -> [`Stop, `Continue] select k {
     k@`Up if selected > u32:0 => {
         selected <- (k ~ selected) - u32:1;
-        // Adjust scroll if needed
-        select selected {
-            s if s < scroll_pos => scroll_pos <- s
-        };
         k ~ `Stop
     },
-    k@`Down if selected < u32:24 => {
+    k@`Down if selected < last => {
         selected <- (k ~ selected) + u32:1;
-        // Adjust scroll if needed (assuming 10 items visible)
-        select selected {
-            s if s >= (scroll_pos + visible) => scroll_pos <- s - u32:9
-        };
         k ~ `Stop
     },
     k@`Home => {
         selected <- k ~ u32:0;
-        scroll_pos <- k ~ u32:0;
         k ~ `Stop
     },
     k@`End => {
-        selected <- k ~ u32:24;
-        scroll_pos <- k ~ u32:15;
+        selected <- k ~ last;
         k ~ `Stop
     },
     k@`PageUp if selected < visible => {
         selected <- k ~ u32:0;
-        scroll_pos <- k ~ u32:0;
         k ~ `Stop
     },
     k@`PageUp => {
         selected <- (k ~ selected) - visible;
-        scroll_pos <- k ~ selected;
         k ~ `Stop
     },
     k@`PageDown if selected > u32:14 => {
-        selected <- k ~ u32:24;
-        scroll_pos <- k ~ u32:14;
+        selected <- k ~ last;
         k ~ `Stop
     },
     k@`PageDown => {
         selected <- (k ~ selected) + visible;
-        scroll_pos <- (k ~ selected) - visible;
         k ~ `Stop
     },
     k => k ~ `Continue
