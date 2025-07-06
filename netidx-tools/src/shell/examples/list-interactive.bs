@@ -1,0 +1,111 @@
+use gui;
+
+let items = [
+  line("Apple"),
+  line("Banana"),
+  line("Cherry"),
+  line("Date"),
+  line("Elderberry"),
+  line("Fig"),
+  line("Grape"),
+  line("Honeydew"),
+  line("Jackfruit"),
+  line("Kiwi"),
+  line("Lemon"),
+  line("Mango"),
+  line("Nectarine"),
+  line("Orange"),
+  line("Papaya"),
+  line("Quince"),
+  line("Raspberry"),
+  line("Strawberry"),
+  line("Tangerine"),
+  line("Ugli fruit"),
+  line("Vanilla bean"),
+  line("Watermelon"),
+  line("Xigua"),
+  line("Yellow passion fruit"),
+  line("Zucchini")
+];
+
+let visible = u32:12;
+let selected = u32:0;
+let scroll_pos = u32:0;
+
+let handle_key = |k: gui::KeyCode| -> [`Stop, `Continue] select k {
+    k@`Up if selected > u32:0 => {
+        selected <- (k ~ selected) - u32:1;
+        // Adjust scroll if needed
+        select selected {
+            s if s < scroll_pos => scroll_pos <- s
+        };
+        k ~ `Stop
+    },
+    k@`Down if selected < u32:24 => {
+        selected <- (k ~ selected) + u32:1;
+        // Adjust scroll if needed (assuming 10 items visible)
+        select selected {
+            s if s >= (scroll_pos + visible) => scroll_pos <- s - u32:9
+        };
+        k ~ `Stop
+    },
+    k@`Home => {
+        selected <- k ~ u32:0;
+        scroll_pos <- k ~ u32:0;
+        k ~ `Stop
+    },
+    k@`End => {
+        selected <- k ~ u32:24;
+        scroll_pos <- k ~ u32:15;
+        k ~ `Stop
+    },
+    k@`PageUp if selected < visible => {
+        selected <- k ~ u32:0;
+        scroll_pos <- k ~ u32:0;
+        k ~ `Stop
+    },
+    k@`PageUp => {
+        selected <- (k ~ selected) - visible;
+        scroll_pos <- k ~ selected;
+        k ~ `Stop
+    },
+    k@`PageDown if selected > u32:14 => {
+        selected <- k ~ u32:24;
+        scroll_pos <- k ~ u32:14;
+        k ~ `Stop
+    },
+    k@`PageDown => {
+        selected <- (k ~ selected) + visible;
+        scroll_pos <- (k ~ selected) - visible;
+        k ~ `Stop
+    },
+    k => k ~ `Continue
+};
+
+let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
+    `Key(k) => handle_key(k.code),
+    e => e ~ `Continue
+};
+
+let title_bottom = {
+   let cur = items[selected]?;
+   line("Selected: [cur.spans]")
+};
+
+gui::input_handler(
+    #handle: &handle_event,
+    &gui::block(
+        #border: &`All,
+        #title: &line("Fruit Selection (Use Arrow Keys, Home, End, PageUp, PageDown)"),
+        #title_bottom: &title_bottom,
+        &gui::list(
+            #highlight_style: &style(#fg: `Black, #bg: `Yellow),
+            #highlight_symbol: &"▶ ",
+            #repeat_highlight_symbol: &false,
+            #selected: &selected,
+            #scroll: &scroll_pos,
+            #style: &style(#fg: `White),
+            &items
+        )
+    )
+)

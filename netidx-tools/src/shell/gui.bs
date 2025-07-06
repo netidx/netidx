@@ -12,7 +12,8 @@ mod gui {
     `Sparkline(Sparkline),
     `LineGauge(LineGauge),
     `Gauge(Gauge),
-    `InputHandler(InputHandler)
+    `InputHandler(InputHandler),
+    `List(List)
   ];
 
   type MediaKeyCode = [
@@ -702,5 +703,42 @@ mod gui {
     #style: &[Style, null] = &null,
     #use_unicode: &[bool, null] = &null,
     ratio: &f64
-  | -> Gui `Gauge({ gauge_style, label, ratio, style, use_unicode })
+  | -> Gui `Gauge({ gauge_style, label, ratio, style, use_unicode });
+
+  type HighlightSpacing = [
+    `Always,
+    `Never,
+    `WhenSelected
+  ];
+
+  type List = {
+    highlight_spacing: &[HighlightSpacing, null],
+    highlight_style: &[Style, null],
+    highlight_symbol: &[string, null],
+    items: &Array<Line>,
+    repeat_highlight_symbol: &[bool, null],
+    scroll: &[u32, null],
+    selected: &[u32, null],
+    style: &[Style, null]
+  };
+
+  let list = |
+    #highlight_spacing: &[HighlightSpacing, null] = &null,
+    #highlight_style: &[Style, null] = &null,
+    #highlight_symbol: &[string, null] = &null,
+    #repeat_highlight_symbol: &[bool, null] = &null,
+    #scroll: &[u32, null] = &null,
+    #selected: &[u32, null] = &null,
+    #style: &[Style, null] = &null,
+    items: &Array<Line>
+  | -> Gui `List({
+    highlight_spacing,
+    highlight_style,
+    highlight_symbol,
+    items,
+    repeat_highlight_symbol,
+    scroll,
+    selected,
+    style
+  })
 }

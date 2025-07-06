@@ -10,6 +10,7 @@ use gauge::GaugeW;
 use input_handler::InputHandlerW;
 use layout::LayoutW;
 use line_gauge::LineGaugeW;
+use list::ListW;
 use log::error;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
@@ -39,6 +40,7 @@ mod gauge;
 mod input_handler;
 mod layout;
 mod line_gauge;
+mod list;
 mod paragraph;
 mod scrollbar;
 mod sparkline;
@@ -297,6 +299,7 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) if &s == "Sparkline" => SparklineW::compile(bs, v).await,
             (s, v) if &s == "LineGauge" => LineGaugeW::compile(bs, v).await,
             (s, v) if &s == "Gauge" => GaugeW::compile(bs, v).await,
+            (s, v) if &s == "List" => ListW::compile(bs, v).await,
             (s, v) if &s == "Tabs" => tabs::TabsW::compile(bs, v).await,
             (s, v) if &s == "InputHandler" => InputHandlerW::compile(bs, v).await,
             (s, v) => bail!("invalid widget type `{s}({v})"),

@@ -1,0 +1,32 @@
+use gui;
+
+let items = [
+  line("First item"),
+  line("Second item"),
+  line("Third item"),
+  line("Fourth item"),
+  line("Fifth item"),
+  line("Sixth item"),
+  line("Seventh item"),
+  line("Eighth item"),
+  line("Ninth item"),
+  line("Tenth item"),
+  line("Eleventh item"),
+  line("Twelfth item"),
+  line("Thirteenth item"),
+  line("Fourteenth item"),
+  line("Fifteenth item")
+];
+
+let clock = time::timer(duration:1.0s, true);
+let selected = u32:0;
+selected <- ((clock ~ selected) + u32:1) % u32:15;
+
+list(
+  #highlight_style: &style(#fg: `Yellow, #bg: `Blue),
+  #highlight_symbol: &"> ",
+  #repeat_highlight_symbol: &false,
+  #selected: &selected,
+  #style: &style(#fg: `White),
+  &items
+)
