@@ -8,7 +8,6 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
-use enumflags2::BitFlags;
 use log::debug;
 use netidx::subscriber::Value;
 use smallvec::{smallvec, SmallVec};
@@ -35,12 +34,7 @@ impl<C: Ctx, E: UserEvent> Select<C, E> {
         pos: &SourcePosition,
     ) -> Result<Node<C, E>> {
         let arg = Cached::new(compile(ctx, arg.clone(), scope, top_id)?);
-        let defined = arg.node.typ().is_defined();
-        let mut atype = if defined {
-            arg.node.typ().clone()
-        } else {
-            Type::Primitive(BitFlags::empty())
-        };
+        let mut atype = arg.node.typ().clone();
         let arms = arms
             .iter()
             .map(|(pat, spec)| {
@@ -48,10 +42,8 @@ impl<C: Ctx, E: UserEvent> Select<C, E> {
                     ModPath(scope.append(&format_compact!("sel{}", SelectId::new().0)));
                 let pat = PatternNode::compile(ctx, &atype, pat, &scope, top_id)
                     .with_context(|| format!("in select at {pos}"))?;
-                if defined && !pat.guard.is_some() {
+                if !pat.guard.is_some() {
                     atype = atype.diff(&ctx.env, &pat.type_predicate)?;
-                } else if !defined {
-                    atype = atype.union(&pat.type_predicate);
                 }
                 let n = Cached::new(compile(ctx, spec.clone(), &scope, top_id)?);
                 Ok((pat, n))

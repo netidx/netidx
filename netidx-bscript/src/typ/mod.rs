@@ -360,6 +360,35 @@ impl Type {
         })
     }
 
+    pub(crate) fn init_wildcard_match<C: Ctx, E: UserEvent>(
+        &self,
+        env: &Env<C, E>,
+        t: &Self,
+    ) -> Result<()> {
+        match (self, t) {
+            (Type::TVar(tt0), Type::TVar(tt1)) => {
+                let alias = {
+                    let t0 = tt0.read();
+                    let t1 = tt1.read();
+                    let addr = Arc::as_ptr(&t1.typ).addr();
+                    match (&*t0.typ.read(), &*t1.typ.read()) {
+                        (Some(_), _) | (_, Some(_)) => false,
+                        (None, None) => !would_cycle_inner(addr, self),
+                    }
+                };
+                if alias {
+                    tt1.alias(&tt0);
+                } else {
+                    self.contains(env, t)?;
+                }
+            }
+            (_, _) => {
+                self.contains(env, t)?;
+            }
+        }
+        Ok(())
+    }
+
     fn could_match_int<C: Ctx, E: UserEvent>(
         &self,
         env: &Env<C, E>,

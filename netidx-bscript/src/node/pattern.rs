@@ -485,7 +485,7 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
                 let typ = spec.structure_predicate.infer_type_predicate();
                 match &spec.structure_predicate {
                     StructurePattern::Bind(_) | StructurePattern::Ignore => {
-                        arg_type.contains(&ctx.env, &typ)?;
+                        arg_type.init_wildcard_match(&ctx.env, &typ)?
                     }
                     _ => {
                         typ.could_match(&ctx.env, &arg_type)?;
@@ -546,19 +546,6 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         }
     }
 
-    /*
-    let tmatch = match (&self.type_predicate, typ) {
-        (Type::Array(_), Typ::Array)
-        | (Type::Tuple(_), Typ::Array)
-        | (Type::Struct(_), Typ::Array)
-        | (Type::Variant(_, _), Typ::Array | Typ::String) => true,
-        (Type::ByRef(_), Typ::U64) => true,
-        _ => self
-            .type_predicate
-            .contains(env, &Type::Primitive(typ.into()))
-            .unwrap_or(false),
-    };
-    */
     pub(super) fn is_match(&self, env: &Env<C, E>, v: &Value) -> bool {
         self.type_predicate.is_a(env, v)
             && self.structure_predicate.is_match(v)

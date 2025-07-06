@@ -178,7 +178,6 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
             }
         }
         let rf = (f.init)(ctx, &self.args, self.top_id)?;
-        self.ftype = f.typ.clone();
         self.function = Some((f.id, rf));
         Ok(())
     }
