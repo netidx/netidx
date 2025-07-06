@@ -25,7 +25,8 @@ let items = [
   line("Watermelon"),
   line("Xigua"),
   line("Yellow passion fruit"),
-  line("Zucchini")
+  line("Zucchini"),
+  line("Pork")
 ];
 
 let last = cast<u32>(array::len(items))? - u32:1;
