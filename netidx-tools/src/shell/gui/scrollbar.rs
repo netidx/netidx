@@ -172,7 +172,7 @@ impl GuiWidget for ScrollbarW {
         end_style.update(id, &v).context("scrollbar update end_style")?;
         end_symbol.update(id, &v).context("scrollbar update end_symbol")?;
         orientation.update(id, &v).context("scrollbar update orientation")?;
-        dbg!(position.update(id, &v).context("scrollbar update position"))?;
+        position.update(id, &v).context("scrollbar update position")?;
         style.update(id, &v).context("scrollbar update style")?;
         thumb_style.update(id, &v).context("scrollbar update thumb_style")?;
         thumb_symbol.update(id, &v).context("scrollbar update thumb_symbol")?;

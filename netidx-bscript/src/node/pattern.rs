@@ -483,13 +483,21 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
             Some(t) => t.scope_refs(scope).lookup_ref(&ctx.env)?.clone(),
             None => {
                 let typ = spec.structure_predicate.infer_type_predicate();
-                arg_type.contains(&ctx.env, &typ)?;
+                match &spec.structure_predicate {
+                    StructurePattern::Bind(_) | StructurePattern::Ignore => {
+                        arg_type.contains(&ctx.env, &typ)?;
+                    }
+                    _ => {
+                        typ.could_match(&ctx.env, &arg_type)?;
+                    }
+                }
                 typ
             }
         };
         match &type_predicate {
             Type::Fn(_) => bail!("can't match on Fn type"),
             Type::Bottom
+            | Type::Any
             | Type::Primitive(_)
             | Type::Set(_)
             | Type::TVar(_)

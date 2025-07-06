@@ -17,7 +17,7 @@ atomic_id!(TVarId);
 
 pub(super) fn would_cycle_inner(addr: usize, t: &Type) -> bool {
     match t {
-        Type::Primitive(_) | Type::Bottom | Type::Ref { .. } => false,
+        Type::Primitive(_) | Type::Any | Type::Bottom | Type::Ref { .. } => false,
         Type::TVar(t) => {
             Arc::as_ptr(&t.read().typ).addr() == addr
                 || match &*t.read().typ.read() {

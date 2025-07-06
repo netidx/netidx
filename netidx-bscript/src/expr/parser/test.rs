@@ -1016,22 +1016,8 @@ fn labeled_argument_lambda() {
                     label: Some(("bar".into(), true)),
                     typ: Type::Primitive(Typ::String.into()),
                 },
-                FnArgType {
-                    label: Some(("a".into(), false)),
-                    typ: Type::Ref {
-                        scope: ModPath::root(),
-                        name: ["Any"].into(),
-                        params: Arc::from_iter([]),
-                    },
-                },
-                FnArgType {
-                    label: None,
-                    typ: Type::Ref {
-                        scope: ModPath::root(),
-                        name: ["Any"].into(),
-                        params: Arc::from_iter([]),
-                    },
-                },
+                FnArgType { label: Some(("a".into(), false)), typ: Type::Any },
+                FnArgType { label: None, typ: Type::Any },
             ]),
             vargs: None,
             rtype: Type::Primitive(Typ::String.into()),

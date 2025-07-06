@@ -275,8 +275,7 @@ impl StructurePattern {
 
     pub fn infer_type_predicate(&self) -> Type {
         match self {
-            Self::Bind(_) => Type::empty_tvar(),
-            Self::Ignore => Type::any(),
+            Self::Bind(_) | Self::Ignore => Type::empty_tvar(),
             Self::Literal(v) => Type::Primitive(Typ::get(v).into()),
             Self::Tuple { all: _, binds } => {
                 let a = binds.iter().map(|p| p.infer_type_predicate());

@@ -741,18 +741,6 @@ pub mod core {
     type Real = [ Float, decimal ];
     type Number = [ Int, Real ];
 
-    type Any = [
-        Number,
-        datetime,
-        duration,
-        bool,
-        string,
-        bytes,
-        error,
-        array,
-        null
-    ];
-
     pub mod array {
         /// filter returns a new array containing only elements where f returned true
         pub let filter = |a, f| 'array_filter;

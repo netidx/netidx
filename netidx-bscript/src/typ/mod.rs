@@ -65,6 +65,7 @@ pub fn format_with_flags<R, F: FnOnce() -> R>(flags: BitFlags<PrintFlag>, f: F) 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Type {
     Bottom,
+    Any,
     Primitive(BitFlags<Typ>),
     Ref { scope: ModPath, name: ModPath, params: Arc<[Type]> },
     Fn(Arc<FnType>),
@@ -100,6 +101,7 @@ impl Type {
     pub fn is_defined(&self) -> bool {
         match self {
             Self::Bottom
+            | Self::Any
             | Self::Primitive(_)
             | Self::Fn(_)
             | Self::Set(_)
@@ -194,6 +196,15 @@ impl Type {
                 *t0.read().typ.write() = Some(Self::Bottom);
                 Ok(true)
             }
+            (Self::TVar(t0), Self::Any) => {
+                if let Some(t0) = &*t0.read().typ.read() {
+                    return t0.contains_int(env, hist, t);
+                }
+                *t0.read().typ.write() = Some(Self::Any);
+                Ok(true)
+            }
+            (Self::Any, _) => Ok(true),
+            (_, Self::Any) => Ok(false),
             (Self::Bottom, _) | (_, Self::Bottom) => Ok(true),
             (Self::Primitive(p0), Self::Primitive(p1)) => Ok(p0.contains(*p1)),
             (
@@ -349,9 +360,85 @@ impl Type {
         })
     }
 
+    fn could_match_int<C: Ctx, E: UserEvent>(
+        &self,
+        env: &Env<C, E>,
+        hist: &mut FxHashMap<(usize, usize), bool>,
+        t: &Self,
+    ) -> Result<bool> {
+        match (self, t) {
+            (
+                Self::Ref { scope: s0, name: n0, .. },
+                Self::Ref { scope: s1, name: n1, .. },
+            ) if s0 == s1 && n0 == n1 => Ok(true),
+            (t0 @ Self::Ref { .. }, t1) | (t0, t1 @ Self::Ref { .. }) => {
+                let t0 = t0.lookup_ref(env)?;
+                let t1 = t1.lookup_ref(env)?;
+                let t0_addr = (t0 as *const Type).addr();
+                let t1_addr = (t1 as *const Type).addr();
+                match hist.get(&(t0_addr, t1_addr)) {
+                    Some(r) => Ok(*r),
+                    None => {
+                        hist.insert((t0_addr, t1_addr), true);
+                        match t0.could_match_int(env, hist, t1) {
+                            Ok(r) => {
+                                hist.insert((t0_addr, t1_addr), r);
+                                Ok(r)
+                            }
+                            Err(e) => {
+                                hist.remove(&(t0_addr, t1_addr));
+                                Err(e)
+                            }
+                        }
+                    }
+                }
+            }
+            (t0, Self::Primitive(s)) => {
+                for t1 in s.iter() {
+                    if t0.contains_int(env, hist, &Type::Primitive(t1.into()))? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            (t0, Self::Set(ts)) => {
+                for t1 in ts.iter() {
+                    if t0.contains_int(env, hist, t1)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            (Type::TVar(t0), t1) => match &*t0.read().typ.read() {
+                Some(t0) => t0.could_match_int(env, hist, t1),
+                None => Ok(false),
+            },
+            (t0, Type::TVar(t1)) => match &*t1.read().typ.read() {
+                Some(t1) => t0.could_match_int(env, hist, t1),
+                None => Ok(false),
+            },
+            (t0, t1) => t0.contains_int(env, hist, t1),
+        }
+    }
+
+    pub fn could_match<C: Ctx, E: UserEvent>(
+        &self,
+        env: &Env<C, E>,
+        t: &Self,
+    ) -> Result<bool> {
+        thread_local! {
+            static HIST: RefCell<FxHashMap<(usize, usize), bool>> = RefCell::new(HashMap::default());
+        }
+        HIST.with_borrow_mut(|hist| {
+            hist.clear();
+            self.could_match_int(env, hist, t)
+        })
+    }
+
     fn union_int(&self, t: &Self) -> Self {
         match (self, t) {
             (Type::Bottom, t) | (t, Type::Bottom) => t.clone(),
+            (Type::Any, _) | (_, Type::Any) => Type::Any,
             (Type::Primitive(p), t) | (t, Type::Primitive(p)) if p.is_empty() => {
                 t.clone()
             }
@@ -466,6 +553,8 @@ impl Type {
         t: &Self,
     ) -> Result<Self> {
         match (self, t) {
+            (Type::Any, _) => Ok(Type::Any),
+            (_, Type::Any) => Ok(Type::Primitive(BitFlags::empty())),
             (
                 Type::Ref { scope: s0, name: n0, .. },
                 Type::Ref { scope: s1, name: n1, .. },
@@ -611,7 +700,7 @@ impl Type {
     }
 
     pub fn any() -> Self {
-        Self::Primitive(Typ::any())
+        Self::Any
     }
 
     pub fn boolean() -> Self {
@@ -633,7 +722,7 @@ impl Type {
     /// alias type variables with the same name to each other
     pub fn alias_tvars(&self, known: &mut FxHashMap<ArcStr, TVar>) {
         match self {
-            Type::Bottom | Type::Primitive(_) => (),
+            Type::Bottom | Type::Any | Type::Primitive(_) => (),
             Type::Ref { params, .. } => {
                 for t in params.iter() {
                     t.alias_tvars(known);
@@ -674,7 +763,7 @@ impl Type {
 
     pub fn collect_tvars(&self, known: &mut FxHashMap<ArcStr, TVar>) {
         match self {
-            Type::Bottom | Type::Primitive(_) => (),
+            Type::Bottom | Type::Any | Type::Primitive(_) => (),
             Type::Ref { params, .. } => {
                 for t in params.iter() {
                     t.collect_tvars(known);
@@ -715,7 +804,7 @@ impl Type {
 
     pub fn check_tvars_declared(&self, declared: &FxHashSet<ArcStr>) -> Result<()> {
         match self {
-            Type::Bottom | Type::Primitive(_) => Ok(()),
+            Type::Bottom | Type::Any | Type::Primitive(_) => Ok(()),
             Type::Ref { params, .. } => {
                 params.iter().try_for_each(|t| t.check_tvars_declared(declared))
             }
@@ -744,7 +833,7 @@ impl Type {
 
     pub fn has_unbound(&self) -> bool {
         match self {
-            Type::Bottom | Type::Primitive(_) => false,
+            Type::Bottom | Type::Any | Type::Primitive(_) => false,
             Type::Ref { .. } => false,
             Type::Array(t0) => t0.has_unbound(),
             Type::ByRef(t0) => t0.has_unbound(),
@@ -760,7 +849,7 @@ impl Type {
     /// bind all unbound type variables to the specified type
     pub fn bind_as(&self, t: &Self) {
         match self {
-            Type::Bottom | Type::Primitive(_) => (),
+            Type::Bottom | Type::Any | Type::Primitive(_) => (),
             Type::Ref { .. } => (),
             Type::Array(t0) => t0.bind_as(t),
             Type::ByRef(t0) => t0.bind_as(t),
@@ -800,6 +889,7 @@ impl Type {
     pub fn reset_tvars(&self) -> Type {
         match self {
             Type::Bottom => Type::Bottom,
+            Type::Any => Type::Any,
             Type::Primitive(p) => Type::Primitive(*p),
             Type::Ref { scope, name, params } => Type::Ref {
                 scope: scope.clone(),
@@ -833,6 +923,7 @@ impl Type {
                 None => Type::TVar(tv.clone()),
             },
             Type::Bottom => Type::Bottom,
+            Type::Any => Type::Any,
             Type::Primitive(p) => Type::Primitive(*p),
             Type::Ref { scope, name, params } => Type::Ref {
                 scope: scope.clone(),
@@ -861,7 +952,7 @@ impl Type {
     /// Unbind any bound tvars, but do not unalias them.
     fn unbind_tvars(&self) {
         match self {
-            Type::Bottom | Type::Primitive(_) | Type::Ref { .. } => (),
+            Type::Bottom | Type::Any | Type::Primitive(_) | Type::Ref { .. } => (),
             Type::Array(t0) => t0.unbind_tvars(),
             Type::ByRef(t0) => t0.unbind_tvars(),
             Type::Tuple(ts) | Type::Variant(_, ts) | Type::Set(ts) => {
@@ -886,14 +977,15 @@ impl Type {
     ) -> Option<Typ> {
         match self {
             Type::Primitive(p) => p.iter().next(),
-            Type::Bottom => None,
-            Type::Fn(_) => None,
             Type::Set(s) => s.iter().find_map(|t| t.first_prim_int(env, hist)),
             Type::TVar(tv) => {
                 tv.read().typ.read().as_ref().and_then(|t| t.first_prim_int(env, hist))
             }
             // array, tuple, and struct casting are handled directly
-            Type::Array(_)
+            Type::Bottom
+            | Type::Any
+            | Type::Fn(_)
+            | Type::Array(_)
             | Type::Tuple(_)
             | Type::Struct(_)
             | Type::Variant(_, _)
@@ -927,7 +1019,7 @@ impl Type {
         hist: &mut FxHashSet<usize>,
     ) -> Result<()> {
         match self {
-            Type::Primitive(_) => Ok(()),
+            Type::Primitive(_) | Type::Any => Ok(()),
             Type::Fn(_) => bail!("can't cast a value to a function"),
             Type::Bottom => bail!("can't cast a value to bottom"),
             Type::Set(s) => Ok(for t in s.iter() {
@@ -1150,6 +1242,7 @@ impl Type {
                 }
             },
             Type::Primitive(t) => t.contains(Typ::get(&v)),
+            Type::Any => true,
             Type::Array(et) => match v {
                 Value::Array(a) => a.iter().all(|v| et.is_a_int(env, hist, v)),
                 _ => false,
@@ -1225,7 +1318,8 @@ impl Type {
     pub fn is_bot(&self) -> bool {
         match self {
             Type::Bottom => true,
-            Type::TVar(_)
+            Type::Any
+            | Type::TVar(_)
             | Type::Primitive(_)
             | Type::Ref { .. }
             | Type::Fn(_)
@@ -1241,6 +1335,7 @@ impl Type {
     pub fn with_deref<R, F: FnOnce(Option<&Self>) -> R>(&self, f: F) -> R {
         match self {
             Self::Bottom
+            | Self::Any
             | Self::Primitive(_)
             | Self::Fn(_)
             | Self::Set(_)
@@ -1270,6 +1365,7 @@ impl Type {
                             s.iter().map(|t| t.clone()).collect();
                         iters.push(Box::new(v.into_iter()))
                     }
+                    Some(Type::Any) => return Type::Any,
                     Some(t) => {
                         let mut merged = false;
                         for i in 0..acc.len() {
@@ -1296,7 +1392,7 @@ impl Type {
 
     pub(crate) fn normalize(&self) -> Self {
         match self {
-            Type::Bottom | Type::Primitive(_) => self.clone(),
+            Type::Bottom | Type::Any | Type::Primitive(_) => self.clone(),
             Type::Ref { scope, name, params } => {
                 let params = Arc::from_iter(params.iter().map(|t| t.normalize()));
                 Type::Ref { scope: scope.clone(), name: name.clone(), params }
@@ -1337,6 +1433,7 @@ impl Type {
             }
             (Type::Ref { .. }, _) | (_, Type::Ref { .. }) => None,
             (Type::Bottom, t) | (t, Type::Bottom) => Some(t.clone()),
+            (Type::Any, _) | (_, Type::Any) => Some(Type::Any),
             (Type::Primitive(p), t) | (t, Type::Primitive(p)) if p.is_empty() => {
                 Some(t.clone())
             }
@@ -1448,6 +1545,7 @@ impl Type {
     pub fn scope_refs(&self, scope: &ModPath) -> Type {
         match self {
             Type::Bottom => Type::Bottom,
+            Type::Any => Type::Any,
             Type::Primitive(s) => Type::Primitive(*s),
             Type::Array(t0) => Type::Array(Arc::new(t0.scope_refs(scope))),
             Type::ByRef(t) => Type::ByRef(Arc::new(t.scope_refs(scope))),
@@ -1505,6 +1603,7 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bottom => write!(f, "_"),
+            Self::Any => write!(f, "Any"),
             Self::Ref { scope: _, name, params } => {
                 write!(f, "{name}")?;
                 if !params.is_empty() {
@@ -1568,9 +1667,7 @@ impl fmt::Display for Type {
             }
             Self::Primitive(s) => {
                 let replace = PRINT_FLAGS.get().contains(PrintFlag::ReplacePrims);
-                if replace && *s == Typ::any() {
-                    write!(f, "Any")
-                } else if replace && *s == Typ::number() {
+                if replace && *s == Typ::number() {
                     write!(f, "Number")
                 } else if replace && *s == Typ::float() {
                     write!(f, "Float")

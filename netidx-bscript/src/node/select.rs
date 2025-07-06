@@ -8,6 +8,7 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
+use enumflags2::BitFlags;
 use netidx::{publisher::Typ, subscriber::Value};
 use smallvec::{smallvec, SmallVec};
 
@@ -33,13 +34,24 @@ impl<C: Ctx, E: UserEvent> Select<C, E> {
         pos: &SourcePosition,
     ) -> Result<Node<C, E>> {
         let arg = Cached::new(compile(ctx, arg.clone(), scope, top_id)?);
+        let defined = arg.node.typ().is_defined();
+        let mut atype = if defined {
+            arg.node.typ().clone()
+        } else {
+            Type::Primitive(BitFlags::empty())
+        };
         let arms = arms
             .iter()
             .map(|(pat, spec)| {
                 let scope =
                     ModPath(scope.append(&format_compact!("sel{}", SelectId::new().0)));
-                let pat = PatternNode::compile(ctx, arg.node.typ(), pat, &scope, top_id)
+                let pat = PatternNode::compile(ctx, &atype, pat, &scope, top_id)
                     .with_context(|| format!("in select at {pos}"))?;
+                if defined {
+                    atype = atype.diff(&ctx.env, &pat.type_predicate)?;
+                } else {
+                    atype = atype.union(&pat.type_predicate);
+                }
                 let n = Cached::new(compile(ctx, spec.clone(), &scope, top_id)?);
                 Ok((pat, n))
             })
@@ -185,9 +197,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
             .map_err(|e| anyhow!("missing match cases {e}"))?;
         let mut atype = self.arg.node.typ().clone().normalize();
         for (pat, _) in self.arms.iter() {
-            let can_match = atype.contains(&ctx.env, &pat.type_predicate)?
-                || pat.type_predicate.contains(&ctx.env, &atype)?;
-            if !can_match {
+            if !pat.type_predicate.could_match(&ctx.env, &atype)? {
                 bail!(
                     "pattern {} will never match {}, unused match cases",
                     pat.type_predicate,

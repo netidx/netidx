@@ -363,8 +363,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Publish<C, E> {
                     Type::Fn(ft) => ft.clone(),
                     t => bail!("expected function not {t}"),
                 };
-                let (x, xn) =
-                    genn::bind(ctx, &scope, "x", Type::Primitive(Typ::any()), top_id);
+                let (x, xn) = genn::bind(ctx, &scope, "x", Type::Any, top_id);
                 let fnode = genn::reference(ctx, pid, Type::Fn(mftyp.clone()), top_id);
                 let on_write = genn::apply(fnode, vec![xn], mftyp.clone(), top_id);
                 Ok(Box::new(Publish {
@@ -447,7 +446,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         }
         Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[0].typ())?;
         Type::Primitive(Typ::String.into()).check_contains(&ctx.env, &from[1].typ())?;
-        Type::Primitive(Typ::any()).check_contains(&ctx.env, &from[2].typ())?;
+        Type::Any.check_contains(&ctx.env, &from[2].typ())?;
         self.on_write.typecheck(ctx)
     }
 

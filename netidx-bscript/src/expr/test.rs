@@ -205,6 +205,7 @@ fn typ() -> impl Strategy<Value = Typ> {
 fn typexp() -> impl Strategy<Value = Type> {
     let leaf = prop_oneof![
         Just(Type::Bottom),
+        Just(Type::Any),
         collection::vec(typ(), (0, 10)).prop_map(|mut prims| {
             prims.sort();
             prims.dedup();
@@ -704,7 +705,7 @@ fn acc_strings<'a>(args: impl IntoIterator<Item = &'a Expr> + 'a) -> Arc<[Expr]>
 }
 
 fn check_type(t0: &Type, t1: &Type) -> bool {
-    t0.normalize() == t1.normalize()
+    dbg!(dbg!(&t0).normalize()) == dbg!(dbg!(&t1).normalize())
 }
 
 fn check_type_opt(t0: &Option<Type>, t1: &Option<Type>) -> bool {

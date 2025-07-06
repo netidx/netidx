@@ -27,7 +27,7 @@ impl<'a, C: Ctx, E: UserEvent> TVal<'a, C, E> {
             );
         }
         match (&self.typ, &self.v) {
-            (Type::Primitive(_) | Type::Bottom | Type::Fn(_), v) => {
+            (Type::Primitive(_) | Type::Bottom | Type::Any | Type::Fn(_), v) => {
                 write!(f, "{}", NakedValue(v))
             }
             (Type::Ref { .. }, v) => match self.typ.lookup_ref(&self.env) {

@@ -32,7 +32,7 @@ use netidx::{
     path::Path,
     pool::Pooled,
     protocol::valarray::ValArray,
-    publisher::{self, Id, PublishFlags, Publisher, Typ, Val, Value, WriteRequest},
+    publisher::{self, Id, PublishFlags, Publisher, Val, Value, WriteRequest},
     resolver_client::ChangeTracker,
     subscriber::{self, Dval, SubId, Subscriber, UpdatesFlags},
 };
@@ -891,7 +891,7 @@ impl BS {
 
     fn compile_ref(&mut self, rt: BSHandle, id: BindId) -> Result<Ref> {
         let eid = ExprId::new();
-        let typ = Type::Primitive(Typ::any());
+        let typ = Type::Any;
         let n = genn::reference(&mut self.ctx, id, typ, eid);
         self.nodes.insert(eid, n);
         let target_bid = self.ctx.env.byref_chain.get(&id).copied();

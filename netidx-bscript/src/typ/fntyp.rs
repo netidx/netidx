@@ -7,7 +7,6 @@ use crate::{
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use fxhash::FxHashMap;
-use netidx::publisher::Typ;
 use parking_lot::RwLock;
 use std::{
     cell::RefCell,
@@ -140,7 +139,7 @@ impl FnType {
             for (name, tv) in known.drain() {
                 if let Some(t) = tv.read().typ.read().as_ref() {
                     if !constraints.iter().any(|(tv, _)| tv.name == name) {
-                        t.bind_as(&Type::Primitive(Typ::any()));
+                        t.bind_as(&Type::Any);
                         constraints.push((tv.clone(), t.normalize()));
                     }
                 }

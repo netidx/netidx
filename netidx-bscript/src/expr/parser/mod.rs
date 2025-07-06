@@ -48,7 +48,7 @@ pub const RESERVED: LazyLock<FxHashSet<&str>> = LazyLock::new(|| {
         "true", "false", "ok", "null", "mod", "let", "select", "pub", "type", "fn",
         "cast", "if", "u32", "v32", "i32", "z32", "u64", "v64", "i64", "z64", "f32",
         "f64", "decimal", "datetime", "duration", "bool", "string", "bytes", "result",
-        "null", "_", "?", "fn", "Array", "any", "use",
+        "null", "_", "?", "fn", "Array", "any", "Any", "use",
     ])
 });
 
@@ -796,6 +796,7 @@ where
                 .unwrap_or_else(|| Arc::from_iter([]));
             Type::Ref { scope: ModPath::root(), name: n, params }
         }),
+        attempt(spstring("Any")).map(|_| Type::Any),
         attempt(typeprim()).map(|typ| Type::Primitive(typ.into())),
         attempt(tvar()).map(|tv| Type::TVar(tv)),
     ))
