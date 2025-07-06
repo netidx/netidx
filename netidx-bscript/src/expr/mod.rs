@@ -477,6 +477,7 @@ pub enum ExprKind {
     Mul { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Div { lhs: Arc<Expr>, rhs: Arc<Expr> },
     Mod { lhs: Arc<Expr>, rhs: Arc<Expr> },
+    Sample { lhs: Arc<Expr>, rhs: Arc<Expr> },
 }
 
 impl ExprKind {
@@ -823,6 +824,7 @@ impl ExprKind {
             ExprKind::Mul { lhs, rhs } => binop!("*", lhs, rhs),
             ExprKind::Div { lhs, rhs } => binop!("/", lhs, rhs),
             ExprKind::Mod { lhs, rhs } => binop!("%", lhs, rhs),
+            ExprKind::Sample { lhs, rhs } => binop!("~", lhs, rhs),
             ExprKind::Not { expr } => {
                 try_single_line!(true);
                 match &expr.kind {
@@ -1186,6 +1188,7 @@ impl fmt::Display for ExprKind {
             ExprKind::Mul { lhs, rhs } => write_binop(f, "*", lhs, rhs),
             ExprKind::Div { lhs, rhs } => write_binop(f, "/", lhs, rhs),
             ExprKind::Mod { lhs, rhs } => write_binop(f, "%", lhs, rhs),
+            ExprKind::Sample { lhs, rhs } => write_binop(f, "~", lhs, rhs),
             ExprKind::ByRef(e) => write!(f, "&{e}"),
             ExprKind::Deref(e) => match &e.kind {
                 ExprKind::Qop(e) => write!(f, "*({e}?)"),
@@ -1398,7 +1401,8 @@ impl Expr {
             | ExprKind::Gt { lhs, rhs }
             | ExprKind::Lt { lhs, rhs }
             | ExprKind::Gte { lhs, rhs }
-            | ExprKind::Lte { lhs, rhs } => {
+            | ExprKind::Lte { lhs, rhs }
+            | ExprKind::Sample { lhs, rhs } => {
                 let init = lhs.fold(init, f);
                 rhs.fold(init, f)
             }
@@ -1756,6 +1760,7 @@ impl Expr {
             ExprKind::Lt { lhs, rhs } => bin_op!(Lt, lhs, rhs),
             ExprKind::Gte { lhs, rhs } => bin_op!(Gte, lhs, rhs),
             ExprKind::Lte { lhs, rhs } => bin_op!(Lte, lhs, rhs),
+            ExprKind::Sample { lhs, rhs } => bin_op!(Sample, lhs, rhs),
         }
     }
 }

@@ -344,6 +344,7 @@ where
                         | (Some(Expr { kind: ExprKind::Apply { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::ByRef(_), .. }), _)
                         | (Some(Expr { kind: ExprKind::Deref(_), .. }), _)
+                        | (Some(Expr { kind: ExprKind::Sample { .. }, .. }), _)
                         | (Some(Expr { kind: ExprKind::Lambda { .. }, .. }), _) => {
                             unreachable!()
                         }
@@ -1043,6 +1044,7 @@ where
                 attempt(spstring("<")),
                 attempt(spstring("&&")),
                 attempt(spstring("||")),
+                attempt(spstring("~")),
             ))
             .map(|op: &str| match op {
                 "+" => |lhs: Expr, rhs: Expr| {
@@ -1096,6 +1098,11 @@ where
                 "||" => |lhs: Expr, rhs: Expr| {
                     let pos = lhs.pos;
                     ExprKind::Or { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }.to_expr(pos)
+                },
+                "~" => |lhs: Expr, rhs: Expr| {
+                    let pos = lhs.pos;
+                    ExprKind::Sample { lhs: Arc::new(lhs), rhs: Arc::new(rhs) }
+                        .to_expr(pos)
                 },
                 _ => unreachable!(),
             }),

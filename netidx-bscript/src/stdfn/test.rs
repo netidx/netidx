@@ -264,7 +264,7 @@ const SAMPLE: &str = r#"
 {
   let a = [0, 1, 2, 3];
   let x = "tweeeenywon!";
-  array::group(sample(#trigger:array::iter(a), x), |n, _| n == u64:4)
+  array::group(array::iter(a) ~ x, |n, _| n == u64:4)
 }
 "#;
 
@@ -412,7 +412,7 @@ const ARRAY_FILTER_MAP: &str = r#"
   let a = [1, 2, 3, 4, 5, 6, 7, 8];
   array::filter_map(a, |x: i64| -> [i64, null] select x > 5 {
     true => x + 1,
-    false => sample(#trigger: x, null)
+    false => x ~ null
   })
 }
 "#;
@@ -455,7 +455,7 @@ const ARRAY_FIND_MAP: &str = r#"
   let a: Array<T> = [("foo", 1), ("bar", 2), ("baz", 3)];
   array::find_map(a, |(k, v): T| select k == "bar" {
     true => v,
-    false => sample(#trigger:v, null)
+    false => v ~ null
   })
 }
 "#;
@@ -1132,7 +1132,7 @@ const NET_RPC: &str = r#"
     #path:get_val,
     #doc:"get the value",
     #spec:[],
-    #f:|a| sample(#trigger:a, v));
+    #f:|a| a ~ v);
   net::rpc(
     #path:set_val,
     #doc:"set the value",
@@ -1141,7 +1141,7 @@ const NET_RPC: &str = r#"
         error as e => e,
         { val } => {
           v <- val;
-          sample(#trigger:val, null)
+          val ~ null
         }
     });
   net::call(set_val, [("val", 42)]);

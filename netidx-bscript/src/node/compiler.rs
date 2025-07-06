@@ -5,7 +5,7 @@ use super::{
     lambda::Lambda,
     op::{Add, And, Div, Eq, Gt, Gte, Lt, Lte, Mod, Mul, Ne, Not, Or, Sub},
     select::Select,
-    Any, Bind, Block, ByRef, Connect, ConnectDeref, Constant, Deref, Qop, Ref,
+    Any, Bind, Block, ByRef, Connect, ConnectDeref, Constant, Deref, Qop, Ref, Sample,
     StringInterpolate, TypeCast, TypeDef, Use,
 };
 use crate::{
@@ -162,6 +162,9 @@ pub(crate) fn compile<C: Ctx, E: UserEvent>(
         }
         Expr { kind: ExprKind::Mod { lhs, rhs }, id: _, pos: _ } => {
             Mod::compile(ctx, spec.clone(), scope, top_id, lhs, rhs)
+        }
+        Expr { kind: ExprKind::Sample { lhs, rhs }, id: _, pos: _ } => {
+            Sample::compile(ctx, spec.clone(), scope, top_id, lhs, rhs)
         }
     }
 }

@@ -645,6 +645,7 @@ fn arithexpr() -> impl Strategy<Value = Expr> {
             binop!(inner.clone(), Mul),
             binop!(inner.clone(), Div),
             binop!(inner.clone(), Mod),
+            binop!(inner.clone(), Sample)
         ]
     })
 }
@@ -1160,6 +1161,10 @@ fn check(s0: &Expr, s1: &Expr) -> bool {
         }
         (ExprKind::ByRef(e0), ExprKind::ByRef(e1)) => check(e0, e1),
         (ExprKind::Deref(e0), ExprKind::Deref(e1)) => check(e0, e1),
+        (
+            ExprKind::Sample { lhs: l0, rhs: r0 },
+            ExprKind::Sample { lhs: l1, rhs: r1 },
+        ) => check(l0, l1) && check(r0, r1),
         (_, _) => false,
     }
 }

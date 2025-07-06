@@ -1008,3 +1008,80 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Any<C, E> {
         Ok(self.typ.check_contains(&ctx.env, &rtyp)?)
     }
 }
+
+#[derive(Debug)]
+struct Sample<C: Ctx, E: UserEvent> {
+    spec: Expr,
+    triggered: usize,
+    typ: Type,
+    id: BindId,
+    top_id: ExprId,
+    trigger: Node<C, E>,
+    arg: Cached<C, E>,
+}
+
+impl<C: Ctx, E: UserEvent> Sample<C, E> {
+    pub(crate) fn compile(
+        ctx: &mut ExecCtx<C, E>,
+        spec: Expr,
+        scope: &ModPath,
+        top_id: ExprId,
+        lhs: &Arc<Expr>,
+        rhs: &Arc<Expr>,
+    ) -> Result<Node<C, E>> {
+        let id = BindId::new();
+        ctx.user.ref_var(id, top_id);
+        let trigger = compile(ctx, (**lhs).clone(), scope, top_id)?;
+        let arg = Cached::new(compile(ctx, (**rhs).clone(), scope, top_id)?);
+        let typ = arg.node.typ().clone();
+        Ok(Box::new(Self { triggered: 0, id, top_id, spec, typ, trigger, arg }))
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Update<C, E> for Sample<C, E> {
+    fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        if let Some(_) = self.trigger.update(ctx, event) {
+            self.triggered += 1;
+        }
+        self.arg.update(ctx, event);
+        let var = event.variables.get(&self.id).cloned();
+        let res = if self.triggered > 0 && self.arg.cached.is_some() && var.is_none() {
+            self.triggered -= 1;
+            self.arg.cached.clone()
+        } else {
+            var
+        };
+        if self.arg.cached.is_some() {
+            while self.triggered > 0 {
+                self.triggered -= 1;
+                ctx.user.set_var(self.id, self.arg.cached.clone().unwrap());
+            }
+        }
+        res
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id);
+        self.arg.node.delete(ctx);
+        self.trigger.delete(ctx);
+    }
+
+    fn spec(&self) -> &Expr {
+        &self.spec
+    }
+
+    fn typ(&self) -> &Type {
+        &self.typ
+    }
+
+    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+        f(self.id);
+        self.arg.node.refs(f);
+        self.trigger.refs(f);
+    }
+
+    fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        wrap!(self.trigger, self.trigger.typecheck(ctx))?;
+        wrap!(self.arg.node, self.arg.node.typecheck(ctx))
+    }
+}

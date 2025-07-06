@@ -557,59 +557,6 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Count {
     }
 }
 
-#[derive(Debug)]
-struct Sample {
-    last: Option<Value>,
-    triggered: usize,
-    id: BindId,
-    top_id: ExprId,
-}
-
-impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Sample {
-    const NAME: &str = "sample";
-    deftype!("core", "fn(#trigger:Any, 'a) -> 'a");
-
-    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|ctx, _, _, _, top_id| {
-            let id = BindId::new();
-            ctx.user.ref_var(id, top_id);
-            Ok(Box::new(Sample { last: None, triggered: 0, id, top_id }))
-        })
-    }
-}
-
-impl<C: Ctx, E: UserEvent> Apply<C, E> for Sample {
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<C, E>,
-        from: &mut [Node<C, E>],
-        event: &mut Event<E>,
-    ) -> Option<Value> {
-        if let Some(_) = from[0].update(ctx, event) {
-            self.triggered += 1;
-        }
-        if let Some(v) = from[1].update(ctx, event) {
-            self.last = Some(v);
-        }
-        let var = event.variables.get(&self.id).cloned();
-        let res = if self.triggered > 0 && self.last.is_some() && var.is_none() {
-            self.triggered -= 1;
-            self.last.clone()
-        } else {
-            var
-        };
-        while self.triggered > 0 && self.last.is_some() {
-            self.triggered -= 1;
-            ctx.user.set_var(self.id, self.last.clone().unwrap());
-        }
-        res
-    }
-
-    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        ctx.user.unref_var(self.id, self.top_id)
-    }
-}
-
 #[derive(Debug, Default)]
 struct MeanEv;
 
@@ -861,10 +808,6 @@ pub mod core {
     /// return the product of all arguments
     pub let product = |@args| 'product;
 
-    /// When v updates it's value will be cached internally. When trigger updates
-    /// the cached value of v will be returned.
-    pub let sample = |#trigger, v| 'sample;
-
     /// return the sum of all arguments
     pub let sum = |@args| 'sum;
 
@@ -923,7 +866,6 @@ pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
     ctx.register_builtin::<Seq>().unwrap();
     ctx.register_builtin::<Or>().unwrap();
     ctx.register_builtin::<Product>().unwrap();
-    ctx.register_builtin::<Sample>().unwrap();
     ctx.register_builtin::<Sum>().unwrap();
     ctx.register_builtin::<Uniq>().unwrap();
     ctx.register_builtin::<array::Iter>().unwrap();
