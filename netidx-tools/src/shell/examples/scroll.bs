@@ -11,7 +11,7 @@ let handle_key = |k: gui::KeyCode| -> [`Stop, `Continue] select k {
         position <- sample(#trigger:k, position) + u32:1;
         sample(#trigger:k, `Stop)
     },
-    k => dbg(sample(#trigger:k, `Continue))
+    k => sample(#trigger:k, `Continue)
 };
 
 let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
@@ -23,6 +23,6 @@ gui::input_handler(
     #handle: &handle_event,
     &gui::scrollbar(
         #position: &position,
-        &gui::paragraph(#scroll: &{x: u32:0, y: position}, &"[position]")
+        &gui::paragraph(#scroll: &{x: u32:0, y: position}, &long_text)
     )
 )

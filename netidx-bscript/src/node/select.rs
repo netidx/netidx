@@ -9,7 +9,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
 use enumflags2::BitFlags;
-use netidx::{publisher::Typ, subscriber::Value};
+use log::debug;
+use netidx::subscriber::Value;
 use smallvec::{smallvec, SmallVec};
 
 atomic_id!(SelectId);
@@ -47,9 +48,9 @@ impl<C: Ctx, E: UserEvent> Select<C, E> {
                     ModPath(scope.append(&format_compact!("sel{}", SelectId::new().0)));
                 let pat = PatternNode::compile(ctx, &atype, pat, &scope, top_id)
                     .with_context(|| format!("in select at {pos}"))?;
-                if defined {
+                if defined && !pat.guard.is_some() {
                     atype = atype.diff(&ctx.env, &pat.type_predicate)?;
-                } else {
+                } else if !defined {
                     atype = atype.union(&pat.type_predicate);
                 }
                 let n = Cached::new(compile(ctx, spec.clone(), &scope, top_id)?);
@@ -108,16 +109,15 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
         } else {
             let sel = match arg.cached.as_ref() {
                 None => None,
-                Some(v) => {
-                    let typ = Typ::get(v);
-                    arms.iter().enumerate().find_map(|(i, (pat, _))| {
-                        if pat.is_match(&ctx.env, typ, v) {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    })
-                }
+                Some(v) => arms.iter().enumerate().find_map(|(i, (pat, _))| {
+                    let res = pat.is_match(&ctx.env, v);
+                    debug!("match {v} with {pat:?} is {res}");
+                    if res {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                }),
             };
             match (sel, *selected) {
                 (Some(i), Some(j)) if i == j => {
