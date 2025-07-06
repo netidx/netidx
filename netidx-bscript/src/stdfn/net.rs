@@ -650,14 +650,14 @@ pub mod net {
     pub let rpc = |#path, #doc, #spec, #f| 'publish_rpc;
 
     /// list paths under the specified path. If #update is specified, then the list will
-    /// be refreshed each time update is triggered. If update is not specified, the list will
+    /// be refreshed each time clock is triggered. If update is not specified, the list will
     /// be updated each second
     pub let list = |#update = time::timer(1, true), path| 'list;
 
     /// list the table under the specified path. If #update is specified, then the table
-    /// will be refreshed each time update is triggered. If update is not specifed, the table
+    /// will be refreshed each time clock is triggered. If update is not specifed, the table
     /// will be updated each second
-    pub let list_table = |#update = time::timer(1, true), path| 'list_table;
+    pub let list_table = |#clock = time::timer(1, true), path| 'list_table;
 
     /// Publish the specifed value at the specified path. Whenever the value updates,
     /// the new value will be sent to subscribers. If #on_write is specified, then if

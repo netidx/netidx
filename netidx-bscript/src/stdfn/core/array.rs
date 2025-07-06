@@ -857,7 +857,7 @@ pub(super) struct IterQ {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for IterQ {
     const NAME: &str = "iterq";
-    deftype!("core::array", "fn(#trigger:Any, Array<'a>) -> 'a");
+    deftype!("core::array", "fn(#clock:Any, Array<'a>) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, _, _, _, top_id| {

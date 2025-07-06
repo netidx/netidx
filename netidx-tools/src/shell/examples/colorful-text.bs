@@ -15,9 +15,9 @@ let colors = [
    `LightMagenta,
    `LightCyan
 ];
-let trigger = time::timer(1, true);
-let style = gui::style(#fg: rand::pick(sample(#trigger, colors)));
+let clock = time::timer(1, true);
+let style = gui::style(#fg: rand::pick(clock ~ colors));
 let hello = span(#style, "Hello");
-let style = gui::style(#fg: rand::pick(sample(#trigger, colors)));
+let style = gui::style(#fg: rand::pick(clock ~ colors));
 let world = span(#style, " World!");
 text(&[line([hello, world])])

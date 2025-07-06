@@ -219,10 +219,10 @@ const QUEUE: &str = r#"
   let a = [1, 2, 3, 4, 5, 6, 7, 8];
   array::map(a, |v| net::publish("/local/[v]", v));
   let v = array::iter(a);
-  let trigger: Any = once(v);
-  let q = queue(#trigger, v);
+  let clock: Any = once(v);
+  let q = queue(#clock, v);
   let out = net::subscribe("/local/[q]")?;
-  trigger <- out;
+  clock <- out;
   array::group(out, |n, _| n == u64:8)
 }
 "#;
@@ -486,9 +486,9 @@ const ARRAY_ITERQ: &str = r#"
 {
    let a = [1, 2, 3, 4];
    a <- [5, 6, 7, 8];
-   let trigger: Any = once(null);
-   let v = array::iterq(#trigger, a);
-   trigger <- v;
+   let clock: Any = once(null);
+   let v = array::iterq(#clock, a);
+   clock <- v;
    filter(v, |x| x == 8)
 }
 "#;
@@ -1159,7 +1159,7 @@ run!(net_rpc, NET_RPC, |v: Result<&Value>| {
 
 #[cfg(test)]
 const RAND: &str = r#"
-  rand::rand(#trigger:null)
+  rand::rand(#clock:null)
 "#;
 
 #[cfg(test)]

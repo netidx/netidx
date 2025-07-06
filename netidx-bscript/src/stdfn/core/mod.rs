@@ -446,7 +446,7 @@ struct Queue {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Queue {
     const NAME: &str = "queue";
-    deftype!("core", "fn(#trigger:Any, 'a) -> 'a");
+    deftype!("core", "fn(#clock:Any, 'a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, _, _, from, top_id| match from {
@@ -720,11 +720,11 @@ pub mod core {
         pub let iter = |a| 'iter;
 
         /// iterq produces updates for each value in a, but it only produces an update when
-        /// trigger updates. If trigger does not update but a does, then iterq will store each a
-        /// in an internal fifo queue. If trigger updates but a does not, iterq will record the
+        /// clock updates. If clock does not update but a does, then iterq will store each a
+        /// in an internal fifo queue. If clock updates but a does not, iterq will record the
         /// number of times it was triggered, and will update immediatly that many times when a
         /// updates.
-        pub let iterq = |#trigger, a| 'iterq;
+        pub let iterq = |#clock, a| 'iterq;
 
         /// returns the length of a
         pub let len = |a| 'array_len;
@@ -815,11 +815,11 @@ pub mod core {
     /// otherwise return nothing.
     pub let uniq = |v| 'uniq;
 
-    /// when v updates place it's value in an internal fifo queue. when trigger updates
-    /// return the oldest value from the fifo queue. If trigger updates and the queue is
-    /// empty, record the number of trigger updates, and produce that number of
+    /// when v updates place it's value in an internal fifo queue. when clock updates
+    /// return the oldest value from the fifo queue. If clock updates and the queue is
+    /// empty, record the number of clock updates, and produce that number of
     /// values from the queue when they are available.
-    pub let queue = |#trigger, v| 'queue;
+    pub let queue = |#clock, v| 'queue;
 
     /// ignore updates to any argument and never return anything
     pub let never = |@args| 'never;

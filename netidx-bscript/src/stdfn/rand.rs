@@ -15,7 +15,7 @@ struct Rand {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Rand {
     const NAME: &str = "rand";
-    deftype!("rand", "fn<'a: [Int, Float]>(?#start:'a, ?#end:'a, #trigger:Any) -> 'a");
+    deftype!("rand", "fn<'a: [Int, Float]>(?#start:'a, ?#end:'a, #clock:Any) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, from, _| Ok(Box::new(Rand { args: CachedVals::new(from) })))
@@ -116,9 +116,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Shuffle {
 const MOD: &str = r#"
 pub mod rand {
     /// generate a random number between #start and #end (exclusive)
-    /// every time #trigger updates. If start and end are not specified,
+    /// every time #clock updates. If start and end are not specified,
     /// they default to 0.0 and 1.0
-    pub let rand = |#start = 0.0, #end = 1.0, #trigger| 'rand;
+    pub let rand = |#start = 0.0, #end = 1.0, #clock| 'rand;
 
     /// pick a random element from the array and return it. Update
     /// each time the array updates. If the array is empty return

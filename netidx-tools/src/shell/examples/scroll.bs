@@ -4,19 +4,19 @@ let position = u32:0;
 
 let handle_key = |k: gui::KeyCode| -> [`Stop, `Continue] select k {
     k@`Up if position > u32:0 => {
-        position <- sample(#trigger:k, position) - u32:1;
-        sample(#trigger:k, `Stop)
+        position <- (k ~ position) - u32:1;
+        k ~ `Stop
     },
     k@`Down if position < u32:65534 => {
-        position <- sample(#trigger:k, position) + u32:1;
-        sample(#trigger:k, `Stop)
+        position <- (k ~ position) + u32:1;
+        k ~ `Stop
     },
-    k => sample(#trigger:k, `Continue)
+    k => k ~ `Continue
 };
 
 let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
     `Key(k) => handle_key(k.code),
-    e => sample(#trigger: e, `Continue)
+    e => e ~ `Continue
 };
 
 gui::input_handler(
