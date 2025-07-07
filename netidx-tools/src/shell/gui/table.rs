@@ -7,6 +7,7 @@ use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::Event;
 use futures::future::try_join_all;
+use log::debug;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
     expr::ExprId,
@@ -55,8 +56,9 @@ struct RowW {
 
 impl RowW {
     async fn compile(bs: &BSHandle, v: Value) -> Result<Self> {
+        debug!("rows value: {v}");
         let [(_, bottom_margin), (_, cells), (_, height), (_, style), (_, top_margin)] =
-            v.cast_to::<[(ArcStr, u64); 5]>()?;
+            v.cast_to::<[(ArcStr, u64); 5]>().context("row fields")?;
         let (bottom_margin, cells_ref, height, style, top_margin) = try_join! {
             bs.compile_ref(bottom_margin),
             bs.compile_ref(cells),
@@ -79,7 +81,7 @@ impl RowW {
     }
 
     fn set_cells(&mut self, v: &Value) -> Result<()> {
-        self.cells = v.clone().cast_to::<Vec<CellV>>()?;
+        self.cells = v.clone().cast_to::<Vec<CellV>>().context("cells")?;
         Ok(())
     }
 
@@ -213,10 +215,14 @@ impl TableW {
             widths: TRef::new(widths).context("table tref widths")?,
             state: TableState::default(),
         };
-        if let Some(v) = t.footer_ref.last.take() {
+        if let Some(v) = t.footer_ref.last.take()
+            && let Some(v) = v.cast_to::<Option<Value>>()?
+        {
             t.footer = Some(RowW::compile(&bs, v).await?);
         }
-        if let Some(v) = t.header_ref.last.take() {
+        if let Some(v) = t.header_ref.last.take()
+            && let Some(v) = v.cast_to::<Option<Value>>()?
+        {
             t.header = Some(RowW::compile(&bs, v).await?);
         }
         if let Some(v) = t.rows_ref.last.take() {
@@ -235,7 +241,8 @@ impl TableW {
     }
 
     async fn set_rows(&mut self, v: Value) -> Result<()> {
-        let rows = v.cast_to::<Vec<Value>>()?;
+        debug!("set rows {v}");
+        let rows = v.cast_to::<Vec<Value>>().context("rows")?;
         self.rows = try_join_all(rows.into_iter().map(|v| {
             let bs = self.bs.clone();
             async move { RowW::compile(&bs, v).await }
@@ -301,13 +308,19 @@ impl GuiWidget for TableW {
         style.update(id, &v).context("table update style")?;
         widths.update(id, &v).context("table update widths")?;
         if footer_ref.id == id {
-            *footer = Some(RowW::compile(bs, v.clone()).await?)
+            match v.clone().cast_to::<Option<Value>>()? {
+                None => *footer = None,
+                Some(v) => *footer = Some(RowW::compile(bs, v).await?),
+            }
         }
         if let Some(r) = footer {
             r.update(id, &v)?;
         }
         if header_ref.id == id {
-            *header = Some(RowW::compile(bs, v.clone()).await?)
+            match v.clone().cast_to::<Option<Value>>()? {
+                None => *header = None,
+                Some(v) => *header = Some(RowW::compile(bs, v).await?),
+            }
         }
         if let Some(r) = header {
             r.update(id, &v)?;
@@ -378,6 +391,7 @@ impl GuiWidget for TableW {
         if let Some(Some(s)) = &style.t {
             table = table.style(s.0);
         }
+        debug!("table {:?}", table);
         frame.render_stateful_widget(table, rect, state);
         Ok(())
     }

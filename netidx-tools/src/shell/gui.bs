@@ -754,18 +754,18 @@ mod gui {
   | -> Cell { content, style };
 
   type Row = {
+    bottom_margin: &[u32, null],
     cells: &Array<Cell>,
     height: &[u32, null],
     style: &[Style, null],
-    top_margin: &[u32, null],
-    bottom_margin: &[u32, null]
+    top_margin: &[u32, null]
   };
 
   let row = |
+    #bottom_margin: &[u32, null] = &null,
     #height: &[u32, null] = &null,
     #style: &[Style, null] = &null,
     #top_margin: &[u32, null] = &null,
-    #bottom_margin: &[u32, null] = &null,
     cells: &Array<Cell>
   | -> Row { cells, height, style, top_margin, bottom_margin };
 
@@ -797,6 +797,7 @@ mod gui {
     #column_highlight_style: &[Style, null] = &null,
     #column_spacing: &[u32, null] = &null,
     #flex: &[Flex, null] = &null,
+    #footer: &[Row, null] = &null,
     #header: &[Row, null] = &null,
     #highlight_spacing: &[HighlightSpacing, null] = &null,
     #highlight_symbol: &[string, null] = &null,
@@ -806,13 +807,17 @@ mod gui {
     #selected_column: &[u64, null] = &null,
     #style: &[Style, null] = &null,
     #widths: &[Array<Constraint>, null] = &null,
-    rows: &Array<Row>,
+    rows: &Array<Row>
   | -> Gui `Table({
+    cell_highlight_style,
+    column_highlight_style,
     column_spacing,
+    flex,
+    footer,
     header,
     highlight_spacing,
-    highlight_style,
     highlight_symbol,
+    row_highlight_style,
     rows,
     selected,
     selected_cell,
