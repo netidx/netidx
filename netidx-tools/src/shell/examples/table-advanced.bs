@@ -1,0 +1,144 @@
+use gui;
+
+// Create a more advanced table with dynamic data
+let clock = time::timer(duration:1.0s, true);
+
+// Sample data for a process monitor table
+let process_data = [
+    {pid: u32:1234, name: "chrome", cpu: f64:12.5, mem: f64:450.2, status: "Running"},
+    {pid: u32:5678, name: "code", cpu: f64:8.3, mem: f64:312.7, status: "Running"},
+    {pid: u32:9012, name: "firefox", cpu: f64:15.7, mem: f64:523.1, status: "Running"},
+    {pid: u32:3456, name: "terminal", cpu: f64:0.5, mem: f64:45.8, status: "Running"},
+    {pid: u32:7890, name: "slack", cpu: f64:3.2, mem: f64:189.4, status: "Sleeping"},
+    {pid: u32:2345, name: "spotify", cpu: f64:2.1, mem: f64:167.3, status: "Running"},
+    {pid: u32:6789, name: "docker", cpu: f64:5.8, mem: f64:234.6, status: "Running"},
+    {pid: u32:4567, name: "vim", cpu: f64:0.1, mem: f64:12.3, status: "Running"},
+    {pid: u32:8901, name: "rust-analyzer", cpu: f64:18.9, mem: f64:456.7, status: "Running"},
+    {pid: u32:1357, name: "systemd", cpu: f64:0.0, mem: f64:8.9, status: "Sleeping"}
+];
+
+// Create styled header with bold yellow text
+let header = row(
+    #style: &style(#fg: `Yellow, #add_modifier: [`Bold]),
+    [
+        cell(line("PID")),
+        cell(line("Process")),
+        cell(line("CPU %")),
+        cell(line("Memory (MB)")),
+        cell(line("Status"))
+    ]
+);
+
+// Helper function to create styled cells based on values
+let cpu_cell = |cpu: f64| -> Cell {
+    let style = select cpu {
+        c if c > 15.0 => style(#fg: `Red),
+        c if c > 10.0 => style(#fg: `Yellow),
+        _ => style()
+    };
+    cell(#style, line(format("{:.1}", cpu)))
+};
+
+let status_cell = |status: string| -> Cell {
+    let style = select status {
+        "Running" => style(#fg: `Green),
+        "Sleeping" => style(#fg: `Gray),
+        _ => style(#fg: `Red)
+    };
+    cell(#style, line(status))
+};
+
+// Create rows with conditional styling
+let rows = array::from_iter(iter::map(
+    |p: {pid: u32, name: string, cpu: f64, mem: f64, status: string}| -> &Row {
+        // Add some dynamism - CPU values change over time
+        let cpu_val = p.cpu;
+        cpu_val <- select clock ~ cpu_val {
+            v => v + rand::rand(#clock, #start: f64:-2.0, #end: f64:2.0)
+        };
+        cpu_val <- max(0.0, min(100.0, cpu_val));
+
+        &row([
+            cell(line("[p.pid]")),
+            cell(line(p.name)),
+            cpu_cell(cpu_val),
+            cell(line(format("{:.1}", p.mem))),
+            status_cell(p.status)
+        ])
+    },
+    process_data
+));
+
+// Selection and scrolling state
+let selected = u32:0;
+let max_idx = cast<u32>(array::len(process_data))? - u32:1;
+
+// Handle keyboard navigation
+let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.code {
+        k@`Up if selected > u32:0 => {
+            selected <- (k ~ selected) - u32:1;
+            k ~ `Stop
+        },
+        k@`Down if selected < max_idx => {
+            selected <- (k ~ selected) + u32:1;
+            k ~ `Stop
+        },
+        k@`Home => {
+            selected <- k ~ u32:0;
+            k ~ `Stop
+        },
+        k@`End => {
+            selected <- k ~ max_idx;
+            k ~ `Stop
+        },
+        k@`PageUp => {
+            selected <- max(u32:0, (k ~ selected) - u32:5);
+            k ~ `Stop
+        },
+        k@`PageDown => {
+            selected <- min(max_idx, (k ~ selected) + u32:5);
+            k ~ `Stop
+        },
+        k => k ~ `Continue
+    },
+    e => e ~ `Continue
+};
+
+// Create the table with all features
+let process_table = table(
+    #header: &header,
+    #highlight_style: &style(#bg: `DarkGray),
+    #highlight_symbol: &"▶ ",
+    #highlight_spacing: &`WhenSelected,
+    #selected: &selected,
+    #style: &style(#fg: `White),
+    #column_spacing: &u32:2,
+    rows,
+    &[
+        `Min(u32:10),     // PID column
+        `Min(u32:15),     // Process name
+        `Min(u32:10),     // CPU %
+        `Min(u32:12),     // Memory
+        `Min(u32:10)      // Status
+    ]
+);
+
+// Add a status line showing selected process
+let status_line = {
+    let proc = process_data[selected]?;
+    line("Selected: PID [proc.pid] - [proc.name]")
+};
+
+// Wrap in an input handler and styled block
+gui::input_handler(
+    #handle: &handle_event,
+    &gui::block(
+        #border: &`All,
+        #border_type: &`Rounded,
+        #title: &line("Process Monitor (Use ↑/↓, Home, End, PgUp, PgDn)"),
+        #title_bottom: &status_line,
+        #style: &style(#fg: `Cyan),
+        &process_table
+    )
+)

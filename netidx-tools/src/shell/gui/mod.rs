@@ -19,7 +19,7 @@ use netidx_bscript::{
 };
 use paragraph::ParagraphW;
 use ratatui::{
-    layout::{Alignment, Direction, Rect},
+    layout::{Alignment, Direction, Flex, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::block::Position,
@@ -44,6 +44,7 @@ mod list;
 mod paragraph;
 mod scrollbar;
 mod sparkline;
+mod table;
 mod tabs;
 mod text;
 
@@ -184,6 +185,24 @@ impl FromValue for LinesV {
     }
 }
 
+#[derive(Clone, Copy)]
+struct FlexV(Flex);
+
+impl FromValue for FlexV {
+    fn from_value(v: Value) -> Result<Self> {
+        let t = match &*v.cast_to::<ArcStr>()? {
+            "Legacy" => Flex::Legacy,
+            "Start" => Flex::Start,
+            "End" => Flex::End,
+            "Center" => Flex::Center,
+            "SpaceBetween" => Flex::SpaceBetween,
+            "SpaceAround" => Flex::SpaceAround,
+            s => bail!("invalid flex {s}"),
+        };
+        Ok(Self(t))
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ScrollV((u16, u16));
 
@@ -218,6 +237,20 @@ impl FromValue for DirectionV {
             s => bail!("invalid direction tag {s}"),
         };
         Ok(Self(t))
+    }
+}
+
+#[derive(Clone)]
+struct HighlightSpacingV(ratatui::widgets::HighlightSpacing);
+
+impl FromValue for HighlightSpacingV {
+    fn from_value(v: Value) -> Result<Self> {
+        match &*v.cast_to::<ArcStr>()? {
+            "Always" => Ok(Self(ratatui::widgets::HighlightSpacing::Always)),
+            "Never" => Ok(Self(ratatui::widgets::HighlightSpacing::Never)),
+            "WhenSelected" => Ok(Self(ratatui::widgets::HighlightSpacing::WhenSelected)),
+            s => bail!("invalid highlight spacing {s}"),
+        }
     }
 }
 
@@ -298,6 +331,7 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) if &s == "Chart" => ChartW::compile(bs, v).await,
             (s, v) if &s == "Sparkline" => SparklineW::compile(bs, v).await,
             (s, v) if &s == "LineGauge" => LineGaugeW::compile(bs, v).await,
+            (s, v) if &s == "Table" => table::TableW::compile(bs, v).await,
             (s, v) if &s == "Gauge" => GaugeW::compile(bs, v).await,
             (s, v) if &s == "List" => ListW::compile(bs, v).await,
             (s, v) if &s == "Tabs" => tabs::TabsW::compile(bs, v).await,

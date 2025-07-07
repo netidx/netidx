@@ -1,31 +1,19 @@
-use super::{into_borrowed_line, GuiW, GuiWidget, LineV, StyleV, TRef};
+use super::{
+    into_borrowed_line, GuiW, GuiWidget, HighlightSpacingV, LineV, StyleV, TRef,
+};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::Event;
-use netidx::publisher::{FromValue, Value};
+use netidx::publisher::Value;
 use netidx_bscript::{expr::ExprId, rt::BSHandle};
 use ratatui::{
     layout::Rect,
-    widgets::{HighlightSpacing, List, ListState},
+    widgets::{List, ListState},
     Frame,
 };
 use std::mem;
 use tokio::try_join;
-
-#[derive(Clone)]
-struct HighlightSpacingV(HighlightSpacing);
-
-impl FromValue for HighlightSpacingV {
-    fn from_value(v: Value) -> Result<Self> {
-        match &*v.cast_to::<ArcStr>()? {
-            "Always" => Ok(Self(HighlightSpacing::Always)),
-            "Never" => Ok(Self(HighlightSpacing::Never)),
-            "WhenSelected" => Ok(Self(HighlightSpacing::WhenSelected)),
-            s => bail!("invalid highlight spacing {s}"),
-        }
-    }
-}
 
 pub(super) struct ListW {
     highlight_spacing: TRef<Option<HighlightSpacingV>>,

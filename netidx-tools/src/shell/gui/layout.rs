@@ -1,4 +1,4 @@
-use super::{compile, DirectionV, GuiW, GuiWidget, TRef};
+use super::{compile, DirectionV, FlexV, GuiW, GuiWidget, TRef};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use async_trait::async_trait;
@@ -10,7 +10,7 @@ use netidx_bscript::{
     rt::{BSHandle, Ref},
 };
 use ratatui::{
-    layout::{Constraint, Flex, Layout, Rect, Spacing},
+    layout::{Constraint, Layout, Rect, Spacing},
     Frame,
 };
 use smallvec::SmallVec;
@@ -33,24 +33,6 @@ impl FromValue for ConstraintV {
                 Constraint::Ratio(*n, *d)
             }
             v => bail!("invalid constraint {v:?}"),
-        };
-        Ok(Self(t))
-    }
-}
-
-#[derive(Clone, Copy)]
-struct FlexV(Flex);
-
-impl FromValue for FlexV {
-    fn from_value(v: Value) -> Result<Self> {
-        let t = match &*v.cast_to::<ArcStr>()? {
-            "Legacy" => Flex::Legacy,
-            "Start" => Flex::Start,
-            "End" => Flex::End,
-            "Center" => Flex::Center,
-            "SpaceBetween" => Flex::SpaceBetween,
-            "SpaceAround" => Flex::SpaceAround,
-            s => bail!("invalid flex {s}"),
         };
         Ok(Self(t))
     }

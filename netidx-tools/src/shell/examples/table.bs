@@ -1,0 +1,78 @@
+use gui;
+
+// Sample data for our table
+let header = row([
+    cell(line("Name")),
+    cell(line("Age")),
+    cell(line("City"))
+]);
+
+// Create rows with data
+let row1 = row([
+    cell(line("Alice")),
+    cell(line("28")),
+    cell(line("New York"))
+]);
+
+let row2 = row([
+    cell(line("Bob")),
+    cell(line("32")),
+    cell(line("San Francisco"))
+]);
+
+let row3 = row([
+    cell(line("Charlie")),
+    cell(line("25")),
+    cell(line("Chicago"))
+]);
+
+let row4 = row([
+    cell(line("Diana")),
+    cell(line("30")),
+    cell(line("Boston"))
+]);
+
+let row5 = row([
+    cell(line("Eve")),
+    cell(line("27")),
+    cell(line("Seattle"))
+]);
+
+// Selection state
+let selected = u32:0;
+
+// Handle keyboard events for selection
+let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.code {
+        k@`Up if selected > u32:0 => {
+            selected <- (k ~ selected) - u32:1;
+            k ~ `Stop
+        },
+        k@`Down if selected < u32:4 => {
+            selected <- (k ~ selected) + u32:1;
+            k ~ `Stop
+        },
+        k => k ~ `Continue
+    },
+    e => e ~ `Continue
+};
+
+// Create the table
+let table = table(
+    #header: &header,
+    #row_highlight_style: &style(#bg: `Yellow, #fg: `Black),
+    #selected: &selected,
+    #column_spacing: &u32:2,
+    #widths: &[`Percentage(u32:30), `Percentage(u32:20), `Percentage(u32:50)],
+    &[&row1, &row2, &row3, &row4, &row5],
+);
+
+// Wrap in input handler and block
+gui::input_handler(
+    #handle: &handle_event,
+    &gui::block(
+        #border: &`All,
+        #title: &line("User Directory (Use Arrow Keys)"),
+        &table
+    )
+)

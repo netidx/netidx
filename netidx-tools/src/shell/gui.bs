@@ -13,7 +13,8 @@ mod gui {
     `LineGauge(LineGauge),
     `Gauge(Gauge),
     `InputHandler(InputHandler),
-    `List(List)
+    `List(List),
+    `Table(Table)
   ];
 
   type MediaKeyCode = [
@@ -740,5 +741,83 @@ mod gui {
     scroll,
     selected,
     style
+  });
+
+  type Cell = {
+    content: Line,
+    style: [Style, null]
+  };
+
+  let cell = |
+    #style: [Style, null] = null,
+    content: Line
+  | -> Cell { content, style };
+
+  type Row = {
+    cells: &Array<Cell>,
+    height: &[u32, null],
+    style: &[Style, null],
+    top_margin: &[u32, null],
+    bottom_margin: &[u32, null]
+  };
+
+  let row = |
+    #height: &[u32, null] = &null,
+    #style: &[Style, null] = &null,
+    #top_margin: &[u32, null] = &null,
+    #bottom_margin: &[u32, null] = &null,
+    cells: &Array<Cell>
+  | -> Row { cells, height, style, top_margin, bottom_margin };
+
+  type TableState = {
+    offset: u32,
+    selected: [u32, null]
+  };
+
+  type Table = {
+    cell_highlight_style: &[Style, null],
+    column_highlight_style: &[Style, null],
+    column_spacing: &[u32, null],
+    flex: &[Flex, null],
+    footer: &[Row, null],
+    header: &[Row, null],
+    highlight_spacing: &[HighlightSpacing, null],
+    highlight_symbol: &[string, null],
+    row_highlight_style: &[Style, null],
+    rows: &Array<Row>,
+    selected: &[u64, null],
+    selected_cell: &[{x: u64, y: u64}, null],
+    selected_column: &[u64, null],
+    style: &[Style, null],
+    widths: &[Array<Constraint>, null]
+  };
+
+  let table = |
+    #cell_highlight_style: &[Style, null] = &null,
+    #column_highlight_style: &[Style, null] = &null,
+    #column_spacing: &[u32, null] = &null,
+    #flex: &[Flex, null] = &null,
+    #header: &[Row, null] = &null,
+    #highlight_spacing: &[HighlightSpacing, null] = &null,
+    #highlight_symbol: &[string, null] = &null,
+    #row_highlight_style: &[Style, null] = &null,
+    #selected: &[u64, null] = &null,
+    #selected_cell: &[{x: u64, y: u64}, null] = &null,
+    #selected_column: &[u64, null] = &null,
+    #style: &[Style, null] = &null,
+    #widths: &[Array<Constraint>, null] = &null,
+    rows: &Array<Row>,
+  | -> Gui `Table({
+    column_spacing,
+    header,
+    highlight_spacing,
+    highlight_style,
+    highlight_symbol,
+    rows,
+    selected,
+    selected_cell,
+    selected_column,
+    style,
+    widths
   })
 }
