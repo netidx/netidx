@@ -33,7 +33,7 @@ let process_data: Array<Process> = [
 // Create styled header with bold yellow text
 let header = row(
     #style: &style(#fg: `Yellow, #add_modifier: [`Bold]),
-    [
+    &[
         cell(line("PID")),
         cell(line("Process")),
         cell(line("CPU %")),
@@ -55,48 +55,46 @@ let cpu_cell = |cpu: f64| -> Cell {
 let status_cell = |status: Status| -> Cell {
     let style = select status {
         `Running => style(#fg: `Green),
-        `Sleeping => style(#fg: `Gray),
+        `Sleeping => style(#fg: `Gray)
     };
-    cell(#style, line(status))
+    cell(#style, line("[status]"))
 };
 
 // Create rows with conditional styling
-let rows = array::from_iter(iter::map(|p: Process| -> &Row {
-        // Add some dynamism - CPU values change over time
-        let cpu_val = p.cpu;
-        cpu_val <- {
-            let v = clock ~ cpu_val;
-            let v = v + rand::rand(#clock, #start: f64:-2.0, #end: f64:2.0);
-            max(0.0, min(100.0, v))
-        };
-        &row([
-            cell(line("[p.pid]")),
-            cell(line(p.name)),
-            cpu_cell(cpu_val),
-            cell(line("[p.mem]")),
-            status_cell(p.status)
-        ])
-    },
-    process_data
-));
+let rows = array::map(process_data, |p: Process| -> Row {
+    // Add some dynamism - CPU values change over time
+    let cpu_val = p.cpu;
+    cpu_val <- {
+        let v = clock ~ cpu_val;
+        let v = v + rand::rand(#clock, #start: f64:-2.0, #end: f64:2.0);
+        max(0.0, min(100.0, v))
+    };
+    row(&[
+        cell(line("[p.pid]")),
+        cell(line(p.name)),
+        cpu_cell(cpu_val),
+        cell(line("[p.mem]")),
+        status_cell(p.status)
+    ])
+});
 
 // Selection and scrolling state
-let selected = u32:0;
-let max_idx = cast<u32>(array::len(process_data))? - u32:1;
+let selected = u64:0;
+let max_idx = cast<u64>(array::len(process_data))? - u64:1;
 
 // Handle keyboard navigation
 let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.code {
-        k@`Up if selected > u32:0 => {
-            selected <- (k ~ selected) - u32:1;
+        k@`Up if selected > u64:0 => {
+            selected <- (k ~ selected) - u64:1;
             k ~ `Stop
         },
         k@`Down if selected < max_idx => {
-            selected <- (k ~ selected) + u32:1;
+            selected <- (k ~ selected) + u64:1;
             k ~ `Stop
         },
         k@`Home => {
-            selected <- k ~ u32:0;
+            selected <- k ~ u64:0;
             k ~ `Stop
         },
         k@`End => {
@@ -104,11 +102,11 @@ let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
             k ~ `Stop
         },
         k@`PageUp => {
-            selected <- max(u32:0, (k ~ selected) - u32:5);
+            selected <- max(u64:0, (k ~ selected) - u64:5);
             k ~ `Stop
         },
         k@`PageDown => {
-            selected <- min(max_idx, (k ~ selected) + u32:5);
+            selected <- min(max_idx, (k ~ selected) + u64:5);
             k ~ `Stop
         },
         k => k ~ `Continue
@@ -132,7 +130,7 @@ let process_table = table(
         `Min(u32:12),     // Memory
         `Min(u32:10)      // Status
     ],
-    rows
+    &rows
 );
 
 // Add a status line showing selected process

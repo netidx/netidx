@@ -7,7 +7,6 @@ use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::Event;
 use futures::future::try_join_all;
-use log::debug;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
     expr::ExprId,
@@ -56,7 +55,6 @@ struct RowW {
 
 impl RowW {
     async fn compile(bs: &BSHandle, v: Value) -> Result<Self> {
-        debug!("rows value: {v}");
         let [(_, bottom_margin), (_, cells), (_, height), (_, style), (_, top_margin)] =
             v.cast_to::<[(ArcStr, u64); 5]>().context("row fields")?;
         let (bottom_margin, cells_ref, height, style, top_margin) = try_join! {
@@ -241,7 +239,6 @@ impl TableW {
     }
 
     async fn set_rows(&mut self, v: Value) -> Result<()> {
-        debug!("set rows {v}");
         let rows = v.cast_to::<Vec<Value>>().context("rows")?;
         self.rows = try_join_all(rows.into_iter().map(|v| {
             let bs = self.bs.clone();
@@ -391,7 +388,6 @@ impl GuiWidget for TableW {
         if let Some(Some(s)) = &style.t {
             table = table.style(s.0);
         }
-        debug!("table {:?}", table);
         frame.render_stateful_widget(table, rect, state);
         Ok(())
     }
