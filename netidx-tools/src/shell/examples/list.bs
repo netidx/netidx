@@ -29,7 +29,7 @@ let items = [
   line("Pork")
 ];
 
-let last = array::len(items)? - 1;
+let last = array::len(items) - 1;
 let visible = 12;
 let selected = 0;
 let scroll_pos = 0;
