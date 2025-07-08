@@ -3,6 +3,7 @@ use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use futures::{channel::mpsc, StreamExt};
 use netidx::{
+    pool::Pooled,
     publisher::{PublisherBuilder, Value},
     resolver_server,
     subscriber::SubscriberBuilder,
@@ -13,7 +14,7 @@ pub struct TestCtx {
     pub rt: BSHandle,
 }
 
-pub async fn init() -> Result<TestCtx> {
+pub async fn init(sub: mpsc::Sender<Pooled<Vec<RtEvent>>>) -> Result<TestCtx> {
     let _ = env_logger::try_init();
     let resolver = {
         use resolver_server::config::{self, file};
@@ -45,13 +46,14 @@ pub async fn init() -> Result<TestCtx> {
             .publisher(publisher)
             .subscriber(subscriber)
             .build()?
-            .start(),
+            .start(sub),
     })
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn bind_ref_arith() -> Result<()> {
-    let ctx = init().await?;
+    let (tx, mut rx) = mpsc::channel(10);
+    let ctx = init(tx).await?;
     let bs = ctx.rt;
     let e = r#"
 {
@@ -59,16 +61,20 @@ async fn bind_ref_arith() -> Result<()> {
   v
 }
 "#;
-    let (tx, mut rx) = mpsc::channel(10);
-    bs.subscribe(tx).await?;
     let e = bs.compile(ArcStr::from(e)).await?;
     let eid = e.exprs[0].id;
     match rx.next().await {
         None => bail!("runtime died"),
-        Some(RtEvent::Env(_)) => (),
-        Some(RtEvent::Updated(id, v)) => {
-            assert_eq!(id, eid);
-            assert_eq!(v, Value::I64(1))
+        Some(mut ev) => {
+            for e in ev.drain(..) {
+                match e {
+                    RtEvent::Env(_) => (),
+                    RtEvent::Updated(id, v) => {
+                        assert_eq!(id, eid);
+                        assert_eq!(v, Value::I64(1))
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -79,10 +85,9 @@ macro_rules! run {
     ($name:ident, $code:expr, $pred:expr) => {
         #[tokio::test(flavor = "current_thread")]
         async fn $name() -> ::anyhow::Result<()> {
-            let ctx = $crate::tests::init().await?;
-            let bs = ctx.rt;
             let (tx, mut rx) = futures::channel::mpsc::channel(10);
-            bs.subscribe(tx).await?;
+            let ctx = $crate::tests::init(tx).await?;
+            let bs = ctx.rt;
             match bs.compile(arcstr::ArcStr::from($code)).await {
                 Err(e) => assert!($pred(dbg!(Err(e)))),
                 Ok(e) => {
@@ -90,10 +95,16 @@ macro_rules! run {
                     let eid = e.exprs[0].id;
                     match futures::StreamExt::next(&mut rx).await {
                         None => bail!("runtime died"),
-                        Some($crate::rt::RtEvent::Env(_)) => (),
-                        Some($crate::rt::RtEvent::Updated(id, v)) => {
-                            assert_eq!(id, eid);
-                            assert!($pred(dbg!(Ok(&v))))
+                        Some(mut batch) => {
+                            for e in batch.drain(..) {
+                                match e {
+                                    $crate::rt::RtEvent::Env(_) => (),
+                                    $crate::rt::RtEvent::Updated(id, v) => {
+                                        assert_eq!(id, eid);
+                                        assert!($pred(dbg!(Ok(&v))))
+                                    }
+                                }
+                            }
                         }
                     }
                 }

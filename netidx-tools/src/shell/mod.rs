@@ -6,6 +6,7 @@ use gui::Gui;
 use log::info;
 use netidx::{
     config::Config,
+    pool::Pooled,
     publisher::{BindCfg, DesiredAuth, PublisherBuilder, Value},
     subscriber::SubscriberBuilder,
 };
@@ -65,7 +66,12 @@ const GUITYP: LazyLock<Type> = LazyLock::new(|| Type::Ref {
     params: Arc::from_iter([]),
 });
 
-async fn bs_init(cfg: Config, auth: DesiredAuth, p: &Params) -> Result<BSHandle> {
+async fn bs_init(
+    cfg: Config,
+    auth: DesiredAuth,
+    p: &Params,
+    sub: mpsc::Sender<Pooled<Vec<RtEvent>>>,
+) -> Result<BSHandle> {
     if let Some(dir) = &p.log_dir {
         let _ = Logger::try_with_env()
             .context("initializing log")?
@@ -96,7 +102,7 @@ async fn bs_init(cfg: Config, auth: DesiredAuth, p: &Params) -> Result<BSHandle>
     if let Some(s) = p.subscribe_timeout {
         bs.subscribe_timeout(Duration::from_secs(s));
     }
-    Ok(bs.build().context("building rt config")?.start())
+    Ok(bs.build().context("building rt config")?.start(sub))
 }
 
 enum Output {
@@ -177,11 +183,10 @@ async fn load_initial_env(
 }
 
 pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()> {
-    let bs = bs_init(cfg, auth, &p).await?;
+    let (tx, mut from_bs) = mpsc::channel(100);
+    let bs = bs_init(cfg, auth, &p, tx).await?;
     let script = p.file.is_some();
     let mut input = InputReader::new();
-    let (tx, mut from_bs) = mpsc::channel(100);
-    bs.subscribe(tx).await.context("subscribing to rt output")?;
     let mut output = Output::None;
     let mut newenv = None;
     let mut exprs = vec![];
@@ -192,11 +197,15 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     }
     loop {
         select! {
-            e = from_bs.select_next_some() => match e {
-                RtEvent::Updated(id, v) => output.process_update(&env, id, v).await,
-                RtEvent::Env(e) => {
-                    env = e;
-                    newenv = Some(env.clone());
+            mut batch = from_bs.select_next_some() => {
+                for e in batch.drain(..) {
+                    match e {
+                        RtEvent::Updated(id, v) => output.process_update(&env, id, v).await,
+                        RtEvent::Env(e) => {
+                            env = e;
+                            newenv = Some(env.clone());
+                        }
+                    }
                 }
             },
             input = input.read_line(&mut output, newenv.take()) => {
