@@ -39,17 +39,17 @@ let row5 = row(&[
 ]);
 
 // Selection state
-let selected = u64:0;
+let selected = 0;
 
 // Handle keyboard events for selection
 let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.code {
-        k@`Up if selected > u64:0 => {
-            selected <- (k ~ selected) - u64:1;
+        k@`Up if selected > 0 => {
+            selected <- (k ~ selected) - 1;
             k ~ `Stop
         },
-        k@`Down if selected < u64:4 => {
-            selected <- (k ~ selected) + u64:1;
+        k@`Down if selected < 4 => {
+            selected <- (k ~ selected) + 1;
             k ~ `Stop
         },
         k => k ~ `Continue
@@ -62,8 +62,8 @@ let table = table(
     #header: &header,
     #row_highlight_style: &style(#bg: `Yellow, #fg: `Black),
     #selected: &selected,
-    #column_spacing: &u32:2,
-    #widths: &[`Percentage(u32:30), `Percentage(u32:20), `Percentage(u32:50)],
+    #column_spacing: &2,
+    #widths: &[`Percentage(30), `Percentage(20), `Percentage(50)],
     &[row1, row2, row3, row4, row5]
 );
 

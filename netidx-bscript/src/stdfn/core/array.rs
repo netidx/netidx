@@ -588,12 +588,12 @@ pub(super) struct WindowEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for WindowEv {
     const NAME: &str = "array_window";
-    deftype!("core::array", "fn(#window:u64, Array<'a>, @args: 'a) -> Array<'a>");
+    deftype!("core::array", "fn(#window:i64, Array<'a>, @args: 'a) -> Array<'a>");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut present = true;
         match &from.0[..] {
-            [Some(Value::U64(window)), Some(Value::Array(a)), tl @ ..] => {
+            [Some(Value::I64(window)), Some(Value::Array(a)), tl @ ..] => {
                 let window = *window as usize;
                 let total = a.len() + tl.len();
                 if total <= window {
@@ -642,11 +642,11 @@ pub(super) struct LenEv;
 
 impl EvalCached for LenEv {
     const NAME: &str = "array_len";
-    deftype!("core::array", "fn(Array<'a>) -> u64");
+    deftype!("core::array", "fn(Array<'a>) -> i64");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
-            Some(Value::Array(a)) => Some(Value::U64(a.len() as u64)),
+            Some(Value::Array(a)) => Some(Value::I64(a.len() as i64)),
             Some(_) | None => None,
         }
     }
@@ -714,7 +714,7 @@ pub(super) struct Group<C: Ctx, E: UserEvent> {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
     const NAME: &str = "group";
-    deftype!("core::array", "fn('a, fn(u64, 'a) -> bool) -> Array<'a>");
+    deftype!("core::array", "fn('a, fn(i64, 'a) -> bool) -> Array<'a>");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
@@ -722,7 +722,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
                 let scope = ModPath(
                     scope.0.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
                 );
-                let n_typ = Type::Primitive(Typ::U64.into());
+                let n_typ = Type::Primitive(Typ::I64.into());
                 let etyp = arg.typ().clone();
                 let mftyp = match &typ.args[1].typ {
                     Type::Fn(ft) => ft.clone(),
@@ -761,7 +761,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
             ($v:expr) => {{
                 self.ready = false;
                 self.buf.push($v.clone());
-                event.variables.insert(self.nid, Value::U64(self.buf.len() as u64));
+                event.variables.insert(self.nid, Value::I64(self.buf.len() as i64));
                 event.variables.insert(self.xid, $v);
             }};
         }

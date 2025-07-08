@@ -6,7 +6,7 @@ let data: Array<(f64, f64)> = {
   x <- (clock ~ x) + 1.0;
   let y = rand::rand(#clock, #start: f64:0., #end: f64:100.);
   let a = [];
-  a <- array::window(#window: u64:32, clock ~ a, (x, y));
+  a <- array::window(#window:32, clock ~ a, (x, y));
   a
 };
 
@@ -22,13 +22,13 @@ let label_style = style(#fg: `Yellow);
 let axis_style = style(#fg: `Magenta);
 
 chart(
-  #style: &style(#bg: `Rgb({r: u32:20, g: u32:20, b: u32:20})),
+  #style: &style(#bg: `Rgb({r: 20, g: 20, b: 20})),
   #x_axis:&axis(
     #title: line(#style: label_style, "Cycle(n)"),
     #style: axis_style,
     #labels: [
       line(#style: label_style, "[(data[0]?).0]"),
-      line(#style: label_style, "[(data[array::len(data)/u64:2]?).0]"),
+      line(#style: label_style, "[(data[array::len(data) / 2]?).0]"),
       line(#style: label_style, "[(data[-1]?).0]")
     ],
     {min: (data[0]?).0, max: (data[-1]?).0}

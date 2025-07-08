@@ -65,7 +65,7 @@ mod gui {
     `BackTab,
     `Delete,
     `Insert,
-    `F(u32),
+    `F(i64),
     `Char(string),
     `Null,
     `Esc,
@@ -126,10 +126,10 @@ mod gui {
   ];
 
   type MouseEvent = {
-    column: u32,
+    column: i64,
     kind: MouseEventKind,
     modifiers: Array<KeyModifier>,
-    row: u32
+    row: i64
   };
 
   type Event = [
@@ -138,7 +138,7 @@ mod gui {
     `Key(KeyEvent),
     `Mouse(MouseEvent),
     `Paste(string),
-    `Resize(u32, u32)
+    `Resize(i64, i64)
   ];
 
   type InputHandler = {
@@ -171,8 +171,8 @@ mod gui {
     `LightMagenta,
     `LightCyan,
     `White,
-    `Rgb({ r: u32, g: u32, b: u32 }), // r, g, b, range 0-255
-    `Indexed(u32) // max 255
+    `Rgb({ r: i64, g: i64, b: i64 }), // r, g, b, range 0-255
+    `Indexed(i64) // max 255
   ];
 
   type Modifier = [
@@ -245,7 +245,7 @@ mod gui {
   type Paragraph = {
     alignment: &[Alignment, null],
     lines: &[Array<Line>, string],
-    scroll: &{ x: u32, y: u32 }, // y is in lines, x is in chars
+    scroll: &{ x: i64, y: i64 }, // y is in lines, x is in chars
     style: &Style,
     trim: &bool // trim leading whitespace when wrapping
   };
@@ -253,7 +253,7 @@ mod gui {
   let paragraph = |
     #style: &Style = &style(),
     #alignment: &[Alignment, null] = &null,
-    #scroll: &{x: u32, y: u32} = &{x: u32:0, y: u32:0},
+    #scroll: &{x: i64, y: i64} = &{x: 0, y: 0},
     #trim: &bool = &true,
     lines: &[Array<Line>, string]
   | -> Gui `Paragraph({ style, alignment, scroll, trim, lines });
@@ -275,10 +275,10 @@ mod gui {
   ];
 
   type Padding = {
-    bottom: u32,
-    left: u32,
-    right: u32,
-    top: u32
+    bottom: i64,
+    left: i64,
+    right: i64,
+    top: i64
   };
 
   type Position = [
@@ -340,33 +340,33 @@ mod gui {
     begin_style: &[Style, null],
     begin_symbol: &[string, null],
     child: &Gui,
-    content_length: &[u32, null],
+    content_length: &[i64, null],
     end_style: &[Style, null],
     end_symbol: &[string, null],
     orientation: &[ScrollbarOrientation, null],
-    position: &[u32, null],
+    position: &[i64, null],
     style: &[Style, null],
     thumb_style: &[Style, null],
     thumb_symbol: &[string, null],
     track_style: &[Style, null],
     track_symbol: &[string, null],
-    viewport_length: &[u32, null]
+    viewport_length: &[i64, null]
   };
 
   let scrollbar = |
     #begin_style: &[Style, null] = &null,
     #begin_symbol: &[string, null] = &null,
-    #content_length: &[u32, null] = &null,
+    #content_length: &[i64, null] = &null,
     #end_style: &[Style, null] = &null,
     #end_symbol: &[string, null] = &null,
     #orientation: &[ScrollbarOrientation, null] = &null,
-    #position: &[u32, null] = &null,
+    #position: &[i64, null] = &null,
     #style: &[Style, null] = &null,
     #thumb_style: &[Style, null] = &null,
     #thumb_symbol: &[string, null] = &null,
     #track_style: &[Style, null] = &null,
     #track_symbol: &[string, null] = &null,
-    #viewport_length: &[u32, null] = &null,
+    #viewport_length: &[i64, null] = &null,
     child: &Gui
   | -> Gui `Scrollbar({
     begin_style,
@@ -386,12 +386,12 @@ mod gui {
   });
 
   type Constraint = [
-    `Min(u32),
-    `Max(u32),
-    `Length(u32),
-    `Percentage(u32),
-    `Ratio(u32, u32),
-    `Fill(u32)
+    `Min(i64),
+    `Max(i64),
+    `Length(i64),
+    `Percentage(i64),
+    `Ratio(i64, i64),
+    `Fill(i64)
   ];
 
   type Direction = [
@@ -409,27 +409,27 @@ mod gui {
   ];
 
   type Spacing = [
-    `Space(u32),
-    `Overlap(u32)
+    `Space(i64),
+    `Overlap(i64)
   ];
 
   type Layout = {
     children: &Array<(Constraint, Gui)>,
     direction: &[Direction, null],
     flex: &[Flex, null],
-    horizontal_margin: &[u32, null],
-    margin: &[u32, null],
+    horizontal_margin: &[i64, null],
+    margin: &[i64, null],
     spacing: &[Spacing, null],
-    vertical_margin: &[u32, null]
+    vertical_margin: &[i64, null]
   };
 
   let layout = |
     #direction: &[Direction, null] = &null,
     #flex: &[Flex, null] = &null,
-    #horizontal_margin: &[u32, null] = &null,
-    #margin: &[u32, null] = &null,
+    #horizontal_margin: &[i64, null] = &null,
+    #margin: &[i64, null] = &null,
     #spacing: &[Spacing, null] = &null,
-    #vertical_margin: &[u32, null] = &null,
+    #vertical_margin: &[i64, null] = &null,
     children: &Array<(Constraint, Gui)>
   | -> Gui `Layout({
     direction,
@@ -446,7 +446,7 @@ mod gui {
     highlight_style: &[Style, null],
     padding_left: &[Line, null],
     padding_right: &[Line, null],
-    selected: &[u32, null],
+    selected: &[i64, null],
     style: &[Style, null],
     tabs: &Array<(Line, Gui)>
   };
@@ -456,7 +456,7 @@ mod gui {
     #highlight_style: &[Style, null] = &null,
     #padding_left: &[Line, null] = &null,
     #padding_right: &[Line, null] = &null,
-    #selected: &[u32, null] = &null,
+    #selected: &[i64, null] = &null,
     #style: &[Style, null] = &null,
     tabs: &Array<(Line, Gui)>
   | -> Gui `Tabs({
@@ -473,7 +473,7 @@ mod gui {
     label: &[Line, null],
     style: &[Style, null],
     text_value: &[string, null],
-    value: &u64,
+    value: &i64,
     value_style: &[Style, null]
   };
 
@@ -482,7 +482,7 @@ mod gui {
     #style: &[Style, null] = &null,
     #text_value: &[string, null] = &null,
     #value_style: &[Style, null] = &null,
-    value: &u64
+    value: &i64
   | -> Bar {
     label,
     style,
@@ -502,26 +502,26 @@ mod gui {
   | -> BarGroup { label, bars };
 
   type BarChart = {
-    bar_gap: &[u32, null],
+    bar_gap: &[i64, null],
     bar_style: &[Style, null],
-    bar_width: &[u32, null],
+    bar_width: &[i64, null],
     data: &Array<BarGroup>,
     direction: &[Direction, null],
-    group_gap: &[u32, null],
+    group_gap: &[i64, null],
     label_style: &[Style, null],
-    max: &[u64, null],
+    max: &[i64, null],
     style: &[Style, null],
     value_style: &[Style, null]
   };
 
   let bar_chart = |
-    #bar_gap: &[u32, null] = &null,
+    #bar_gap: &[i64, null] = &null,
     #bar_style: &[Style, null] = &null,
-    #bar_width: &[u32, null] = &null,
+    #bar_width: &[i64, null] = &null,
     #direction: &[Direction, null] = &null,
-    #group_gap: &[u32, null] = &null,
+    #group_gap: &[i64, null] = &null,
     #label_style: &[Style, null] = &null,
-    #max: &[u64, null] = &null,
+    #max: &[i64, null] = &null,
     #style: &[Style, null] = &null,
     #value_style: &[Style, null] = &null,
     data: &Array<BarGroup>
@@ -645,7 +645,7 @@ mod gui {
     absent_value_symbol: &[string, null],
     data: &Array<[SparklineBar, f64, null]>,
     direction: &[RenderDirection, null],
-    max: &[u64, null],
+    max: &[i64, null],
     style: &[Style, null]
   };
 
@@ -653,7 +653,7 @@ mod gui {
     #absent_value_style: &[Style, null] = &null,
     #absent_value_symbol: &[string, null] = &null,
     #direction: &[RenderDirection, null] = &null,
-    #max: &[u64, null] = &null,
+    #max: &[i64, null] = &null,
     #style: &[Style, null] = &null,
     data: &Array<[SparklineBar, f64, null]>
   | -> Gui `Sparkline({
@@ -718,8 +718,8 @@ mod gui {
     highlight_symbol: &[string, null],
     items: &Array<Line>,
     repeat_highlight_symbol: &[bool, null],
-    scroll: &[u32, null],
-    selected: &[u32, null],
+    scroll: &[i64, null],
+    selected: &[i64, null],
     style: &[Style, null]
   };
 
@@ -728,8 +728,8 @@ mod gui {
     #highlight_style: &[Style, null] = &null,
     #highlight_symbol: &[string, null] = &null,
     #repeat_highlight_symbol: &[bool, null] = &null,
-    #scroll: &[u32, null] = &null,
-    #selected: &[u32, null] = &null,
+    #scroll: &[i64, null] = &null,
+    #selected: &[i64, null] = &null,
     #style: &[Style, null] = &null,
     items: &Array<Line>
   | -> Gui `List({
@@ -754,30 +754,30 @@ mod gui {
   | -> Cell { content, style };
 
   type Row = {
-    bottom_margin: &[u32, null],
+    bottom_margin: &[i64, null],
     cells: &Array<Cell>,
-    height: &[u32, null],
+    height: &[i64, null],
     style: &[Style, null],
-    top_margin: &[u32, null]
+    top_margin: &[i64, null]
   };
 
   let row = |
-    #bottom_margin: &[u32, null] = &null,
-    #height: &[u32, null] = &null,
+    #bottom_margin: &[i64, null] = &null,
+    #height: &[i64, null] = &null,
     #style: &[Style, null] = &null,
-    #top_margin: &[u32, null] = &null,
+    #top_margin: &[i64, null] = &null,
     cells: &Array<Cell>
   | -> Row { cells, height, style, top_margin, bottom_margin };
 
   type TableState = {
-    offset: u32,
-    selected: [u32, null]
+    offset: i64,
+    selected: [i64, null]
   };
 
   type Table = {
     cell_highlight_style: &[Style, null],
     column_highlight_style: &[Style, null],
-    column_spacing: &[u32, null],
+    column_spacing: &[i64, null],
     flex: &[Flex, null],
     footer: &[Row, null],
     header: &[Row, null],
@@ -785,9 +785,9 @@ mod gui {
     highlight_symbol: &[string, null],
     row_highlight_style: &[Style, null],
     rows: &Array<Row>,
-    selected: &[u64, null],
-    selected_cell: &[{x: u64, y: u64}, null],
-    selected_column: &[u64, null],
+    selected: &[i64, null],
+    selected_cell: &[{x: i64, y: i64}, null],
+    selected_column: &[i64, null],
     style: &[Style, null],
     widths: &[Array<Constraint>, null]
   };
@@ -795,16 +795,16 @@ mod gui {
   let table = |
     #cell_highlight_style: &[Style, null] = &null,
     #column_highlight_style: &[Style, null] = &null,
-    #column_spacing: &[u32, null] = &null,
+    #column_spacing: &[i64, null] = &null,
     #flex: &[Flex, null] = &null,
     #footer: &[Row, null] = &null,
     #header: &[Row, null] = &null,
     #highlight_spacing: &[HighlightSpacing, null] = &null,
     #highlight_symbol: &[string, null] = &null,
     #row_highlight_style: &[Style, null] = &null,
-    #selected: &[u64, null] = &null,
-    #selected_cell: &[{x: u64, y: u64}, null] = &null,
-    #selected_column: &[u64, null] = &null,
+    #selected: &[i64, null] = &null,
+    #selected_cell: &[{x: i64, y: i64}, null] = &null,
+    #selected_column: &[i64, null] = &null,
     #style: &[Style, null] = &null,
     #widths: &[Array<Constraint>, null] = &null,
     rows: &Array<Row>

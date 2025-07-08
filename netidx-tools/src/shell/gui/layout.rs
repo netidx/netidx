@@ -22,15 +22,15 @@ pub(super) struct ConstraintV(pub Constraint);
 impl FromValue for ConstraintV {
     fn from_value(v: Value) -> Result<Self> {
         let t = match &v.cast_to::<SmallVec<[Value; 3]>>()?[..] {
-            [Value::String(s), Value::U32(p)] => match &**s {
+            [Value::String(s), Value::I64(p)] => match &**s {
                 "Min" => Constraint::Min(*p as u16),
                 "Max" => Constraint::Max(*p as u16),
                 "Percentage" => Constraint::Percentage(*p as u16),
                 "Fill" => Constraint::Fill(*p as u16),
                 s => bail!("invalid constraint tag {s}"),
             },
-            [Value::String(s), Value::U32(n), Value::U32(d)] if &**s == "Ratio" => {
-                Constraint::Ratio(*n, *d)
+            [Value::String(s), Value::I64(n), Value::I64(d)] if &**s == "Ratio" => {
+                Constraint::Ratio(*n as u32, *d as u32)
             }
             v => bail!("invalid constraint {v:?}"),
         };

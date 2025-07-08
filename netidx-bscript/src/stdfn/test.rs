@@ -223,7 +223,7 @@ const QUEUE: &str = r#"
   let q = queue(#clock, v);
   let out = net::subscribe("/local/[q]")?;
   clock <- out;
-  array::group(out, |n, _| n == u64:8)
+  array::group(out, |n, _| n == 8)
 }
 "#;
 
@@ -244,7 +244,7 @@ run!(queue, QUEUE, |v: Result<&Value>| {
 const COUNT: &str = r#"
 {
   let a = [0, 1, 2, 3];
-  array::group(count(array::iter(a)), |n, _| n == u64:4)
+  array::group(count(array::iter(a)), |n, _| n == 4)
 }
 "#;
 
@@ -252,7 +252,7 @@ const COUNT: &str = r#"
 run!(count, COUNT, |v: Result<&Value>| {
     match v {
         Ok(Value::Array(a)) => match &a[..] {
-            [Value::U64(1), Value::U64(2), Value::U64(3), Value::U64(4)] => true,
+            [Value::I64(1), Value::I64(2), Value::I64(3), Value::I64(4)] => true,
             _ => false,
         },
         _ => false,
@@ -264,7 +264,7 @@ const SAMPLE: &str = r#"
 {
   let a = [0, 1, 2, 3];
   let x = "tweeeenywon!";
-  array::group(array::iter(a) ~ x, |n, _| n == u64:4)
+  array::group(array::iter(a) ~ x, |n, _| n == 4)
 }
 "#;
 
@@ -299,14 +299,14 @@ run!(uniq, UNIQ, |v: Result<&Value>| {
 
 #[cfg(test)]
 const SEQ: &str = r#"
-  array::group(seq(u64:4), |n, _| n == u64:4)
+  array::group(seq(4), |n, _| n == 4)
 "#;
 
 #[cfg(test)]
 run!(seq, SEQ, |v: Result<&Value>| {
     match v {
         Ok(Value::Array(a)) => match &a[..] {
-            [Value::U64(0), Value::U64(1), Value::U64(2), Value::U64(3)] => true,
+            [Value::I64(0), Value::I64(1), Value::I64(2), Value::I64(3)] => true,
             _ => false,
         },
         _ => false,
@@ -563,7 +563,7 @@ run!(array_push_front, ARRAY_PUSH_FRONT, |v: Result<&Value>| {
 
 #[cfg(test)]
 const ARRAY_WINDOW0: &str = r#"
-  array::window(#window:u64:1, [(1, 2), (3, 4)], (5, 6))
+  array::window(#window:1, [(1, 2), (3, 4)], (5, 6))
 "#;
 
 #[cfg(test)]
@@ -576,7 +576,7 @@ run!(array_window0, ARRAY_WINDOW0, |v: Result<&Value>| {
 
 #[cfg(test)]
 const ARRAY_WINDOW1: &str = r#"
-  array::window(#window:u64:2, [(1, 2), (3, 4)], (5, 6))
+  array::window(#window:2, [(1, 2), (3, 4)], (5, 6))
 "#;
 
 #[cfg(test)]
@@ -589,7 +589,7 @@ run!(array_window1, ARRAY_WINDOW1, |v: Result<&Value>| {
 
 #[cfg(test)]
 const ARRAY_WINDOW2: &str = r#"
-  array::window(#window:u64:3, [(1, 2), (3, 4)], (5, 6))
+  array::window(#window:3, [(1, 2), (3, 4)], (5, 6))
 "#;
 
 #[cfg(test)]
@@ -611,7 +611,7 @@ const ARRAY_LEN: &str = r#"
 #[cfg(test)]
 run!(array_len, ARRAY_LEN, |v: Result<&Value>| {
     match v {
-        Ok(Value::U64(6)) => true,
+        Ok(Value::I64(6)) => true,
         _ => false,
     }
 });
@@ -1023,7 +1023,7 @@ run!(re_split, RE_SPLIT, |v: Result<&Value>| {
 
 #[cfg(test)]
 const RE_SPLITN: &str = r#"
-  re::splitn(#pat:r',\\s*', #limit:u64:2, r'foo, bar, baz')
+  re::splitn(#pat:r',\\s*', #limit:2, r'foo, bar, baz')
 "#;
 
 #[cfg(test)]
@@ -1061,7 +1061,7 @@ const NET_WRITE: &str = r#"
   net::publish(#on_write:|v| x <- cast<i64>(v)?, p, x);
   let s = cast<i64>(net::subscribe(p)?)?;
   net::write(p, once(s + 1));
-  array::group(s, |n, _| n == u64:2)
+  array::group(s, |n, _| n == 2)
 }
 "#;
 

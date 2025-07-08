@@ -28,11 +28,11 @@ let block2rem = block(
   #border_style: &style(#fg: `Yellow),
   #title: &line("Content!"),
   &{
-     let position = u32:0;
+     let position = 0;
      scrollbar(
        #position: &position,
-       #content_length:&u32:150,
-       &paragraph(#scroll: &{x: u32:0, y: position}, &long_text)
+       #content_length:&150,
+       &paragraph(#scroll: &{x: 0, y: position}, &long_text)
      )
   }
 );
@@ -40,10 +40,10 @@ let block2rem = block(
 let block2 = layout(
   #direction: &`Horizontal,
   &[
-    (`Percentage(u32:25), block2l),
-    (`Percentage(u32:25), block2r),
-    (`Percentage(u32:50), block2rem)
+    (`Percentage(25), block2l),
+    (`Percentage(25), block2r),
+    (`Percentage(50), block2rem)
   ]
 );
 
-layout(&[(`Percentage(u32:50), block1), (`Percentage(u32:50), block2)])
+layout(&[(`Percentage(50), block1), (`Percentage(50), block2)])

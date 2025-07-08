@@ -6,12 +6,12 @@ let group0 = [
   bar(
     #style: &style(#fg: `Red),
     #label: &line("stuff"),
-    &rand(#start:u64:0, #end:u64:100, #clock)
+    &rand(#start:0, #end:100, #clock)
   ),
   bar(
     #style: &style(#fg: `Yellow),
     #label: &line("things"),
-    &rand(#start:u64:25, #end:u64:200, #clock)
+    &rand(#start:25, #end:200, #clock)
   )
 ];
 
@@ -19,19 +19,19 @@ let group1 = [
   bar(
     #style: &style(#fg: `Cyan),
     #label: &line("widget"),
-    &rand(#start:u64:0, #end:u64:50, #clock)
+    &rand(#start:0, #end:50, #clock)
   ),
   bar(
     #style: &style(#fg: `Magenta),
     #label: &line("wojet"),
-    &rand(#start:u64:1, #end:u64:25, #clock)
+    &rand(#start:1, #end:25, #clock)
   )
 ];
 
 let chart = bar_chart(
-  #bar_gap: &u32:2,
-  #bar_width: &u32:8,
-  #max: &u64:200,
+  #bar_gap: &2,
+  #bar_width: &8,
+  #max: &200,
   &[
      bar_group(#label: line("group0"), group0),
      bar_group(#label: line("group1"), group1)
@@ -41,7 +41,7 @@ let chart = bar_chart(
 let layout = layout(
   #direction:&`Horizontal,
   #flex: &`Center,
-  &[(`Max(u32:40), chart)]
+  &[(`Max(40), chart)]
 );
 
 block(

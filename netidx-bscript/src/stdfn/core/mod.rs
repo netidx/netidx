@@ -493,7 +493,7 @@ struct Seq {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Seq {
     const NAME: &str = "seq";
-    deftype!("core", "fn(u64) -> u64");
+    deftype!("core", "fn(i64) -> i64");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, _, _, from, top_id| match from {
@@ -514,9 +514,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Seq {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        if let Some(Value::U64(i)) = from[0].update(ctx, event) {
+        if let Some(Value::I64(i)) = from[0].update(ctx, event) {
             for i in 0..i {
-                ctx.user.set_var(self.id, Value::U64(i));
+                ctx.user.set_var(self.id, Value::I64(i));
             }
         }
         event.variables.get(&self.id).cloned()
@@ -529,12 +529,12 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Seq {
 
 #[derive(Debug)]
 struct Count {
-    count: u64,
+    count: i64,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Count {
     const NAME: &str = "count";
-    deftype!("core", "fn(Any) -> u64");
+    deftype!("core", "fn(Any) -> i64");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_, _, _, _, _| Ok(Box::new(Count { count: 0 })))
@@ -550,7 +550,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Count {
     ) -> Option<Value> {
         if from.into_iter().fold(false, |u, n| u || n.update(ctx, event).is_some()) {
             self.count += 1;
-            Some(Value::U64(self.count))
+            Some(Value::I64(self.count))
         } else {
             None
         }

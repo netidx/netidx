@@ -145,7 +145,7 @@ struct SplitNEv {
 
 impl EvalCached for SplitNEv {
     const NAME: &str = "re_splitn";
-    deftype!("re", "fn(#pat:string, #limit:u64, string) -> [Array<string>, error]");
+    deftype!("re", "fn(#pat:string, #limit:i64, string) -> [Array<string>, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         if let Some(Value::String(s)) = &from.0[0] {
@@ -153,7 +153,7 @@ impl EvalCached for SplitNEv {
                 return errf!("{e:?}");
             }
         }
-        if let Some(Value::U64(lim)) = &from.0[1] {
+        if let Some(Value::I64(lim)) = &from.0[1] {
             self.lim = Some(*lim as usize);
         }
         if let Some(Value::String(s)) = &from.0[2] {

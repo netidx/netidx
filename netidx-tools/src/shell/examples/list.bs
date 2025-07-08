@@ -29,10 +29,10 @@ let items = [
   line("Pork")
 ];
 
-let last = cast<u32>(array::len(items))? - u32:1;
-let visible = u32:12;
-let selected = u32:0;
-let scroll_pos = u32:0;
+let last = array::len(items)? - 1;
+let visible = 12;
+let selected = 0;
+let scroll_pos = 0;
 scroll_pos <- select selected {
     s if s < scroll_pos => s,
     s if s > (scroll_pos + visible) => s - visible,
@@ -46,16 +46,16 @@ let title_bottom = {
 
 let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.code {
-        k@`Up if selected > u32:0 => {
-            selected <- (k ~ selected) - u32:1;
+        k@`Up if selected > 0 => {
+            selected <- (k ~ selected) - 1;
             k ~ `Stop
         },
         k@`Down if selected < last => {
-            selected <- (k ~ selected) + u32:1;
+            selected <- (k ~ selected) + 1;
             k ~ `Stop
         },
         k@`Home => {
-            selected <- k ~ u32:0;
+            selected <- k ~ 0;
             k ~ `Stop
         },
         k@`End => {
@@ -63,14 +63,14 @@ let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
             k ~ `Stop
         },
         k@`PageUp if selected < visible => {
-            selected <- k ~ u32:0;
+            selected <- k ~ 0;
             k ~ `Stop
         },
         k@`PageUp => {
             selected <- (k ~ selected) - visible;
             k ~ `Stop
         },
-        k@`PageDown if selected > u32:14 => {
+        k@`PageDown if selected > 14 => {
             selected <- k ~ last;
             k ~ `Stop
         },

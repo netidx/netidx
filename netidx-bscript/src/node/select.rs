@@ -8,7 +8,6 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
-use log::debug;
 use netidx::subscriber::Value;
 use smallvec::{smallvec, SmallVec};
 
@@ -103,7 +102,6 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
                 None => None,
                 Some(v) => arms.iter().enumerate().find_map(|(i, (pat, _))| {
                     let res = pat.is_match(&ctx.env, v);
-                    debug!("match {v} with {pat:?} is {res}");
                     if res {
                         Some(i)
                     } else {
