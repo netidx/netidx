@@ -4,8 +4,15 @@ use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::Event;
 use netidx::publisher::{FromValue, Value};
-use netidx_bscript::{expr::ExprId, rt::{BSHandle, Ref}};
-use ratatui::{layout::Rect, widgets::calendar::{CalendarEventStore, Monthly}, Frame};
+use netidx_bscript::{
+    expr::ExprId,
+    rt::{BSHandle, Ref},
+};
+use ratatui::{
+    layout::Rect,
+    widgets::calendar::{CalendarEventStore, Monthly},
+    Frame,
+};
 use time::{Date, Month};
 use tokio::try_join;
 
@@ -15,9 +22,9 @@ struct DateV(Date);
 impl FromValue for DateV {
     fn from_value(v: Value) -> Result<Self> {
         // bscript structs are stored sorted by field name (day, month, year)
-        let [(_, day), (_, month), (_, year)] =
-            v.cast_to::<[(ArcStr, i64); 3]>()?;
-        let month = Month::try_from(month as u8).map_err(|_| anyhow::anyhow!("invalid month {month}"))?;
+        let [(_, day), (_, month), (_, year)] = v.cast_to::<[(ArcStr, i64); 3]>()?;
+        let month = Month::try_from(month as u8)
+            .map_err(|_| anyhow::anyhow!("invalid month {month}"))?;
         let date = Date::from_calendar_date(year as i32, month, day as u8)?;
         Ok(Self(date))
     }
@@ -36,7 +43,6 @@ impl FromValue for EventV {
 }
 
 pub(super) struct CalendarW {
-    bs: BSHandle,
     display_date: TRef<DateV>,
     events_ref: Ref,
     events: CalendarEventStore,
@@ -50,7 +56,14 @@ impl CalendarW {
     pub(super) async fn compile(bs: BSHandle, v: Value) -> Result<GuiW> {
         let [(_, default_style), (_, display_date), (_, events), (_, show_month), (_, show_surrounding), (_, show_weekday)] =
             v.cast_to::<[(ArcStr, u64); 6]>().context("calendar fields")?;
-        let (default_style, display_date, events_ref, show_month, show_surrounding, show_weekday) = try_join! {
+        let (
+            default_style,
+            display_date,
+            events_ref,
+            show_month,
+            show_surrounding,
+            show_weekday,
+        ) = try_join! {
             bs.compile_ref(default_style),
             bs.compile_ref(display_date),
             bs.compile_ref(events),
@@ -59,14 +72,17 @@ impl CalendarW {
             bs.compile_ref(show_weekday)
         }?;
         let mut t = Self {
-            bs: bs.clone(),
-            display_date: TRef::new(display_date).context("calendar tref display_date")?,
+            display_date: TRef::new(display_date)
+                .context("calendar tref display_date")?,
             events_ref,
             events: CalendarEventStore::default(),
             show_month: TRef::new(show_month).context("calendar tref show_month")?,
-            show_surrounding: TRef::new(show_surrounding).context("calendar tref show_surrounding")?,
-            show_weekday: TRef::new(show_weekday).context("calendar tref show_weekday")?,
-            default_style: TRef::new(default_style).context("calendar tref default_style")?,
+            show_surrounding: TRef::new(show_surrounding)
+                .context("calendar tref show_surrounding")?,
+            show_weekday: TRef::new(show_weekday)
+                .context("calendar tref show_weekday")?,
+            default_style: TRef::new(default_style)
+                .context("calendar tref default_style")?,
         };
         if let Some(v) = t.events_ref.last.take() {
             t.set_events(&v)?;
@@ -92,11 +108,12 @@ impl CalendarW {
 
 #[async_trait]
 impl GuiWidget for CalendarW {
-    async fn handle_event(&mut self, _e: Event) -> Result<()> { Ok(()) }
+    async fn handle_event(&mut self, _e: Event) -> Result<()> {
+        Ok(())
+    }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
         let Self {
-            bs: _,
             display_date,
             events_ref,
             events: _,
@@ -105,17 +122,11 @@ impl GuiWidget for CalendarW {
             show_weekday,
             default_style,
         } = self;
-        display_date
-            .update(id, &v)
-            .context("calendar update display_date")?;
+        display_date.update(id, &v).context("calendar update display_date")?;
         show_month.update(id, &v).context("calendar update show_month")?;
-        show_surrounding
-            .update(id, &v)
-            .context("calendar update show_surrounding")?;
+        show_surrounding.update(id, &v).context("calendar update show_surrounding")?;
         show_weekday.update(id, &v).context("calendar update show_weekday")?;
-        default_style
-            .update(id, &v)
-            .context("calendar update default_style")?;
+        default_style.update(id, &v).context("calendar update default_style")?;
         if events_ref.id == id {
             self.set_events(&v)?;
         }
@@ -124,7 +135,6 @@ impl GuiWidget for CalendarW {
 
     fn draw(&mut self, frame: &mut Frame, rect: Rect) -> Result<()> {
         let Self {
-            bs: _,
             display_date,
             events_ref: _,
             events,
@@ -150,4 +160,3 @@ impl GuiWidget for CalendarW {
         Ok(())
     }
 }
-

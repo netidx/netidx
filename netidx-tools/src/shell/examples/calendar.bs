@@ -10,5 +10,5 @@ calendar(
   #show_weekday: &style(#fg:`Cyan),
   #show_surrounding: &style(#fg:`DarkGray),
   #events: &events,
-  date(2024, 5, 1)
+  &date(2024, 5, 1)
 )

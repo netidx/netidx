@@ -825,8 +825,7 @@ mod gui {
     selected_column,
     style,
     widths
-  })
-}
+  });
 
   type Date = {
     year: i64,
