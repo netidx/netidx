@@ -418,7 +418,6 @@ parser! {
     where [I: RangeStream<Token = char, Position = SourcePosition>, I::Range: Range]
     {
         choice((
-            attempt(spaces().with(qop(do_block()))),
             attempt(spaces().with(qop(reference()))),
             between(sptoken('('), sptoken(')'), expr()),
         ))
@@ -431,7 +430,6 @@ parser! {
     {
         choice((
             attempt(spaces().with(qop(apply()))),
-            attempt(spaces().with(qop(do_block()))),
             attempt(spaces().with(qop(reference()))),
             between(sptoken('('), sptoken(')'), expr()),
         ))
