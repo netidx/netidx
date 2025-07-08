@@ -1,0 +1,14 @@
+use gui;
+
+let events = [
+  calendar_event(style(#fg:`Red), date(2024, 5, 5)),
+  calendar_event(style(#fg:`Green), date(2024, 5, 15))
+];
+
+calendar(
+  #show_month: &style(#fg:`Yellow),
+  #show_weekday: &style(#fg:`Cyan),
+  #show_surrounding: &style(#fg:`DarkGray),
+  #events: &events,
+  &date(2024, 5, 1)
+)

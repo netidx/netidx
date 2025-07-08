@@ -11,6 +11,7 @@ use input_handler::InputHandlerW;
 use layout::LayoutW;
 use line_gauge::LineGaugeW;
 use list::ListW;
+use calendar::CalendarW;
 use log::error;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
@@ -44,6 +45,7 @@ mod list;
 mod paragraph;
 mod scrollbar;
 mod sparkline;
+mod calendar;
 mod table;
 mod tabs;
 mod text;
@@ -331,6 +333,7 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) if &s == "Chart" => ChartW::compile(bs, v).await,
             (s, v) if &s == "Sparkline" => SparklineW::compile(bs, v).await,
             (s, v) if &s == "LineGauge" => LineGaugeW::compile(bs, v).await,
+            (s, v) if &s == "Calendar" => CalendarW::compile(bs, v).await,
             (s, v) if &s == "Table" => table::TableW::compile(bs, v).await,
             (s, v) if &s == "Gauge" => GaugeW::compile(bs, v).await,
             (s, v) if &s == "List" => ListW::compile(bs, v).await,

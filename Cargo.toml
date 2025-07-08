@@ -20,6 +20,7 @@ bitflags = "2"
 byteorder = "1"
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "^0.4.24", features = ["serde"] }
+time = "0.3"
 combine = "4"
 compact_str = { version = "0.9", features = ["serde"] }
 crossbeam = "0.8"

@@ -65,3 +65,4 @@ smallvec = { workspace = true }
 structopt = { workspace = true }
 tokio = { workspace = true }
 triomphe = { workspace = true }
+time = { workspace = true }
