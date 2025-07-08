@@ -27,7 +27,7 @@ use derive_builder::Builder;
 use futures::{channel::mpsc, future::join_all, FutureExt, SinkExt, StreamExt};
 use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
-use log::{debug, error};
+use log::{debug, error, info};
 use netidx::{
     path::Path,
     pool::{Pool, Pooled},
@@ -769,6 +769,7 @@ impl BS {
 
     async fn load(&mut self, rt: BSHandle, file: &PathBuf) -> Result<CompRes> {
         let scope = ModPath::root();
+        let st = Instant::now();
         let (scope, ori) = match file.extension() {
             Some(e) if e.as_bytes() == b"bs" => {
                 let scope = match file.file_name() {
@@ -833,10 +834,13 @@ impl BS {
             value: ModuleKind::Inline(ori.exprs.clone()),
         }
         .to_expr(SourcePosition::default());
+        info!("parse time: {:?}", st.elapsed());
+        let st = Instant::now();
         let expr = expr
             .resolve_modules(&scope, &self.resolvers)
             .await
             .with_context(|| ori.clone())?;
+        info!("resolve time: {:?}", st.elapsed());
         let top_id = expr.id;
         let n = compile(&mut self.ctx, &scope, expr).with_context(|| ori.clone())?;
         let has_out = is_output(&n);

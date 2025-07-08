@@ -21,6 +21,7 @@ use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use expr::Expr;
 use fxhash::FxHashMap;
+use log::info;
 use netidx::{
     path::Path,
     publisher::{Id, Val, WriteRequest},
@@ -37,6 +38,7 @@ use std::{
     sync::{self, LazyLock},
     time::Duration,
 };
+use tokio::time::Instant;
 use triomphe::Arc;
 
 #[cfg(test)]
@@ -433,6 +435,7 @@ pub fn compile<C: Ctx, E: UserEvent>(
 ) -> Result<Node<C, E>> {
     let top_id = spec.id;
     let env = ctx.env.clone();
+    let st = Instant::now();
     let mut node = match compiler::compile(ctx, spec, scope, top_id) {
         Ok(n) => n,
         Err(e) => {
@@ -440,9 +443,12 @@ pub fn compile<C: Ctx, E: UserEvent>(
             return Err(e);
         }
     };
+    info!("compile time {:?}", st.elapsed());
+    let st = Instant::now();
     if let Err(e) = node.typecheck(ctx) {
         ctx.env = env;
         return Err(e);
     }
+    info!("typecheck time {:?}", st.elapsed());
     Ok(node)
 }

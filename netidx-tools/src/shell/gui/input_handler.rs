@@ -7,7 +7,6 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MediaKeyCode,
     ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
 };
-use log::debug;
 use netidx::{protocol::valarray::ValArray, publisher::Value};
 use netidx_bscript::{
     expr::ExprId,
@@ -401,7 +400,6 @@ impl InputHandlerW {
             && let Some(h) = &self.handle
         {
             let v = event_to_value(e);
-            debug!("Sending event: {}", v);
             h.call(ValArray::from_iter_exact([v].into_iter())).await?;
             self.pending = true
         }
@@ -409,9 +407,7 @@ impl InputHandlerW {
     }
 
     async fn set_handle(&mut self, v: Value) -> Result<()> {
-        debug!("Setting handle to: {}", v);
         let handle = self.bs.compile_callable(v).await?;
-        debug!("handle exprid: {:?}", handle.expr);
         self.handle = Some(handle);
         self.maybe_send_queued().await?;
         Ok(())
@@ -429,7 +425,6 @@ impl GuiWidget for InputHandlerW {
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
-        debug!("update id: {id:?}, v: {v}");
         let Self {
             bs: _,
             enabled,

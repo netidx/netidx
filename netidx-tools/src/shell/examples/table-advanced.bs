@@ -1,8 +1,5 @@
 use gui;
 
-// Create a more advanced table with dynamic data
-let clock = time::timer(duration:1.0s, true);
-
 type Status = [
   `Running,
   `Sleeping
@@ -11,23 +8,23 @@ type Status = [
 type Process = {
     pid: i64,
     name: string,
-    cpu: f64,
+    cpu: i64,
     mem: f64,
     status: Status
 };
 
 // Sample data for a process monitor table
 let process_data: Array<Process> = [
-    {pid: 1234, name: "chrome", cpu: 12.5, mem: 450.2, status: `Running},
-    {pid: 5678, name: "code", cpu: 8.3, mem: 312.7, status: `Running},
-    {pid: 9012, name: "firefox", cpu: 15.7, mem: 523.1, status: `Running},
-    {pid: 3456, name: "terminal", cpu: 0.5, mem: 45.8, status: `Running},
-    {pid: 7890, name: "slack", cpu: 3.2, mem: 189.4, status: `Sleeping},
-    {pid: 2345, name: "spotify", cpu: 2.1, mem: 167.3, status: `Running},
-    {pid: 6789, name: "docker", cpu: 5.8, mem: 234.6, status: `Running},
-    {pid: 4567, name: "vim", cpu: 0.1, mem: 12.3, status: `Running},
-    {pid: 8901, name: "rust-analyzer", cpu: 18.9, mem: 456.7, status: `Running},
-    {pid: 1357, name: "systemd", cpu: 0.0, mem: 8.9, status: `Sleeping}
+    {pid: 1234, name: "chrome", cpu: 12, mem: 450.2, status: `Running},
+    {pid: 5678, name: "code", cpu: 8, mem: 312.7, status: `Running},
+    {pid: 9012, name: "firefox", cpu: 15, mem: 523.1, status: `Running},
+    {pid: 3456, name: "terminal", cpu: 0, mem: 45.8, status: `Running},
+    {pid: 7890, name: "slack", cpu: 3, mem: 189.4, status: `Sleeping},
+    {pid: 2345, name: "spotify", cpu: 2, mem: 167.3, status: `Running},
+    {pid: 6789, name: "docker", cpu: 5, mem: 234.6, status: `Running},
+    {pid: 4567, name: "vim", cpu: 0, mem: 12.3, status: `Running},
+    {pid: 8901, name: "rust-analyzer", cpu: 18, mem: 456.7, status: `Running},
+    {pid: 1357, name: "systemd", cpu: 0, mem: 8.9, status: `Sleeping}
 ];
 
 // Create styled header with bold yellow text
@@ -43,10 +40,10 @@ let header = row(
 );
 
 // Helper function to create styled cells based on values
-let cpu_cell = |cpu: f64| -> Cell {
+let cpu_cell = |cpu: i64| -> Cell {
     let style = select cpu {
-        c if c > 15.0 => style(#fg: `Red),
-        c if c > 10.0 => style(#fg: `Yellow),
+        c if c > 80 => style(#fg: `Red),
+        c if c > 50 => style(#fg: `Yellow),
         _ => style()
     };
     cell(#style, line("[cpu]"))
@@ -61,13 +58,14 @@ let status_cell = |status: Status| -> Cell {
 };
 
 // Create rows with conditional styling
+let clock = time::timer(duration:1.0s, true);
 let rows = array::map(process_data, |p: Process| -> Row {
     // Add some dynamism - CPU values change over time
     let cpu_val = p.cpu;
     cpu_val <- {
         let v = clock ~ cpu_val;
-        let v = v + rand::rand(#clock, #start:-2.0, #end:2.0);
-        max(0.0, min(100.0, v))
+        let v = v + rand::rand(#clock, #start:-30, #end:30);
+        max(0, min(100, v))
     };
     row(&[
         cell(line("[p.pid]")),
