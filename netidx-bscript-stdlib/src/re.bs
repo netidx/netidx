@@ -1,0 +1,19 @@
+/// return true if the string is matched by #pat, otherwise return false.
+/// return an error if #pat is invalid.
+pub let is_match = |#pat, s| 're_is_match;
+
+/// return an array of instances of #pat in s. return an error if #pat is
+/// invalid.
+pub let find = |#pat, s| 're_find;
+
+/// return an array of captures matched by #pat. The array will have an element for each
+/// capture, regardless of whether it matched or not. If it did not match the corresponding
+/// element will be null. Return an error if #pat is invalid.
+pub let captures = |#pat, s| 're_captures;
+
+/// return an array of strings split by #pat. return an error if #pat is invalid.
+pub let split = |#pat, s| 're_split;
+
+/// split the string by #pat at most #limit times and return an array of the parts.
+/// return an error if #pat is invalid
+pub let splitn = |#pat, #limit, s| 're_splitn

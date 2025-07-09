@@ -1,5 +1,5 @@
 use crate::typ::{TVar, Type};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use arcstr::ArcStr;
 use combine::stream::position::SourcePosition;
 use compact_str::{format_compact, CompactString};
@@ -1002,7 +1002,7 @@ impl fmt::Display for ExprKind {
             ExprKind::Module { name, export, value } => {
                 write!(f, "{}mod {name}", exp(*export))?;
                 match value {
-                    ModuleKind::Resolved(_) | ModuleKind::Unresolved => write!(f, ";"),
+                    ModuleKind::Resolved(_) | ModuleKind::Unresolved => Ok(()),
                     ModuleKind::Inline(exprs) => print_exprs(f, &**exprs, "{", "}", "; "),
                 }
             }
@@ -1542,7 +1542,10 @@ impl Expr {
                             }
                         }
                     };
-                    let value = ModuleKind::Resolved(parser::parse(Some(filename), s)?);
+                    let value = ModuleKind::Resolved(
+                        parser::parse(Some(filename.clone()), s)
+                            .with_context(|| format!("parsing file {filename}"))?,
+                    );
                     let kind = ExprKind::Module { name, export, value };
                     return Ok(Expr { id, pos, kind });
                 }

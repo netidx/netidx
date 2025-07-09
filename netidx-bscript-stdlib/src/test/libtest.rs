@@ -603,7 +603,7 @@ run!(array_window2, ARRAY_WINDOW2, |v: Result<&Value>| {
 #[cfg(test)]
 const ARRAY_LEN: &str = r#"
 {
-  use core::array;
+  use array;
   len(concat([1, 2, 3], [4, 5], [6]))
 }
 "#;

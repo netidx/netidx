@@ -361,11 +361,11 @@ parser! {
             position(),
             optional(string("pub").skip(space())).map(|o| o.is_some()),
             spstring("mod").with(space()).with(spfname()),
-            choice((
-                attempt(sptoken(';')).map(|_| ModuleKind::Unresolved),
-                between(sptoken('{'), sptoken('}'), sep_by(expr(), attempt(sptoken(';'))))
-                    .map(|m: Vec<Expr>| ModuleKind::Inline(Arc::from(m))),
-            )),
+            optional(attempt(between(sptoken('{'), sptoken('}'), sep_by(expr(), attempt(sptoken(';'))))))
+                .map(|m: Option<Vec<Expr>>| match m {
+                    Some(m) => ModuleKind::Inline(Arc::from(m)),
+                    None => ModuleKind::Unresolved
+                }),
         )
             .map(|(pos, export, name, value)| {
                 ExprKind::Module { name, export, value }.to_expr(pos)

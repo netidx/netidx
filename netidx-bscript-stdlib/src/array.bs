@@ -1,0 +1,71 @@
+/// filter returns a new array containing only elements where f returned true
+pub let filter = |a, f| 'array_filter;
+
+/// filter_map returns a new array containing the outputs of f
+/// that were not null
+pub let filter_map = |a, f| 'array_filter_map;
+
+/// return a new array where each element is the output of f applied to the
+/// corresponding element in a
+pub let map = |a, f| 'array_map;
+
+/// return a new array where each element is the output of f applied to the
+/// corresponding element in a, except that if f returns an array then it's
+/// elements will be concatanated to the end of the output instead of nesting.
+pub let flat_map = |a, f| 'array_flat_map;
+
+/// return the result of f applied to the init and every element of a in
+/// sequence. f(f(f(init, a[0]), a[1]), ...)
+pub let fold = |a, init, f| 'array_fold;
+
+/// each time v updates group places the value of v in an internal buffer
+/// and calls f with the length of the internal buffer and the value of v.
+/// If f returns true then group returns the internal buffer as an array
+/// otherwise group returns nothing.
+pub let group = |v, f| 'group;
+
+/// iter produces an update for every value in the array a. updates are produced
+/// in the order they appear in a.
+pub let iter = |a| 'iter;
+
+/// iterq produces updates for each value in a, but it only produces an update when
+/// clock updates. If clock does not update but a does, then iterq will store each a
+/// in an internal fifo queue. If clock updates but a does not, iterq will record the
+/// number of times it was triggered, and will update immediatly that many times when a
+/// updates.
+pub let iterq = |#clock, a| 'iterq;
+
+/// returns the length of a
+pub let len = |a| 'array_len;
+
+/// returns the concatenation of two or more arrays. O(N) where
+/// N is the size of the final array.
+pub let concat = |x, @args| 'array_concat;
+
+/// return an array with the args added to the end. O(N)
+/// where N is the size of the final array
+pub let push = |a, @args| 'array_push_back;
+
+/// return an array with the args added to the front. O(N)
+/// where N is the size of the final array
+pub let push_front = |a, @args| 'array_push_front;
+
+/// return an array no larger than #window with the args
+/// added to the back. If pushing the args would cause the
+/// array to become bigger than #window, remove values from the
+/// front. O(N) where N is the window size.
+pub let window = |#window, a, @args| 'array_window;
+
+/// flatten takes an array with two levels of nesting and produces a flat array
+/// with all the nested elements concatenated together.
+pub let flatten = |a| 'array_flatten;
+
+/// applies f to every element in a and returns the first element for which f
+/// returns true, or null if no element returns true
+pub let find = |a, f| 'array_find;
+
+/// applies f to every element in a and returns the first non null output of f
+pub let find_map = |a, f| 'array_find_map;
+
+/// return a new copy of a sorted descending
+pub let sort = |a| 'array_sort

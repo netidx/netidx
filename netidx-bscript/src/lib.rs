@@ -9,12 +9,11 @@ pub mod env;
 pub mod expr;
 pub mod node;
 pub mod rt;
-pub mod stdfn;
 pub mod typ;
 
 use crate::{
     env::Env,
-    expr::{ExprId, ExprKind, ModPath},
+    expr::{ExprId, ModPath},
     typ::{FnType, Type},
 };
 use anyhow::{bail, Result};
@@ -41,12 +40,15 @@ use std::{
 use tokio::time::Instant;
 use triomphe::Arc;
 
-#[cfg(test)]
-#[macro_use]
-mod tests;
+atomic_id!(LambdaId);
+
+impl From<u64> for LambdaId {
+    fn from(v: u64) -> Self {
+        LambdaId(v)
+    }
+}
 
 atomic_id!(BindId);
-atomic_id!(LambdaId);
 
 impl From<u64> for BindId {
     fn from(v: u64) -> Self {
@@ -332,7 +334,6 @@ pub trait Ctx: Debug + 'static {
 
 pub struct ExecCtx<C: Ctx, E: UserEvent> {
     builtins: FxHashMap<&'static str, (FnType, BuiltInInitFn<C, E>)>,
-    std: Vec<Node<C, E>>,
     pub env: Env<C, E>,
     pub cached: FxHashMap<BindId, Value>,
     pub user: C,
@@ -344,50 +345,21 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         self.user.clear();
     }
 
-    /// build a new context with only the core library
-    pub fn new_no_std(user: C) -> Self {
-        let mut t = ExecCtx {
+    /// Build a new execution context.
+    ///
+    /// This is a very low level interface that you can use to build a
+    /// custom runtime with deep integration to your code. It is very
+    /// difficult to use, and if you don't implement everything
+    /// correctly the semantics of the language can be wrong.
+    ///
+    /// Most likely you want to use the `rt` module instead.
+    pub fn new(user: C) -> Self {
+        Self {
             env: Env::new(),
             builtins: FxHashMap::default(),
-            std: vec![],
             cached: HashMap::default(),
             user,
-        };
-        let core = stdfn::core::register(&mut t);
-        let root = ModPath(Path::root());
-        let node = compile(&mut t, &root, core).expect("error compiling core");
-        t.std.push(node);
-        let node = compile(
-            &mut t,
-            &root,
-            ExprKind::Use { name: ModPath::from(["core"]) }.to_expr(Default::default()),
-        )
-        .expect("error compiling use core");
-        t.std.push(node);
-        t
-    }
-
-    /// build a new context with the full standard library
-    pub fn new(user: C) -> Self {
-        let mut t = Self::new_no_std(user);
-        let root = ModPath(Path::root());
-        let str = stdfn::str::register(&mut t);
-        let node = compile(&mut t, &root, str).expect("failed to compile the str module");
-        t.std.push(node);
-        let re = stdfn::re::register(&mut t);
-        let node = compile(&mut t, &root, re).expect("failed to compile the re module");
-        t.std.push(node);
-        let time = stdfn::time::register(&mut t);
-        let node =
-            compile(&mut t, &root, time).expect("failed to compile the time module");
-        t.std.push(node);
-        let rand = stdfn::rand::register(&mut t);
-        let node = compile(&mut t, &root, rand).expect("failed to compile rand module");
-        t.std.push(node);
-        let net = stdfn::net::register(&mut t);
-        let node = compile(&mut t, &root, net).expect("failed to compile the net module");
-        t.std.push(node);
-        t
+        }
     }
 
     pub fn register_builtin<T: BuiltIn<C, E>>(&mut self) -> Result<()> {

@@ -1,20 +1,15 @@
-use crate::{
-    deftype, err, errf,
-    expr::{Expr, ExprId},
-    node::genn,
-    stdfn::{CachedArgs, CachedVals, EvalCached},
-    typ::FnType,
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
-};
-use anyhow::bail;
+use crate::{deftype, CachedArgs, CachedVals, EvalCached};
+use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
 use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
 use netidx::subscriber::Value;
+use netidx_bscript::{
+    err, errf, expr::ExprId, node::genn, typ::FnType, Apply, BindId, BuiltIn,
+    BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
+};
 use std::{collections::VecDeque, sync::Arc};
 use triomphe::Arc as TArc;
-
-pub mod array;
 
 #[derive(Debug)]
 struct IsErr;
@@ -679,197 +674,26 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Dbg {
     }
 }
 
-const MOD: &str = r#"
-pub mod core {
-    type Sint = [ i32, z32, i64, z64 ];
-    type Uint = [ u32, v32, u64, v64 ];
-    type Int = [ Sint, Uint ];
-    type Float = [ f32, f64 ];
-    type Real = [ Float, decimal ];
-    type Number = [ Int, Real ];
-
-    pub mod array {
-        /// filter returns a new array containing only elements where f returned true
-        pub let filter = |a, f| 'array_filter;
-
-        /// filter_map returns a new array containing the outputs of f
-        /// that were not null
-        pub let filter_map = |a, f| 'array_filter_map;
-
-        /// return a new array where each element is the output of f applied to the
-        /// corresponding element in a
-        pub let map = |a, f| 'array_map;
-
-        /// return a new array where each element is the output of f applied to the
-        /// corresponding element in a, except that if f returns an array then it's
-        /// elements will be concatanated to the end of the output instead of nesting.
-        pub let flat_map = |a, f| 'array_flat_map;
-
-        /// return the result of f applied to the init and every element of a in
-        /// sequence. f(f(f(init, a[0]), a[1]), ...)
-        pub let fold = |a, init, f| 'array_fold;
-
-        /// each time v updates group places the value of v in an internal buffer
-        /// and calls f with the length of the internal buffer and the value of v.
-        /// If f returns true then group returns the internal buffer as an array
-        /// otherwise group returns nothing.
-        pub let group = |v, f| 'group;
-
-        /// iter produces an update for every value in the array a. updates are produced
-        /// in the order they appear in a.
-        pub let iter = |a| 'iter;
-
-        /// iterq produces updates for each value in a, but it only produces an update when
-        /// clock updates. If clock does not update but a does, then iterq will store each a
-        /// in an internal fifo queue. If clock updates but a does not, iterq will record the
-        /// number of times it was triggered, and will update immediatly that many times when a
-        /// updates.
-        pub let iterq = |#clock, a| 'iterq;
-
-        /// returns the length of a
-        pub let len = |a| 'array_len;
-
-        /// returns the concatenation of two or more arrays. O(N) where
-        /// N is the size of the final array.
-        pub let concat = |x, @args| 'array_concat;
-
-        /// return an array with the args added to the end. O(N)
-        /// where N is the size of the final array
-        pub let push = |a, @args| 'array_push_back;
-
-        /// return an array with the args added to the front. O(N)
-        /// where N is the size of the final array
-        pub let push_front = |a, @args| 'array_push_front;
-
-        /// return an array no larger than #window with the args
-        /// added to the back. If pushing the args would cause the
-        /// array to become bigger than #window, remove values from the
-        /// front. O(N) where N is the window size.
-        pub let window = |#window, a, @args| 'array_window;
-
-        /// flatten takes an array with two levels of nesting and produces a flat array
-        /// with all the nested elements concatenated together.
-        pub let flatten = |a| 'array_flatten;
-
-        /// applies f to every element in a and returns the first element for which f
-        /// returns true, or null if no element returns true
-        pub let find = |a, f| 'array_find;
-
-        /// applies f to every element in a and returns the first non null output of f
-        pub let find_map = |a, f| 'array_find_map;
-
-        /// return a new copy of a sorted descending
-        pub let sort = |a| 'array_sort
-    };
-
-    /// return the first argument when all arguments are equal, otherwise return nothing
-    pub let all = |@args| 'all;
-
-    /// return true if all arguments are true, otherwise return false
-    pub let and = |@args| 'and;
-
-    /// return the number of times x has updated
-    pub let count = |x| 'count;
-
-    /// return the first argument divided by all subsuquent arguments
-    pub let divide = |@args| 'divide;
-
-    /// return e only if e is an error
-    pub let filter_err = |e| 'filter_err;
-
-    /// return v if f(v) is true, otherwise return nothing
-    pub let filter = |v, f| 'filter;
-
-    /// return true if e is an error
-    pub let is_err = |e| 'is_err;
-
-    /// construct an error from the specified string
-    pub let error = |e| 'error;
-
-    /// return the maximum value of any argument
-    pub let max = |a, @args| 'max;
-
-    /// return the mean of the passed in arguments
-    pub let mean = |v, @args| 'mean;
-
-    /// return the minimum value of any argument
-    pub let min = |a, @args| 'min;
-
-    /// return v only once, subsuquent updates to v will be ignored
-    /// and once will return nothing
-    pub let once = |v| 'once;
-
-    /// seq will update i times from 0 to i - 1 in that order.
-    pub let seq = |i| 'seq;
-
-    /// return true if any argument is true
-    pub let or = |@args| 'or;
-
-    /// return the product of all arguments
-    pub let product = |@args| 'product;
-
-    /// return the sum of all arguments
-    pub let sum = |@args| 'sum;
-
-    /// when v updates return v if the new value is different from the previous value,
-    /// otherwise return nothing.
-    pub let uniq = |v| 'uniq;
-
-    /// when v updates place it's value in an internal fifo queue. when clock updates
-    /// return the oldest value from the fifo queue. If clock updates and the queue is
-    /// empty, record the number of clock updates, and produce that number of
-    /// values from the queue when they are available.
-    pub let queue = |#clock, v| 'queue;
-
-    /// ignore updates to any argument and never return anything
-    pub let never = |@args| 'never;
-
-    /// when v updates, return it, but also print it along with the position of the expression
-    pub let dbg = |v| 'dbg;
-
-    /// This is the toplevel error sink for the ? operator. If no other lexical binding of errors
-    /// exists closer to the error site then errors handled by ? will come here.
-    pub let errors: error = never()
-}
-"#;
-
-pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<Queue>().unwrap();
-    ctx.register_builtin::<All>().unwrap();
-    ctx.register_builtin::<And>().unwrap();
-    ctx.register_builtin::<Count>().unwrap();
-    ctx.register_builtin::<Divide>().unwrap();
-    ctx.register_builtin::<Filter<C, E>>().unwrap();
-    ctx.register_builtin::<array::Concat>().unwrap();
-    ctx.register_builtin::<array::Window>().unwrap();
-    ctx.register_builtin::<array::PushFront>().unwrap();
-    ctx.register_builtin::<array::PushBack>().unwrap();
-    ctx.register_builtin::<array::Len>().unwrap();
-    ctx.register_builtin::<array::Flatten>().unwrap();
-    ctx.register_builtin::<array::Filter<C, E>>().unwrap();
-    ctx.register_builtin::<array::FlatMap<C, E>>().unwrap();
-    ctx.register_builtin::<array::Find<C, E>>().unwrap();
-    ctx.register_builtin::<array::FindMap<C, E>>().unwrap();
-    ctx.register_builtin::<array::Map<C, E>>().unwrap();
-    ctx.register_builtin::<array::Fold<C, E>>().unwrap();
-    ctx.register_builtin::<array::FilterMap<C, E>>().unwrap();
-    ctx.register_builtin::<array::IterQ>().unwrap();
-    ctx.register_builtin::<array::Group<C, E>>().unwrap();
-    ctx.register_builtin::<array::Sort>().unwrap();
-    ctx.register_builtin::<FilterErr>().unwrap();
-    ctx.register_builtin::<IsErr>().unwrap();
-    ctx.register_builtin::<Max>().unwrap();
-    ctx.register_builtin::<Mean>().unwrap();
-    ctx.register_builtin::<Min>().unwrap();
-    ctx.register_builtin::<Never>().unwrap();
-    ctx.register_builtin::<Once>().unwrap();
-    ctx.register_builtin::<Seq>().unwrap();
-    ctx.register_builtin::<Or>().unwrap();
-    ctx.register_builtin::<Product>().unwrap();
-    ctx.register_builtin::<Sum>().unwrap();
-    ctx.register_builtin::<Uniq>().unwrap();
-    ctx.register_builtin::<array::Iter>().unwrap();
-    ctx.register_builtin::<ToError>().unwrap();
-    ctx.register_builtin::<Dbg>().unwrap();
-    MOD.parse().unwrap()
+pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
+    ctx.register_builtin::<Queue>()?;
+    ctx.register_builtin::<All>()?;
+    ctx.register_builtin::<And>()?;
+    ctx.register_builtin::<Count>()?;
+    ctx.register_builtin::<Divide>()?;
+    ctx.register_builtin::<Filter<C, E>>()?;
+    ctx.register_builtin::<FilterErr>()?;
+    ctx.register_builtin::<IsErr>()?;
+    ctx.register_builtin::<Max>()?;
+    ctx.register_builtin::<Mean>()?;
+    ctx.register_builtin::<Min>()?;
+    ctx.register_builtin::<Never>()?;
+    ctx.register_builtin::<Once>()?;
+    ctx.register_builtin::<Seq>()?;
+    ctx.register_builtin::<Or>()?;
+    ctx.register_builtin::<Product>()?;
+    ctx.register_builtin::<Sum>()?;
+    ctx.register_builtin::<Uniq>()?;
+    ctx.register_builtin::<ToError>()?;
+    ctx.register_builtin::<Dbg>()?;
+    Ok(literal!(include_str!("core.bs")))
 }

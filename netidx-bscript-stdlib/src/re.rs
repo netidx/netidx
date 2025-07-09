@@ -1,13 +1,9 @@
-use crate::{
-    deftype, errf,
-    expr::Expr,
-    stdfn::{CachedArgs, CachedVals, EvalCached},
-    Ctx, ExecCtx, UserEvent,
-};
+use crate::{deftype, CachedArgs, CachedVals, EvalCached};
 use anyhow::Result;
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use netidx::subscriber::Value;
+use netidx_bscript::{errf, Ctx, ExecCtx, UserEvent};
 use netidx_netproto::valarray::ValArray;
 use regex::Regex;
 
@@ -172,35 +168,11 @@ impl EvalCached for SplitNEv {
 
 type SplitN = CachedArgs<SplitNEv>;
 
-const MOD: &str = r#"
-pub mod re {
-  /// return true if the string is matched by #pat, otherwise return false.
-  /// return an error if #pat is invalid.
-  pub let is_match = |#pat, s| 're_is_match;
-
-  /// return an array of instances of #pat in s. return an error if #pat is
-  /// invalid.
-  pub let find = |#pat, s| 're_find;
-
-  /// return an array of captures matched by #pat. The array will have an element for each
-  /// capture, regardless of whether it matched or not. If it did not match the corresponding
-  /// element will be null. Return an error if #pat is invalid.
-  pub let captures = |#pat, s| 're_captures;
-
-  /// return an array of strings split by #pat. return an error if #pat is invalid.
-  pub let split = |#pat, s| 're_split;
-
-  /// split the string by #pat at most #limit times and return an array of the parts.
-  /// return an error if #pat is invalid
-  pub let splitn = |#pat, #limit, s| 're_splitn
-}
-"#;
-
-pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<IsMatch>().unwrap();
-    ctx.register_builtin::<Find>().unwrap();
-    ctx.register_builtin::<Captures>().unwrap();
-    ctx.register_builtin::<Split>().unwrap();
-    ctx.register_builtin::<SplitN>().unwrap();
-    MOD.parse().unwrap()
+pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
+    ctx.register_builtin::<IsMatch>()?;
+    ctx.register_builtin::<Find>()?;
+    ctx.register_builtin::<Captures>()?;
+    ctx.register_builtin::<Split>()?;
+    ctx.register_builtin::<SplitN>()?;
+    Ok(literal!(include_str!("re.bs")))
 }

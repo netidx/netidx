@@ -1,7 +1,12 @@
-use crate::{
-    typ::FnType, Apply, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
+use anyhow::Result;
+use arcstr::ArcStr;
+use enumflags2::{bitflags, BitFlags};
+use fxhash::FxHashMap;
+use netidx::{path::Path, subscriber::Value};
+use netidx_bscript::{
+    expr::ModuleResolver, typ::FnType, Apply, BuiltIn, BuiltInInitFn, Ctx, Event,
+    ExecCtx, Node, UserEvent,
 };
-use netidx::subscriber::Value;
 use netidx_core::utils::Either;
 use std::{
     fmt::Debug,
@@ -9,22 +14,24 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-pub mod core;
-pub mod net;
-pub mod rand;
-pub mod re;
-pub mod str;
+mod array;
+mod core;
+mod net;
+mod rand;
+mod re;
+mod str;
 #[cfg(test)]
 mod test;
-pub mod time;
+mod time;
 
 #[macro_export]
 macro_rules! deftype {
     ($scope:literal, $s:literal) => {
-        const TYP: ::std::sync::LazyLock<$crate::typ::FnType> =
+        const TYP: ::std::sync::LazyLock<netidx_bscript::typ::FnType> =
             ::std::sync::LazyLock::new(|| {
-                let scope = $crate::expr::ModPath(::netidx::path::Path::from($scope));
-                $crate::expr::parser::parse_fn_type($s)
+                let scope =
+                    netidx_bscript::expr::ModPath(::netidx::path::Path::from($scope));
+                netidx_bscript::expr::parser::parse_fn_type($s)
                     .expect("failed to parse fn type {s}")
                     .scope_refs(&scope)
             });
@@ -142,4 +149,89 @@ impl<C: Ctx, E: UserEvent, T: EvalCached> Apply<C, E> for CachedArgs<T> {
             None
         }
     }
+}
+
+#[bitflags]
+#[derive(Clone, Copy)]
+#[repr(u64)]
+pub enum Module {
+    Array,
+    NetAndTime,
+    Rand,
+    Re,
+    Str,
+}
+
+/// Register selected modules of the standard bscript library and
+/// return a root module that will load them along with a module
+/// resolver that contains the necessary code. You need both of these
+/// for the `rt` module.
+///
+/// Note, core is always included and registered, all the other
+/// modules are optional
+///
+/// # Example
+///
+/// ```no_run
+/// use netidx::{publisher::Publisher, subscriber::Subscriber};
+/// use anyhow::Result;
+/// use netidx_core::pool::Pooled;
+/// use netidx_bscript::{ExecCtx, rt::{BSCtx, BSConfigBuilder, BSHandle, RtEvent}};
+/// use futures::channel::mpsc;
+/// use enumflags2::BitFlags;
+///
+/// async fn start_runtime(
+///     publisher: Publisher,
+///     subscriber: Subscriber,
+///     sub: mpsc::Sender<Pooled<Vec<RtEvent>>>
+/// ) -> Result<BSHandle> {
+///     let mut ctx = ExecCtx::new(BSCtx::new(publisher, subscriber));
+///     let (root, mods) = netidx_bscript_stdlib::register(&mut ctx, BitFlags::all())?;
+///     BSConfigBuilder::default()
+///        .ctx(ctx)
+///        .root(root)
+///        .resolvers(vec![mods])
+///        .sub(sub)
+///        .build()?
+///        .start()
+///        .await
+/// }
+/// ```
+pub fn register<C: Ctx, E: UserEvent>(
+    ctx: &mut ExecCtx<C, E>,
+    modules: BitFlags<Module>,
+) -> Result<(ArcStr, ModuleResolver)> {
+    let mut tbl = FxHashMap::default();
+    tbl.insert(Path::from("/core"), core::register(ctx)?);
+    let mut root = String::from("pub mod core;\nuse core;\n");
+    for module in modules {
+        match module {
+            Module::Array => {
+                root.push_str("pub mod array;\n");
+                tbl.insert(Path::from("/array"), array::register(ctx)?);
+            }
+            Module::NetAndTime => {
+                root.push_str("pub mod time;\n");
+                tbl.insert(Path::from("/time"), time::register(ctx)?);
+                root.push_str("pub mod net;\n");
+                tbl.insert(Path::from("/net"), net::register(ctx)?);
+            }
+            Module::Rand => {
+                root.push_str("pub mod rand;\n");
+                tbl.insert(Path::from("/rand"), rand::register(ctx)?);
+            }
+            Module::Re => {
+                root.push_str("pub mod re;\n");
+                tbl.insert(Path::from("/re"), re::register(ctx)?);
+            }
+            Module::Str => {
+                root.push_str("pub mod str;\n");
+                tbl.insert(Path::from("/str"), str::register(ctx)?);
+            }
+        }
+    }
+    root.pop();
+    root.pop();
+    root.push('\n');
+    Ok((ArcStr::from(root), ModuleResolver::VFS(tbl)))
 }

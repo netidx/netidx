@@ -1,11 +1,8 @@
-use crate::{
-    deftype, err,
-    expr::Expr,
-    stdfn::{CachedArgs, CachedVals, EvalCached},
-    Ctx, ExecCtx, UserEvent,
-};
+use crate::{deftype, CachedArgs, CachedVals, EvalCached};
+use anyhow::Result;
 use arcstr::{literal, ArcStr};
 use netidx::{path::Path, subscriber::Value, utils};
+use netidx_bscript::{err, Ctx, ExecCtx, UserEvent};
 use netidx_netproto::valarray::ValArray;
 use smallvec::SmallVec;
 use std::cell::RefCell;
@@ -550,93 +547,26 @@ impl EvalCached for StringToUpperEv {
 
 type StringToUpper = CachedArgs<StringToUpperEv>;
 
-const MOD: &str = r#"
-pub mod str {
-    /// return true if s starts with #pfx, otherwise return false
-    pub let starts_with = |#pfx, s| 'starts_with;
-
-    /// return true if s ends with #sfx otherwise return false
-    pub let ends_with = |#sfx, s| 'ends_with;
-
-    /// return true if s contains #part, otherwise return false
-    pub let contains = |#part, s| 'contains;
-
-    /// if s starts with #pfx then return s with #pfx stripped otherwise return null
-    pub let strip_prefix = |#pfx, s| 'strip_prefix;
-
-    /// if s ends with #sfx then return s with #sfx stripped otherwise return null
-    pub let strip_suffix = |#sfx, s| 'strip_suffix;
-
-    /// return s with leading and trailing whitespace removed
-    pub let trim = |s| 'trim;
-
-    /// return s with leading whitespace removed
-    pub let trim_start = |s| 'trim_start;
-
-    /// return s with trailing whitespace removed
-    pub let trim_end = |s| 'trim_end;
-
-    /// replace all instances of #pat in s with #rep and return s
-    pub let replace = |#pat, #rep, s| 'replace;
-
-    /// return the parent path of s, or null if s does not have a parent path
-    pub let dirname = |path| 'dirname;
-
-    /// return the leaf path of s, or null if s is not a path. e.g. /foo/bar -> bar
-    pub let basename = |path| 'basename;
-
-    /// return a single string with the arguments concatenated and separated by #sep
-    pub let join = |#sep, @args| 'string_join;
-
-    /// concatenate the specified strings into a single string
-    pub let concat = |@args| 'string_concat;
-
-    /// escape all the charachters in #to_escape in s with the escape charachter #escape.
-    /// The escape charachter must appear in #to_escape
-    pub let escape = |#to_escape = "/", #escape = "\\", s| 'string_escape;
-
-    /// unescape all the charachters in s escaped by the specified #escape charachter
-    pub let unescape = |#escape = "\\", s| 'string_unescape;
-
-    /// split the string by the specified #pat and return an array of each part
-    pub let split = |#pat, s| 'string_split;
-
-    /// split the string once from the beginning by #pat and return a
-    /// tuple of strings, or return null if #pat was not found in the string
-    pub let split_once = |#pat, s| 'string_split_once;
-
-    /// split the string once from the end by #pat and return a tuple of strings
-    /// or return null if #pat was not found in the string    
-    pub let rsplit_once = |#pat, s| 'string_rsplit_once;
-
-    /// change the string to lowercase
-    pub let to_lower = |s| 'string_to_lower;
-
-    /// change the string to uppercase
-    pub let to_upper = |s| 'string_to_upper
-}
-"#;
-
-pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<StartsWith>().unwrap();
-    ctx.register_builtin::<EndsWith>().unwrap();
-    ctx.register_builtin::<Contains>().unwrap();
-    ctx.register_builtin::<StripPrefix>().unwrap();
-    ctx.register_builtin::<StripSuffix>().unwrap();
-    ctx.register_builtin::<Trim>().unwrap();
-    ctx.register_builtin::<TrimStart>().unwrap();
-    ctx.register_builtin::<TrimEnd>().unwrap();
-    ctx.register_builtin::<Replace>().unwrap();
-    ctx.register_builtin::<Dirname>().unwrap();
-    ctx.register_builtin::<Basename>().unwrap();
-    ctx.register_builtin::<StringJoin>().unwrap();
-    ctx.register_builtin::<StringConcat>().unwrap();
-    ctx.register_builtin::<StringEscape>().unwrap();
-    ctx.register_builtin::<StringUnescape>().unwrap();
-    ctx.register_builtin::<StringSplit>().unwrap();
-    ctx.register_builtin::<StringSplitOnce>().unwrap();
-    ctx.register_builtin::<StringRSplitOnce>().unwrap();
-    ctx.register_builtin::<StringToLower>().unwrap();
-    ctx.register_builtin::<StringToUpper>().unwrap();
-    MOD.parse().unwrap()
+pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
+    ctx.register_builtin::<StartsWith>()?;
+    ctx.register_builtin::<EndsWith>()?;
+    ctx.register_builtin::<Contains>()?;
+    ctx.register_builtin::<StripPrefix>()?;
+    ctx.register_builtin::<StripSuffix>()?;
+    ctx.register_builtin::<Trim>()?;
+    ctx.register_builtin::<TrimStart>()?;
+    ctx.register_builtin::<TrimEnd>()?;
+    ctx.register_builtin::<Replace>()?;
+    ctx.register_builtin::<Dirname>()?;
+    ctx.register_builtin::<Basename>()?;
+    ctx.register_builtin::<StringJoin>()?;
+    ctx.register_builtin::<StringConcat>()?;
+    ctx.register_builtin::<StringEscape>()?;
+    ctx.register_builtin::<StringUnescape>()?;
+    ctx.register_builtin::<StringSplit>()?;
+    ctx.register_builtin::<StringSplitOnce>()?;
+    ctx.register_builtin::<StringRSplitOnce>()?;
+    ctx.register_builtin::<StringToLower>()?;
+    ctx.register_builtin::<StringToUpper>()?;
+    Ok(literal!(include_str!("str.bs")))
 }

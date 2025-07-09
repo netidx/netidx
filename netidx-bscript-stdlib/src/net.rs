@@ -1,12 +1,4 @@
-use crate::{
-    arity1, arity2, deftype, errf,
-    expr::{Expr, ExprId, ModPath},
-    node::genn,
-    stdfn::CachedVals,
-    typ::{FnType, Type},
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, Node,
-    UserEvent,
-};
+use crate::{arity1, arity2, deftype, CachedVals};
 use anyhow::{anyhow, bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
@@ -14,6 +6,14 @@ use netidx::{
     path::Path,
     publisher::{Typ, Val},
     subscriber::{self, Dval, UpdatesFlags, Value},
+};
+use netidx_bscript::{
+    errf,
+    expr::{ExprId, ModPath},
+    node::genn,
+    typ::{FnType, Type},
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, Node,
+    UserEvent,
 };
 use netidx_core::utils::Either;
 use netidx_netproto::valarray::ValArray;
@@ -355,9 +355,10 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Publish<C, E> {
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
             [_, _, _] => {
-                let scope = ModPath(
-                    scope.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
-                );
+                let scope =
+                    ModPath(scope.append(
+                        format_compact!("fn{}", LambdaId::new().inner()).as_str(),
+                    ));
                 let pid = BindId::new();
                 let mftyp = match &typ.args[0].typ {
                     Type::Fn(ft) => ft.clone(),
@@ -483,9 +484,10 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for PublishRpc<C, E> {
     fn init(_ctx: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
             [_, _, _, _] => {
-                let scope = ModPath(
-                    scope.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
-                );
+                let scope =
+                    ModPath(scope.append(
+                        format_compact!("fn{}", LambdaId::new().inner()).as_str(),
+                    ));
                 let id = BindId::new();
                 ctx.user.ref_var(id, top_id);
                 let pid = BindId::new();
@@ -630,50 +632,13 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
     }
 }
 
-const MOD: &str = r#"
-pub mod net {
-    type Table = { rows: Array<string>, columns: Array<(string, v64)> };
-    type ArgSpec = { name: string, doc: string, default: Any };
-
-    /// write the value to the specified path
-    pub let write = |path, value| 'write;
-
-    /// subscribe to the specified path
-    pub let subscribe = |path| 'subscribe;
-
-    /// call the specified rpc
-    pub let call = |path, args| 'call;
-
-    /// Publish an rpc. When the rpc is called f will be called with the arguments
-    /// sent by the caller, and whatever f returns will be sent back to the caller.
-    /// If f does not return, the caller will hang waiting for a reply.
-    pub let rpc = |#path, #doc, #spec, #f| 'publish_rpc;
-
-    /// list paths under the specified path. If #update is specified, then the list will
-    /// be refreshed each time clock is triggered. If update is not specified, the list will
-    /// be updated each second
-    pub let list = |#update = time::timer(1, true), path| 'list;
-
-    /// list the table under the specified path. If #update is specified, then the table
-    /// will be refreshed each time clock is triggered. If update is not specifed, the table
-    /// will be updated each second
-    pub let list_table = |#clock = time::timer(1, true), path| 'list_table;
-
-    /// Publish the specifed value at the specified path. Whenever the value updates,
-    /// the new value will be sent to subscribers. If #on_write is specified, then if
-    /// subscribers write to the value on_write will be called with the written value.
-    /// on_write need not return anything.
-    pub let publish = |#on_write = |v| never(v), path, v| 'publish
-}
-"#;
-
-pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<Write>().unwrap();
-    ctx.register_builtin::<Subscribe>().unwrap();
-    ctx.register_builtin::<RpcCall>().unwrap();
-    ctx.register_builtin::<List>().unwrap();
-    ctx.register_builtin::<ListTable>().unwrap();
-    ctx.register_builtin::<Publish<C, E>>().unwrap();
-    ctx.register_builtin::<PublishRpc<C, E>>().unwrap();
-    MOD.parse().unwrap()
+pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
+    ctx.register_builtin::<Write>()?;
+    ctx.register_builtin::<Subscribe>()?;
+    ctx.register_builtin::<RpcCall>()?;
+    ctx.register_builtin::<List>()?;
+    ctx.register_builtin::<ListTable>()?;
+    ctx.register_builtin::<Publish<C, E>>()?;
+    ctx.register_builtin::<PublishRpc<C, E>>()?;
+    Ok(literal!(include_str!("net.bs")))
 }
