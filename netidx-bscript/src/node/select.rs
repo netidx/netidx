@@ -113,9 +113,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
                 (Some(i), Some(j)) if i == j => {
                     if arg_up {
                         bind!(i);
-                        val_up[i] = true;
                     }
                     update!();
+                    if arg_up {
+                        val_up[i] = true;
+                    }
                     val!(i)
                 }
                 (Some(i), Some(_) | None) => {
