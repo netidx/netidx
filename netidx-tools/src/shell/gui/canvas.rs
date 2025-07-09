@@ -170,13 +170,13 @@ impl ShapeV {
 
 struct ShapeRef {
     r: Ref,
-    shape: ShapeV,
+    shape: Option<ShapeV>,
 }
 
 impl ShapeRef {
     fn update(&mut self, id: ExprId, v: &Value) -> Result<()> {
         if self.r.id == id {
-            self.shape = v.clone().cast_to::<ShapeV>()?;
+            self.shape = Some(v.clone().cast_to::<ShapeV>()?);
         }
         Ok(())
     }
@@ -225,12 +225,13 @@ impl CanvasW {
             async move {
                 let mut r = bs.compile_ref(id).await?;
                 let shape = match r.last.take() {
-                    Some(v) => v.cast_to::<ShapeV>()?,
-                    None => bail!("shape value unavailable"),
+                    Some(v) => Some(v.cast_to::<ShapeV>()?),
+                    None => None,
                 };
                 Ok::<ShapeRef, anyhow::Error>(ShapeRef { r, shape })
             }
-        })).await?;
+        }))
+        .await?;
         self.shapes = refs;
         Ok(())
     }
@@ -259,17 +260,21 @@ impl GuiWidget for CanvasW {
     fn draw(&mut self, frame: &mut Frame, rect: Rect) -> Result<()> {
         let x_bounds = self.x_bounds.t.unwrap_or(BoundsV([0.0, 0.0])).0;
         let y_bounds = self.y_bounds.t.unwrap_or(BoundsV([0.0, 0.0])).0;
+        let bg = self.background_color.t.as_ref().and_then(|c| c.as_ref()).cloned();
+        let marker = self.marker.t.as_ref().and_then(|m| m.as_ref()).cloned();
+        let shapes = &self.shapes;
         let mut canvas = Canvas::default().x_bounds(x_bounds).y_bounds(y_bounds);
-        if let Some(Some(c)) = &self.background_color.t {
+        if let Some(c) = bg {
             canvas = canvas.background_color(c.0);
         }
-        if let Some(Some(m)) = &self.marker.t {
+        if let Some(m) = marker {
             canvas = canvas.marker(m.0);
         }
-        let shapes: Vec<_> = self.shapes.iter().map(|s| s.shape.clone()).collect();
-        canvas = canvas.paint(move |ctx| {
-            for s in &shapes {
-                s.draw(ctx);
+        canvas = canvas.paint(|ctx| {
+            for s in shapes {
+                if let Some(shape) = &s.shape {
+                    shape.draw(ctx);
+                }
             }
         });
         frame.render_widget(canvas, rect);
