@@ -630,9 +630,7 @@ impl ExprKind {
             ExprKind::StructWith { source, replace } => {
                 try_single_line!(true);
                 match &source.kind {
-                    ExprKind::Ref { .. } | ExprKind::Apply { .. } => {
-                        writeln!(buf, "{{ {source} with")?
-                    }
+                    ExprKind::Ref { .. } => writeln!(buf, "{{ {source} with")?,
                     _ => writeln!(buf, "{{ ({source}) with")?,
                 }
                 let indent = indent + 2;
@@ -964,9 +962,7 @@ impl fmt::Display for ExprKind {
             }
             ExprKind::StructWith { source, replace } => {
                 match &source.kind {
-                    ExprKind::Ref { .. } | ExprKind::Apply { .. } => {
-                        write!(f, "{{ {source} with ")?
-                    }
+                    ExprKind::Ref { .. } => write!(f, "{{ {source} with ")?,
                     _ => write!(f, "{{ ({source}) with ")?,
                 }
                 for (i, (name, e)) in replace.iter().enumerate() {
@@ -988,13 +984,13 @@ impl fmt::Display for ExprKind {
                 write!(f, "{name}")
             }
             ExprKind::StructRef { source, field } => match &source.kind {
-                ExprKind::Ref { .. } | ExprKind::Apply { .. } => {
+                ExprKind::Ref { .. } => {
                     write!(f, "{source}.{field}")
                 }
                 source => write!(f, "({source}).{field}"),
             },
             ExprKind::TupleRef { source, field } => match &source.kind {
-                ExprKind::Ref { .. } | ExprKind::Apply { .. } => {
+                ExprKind::Ref { .. } => {
                     write!(f, "{source}.{field}")
                 }
                 source => write!(f, "({source}).{field}"),
@@ -1112,7 +1108,7 @@ impl fmt::Display for ExprKind {
                 write!(f, "\"")
             }
             ExprKind::ArrayRef { source, i } => match &source.kind {
-                ExprKind::Ref { .. } | ExprKind::Apply { .. } => {
+                ExprKind::Ref { .. } => {
                     write!(f, "{}[{}]", source, i)
                 }
                 _ => write!(f, "({})[{}]", &source, &i),
@@ -1127,7 +1123,7 @@ impl fmt::Display for ExprKind {
                     Some(e) => &format_compact!("{e}"),
                 };
                 match &source.kind {
-                    ExprKind::Ref { .. } | ExprKind::Apply { .. } => {
+                    ExprKind::Ref { .. } => {
                         write!(f, "{}[{}..{}]", source, s, e)
                     }
                     _ => write!(f, "({})[{}..{}]", source, s, e),
