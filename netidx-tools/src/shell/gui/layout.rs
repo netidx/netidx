@@ -62,16 +62,26 @@ pub(super) struct LayoutW {
     margin: TRef<Option<u16>>,
     spacing: TRef<Option<SpacingV>>,
     vertical_margin: TRef<Option<u16>>,
+    focused: TRef<Option<u32>>,
 }
 
 impl LayoutW {
     pub(super) async fn compile(bs: BSHandle, v: Value) -> Result<GuiW> {
-        let [(_, children), (_, direction), (_, flex), (_, horizontal_margin), (_, margin), (_, spacing), (_, vertical_margin)] =
-            v.cast_to::<[(ArcStr, u64); 7]>().context("layout fields")?;
+        let [
+            (_, children),
+            (_, direction),
+            (_, flex),
+            (_, focused),
+            (_, horizontal_margin),
+            (_, margin),
+            (_, spacing),
+            (_, vertical_margin),
+        ] = v.cast_to::<[(ArcStr, u64); 8]>().context("layout fields")?;
         let (
             children_ref,
             direction,
             flex,
+            focused,
             horizontal_margin,
             margin,
             spacing,
@@ -80,6 +90,7 @@ impl LayoutW {
             bs.compile_ref(children),
             bs.compile_ref(direction),
             bs.compile_ref(flex),
+            bs.compile_ref(focused),
             bs.compile_ref(horizontal_margin),
             bs.compile_ref(margin),
             bs.compile_ref(spacing),
@@ -95,6 +106,7 @@ impl LayoutW {
             TRef::<Option<SpacingV>>::new(spacing).context("layout tref spacing")?;
         let vertical_margin = TRef::<Option<u16>>::new(vertical_margin)
             .context("layout tref vertical_margin")?;
+        let focused = TRef::<Option<u32>>::new(focused).context("layout tref focused")?;
         let mut t = Self {
             bs,
             children: vec![],
@@ -105,6 +117,7 @@ impl LayoutW {
             margin,
             spacing,
             vertical_margin,
+            focused,
         };
         if let Some(v) = t.children_ref.last.take() {
             t.set_children(v).await?;
@@ -134,11 +147,14 @@ impl LayoutW {
 #[async_trait]
 impl GuiWidget for LayoutW {
     async fn handle_event(&mut self, e: Event) -> Result<()> {
-        future::try_join_all(self.children.iter_mut().map(|(_, c)| {
-            let e = e.clone();
-            async move { c.handle_event(e).await }
-        }))
-        .await?;
+        let idx = self
+            .focused
+            .t
+            .and_then(|o| o.map(|i| i as usize))
+            .unwrap_or(0);
+        if let Some((_, c)) = self.children.get_mut(idx) {
+            c.handle_event(e).await?;
+        }
         Ok(())
     }
 
@@ -149,6 +165,7 @@ impl GuiWidget for LayoutW {
             children_ref,
             direction,
             flex,
+            focused,
             horizontal_margin,
             margin,
             spacing,
@@ -156,6 +173,7 @@ impl GuiWidget for LayoutW {
         } = self;
         direction.update(id, &v).context("layout direction update")?;
         flex.update(id, &v).context("layout flex update")?;
+        focused.update(id, &v).context("layout focused update")?;
         horizontal_margin.update(id, &v).context("layout horizontal_margin update")?;
         margin.update(id, &v).context("layout margin update")?;
         spacing.update(id, &v).context("layout spacing update")?;
