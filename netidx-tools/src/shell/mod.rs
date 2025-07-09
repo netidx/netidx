@@ -100,10 +100,28 @@ async fn bs_init(
     let root = ArcStr::from(format!("{root};\nmod gui"));
     let mods = vec![
         mods,
-        ModuleResolver::VFS(HashMap::from_iter([(
-            Path::from("/gui"),
-            literal!(include_str!("gui.bs")),
-        )])),
+        ModuleResolver::VFS(HashMap::from_iter([
+            (Path::from("/gui"), literal!(include_str!("gui/mod.bs"))),
+            (
+                Path::from("/gui/input_handler"),
+                literal!(include_str!("gui/input_handler.bs")),
+            ),
+            (Path::from("/gui/text"), literal!(include_str!("gui/text.bs"))),
+            (Path::from("/gui/paragraph"), literal!(include_str!("gui/paragraph.bs"))),
+            (Path::from("/gui/block"), literal!(include_str!("gui/block.bs"))),
+            (Path::from("/gui/scrollbar"), literal!(include_str!("gui/scrollbar.bs"))),
+            (Path::from("/gui/layout"), literal!(include_str!("gui/layout.bs"))),
+            (Path::from("/gui/tabs"), literal!(include_str!("gui/tabs.bs"))),
+            (Path::from("/gui/barchart"), literal!(include_str!("gui/barchart.bs"))),
+            (Path::from("/gui/chart"), literal!(include_str!("gui/chart.bs"))),
+            (Path::from("/gui/sparkline"), literal!(include_str!("gui/sparkline.bs"))),
+            (Path::from("/gui/line_gauge"), literal!(include_str!("gui/line_gauge.bs"))),
+            (Path::from("/gui/gauge"), literal!(include_str!("gui/gauge.bs"))),
+            (Path::from("/gui/list"), literal!(include_str!("gui/list.bs"))),
+            (Path::from("/gui/table"), literal!(include_str!("gui/table.bs"))),
+            (Path::from("/gui/calendar"), literal!(include_str!("gui/calendar.bs"))),
+            (Path::from("/gui/canvas"), literal!(include_str!("gui/canvas.bs"))),
+        ])),
     ];
     let mut bs = BSConfig::builder(ctx, sub);
     if let Some(s) = p.publish_timeout {

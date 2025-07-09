@@ -5,6 +5,7 @@ use combine::stream::position::SourcePosition;
 use compact_str::{format_compact, CompactString};
 use futures::future::try_join_all;
 use fxhash::FxHashMap;
+use log::info;
 use netidx::{
     path::Path,
     publisher::Typ,
@@ -30,7 +31,7 @@ use std::{
     sync::LazyLock,
     time::Duration,
 };
-use tokio::{task, try_join};
+use tokio::{task, time::Instant, try_join};
 use triomphe::Arc;
 
 pub mod parser;
@@ -1495,8 +1496,11 @@ impl Expr {
             name: ArcStr,
         ) -> Result<Expr> {
             let jh = task::spawn(async move {
+                let ts = Instant::now();
                 let full_name = scope.append(&name);
                 let full_name_rel = full_name.trim_start_matches(Path::SEP);
+                let full_name_mod = scope.append(&name).append("mod.bs");
+                let full_name_mod = full_name_mod.trim_start_matches(Path::SEP);
                 let mut errors = vec![];
                 for r in resolvers.iter() {
                     let (filename, s) = match r {
@@ -1511,10 +1515,17 @@ impl Expr {
                                     ArcStr::from(full_path.to_string_lossy()),
                                     ArcStr::from(s),
                                 ),
-                                Err(e) => {
-                                    errors.push(anyhow::Error::from(e));
-                                    continue;
-                                }
+                                Err(_) => match tokio::fs::read_to_string(&full_name_mod)
+                                    .await
+                                {
+                                    Ok(s) => {
+                                        (ArcStr::from(full_name_mod), ArcStr::from(s))
+                                    }
+                                    Err(e) => {
+                                        errors.push(anyhow::Error::from(e));
+                                        continue;
+                                    }
+                                },
                             }
                         }
                         ModuleResolver::Netidx { subscriber, base, timeout } => {
@@ -1543,6 +1554,7 @@ impl Expr {
                             .with_context(|| format!("parsing file {filename}"))?,
                     );
                     let kind = ExprKind::Module { name, export, value };
+                    info!("load and parse {filename} {:?}", ts.elapsed());
                     return Ok(Expr { id, pos, kind });
                 }
                 bail!("module {name} could not be found {errors:?}")
@@ -1555,7 +1567,12 @@ impl Expr {
         match self.kind.clone() {
             ExprKind::Module { value: ModuleKind::Unresolved, export, name } => {
                 let (id, pos, resolvers) = (self.id, self.pos, Arc::clone(resolvers));
-                Box::pin(resolve(resolvers, id, pos, scope.clone(), export, name))
+                Box::pin(async move {
+                    let e =
+                        resolve(resolvers.clone(), id, pos, scope.clone(), export, name)
+                            .await?;
+                    e.resolve_modules(&scope, &resolvers).await
+                })
             }
             ExprKind::Constant(_)
             | ExprKind::Use { .. }

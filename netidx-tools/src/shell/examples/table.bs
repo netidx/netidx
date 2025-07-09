@@ -1,4 +1,7 @@
 use gui;
+use gui::table;
+use gui::input_handler;
+use gui::block;
 
 // Sample data for our table
 let header = row(&[
@@ -42,7 +45,7 @@ let row5 = row(&[
 let selected = 0;
 
 // Handle keyboard events for selection
-let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
+let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.code {
         k@`Up if selected > 0 => {
             selected <- (k ~ selected) - 1;

@@ -1,4 +1,5 @@
 use gui;
+use gui::canvas;
 
 let l = `Line({ color:`Red, x1:0.0, y1:0.0, x2:10.0, y2:5.0 });
 let c = `Circle({ color:`Blue, x:5.0, y:5.0, radius:2.0 });

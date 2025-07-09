@@ -1,0 +1,150 @@
+// The type of a gui, return this type from a shell expression to draw a gui
+type Gui = [
+  `Text(text::Text),
+  `Paragraph(paragraph::Paragraph),
+  `Block(block::Block),
+  `Scrollbar(scrollbar::Scrollbar),
+  `Layout(layout::Layout),
+  `Tabs(tabs::Tabs),
+  `BarChart(barchart::BarChart),
+  `Chart(chart::Chart),
+  `Sparkline(sparkline::Sparkline),
+  `LineGauge(line_gauge::LineGauge),
+  `Gauge(gauge::Gauge),
+  `InputHandler(input_handler::InputHandler),
+  `List(list::List),
+  `Table(table::Table),
+  `Calendar(calendar::Calendar),
+  `Canvas(canvas::Canvas)
+];
+
+type Color = [
+  `Reset,
+  `Black,
+  `Red,
+  `Green,
+  `Yellow,
+  `Blue,
+  `Magenta,
+  `Cyan,
+  `Gray,
+  `DarkGray,
+  `LightRed,
+  `LightGreen,
+  `LightYellow,
+  `LightBlue,
+  `LightMagenta,
+  `LightCyan,
+  `White,
+  `Rgb({ r: i64, g: i64, b: i64 }), // r, g, b, range 0-255
+  `Indexed(i64) // max 255
+];
+
+type Modifier = [
+  `Bold,
+  `Italic
+];
+
+type Alignment = [
+  `Left,
+  `Center,
+  `Right
+];
+
+type Style = {
+  fg: [Color, null],
+  bg: [Color, null],
+  underline_color: [Color, null],
+  add_modifier: [Array<Modifier>, null],
+  sub_modifier: [Array<Modifier>, null]
+};
+
+let style = |
+  #fg: [Color, null] = null,
+  #bg: [Color, null] = null,
+  #underline_color: [Color, null] = null,
+  #add_modifier: [Array<Modifier>, null] = null,
+  #sub_modifier: [Array<Modifier>, null] = null
+| -> Style {
+  fg,
+  bg,
+  underline_color,
+  add_modifier,
+  sub_modifier
+};
+
+type Span = {
+  style: Style,
+  content: string
+};
+
+let span = |#style: Style = style(), content: string| -> Span {
+  style,
+  content
+};
+
+type Line = {
+  style: Style,
+  alignment: [Alignment, null],
+  spans: [Array<Span>, string]
+};
+
+let line = |
+  #style: Style = style(),
+  #alignment: [Alignment, null] = null,
+  spans: [Array<Span>, string]
+| -> Line { style, alignment, spans };
+
+type Direction = [
+  `Horizontal,
+  `Vertical
+];
+
+type Flex = [
+  `Legacy,
+  `Start,
+  `End,
+  `Center,
+  `SpaceBetween,
+  `SpaceAround
+];
+
+type HighlightSpacing = [
+  `Always,
+  `Never,
+  `WhenSelected
+];
+
+type Constraint = [
+  `Min(i64),
+  `Max(i64),
+  `Length(i64),
+  `Percentage(i64),
+  `Ratio(i64, i64),
+  `Fill(i64)
+];
+
+type Marker = [
+  `Dot,
+  `Block,
+  `Bar,
+  `Braille,
+  `HalfBlock
+];
+
+pub mod input_handler;
+pub mod text;
+pub mod paragraph;
+pub mod block;
+pub mod scrollbar;
+pub mod layout;
+pub mod tabs;
+pub mod barchart;
+pub mod chart;
+pub mod sparkline;
+pub mod line_gauge;
+pub mod gauge;
+pub mod list;
+pub mod table;
+pub mod calendar;
+pub mod canvas

@@ -1,4 +1,6 @@
 use gui;
+use gui::sparkline;
+use gui::block;
 use rand;
 
 let data: Array<[SparklineBar, f64]> = {
