@@ -573,31 +573,35 @@ struct BS {
     nodes: IndexMap<ExprId, Node<BSCtx, NoUserEvent>, FxBuildHasher>,
     callables: FxHashMap<CallableId, CallableInt>,
     sub: mpsc::Sender<Pooled<Vec<RtEvent>>>,
-    resolvers: Vec<ModuleResolver>,
+    resolvers: Arc<[ModuleResolver]>,
     publish_timeout: Option<Duration>,
     last_rpc_gc: Instant,
 }
 
 impl BS {
-    fn new(mut rt: BSConfig, sub: mpsc::Sender<Pooled<Vec<RtEvent>>>) -> Self {
-        let resolvers_default = || match dirs::data_dir() {
-            None => vec![ModuleResolver::Files("".into())],
-            Some(dd) => vec![
-                ModuleResolver::Files("".into()),
-                ModuleResolver::Files(dd.join("bscript")),
-            ],
+    fn new(
+        mut rt: BSConfig,
+        mut resolvers: Vec<ModuleResolver>,
+        sub: mpsc::Sender<Pooled<Vec<RtEvent>>>,
+    ) -> Self {
+        let resolvers_default = |r: &mut Vec<ModuleResolver>| match dirs::data_dir() {
+            None => r.push(ModuleResolver::Files("".into())),
+            Some(dd) => {
+                r.push(ModuleResolver::Files("".into()));
+                r.push(ModuleResolver::Files(dd.join("bscript")));
+            }
         };
-        let resolvers = match std::env::var("BSCRIPT_MODPATH") {
-            Err(_) => resolvers_default(),
+        match std::env::var("BSCRIPT_MODPATH") {
+            Err(_) => resolvers_default(&mut resolvers),
             Ok(mp) => match ModuleResolver::parse_env(
                 rt.subscriber.clone(),
                 rt.subscribe_timeout,
                 &mp,
             ) {
-                Ok(r) => r,
+                Ok(r) => resolvers.extend(r),
                 Err(e) => {
                     error!("failed to parse BSCRIPT_MODPATH, using default {e:?}");
-                    resolvers_default()
+                    resolvers_default(&mut resolvers)
                 }
             },
         };
@@ -620,7 +624,7 @@ impl BS {
             nodes: IndexMap::default(),
             callables: HashMap::default(),
             sub,
-            resolvers,
+            resolvers: Arc::from(resolvers),
             publish_timeout: rt.publish_timeout,
             last_rpc_gc: Instant::now(),
         }
@@ -1156,10 +1160,14 @@ impl BSConfig {
 
     /// Start the BS runtime with the specified config, return a
     /// handle capable of interacting with it.
-    pub fn start(self, sub: mpsc::Sender<Pooled<Vec<RtEvent>>>) -> BSHandle {
+    pub fn start(
+        self,
+        resolvers: Vec<ModuleResolver>,
+        sub: mpsc::Sender<Pooled<Vec<RtEvent>>>,
+    ) -> BSHandle {
         let (tx, rx) = mpsc::unbounded();
         task::spawn(async move {
-            let bs = BS::new(self, sub);
+            let bs = BS::new(self, resolvers, sub);
             if let Err(e) = bs.run(rx).await {
                 error!("run loop exited with error {e:?}")
             }
