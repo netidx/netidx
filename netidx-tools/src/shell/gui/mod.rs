@@ -48,6 +48,7 @@ mod sparkline;
 mod calendar;
 mod table;
 mod tabs;
+mod canvas;
 mod text;
 
 #[derive(Clone, Copy)]
@@ -154,7 +155,7 @@ impl FromValue for SpanV {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct LineV(Line<'static>);
 
 impl FromValue for LineV {
@@ -338,6 +339,7 @@ fn compile(bs: BSHandle, source: Value) -> CompRes {
             (s, v) if &s == "Gauge" => GaugeW::compile(bs, v).await,
             (s, v) if &s == "List" => ListW::compile(bs, v).await,
             (s, v) if &s == "Tabs" => tabs::TabsW::compile(bs, v).await,
+            (s, v) if &s == "Canvas" => canvas::CanvasW::compile(bs, v).await,
             (s, v) if &s == "InputHandler" => InputHandlerW::compile(bs, v).await,
             (s, v) => bail!("invalid widget type `{s}({v})"),
         }
