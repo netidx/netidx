@@ -1,15 +1,15 @@
-use crate::{
-    deftype,
+use crate::{deftype, CachedArgs, CachedVals, EvalCached};
+use anyhow::{anyhow, bail, Result};
+use arcstr::{literal, ArcStr};
+use compact_str::format_compact;
+use netidx::{publisher::Typ, subscriber::Value, utils::Either};
+use netidx_bscript::{
     expr::{ExprId, ModPath},
     node::genn,
-    stdfn::{CachedArgs, CachedVals, EvalCached},
     typ::{FnType, Type},
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, Node,
     UserEvent,
 };
-use anyhow::{anyhow, bail};
-use compact_str::format_compact;
-use netidx::{publisher::Typ, subscriber::Value, utils::Either};
 use netidx_netproto::valarray::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{
@@ -58,26 +58,28 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> BuiltIn<C, E> for MapQ<C, E, T> {
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|_ctx, typ, scope, from, top_id| match from {
-            [_, _] => Ok(Box::new(Self {
-                scope: ModPath(
-                    scope.0.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
-                ),
-                predid: BindId::new(),
-                top_id,
-                ftyp: TArc::new(typ.clone()),
+            [_, _] => {
+                Ok(Box::new(Self {
+                    scope: ModPath(scope.0.append(
+                        format_compact!("fn{}", LambdaId::new().inner()).as_str(),
+                    )),
+                    predid: BindId::new(),
+                    top_id,
+                    ftyp: TArc::new(typ.clone()),
 
-                etyp: match &typ.args[0].typ {
-                    Type::Array(et) => (**et).clone(),
-                    t => bail!("expected array not {t}"),
-                },
-                mftyp: match &typ.args[1].typ {
-                    Type::Fn(ft) => ft.clone(),
-                    t => bail!("expected a function not {t}"),
-                },
-                slots: vec![],
-                cur: ValArray::from([]),
-                t: T::default(),
-            })),
+                    etyp: match &typ.args[0].typ {
+                        Type::Array(et) => (**et).clone(),
+                        t => bail!("expected array not {t}"),
+                    },
+                    mftyp: match &typ.args[1].typ {
+                        Type::Fn(ft) => ft.clone(),
+                        t => bail!("expected a function not {t}"),
+                    },
+                    slots: vec![],
+                    cur: ValArray::from([]),
+                    t: T::default(),
+                }))
+            }
             _ => bail!("expected two arguments"),
         })
     }
@@ -719,9 +721,10 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, typ, scope, from, top_id| match from {
             [arg, _] => {
-                let scope = ModPath(
-                    scope.0.append(format_compact!("fn{}", LambdaId::new().0).as_str()),
-                );
+                let scope =
+                    ModPath(scope.0.append(
+                        format_compact!("fn{}", LambdaId::new().inner()).as_str(),
+                    ));
                 let n_typ = Type::Primitive(Typ::I64.into());
                 let etyp = arg.typ().clone();
                 let mftyp = match &typ.args[1].typ {
@@ -900,4 +903,25 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for IterQ {
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         ctx.user.unref_var(self.id, self.top_id)
     }
+}
+
+pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
+    ctx.register_builtin::<Concat>()?;
+    ctx.register_builtin::<Filter<C, E>>()?;
+    ctx.register_builtin::<FilterMap<C, E>>()?;
+    ctx.register_builtin::<Find<C, E>>()?;
+    ctx.register_builtin::<FindMap<C, E>>()?;
+    ctx.register_builtin::<FlatMap<C, E>>()?;
+    ctx.register_builtin::<Flatten>()?;
+    ctx.register_builtin::<Fold<C, E>>()?;
+    ctx.register_builtin::<Group<C, E>>()?;
+    ctx.register_builtin::<Iter>()?;
+    ctx.register_builtin::<IterQ>()?;
+    ctx.register_builtin::<Len>()?;
+    ctx.register_builtin::<Map<C, E>>()?;
+    ctx.register_builtin::<PushBack>()?;
+    ctx.register_builtin::<PushFront>()?;
+    ctx.register_builtin::<Sort>()?;
+    ctx.register_builtin::<Window>()?;
+    Ok(literal!(include_str!("array.bs")))
 }

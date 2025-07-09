@@ -1,3 +1,5 @@
 use gui;
+use gui::block;
+use gui::paragraph;
 let p = paragraph(&"I've got a lovely bunch of coconuts ... all lined up in a row. Big ones small ones, some the size of your head!");
 block(#border: &`All, #border_style: &style(#fg: `Cyan), #title: &line("Title"), &p)

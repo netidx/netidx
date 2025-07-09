@@ -752,7 +752,7 @@ fn external_module() {
         value: ModuleKind::Unresolved,
     }
     .to_expr_nopos();
-    let s = r#"pub mod foo;"#;
+    let s = r#"pub mod foo"#;
     assert_eq!(exp, parse_one(s).unwrap());
 }
 

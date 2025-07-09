@@ -1,4 +1,7 @@
 use gui;
+use gui::table;
+use gui::input_handler;
+use gui::block;
 
 type Status = [
   `Running,
@@ -81,7 +84,7 @@ let selected = 0;
 let max_idx = array::len(process_data) - 1;
 
 // Handle keyboard navigation
-let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
+let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.code {
         k@`Up if selected > 0 => {
             selected <- (k ~ selected) - 1;
@@ -138,9 +141,9 @@ let status_line = {
 };
 
 // Wrap in an input handler and styled block
-gui::input_handler(
+input_handler(
     #handle: &handle_event,
-    &gui::block(
+    &block(
         #border: &`All,
         #border_type: &`Rounded,
         #title: &line("Process Monitor (Use ↑/↓, Home, End, PgUp, PgDn)"),

@@ -1,0 +1,9 @@
+/// When v updates wait timeout and then return it. If v updates again
+/// before timeout expires, reset the timeout and continue waiting.
+pub let after_idle = |timeout, v| 'after_idle;
+
+/// timer will wait timeout and then update with the current time.
+/// If repeat is true, it will do this forever. If repeat is a number n,
+/// it will do this n times and then stop. If repeat is false, it will do
+/// this once.
+pub let timer = |timeout, repeat| 'timer

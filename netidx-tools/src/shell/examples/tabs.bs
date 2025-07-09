@@ -1,4 +1,6 @@
 use gui;
+use gui::paragraph;
+use gui::tabs;
 
 let clock = time::timer(duration:1.0s, true);
 let selected = 0;

@@ -1,0 +1,12 @@
+/// generate a random number between #start and #end (exclusive)
+/// every time #clock updates. If start and end are not specified,
+/// they default to 0.0 and 1.0
+pub let rand = |#start = 0.0, #end = 1.0, #clock| 'rand;
+
+/// pick a random element from the array and return it. Update
+/// each time the array updates. If the array is empty return
+/// nothing.
+pub let pick = |a| 'rand_pick;
+
+/// return a shuffled copy of a
+pub let shuffle = |a| 'rand_shuffle

@@ -1,13 +1,12 @@
-use crate::{
-    arity2, deftype, err, errf,
-    expr::{Expr, ExprId},
-    stdfn::CachedVals,
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
-};
+use crate::{arity2, deftype, CachedVals};
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use netidx::{publisher::FromValue, subscriber::Value};
+use netidx_bscript::{
+    err, errf, expr::ExprId, Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx,
+    Node, UserEvent,
+};
 use std::{ops::SubAssign, sync::Arc, time::Duration};
 
 #[derive(Debug)]
@@ -217,22 +216,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
     }
 }
 
-const MOD: &str = r#"
-pub mod time {
-    /// When v updates wait timeout and then return it. If v updates again
-    /// before timeout expires, reset the timeout and continue waiting.
-    pub let after_idle = |timeout, v| 'after_idle;
-
-    /// timer will wait timeout and then update with the current time.
-    /// If repeat is true, it will do this forever. If repeat is a number n,
-    /// it will do this n times and then stop. If repeat is false, it will do
-    /// this once.
-    pub let timer = |timeout, repeat| 'timer
-}
-"#;
-
-pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<AfterIdle>().unwrap();
-    ctx.register_builtin::<Timer>().unwrap();
-    MOD.parse().unwrap()
+pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
+    ctx.register_builtin::<AfterIdle>()?;
+    ctx.register_builtin::<Timer>()?;
+    Ok(literal!(include_str!("time.bs")))
 }

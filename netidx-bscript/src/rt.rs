@@ -15,7 +15,7 @@ use crate::{
     expr::{self, ExprId, ExprKind, ModPath, ModuleKind, ModuleResolver, Origin},
     node::genn,
     typ::{FnType, Type},
-    BindId, BuiltIn, Ctx, Event, ExecCtx, LambdaId, NoUserEvent, Node,
+    BindId, Ctx, Event, ExecCtx, LambdaId, NoUserEvent, Node,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use arcstr::{literal, ArcStr};
@@ -103,7 +103,7 @@ pub struct BSCtx {
 }
 
 impl BSCtx {
-    fn new(publisher: Publisher, subscriber: Subscriber) -> Self {
+    pub fn new(publisher: Publisher, subscriber: Subscriber) -> Self {
         let (updates_tx, updates) = mpsc::channel(100);
         let (writes_tx, writes) = mpsc::channel(100);
         let (rpcs_tx, rpcs) = mpsc::channel(100);
@@ -573,57 +573,51 @@ struct BS {
     nodes: IndexMap<ExprId, Node<BSCtx, NoUserEvent>, FxBuildHasher>,
     callables: FxHashMap<CallableId, CallableInt>,
     sub: mpsc::Sender<Pooled<Vec<RtEvent>>>,
-    resolvers: Vec<ModuleResolver>,
+    resolvers: Arc<[ModuleResolver]>,
     publish_timeout: Option<Duration>,
     last_rpc_gc: Instant,
 }
 
 impl BS {
-    fn new(mut rt: BSConfig, sub: mpsc::Sender<Pooled<Vec<RtEvent>>>) -> Self {
-        let resolvers_default = || match dirs::data_dir() {
-            None => vec![ModuleResolver::Files("".into())],
-            Some(dd) => vec![
-                ModuleResolver::Files("".into()),
-                ModuleResolver::Files(dd.join("bscript")),
-            ],
+    async fn new(mut rt: BSConfig) -> Result<Self> {
+        let resolvers_default = |r: &mut Vec<ModuleResolver>| match dirs::data_dir() {
+            None => r.push(ModuleResolver::Files("".into())),
+            Some(dd) => {
+                r.push(ModuleResolver::Files("".into()));
+                r.push(ModuleResolver::Files(dd.join("bscript")));
+            }
         };
-        let resolvers = match std::env::var("BSCRIPT_MODPATH") {
-            Err(_) => resolvers_default(),
+        match std::env::var("BSCRIPT_MODPATH") {
+            Err(_) => resolvers_default(&mut rt.resolvers),
             Ok(mp) => match ModuleResolver::parse_env(
-                rt.subscriber.clone(),
+                rt.ctx.user.subscriber.clone(),
                 rt.subscribe_timeout,
                 &mp,
             ) {
-                Ok(r) => r,
+                Ok(r) => rt.resolvers.extend(r),
                 Err(e) => {
                     error!("failed to parse BSCRIPT_MODPATH, using default {e:?}");
-                    resolvers_default()
+                    resolvers_default(&mut rt.resolvers)
                 }
             },
         };
-        let mut event = Event::new(NoUserEvent);
-        let mut ctx = match rt.ctx.take() {
-            Some(ctx) => ctx,
-            None => ExecCtx::new(BSCtx::new(rt.publisher, rt.subscriber)),
-        };
-        event.init = true;
-        let mut std = mem::take(&mut ctx.std);
-        for n in std.iter_mut() {
-            let _ = n.update(&mut ctx, &mut event);
-        }
-        ctx.std = std;
-        event.init = false;
-        Self {
-            ctx,
-            event,
+        let mut t = Self {
+            ctx: rt.ctx,
+            event: Event::new(NoUserEvent),
             updated: HashMap::default(),
             nodes: IndexMap::default(),
             callables: HashMap::default(),
-            sub,
-            resolvers,
+            sub: rt.sub,
+            resolvers: Arc::from(rt.resolvers),
             publish_timeout: rt.publish_timeout,
             last_rpc_gc: Instant::now(),
+        };
+        let st = Instant::now();
+        if let Some(root) = rt.root {
+            t.compile_root(root).await?;
         }
+        info!("root init time: {:?}", st.elapsed());
+        Ok(t)
     }
 
     async fn do_cycle(
@@ -733,6 +727,34 @@ impl BS {
             || self.ctx.user.net_updates.len() > 0
             || self.ctx.user.net_writes.len() > 0
             || self.ctx.user.rpc_overflow.len() > 0
+    }
+
+    async fn compile_root(&mut self, text: ArcStr) -> Result<()> {
+        let scope = ModPath::root();
+        let ori =
+            expr::parser::parse(None, text.clone()).context("parsing the root module")?;
+        let exprs = join_all(
+            ori.exprs.iter().map(|e| e.resolve_modules(&scope, &self.resolvers)),
+        )
+        .await
+        .into_iter()
+        .collect::<Result<SmallVec<[_; 4]>>>()
+        .context(CouldNotResolve)?;
+        let ori = Origin { exprs: Arc::from_iter(exprs), ..ori };
+        let nodes = ori
+            .exprs
+            .iter()
+            .map(|e| {
+                compile(&mut self.ctx, &scope, e.clone())
+                    .with_context(|| format!("compiling root expression {e}"))
+            })
+            .collect::<Result<SmallVec<[_; 4]>>>()
+            .with_context(|| ori.clone())?;
+        for (e, n) in ori.exprs.iter().zip(nodes.into_iter()) {
+            self.updated.insert(e.id, true);
+            self.nodes.insert(e.id, n);
+        }
+        Ok(())
     }
 
     async fn compile(&mut self, rt: BSHandle, text: ArcStr) -> Result<CompRes> {
@@ -1127,43 +1149,62 @@ impl BSHandle {
 }
 
 #[derive(Builder)]
+#[builder(pattern = "owned")]
 pub struct BSConfig {
-    publisher: Publisher,
-    subscriber: Subscriber,
+    /// The subscribe timeout to use when subscribing
     #[builder(setter(strip_option), default)]
     subscribe_timeout: Option<Duration>,
+    /// The publish timeout to use when sending published batches. Default None.
     #[builder(setter(strip_option), default)]
     publish_timeout: Option<Duration>,
-    #[builder(setter(skip))]
-    ctx: Option<ExecCtx<BSCtx, NoUserEvent>>,
+    /// The execution context with any builtins already registered
+    ctx: ExecCtx<BSCtx, NoUserEvent>,
+    /// The text of the root module
+    #[builder(setter(strip_option), default)]
+    root: Option<ArcStr>,
+    /// The set of module resolvers to use when resolving loaded modules
+    #[builder(default)]
+    resolvers: Vec<ModuleResolver>,
+    /// The channel that will receive events from the runtime
+    sub: mpsc::Sender<Pooled<Vec<RtEvent>>>,
 }
 
 impl BSConfig {
-    /// Register a builtin bscript function
-    pub fn register_builtin<T: BuiltIn<BSCtx, NoUserEvent>>(&mut self) -> Result<()> {
-        let ctx = match self.ctx.as_mut() {
-            Some(ctx) => ctx,
-            None => {
-                self.ctx = Some(ExecCtx::new(BSCtx::new(
-                    self.publisher.clone(),
-                    self.subscriber.clone(),
-                )));
-                self.ctx.as_mut().unwrap()
-            }
-        };
-        ctx.register_builtin::<T>()
+    /// Create a new config
+    pub fn builder(
+        ctx: ExecCtx<BSCtx, NoUserEvent>,
+        sub: mpsc::Sender<Pooled<Vec<RtEvent>>>,
+    ) -> BSConfigBuilder {
+        BSConfigBuilder::default().ctx(ctx).sub(sub)
     }
 
     /// Start the BS runtime with the specified config, return a
     /// handle capable of interacting with it.
-    pub fn start(self, sub: mpsc::Sender<Pooled<Vec<RtEvent>>>) -> BSHandle {
+    ///
+    /// root is the text of the root module you wish to initially
+    /// load. This will define the environment for the rest of the
+    /// code compiled by this runtime. The runtime starts completely
+    /// empty, with only the language, no core library, no standard
+    /// library. To build a runtime with the full standard library and
+    /// nothing else simply pass the output of
+    /// `netidx_bscript_stdlib::register` to start.
+    pub async fn start(self) -> Result<BSHandle> {
+        let (init_tx, init_rx) = oneshot::channel();
         let (tx, rx) = mpsc::unbounded();
         task::spawn(async move {
-            let bs = BS::new(self, sub);
-            if let Err(e) = bs.run(rx).await {
-                error!("run loop exited with error {e:?}")
-            }
+            match BS::new(self).await {
+                Ok(bs) => {
+                    let _ = init_tx.send(Ok(()));
+                    if let Err(e) = bs.run(rx).await {
+                        error!("run loop exited with error {e:?}")
+                    }
+                }
+                Err(e) => {
+                    let _ = init_tx.send(Err(e));
+                }
+            };
         });
-        BSHandle(tx)
+        init_rx.await??;
+        Ok(BSHandle(tx))
     }
 }

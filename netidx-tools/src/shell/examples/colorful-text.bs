@@ -1,4 +1,6 @@
 use gui;
+use gui::text;
+
 let colors = [
    `Red,
    `Green,

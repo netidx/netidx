@@ -1,0 +1,48 @@
+[package]
+name = "netidx-bscript-stdlib"
+version = "0.28.0"
+authors = ["Eric Stokes <letaris@gmail.com>"]
+edition = "2024"
+homepage = "https://netidx.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
+description = "The bscript standard library"
+documentation = "https://docs.rs/netidx-bscript"
+readme = "../README.md"
+license = "MIT"
+
+[features]
+default = []
+krb5_iov = ["netidx/krb5_iov"]
+
+[dependencies]
+anyhow = { workspace = true }
+arcstr = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+combine = { workspace = true }
+compact_str = { workspace = true }
+derive_builder = { workspace = true }
+dirs = { workspace = true }
+enumflags2 = { workspace = true }
+futures = { workspace = true }
+fxhash = { workspace = true }
+immutable-chunkmap = { workspace = true }
+indexmap = { workspace = true }
+log = { workspace = true }
+netidx-core = { path = "../netidx-core", version = "0.28.0" }
+netidx-netproto = { path = "../netidx-netproto", version = "0.28.0" }
+netidx-bscript = { path = "../netidx-bscript", version = "0.28.0" }
+netidx = { path = "../netidx", version = "0.28.0", default-features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.28.0" }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+serde_derive = { workspace = true }
+serde = { workspace = true }
+smallvec = { workspace = true }
+tokio = { workspace = true }
+triomphe = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+env_logger = { workspace = true }

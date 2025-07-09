@@ -1,4 +1,7 @@
 use gui;
+use gui::list;
+use gui::block;
+use gui::input_handler;
 
 let items = [
   line("Apple"),
@@ -44,7 +47,7 @@ let title_bottom = {
    line("Selected: [cur.spans]")
 };
 
-let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
+let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.code {
         k@`Up if selected > 0 => {
             selected <- (k ~ selected) - 1;
@@ -83,13 +86,13 @@ let handle_event = |e: gui::Event| -> [`Stop, `Continue] select e {
     e => e ~ `Continue
 };
 
-gui::input_handler(
+input_handler(
     #handle: &handle_event,
-    &gui::block(
+    &block(
         #border: &`All,
         #title: &line("Fruit Selection (Use Arrow Keys, Home, End, PageUp, PageDown)"),
         #title_bottom: &title_bottom,
-        &gui::list(
+        &list(
             #highlight_style: &style(#fg: `Black, #bg: `Yellow),
             #highlight_symbol: &"▶ ",
             #repeat_highlight_symbol: &false,

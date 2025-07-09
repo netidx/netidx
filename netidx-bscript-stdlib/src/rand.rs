@@ -1,8 +1,10 @@
-use crate::{
-    deftype, expr::Expr, stdfn::CachedVals, Apply, BuiltIn, BuiltInInitFn, Ctx, Event,
-    ExecCtx, Node, UserEvent,
-};
+use crate::{deftype, CachedVals};
+use anyhow::Result;
+use arcstr::{literal, ArcStr};
 use netidx::subscriber::Value;
+use netidx_bscript::{
+    Apply, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
+};
 use netidx_netproto::valarray::ValArray;
 use rand::{rng, seq::SliceRandom, Rng};
 use smallvec::{smallvec, SmallVec};
@@ -113,26 +115,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Shuffle {
     }
 }
 
-const MOD: &str = r#"
-pub mod rand {
-    /// generate a random number between #start and #end (exclusive)
-    /// every time #clock updates. If start and end are not specified,
-    /// they default to 0.0 and 1.0
-    pub let rand = |#start = 0.0, #end = 1.0, #clock| 'rand;
-
-    /// pick a random element from the array and return it. Update
-    /// each time the array updates. If the array is empty return
-    /// nothing.
-    pub let pick = |a| 'rand_pick;
-
-    /// return a shuffled copy of a
-    pub let shuffle = |a| 'rand_shuffle
-}
-"#;
-
-pub fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Expr {
-    ctx.register_builtin::<Rand>().unwrap();
-    ctx.register_builtin::<Pick>().unwrap();
-    ctx.register_builtin::<Shuffle>().unwrap();
-    MOD.parse().unwrap()
+pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
+    ctx.register_builtin::<Rand>()?;
+    ctx.register_builtin::<Pick>()?;
+    ctx.register_builtin::<Shuffle>()?;
+    Ok(literal!(include_str!("rand.bs")))
 }

@@ -1,4 +1,6 @@
 use gui;
+use gui::gauge;
+use gui::block;
 
 let clock = time::timer(duration:0.5s, true);
 let power = 0.0;

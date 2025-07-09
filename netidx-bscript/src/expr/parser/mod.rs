@@ -361,11 +361,11 @@ parser! {
             position(),
             optional(string("pub").skip(space())).map(|o| o.is_some()),
             spstring("mod").with(space()).with(spfname()),
-            choice((
-                attempt(sptoken(';')).map(|_| ModuleKind::Unresolved),
-                between(sptoken('{'), sptoken('}'), sep_by(expr(), attempt(sptoken(';'))))
-                    .map(|m: Vec<Expr>| ModuleKind::Inline(Arc::from(m))),
-            )),
+            optional(attempt(between(sptoken('{'), sptoken('}'), sep_by(expr(), attempt(sptoken(';'))))))
+                .map(|m: Option<Vec<Expr>>| match m {
+                    Some(m) => ModuleKind::Inline(Arc::from(m)),
+                    None => ModuleKind::Unresolved
+                }),
         )
             .map(|(pos, export, name, value)| {
                 ExprKind::Module { name, export, value }.to_expr(pos)
@@ -429,7 +429,6 @@ parser! {
     where [I: RangeStream<Token = char, Position = SourcePosition>, I::Range: Range]
     {
         choice((
-            attempt(spaces().with(qop(apply()))),
             attempt(spaces().with(qop(reference()))),
             between(sptoken('('), sptoken(')'), expr()),
         ))
@@ -525,16 +524,16 @@ parser! {
                 sptoken(')'),
                 sep_by(
                     choice((
+                        attempt((sptoken('#').with(fname()).skip(token(':')), expr()))
+                            .map(|(n, e)| (Some(n), e)),
                         attempt((
                             position(),
-                            sptoken('#').with(fname()).skip(not_followed_by(token(':'))),
+                            sptoken('#').with(fname()),
                         ))
                             .map(|(pos, n)| {
                                 let e = ExprKind::Ref { name: [n.clone()].into() }.to_expr(pos);
                                 (Some(n), e)
                             }),
-                        attempt((sptoken('#').with(fname()).skip(token(':')), expr()))
-                            .map(|(n, e)| (Some(n), e)),
                         expr().map(|e| (None, e)),
                     )),
                     csep(),
@@ -956,11 +955,11 @@ parser! {
             attempt(spaces().with(tuple())),
             attempt(spaces().with(structure())),
             attempt(spaces().with(variant())),
+            attempt(spaces().with(qop(apply()))),
             attempt(spaces().with(structwith())),
             attempt(spaces().with(qop(arrayref()))),
             attempt(spaces().with(qop(tupleref()))),
             attempt(spaces().with(qop(structref()))),
-            attempt(spaces().with(qop(apply()))),
             attempt(spaces().with(qop(do_block()))),
             attempt(spaces().with(qop(select()))),
             attempt(spaces().with(qop(cast()))),
@@ -1501,11 +1500,11 @@ parser! {
                 attempt(spaces().with(structure())),
                 attempt(spaces().with(variant())),
             ))),
+            attempt(spaces().with(qop(apply()))),
             attempt(spaces().with(structwith())),
             attempt(spaces().with(qop(arrayref()))),
             attempt(spaces().with(qop(tupleref()))),
             attempt(spaces().with(qop(structref()))),
-            attempt(spaces().with(qop(apply()))),
             attempt(spaces().with(qop(do_block()))),
             attempt(spaces().with(lambda())),
             attempt(spaces().with(letbind())),

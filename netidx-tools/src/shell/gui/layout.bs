@@ -1,0 +1,32 @@
+type Spacing = [
+  `Space(i64),
+  `Overlap(i64)
+];
+
+type Layout = {
+  children: &Array<(Constraint, Gui)>,
+  direction: &[Direction, null],
+  flex: &[Flex, null],
+  horizontal_margin: &[i64, null],
+  margin: &[i64, null],
+  spacing: &[Spacing, null],
+  vertical_margin: &[i64, null]
+};
+
+let layout = |
+  #direction: &[Direction, null] = &null,
+  #flex: &[Flex, null] = &null,
+  #horizontal_margin: &[i64, null] = &null,
+  #margin: &[i64, null] = &null,
+  #spacing: &[Spacing, null] = &null,
+  #vertical_margin: &[i64, null] = &null,
+  children: &Array<(Constraint, Gui)>
+| -> Gui `Layout({
+  direction,
+  flex,
+  horizontal_margin,
+  margin,
+  spacing,
+  vertical_margin,
+  children
+})

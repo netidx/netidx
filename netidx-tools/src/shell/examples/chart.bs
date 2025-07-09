@@ -1,4 +1,5 @@
 use gui;
+use gui::chart;
 
 let data: Array<(f64, f64)> = {
   let clock = time::timer(duration:0.5s, true);

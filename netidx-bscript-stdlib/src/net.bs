@@ -1,0 +1,32 @@
+type Table = { rows: Array<string>, columns: Array<(string, v64)> };
+type ArgSpec = { name: string, doc: string, default: Any };
+
+/// write the value to the specified path
+pub let write = |path, value| 'write;
+
+/// subscribe to the specified path
+pub let subscribe = |path| 'subscribe;
+
+/// call the specified rpc
+pub let call = |path, args| 'call;
+
+/// Publish an rpc. When the rpc is called f will be called with the arguments
+/// sent by the caller, and whatever f returns will be sent back to the caller.
+/// If f does not return, the caller will hang waiting for a reply.
+pub let rpc = |#path, #doc, #spec, #f| 'publish_rpc;
+
+/// list paths under the specified path. If #update is specified, then the list will
+/// be refreshed each time clock is triggered. If update is not specified, the list will
+/// be updated each second
+pub let list = |#update = time::timer(1, true), path| 'list;
+
+/// list the table under the specified path. If #update is specified, then the table
+/// will be refreshed each time clock is triggered. If update is not specifed, the table
+/// will be updated each second
+pub let list_table = |#clock = time::timer(1, true), path| 'list_table;
+
+/// Publish the specifed value at the specified path. Whenever the value updates,
+/// the new value will be sent to subscribers. If #on_write is specified, then if
+/// subscribers write to the value on_write will be called with the written value.
+/// on_write need not return anything.
+pub let publish = |#on_write = |v| never(v), path, v| 'publish

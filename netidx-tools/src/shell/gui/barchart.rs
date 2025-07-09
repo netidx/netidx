@@ -4,7 +4,6 @@ use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::Event;
 use futures::future::{self, try_join_all};
-use log::debug;
 use netidx::publisher::Value;
 use netidx_bscript::{
     expr::ExprId,
@@ -110,7 +109,6 @@ pub(super) struct BarChartW {
 impl BarChartW {
     pub(super) async fn compile(bs: BSHandle, v: Value) -> Result<GuiW> {
         let flds = v.cast_to::<[(ArcStr, u64); 10]>().context("barchart fields")?;
-        debug!("compile fields {flds:?}");
         let [(_, bar_gap), (_, bar_style), (_, bar_width), (_, data), (_, direction), (_, group_gap), (_, label_style), (_, max), (_, style), (_, value_style)] =
             flds;
         let (
@@ -167,7 +165,6 @@ impl BarChartW {
             value_style,
         };
         if let Some(v) = t.data_ref.last.take() {
-            debug!("data init {v}");
             t.set_data(v).await?;
         }
         Ok(Box::new(t))
@@ -189,7 +186,6 @@ impl GuiWidget for BarChartW {
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
-        debug!("handle update {:?}", (id, &v));
         let Self {
             bs: _,
             data_ref,
@@ -214,7 +210,6 @@ impl GuiWidget for BarChartW {
         style.update(id, &v).context("barchart update style")?;
         value_style.update(id, &v).context("barchart update value_style")?;
         if data_ref.id == id {
-            debug!("update data {}", v);
             self.set_data(v.clone()).await?;
         }
         for g in self.data.iter_mut() {
@@ -268,7 +263,6 @@ impl GuiWidget for BarChartW {
         if let Some(Some(gap)) = group_gap.t {
             chart = chart.group_gap(gap);
         }
-        debug!("draw data length: {}", data.len());
         for group in data.iter_mut() {
             let mut bars: SmallVec<[Bar; 8]> = smallvec![];
             let mut g = BarGroup::default();
