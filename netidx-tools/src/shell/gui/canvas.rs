@@ -1,13 +1,24 @@
-use super::{ColorV, LineV, TRef, GuiW, GuiWidget};
+use super::{ColorV, GuiW, GuiWidget, LineV, TRef};
 use anyhow::{bail, Context, Result};
 use arcstr::ArcStr;
 use async_trait::async_trait;
 use crossterm::event::Event;
-use netidx::publisher::{FromValue, Value};
-use netidx_bscript::{expr::ExprId, rt::{BSHandle, Ref}};
-use smallvec::SmallVec;
-use ratatui::{layout::Rect, style::Color, symbols, widgets::canvas::{Canvas, Context as CanvasContext, Line, Points, Rectangle, Circle}, Frame};
 use futures::future::try_join_all;
+use netidx::publisher::{FromValue, Value};
+use netidx_bscript::{
+    expr::ExprId,
+    rt::{BSHandle, Ref},
+};
+use ratatui::{
+    layout::Rect,
+    style::Color,
+    symbols,
+    widgets::canvas::{
+        Canvas, Circle, Context as CanvasContext, Line, Points, Rectangle,
+    },
+    Frame,
+};
+use smallvec::SmallVec;
 use tokio::try_join;
 
 #[derive(Clone, Copy)]
@@ -45,7 +56,13 @@ impl FromValue for CanvasLineV {
         let [(_, color), (_, x1), (_, x2), (_, y1), (_, y2)] =
             v.cast_to::<[(ArcStr, Value); 5]>()?;
         let color = color.cast_to::<ColorV>()?.0;
-        Ok(Self(Line { x1: x1.cast_to()?, y1: y1.cast_to()?, x2: x2.cast_to()?, y2: y2.cast_to()?, color }))
+        Ok(Self(Line {
+            x1: x1.cast_to()?,
+            y1: y1.cast_to()?,
+            x2: x2.cast_to()?,
+            y2: y2.cast_to()?,
+            color,
+        }))
     }
 }
 

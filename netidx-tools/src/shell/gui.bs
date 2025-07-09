@@ -866,7 +866,7 @@ mod gui {
     show_month,
     show_surrounding,
     show_weekday
-  })
+  });
 
   type CanvasLine = {
     color: Color,
@@ -921,8 +921,8 @@ mod gui {
   let canvas = |
     #background_color: &[Color, null] = &null,
     #marker: &[Marker, null] = &null,
-    x_bounds: &{ max: f64, min: f64 },
-    y_bounds: &{ max: f64, min: f64 },
+    #x_bounds: &{ max: f64, min: f64 },
+    #y_bounds: &{ max: f64, min: f64 },
     shapes: &Array<&CanvasShape>
   | -> Gui `Canvas({
     background_color,

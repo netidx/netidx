@@ -1,10 +1,10 @@
 use gui;
 
-let l = canvas_line(#color:`Red, #x1:0.0, #y1:0.0, #x2:10.0, #y2:5.0);
-let c = canvas_circle(#color:`Blue, #x:5.0, #y:5.0, #radius:2.0);
-let r = canvas_rectangle(#color:`Green, #x:2.0, #y:2.0, #width:3.0, #height:4.0);
-let p = canvas_points(#color:`Yellow, &[ (1.0,1.0), (2.0,3.0), (3.0,1.5) ]);
-let t = canvas_label(#line: line("Hello"), #x:5.0, #y:0.5);
+let l = `Line({ color:`Red, x1:0.0, y1:0.0, x2:10.0, y2:5.0 });
+let c = `Circle({ color:`Blue, x:5.0, y:5.0, radius:2.0 });
+let r = `Rectangle({ color:`Green, x:2.0, y:2.0, width:3.0, height:4.0 });
+let p = `Points({ color:`Yellow, coords: [ (1.0, 1.0), (2.0, 3.0), (3.0, 1.5) ] });
+let t = `Label({ line: line("Hello"), x:5.0, y:0.5 });
 
 canvas(
   #background_color: &`Rgb({r:0,g:0,b:0}),
