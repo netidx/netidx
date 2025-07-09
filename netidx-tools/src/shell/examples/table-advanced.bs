@@ -88,31 +88,31 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.code {
         k@`Up if selected > 0 => {
             selected <- (k ~ selected) - 1;
-            k ~ `Stop
+            `Stop
         },
         k@`Down if selected < max_idx => {
             selected <- (k ~ selected) + 1;
-            k ~ `Stop
+            `Stop
         },
         k@`Home => {
             selected <- k ~ 0;
-            k ~ `Stop
+            `Stop
         },
         k@`End => {
             selected <- k ~ max_idx;
-            k ~ `Stop
+            `Stop
         },
         k@`PageUp => {
             selected <- max(0, (k ~ selected) - 5);
-            k ~ `Stop
+            `Stop
         },
         k@`PageDown => {
             selected <- min(max_idx, (k ~ selected) + 5);
-            k ~ `Stop
+            `Stop
         },
-        k => k ~ `Continue
+        _ => `Continue
     },
-    e => e ~ `Continue
+    _ => `Continue
 };
 
 // Create the table with all features

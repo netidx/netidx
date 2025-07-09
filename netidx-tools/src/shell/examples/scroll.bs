@@ -10,18 +10,18 @@ let position = 0;
 let handle_key = |k: KeyCode| -> [`Stop, `Continue] select k {
     k@`Up if position > 0 => {
         position <- (k ~ position) - 1;
-        k ~ `Stop
+        `Stop
     },
     k@`Down if position < 65534 => {
         position <- (k ~ position) + 1;
-        k ~ `Stop
+        `Stop
     },
-    k => k ~ `Continue
+    _ => `Continue
 };
 
 let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => handle_key(k.code),
-    e => e ~ `Continue
+    _ => `Continue
 };
 
 input_handler(

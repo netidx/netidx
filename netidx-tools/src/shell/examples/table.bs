@@ -49,15 +49,15 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.code {
         k@`Up if selected > 0 => {
             selected <- (k ~ selected) - 1;
-            k ~ `Stop
+            `Stop
         },
         k@`Down if selected < 4 => {
             selected <- (k ~ selected) + 1;
-            k ~ `Stop
+            `Stop
         },
-        k => k ~ `Continue
+        _ => `Continue
     },
-    e => e ~ `Continue
+    _ => `Continue
 };
 
 // Create the table
