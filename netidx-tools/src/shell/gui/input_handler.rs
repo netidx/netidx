@@ -172,9 +172,10 @@ fn keycode_to_value(kc: &KeyCode) -> Value {
         BackTab => literal!("BackTab").into(),
         Delete => literal!("Delete").into(),
         Insert => literal!("Insert").into(),
-        F(n) => {
-            ValArray::from_iter_exact([literal!("F").into(), n.into()].into_iter()).into()
-        }
+        F(n) => ValArray::from_iter_exact(
+            [literal!("F").into(), (*n as i64).into()].into_iter(),
+        )
+        .into(),
         Char(c) => {
             if c.len_utf8() == 1 {
                 let mut buf = [0u8];
@@ -315,7 +316,7 @@ fn mouse_event_kind_to_value(k: &MouseEventKind) -> Value {
 
 fn mouse_event_to_value(e: &MouseEvent) -> Value {
     let column: Value = ValArray::from_iter_exact(
-        [literal!("column").into(), e.column.into()].into_iter(),
+        [literal!("column").into(), (e.column as i64).into()].into_iter(),
     )
     .into();
     let kind: Value = ValArray::from_iter_exact(
@@ -326,9 +327,10 @@ fn mouse_event_to_value(e: &MouseEvent) -> Value {
         [literal!("modifiers").into(), key_modifiers_to_value(&e.modifiers)].into_iter(),
     )
     .into();
-    let row =
-        ValArray::from_iter_exact([literal!("row").into(), e.row.into()].into_iter())
-            .into();
+    let row = ValArray::from_iter_exact(
+        [literal!("row").into(), (e.row as i64).into()].into_iter(),
+    )
+    .into();
     ValArray::from_iter_exact([column, kind, modifiers, row].into_iter()).into()
 }
 
@@ -349,7 +351,8 @@ fn event_to_value(e: &Event) -> Value {
         )
         .into(),
         Event::Resize(x, y) => ValArray::from_iter_exact(
-            [literal!("Resize").into(), x.into(), y.into()].into_iter(),
+            [literal!("Resize").into(), (*x as i64).into(), (*y as i64).into()]
+                .into_iter(),
         )
         .into(),
     }
