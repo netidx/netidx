@@ -7,6 +7,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MediaKeyCode,
     ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
 };
+use log::debug;
 use netidx::{protocol::valarray::ValArray, publisher::Value};
 use netidx_bscript::{
     expr::ExprId,
@@ -402,6 +403,7 @@ impl InputHandlerW {
             && let Some(e) = self.queued.front()
             && let Some(h) = &self.handle
         {
+            debug!("sending event: {e:?}");
             let v = event_to_value(e);
             h.call(ValArray::from_iter_exact([v].into_iter())).await?;
             self.pending = true

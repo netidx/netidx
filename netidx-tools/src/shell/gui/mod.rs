@@ -3,15 +3,20 @@ use arcstr::ArcStr;
 use async_trait::async_trait;
 use barchart::BarChartW;
 use block::BlockW;
+use calendar::CalendarW;
 use chart::ChartW;
-use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
+use crossterm::{
+    event::{
+        EnableFocusChange, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers,
+    },
+    ExecutableCommand,
+};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use gauge::GaugeW;
 use input_handler::InputHandlerW;
 use layout::LayoutW;
 use line_gauge::LineGaugeW;
 use list::ListW;
-use calendar::CalendarW;
 use log::error;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
@@ -36,6 +41,8 @@ use tokio::{select, sync::oneshot, task};
 
 mod barchart;
 mod block;
+mod calendar;
+mod canvas;
 mod chart;
 mod gauge;
 mod input_handler;
@@ -45,10 +52,8 @@ mod list;
 mod paragraph;
 mod scrollbar;
 mod sparkline;
-mod calendar;
 mod table;
 mod tabs;
-mod canvas;
 mod text;
 
 #[derive(Clone, Copy)]
@@ -426,7 +431,11 @@ async fn run(
     mut to_rx: mpsc::Receiver<ToGui>,
     from_tx: mpsc::UnboundedSender<FromGui>,
 ) -> Result<()> {
+    use std::io::stdout;
     let mut terminal = ratatui::init();
+    let mut stdout = stdout();
+    stdout.execute(EnableMouseCapture)?;
+    stdout.execute(EnableFocusChange)?;
     let mut events = EventStream::new().fuse();
     let mut root: GuiW = Box::new(EmptyW);
     let notify = loop {
