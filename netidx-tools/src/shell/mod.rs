@@ -1,23 +1,25 @@
 use anyhow::{Context, Result};
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
+use enumflags2::BitFlags;
 use flexi_logger::{FileSpec, Logger};
 use futures::{channel::mpsc, StreamExt};
 use gui::Gui;
 use log::info;
 use netidx::{
     config::Config,
+    path::Path,
     pool::Pooled,
     publisher::{BindCfg, DesiredAuth, PublisherBuilder, Value},
     subscriber::SubscriberBuilder,
 };
 use netidx_bscript::{
-    expr::{ExprId, ModPath},
-    rt::{BSConfigBuilder, BSCtx, BSHandle, CompExp, CouldNotResolve, RtEvent},
+    expr::{ExprId, ModPath, ModuleResolver},
+    rt::{BSConfig, BSCtx, BSHandle, CompExp, CouldNotResolve, RtEvent},
     typ::{format_with_flags, PrintFlag, TVal, Type},
-    NoUserEvent,
+    ExecCtx, NoUserEvent,
 };
 use reedline::Signal;
-use std::{path::PathBuf, sync::LazyLock, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::LazyLock, time::Duration};
 use structopt::StructOpt;
 use tokio::select;
 use triomphe::Arc;
@@ -59,7 +61,6 @@ pub(crate) struct Params {
 
 type Env = netidx_bscript::env::Env<BSCtx, NoUserEvent>;
 
-const GUI: &str = include_str!("gui.bs");
 const GUITYP: LazyLock<Type> = LazyLock::new(|| Type::Ref {
     scope: ModPath::root(),
     name: ModPath::from(["gui", "Gui"]),
@@ -94,15 +95,31 @@ async fn bs_init(
         .desired_auth(auth)
         .build()
         .context("creating subscriber")?;
-    let mut bs = BSConfigBuilder::default();
-    bs.publisher(publisher).subscriber(subscriber);
+    let mut ctx = ExecCtx::new(BSCtx::new(publisher, subscriber));
+    let (root, mods) = netidx_bscript_stdlib::register(&mut ctx, BitFlags::all())?;
+    let root = ArcStr::from(format!("{root};\nmod gui"));
+    let mods = vec![
+        mods,
+        ModuleResolver::VFS(HashMap::from_iter([(
+            Path::from("/gui"),
+            literal!(include_str!("gui.bs")),
+        )])),
+    ];
+    let mut bs = BSConfig::builder(ctx, sub);
     if let Some(s) = p.publish_timeout {
-        bs.publish_timeout(Duration::from_secs(s));
+        bs = bs.publish_timeout(Duration::from_secs(s));
     }
     if let Some(s) = p.subscribe_timeout {
-        bs.subscribe_timeout(Duration::from_secs(s));
+        bs = bs.subscribe_timeout(Duration::from_secs(s));
     }
-    Ok(bs.build().context("building rt config")?.start(sub))
+    Ok(bs
+        .root(root)
+        .resolvers(mods)
+        .build()
+        .context("building rt config")?
+        .start()
+        .await
+        .context("loading initial modules")?)
 }
 
 enum Output {
@@ -149,7 +166,6 @@ async fn load_initial_env(
     exprs: &mut Vec<CompExp>,
 ) -> Result<Env> {
     let env;
-    exprs.extend(bs.compile(ArcStr::from(GUI)).await?.exprs);
     *newenv = if let Some(file) = p.file.as_ref() {
         let r = bs.load(file.clone()).await?;
         exprs.extend(r.exprs);
@@ -159,7 +175,7 @@ async fn load_initial_env(
         }
         None
     } else if !p.no_init {
-        match bs.compile("mod init;".into()).await {
+        match bs.compile("mod init".into()).await {
             Ok(res) => {
                 env = res.env;
                 exprs.extend(res.exprs);

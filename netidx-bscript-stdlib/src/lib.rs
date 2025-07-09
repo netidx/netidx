@@ -232,6 +232,5 @@ pub fn register<C: Ctx, E: UserEvent>(
     }
     root.pop();
     root.pop();
-    root.push('\n');
     Ok((ArcStr::from(root), ModuleResolver::VFS(tbl)))
 }

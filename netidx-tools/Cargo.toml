@@ -48,8 +48,10 @@ fxhash = { workspace = true }
 hdrhistogram = { workspace = true }
 indexmap = { workspace = true }
 log = { workspace = true }
+enumflags2 = { workspace = true }
 netidx-archive = { path = "../netidx-archive", version = "0.28.0", default-features = false }
 netidx-bscript = { path = "../netidx-bscript", version = "0.28.0", default-features = false }
+netidx-bscript-stdlib = { path = "../netidx-bscript-stdlib", version = "0.28.0", default-features = false }
 netidx-container = { path = "../netidx-container", version = "0.28.0", default-features = false }
 netidx = { path = "../netidx", version = "0.28.1", default-features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.28.0", default-features = false }

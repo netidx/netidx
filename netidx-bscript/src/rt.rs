@@ -613,7 +613,9 @@ impl BS {
             last_rpc_gc: Instant::now(),
         };
         let st = Instant::now();
-        t.compile_root(rt.root).await?;
+        if let Some(root) = rt.root {
+            t.compile_root(root).await?;
+        }
         info!("root init time: {:?}", st.elapsed());
         Ok(t)
     }
@@ -1158,8 +1160,8 @@ pub struct BSConfig {
     /// The execution context with any builtins already registered
     ctx: ExecCtx<BSCtx, NoUserEvent>,
     /// The text of the root module
-    #[builder(default)]
-    root: ArcStr,
+    #[builder(setter(strip_option), default)]
+    root: Option<ArcStr>,
     /// The set of module resolvers to use when resolving loaded modules
     #[builder(default)]
     resolvers: Vec<ModuleResolver>,
@@ -1168,6 +1170,14 @@ pub struct BSConfig {
 }
 
 impl BSConfig {
+    /// Create a new config
+    pub fn builder(
+        ctx: ExecCtx<BSCtx, NoUserEvent>,
+        sub: mpsc::Sender<Pooled<Vec<RtEvent>>>,
+    ) -> BSConfigBuilder {
+        BSConfigBuilder::default().ctx(ctx).sub(sub)
+    }
+
     /// Start the BS runtime with the specified config, return a
     /// handle capable of interacting with it.
     ///

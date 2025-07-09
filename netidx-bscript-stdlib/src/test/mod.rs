@@ -6,7 +6,7 @@ use netidx::{
     subscriber::SubscriberBuilder,
 };
 use netidx_bscript::{
-    rt::{BSConfigBuilder, BSCtx, BSHandle, RtEvent},
+    rt::{BSConfig, BSCtx, BSHandle, RtEvent},
     ExecCtx,
 };
 
@@ -48,11 +48,9 @@ pub async fn init(sub: mpsc::Sender<Pooled<Vec<RtEvent>>>) -> Result<TestCtx> {
     let (root, mods) = crate::register(&mut ctx, BitFlags::all())?;
     Ok(TestCtx {
         _resolver: resolver,
-        rt: BSConfigBuilder::default()
-            .ctx(ctx)
+        rt: BSConfig::builder(ctx, sub)
             .root(root)
             .resolvers(vec![mods])
-            .sub(sub)
             .build()?
             .start()
             .await?,
