@@ -194,6 +194,7 @@ impl GuiWidget for LayoutW {
             children_ref: _,
             direction,
             flex,
+            focused: _,
             horizontal_margin,
             margin,
             spacing,
