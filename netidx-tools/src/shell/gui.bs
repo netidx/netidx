@@ -913,7 +913,7 @@ mod gui {
   type Canvas = {
     background_color: &[Color, null],
     marker: &[Marker, null],
-    shapes: &Array<CanvasShape>,
+    shapes: &Array<&CanvasShape>,
     x_bounds: &{ max: f64, min: f64 },
     y_bounds: &{ max: f64, min: f64 }
   };
@@ -923,7 +923,7 @@ mod gui {
     #marker: &[Marker, null] = &null,
     x_bounds: &{ max: f64, min: f64 },
     y_bounds: &{ max: f64, min: f64 },
-    shapes: &Array<CanvasShape>
+    shapes: &Array<&CanvasShape>
   | -> Gui `Canvas({
     background_color,
     marker,

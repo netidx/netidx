@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use crossterm::event::Event;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{expr::ExprId, rt::{BSHandle, Ref}};
+use smallvec::SmallVec;
 use ratatui::{layout::Rect, style::Color, symbols, widgets::canvas::{Canvas, Context as CanvasContext, Line, Points, Rectangle, Circle}, Frame};
+use futures::future::try_join_all;
 use tokio::try_join;
 
 #[derive(Clone, Copy)]
@@ -166,9 +168,24 @@ impl ShapeV {
     }
 }
 
+struct ShapeRef {
+    r: Ref,
+    shape: ShapeV,
+}
+
+impl ShapeRef {
+    fn update(&mut self, id: ExprId, v: &Value) -> Result<()> {
+        if self.r.id == id {
+            self.shape = v.clone().cast_to::<ShapeV>()?;
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct CanvasW {
+    bs: BSHandle,
     shapes_ref: Ref,
-    shapes: Vec<ShapeV>,
+    shapes: Vec<ShapeRef>,
     background_color: TRef<Option<ColorV>>,
     marker: TRef<Option<MarkerV>>,
     x_bounds: TRef<BoundsV>,
@@ -187,6 +204,7 @@ impl CanvasW {
             bs.compile_ref(y_bounds)
         }?;
         let mut t = Self {
+            bs: bs.clone(),
             shapes_ref,
             shapes: Vec::new(),
             background_color: TRef::new(background_color)?,
@@ -195,23 +213,26 @@ impl CanvasW {
             y_bounds: TRef::new(y_bounds)?,
         };
         if let Some(v) = t.shapes_ref.last.take() {
-            t.set_shapes(&v)?;
+            t.set_shapes(v).await?;
         }
         Ok(Box::new(t))
     }
 
-    fn set_shapes(&mut self, v: &Value) -> Result<()> {
-        self.shapes.clear();
-        match v {
-            Value::Null => Ok(()),
-            Value::Array(a) => {
-                for s in a {
-                    self.shapes.push(s.clone().cast_to::<ShapeV>()?);
-                }
-                Ok(())
+    async fn set_shapes(&mut self, v: Value) -> Result<()> {
+        let ids = v.cast_to::<SmallVec<[u64; 8]>>()?;
+        let refs = try_join_all(ids.into_iter().map(|id| {
+            let bs = self.bs.clone();
+            async move {
+                let mut r = bs.compile_ref(id).await?;
+                let shape = match r.last.take() {
+                    Some(v) => v.cast_to::<ShapeV>()?,
+                    None => bail!("shape value unavailable"),
+                };
+                Ok::<ShapeRef, anyhow::Error>(ShapeRef { r, shape })
             }
-            v => bail!("invalid canvas shapes {v}"),
-        }
+        })).await?;
+        self.shapes = refs;
+        Ok(())
     }
 }
 
@@ -227,7 +248,10 @@ impl GuiWidget for CanvasW {
         self.x_bounds.update(id, &v).context("canvas x_bounds update")?;
         self.y_bounds.update(id, &v).context("canvas y_bounds update")?;
         if self.shapes_ref.id == id {
-            self.set_shapes(&v)?;
+            self.set_shapes(v.clone()).await?;
+        }
+        for s in &mut self.shapes {
+            s.update(id, &v)?;
         }
         Ok(())
     }
@@ -242,7 +266,7 @@ impl GuiWidget for CanvasW {
         if let Some(Some(m)) = &self.marker.t {
             canvas = canvas.marker(m.0);
         }
-        let shapes = self.shapes.clone();
+        let shapes: Vec<_> = self.shapes.iter().map(|s| s.shape.clone()).collect();
         canvas = canvas.paint(move |ctx| {
             for s in &shapes {
                 s.draw(ctx);
