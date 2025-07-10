@@ -31,7 +31,6 @@ fs3 = { workspace = true }
 futures = { workspace = true }
 fxhash = { workspace = true }
 indexmap = { workspace = true }
-lazy_static = { workspace = true }
 log = { workspace = true }
 memmap2 = { workspace = true }
 num_cpus = { workspace = true }

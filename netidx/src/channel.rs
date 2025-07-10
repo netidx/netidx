@@ -20,7 +20,7 @@ use std::{
     fmt::Debug,
     mem::{self, MaybeUninit},
     ops::{Deref, DerefMut},
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 use tokio::{
@@ -320,9 +320,8 @@ impl PBuf {
 
 impl Default for PBuf {
     fn default() -> Self {
-        lazy_static! {
-            static ref POOL: Pool<Vec<u8>> = Pool::new(10, BUF << 2);
-        }
+        static POOL: LazyLock<Pool<Vec<u8>>> = LazyLock::new(|| Pool::new(10, BUF << 2));
+
         Self { data: POOL.take(), pos: 0 }
     }
 }

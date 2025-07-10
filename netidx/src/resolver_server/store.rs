@@ -20,25 +20,27 @@ use std::{
     clone::Clone,
     collections::{
         hash_map::Entry,
-        BTreeMap, Bound,
-        Bound::{Excluded, Included, Unbounded},
+        BTreeMap,
+        Bound::{self, Excluded, Included, Unbounded},
         HashMap, HashSet,
     },
     convert::AsRef,
     hash::Hash,
     iter::{self, FromIterator},
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
-lazy_static! {
-    static ref SIGNED_PUBS_POOL: Pool<Vec<PublisherRef>> = Pool::new(100, 100);
-    static ref BY_ID_POOL: Pool<FxHashMap<PublisherId, PublisherRef>> =
-        Pool::new(100, 100);
-    pub(super) static ref PATH_POOL: Pool<Vec<Path>> = Pool::new(100, 10_000);
-    pub(super) static ref COLS_POOL: Pool<Vec<(Path, Z64)>> = Pool::new(100, 10_000);
-    pub(super) static ref REF_POOL: Pool<Vec<Referral>> = Pool::new(100, 100);
-}
+static SIGNED_PUBS_POOL: LazyLock<Pool<Vec<PublisherRef>>> =
+    LazyLock::new(|| Pool::new(100, 100));
+static BY_ID_POOL: LazyLock<Pool<FxHashMap<PublisherId, PublisherRef>>> =
+    LazyLock::new(|| Pool::new(100, 100));
+pub(super) static PATH_POOL: LazyLock<Pool<Vec<Path>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static COLS_POOL: LazyLock<Pool<Vec<(Path, Z64)>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static REF_POOL: LazyLock<Pool<Vec<Referral>>> =
+    LazyLock::new(|| Pool::new(100, 100));
 
 type Set<T> = ISet<T, 8>;
 pub(super) const MAX_WRITE_BATCH: usize = 100_000;

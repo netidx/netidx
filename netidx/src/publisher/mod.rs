@@ -38,7 +38,7 @@ use std::{
     pin::Pin,
     result,
     str::FromStr,
-    sync::{Arc, Weak},
+    sync::{Arc, LazyLock, Weak},
     time::Duration,
 };
 use tokio::{net::TcpListener, task};
@@ -292,32 +292,37 @@ impl BindCfg {
 
 atomic_id!(ClId);
 
-lazy_static! {
-    static ref BATCHES: Pool<Vec<WriteRequest>> = Pool::new(100, 10_000);
-    static ref TOPUB: Pool<HashMap<Path, Option<u32>>> = Pool::new(10, 10_000);
-    static ref TOUPUB: Pool<HashSet<Path>> = Pool::new(5, 10_000);
-    static ref TOUSUB: Pool<HashMap<Id, Subscribed>> = Pool::new(5, 10_000);
-    static ref RAWBATCH: Pool<Vec<BatchMsg>> = Pool::new(100, 10_000);
-    static ref UPDATES: Pool<Vec<publisher::From>> = Pool::new(100, 10_000);
-    static ref RAWUNSUBS: Pool<Vec<(ClId, Id)>> = Pool::new(100, 10_000);
-    static ref UNSUBS: Pool<Vec<Id>> = Pool::new(100, 10_000);
-    static ref BATCH: Pool<FxHashMap<ClId, Update>> = Pool::new(100, 1000);
+static BATCHES: LazyLock<Pool<Vec<WriteRequest>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+static TOPUB: LazyLock<Pool<HashMap<Path, Option<u32>>>> =
+    LazyLock::new(|| Pool::new(10, 10_000));
+static TOUPUB: LazyLock<Pool<HashSet<Path>>> = LazyLock::new(|| Pool::new(5, 10_000));
+static TOUSUB: LazyLock<Pool<HashMap<Id, Subscribed>>> =
+    LazyLock::new(|| Pool::new(5, 10_000));
+static RAWBATCH: LazyLock<Pool<Vec<BatchMsg>>> = LazyLock::new(|| Pool::new(100, 10_000));
+static UPDATES: LazyLock<Pool<Vec<publisher::From>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+static RAWUNSUBS: LazyLock<Pool<Vec<(ClId, Id)>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+static UNSUBS: LazyLock<Pool<Vec<Id>>> = LazyLock::new(|| Pool::new(100, 10_000));
+static BATCH: LazyLock<Pool<FxHashMap<ClId, Update>>> =
+    LazyLock::new(|| Pool::new(100, 1000));
 
-    // estokes 2021: This is reasonable because there will never be
-    // that many publishers in a process. Since a publisher wraps
-    // actual expensive OS resources, users will hit other constraints
-    // (e.g. file descriptor exhaustion) long before N^2 drop becomes
-    // a problem.
-    //
-    // Moreover publisher is architected such that there should not be
-    // very many applications that require more than one publisher in
-    // a process.
-    //
-    // The payback on the other hand is saving a word in EVERY
-    // published value, and that adds up quite fast to a lot of saved
-    // memory.
-    static ref PUBLISHERS: Mutex<Vec<PublisherWeak>> = Mutex::new(Vec::new());
-}
+// estokes 2021: This is reasonable because there will never be
+// that many publishers in a process. Since a publisher wraps
+// actual expensive OS resources, users will hit other constraints
+// (e.g. file descriptor exhaustion) long before N^2 drop becomes
+// a problem.
+//
+// Moreover publisher is architected such that there should not be
+// very many applications that require more than one publisher in
+// a process.
+//
+// The payback on the other hand is saving a word in EVERY
+// published value, and that adds up quite fast to a lot of saved
+// memory.
+static PUBLISHERS: LazyLock<Mutex<Vec<PublisherWeak>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 
 bitflags! {
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]

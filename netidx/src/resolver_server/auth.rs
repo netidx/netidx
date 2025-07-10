@@ -8,7 +8,6 @@ use anyhow::{anyhow, Error, Result};
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use fxhash::FxHashMap;
-use netidx_core::pool::Pool;
 use netidx_netproto::resolver;
 use std::{
     cell::RefCell,
@@ -16,7 +15,7 @@ use std::{
     convert::TryFrom,
     iter,
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 bitflags! {
@@ -92,16 +91,15 @@ impl UserInfo {
     }
 }
 
-lazy_static! {
-    pub(crate) static ref ANONYMOUS: Arc<UserInfo> = Arc::new(UserInfo {
-	timestamp: Utc::now(),
+pub(crate) static ANONYMOUS: LazyLock<Arc<UserInfo>> = LazyLock::new(|| {
+    Arc::new(UserInfo {
+        timestamp: Utc::now(),
         id: Entity(0),
         primary_group: Entity(0),
         groups: vec![Entity(0)],
         user_info: None,
-    });
-    static ref GROUPS: Pool<Vec<ArcStr>> = Pool::new(200, 100);
-}
+    })
+});
 
 pub(crate) struct UserDb {
     next: u32,

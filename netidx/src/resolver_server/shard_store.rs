@@ -35,7 +35,7 @@ use std::{
     iter,
     net::SocketAddr,
     result,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::SystemTime,
 };
 use tokio::task;
@@ -45,20 +45,24 @@ type ReadR = VecDeque<(u64, FromRead)>;
 type WriteB = Vec<(u64, ToWrite)>;
 type WriteR = VecDeque<(u64, FromWrite)>;
 
-lazy_static! {
-    static ref PUBLISHERS_POOL: Pool<FxHashMap<PublisherId, Publisher>> =
-        Pool::new(100, 1000);
-    static ref TO_READ_POOL: Pool<ReadB> = Pool::new(100, 10_000);
-    static ref FROM_READ_POOL: Pool<ReadR> = Pool::new(100, 10_000);
-    static ref TO_WRITE_POOL: Pool<WriteB> = Pool::new(100, 10_000);
-    static ref REPLIES: Pool<Vec<Pooled<ReadR>>> = Pool::new(10, 1024);
-    static ref FROM_WRITE_POOL: Pool<WriteR> = Pool::new(100, 10_000);
-    static ref COLS_HPOOL: Pool<HashMap<Path, Z64>> = Pool::new(32, 10_000);
-    static ref PATH_HPOOL: Pool<HashSet<Path>> = Pool::new(32, 10_000);
-    static ref PATH_BPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(32, 1024);
-    static ref READ_SHARD_BATCH: Pool<Vec<Pooled<ReadB>>> = Pool::new(100, 1024);
-    static ref WRITE_SHARD_BATCH: Pool<Vec<Pooled<WriteB>>> = Pool::new(100, 1024);
-}
+static PUBLISHERS_POOL: LazyLock<Pool<FxHashMap<PublisherId, Publisher>>> =
+    LazyLock::new(|| Pool::new(100, 1000));
+static TO_READ_POOL: LazyLock<Pool<ReadB>> = LazyLock::new(|| Pool::new(100, 10_000));
+static FROM_READ_POOL: LazyLock<Pool<ReadR>> = LazyLock::new(|| Pool::new(100, 10_000));
+static TO_WRITE_POOL: LazyLock<Pool<WriteB>> = LazyLock::new(|| Pool::new(100, 10_000));
+static REPLIES: LazyLock<Pool<Vec<Pooled<ReadR>>>> =
+    LazyLock::new(|| Pool::new(10, 1024));
+static FROM_WRITE_POOL: LazyLock<Pool<WriteR>> = LazyLock::new(|| Pool::new(100, 10_000));
+static COLS_HPOOL: LazyLock<Pool<HashMap<Path, Z64>>> =
+    LazyLock::new(|| Pool::new(32, 10_000));
+static PATH_HPOOL: LazyLock<Pool<HashSet<Path>>> =
+    LazyLock::new(|| Pool::new(32, 10_000));
+static PATH_BPOOL: LazyLock<Pool<Vec<Pooled<Vec<Path>>>>> =
+    LazyLock::new(|| Pool::new(32, 1024));
+static READ_SHARD_BATCH: LazyLock<Pool<Vec<Pooled<ReadB>>>> =
+    LazyLock::new(|| Pool::new(100, 1024));
+static WRITE_SHARD_BATCH: LazyLock<Pool<Vec<Pooled<WriteB>>>> =
+    LazyLock::new(|| Pool::new(100, 1024));
 
 struct ReadRequest {
     uifo: Arc<UserInfo>,

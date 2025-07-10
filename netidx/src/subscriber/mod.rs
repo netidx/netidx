@@ -35,6 +35,7 @@ use parking_lot::Mutex;
 use rand::Rng;
 use smallvec::SmallVec;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::LazyLock;
 use std::{
     cmp::{max, Eq, PartialEq},
     collections::{hash_map::Entry, HashMap, VecDeque},
@@ -52,10 +53,9 @@ use tokio::{
 };
 use triomphe::Arc as TArc;
 
-lazy_static! {
-    static ref BATCHES: Pool<Vec<(SubId, Event)>> = Pool::new(64, 16384);
-    static ref DECODE_BATCHES: Pool<Vec<From>> = Pool::new(64, 16384);
-}
+static BATCHES: LazyLock<Pool<Vec<(SubId, Event)>>> =
+    LazyLock::new(|| Pool::new(64, 16384));
+static DECODE_BATCHES: LazyLock<Pool<Vec<From>>> = LazyLock::new(|| Pool::new(64, 16384));
 
 #[derive(Debug)]
 pub struct PermissionDenied;

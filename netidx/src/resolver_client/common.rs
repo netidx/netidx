@@ -12,29 +12,35 @@ use cross_krb5::{ClientCtx, InitiateFlags, Step};
 use futures::channel::oneshot;
 use fxhash::FxHashMap;
 use netidx_core::pack::BoundedBytes;
-use std::{fmt::Debug, str::FromStr, time::Duration};
+use std::{fmt::Debug, str::FromStr, sync::LazyLock, time::Duration};
 use tokio::{net::TcpStream, task, time};
 
 pub(super) const HELLO_TO: Duration = Duration::from_secs(15);
 
-lazy_static! {
-    pub(super) static ref PUBLISHERPOOL: Pool<FxHashMap<PublisherId, Publisher>> =
-        Pool::new(1000, 100);
-    pub(super) static ref RAWTOREADPOOL: Pool<Vec<ToRead>> = Pool::new(100, 10_000);
-    pub(super) static ref RAWFROMREADPOOL: Pool<Vec<FromRead>> = Pool::new(100, 10_000);
-    pub(super) static ref TOREADPOOL: Pool<Vec<(usize, ToRead)>> = Pool::new(100, 10_000);
-    pub(super) static ref FROMREADPOOL: Pool<Vec<(usize, FromRead)>> =
-        Pool::new(100, 10_000);
-    pub(super) static ref RAWTOWRITEPOOL: Pool<Vec<ToWrite>> = Pool::new(100, 10_000);
-    pub(super) static ref RAWFROMWRITEPOOL: Pool<Vec<FromWrite>> = Pool::new(100, 10_000);
-    pub(super) static ref TOWRITEPOOL: Pool<Vec<(usize, ToWrite)>> =
-        Pool::new(100, 10_000);
-    pub(super) static ref FROMWRITEPOOL: Pool<Vec<(usize, FromWrite)>> =
-        Pool::new(100, 10_000);
-    pub(super) static ref RESOLVEDPOOL: Pool<Vec<Resolved>> = Pool::new(100, 10_000);
-    pub(super) static ref LISTPOOL: Pool<Vec<Pooled<Vec<Path>>>> = Pool::new(100, 10_000);
-    pub(super) static ref PATHPOOL: Pool<Vec<Path>> = Pool::new(100, 100);
-}
+pub(super) static PUBLISHERPOOL: LazyLock<Pool<FxHashMap<PublisherId, Publisher>>> =
+    LazyLock::new(|| Pool::new(1000, 100));
+pub(super) static RAWTOREADPOOL: LazyLock<Pool<Vec<ToRead>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static RAWFROMREADPOOL: LazyLock<Pool<Vec<FromRead>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static TOREADPOOL: LazyLock<Pool<Vec<(usize, ToRead)>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static FROMREADPOOL: LazyLock<Pool<Vec<(usize, FromRead)>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static RAWTOWRITEPOOL: LazyLock<Pool<Vec<ToWrite>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static RAWFROMWRITEPOOL: LazyLock<Pool<Vec<FromWrite>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static TOWRITEPOOL: LazyLock<Pool<Vec<(usize, ToWrite)>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static FROMWRITEPOOL: LazyLock<Pool<Vec<(usize, FromWrite)>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static RESOLVEDPOOL: LazyLock<Pool<Vec<Resolved>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static LISTPOOL: LazyLock<Pool<Vec<Pooled<Vec<Path>>>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(super) static PATHPOOL: LazyLock<Pool<Vec<Path>>> =
+    LazyLock::new(|| Pool::new(100, 100));
 
 /// `DesiredAuth` instructs publishers and subscribers what authentication mechanism
 /// they should try to use. To use the default specified in the configuration you

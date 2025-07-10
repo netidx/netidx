@@ -11,7 +11,7 @@ use crate::{
     recorder_client::{OneshotReply, OneshotReplyShard, PATHMAPS, SHARDS},
 };
 use anyhow::Result;
-use arcstr::{ArcStr, literal};
+use arcstr::{literal, ArcStr};
 use chrono::prelude::*;
 use futures::{channel::mpsc, future, prelude::*, select_biased};
 use fxhash::{FxHashMap, FxHashSet};
@@ -39,7 +39,7 @@ use std::{
         HashMap,
     },
     ops::Bound,
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 use tokio::task::JoinSet;
 
@@ -52,9 +52,8 @@ pub(crate) struct OneshotConfig {
 
 atomic_id!(Oid);
 
-lazy_static! {
-    pub(crate) static ref FILTER: Pool<FxHashSet<Id>> = Pool::new(100, 10000);
-}
+pub(crate) static FILTER: LazyLock<Pool<FxHashSet<Id>>> =
+    LazyLock::new(|| Pool::new(100, 10000));
 
 #[derive(Debug, Pack)]
 enum ClusterCmd {

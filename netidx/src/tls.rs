@@ -11,11 +11,13 @@ use smallvec::SmallVec;
 use std::{
     collections::{BTreeMap, HashMap},
     fmt, mem,
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 use x509_parser::prelude::GeneralName;
 
-pub(crate) fn load_certs(path: &str) -> Result<Vec<rustls_pki_types::CertificateDer<'static>>> {
+pub(crate) fn load_certs(
+    path: &str,
+) -> Result<Vec<rustls_pki_types::CertificateDer<'static>>> {
     use std::{fs, io::BufReader};
     Ok(rustls_pemfile::certs(&mut BufReader::new(fs::File::open(path)?))
         .map(|r| r.map_err(anyhow::Error::from))
@@ -65,9 +67,8 @@ pub(crate) fn get_names(cert: &[u8]) -> Result<Option<Names>> {
     Ok(cn.map(|cn| Names { cn, alt_name }))
 }
 
-lazy_static! {
-    static ref CACHED: Mutex<FxHashMap<String, String>> = Mutex::new(HashMap::default());
-}
+static CACHED: LazyLock<Mutex<FxHashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::default()));
 
 /// If you obtained a certificate private key password via another
 /// method as part of startup, you can provide it here and the system

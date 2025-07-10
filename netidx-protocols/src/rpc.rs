@@ -30,6 +30,7 @@ pub mod server {
     use std::{
         collections::HashSet,
         panic::{catch_unwind, AssertUnwindSafe},
+        sync::LazyLock,
     };
 
     use super::*;
@@ -97,9 +98,8 @@ pub mod server {
         }}
     }
 
-    lazy_static! {
-        static ref ARGS: Pool<HashMap<ArcStr, Value>> = Pool::new(1000, 50);
-    }
+    static ARGS: LazyLock<Pool<HashMap<ArcStr, Value>>> =
+        LazyLock::new(|| Pool::new(1000, 50));
 
     #[derive(Debug)]
     pub struct RpcReply(Option<SendResult>);
