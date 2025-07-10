@@ -13,7 +13,7 @@ use std::{
     cmp::{Eq, PartialEq},
     ops::Deref,
     result,
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use crate::value::{FromValue, Value};
@@ -262,9 +262,7 @@ impl GlobSet {
         published_only: bool,
         globs: impl IntoIterator<Item = Glob>,
     ) -> Result<GlobSet> {
-        lazy_static! {
-            static ref GLOB: Pool<Vec<Glob>> = Pool::new(10, 100);
-        }
+        static GLOB: LazyLock<Pool<Vec<Glob>>> = LazyLock::new(|| Pool::new(10, 100));
         let mut builder = globset::GlobSetBuilder::new();
         let mut raw = GLOB.take();
         for glob in globs {

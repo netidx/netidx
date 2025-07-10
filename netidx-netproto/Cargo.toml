@@ -13,25 +13,17 @@ license = "MIT"
 [dependencies]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
-base64 = { workspace = true }
 bytes = { workspace = true }
-chrono = { workspace = true }
-combine = { workspace = true }
-compact_str = { workspace = true }
-enumflags2 = { workspace = true }
-fxhash = { workspace = true }
 globset = { workspace = true }
-indexmap = { workspace = true }
-lazy_static = { workspace = true }
 netidx-core = { version = "0.28.0", path = "../netidx-core" }
 netidx-derive = { version = "0.22", path = "../netidx-derive" }
-rust_decimal = { workspace = true }
+netidx-value = { version = "0.28.0", path = "../netidx-value" }
 serde_derive = { workspace = true }
 serde = { workspace = true }
 seq-macro = { workspace = true }
 smallvec = { workspace = true }
-triomphe = { workspace = true }
-uuid = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"
+chrono = { workspace = true }
+rust_decimal = { workspace = true }

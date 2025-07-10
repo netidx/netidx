@@ -1,0 +1,86 @@
+type Marker = [
+  `Dot,
+  `Block,
+  `Bar,
+  `Braille,
+  `HalfBlock
+];
+
+type GraphType = [
+  `Scatter,
+  `Line,
+  `Bar
+];
+
+type LegendPosition = [
+  `Top,
+  `TopRight,
+  `TopLeft,
+  `Left,
+  `Right,
+  `Bottom,
+  `BottomRight,
+  `BottomLeft
+];
+
+type Axis = {
+  bounds: {min: f64, max: f64},
+  labels: [Array<Line>, null],
+  labels_alignment: [Alignment, null],
+  style: [Style, null],
+  title: [Line, null]
+};
+
+let axis = |
+  #labels: [Array<Line>, null] = null,
+  #labels_alignment: [Alignment, null] = null,
+  #style: [Style, null] = null,
+  #title: [Line, null] = null,
+  bounds: {min: f64, max: f64}
+| -> Axis { bounds, labels, labels_alignment, style, title };
+
+type Dataset = {
+  data: &Array<(f64, f64)>,
+  graph_type: &[GraphType, null],
+  marker: &[Marker, null],
+  name: &[Line, null],
+  style: &[Style, null]
+};
+
+let dataset = |
+  #marker: &[Marker, null] = &null,
+  #graph_type: &[GraphType, null] = &null,
+  #name: &[Line, null] = &null,
+  #style: &[Style, null] = &null,
+  data: &Array<(f64, f64)>
+| -> Dataset { name, data, marker, graph_type, style };
+
+type LegendConstraints = {
+  width: Constraint,
+  height: Constraint
+};
+
+type Chart = {
+  datasets: &Array<Dataset>,
+  hidden_legend_constraints: &[LegendConstraints, null],
+  legend_position: &[LegendPosition, null],
+  style: &[Style, null],
+  x_axis: &[Axis, null],
+  y_axis: &[Axis, null]
+};
+
+let chart = |
+  #hidden_legend_constraints: &[LegendConstraints, null] = &null,
+  #legend_position: &[LegendPosition, null] = &null,
+  #style: &[Style, null] = &null,
+  #x_axis: &[Axis, null] = &null,
+  #y_axis: &[Axis, null] = &null,
+  datasets: &Array<Dataset>
+| -> Tui `Chart({
+  datasets,
+  hidden_legend_constraints,
+  legend_position,
+  style,
+  x_axis,
+  y_axis
+})

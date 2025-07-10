@@ -69,7 +69,7 @@ impl InputReader {
         env: Option<Env>,
     ) -> Result<Signal> {
         match output {
-            Output::Gui(gui) => Ok(gui.wait_signal().await),
+            Output::Tui(tui) => Ok(tui.wait_signal().await),
             Output::Text(_) => {
                 tokio::signal::ctrl_c().await?;
                 Ok(Signal::CtrlC)

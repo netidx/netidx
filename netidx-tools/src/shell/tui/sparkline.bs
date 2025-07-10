@@ -1,0 +1,39 @@
+type RenderDirection = [
+  `LeftToRight,
+  `RightToLeft
+];
+
+type SparklineBar = {
+  style: [Style, null],
+  value: [f64, null]
+};
+
+let sparkline_bar = |
+  #style: [Style, null] = null,
+  value: [f64, null]
+| -> SparklineBar { style, value };
+
+type Sparkline = {
+  absent_value_style: &[Style, null],
+  absent_value_symbol: &[string, null],
+  data: &Array<[SparklineBar, f64, null]>,
+  direction: &[RenderDirection, null],
+  max: &[i64, null],
+  style: &[Style, null]
+};
+
+let sparkline = |
+  #absent_value_style: &[Style, null] = &null,
+  #absent_value_symbol: &[string, null] = &null,
+  #direction: &[RenderDirection, null] = &null,
+  #max: &[i64, null] = &null,
+  #style: &[Style, null] = &null,
+  data: &Array<[SparklineBar, f64, null]>
+| -> Tui `Sparkline({
+  absent_value_symbol,
+  absent_value_style,
+  data,
+  direction,
+  max,
+  style
+})

@@ -1,7 +1,7 @@
-use gui;
-use gui::table;
-use gui::input_handler;
-use gui::block;
+use tui;
+use tui::table;
+use tui::input_handler;
+use tui::block;
 
 type Status = [
   `Running,

@@ -1,0 +1,11 @@
+type Text = {
+  style: &Style,
+  alignment: &[Alignment, null],
+  lines: &[Array<Line>, string]
+};
+
+let text = |
+  #style: &Style = &style(),
+  #alignment: &[Alignment, null] = &null,
+  lines: &[Array<Line>, string]
+| -> Tui `Text({ style, alignment, lines })

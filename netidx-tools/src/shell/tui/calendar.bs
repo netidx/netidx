@@ -1,0 +1,39 @@
+type Date = {
+  year: i64,
+  month: i64,
+  day: i64
+};
+
+let date = |year: i64, month: i64, day: i64| -> Date { year, month, day };
+
+type CalendarEvent = {
+  date: Date,
+  style: Style
+};
+
+let calendar_event = |style: Style, date: Date| -> CalendarEvent { date, style };
+
+type Calendar = {
+  default_style: &[Style, null],
+  display_date: &Date,
+  events: &[Array<CalendarEvent>, null],
+  show_month: &[Style, null],
+  show_surrounding: &[Style, null],
+  show_weekday: &[Style, null]
+};
+
+let calendar = |
+  #default_style: &[Style, null] = &null,
+  #show_month: &[Style, null] = &null,
+  #show_surrounding: &[Style, null] = &null,
+  #show_weekday: &[Style, null] = &null,
+  #events: &[Array<CalendarEvent>, null] = &null,
+  display_date: &Date
+| -> Tui `Calendar({
+  default_style,
+  display_date,
+  events,
+  show_month,
+  show_surrounding,
+  show_weekday
+})

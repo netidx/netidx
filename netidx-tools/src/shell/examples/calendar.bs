@@ -1,5 +1,5 @@
-use gui;
-use gui::calendar;
+use tui;
+use tui::calendar;
 
 let events = [
   calendar_event(style(#fg:`Red), date(2024, 5, 5)),

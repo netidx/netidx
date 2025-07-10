@@ -3,7 +3,6 @@ use arcstr::{literal, ArcStr};
 use enumflags2::BitFlags;
 use flexi_logger::{FileSpec, Logger};
 use futures::{channel::mpsc, StreamExt};
-use gui::Gui;
 use log::info;
 use netidx::{
     config::Config,
@@ -23,10 +22,11 @@ use std::{collections::HashMap, path::PathBuf, sync::LazyLock, time::Duration};
 use structopt::StructOpt;
 use tokio::select;
 use triomphe::Arc;
+use tui::Tui;
 
 mod completion;
-mod gui;
 mod input;
+mod tui;
 
 use input::InputReader;
 
@@ -61,9 +61,9 @@ pub(crate) struct Params {
 
 type Env = netidx_bscript::env::Env<BSCtx, NoUserEvent>;
 
-const GUITYP: LazyLock<Type> = LazyLock::new(|| Type::Ref {
+const TUITYP: LazyLock<Type> = LazyLock::new(|| Type::Ref {
     scope: ModPath::root(),
-    name: ModPath::from(["gui", "Gui"]),
+    name: ModPath::from(["tui", "Tui"]),
     params: Arc::from_iter([]),
 });
 
@@ -97,30 +97,30 @@ async fn bs_init(
         .context("creating subscriber")?;
     let mut ctx = ExecCtx::new(BSCtx::new(publisher, subscriber));
     let (root, mods) = netidx_bscript_stdlib::register(&mut ctx, BitFlags::all())?;
-    let root = ArcStr::from(format!("{root};\nmod gui"));
+    let root = ArcStr::from(format!("{root};\nmod tui"));
     let mods = vec![
         mods,
         ModuleResolver::VFS(HashMap::from_iter([
-            (Path::from("/gui"), literal!(include_str!("gui/mod.bs"))),
+            (Path::from("/tui"), literal!(include_str!("tui/mod.bs"))),
             (
-                Path::from("/gui/input_handler"),
-                literal!(include_str!("gui/input_handler.bs")),
+                Path::from("/tui/input_handler"),
+                literal!(include_str!("tui/input_handler.bs")),
             ),
-            (Path::from("/gui/text"), literal!(include_str!("gui/text.bs"))),
-            (Path::from("/gui/paragraph"), literal!(include_str!("gui/paragraph.bs"))),
-            (Path::from("/gui/block"), literal!(include_str!("gui/block.bs"))),
-            (Path::from("/gui/scrollbar"), literal!(include_str!("gui/scrollbar.bs"))),
-            (Path::from("/gui/layout"), literal!(include_str!("gui/layout.bs"))),
-            (Path::from("/gui/tabs"), literal!(include_str!("gui/tabs.bs"))),
-            (Path::from("/gui/barchart"), literal!(include_str!("gui/barchart.bs"))),
-            (Path::from("/gui/chart"), literal!(include_str!("gui/chart.bs"))),
-            (Path::from("/gui/sparkline"), literal!(include_str!("gui/sparkline.bs"))),
-            (Path::from("/gui/line_gauge"), literal!(include_str!("gui/line_gauge.bs"))),
-            (Path::from("/gui/gauge"), literal!(include_str!("gui/gauge.bs"))),
-            (Path::from("/gui/list"), literal!(include_str!("gui/list.bs"))),
-            (Path::from("/gui/table"), literal!(include_str!("gui/table.bs"))),
-            (Path::from("/gui/calendar"), literal!(include_str!("gui/calendar.bs"))),
-            (Path::from("/gui/canvas"), literal!(include_str!("gui/canvas.bs"))),
+            (Path::from("/tui/text"), literal!(include_str!("tui/text.bs"))),
+            (Path::from("/tui/paragraph"), literal!(include_str!("tui/paragraph.bs"))),
+            (Path::from("/tui/block"), literal!(include_str!("tui/block.bs"))),
+            (Path::from("/tui/scrollbar"), literal!(include_str!("tui/scrollbar.bs"))),
+            (Path::from("/tui/layout"), literal!(include_str!("tui/layout.bs"))),
+            (Path::from("/tui/tabs"), literal!(include_str!("tui/tabs.bs"))),
+            (Path::from("/tui/barchart"), literal!(include_str!("tui/barchart.bs"))),
+            (Path::from("/tui/chart"), literal!(include_str!("tui/chart.bs"))),
+            (Path::from("/tui/sparkline"), literal!(include_str!("tui/sparkline.bs"))),
+            (Path::from("/tui/line_gauge"), literal!(include_str!("tui/line_gauge.bs"))),
+            (Path::from("/tui/gauge"), literal!(include_str!("tui/gauge.bs"))),
+            (Path::from("/tui/list"), literal!(include_str!("tui/list.bs"))),
+            (Path::from("/tui/table"), literal!(include_str!("tui/table.bs"))),
+            (Path::from("/tui/calendar"), literal!(include_str!("tui/calendar.bs"))),
+            (Path::from("/tui/canvas"), literal!(include_str!("tui/canvas.bs"))),
         ])),
     ];
     let mut bs = BSConfig::builder(ctx, sub);
@@ -142,14 +142,14 @@ async fn bs_init(
 
 enum Output {
     None,
-    Gui(Gui),
+    Tui(Tui),
     Text(CompExp),
 }
 
 impl Output {
     fn from_expr(bs: &BSHandle, env: &Env, e: CompExp) -> Self {
-        if GUITYP.contains(env, &e.typ).unwrap() {
-            Self::Gui(Gui::start(bs, env.clone(), e))
+        if TUITYP.contains(env, &e.typ).unwrap() {
+            Self::Tui(Tui::start(bs, env.clone(), e))
         } else {
             Self::Text(e)
         }
@@ -158,7 +158,7 @@ impl Output {
     async fn clear(&mut self) {
         match self {
             Self::None | Self::Text(_) => (),
-            Self::Gui(gui) => gui.stop().await,
+            Self::Tui(tui) => tui.stop().await,
         }
         *self = Self::None
     }
@@ -166,7 +166,7 @@ impl Output {
     async fn process_update(&mut self, env: &Env, id: ExprId, v: Value) {
         match self {
             Self::None => (),
-            Self::Gui(gui) => gui.update(id, v).await,
+            Self::Tui(tui) => tui.update(id, v).await,
             Self::Text(e) => {
                 if e.id == id {
                     println!("{}", TVal { env: &env, typ: &e.typ, v: &v })

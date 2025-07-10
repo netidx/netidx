@@ -1,0 +1,15 @@
+type Paragraph = {
+  alignment: &[Alignment, null],
+  lines: &[Array<Line>, string],
+  scroll: &{ x: i64, y: i64 }, // y is in lines, x is in chars
+  style: &Style,
+  trim: &bool // trim leading whitespace when wrapping
+};
+
+let paragraph = |
+  #style: &Style = &style(),
+  #alignment: &[Alignment, null] = &null,
+  #scroll: &{x: i64, y: i64} = &{x: 0, y: 0},
+  #trim: &bool = &true,
+  lines: &[Array<Line>, string]
+| -> Tui `Paragraph({ style, alignment, scroll, trim, lines })

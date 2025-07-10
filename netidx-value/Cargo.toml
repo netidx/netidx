@@ -1,0 +1,31 @@
+[package]
+name = "netidx-value"
+version = "0.28.0"
+authors = ["Eric Stokes <letaris@gmail.com>"]
+edition = "2024"
+homepage = "https://netidx.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
+description = "netidx value type"
+documentation = "https://docs.rs/netidx-netproto"
+readme = "../README.md"
+license = "MIT"
+
+[dependencies]
+anyhow = { workspace = true }
+arcstr = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+combine = { workspace = true }
+compact_str = { workspace = true }
+enumflags2 = { workspace = true }
+fxhash = { workspace = true }
+indexmap = { workspace = true }
+netidx-core = { version = "0.28.0", path = "../netidx-core" }
+rust_decimal = { workspace = true }
+serde_derive = { workspace = true }
+serde = { workspace = true }
+seq-macro = { workspace = true }
+smallvec = { workspace = true }
+triomphe = { workspace = true }
+uuid = { workspace = true }

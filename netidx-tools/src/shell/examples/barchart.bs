@@ -1,7 +1,7 @@
-use gui;
-use gui::barchart;
-use gui::layout;
-use gui::block;
+use tui;
+use tui::barchart;
+use tui::layout;
+use tui::block;
 use rand;
 let clock = time::timer(duration:0.7s, true);
 

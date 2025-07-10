@@ -1,7 +1,7 @@
-use gui;
-use gui::list;
-use gui::block;
-use gui::input_handler;
+use tui;
+use tui::list;
+use tui::block;
+use tui::input_handler;
 
 let items = [
   line("Apple"),

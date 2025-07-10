@@ -1,6 +1,6 @@
-use gui;
-use gui::block;
-use gui::line_gauge;
+use tui;
+use tui::block;
+use tui::line_gauge;
 
 let clock = time::timer(duration:0.5s, true);
 let power = 0.0;

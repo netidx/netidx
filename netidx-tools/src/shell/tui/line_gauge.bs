@@ -1,0 +1,24 @@
+type LineSet = [
+  `Normal,
+  `Rounded,
+  `Double,
+  `Thick
+];
+
+type LineGauge = {
+  filled_style: &[Style, null],
+  label: &[Line, null],
+  line_set: &[LineSet, null],
+  ratio: &f64,
+  style: &[Style, null],
+  unfilled_style: &[Style, null]
+};
+
+let line_gauge = |
+  #filled_style: &[Style, null] = &null,
+  #label: &[Line, null] = &null,
+  #line_set: &[LineSet, null] = &null,
+  #style: &[Style, null] = &null,
+  #unfilled_style: &[Style, null] = &null,
+  ratio: &f64
+| -> Tui `LineGauge({ filled_style, label, line_set, ratio, style, unfilled_style })

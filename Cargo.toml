@@ -97,6 +97,7 @@ resolver = "2"
 members = [
     "netidx-core",
     "netidx-netproto",
+    "netidx-value",
     "netidx",
     "netidx-archive",
     "netidx-bscript",

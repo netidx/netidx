@@ -1,0 +1,63 @@
+type CanvasLine = {
+  color: Color,
+  x1: f64,
+  x2: f64,
+  y1: f64,
+  y2: f64
+};
+
+type CanvasCircle = {
+  color: Color,
+  radius: f64,
+  x: f64,
+  y: f64
+};
+
+type CanvasRectangle = {
+  color: Color,
+  height: f64,
+  width: f64,
+  x: f64,
+  y: f64
+};
+
+type CanvasPoints = {
+  color: Color,
+  coords: Array<(f64, f64)>
+};
+
+type CanvasLabel = {
+  line: Line,
+  x: f64,
+  y: f64
+};
+
+type CanvasShape = [
+  `Line(CanvasLine),
+  `Circle(CanvasCircle),
+  `Rectangle(CanvasRectangle),
+  `Points(CanvasPoints),
+  `Label(CanvasLabel)
+];
+
+type Canvas = {
+  background_color: &[Color, null],
+  marker: &[Marker, null],
+  shapes: &Array<&CanvasShape>,
+  x_bounds: &{ max: f64, min: f64 },
+  y_bounds: &{ max: f64, min: f64 }
+};
+
+let canvas = |
+  #background_color: &[Color, null] = &null,
+  #marker: &[Marker, null] = &null,
+  #x_bounds: &{ max: f64, min: f64 },
+  #y_bounds: &{ max: f64, min: f64 },
+  shapes: &Array<&CanvasShape>
+| -> Tui `Canvas({
+  background_color,
+  marker,
+  shapes,
+  x_bounds,
+  y_bounds
+})
