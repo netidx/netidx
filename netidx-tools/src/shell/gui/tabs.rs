@@ -5,7 +5,10 @@ use async_trait::async_trait;
 use crossterm::event::Event;
 use futures::future;
 use netidx::publisher::Value;
-use netidx_bscript::{expr::ExprId, rt::{BSHandle, Ref}};
+use netidx_bscript::{
+    expr::ExprId,
+    rt::{BSHandle, Ref},
+};
 use ratatui::{layout::Rect, widgets::Tabs, Frame};
 use smallvec::SmallVec;
 use tokio::try_join;
@@ -44,10 +47,14 @@ impl TabsW {
             bs.compile_ref(tabs)
         }?;
         let divider = TRef::<Option<SpanV>>::new(divider).context("tabs tref divider")?;
-        let highlight_style = TRef::<Option<StyleV>>::new(highlight_style).context("tabs tref highlight_style")?;
-        let padding_left = TRef::<Option<LineV>>::new(padding_left).context("tabs tref padding_left")?;
-        let padding_right = TRef::<Option<LineV>>::new(padding_right).context("tabs tref padding_right")?;
-        let selected = TRef::<Option<u32>>::new(selected).context("tabs tref selected")?;
+        let highlight_style = TRef::<Option<StyleV>>::new(highlight_style)
+            .context("tabs tref highlight_style")?;
+        let padding_left =
+            TRef::<Option<LineV>>::new(padding_left).context("tabs tref padding_left")?;
+        let padding_right = TRef::<Option<LineV>>::new(padding_right)
+            .context("tabs tref padding_right")?;
+        let selected =
+            TRef::<Option<u32>>::new(selected).context("tabs tref selected")?;
         let style = TRef::<Option<StyleV>>::new(style).context("tabs tref style")?;
         let mut t = Self {
             bs: bs.clone(),
@@ -68,15 +75,13 @@ impl TabsW {
 
     async fn set_tabs(&mut self, v: Value) -> Result<()> {
         let arr = v.cast_to::<SmallVec<[(LineV, Value); 8]>>()?;
-        self.tabs = future::try_join_all(
-            arr.into_iter().map(|(l, v)| {
-                let bs = self.bs.clone();
-                async move {
-                    let w = compile(bs, v).await?;
-                    Ok::<(LineV, GuiW), anyhow::Error>((l, w))
-                }
-            }),
-        )
+        self.tabs = future::try_join_all(arr.into_iter().map(|(l, v)| {
+            let bs = self.bs.clone();
+            async move {
+                let w = compile(bs, v).await?;
+                Ok::<(LineV, GuiW), anyhow::Error>((l, w))
+            }
+        }))
         .await?;
         Ok(())
     }
@@ -84,25 +89,19 @@ impl TabsW {
 
 #[async_trait]
 impl GuiWidget for TabsW {
-    async fn handle_event(&mut self, e: Event) -> Result<()> {
+    async fn handle_event(&mut self, e: Event, v: Value) -> Result<()> {
         let idx = self.selected.t.and_then(|o| o.map(|s| s as usize)).unwrap_or(0);
         if let Some((_, child)) = self.tabs.get_mut(idx) {
-            child.handle_event(e).await?;
+            child.handle_event(e, v).await?;
         }
         Ok(())
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
         self.divider.update(id, &v).context("tabs divider update")?;
-        self.highlight_style
-            .update(id, &v)
-            .context("tabs highlight_style update")?;
-        self.padding_left
-            .update(id, &v)
-            .context("tabs padding_left update")?;
-        self.padding_right
-            .update(id, &v)
-            .context("tabs padding_right update")?;
+        self.highlight_style.update(id, &v).context("tabs highlight_style update")?;
+        self.padding_left.update(id, &v).context("tabs padding_left update")?;
+        self.padding_right.update(id, &v).context("tabs padding_right update")?;
         self.selected.update(id, &v).context("tabs selected update")?;
         self.style.update(id, &v).context("tabs style update")?;
         if self.tabs_ref.id == id {

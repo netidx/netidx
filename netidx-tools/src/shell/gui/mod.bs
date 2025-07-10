@@ -147,4 +147,7 @@ pub mod gauge;
 pub mod list;
 pub mod table;
 pub mod calendar;
-pub mod canvas
+pub mod canvas;
+
+let size: { columns: i64, rows: i64 } = never();
+let event: input_handler::Event = never()

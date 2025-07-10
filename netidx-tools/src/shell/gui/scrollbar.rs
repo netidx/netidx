@@ -140,8 +140,8 @@ impl ScrollbarW {
 
 #[async_trait]
 impl GuiWidget for ScrollbarW {
-    async fn handle_event(&mut self, e: Event) -> Result<()> {
-        self.child.handle_event(e).await
+    async fn handle_event(&mut self, e: Event, v: Value) -> Result<()> {
+        self.child.handle_event(e, v).await
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {

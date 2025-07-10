@@ -1,5 +1,5 @@
 use anyhow::Result;
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 use async_trait::async_trait;
 use barchart::BarChartW;
 use block::BlockW;
@@ -7,21 +7,24 @@ use calendar::CalendarW;
 use chart::ChartW;
 use crossterm::{
     event::{
-        EnableFocusChange, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers,
+        DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+        Event, EventStream, KeyCode, KeyModifiers,
     },
-    ExecutableCommand,
+    terminal, ExecutableCommand,
 };
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use gauge::GaugeW;
-use input_handler::InputHandlerW;
+use input_handler::{event_to_value, InputHandlerW};
 use layout::LayoutW;
 use line_gauge::LineGaugeW;
 use list::ListW;
 use log::error;
 use netidx::publisher::{FromValue, Value};
 use netidx_bscript::{
-    expr::ExprId,
-    rt::{BSHandle, CompExp, Ref},
+    env::Env,
+    expr::{ExprId, ModPath},
+    rt::{BSCtx, BSHandle, CompExp, Ref},
+    BindId, NoUserEvent,
 };
 use paragraph::ParagraphW;
 use ratatui::{
@@ -319,7 +322,7 @@ impl<T: Into<Value> + FromValue + Clone> TRef<T> {
 
 #[async_trait]
 trait GuiWidget {
-    async fn handle_event(&mut self, e: Event) -> Result<()>;
+    async fn handle_event(&mut self, e: Event, v: Value) -> Result<()>;
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()>;
     fn draw(&mut self, frame: &mut Frame, rect: Rect) -> Result<()>;
 }
@@ -355,7 +358,7 @@ pub(super) struct EmptyW;
 
 #[async_trait]
 impl GuiWidget for EmptyW {
-    async fn handle_event(&mut self, _e: Event) -> Result<()> {
+    async fn handle_event(&mut self, _e: Event, _v: Value) -> Result<()> {
         Ok(())
     }
 
@@ -384,12 +387,16 @@ pub(super) struct Gui {
 }
 
 impl Gui {
-    pub(super) fn start(bs: &BSHandle, root: CompExp) -> Gui {
+    pub(super) fn start(
+        bs: &BSHandle,
+        env: Env<BSCtx, NoUserEvent>,
+        root: CompExp,
+    ) -> Gui {
         let bs = bs.clone();
         let (to_tx, to_rx) = mpsc::channel(3);
         let (from_tx, from_rx) = mpsc::unbounded();
         task::spawn(async move {
-            if let Err(e) = run(bs, root, to_rx, from_tx).await {
+            if let Err(e) = run(bs, env, root, to_rx, from_tx).await {
                 error!("gui::run returned {e:?}")
             }
         });
@@ -425,8 +432,23 @@ fn is_ctrl_c(e: &Event) -> bool {
         .unwrap_or(false)
 }
 
+fn get_id(env: &Env<BSCtx, NoUserEvent>, name: &ModPath) -> Result<BindId> {
+    Ok(env
+        .lookup_bind(&ModPath::root(), name)
+        .ok_or_else(|| anyhow!("could not find {name}"))?
+        .1
+        .id)
+}
+
+fn set_size(bs: &BSHandle, id: BindId, (col, row): (u16, u16)) -> Result<()> {
+    let v: Value =
+        [(literal!("columns"), (col as i64)), (literal!("rows"), (row as i64))].into();
+    bs.set(id, v)
+}
+
 async fn run(
     bs: BSHandle,
+    env: Env<BSCtx, NoUserEvent>,
     root_exp: CompExp,
     mut to_rx: mpsc::Receiver<ToGui>,
     from_tx: mpsc::UnboundedSender<FromGui>,
@@ -436,6 +458,9 @@ async fn run(
     let mut stdout = stdout();
     stdout.execute(EnableMouseCapture)?;
     stdout.execute(EnableFocusChange)?;
+    let size = get_id(&env, &["gui", "size"].into())?;
+    let event = get_id(&env, &["gui", "event"].into())?;
+    set_size(&bs, size, terminal::size()?)?;
     let mut events = EventStream::new().fuse();
     let mut root: GuiW = Box::new(EmptyW);
     let notify = loop {
@@ -468,8 +493,18 @@ async fn run(
                         break oneshot::channel().0
                     }
                 }
-                Ok(e) => if let Err(e) = root.handle_event(e).await {
-                    error!("error handling event {e:?}")
+                Ok(e) => {
+                    let v = event_to_value(&e);
+                    if let Event::Resize(col, row) = e
+                        && let Err(e) = set_size(&bs, size, (col, row)) {
+                        error!("could not set the size ref {e:?}")
+                    }
+                    if let Err(e) = bs.set(event, v.clone()) {
+                        error!("could not set event ref {e:?}")
+                    }
+                    if let Err(e) = root.handle_event(e, v).await {
+                        error!("error handling event {e:?}")
+                    }
                 },
                 Err(e) => {
                     error!("error reading event from terminal {e:?}");
@@ -478,6 +513,8 @@ async fn run(
             }
         }
     };
+    stdout.execute(DisableMouseCapture)?;
+    stdout.execute(DisableFocusChange)?;
     ratatui::restore();
     let _ = notify.send(());
     Ok(())

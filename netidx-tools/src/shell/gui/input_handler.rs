@@ -335,7 +335,7 @@ fn mouse_event_to_value(e: &MouseEvent) -> Value {
     ValArray::from_iter_exact([column, kind, modifiers, row].into_iter()).into()
 }
 
-fn event_to_value(e: &Event) -> Value {
+pub(super) fn event_to_value(e: &Event) -> Value {
     match e {
         Event::FocusGained => literal!("FocusGained").into(),
         Event::FocusLost => literal!("FocusLost").into(),
@@ -366,7 +366,7 @@ pub(super) struct InputHandlerW {
     handle: Option<Callable>,
     child_ref: Ref,
     child: GuiW,
-    queued: VecDeque<Event>,
+    queued: VecDeque<(Event, Value)>,
     pending: bool,
 }
 
@@ -400,12 +400,11 @@ impl InputHandlerW {
 
     async fn maybe_send_queued(&mut self) -> Result<()> {
         if !self.pending
-            && let Some(e) = self.queued.front()
+            && let Some((e, v)) = self.queued.front()
             && let Some(h) = &self.handle
         {
             debug!("sending event: {e:?}");
-            let v = event_to_value(e);
-            h.call(ValArray::from_iter_exact([v].into_iter())).await?;
+            h.call(ValArray::from_iter_exact([v.clone()].into_iter())).await?;
             self.pending = true
         }
         Ok(())
@@ -421,9 +420,9 @@ impl InputHandlerW {
 
 #[async_trait]
 impl GuiWidget for InputHandlerW {
-    async fn handle_event(&mut self, e: Event) -> Result<()> {
+    async fn handle_event(&mut self, e: Event, v: Value) -> Result<()> {
         if self.enabled.t.and_then(|b| b).unwrap_or(true) {
-            self.queued.push_back(e);
+            self.queued.push_back((e, v));
             self.maybe_send_queued().await?
         }
         Ok(())
@@ -453,10 +452,10 @@ impl GuiWidget for InputHandlerW {
             && id == h.expr
         {
             *pending = false;
-            if let Some(e) = queued.pop_front() {
+            if let Some((e, ev)) = queued.pop_front() {
                 match &*v.clone().cast_to::<ArcStr>()? {
                     "Stop" => (),
-                    "Continue" => child.handle_event(e).await?,
+                    "Continue" => child.handle_event(e, ev).await?,
                     v => bail!("invalid respose from input handler {v}"),
                 }
             }

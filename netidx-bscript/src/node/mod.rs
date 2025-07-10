@@ -1,7 +1,7 @@
 use crate::{
     env, err,
     expr::{self, Expr, ExprId, ExprKind, ModPath},
-    typ::{self, TVar, Type},
+    typ::{self, TVal, TVar, Type},
     wrap, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -9,7 +9,7 @@ use arcstr::{literal, ArcStr};
 use combine::stream::position::SourcePosition;
 use compiler::compile;
 use enumflags2::BitFlags;
-use netidx_netproto::value::{NakedValue, Typ, Value};
+use netidx_netproto::value::{Typ, Value};
 use pattern::StructPatternNode;
 use std::{cell::RefCell, sync::LazyLock};
 use triomphe::Arc;
@@ -510,7 +510,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
                 for c in &self.args {
                     match c.cached.as_ref().unwrap() {
                         Value::String(s) => write!(buf, "{s}"),
-                        v => write!(buf, "{}", NakedValue(v)),
+                        v => write!(
+                            buf,
+                            "{}",
+                            TVal { env: &ctx.env, typ: c.node.typ(), v }
+                        ),
                     }
                     .unwrap()
                 }

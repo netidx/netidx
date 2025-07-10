@@ -108,7 +108,7 @@ impl CalendarW {
 
 #[async_trait]
 impl GuiWidget for CalendarW {
-    async fn handle_event(&mut self, _e: Event) -> Result<()> {
+    async fn handle_event(&mut self, _e: Event, _v: Value) -> Result<()> {
         Ok(())
     }
 

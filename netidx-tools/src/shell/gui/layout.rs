@@ -67,16 +67,8 @@ pub(super) struct LayoutW {
 
 impl LayoutW {
     pub(super) async fn compile(bs: BSHandle, v: Value) -> Result<GuiW> {
-        let [
-            (_, children),
-            (_, direction),
-            (_, flex),
-            (_, focused),
-            (_, horizontal_margin),
-            (_, margin),
-            (_, spacing),
-            (_, vertical_margin),
-        ] = v.cast_to::<[(ArcStr, u64); 8]>().context("layout fields")?;
+        let [(_, children), (_, direction), (_, flex), (_, focused), (_, horizontal_margin), (_, margin), (_, spacing), (_, vertical_margin)] =
+            v.cast_to::<[(ArcStr, u64); 8]>().context("layout fields")?;
         let (
             children_ref,
             direction,
@@ -146,14 +138,10 @@ impl LayoutW {
 
 #[async_trait]
 impl GuiWidget for LayoutW {
-    async fn handle_event(&mut self, e: Event) -> Result<()> {
-        let idx = self
-            .focused
-            .t
-            .and_then(|o| o.map(|i| i as usize))
-            .unwrap_or(0);
+    async fn handle_event(&mut self, e: Event, v: Value) -> Result<()> {
+        let idx = self.focused.t.and_then(|o| o.map(|i| i as usize)).unwrap_or(0);
         if let Some((_, c)) = self.children.get_mut(idx) {
-            c.handle_event(e).await?;
+            c.handle_event(e, v).await?;
         }
         Ok(())
     }

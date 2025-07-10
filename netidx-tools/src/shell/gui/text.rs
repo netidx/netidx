@@ -45,7 +45,7 @@ impl GuiWidget for TextW {
         Ok(())
     }
 
-    async fn handle_event(&mut self, _: Event) -> Result<()> {
+    async fn handle_event(&mut self, _: Event, _: Value) -> Result<()> {
         Ok(())
     }
 

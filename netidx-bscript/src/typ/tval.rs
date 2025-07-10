@@ -111,6 +111,9 @@ impl<'a, C: Ctx, E: UserEvent> fmt::Display for TVal<'a, C, E> {
         thread_local! {
             static HIST: RefCell<FxHashSet<(usize, usize)>> = RefCell::new(HashSet::default());
         }
-        HIST.with_borrow_mut(|hist| self.fmt_int(f, hist))
+        HIST.with_borrow_mut(|hist| {
+            hist.clear();
+            self.fmt_int(f, hist)
+        })
     }
 }
