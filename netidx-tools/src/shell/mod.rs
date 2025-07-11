@@ -242,7 +242,7 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
                     }
                 }
             },
-            input = input.read_line(&mut output, newenv.take()) => {
+            input = input.read_line(&mut output, &mut newenv) => {
                 match input {
                     Err(e) => eprintln!("error reading line {e:?}"),
                     Ok(Signal::CtrlC) if script => break Ok(()),

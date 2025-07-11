@@ -66,7 +66,7 @@ impl InputReader {
     pub(super) async fn read_line(
         &mut self,
         output: &mut Output,
-        env: Option<Env>,
+        env: &mut Option<Env>,
     ) -> Result<Signal> {
         match output {
             Output::Tui(tui) => Ok(tui.wait_signal().await),
@@ -76,7 +76,7 @@ impl InputReader {
             }
             Output::None => {
                 if let Some(tx) = self.go.take() {
-                    let _ = tx.send(env);
+                    let _ = tx.send(env.take());
                 }
                 match self.recv.next().await {
                     None => bail!("input stream ended"),
