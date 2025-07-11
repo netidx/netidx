@@ -1,7 +1,12 @@
 use crate::{parser, Value};
+use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use netidx_core::utils;
-use std::{fmt, ops::Deref};
+use smallvec::smallvec;
+use std::{
+    fmt::{self, Write},
+    ops::Deref,
+};
 
 /// A value reference that formats without type tags
 pub struct NakedValue<'a>(pub &'a Value);
@@ -24,6 +29,68 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.fmt_ext(f, &parser::VAL_ESC, true)
     }
+}
+
+pub fn printf(f: &mut impl Write, fmt: &str, args: &[Value]) -> Result<usize> {
+    use compact_str::{format_compact, CompactString};
+    use fish_printf::{printf_c_locale, Arg, ToArg};
+    use rust_decimal::prelude::ToPrimitive;
+    use smallvec::SmallVec;
+    enum T<'a> {
+        Arg(Arg<'a>),
+        Index(usize),
+    }
+    let mut strings: SmallVec<[CompactString; 4]> = smallvec![];
+    let mut fish_args: SmallVec<[T; 8]> = smallvec![];
+    for v in args {
+        fish_args.push(match v {
+            Value::U32(v) | Value::V32(v) => T::Arg(v.to_arg()),
+            Value::I32(v) | Value::Z32(v) => T::Arg(v.to_arg()),
+            Value::U64(v) | Value::V64(v) => T::Arg(v.to_arg()),
+            Value::I64(v) | Value::Z64(v) => T::Arg(v.to_arg()),
+            Value::F32(v) => T::Arg(v.to_arg()),
+            Value::F64(v) => T::Arg(v.to_arg()),
+            Value::Decimal(v) => match v.to_f64() {
+                Some(f) => T::Arg(f.to_arg()),
+                None => {
+                    strings.push(format_compact!("{v}"));
+                    T::Index(strings.len() - 1)
+                }
+            },
+            Value::DateTime(v) => {
+                strings.push(format_compact!("{v}"));
+                T::Index(strings.len() - 1)
+            }
+            Value::Duration(v) => {
+                strings.push(format_compact!("{v:?}"));
+                T::Index(strings.len() - 1)
+            }
+            Value::String(s) => T::Arg(s.to_arg()),
+            Value::Bytes(b) => {
+                strings.push(format_compact!("{}", BASE64.encode(b)));
+                T::Index(strings.len() - 1)
+            }
+            Value::Bool(true) => T::Arg("true".to_arg()),
+            Value::Bool(false) => T::Arg("false".to_arg()),
+            Value::Null => T::Arg("null".to_arg()),
+            v @ Value::Error(_) => {
+                strings.push(format_compact!("{v}"));
+                T::Index(strings.len() - 1)
+            }
+            v @ Value::Array(_) => {
+                strings.push(format_compact!("{v}"));
+                T::Index(strings.len() - 1)
+            }
+        })
+    }
+    let mut fish_args: SmallVec<[Arg; 8]> = fish_args
+        .into_iter()
+        .map(|t| match t {
+            T::Arg(a) => a,
+            T::Index(i) => strings[i].to_arg(),
+        })
+        .collect();
+    printf_c_locale(f, fmt, &mut fish_args).map_err(|e| anyhow!(format!("{e:?}")))
 }
 
 impl Value {

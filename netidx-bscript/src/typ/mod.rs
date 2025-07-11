@@ -7,7 +7,7 @@ use netidx::{
     publisher::{Typ, Value},
     utils::Either,
 };
-use netidx_netproto::valarray::ValArray;
+use netidx_value::ValArray;
 use parking_lot::RwLock;
 use smallvec::{smallvec, SmallVec};
 use std::{

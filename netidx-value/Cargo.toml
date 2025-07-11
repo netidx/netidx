@@ -19,6 +19,7 @@ chrono = { workspace = true }
 combine = { workspace = true }
 compact_str = { workspace = true }
 enumflags2 = { workspace = true }
+fish-printf = { workspace = true }
 fxhash = { workspace = true }
 indexmap = { workspace = true }
 netidx-core = { version = "0.28.0", path = "../netidx-core" }

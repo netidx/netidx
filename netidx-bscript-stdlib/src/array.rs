@@ -10,7 +10,7 @@ use netidx_bscript::{
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, Node,
     UserEvent,
 };
-use netidx_netproto::valarray::ValArray;
+use netidx_value::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{
     collections::VecDeque,

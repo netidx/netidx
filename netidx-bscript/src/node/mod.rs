@@ -9,7 +9,7 @@ use arcstr::{literal, ArcStr};
 use combine::stream::position::SourcePosition;
 use compiler::compile;
 use enumflags2::BitFlags;
-use netidx_netproto::value::{Typ, Value};
+use netidx_value::{Typ, Value};
 use pattern::StructPatternNode;
 use std::{cell::RefCell, sync::LazyLock};
 use triomphe::Arc;

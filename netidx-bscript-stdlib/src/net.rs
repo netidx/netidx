@@ -16,8 +16,8 @@ use netidx_bscript::{
     UserEvent,
 };
 use netidx_core::utils::Either;
-use netidx_netproto::valarray::ValArray;
 use netidx_protocols::rpc::server::{self, ArgSpec};
+use netidx_value::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{collections::VecDeque, sync::Arc};
 use triomphe::Arc as TArc;

@@ -29,9 +29,7 @@ use netidx::{
     publisher::{Typ, Value},
     utils::Either,
 };
-use netidx_netproto::value_parser::{
-    escaped_string, int, value as netidx_value, VAL_ESC,
-};
+use netidx_value::parser::{escaped_string, int, value as parse_value, VAL_ESC};
 use parking_lot::RwLock;
 use smallvec::{smallvec, SmallVec};
 use std::sync::LazyLock;
@@ -910,7 +908,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    (position(), netidx_value(&BSCRIPT_ESC).skip(not_followed_by(token('_'))))
+    (position(), parse_value(&BSCRIPT_ESC).skip(not_followed_by(token('_'))))
         .map(|(pos, v)| ExprKind::Constant(v).to_expr(pos))
 }
 
@@ -1268,7 +1266,7 @@ parser! {
             attempt(tuple_pattern()),
             attempt(struct_pattern()),
             attempt(variant_pattern()),
-            attempt(netidx_value(&VAL_ESC).skip(not_followed_by(token('_'))))
+            attempt(parse_value(&VAL_ESC).skip(not_followed_by(token('_'))))
                 .map(|v| StructurePattern::Literal(v)),
             attempt(sptoken('_')).map(|_| StructurePattern::Ignore),
             spfname().map(|name| StructurePattern::Bind(name)),

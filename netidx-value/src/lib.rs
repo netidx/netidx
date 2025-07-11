@@ -25,7 +25,7 @@ mod typ;
 pub use array::ValArray;
 pub use convert::FromValue;
 pub use pbuf::PBytes;
-pub use print::NakedValue;
+pub use print::{printf, NakedValue};
 pub use typ::Typ;
 
 #[macro_export]

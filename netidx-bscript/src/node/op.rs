@@ -5,7 +5,7 @@ use crate::{
     wrap, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
 };
 use anyhow::Result;
-use netidx_netproto::value::{Typ, Value};
+use netidx_value::{Typ, Value};
 
 macro_rules! compare_op {
     ($name:ident, $op:tt) => {

@@ -4,7 +4,7 @@ use arcstr::{literal, ArcStr};
 use compact_str::format_compact;
 use netidx::subscriber::Value;
 use netidx_bscript::{errf, Ctx, ExecCtx, UserEvent};
-use netidx_netproto::valarray::ValArray;
+use netidx_value::ValArray;
 use regex::Regex;
 
 fn maybe_compile(s: &str, re: &mut Option<Regex>) -> Result<()> {

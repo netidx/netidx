@@ -5,7 +5,7 @@ use netidx::subscriber::Value;
 use netidx_bscript::{
     Apply, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
 };
-use netidx_netproto::valarray::ValArray;
+use netidx_value::ValArray;
 use rand::{rng, seq::SliceRandom, Rng};
 use smallvec::{smallvec, SmallVec};
 use std::sync::Arc;

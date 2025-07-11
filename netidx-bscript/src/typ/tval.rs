@@ -2,7 +2,7 @@ use super::Type;
 use crate::{env::Env, Ctx, UserEvent};
 use fxhash::FxHashSet;
 use netidx::publisher::Value;
-use netidx_netproto::value::NakedValue;
+use netidx_value::NakedValue;
 use std::{cell::RefCell, collections::HashSet, fmt};
 
 /// A value with it's type, used for formatting

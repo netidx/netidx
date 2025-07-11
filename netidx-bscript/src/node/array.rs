@@ -7,10 +7,7 @@ use crate::{
 };
 use anyhow::Result;
 use arcstr::literal;
-use netidx_netproto::{
-    valarray::ValArray,
-    value::{Typ, Value},
-};
+use netidx_value::{Typ, ValArray, Value};
 use triomphe::Arc;
 
 #[derive(Debug)]

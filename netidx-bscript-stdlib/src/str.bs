@@ -59,4 +59,7 @@ pub let rsplit_once = |#pat, s| 'string_rsplit_once;
 pub let to_lower = |s| 'string_to_lower;
 
 /// change the string to uppercase
-pub let to_upper = |s| 'string_to_upper
+pub let to_upper = |s| 'string_to_upper;
+
+/// C style sprintf, implements most C standard format args
+pub let sprintf = |fmt, @args| 'string_sprintf

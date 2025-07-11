@@ -3,7 +3,7 @@ use anyhow::Result;
 use arcstr::{literal, ArcStr};
 use netidx::{path::Path, subscriber::Value, utils};
 use netidx_bscript::{err, Ctx, ExecCtx, UserEvent};
-use netidx_netproto::valarray::ValArray;
+use netidx_value::ValArray;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 
@@ -547,6 +547,39 @@ impl EvalCached for StringToUpperEv {
 
 type StringToUpper = CachedArgs<StringToUpperEv>;
 
+#[derive(Debug, Default)]
+struct SprintfEv {
+    buf: String,
+    args: Vec<Value>,
+}
+
+impl EvalCached for SprintfEv {
+    const NAME: &str = "string_sprintf";
+    deftype!("str", "fn(string, @args: Any) -> string");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        match &from.0[..] {
+            [Some(Value::String(fmt)), args @ ..] => {
+                self.buf.clear();
+                self.args.clear();
+                for v in args {
+                    match v {
+                        Some(v) => self.args.push(v.clone()),
+                        None => return None,
+                    }
+                }
+                match netidx_value::printf(&mut self.buf, fmt, &self.args) {
+                    Ok(_) => Some(Value::String(ArcStr::from(&self.buf))),
+                    Err(e) => Some(Value::Error(ArcStr::from(e.to_string()))),
+                }
+            }
+            _ => err!("sprintf invalid args"),
+        }
+    }
+}
+
+type Sprintf = CachedArgs<SprintfEv>;
+
 pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
     ctx.register_builtin::<StartsWith>()?;
     ctx.register_builtin::<EndsWith>()?;
@@ -568,5 +601,6 @@ pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<
     ctx.register_builtin::<StringRSplitOnce>()?;
     ctx.register_builtin::<StringToLower>()?;
     ctx.register_builtin::<StringToUpper>()?;
+    ctx.register_builtin::<Sprintf>()?;
     Ok(literal!(include_str!("str.bs")))
 }

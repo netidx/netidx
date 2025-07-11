@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
-use netidx_netproto::{valarray::ValArray, value::Value};
+use netidx_value::{ValArray, Value};
 use smallvec::{smallvec, SmallVec};
 use std::iter;
 use triomphe::Arc;
