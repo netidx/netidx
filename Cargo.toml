@@ -7,13 +7,12 @@ debug = false
 [profile.dev]
 opt-level = "s"
 lto = "thin"
-debug = 1
+debug = true
 
 [workspace.dependencies]
 anyhow = "1"
 arcstr = { version = "1", features = ["serde"] }
 arrayvec = "0.7.4"
-async-stream = "0.3"
 async-trait = { version = "0.1" }
 base64 = "0.22"
 bitflags = "2"

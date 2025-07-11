@@ -220,16 +220,14 @@ impl Ctx {
                     Box::new(init.fuse())
                 } else {
                     let stdin = Box::pin({
-                        let mut stdin = BufReader::new(io::stdin()).lines();
-                        async_stream::stream! {
-                            loop {
-                                match stdin.next_line().await {
-                                    Ok(None) => break,
-                                    Ok(Some(line)) => yield Ok(line),
-                                    Err(e) => yield Err(Error::from(e)),
-                                }
+                        let stdin = BufReader::new(io::stdin()).lines();
+                        stream::unfold(stdin, |mut stdin| async move {
+                            match stdin.next_line().await {
+                                Ok(None) => None,
+                                Ok(Some(line)) => Some((Ok(line), stdin)),
+                                Err(e) => Some((Err(anyhow::Error::from(e)), stdin)),
                             }
-                        }
+                        })
                     });
                     Box::new(init.chain(stdin))
                 }

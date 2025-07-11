@@ -7,7 +7,7 @@ use bytes::Bytes;
 use chrono::prelude::*;
 use enumflags2::BitFlags;
 use netidx::protocol::value::Typ;
-use netidx_netproto::pbuf::PBytes;
+use netidx_value::PBytes;
 use parking_lot::RwLock;
 use parser::RESERVED;
 use prop::option;
