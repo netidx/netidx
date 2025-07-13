@@ -9,6 +9,7 @@ description = "netidx archive file format"
 documentation = "https://docs.rs/netidx-archive"
 readme = "../README.md"
 license = "MIT"
+categories = ["network-programming"]
 
 [features]
 default = []

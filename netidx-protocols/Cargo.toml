@@ -9,6 +9,7 @@ description = "Protocols built on top of netidx"
 documentation = "https://docs.rs/netidx-protocols"
 readme = "../README.md"
 license = "MIT"
+categories = ["network-programming"]
 
 [features]
 default = []

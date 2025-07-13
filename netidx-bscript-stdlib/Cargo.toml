@@ -9,6 +9,7 @@ description = "The bscript standard library"
 documentation = "https://docs.rs/netidx-bscript"
 readme = "../README.md"
 license = "MIT"
+categories = ["network-programming", "compilers"]
 
 [features]
 default = []

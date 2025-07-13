@@ -9,6 +9,7 @@ description = "netidx wire protocol"
 documentation = "https://docs.rs/netidx-netproto"
 readme = "../README.md"
 license = "MIT"
+categories = ["network-programming"]
 
 [dependencies]
 anyhow = { workspace = true }

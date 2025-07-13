@@ -9,6 +9,7 @@ description = "An incremental scripting language for netidx"
 documentation = "https://docs.rs/netidx-bscript"
 readme = "../README.md"
 license = "MIT"
+categories = ["network-programming", "compilers"]
 
 [features]
 default = []

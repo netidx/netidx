@@ -9,6 +9,7 @@ description = "netidx value type"
 documentation = "https://docs.rs/netidx-netproto"
 readme = "../README.md"
 license = "MIT"
+categories = ["network-programming", "data-structures"]
 
 [dependencies]
 anyhow = { workspace = true }
