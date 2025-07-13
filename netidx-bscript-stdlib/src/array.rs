@@ -701,6 +701,82 @@ impl EvalCached for SortEv {
 
 pub(super) type Sort = CachedArgs<SortEv>;
 
+#[derive(Debug, Default)]
+pub(super) struct EnumerateEv;
+
+impl EvalCached for EnumerateEv {
+    const NAME: &str = "array_enumerate";
+    deftype!("core::array", "fn(Array<'a>) -> Array<(i64, 'a)>");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        if let Some(Value::Array(a)) = &from.0[0] {
+            let a = ValArray::from_iter_exact(
+                a.iter().enumerate().map(|(i, v)| (i, v.clone()).into()),
+            );
+            return Some(Value::Array(a));
+        }
+        None
+    }
+}
+
+pub(super) type Enumerate = CachedArgs<EnumerateEv>;
+
+#[derive(Debug, Default)]
+pub(super) struct ZipEv;
+
+impl EvalCached for ZipEv {
+    const NAME: &str = "array_zip";
+    deftype!("core::array", "fn(Array<'a>, Array<'b>) -> Array<('a, 'b)>");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        match &from.0[..] {
+            [Some(Value::Array(a0)), Some(Value::Array(a1))] => {
+                Some(Value::Array(ValArray::from_iter_exact(
+                    a0.iter().cloned().zip(a1.iter().cloned()).map(|p| p.into()),
+                )))
+            }
+            _ => None,
+        }
+    }
+}
+
+pub(super) type Zip = CachedArgs<ZipEv>;
+
+#[derive(Debug, Default)]
+pub(super) struct UnzipEv {
+    t0: Vec<Value>,
+    t1: Vec<Value>,
+}
+
+impl EvalCached for UnzipEv {
+    const NAME: &str = "array_unzip";
+    deftype!("core::array", "fn(Array<('a, 'b)>) -> (Array<'a>, Array<'b>)");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        match &from.0[..] {
+            [Some(Value::Array(a))] => {
+                for v in a {
+                    if let Value::Array(a) = v {
+                        match &a[..] {
+                            [v0, v1] => {
+                                self.t0.push(v0.clone());
+                                self.t1.push(v1.clone());
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+                let v0 = Value::Array(ValArray::from_iter_exact(self.t0.drain(..)));
+                let v1 = Value::Array(ValArray::from_iter_exact(self.t1.drain(..)));
+                Some(Value::Array(ValArray::from_iter_exact([v0, v1].into_iter())))
+            }
+            _ => None,
+        }
+    }
+}
+
+pub(super) type Unzip = CachedArgs<UnzipEv>;
+
 #[derive(Debug)]
 pub(super) struct Group<C: Ctx, E: UserEvent> {
     queue: VecDeque<Value>,
@@ -912,6 +988,9 @@ pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<
     ctx.register_builtin::<Find<C, E>>()?;
     ctx.register_builtin::<FindMap<C, E>>()?;
     ctx.register_builtin::<FlatMap<C, E>>()?;
+    ctx.register_builtin::<Enumerate>()?;
+    ctx.register_builtin::<Zip>()?;
+    ctx.register_builtin::<Unzip>()?;
     ctx.register_builtin::<Flatten>()?;
     ctx.register_builtin::<Fold<C, E>>()?;
     ctx.register_builtin::<Group<C, E>>()?;

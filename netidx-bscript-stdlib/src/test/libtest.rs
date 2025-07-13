@@ -677,6 +677,64 @@ run!(array_sort, ARRAY_SORT, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
+const ARRAY_ENUMERATE: &str = r#"
+{
+   let a = [1, 2, 3];
+   array::enumerate(a)
+}
+"#;
+
+#[cfg(test)]
+run!(array_enumerate, ARRAY_ENUMERATE, |v: Result<&Value>| {
+    match v {
+        Ok(v) => match v.clone().cast_to::<[(i64, i64); 3]>() {
+            Ok([(0, 1), (1, 2), (2, 3)]) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const ARRAY_ZIP: &str = r#"
+{
+   let a0 = [1, 2, 5];
+   let a1 = [1, 2, 3];
+   array::zip(a0, a1)
+}
+"#;
+
+#[cfg(test)]
+run!(array_zip, ARRAY_ZIP, |v: Result<&Value>| {
+    match v {
+        Ok(v) => match v.clone().cast_to::<[(i64, i64); 3]>() {
+            Ok([(1, 1), (2, 2), (5, 3)]) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const ARRAY_UNZIP: &str = r#"
+{
+   let a = [(1, 1), (2, 2), (5, 3)];
+   array::unzip(a)
+}
+"#;
+
+#[cfg(test)]
+run!(array_unzip, ARRAY_UNZIP, |v: Result<&Value>| {
+    match v {
+        Ok(v) => match v.clone().cast_to::<([i64; 3], [i64; 3])>() {
+            Ok(([1, 2, 5], [1, 2, 3])) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
 const STR_STARTS_WITH: &str = r#"
   str::starts_with(#pfx:"foo", "foobarbaz")
 "#;

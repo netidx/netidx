@@ -68,4 +68,19 @@ pub let find = |a, f| 'array_find;
 pub let find_map = |a, f| 'array_find_map;
 
 /// return a new copy of a sorted descending
-pub let sort = |a| 'array_sort
+pub let sort = |a| 'array_sort;
+
+/// return an array of pairs where the first element is the index in
+/// the array and the second element is the value.
+pub let enumerate = |a| 'array_enumerate;
+
+/// given two arrays, return a single array of pairs where the first
+/// element in the pair is from the first array and the second element in
+/// the pair is from the second array. The final array's length will be the
+/// minimum of the length of the input arrays
+let zip = |a0, a1| 'array_zip;
+
+/// given an array of pairs, return two arrays with the first array
+/// containing all the elements from the first pair element and second
+/// array containing all the elements of the second pair element.
+let unzip = |a| 'array_unzip
