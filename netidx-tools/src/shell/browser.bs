@@ -3,18 +3,31 @@ use tui::table;
 use tui::input_handler;
 
 let path = "/";
+let structure = net::list_table(path);
 let selected = { row: 0, column: 0 };
+let header = select structure.columns {
+    [] => row(&[cell(line("Name")), cell(line("Value"))]),
+    cols => {
+        let cols = array::map(cols, |(col, _): (string, v64)| cell(line(col)));
+        array::push_front(cols, cell(line("Name")))
+    }
+};
+let widths = select structure.columns {
+    [] => [`Percentage(20), `Percentage(80)],
+    cols => {
+        array::map(cols, |(col, _): (string, v64)| `Min()
+    }
+};
 
 let list_view = |rows: Array<string>| -> Tui table(
-    #header:row(&[cell(line("Name")), cell(line("Value"))]),
-    #flex:&`End,
-    #widths: &[`Percentage(20), `Percentage(80)],
-    
+    #header:&header,
+    #flex:&`Center,
+    #widths: &widths,
+
 );
 
 let table_view = |rows: Array<string>, columns: Array<string>| -> Tui never();
 
-let structure = net::list_table(path);
 select structure {
     { columns = [], rows } => list_view(rows),
     { columns, rows } => {

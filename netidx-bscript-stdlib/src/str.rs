@@ -580,6 +580,23 @@ impl EvalCached for SprintfEv {
 
 type Sprintf = CachedArgs<SprintfEv>;
 
+#[derive(Debug, Default)]
+struct LenEv;
+
+impl EvalCached for LenEv {
+    const NAME: &str = "string_len";
+    deftype!("str", "fn(string) -> i64");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        match &from.0[0] {
+            Some(Value::String(s)) => Some(Value::I64(s.len() as i64)),
+            _ => err!("sprintf invalid args"),
+        }
+    }
+}
+
+type Len = CachedArgs<LenEv>;
+
 pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
     ctx.register_builtin::<StartsWith>()?;
     ctx.register_builtin::<EndsWith>()?;
@@ -602,5 +619,6 @@ pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<
     ctx.register_builtin::<StringToLower>()?;
     ctx.register_builtin::<StringToUpper>()?;
     ctx.register_builtin::<Sprintf>()?;
+    ctx.register_builtin::<Len>()?;
     Ok(literal!(include_str!("str.bs")))
 }

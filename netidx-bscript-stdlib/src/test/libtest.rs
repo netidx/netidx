@@ -1009,6 +1009,19 @@ run!(str_to_upper, STR_TO_UPPER, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
+const STR_LEN: &str = r#"
+  str::len("foo")
+"#;
+
+#[cfg(test)]
+run!(str_len, STR_LEN, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(3)) => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
 const RE_IS_MATCH: &str = r#"
   re::is_match(#pat:r'[\\[\\]0-9]+', r'foo[0]')
 "#;

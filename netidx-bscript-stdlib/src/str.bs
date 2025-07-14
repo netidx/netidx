@@ -52,7 +52,7 @@ pub let split = |#pat, s| 'string_split;
 pub let split_once = |#pat, s| 'string_split_once;
 
 /// split the string once from the end by #pat and return a tuple of strings
-/// or return null if #pat was not found in the string    
+/// or return null if #pat was not found in the string
 pub let rsplit_once = |#pat, s| 'string_rsplit_once;
 
 /// change the string to lowercase
@@ -62,4 +62,7 @@ pub let to_lower = |s| 'string_to_lower;
 pub let to_upper = |s| 'string_to_upper;
 
 /// C style sprintf, implements most C standard format args
-pub let sprintf = |fmt, @args| 'string_sprintf
+pub let sprintf = |fmt, @args| 'string_sprintf;
+
+/// return the length of the string in bytes
+pub let len = |s| 'string_len
