@@ -1429,17 +1429,24 @@ parser! {
                 sptoken('}'),
                 (
                     ref_pexp().skip(space()).skip(spstring("with")).skip(space()),
-                    sep_by1((spfname().skip(sptoken(':')), expr()), csep()),
+                    sep_by1((spfname(), optional(attempt(sptoken(':').with(expr())))), csep()),
                 ),
             ),
         )
             .then(
-                |(pos, (source, mut exprs)): (_, (Expr, SmallVec<[(ArcStr, Expr); 8]>))| {
+                |(pos, (source, mut exprs)): (_, (Expr, SmallVec<[(ArcStr, Option<Expr>); 8]>))| {
                     let s = exprs.iter().map(|(n, _)| n).collect::<FxHashSet<_>>();
                     if s.len() < exprs.len() {
                         return unexpected_any("struct fields must be unique").left();
                     }
                     exprs.sort_by_key(|(n, _)| n.clone());
+                    let exprs = exprs.into_iter().map(|(name, e)| match e {
+                        Some(e) => (name, e),
+                        None => {
+                            let e = ExprKind::Ref { name: ModPath::from([name.clone()]) }.to_expr(pos);
+                            (name, e)
+                        }
+                    });
                     let e = ExprKind::StructWith {
                         source: Arc::new(source),
                         replace: Arc::from_iter(exprs),

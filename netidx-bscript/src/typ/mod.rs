@@ -1396,16 +1396,20 @@ impl Type {
                     }
                     Some(Type::Any) => return Type::Any,
                     Some(t) => {
-                        let mut merged = false;
-                        for i in 0..acc.len() {
-                            if let Some(t) = t.merge(&acc[i]) {
-                                acc[i] = t;
-                                merged = true;
-                                break;
+                        acc.push(t);
+                        let mut i = 0;
+                        let mut j;
+                        while i < acc.len() {
+                            j = i + 1;
+                            while j < acc.len() {
+                                if let Some(t) = acc[i].merge(&acc[j]) {
+                                    acc[i] = t;
+                                    acc.remove(j);
+                                } else {
+                                    j += 1;
+                                }
                             }
-                        }
-                        if !merged {
-                            acc.push(t);
+                            i += 1;
                         }
                     }
                 },

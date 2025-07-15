@@ -637,8 +637,18 @@ impl ExprKind {
                 let indent = indent + 2;
                 for (i, (name, e)) in replace.iter().enumerate() {
                     push_indent(indent, buf);
-                    write!(buf, "{name}: ")?;
-                    e.kind.pretty_print(indent + 2, limit, false, buf)?;
+                    match &e.kind {
+                        ExprKind::Ref { name: n }
+                            if Path::dirname(&**n).is_none()
+                                && Path::basename(&**n) == Some(&**name) =>
+                        {
+                            write!(buf, "{name}")?
+                        }
+                        e => {
+                            write!(buf, "{name}: ")?;
+                            e.pretty_print(indent + 2, limit, false, buf)?;
+                        }
+                    }
                     if i < replace.len() - 1 {
                         kill_newline!(buf);
                         writeln!(buf, ",")?
@@ -967,7 +977,15 @@ impl fmt::Display for ExprKind {
                     _ => write!(f, "{{ ({source}) with ")?,
                 }
                 for (i, (name, e)) in replace.iter().enumerate() {
-                    write!(f, "{name}: {e}")?;
+                    match &e.kind {
+                        ExprKind::Ref { name: n }
+                            if Path::dirname(&**n).is_none()
+                                && Path::basename(&**n) == Some(&**name) =>
+                        {
+                            write!(f, "{name}")?
+                        }
+                        _ => write!(f, "{name}: {e}")?,
+                    }
                     if i < replace.len() - 1 {
                         write!(f, ", ")?
                     }

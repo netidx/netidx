@@ -4,34 +4,69 @@ use tui::input_handler;
 
 let path = "/";
 let structure = net::list_table(path);
-let selected = { row: 0, column: 0 };
-let header = select structure.columns {
-    [] => row(&[cell(line("Name")), cell(line("Value"))]),
-    cols => {
-        let cols = array::map(cols, |(col, _): (string, v64)| cell(line(col)));
-        array::push_front(cols, cell(line("Name")))
+let selected = { x: 0, y: 0 };
+let visible_range = {
+    row: {
+        min: max(0, selected.y - size.rows),
+        max: selected.y + size.rows
+    },
+    column: {
+        min: max(0, selected.x - size.columns),
+        max: selected.x + size.columns
     }
 };
-let widths = select structure.columns {
-    [] => [`Percentage(20), `Percentage(80)],
-    cols => {
-        array::map(cols, |(col, _): (string, v64)| `Min()
-    }
+let is_visible = |row: i64, col: i64| uniq(
+    row >= (visible_range.row).min &&
+    row <= (visible_range.row).max &&
+    col >= (visible_range.column).min &&
+    col <= (visible_range.column).max
+);
+let columns = {
+    let cols = array::map(structure.columns, |(col, _): (string, v64)| col);
+    array::push_front(cols, "Name")
 };
-
-let list_view = |rows: Array<string>| -> Tui table(
+let header = select array::len(columns) {
+    1 => row(&[cell(line("Name")), cell(line("Value"))]),
+    _ => array::map(columns, |col| cell(line(col)))
+};
+let widths = select array::len(columns) {
+    1 => [`Percentage(20), `Percentage(80)],
+    _ => array::map(columns, |col| `Min(str::len(col)))
+};
+let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
+    let name = cell(line(str::basename(row)));
+    row(&select array::len(columns) {
+        1 => {
+            let path = select is_visible(i, 0) { true => "[row]", false => "" };
+            &[ name, cell(line("[net::subscribe(path)]")) ]
+        }
+        _ => &array::map(array::enumerate(columns), |(j, col)| select j {
+            0 => name,
+            j => {
+                let path = select is_visible(i, j) {
+                    true => "[row]/[col]",
+                    false => ""
+                };
+                cell(line("[net::subscribe(path)]"))
+            }
+        })
+    })
+});
+let table = table(
     #header:&header,
     #flex:&`Center,
     #widths: &widths,
-
+    #selected_cell: &selected,
+    &rows
 );
-
-let table_view = |rows: Array<string>, columns: Array<string>| -> Tui never();
-
-select structure {
-    { columns = [], rows } => list_view(rows),
-    { columns, rows } => {
-        let columns = array::map(columns, |(col, _): (string, v64)| col);
-        table_view(columns, rows)
+input_handler(
+    #handle:|e: Event| -> [`Stop, `Continue] select e {
+        `Key(e) => select e.code {
+            e@ `Left => selected <- { selected with x: e ~ max(0, selected.x - 1) },
+            e@ `Right => {
+                let x = e ~ min(array::len(columns), selected.x + 1);
+                selected <- { selected with x }
+        }
+        _ => `Continue
     }
-}
+)
