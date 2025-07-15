@@ -6,7 +6,7 @@ use crate::{
     typ::{FnArgType, FnType, TVar, Type},
     wrap, Apply, BindId, Ctx, Event, ExecCtx, InitFn, LambdaId, Node, Update, UserEvent,
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use compact_str::format_compact;
 use fxhash::FxHashMap;
@@ -45,14 +45,6 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BScriptLambda<C, E> {
         ctx: &mut ExecCtx<C, E>,
         args: &mut [Node<C, E>],
     ) -> Result<()> {
-        macro_rules! wrap {
-            ($n:expr, $e:expr) => {
-                match $e {
-                    Ok(()) => Ok(()),
-                    Err(e) => Err(anyhow!("in expr: {}, type error: {e:?}", $n.spec())),
-                }
-            };
-        }
         self.typ.unbind_tvars();
         for (arg, FnArgType { typ, .. }) in args.iter_mut().zip(self.typ.args.iter()) {
             wrap!(arg, arg.typecheck(ctx))?;
@@ -129,14 +121,6 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInLambda<C, E> {
         ctx: &mut ExecCtx<C, E>,
         args: &mut [Node<C, E>],
     ) -> Result<()> {
-        macro_rules! wrap {
-            ($n:expr, $e:expr) => {
-                match $e {
-                    Ok(()) => Ok(()),
-                    Err(e) => Err(anyhow!("in expr: {}, type error: {e:?}", $n.spec())),
-                }
-            };
-        }
         if args.len() < self.typ.args.len()
             || (args.len() > self.typ.args.len() && self.typ.vargs.is_none())
         {

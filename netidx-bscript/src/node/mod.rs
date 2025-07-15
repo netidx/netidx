@@ -29,7 +29,9 @@ macro_rules! wrap {
     ($n:expr, $e:expr) => {
         match $e {
             Ok(x) => Ok(x),
-            Err(e) => Err(anyhow::anyhow!("in expr: {}, type error: {e:?}", $n.spec())),
+            e => {
+                anyhow::Context::context(e, $crate::expr::ErrorContext($n.spec().clone()))
+            }
         }
     };
 }
