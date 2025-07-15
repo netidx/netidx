@@ -16,10 +16,10 @@ let visible_range = {
     }
 };
 let is_visible = |row: i64, col: i64| uniq(
-    row >= (visible_range.row).min &&
-    row <= (visible_range.row).max &&
-    col >= (visible_range.column).min &&
-    col <= (visible_range.column).max
+    (row >= (visible_range.row).min) &&
+    (row <= (visible_range.row).max) &&
+    (col >= (visible_range.column).min) &&
+    (col <= (visible_range.column).max)
 );
 let columns = {
     let cols = array::map(structure.columns, |(col, _): (string, v64)| col);
@@ -39,7 +39,7 @@ let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
         1 => {
             let path = select is_visible(i, 0) { true => "[row]", false => "" };
             &[ name, cell(line("[net::subscribe(path)]")) ]
-        }
+        },
         _ => &array::map(array::enumerate(columns), |(j, col)| select j {
             0 => name,
             j => {
@@ -59,14 +59,42 @@ let table = table(
     #selected_cell: &selected,
     &rows
 );
-input_handler(
-    #handle:|e: Event| -> [`Stop, `Continue] select e {
-        `Key(e) => select e.code {
-            e@ `Left => selected <- { selected with x: e ~ max(0, selected.x - 1) },
-            e@ `Right => {
-                let x = e ~ min(array::len(columns), selected.x + 1);
-                selected <- { selected with x }
-        }
+let handle_event = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(e) => select e.code {
+        e@ `Left => {
+            selected <- { selected with x: e ~ max(0, selected.x - 1) };
+            `Stop
+        },
+        e@ `Right => {
+            let x = e ~ min(array::len(columns) - 1, selected.x + 1);
+            selected <- { selected with x };
+            `Stop
+        },
+        e@ `Down => {
+            let y = e ~ min(array::len(structure.rows) - 1, selected.y + 1);
+            selected <- { selected with y };
+            `Stop
+        },
+        e@ `Up => {
+            selected <- { selected with y: e ~ max(0, selected.y - 1) };
+            `Stop
+        },
+        e@ `Enter => select array::len(columns) {
+            1 => `Stop,
+            _ => {
+                path <- (structure.rows)[e ~ selected.y];
+                `Stop
+            }
+        },
+        e@ `Backspace => select str::dirname(path) {
+            null => `Stop,
+            s => {
+                path <- s;
+                `Stop
+            }
+        },
         _ => `Continue
-    }
-)
+    },
+    _ => `Continue
+};
+input_handler(#handle: &handle_event, &table)

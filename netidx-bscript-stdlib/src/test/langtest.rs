@@ -796,6 +796,32 @@ run!(lambdamatch0, LAMBDAMATCH0, |v: Result<&Value>| match v {
     _ => false,
 });
 
+const MATCH_EXHAUST0: &str = r#"
+select 42 {
+    1 => never(),
+    2 => never(),
+    5 => never()
+}
+"#;
+
+run!(match_exhaust0, MATCH_EXHAUST0, |v: Result<&Value>| match v {
+    Ok(_) => false,
+    _ => true,
+});
+
+const MATCH_EXHAUST1: &str = r#"
+select 42 {
+    1 => never(),
+    2 => never(),
+    _ => 42
+}
+"#;
+
+run!(match_exhaust1, MATCH_EXHAUST1, |v: Result<&Value>| match v {
+    Ok(Value::I64(42)) => true,
+    _ => false,
+});
+
 #[cfg(test)]
 const ANY0: &str = r#"
 {

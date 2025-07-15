@@ -207,6 +207,7 @@ impl EvalCached for DirnameEv {
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match &from.0[0] {
             Some(Value::String(path)) => match Path::dirname(path) {
+                None if path != "/" => Some(Value::String(literal!("/"))),
                 None => Some(Value::Null),
                 Some(dn) => Some(Value::String(dn.into())),
             },

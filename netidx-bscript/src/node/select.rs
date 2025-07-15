@@ -41,7 +41,7 @@ impl<C: Ctx, E: UserEvent> Select<C, E> {
                     ModPath(scope.append(&format_compact!("sel{}", SelectId::new().0)));
                 let pat = PatternNode::compile(ctx, &atype, pat, &scope, top_id)
                     .with_context(|| format!("in select at {pos}"))?;
-                if !pat.guard.is_some() {
+                if !pat.guard.is_some() && !pat.structure_predicate.is_refutable() {
                     atype = atype.diff(&ctx.env, &pat.type_predicate)?;
                 }
                 let n = Cached::new(compile(ctx, spec.clone(), &scope, top_id)?);
@@ -176,7 +176,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
         for (pat, n) in self.arms.iter_mut() {
             match &mut pat.guard {
                 Some(guard) => guard.node.typecheck(ctx)?,
-                None => mtype = mtype.union(&pat.type_predicate),
+                None => {
+                    if !pat.structure_predicate.is_refutable() {
+                        mtype = mtype.union(&pat.type_predicate)
+                    }
+                }
             }
             itype = itype.union(&pat.type_predicate);
             n.node.typecheck(ctx)?;
