@@ -1,4 +1,4 @@
-use super::{compiler::compile, Cached};
+use super::{compiler::compile, pattern::StructPatternNode, Cached};
 use crate::{
     expr::{Expr, ExprId, ModPath, Pattern},
     node::pattern::PatternNode,
@@ -8,7 +8,9 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
+use enumflags2::BitFlags;
 use netidx::subscriber::Value;
+use netidx_value::Typ;
 use smallvec::{smallvec, SmallVec};
 
 atomic_id!(SelectId);
@@ -170,15 +172,25 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         self.arg.node.typecheck(ctx)?;
-        let mut rtype = Type::Bottom;
-        let mut mtype = Type::Bottom;
-        let mut itype = Type::Bottom;
+        let mut rtype = Type::Primitive(BitFlags::empty());
+        let mut mtype = Type::Primitive(BitFlags::empty());
+        let mut itype = Type::Primitive(BitFlags::empty());
+        let mut saw_true = false; // oooooh it's such a hack
+        let mut saw_false = false; // round two round two
         for (pat, n) in self.arms.iter_mut() {
             match &mut pat.guard {
                 Some(guard) => guard.node.typecheck(ctx)?,
                 None => {
                     if !pat.structure_predicate.is_refutable() {
                         mtype = mtype.union(&pat.type_predicate)
+                    } else if let StructPatternNode::Literal(Value::Bool(b)) =
+                        &pat.structure_predicate
+                    {
+                        saw_true |= b;
+                        saw_false |= !b;
+                        if saw_true && saw_false {
+                            mtype = mtype.union(&Type::Primitive(Typ::Bool.into()));
+                        }
                     }
                 }
             }

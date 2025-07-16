@@ -145,21 +145,21 @@ run!(first_class_lambdas, FIRST_CLASS_LAMBDAS, |v: Result<&Value>| match v {
     _ => false,
 });
 
-const SELECT: &str = r#"
+const SELECT0: &str = r#"
 {
   let x = 1;
   let y = x + 1;
   let z = y + 1;
   let s = select any(x, y, z) {
-    i64 as v if v == 1 => "first [v]",
-    _ as v if v == 2 => "second [v]",
-    _ as v => "third [v]"
+    v if v == 1 => "first [v]",
+    v if v == 2 => "second [v]",
+    v => "third [v]"
   };
   array::group(s, |n, x| n == 3)
 }
 "#;
 
-run!(select, SELECT, |v: Result<&Value>| match v {
+run!(select0, SELECT0, |v: Result<&Value>| match v {
     Ok(Value::Array(a)) => match &**a {
         [Value::String(a), Value::String(b), Value::String(c)]
             if &**a == "first 1" && &**b == "second 2" && &**c == "third 3" =>
@@ -523,7 +523,8 @@ const ARRAY_MATCH0: &str = r#"
 {
   let a = [0, 1, 2, 3, 4, 5, 6];
   select a {
-    Array<i64> as [a, b, c, d, ..] => a + b + c + d
+    [a, b, c, d, ..] => a + b + c + d,
+    _ => never()
   }
 }
 "#;
@@ -537,10 +538,11 @@ const ARRAY_MATCH1: &str = r#"
 {
   let a = [0, 1, 2, 3, 4, 5, 6, 7];
   let out = select a {
-    Array<i64> as [x, y, tl..] => {
+    [x, y, tl..] => {
       a <- tl;
       [x, y]
-    }
+    },
+    _ => never()
   };
   array::group(out, |i, x| i == 4)
 }
@@ -598,10 +600,10 @@ run!(tuples1, TUPLES1, |v: Result<&Value>| match v {
 
 const TUPLES2: &str = r#"
 {
-  type T = (string, i64, f64);
-  let t: T = ("foo", 42, 23.5);
+  let t = ("foo", 42, 23.5);
   select t {
-    T as ("foo", x, y) => x + y
+    ("foo", x, y) => x + y,
+    _ => never()
   }
 }
 "#;
@@ -769,10 +771,10 @@ run!(nestedmatch2, NESTEDMATCH2, |v: Result<&Value>| match v {
 
 const NESTEDMATCH3: &str = r#"
 {
-  type T = { foo: Array<f64>, bar: i64, baz: f64 };
   let x = { foo: [ 1.0, 2.0, 4.3, 55.23 ], bar: 42, baz: 84.0 };
   select x {
-    T as { foo: [x, y, ..], bar: _, baz: _ } => x + y
+    { foo: [x, y, ..], bar: _, baz: _ } => x + y,
+    _ => never()
   }
 }
 "#;
@@ -786,13 +788,76 @@ const LAMBDAMATCH0: &str = r#"
 {
   type T = { foo: Array<f64>, bar: i64, baz: f64 };
   let x = { foo: [ 1.0, 2.0, 4.3, 55.23 ], bar: 42, baz: 84.0 };
-  let f = |{foo, ..}: T| foo[0]? + foo[1]?;
+  let f = |{bar, ..}: T| bar + bar;
   f(x)
 }
 "#;
 
 run!(lambdamatch0, LAMBDAMATCH0, |v: Result<&Value>| match v {
-    Ok(Value::F64(3.0)) => true,
+    Ok(Value::I64(84)) => true,
+    _ => false,
+});
+
+const LAMBDAMATCH1: &str = r#"
+{
+  type T = { foo: Array<f64>, bar: i64, baz: f64 };
+  let x = { foo: [ 1.0, 2.0, 4.3, 55.23 ], bar: 42, baz: 84.0 };
+  let f = |{bar, ..}| bar + bar;
+  f(x)
+}
+"#;
+
+run!(lambdamatch1, LAMBDAMATCH1, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const LAMBDAMATCH2: &str = r#"
+{
+  let x = { foo: [ 1.0, 2.0, 4.3, 55.23 ], bar: 42, baz: 84.0 };
+  let f = |{foo: _, bar, baz: _}| bar + bar;
+  f(x)
+}
+"#;
+
+run!(lambdamatch2, LAMBDAMATCH2, |v: Result<&Value>| match v {
+    Ok(Value::I64(84)) => true,
+    _ => false,
+});
+
+const LAMBDAMATCH3: &str = r#"
+{
+  let f = |{foo: _, bar, baz: _}| bar + bar;
+  f({bar: 42, baz: 1})
+}
+"#;
+
+run!(lambdamatch3, LAMBDAMATCH3, |v: Result<&Value>| match v {
+    Err(_) => true,
+    _ => false,
+});
+
+const LAMBDAMATCH4: &str = r#"
+{
+  let f = |(i, _)| i * 2;
+  f((42, "foo"))
+}
+"#;
+
+run!(lambdamatch4, LAMBDAMATCH4, |v: Result<&Value>| match v {
+    Ok(Value::I64(84)) => true,
+    _ => false,
+});
+
+const LAMBDAMATCH5: &str = r#"
+{
+  let f = |(i, _)| i * 2;
+  f("foo")
+}
+"#;
+
+run!(lambdamatch5, LAMBDAMATCH5, |v: Result<&Value>| match v {
+    Err(_) => true,
     _ => false,
 });
 
@@ -805,8 +870,8 @@ select 42 {
 "#;
 
 run!(match_exhaust0, MATCH_EXHAUST0, |v: Result<&Value>| match v {
-    Ok(_) => false,
-    _ => true,
+    Err(_) => true,
+    _ => false,
 });
 
 const MATCH_EXHAUST1: &str = r#"

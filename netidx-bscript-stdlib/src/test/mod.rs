@@ -70,15 +70,18 @@ macro_rules! run {
                 Ok(e) => {
                     dbg!("compilation succeeded");
                     let eid = e.exprs[0].id;
-                    match futures::StreamExt::next(&mut rx).await {
-                        None => bail!("runtime died"),
-                        Some(mut batch) => {
-                            for e in batch.drain(..) {
-                                match e {
-                                    netidx_bscript::rt::RtEvent::Env(_) => (),
-                                    netidx_bscript::rt::RtEvent::Updated(id, v) => {
-                                        assert_eq!(id, eid);
-                                        assert!($pred(dbg!(Ok(&v))))
+                    loop {
+                        match futures::StreamExt::next(&mut rx).await {
+                            None => bail!("runtime died"),
+                            Some(mut batch) => {
+                                for e in batch.drain(..) {
+                                    match e {
+                                        netidx_bscript::rt::RtEvent::Env(_) => (),
+                                        netidx_bscript::rt::RtEvent::Updated(id, v) => {
+                                            assert_eq!(id, eid);
+                                            assert!($pred(dbg!(Ok(&v))));
+                                            return Ok(());
+                                        }
                                     }
                                 }
                             }

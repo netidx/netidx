@@ -979,7 +979,7 @@ impl Type {
     }
 
     /// Unbind any bound tvars, but do not unalias them.
-    fn unbind_tvars(&self) {
+    pub(crate) fn unbind_tvars(&self) {
         match self {
             Type::Bottom | Type::Any | Type::Primitive(_) | Type::Ref { .. } => (),
             Type::Array(t0) => t0.unbind_tvars(),

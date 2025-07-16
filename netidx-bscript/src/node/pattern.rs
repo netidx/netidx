@@ -10,6 +10,7 @@ use arcstr::ArcStr;
 use netidx::{publisher::Typ, subscriber::Value};
 use smallvec::SmallVec;
 use std::fmt::Debug;
+use triomphe::Arc;
 
 #[derive(Debug)]
 pub enum StructPatternNode {
@@ -62,9 +63,13 @@ impl StructPatternNode {
         scope: &ModPath,
     ) -> Result<Self> {
         macro_rules! with_pref_suf {
-            ($all:expr, $single:expr, $multi:expr) => {
-                match &type_predicate {
-                    Type::Array(et) => {
+            ($all:expr, $single:expr, $multi:expr) => {{
+                type_predicate.check_contains(
+                    &ctx.env,
+                    &Type::Array(Arc::new(Type::empty_tvar())),
+                )?;
+                match &type_predicate.with_deref(|t| t.cloned()) {
+                    Some(Type::Array(et)) => {
                         let all = $all.as_ref().map(|n| {
                             ctx.env.bind_variable(scope, n, type_predicate.clone()).id
                         });
@@ -77,9 +82,9 @@ impl StructPatternNode {
                             .collect::<Result<Box<[Self]>>>()?;
                         (all, single, multi)
                     }
-                    t => bail!("slice patterns can't match {t}"),
+                    _ => bail!("slice patterns can't match {type_predicate}"),
                 }
-            };
+            }};
         }
         let type_predicate = match type_predicate {
             Type::Ref { .. } => &type_predicate.lookup_ref(&ctx.env)?.clone(),
@@ -104,56 +109,81 @@ impl StructPatternNode {
                 let (all, head, suffix) = with_pref_suf!(all, head, suffix);
                 Self::SliceSuffix { all, head, suffix }
             }
-            StructurePattern::Slice { all, binds } => match &type_predicate {
-                Type::Array(et) => {
-                    let all = all.as_ref().map(|n| {
-                        ctx.env.bind_variable(scope, n, type_predicate.clone()).id
-                    });
-                    let binds = binds
-                        .iter()
-                        .map(|b| Self::compile_int(ctx, et, b, scope))
-                        .collect::<Result<Box<[Self]>>>()?;
-                    Self::Slice { tuple: false, all, binds }
-                }
-                t => bail!("slice patterns can't match {t}"),
-            },
-            StructurePattern::Tuple { all, binds } => match &type_predicate {
-                Type::Tuple(elts) => {
-                    if binds.len() != elts.len() {
-                        bail!("expected a tuple of length {}", elts.len())
+            StructurePattern::Slice { all, binds } => {
+                type_predicate.check_contains(
+                    &ctx.env,
+                    &Type::Array(Arc::new(Type::empty_tvar())),
+                )?;
+                match &type_predicate.with_deref(|t| t.cloned()) {
+                    Some(Type::Array(et)) => {
+                        let all = all.as_ref().map(|n| {
+                            ctx.env.bind_variable(scope, n, type_predicate.clone()).id
+                        });
+                        let binds = binds
+                            .iter()
+                            .map(|b| Self::compile_int(ctx, et, b, scope))
+                            .collect::<Result<Box<[Self]>>>()?;
+                        Self::Slice { tuple: false, all, binds }
                     }
-                    let all = all.as_ref().map(|n| {
-                        ctx.env.bind_variable(scope, n, type_predicate.clone()).id
-                    });
-                    let binds = elts
-                        .iter()
-                        .zip(binds.iter())
-                        .map(|(t, b)| Self::compile_int(ctx, t, b, scope))
-                        .collect::<Result<Box<[Self]>>>()?;
-                    Self::Slice { tuple: true, all, binds }
+                    _ => bail!("slice patterns can't match {type_predicate}"),
                 }
-                t => bail!("tuple patterns can't match {t}"),
-            },
-            StructurePattern::Variant { all, tag, binds } => match &type_predicate {
-                Type::Variant(ttag, elts) => {
-                    if ttag != tag {
-                        bail!("pattern cannot match type, tag mismatch {ttag} vs {tag}")
+            }
+            StructurePattern::Tuple { all, binds } => {
+                type_predicate.check_contains(
+                    &ctx.env,
+                    &Type::Tuple(Arc::from_iter(
+                        binds.iter().map(|_| Type::empty_tvar()),
+                    )),
+                )?;
+                match &type_predicate.with_deref(|t| t.cloned()) {
+                    Some(Type::Tuple(elts)) => {
+                        if binds.len() != elts.len() {
+                            bail!("expected a tuple of length {}", elts.len())
+                        }
+                        let all = all.as_ref().map(|n| {
+                            ctx.env.bind_variable(scope, n, type_predicate.clone()).id
+                        });
+                        let binds = elts
+                            .iter()
+                            .zip(binds.iter())
+                            .map(|(t, b)| Self::compile_int(ctx, t, b, scope))
+                            .collect::<Result<Box<[Self]>>>()?;
+                        Self::Slice { tuple: true, all, binds }
                     }
-                    if binds.len() != elts.len() {
-                        bail!("expected a variant with {} args", elts.len())
-                    }
-                    let all = all.as_ref().map(|n| {
-                        ctx.env.bind_variable(scope, n, type_predicate.clone()).id
-                    });
-                    let binds = elts
-                        .iter()
-                        .zip(binds.iter())
-                        .map(|(t, b)| Self::compile_int(ctx, t, b, scope))
-                        .collect::<Result<Box<[Self]>>>()?;
-                    Self::Variant { tag: tag.clone(), all, binds }
+                    _ => bail!("tuple patterns can't match {type_predicate}"),
                 }
-                t => bail!("variant patterns can't match {t}"),
-            },
+            }
+            StructurePattern::Variant { all, tag, binds } => {
+                type_predicate.check_contains(
+                    &ctx.env,
+                    &Type::Variant(
+                        tag.clone(),
+                        Arc::from_iter(binds.iter().map(|_| Type::empty_tvar())),
+                    ),
+                )?;
+                match &type_predicate.with_deref(|t| t.cloned()) {
+                    Some(Type::Variant(ttag, elts)) => {
+                        if ttag != tag {
+                            bail!(
+                                "pattern cannot match type, tag mismatch {ttag} vs {tag}"
+                            )
+                        }
+                        if binds.len() != elts.len() {
+                            bail!("expected a variant with {} args", elts.len())
+                        }
+                        let all = all.as_ref().map(|n| {
+                            ctx.env.bind_variable(scope, n, type_predicate.clone()).id
+                        });
+                        let binds = elts
+                            .iter()
+                            .zip(binds.iter())
+                            .map(|(t, b)| Self::compile_int(ctx, t, b, scope))
+                            .collect::<Result<Box<[Self]>>>()?;
+                        Self::Variant { tag: tag.clone(), all, binds }
+                    }
+                    _ => bail!("variant patterns can't match {type_predicate}"),
+                }
+            }
             StructurePattern::Struct { exhaustive, all, binds } => {
                 struct Ifo {
                     name: ArcStr,
@@ -162,7 +192,19 @@ impl StructPatternNode {
                     typ: Type,
                 }
                 match &type_predicate {
-                    Type::Struct(elts) => {
+                    Type::Struct(_) => (),
+                    _ if *exhaustive => type_predicate.check_contains(
+                        &ctx.env,
+                        &Type::Struct(Arc::from_iter(
+                            binds
+                                .iter()
+                                .map(|(name, _)| (name.clone(), Type::empty_tvar())),
+                        )),
+                    )?,
+                    _ => bail!("non exhaustive struct matches require type annotations"),
+                }
+                match &type_predicate.with_deref(|t| t.cloned()) {
+                    Some(Type::Struct(elts)) => {
                         let binds = binds
                             .iter()
                             .map(|(field, pat)| {
@@ -206,7 +248,7 @@ impl StructPatternNode {
                             .collect::<Result<Box<[(ArcStr, usize, Self)]>>>()?;
                         Self::Struct { all, binds }
                     }
-                    t => bail!("struct patterns can't match {t}"),
+                    _ => bail!("struct patterns can't match {type_predicate}"),
                 }
             }
         };

@@ -22,7 +22,7 @@ let is_visible = |row: i64, col: i64| uniq(
     (col <= (visible_range.column).max)
 );
 let columns = {
-    let cols = array::map(structure.columns, |(col, _): (string, v64)| col);
+    let cols = array::map(structure.columns, |(col, _)| col);
     array::push_front(cols, "Name")
 };
 let header = select array::len(columns) {

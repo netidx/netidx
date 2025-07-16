@@ -45,7 +45,6 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BScriptLambda<C, E> {
         ctx: &mut ExecCtx<C, E>,
         args: &mut [Node<C, E>],
     ) -> Result<()> {
-        self.typ.unbind_tvars();
         for (arg, FnArgType { typ, .. }) in args.iter_mut().zip(self.typ.args.iter()) {
             wrap!(arg, arg.typecheck(ctx))?;
             wrap!(arg, typ.check_contains(&ctx.env, &arg.typ()))?;
@@ -145,7 +144,6 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInLambda<C, E> {
             tc.check_contains(&ctx.env, &Type::TVar(tv.clone()))?
         }
         self.apply.typecheck(ctx, args)?;
-        self.typ.unbind_tvars();
         Ok(())
     }
 
@@ -327,6 +325,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Lambda<C, E> {
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
+        self.typ.unbind_tvars();
         let mut faux_args: Vec<Node<C, E>> = self
             .def
             .argspec
