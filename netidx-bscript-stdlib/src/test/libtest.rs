@@ -346,6 +346,39 @@ run!(mean, MEAN, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
+const OR_NEVER: &str = r#"
+{
+  let a = [null, 0];
+  or_never(array::iter(a))
+}
+"#;
+
+#[cfg(test)]
+run!(or_never, OR_NEVER, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(0)) => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const MAP_NULL: &str = r#"
+{
+  let a = [0, null, 0];
+  let nums = map_null(#to:1, array::iter(a));
+  sum(array::group(nums, |n, _| n == 3))
+}
+"#;
+
+#[cfg(test)]
+run!(map_null, MAP_NULL, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(1)) => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
 const ARRAY_MAP: &str = r#"
 {
   let a = [1, 2, 3, 4];

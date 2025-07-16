@@ -206,7 +206,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
             .map_err(|e| anyhow!("missing match cases {e}"))?;
         let mut atype = self.arg.node.typ().clone().normalize();
         for (pat, _) in self.arms.iter() {
-            if !pat.type_predicate.could_match(&ctx.env, &atype)? {
+            if !&pat.type_predicate.could_match(&ctx.env, &atype)? {
                 bail!(
                     "pattern {} will never match {}, unused match cases",
                     pat.type_predicate,

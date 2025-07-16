@@ -324,6 +324,22 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Lambda<C, E> {
         &self.typ
     }
 
+    /*
+    // for debugging
+    fn is_named_builtin(spec: &Expr, name: &str) -> bool {
+        match &spec.kind {
+            ExprKind::Lambda(a) => match &**a {
+                expr::Lambda { body: Either::Right(bname), .. }
+                    if &**bname == name =>
+                {
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    */
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         self.typ.unbind_tvars();
         let mut faux_args: Vec<Node<C, E>> = self
@@ -344,7 +360,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Lambda<C, E> {
         let mut f = wrap!(self, (self.def.init)(ctx, &faux_args, ExprId::new()))?;
         let res = wrap!(self, f.typecheck(ctx, &mut faux_args));
         f.typ().constrain_known();
-        f.typ().unbind_tvars();
+        self.typ.unbind_tvars();
         f.delete(ctx);
         res
     }

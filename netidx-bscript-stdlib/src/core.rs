@@ -674,6 +674,55 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Dbg {
     }
 }
 
+#[derive(Debug, Default)]
+struct OrNeverEv;
+
+impl EvalCached for OrNeverEv {
+    const NAME: &str = "or_never";
+    deftype!("core", "fn(['a, null]) -> 'a");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        from.0[0].as_ref().and_then(|v| match v {
+            Value::Null => None,
+            v => Some(v.clone()),
+        })
+    }
+}
+
+type OrNever = CachedArgs<OrNeverEv>;
+
+#[derive(Debug)]
+struct MapNull {
+    args: CachedVals,
+}
+
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for MapNull {
+    const NAME: &str = "map_null";
+    deftype!("core", "fn(#to:'a, ['a, null]) -> 'a");
+
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, from, _| Ok(Box::new(MapNull { args: CachedVals::new(from) })))
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Apply<C, E> for MapNull {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        let mut up = [false; 2];
+        self.args.update_diff(&mut up, ctx, from, event);
+        match (up, &self.args.0[..]) {
+            ([false, false], [_, _]) => None,
+            ([_, _], [Some(v), Some(Value::Null)]) => Some(v.clone()),
+            ([_, true], [_, Some(v)]) => Some(v.clone()),
+            ([_, _], _) => None,
+        }
+    }
+}
+
 pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
     ctx.register_builtin::<Queue>()?;
     ctx.register_builtin::<All>()?;
@@ -695,5 +744,7 @@ pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<
     ctx.register_builtin::<Uniq>()?;
     ctx.register_builtin::<ToError>()?;
     ctx.register_builtin::<Dbg>()?;
+    ctx.register_builtin::<OrNever>()?;
+    ctx.register_builtin::<MapNull>()?;
     Ok(literal!(include_str!("core.bs")))
 }

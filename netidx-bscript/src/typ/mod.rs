@@ -162,6 +162,9 @@ impl Type {
         hist: &mut FxHashMap<(usize, usize), bool>,
         t: &Self,
     ) -> Result<bool> {
+        if (self as *const Type) == (t as *const Type) {
+            return Ok(true);
+        }
         match (self, t) {
             (
                 Self::Ref { scope: s0, name: n0, .. },
@@ -215,6 +218,11 @@ impl Type {
             (Self::Array(t0), Self::Primitive(p)) if *p == BitFlags::from(Typ::Array) => {
                 t0.contains_int(env, hist, &Type::Primitive(BitFlags::all()))
             }
+            (Self::Tuple(t0), Self::Tuple(t1))
+                if t0.as_ptr().addr() == t1.as_ptr().addr() =>
+            {
+                Ok(true)
+            }
             (Self::Tuple(t0), Self::Tuple(t1)) => Ok(t0.len() == t1.len()
                 && t0
                     .iter()
@@ -222,6 +230,11 @@ impl Type {
                     .map(|(t0, t1)| t0.contains_int(env, hist, t1))
                     .collect::<Result<AndAc>>()?
                     .0),
+            (Self::Struct(t0), Self::Struct(t1))
+                if t0.as_ptr().addr() == t1.as_ptr().addr() =>
+            {
+                Ok(true)
+            }
             (Self::Struct(t0), Self::Struct(t1)) => {
                 Ok(t0.len() == t1.len() && {
                     // struct types are always sorted by field name
@@ -233,6 +246,12 @@ impl Type {
                         .collect::<Result<AndAc>>()?
                         .0
                 })
+            }
+            (Self::Variant(tg0, t0), Self::Variant(tg1, t1))
+                if tg0.as_ptr() == tg1.as_ptr()
+                    && t0.as_ptr().addr() == t1.as_ptr().addr() =>
+            {
+                Ok(true)
             }
             (Self::Variant(tg0, t0), Self::Variant(tg1, t1)) => Ok(tg0 == tg1
                 && t0.len() == t1.len()
@@ -259,6 +278,7 @@ impl Type {
             | (Self::Variant(_, _), Self::Struct(_))
             | (Self::Variant(_, _), Self::Primitive(_))
             | (Self::Variant(_, _), Self::Tuple(_)) => Ok(false),
+            (Self::TVar(t0), Self::TVar(t1)) if t0.addr() == t1.addr() => Ok(true),
             (Self::TVar(t0), tt1 @ Self::TVar(t1)) => {
                 #[derive(Debug)]
                 enum Act {
@@ -316,6 +336,11 @@ impl Type {
                     return t0.contains_int(env, hist, t1);
                 }
                 *t1.read().typ.write() = Some(t0.clone());
+                Ok(true)
+            }
+            (Self::Set(s0), Self::Set(s1))
+                if s0.as_ptr().addr() == s1.as_ptr().addr() =>
+            {
                 Ok(true)
             }
             (t0, Self::Set(s)) => Ok(s
@@ -1558,13 +1583,9 @@ impl Type {
             (Type::TVar(tv0), Type::TVar(tv1)) if tv0.name == tv1.name && tv0 == tv1 => {
                 Some(Type::TVar(tv0.clone()))
             }
-            (Type::TVar(tv), t) => {
-                tv.read().typ.read().as_ref().and_then(|tv| tv.merge(t))
-            }
-            (t, Type::TVar(tv)) => {
-                tv.read().typ.read().as_ref().and_then(|tv| t.merge(tv))
-            }
-            (Type::Tuple(_), _)
+            (Type::TVar(_), _)
+            | (_, Type::TVar(_))
+            | (Type::Tuple(_), _)
             | (_, Type::Tuple(_))
             | (Type::Struct(_), _)
             | (_, Type::Struct(_))

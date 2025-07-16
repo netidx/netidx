@@ -201,4 +201,8 @@ impl TVar {
         let addr = Arc::as_ptr(&self.read().typ).addr();
         would_cycle_inner(addr, t)
     }
+
+    pub(super) fn addr(&self) -> usize {
+        self.0.as_ptr().addr()
+    }
 }

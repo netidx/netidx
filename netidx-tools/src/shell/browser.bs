@@ -34,8 +34,9 @@ let widths = select array::len(columns) {
     _ => array::map(columns, |col| `Min(str::len(col)))
 };
 let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
-    let name = cell(line(str::basename(row)));
-    row(&select array::len(columns) {
+    let name = select str::basename(row) { null as _ => "", v => v };
+    let name = cell(line(name));
+    tui::table::row(&select array::len(columns) {
         1 => {
             let path = select is_visible(i, 0) { true => "[row]", false => "" };
             &[ name, cell(line("[net::subscribe(path)]")) ]
@@ -52,13 +53,6 @@ let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
         })
     })
 });
-let table = table(
-    #header:&header,
-    #flex:&`Center,
-    #widths: &widths,
-    #selected_cell: &selected,
-    &rows
-);
 let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(e) => select e.code {
         e@ `Left => {
@@ -97,4 +91,13 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     },
     _ => `Continue
 };
-input_handler(#handle: &handle_event, &table)
+input_handler(
+    #handle: &handle_event,
+    &table(
+        #header:&header,
+        #flex:&`Center,
+        #widths: &widths,
+        #selected_cell: &selected,
+        &rows
+    )
+)
