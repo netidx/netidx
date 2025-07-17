@@ -6,10 +6,10 @@ let path = "/";
 dbg(path);
 let structure = net::list_table(path);
 dbg(structure);
-let mode = uniq(select structure.columns {
+let mode = select uniq(structure.columns) {
     [] => `List,
     _ => `Table
-});
+};
 let selected = { x: 0, y: 0 };
 dbg(selected);
 let visible_range = {

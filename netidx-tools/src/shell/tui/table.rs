@@ -17,7 +17,6 @@ use ratatui::{
     widgets::{Cell, Row, Table, TableState},
     Frame,
 };
-use std::mem;
 use tokio::try_join;
 
 #[derive(Debug, Clone, Copy)]
@@ -26,7 +25,7 @@ struct SelectedV((usize, usize));
 impl FromValue for SelectedV {
     fn from_value(v: Value) -> Result<Self> {
         let [(_, x), (_, y)] = v.cast_to::<[(ArcStr, usize); 2]>()?;
-        Ok(Self((x, y)))
+        Ok(Self((y, x)))
     }
 }
 
@@ -148,6 +147,7 @@ pub(super) struct TableW {
 
 impl TableW {
     pub(super) async fn compile(bs: BSHandle, v: Value) -> Result<TuiW> {
+        dbg!("compile table");
         let [(_, cell_highlight_style), (_, column_highlight_style), (_, column_spacing), (_, flex), (_, footer), (_, header), (_, highlight_spacing), (_, highlight_symbol), (_, row_highlight_style), (_, rows), (_, selected), (_, selected_cell), (_, selected_column), (_, style), (_, widths)] =
             v.cast_to::<[(ArcStr, u64); 15]>().context("table fields")?;
         let (
@@ -229,10 +229,10 @@ impl TableW {
         if let Some(Some(s)) = dbg!(t.selected_cell.t) {
             t.state = t.state.with_selected_cell(s.0);
         }
-        if let Some(Some(s)) = t.selected_column.t {
+        if let Some(Some(s)) = dbg!(t.selected_column.t) {
             t.state = t.state.with_selected_column(s)
         }
-        if let Some(Some(s)) = t.selected.t {
+        if let Some(Some(s)) = dbg!(t.selected.t) {
             t.state = t.state.with_selected(s)
         }
         Ok(Box::new(t))
@@ -290,17 +290,17 @@ impl TuiWidget for TableW {
         row_highlight_style.update(id, &v).context("table update highlight_style")?;
         highlight_symbol.update(id, &v).context("table update highlight_symbol")?;
         if let Some(s) = selected.update(id, &v).context("table update selected")? {
-            *state = mem::take(state).with_selected(*s);
+            *state = state.clone().with_selected(*s);
         }
         if let Some(s) =
             selected_column.update(id, &v).context("table update selected_column")?
         {
-            *state = mem::take(state).with_selected_column(*s)
+            *state = state.clone().with_selected_column(*s)
         }
         if let Some(s) =
             selected_cell.update(id, &v).context("table update selected_cell")?
         {
-            *state = mem::take(state).with_selected_cell(s.map(|s| s.0))
+            *state = state.clone().with_selected_cell(s.map(|s| s.0))
         }
         style.update(id, &v).context("table update style")?;
         widths.update(id, &v).context("table update widths")?;
@@ -388,7 +388,7 @@ impl TuiWidget for TableW {
         if let Some(Some(s)) = &style.t {
             table = table.style(s.0);
         }
-        frame.render_stateful_widget(table, rect, state);
+        frame.render_stateful_widget(table, rect, dbg!(state));
         Ok(())
     }
 }

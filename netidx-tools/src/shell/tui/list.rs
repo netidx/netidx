@@ -12,7 +12,6 @@ use ratatui::{
     widgets::{List, ListState},
     Frame,
 };
-use std::mem;
 use tokio::try_join;
 
 pub(super) struct ListW {
@@ -101,10 +100,10 @@ impl TuiWidget for ListW {
             .update(id, &v)
             .context("list update repeat_highlight_symbol")?;
         if let Some(Some(s)) = scroll.update(id, &v).context("list update scroll")? {
-            *state = mem::take(state).with_offset(*s as usize);
+            *state = state.clone().with_offset(*s as usize);
         }
         if let Some(s) = selected.update(id, &v).context("list update selected")? {
-            *state = mem::take(state).with_selected(s.map(|s| s as usize));
+            *state = state.clone().with_selected(s.map(|s| s as usize));
         }
         style.update(id, &v).context("list update style")?;
         Ok(())
