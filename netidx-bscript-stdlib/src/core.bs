@@ -5,6 +5,7 @@ type Float = [ f32, f64 ];
 type Real = [ Float, decimal ];
 type Number = [ Int, Real ];
 type NotNull = [Number, string, error, array, datetime, duration];
+type Log = [`Trace, `Debug, `Info, `Warn, `Error];
 
 /// return the first argument when all arguments are equal, otherwise return nothing
 pub let all = |@args| 'all;
@@ -68,8 +69,16 @@ pub let queue = |#clock, v| 'queue;
 /// ignore updates to any argument and never return anything
 pub let never = |@args| 'never;
 
-/// when v updates, return it, but also print it along with the position of the expression
-pub let dbg = |v| 'dbg;
+/// when v updates, return it, but also print it along
+/// with the position of the expression to the specified sink
+pub let dbg = |#dest:[`Stdout, `Stderr, Log] = `Stderr, v| 'dbg;
+
+/// print a log message to the specified log level using the rust log
+/// crate. Where the message goes, if anywhere, depends on which
+/// logger is in use and how it is configured.
+///
+/// Unlike dbg, log does not also return the value
+pub let log = |#level: Log = `Info, msg| 'log;
 
 /// This is the toplevel error sink for the ? operator. If no other lexical binding of errors
 /// exists closer to the error site then errors handled by ? will come here.

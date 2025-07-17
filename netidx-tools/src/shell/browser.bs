@@ -3,8 +3,11 @@ use tui::table;
 use tui::input_handler;
 
 let path = "/";
+dbg(path);
 let structure = net::list_table(path);
+dbg(structure);
 let selected = { x: 0, y: 0 };
+dbg(selected);
 let visible_range = {
     row: {
         min: max(0, selected.y - size.rows),
@@ -39,7 +42,7 @@ let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
     tui::table::row(&select array::len(columns) {
         1 => {
             let path = select is_visible(i, 0) { true => "[row]", false => "" };
-            [ name, cell(line("[net::subscribe(path)]")) ]
+            [ name, cell(line("[any("#VAL", net::subscribe(path))]")) ]
         },
         _ => array::map(array::enumerate(columns), |(j, col)| select j {
             0 => name,
@@ -48,7 +51,7 @@ let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
                     true => "[row]/[col]",
                     false => ""
                 };
-                cell(line("[net::subscribe(path)]"))
+                cell(line("[any("#VAL", net::subscribe(path))]"))
             }
         })
     })
@@ -56,31 +59,31 @@ let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
 let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(e) => select e.code {
         e@ `Left => {
-            selected <- { selected with x: e ~ max(0, selected.x - 1) };
+            selected <- e ~ { selected with x: max(0, selected.x - 1) };
             `Stop
         },
         e@ `Right => {
-            let x = e ~ min(array::len(columns) - 1, selected.x + 1);
-            selected <- { selected with x };
+            let x = min(dbg(array::len(columns) - 1), selected.x + 1);
+            selected <- e ~ { selected with x };
             `Stop
         },
         e@ `Down => {
-            let y = e ~ min(array::len(structure.rows) - 1, selected.y + 1);
-            selected <- { selected with y };
+            let y = min(array::len(structure.rows) - 1, selected.y + 1);
+            selected <- e ~ { selected with y };
             `Stop
         },
         e@ `Up => {
-            selected <- { selected with y: e ~ max(0, selected.y - 1) };
+            selected <- e ~ { selected with y: max(0, selected.y - 1) };
             `Stop
         },
-        e@ `Enter => select array::len(columns) {
+        e@ `Enter => select e ~ array::len(columns) {
             1 => `Stop,
             _ => {
-                path <- (structure.rows)[e ~ selected.y]?;
+                path <- e ~ (structure.rows)[selected.y]?;
                 `Stop
             }
         },
-        e@ `Backspace => select str::dirname(path) {
+        e@ `Backspace => select e ~ str::dirname(path) {
             null as _ => `Stop,
             s => {
                 path <- s;
@@ -94,6 +97,7 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
 input_handler(
     #handle: &handle_event,
     &table(
+        #cell_highlight_style:&style(#bg:`Yellow),
         #header:&header,
         #flex:&`Center,
         #widths: &widths,

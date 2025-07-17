@@ -1,13 +1,16 @@
 use crate::{deftype, CachedArgs, CachedVals, EvalCached};
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
-use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
 use netidx::subscriber::Value;
 use netidx_bscript::{
-    err, errf, expr::ExprId, node::genn, typ::FnType, Apply, BindId, BuiltIn,
-    BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
+    err, errf,
+    expr::{Expr, ExprId, ModPath},
+    node::genn,
+    typ::FnType,
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
 };
+use netidx_value::FromValue;
 use std::{collections::VecDeque, sync::Arc};
 use triomphe::Arc as TArc;
 
@@ -648,15 +651,59 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Never {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Level {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl FromValue for Level {
+    fn from_value(v: Value) -> Result<Self> {
+        match &*v.cast_to::<ArcStr>()? {
+            "Trace" => Ok(Self::Trace),
+            "Debug" => Ok(Self::Debug),
+            "Info" => Ok(Self::Info),
+            "Warn" => Ok(Self::Warn),
+            "Error" => Ok(Self::Error),
+            v => bail!("invalid log level {v}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LogDest {
+    Stdout,
+    Stderr,
+    Log(Level),
+}
+
+impl FromValue for LogDest {
+    fn from_value(v: Value) -> Result<Self> {
+        match &*v.clone().cast_to::<ArcStr>()? {
+            "Stdout" => Ok(Self::Stdout),
+            "Stderr" => Ok(Self::Stderr),
+            _ => Ok(Self::Log(v.cast_to()?)),
+        }
+    }
+}
+
 #[derive(Debug)]
-struct Dbg(SourcePosition);
+struct Dbg {
+    spec: Expr,
+    dest: LogDest,
+}
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Dbg {
     const NAME: &str = "dbg";
-    deftype!("core", "fn('a) -> 'a");
+    deftype!("core", "fn(?#dest:[`Stdout, `Stderr, Log], 'a) -> 'a");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|_, _, _, from, _| Ok(Box::new(Dbg(from[0].spec().pos))))
+        Arc::new(|_, _, _, from, _| {
+            Ok(Box::new(Dbg { spec: from[1].spec().clone(), dest: LogDest::Stderr }))
+        })
     }
 }
 
@@ -667,10 +714,67 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Dbg {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        from[0].update(ctx, event).map(|v| {
-            eprintln!("{}: {v}", self.0);
+        if let Some(v) = from[0].update(ctx, event)
+            && let Ok(d) = v.cast_to::<LogDest>()
+        {
+            self.dest = d;
+        }
+        from[1].update(ctx, event).map(|v| {
+            match self.dest {
+                LogDest::Stderr => eprintln!("{}({}): {v}", self.spec.pos, self.spec),
+                LogDest::Stdout => println!("{}({}): {v}", self.spec.pos, self.spec),
+                LogDest::Log(level) => match level {
+                    Level::Trace => log::trace!("{}({}): {v}", self.spec.pos, self.spec),
+                    Level::Debug => log::debug!("{}({}): {v}", self.spec.pos, self.spec),
+                    Level::Info => log::info!("{}({}): {v}", self.spec.pos, self.spec),
+                    Level::Warn => log::warn!("{}({}): {v}", self.spec.pos, self.spec),
+                    Level::Error => log::error!("{}({}): {v}", self.spec.pos, self.spec),
+                },
+            };
             v
         })
+    }
+}
+
+#[derive(Debug)]
+struct Log {
+    scope: ModPath,
+    dest: Level,
+}
+
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Log {
+    const NAME: &str = "log";
+    deftype!("core", "fn(?#level:Log, 'a) -> 'a");
+
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, scope, _, _| {
+            Ok(Box::new(Self { scope: scope.clone(), dest: Level::Info }))
+        })
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Log {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        if let Some(v) = from[0].update(ctx, event)
+            && let Ok(d) = v.cast_to::<Level>()
+        {
+            self.dest = d;
+        }
+        if let Some(v) = from[1].update(ctx, event) {
+            match self.dest {
+                Level::Trace => log::trace!("{}: {v}", self.scope),
+                Level::Debug => log::debug!("{}: {v}", self.scope),
+                Level::Info => log::info!("{}: {v}", self.scope),
+                Level::Warn => log::warn!("{}: {v}", self.scope),
+                Level::Error => log::error!("{}: {v}", self.scope),
+            }
+        }
+        None
     }
 }
 
@@ -695,5 +799,6 @@ pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<
     ctx.register_builtin::<Uniq>()?;
     ctx.register_builtin::<ToError>()?;
     ctx.register_builtin::<Dbg>()?;
+    ctx.register_builtin::<Log>()?;
     Ok(literal!(include_str!("core.bs")))
 }
