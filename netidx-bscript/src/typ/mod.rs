@@ -492,7 +492,7 @@ impl Type {
     fn union_int<C: Ctx, E: UserEvent>(
         &self,
         env: &Env<C, E>,
-        hist: &mut FxHashSet<(usize, usize)>,
+        hist: &mut FxHashMap<(usize, usize), Type>,
         t: &Self,
     ) -> Result<Self> {
         match (self, t) {
@@ -504,20 +504,28 @@ impl Type {
                 let t0 = tr.lookup_ref(env)?;
                 let t0_addr = (t0 as *const Type).addr();
                 let t_addr = (t as *const Type).addr();
-                if !hist.insert((t0_addr, t_addr)) {
-                    Ok(tr.clone())
-                } else {
-                    t0.union_int(env, hist, t)
+                match hist.get(&(t0_addr, t_addr)) {
+                    Some(t) => Ok(t.clone()),
+                    None => {
+                        hist.insert((t0_addr, t_addr), tr.clone());
+                        let r = t0.union_int(env, hist, t)?;
+                        hist.insert((t0_addr, t_addr), r.clone());
+                        Ok(r)
+                    }
                 }
             }
             (t, tr @ Type::Ref { .. }) => {
                 let t1 = tr.lookup_ref(env)?;
                 let t1_addr = (t1 as *const Type).addr();
                 let t_addr = (t as *const Type).addr();
-                if !hist.insert((t_addr, t1_addr)) {
-                    Ok(tr.clone())
-                } else {
-                    t.union_int(env, hist, t1)
+                match hist.get(&(t_addr, t1_addr)) {
+                    Some(t) => Ok(t.clone()),
+                    None => {
+                        hist.insert((t_addr, t1_addr), tr.clone());
+                        let r = t.union_int(env, hist, t1)?;
+                        hist.insert((t_addr, t1_addr), r.clone());
+                        Ok(r)
+                    }
                 }
             }
             (Type::Bottom, t) | (t, Type::Bottom) => Ok(t.clone()),
@@ -629,7 +637,7 @@ impl Type {
 
     pub fn union<C: Ctx, E: UserEvent>(&self, env: &Env<C, E>, t: &Self) -> Result<Self> {
         thread_local! {
-            static HIST: RefCell<FxHashSet<(usize, usize)>> = RefCell::new(HashSet::default());
+            static HIST: RefCell<FxHashMap<(usize, usize), Type>> = RefCell::new(HashMap::default());
         }
         HIST.with_borrow_mut(|hist| {
             hist.clear();
