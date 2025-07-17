@@ -1130,6 +1130,22 @@ run!(late_binding2, LATE_BINDING2, |v: Result<&Value>| match v {
 });
 
 #[cfg(test)]
+const LATE_BINDING3: &str = r#"
+{
+    let f: fn(i64) -> i64 = never();
+    let res = f(1);
+    f <- |i: i64| i + 1;
+    res
+}
+"#;
+
+#[cfg(test)]
+run!(late_binding3, LATE_BINDING3, |v: Result<&Value>| match v {
+    Ok(Value::I64(2)) => true,
+    _ => false,
+});
+
+#[cfg(test)]
 const RECTYPES0: &str = r#"
 {
   type List = [

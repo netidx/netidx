@@ -215,7 +215,7 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
         let mut rf = (f.init)(ctx, &self.ref_args, self.top_id)?;
         // some nodes, such as structwith, depend on the typecheck pass to
         // resolve things like field indexes. This should always succeed.
-        rf.typecheck(ctx, &mut self.ref_args)?;
+        let _ = rf.typecheck(ctx, &mut self.ref_args);
         self.function = Some((f.id, rf));
         Ok(())
     }
@@ -263,7 +263,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
                     None => error!("function {id:?} is no longer callable"),
                     Some(lb) => {
                         if let Err(e) = self.bind(ctx, lb, event, &mut set) {
-                            error!("failed to bind to lambda {e}")
+                            error!("failed to bind to lambda {e:?}")
                         }
                         true
                     }
@@ -282,6 +282,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
             }
             Some((_, f)) => {
                 let init = mem::replace(&mut event.init, true);
+                update_args!(true);
+                for (id, v) in mem::take(&mut self.queued) {
+                    set_or_queue!(id, v)
+                }
                 f.refs(&mut |id: BindId| {
                     if let Entry::Vacant(e) = event.variables.entry(id) {
                         if let Some(v) = ctx.cached.get(&id) {
@@ -290,10 +294,6 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
                         }
                     }
                 });
-                update_args!(true);
-                for (id, v) in mem::take(&mut self.queued) {
-                    set_or_queue!(id, v)
-                }
                 let res = f.update(ctx, &mut self.ref_args, event);
                 event.init = init;
                 for id in set {
