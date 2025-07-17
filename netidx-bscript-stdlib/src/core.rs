@@ -351,7 +351,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Filter<C, E> {
                 let fid = BindId::new();
                 let fnode = genn::reference(ctx, fid, fnode.typ().clone(), top_id);
                 let typ = TArc::new(typ.clone());
-                let pred = genn::apply(ctx, fnode, vec![xn], typ.clone(), top_id);
+                let pred = genn::apply(fnode, vec![xn], typ.clone(), top_id);
                 let queue = VecDeque::new();
                 let out = BindId::new();
                 ctx.user.ref_var(out, top_id);
@@ -720,7 +720,6 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Dbg {
             self.dest = d;
         }
         from[1].update(ctx, event).map(|v| {
-            eprintln!("dbg saw {v}");
             match self.dest {
                 LogDest::Stderr => eprintln!("{} dbg({}): {v}", self.spec.pos, self.spec),
                 LogDest::Stdout => println!("{} dbg({}): {v}", self.spec.pos, self.spec),

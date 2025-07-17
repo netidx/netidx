@@ -66,21 +66,21 @@ let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
 let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(e) => select e.code {
         e@ `Left => {
-            selected <- e ~ { selected with x: max(0, selected.x - 1) };
+            selected <- dbg(e) ~ { selected with x: max(0, selected.x - 1) };
             `Stop
         },
         e@ `Right => {
             let x = min(array::len(columns) - 1, selected.x + 1);
-            selected <- e ~ { selected with x };
+            selected <- dbg(e) ~ { selected with x };
             `Stop
         },
         e@ `Down => {
-            let y = min(array::len(structure.rows) - 1, selected.y + 1);
-            selected <- e ~ { selected with y };
+            //let y = min(array::len(structure.rows) - 1, e ~ (selected.y + 1));
+            selected <- dbg(e) ~ { selected with y: selected.y + 1 };
             `Stop
         },
         e@ `Up => {
-            selected <- e ~ { selected with y: max(0, selected.y - 1) };
+            selected <- dbg(e) ~ { selected with y: max(0, selected.y - 1) };
             `Stop
         },
         e@ `Enter => select e ~ mode {
