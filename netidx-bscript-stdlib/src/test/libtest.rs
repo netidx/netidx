@@ -346,14 +346,6 @@ run!(mean, MEAN, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
-const OR_NEVER: &str = r#"
-{
-  let a = [null, 0];
-  or_never(array::iter(a))
-}
-"#;
-
-#[cfg(test)]
 const ARRAY_MAP: &str = r#"
 {
   let a = [1, 2, 3, 4];
