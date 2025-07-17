@@ -723,6 +723,103 @@ run!(structwith1, STRUCTWITH1, |v: Result<&Value>| match v {
     _ => false,
 });
 
+const STRUCTWITH2: &str = r#"
+{
+  let selected = { x: 0, y: 0 };
+  let y = 1;
+  { selected with y }
+}
+"#;
+
+run!(structwith2, STRUCTWITH2, |v: Result<&Value>| match v {
+    Ok(v) => match v.clone().cast_to::<[(ArcStr, i64); 2]>() {
+        Ok([(s0, 0), (s1, 1)]) if &*s0 == "x" && &*s1 == "y" => true,
+        _ => false,
+    },
+    _ => false,
+});
+
+const STRUCTWITH3: &str = r#"
+{
+  let selected = { x: 0, y: 0 };
+  { selected with y: selected.y + 1 }
+}
+"#;
+
+run!(structwith3, STRUCTWITH3, |v: Result<&Value>| match v {
+    Ok(v) => match v.clone().cast_to::<[(ArcStr, i64); 2]>() {
+        Ok([(s0, 0), (s1, 1)]) if &*s0 == "x" && &*s1 == "y" => true,
+        _ => false,
+    },
+    _ => false,
+});
+
+const STRUCTWITH4: &str = r#"
+{
+    let selected = { x: 0, y: 0 };
+    let handle = |e: [`Up, `Down, `Left, `Right]| -> `Stop select e {
+        e@ `Left => {
+            selected <- e ~ { selected with x: selected.x - 1 };
+            `Stop
+        },
+        e@ `Right => {
+            selected <- e ~ { selected with x: selected.x + 1 };
+            `Stop
+        },
+        e@ `Down => {
+            selected <- e ~ { selected with y: selected.y + 1 };
+            `Stop
+        },
+        e@ `Up => {
+            selected <- e ~ { selected with y: selected.y - 1 };
+            `Stop
+        }
+    };
+    handle(array::iter([`Up, `Down, `Left, `Right]));
+    (array::group(selected, |n, _| n == 5))[1..]
+}
+"#;
+
+run!(structwith4, STRUCTWITH4, |v: Result<&Value>| match v {
+    Ok(v) => match v.clone().cast_to::<[[(ArcStr, i64); 2]; 4]>() {
+        Ok(
+            [[(f00, 0), (f01, -1)], [(f10, 0), (f11, 0)], [(f20, -1), (f21, 0)], [(f30, 0), (f31, 0)]],
+        ) if f00 == "x"
+            && f01 == "y"
+            && f10 == f00
+            && f20 == f00
+            && f30 == f00
+            && f11 == f01
+            && f21 == f01
+            && f31 == f01 =>
+            true,
+        _ => false,
+    },
+    _ => false,
+});
+
+const STRUCTWITH5: &str = r#"
+{
+    let selected = { x: 0, y: 0 };
+    let handle = |e: [`Up]| -> `Stop select e {
+        e@ `Up => {
+            selected <- e ~ { selected with y: selected.y - 1 };
+            `Stop
+        }
+    };
+    handle(array::iter([`Up]));
+    (array::group(selected, |n, _| n == 2))[1..]
+}
+"#;
+
+run!(structwith5, STRUCTWITH5, |v: Result<&Value>| match v {
+    Ok(v) => match v.clone().cast_to::<[[(ArcStr, i64); 2]; 1]>() {
+        Ok([[(f00, 0), (f01, -1)]]) if f00 == "x" && f01 == "y" => true,
+        _ => false,
+    },
+    _ => false,
+});
+
 const NESTEDMATCH0: &str = r#"
 {
   type T = { foo: (string, i64, f64), bar: i64, baz: f64 };

@@ -1,0 +1,32 @@
+use tui;
+use tui::text;
+use tui::input_handler;
+
+let selected = { x: 0, y: 0 };
+dbg(selected);
+let handle_event = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(e) => select e.code {
+        e@ `Left => {
+            selected <- e ~ { selected with x: selected.x - 1 };
+            `Stop
+        },
+        e@ `Right => {
+            selected <- e ~ { selected with x: selected.x + 1 };
+            `Stop
+        },
+        e@ `Down => {
+            selected <- e ~ { selected with y: selected.y + 1 };
+            `Stop
+        },
+        e@ `Up => {
+            selected <- e ~ { selected with y: selected.y - 1 };
+            `Stop
+        },
+        _ => `Continue
+    },
+    _ => `Continue
+};
+input_handler(
+    #handle: &handle_event,
+    &text(&"[selected]")
+)

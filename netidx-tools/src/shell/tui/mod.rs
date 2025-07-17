@@ -446,6 +446,26 @@ fn set_size(bs: &BSHandle, id: BindId, (col, row): (u16, u16)) -> Result<()> {
     bs.set(id, v)
 }
 
+fn set_mouse(enable: bool) {
+    use std::io::stdout;
+    let mut stdout = stdout();
+    if enable {
+        if let Err(e) = stdout.execute(EnableMouseCapture) {
+            error!("could not enable mouse capture {e:?}")
+        }
+        if let Err(e) = stdout.execute(EnableFocusChange) {
+            error!("could not enable focus change {e:?}")
+        }
+    } else {
+        if let Err(e) = stdout.execute(DisableMouseCapture) {
+            error!("could not disable mouse capture {e:?}")
+        }
+        if let Err(e) = stdout.execute(DisableFocusChange) {
+            error!("could not disable mouse capture {e:?}")
+        }
+    }
+}
+
 async fn run(
     bs: BSHandle,
     env: Env<BSCtx, NoUserEvent>,
@@ -453,13 +473,14 @@ async fn run(
     mut to_rx: mpsc::Receiver<ToTui>,
     from_tx: mpsc::UnboundedSender<FromTui>,
 ) -> Result<()> {
-    use std::io::stdout;
     let mut terminal = ratatui::init();
-    let mut stdout = stdout();
-    stdout.execute(EnableMouseCapture)?;
-    stdout.execute(EnableFocusChange)?;
     let size = get_id(&env, &["tui", "size"].into())?;
     let event = get_id(&env, &["tui", "event"].into())?;
+    let mut mouse: TRef<bool> =
+        TRef::new(bs.compile_ref(get_id(&env, &["tui", "mouse"].into())?).await?)?;
+    if let Some(b) = mouse.t {
+        set_mouse(b)
+    }
     set_size(&bs, size, terminal::size()?)?;
     let mut events = EventStream::new().fuse();
     let mut root: TuiW = Box::new(EmptyW);
@@ -474,6 +495,9 @@ async fn run(
                 None => break oneshot::channel().0,
                 Some(ToTui::Stop(tx)) => break tx,
                 Some(ToTui::Update(id, v)) => {
+                    if let Ok(Some(v)) = mouse.update(id, &v) {
+                        set_mouse(*v)
+                    }
                     if id == root_exp.id {
                         match compile(bs.clone(), v).await {
                             Err(e) => error!("invalid widget specification {e:?}"),
@@ -513,8 +537,9 @@ async fn run(
             }
         }
     };
-    stdout.execute(DisableMouseCapture)?;
-    stdout.execute(DisableFocusChange)?;
+    if let Some(true) = mouse.t {
+        set_mouse(false)
+    }
     ratatui::restore();
     let _ = notify.send(());
     Ok(())

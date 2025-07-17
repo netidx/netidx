@@ -149,5 +149,12 @@ pub mod table;
 pub mod calendar;
 pub mod canvas;
 
+/// this will be set to the current terminal size
 let size: { columns: i64, rows: i64 } = never();
-let event: input_handler::Event = never()
+
+/// this will receive all input events even if no input_handler is created
+let event: input_handler::Event = never();
+
+/// set this to true if your terminal supports mouse interaction and you want to
+/// enable it
+let mouse: bool = never()

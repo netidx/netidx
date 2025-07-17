@@ -147,7 +147,6 @@ pub(super) struct TableW {
 
 impl TableW {
     pub(super) async fn compile(bs: BSHandle, v: Value) -> Result<TuiW> {
-        dbg!("compile table");
         let [(_, cell_highlight_style), (_, column_highlight_style), (_, column_spacing), (_, flex), (_, footer), (_, header), (_, highlight_spacing), (_, highlight_symbol), (_, row_highlight_style), (_, rows), (_, selected), (_, selected_cell), (_, selected_column), (_, style), (_, widths)] =
             v.cast_to::<[(ArcStr, u64); 15]>().context("table fields")?;
         let (
@@ -225,15 +224,6 @@ impl TableW {
         }
         if let Some(v) = t.rows_ref.last.take() {
             t.set_rows(v).await?;
-        }
-        if let Some(Some(s)) = dbg!(t.selected_cell.t) {
-            t.state = t.state.with_selected_cell(s.0);
-        }
-        if let Some(Some(s)) = dbg!(t.selected_column.t) {
-            t.state = t.state.with_selected_column(s)
-        }
-        if let Some(Some(s)) = dbg!(t.selected.t) {
-            t.state = t.state.with_selected(s)
         }
         Ok(Box::new(t))
     }
@@ -347,9 +337,9 @@ impl TuiWidget for TableW {
             highlight_symbol,
             rows_ref: _,
             rows,
-            selected: _,
-            selected_column: _,
-            selected_cell: _,
+            selected,
+            selected_column,
+            selected_cell,
             style,
             widths,
             state,
@@ -388,7 +378,16 @@ impl TuiWidget for TableW {
         if let Some(Some(s)) = &style.t {
             table = table.style(s.0);
         }
-        frame.render_stateful_widget(table, rect, dbg!(state));
+        if let Some(Some(s)) = selected_cell.t {
+            *state = state.clone().with_selected_cell(s.0);
+        }
+        if let Some(Some(s)) = selected_column.t {
+            *state = state.clone().with_selected_column(s)
+        }
+        if let Some(Some(s)) = selected.t {
+            *state = state.clone().with_selected(s)
+        }
+        frame.render_stateful_widget(table, rect, state);
         Ok(())
     }
 }

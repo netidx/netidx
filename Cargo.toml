@@ -4,10 +4,10 @@ opt-level = 3
 lto = true
 debug = false
 
-[profile.dev]
-opt-level = "s"
-lto = "thin"
-debug = true
+#[profile.dev]
+#opt-level = "s"
+#lto = "thin"
+#debug = true
 
 [workspace.dependencies]
 anyhow = "1"

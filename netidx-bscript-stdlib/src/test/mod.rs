@@ -79,7 +79,8 @@ macro_rules! run {
                                         netidx_bscript::rt::RtEvent::Env(_) => (),
                                         netidx_bscript::rt::RtEvent::Updated(id, v) => {
                                             assert_eq!(id, eid);
-                                            assert!($pred(dbg!(Ok(&v))));
+                                            eprintln!("{v}");
+                                            assert!($pred(Ok(&v)));
                                             return Ok(());
                                         }
                                     }

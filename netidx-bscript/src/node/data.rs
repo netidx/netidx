@@ -135,7 +135,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
             .update(ctx, event)
             .map(|v| match v {
                 Value::Array(a) => {
-                    self.current = Some(a.clone());
+                    self.current = Some(a);
                     true
                 }
                 _ => false,
