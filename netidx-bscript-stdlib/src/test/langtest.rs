@@ -956,6 +956,26 @@ run!(variants0, VARIANTS0, |v: Result<&Value>| match v {
 });
 
 #[cfg(test)]
+const VARIANTS1: &str = r#"
+{
+    let mode = select 0 {
+        0 => `List,
+        _ => `Table
+    };
+    select mode {
+        `List => 0,
+        `Table => 1
+    }
+}
+"#;
+
+#[cfg(test)]
+run!(variants1, VARIANTS1, |v: Result<&Value>| match v {
+    Ok(Value::I64(0)) => true,
+    _ => false,
+});
+
+#[cfg(test)]
 const LATE_BINDING0: &str = r#"
 {
   type T = { foo: string, bar: i64, f: fn(#x: i64, #y: i64) -> i64 };

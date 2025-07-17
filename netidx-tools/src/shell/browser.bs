@@ -6,6 +6,10 @@ let path = "/";
 dbg(path);
 let structure = net::list_table(path);
 dbg(structure);
+let mode = uniq(select structure.columns {
+    [] => `List,
+    _ => `Table
+});
 let selected = { x: 0, y: 0 };
 dbg(selected);
 let visible_range = {
@@ -26,25 +30,28 @@ let is_visible = |row: i64, col: i64| uniq(
 );
 let columns = {
     let cols = array::map(structure.columns, |(col, _)| col);
-    array::push_front(cols, "Name")
+    select cols {
+        [] => ["Name", "Value"],
+        cols => array::push_front(cols, "Name")
+    }
 };
-let header = select array::len(columns) {
-    1 => row(&[cell(line("Name")), cell(line("Value"))]),
-    _ => row(&array::map(columns, |col| cell(line(col))))
+let header = select mode {
+    `List => row(&[cell(line("Name")), cell(line("Value"))]),
+    `Table => row(&array::map(columns, |col| cell(line(col))))
 };
-let widths: Array<Constraint> = select array::len(columns) {
-    1 => [`Percentage(20), `Percentage(80)],
-    _ => array::map(columns, |col| `Min(str::len(col)))
+let widths: Array<Constraint> = select mode {
+    `List => [`Percentage(20), `Percentage(80)],
+    `Table => array::map(columns, |col| `Min(str::len(col)))
 };
 let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
     let name = select str::basename(row) { null as _ => "", s => s };
     let name = cell(line(name));
-    tui::table::row(&select array::len(columns) {
-        1 => {
+    tui::table::row(&select mode {
+        `List => {
             let path = select is_visible(i, 0) { true => "[row]", false => "" };
             [ name, cell(line("[any("#VAL", net::subscribe(path))]")) ]
         },
-        _ => array::map(array::enumerate(columns), |(j, col)| select j {
+        `Table => array::map(array::enumerate(columns), |(j, col)| select j {
             0 => name,
             j => {
                 let path = select is_visible(i, j) {
@@ -63,7 +70,7 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
             `Stop
         },
         e@ `Right => {
-            let x = min(dbg(array::len(columns) - 1), selected.x + 1);
+            let x = min(array::len(columns) - 1, selected.x + 1);
             selected <- e ~ { selected with x };
             `Stop
         },
@@ -76,9 +83,9 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
             selected <- e ~ { selected with y: max(0, selected.y - 1) };
             `Stop
         },
-        e@ `Enter => select e ~ array::len(columns) {
-            1 => `Stop,
-            _ => {
+        e@ `Enter => select e ~ mode {
+            `List => `Stop,
+            `Table => {
                 path <- e ~ (structure.rows)[selected.y]?;
                 `Stop
             }

@@ -498,8 +498,10 @@ impl StructPatternNode {
             Self::Struct { all: _, binds } => {
                 binds.iter().any(|(_, _, p)| p.is_refutable())
             }
-            Self::Variant { .. }
-            | Self::Slice { tuple: false, .. }
+            Self::Variant { all: _, tag: _, binds } => {
+                binds.len() > 0 && binds.iter().any(|p| p.is_refutable())
+            }
+            Self::Slice { tuple: false, .. }
             | Self::SlicePrefix { .. }
             | Self::SliceSuffix { .. } => true,
         }

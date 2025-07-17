@@ -226,7 +226,7 @@ impl TableW {
         if let Some(v) = t.rows_ref.last.take() {
             t.set_rows(v).await?;
         }
-        if let Some(Some(s)) = t.selected_cell.t {
+        if let Some(Some(s)) = dbg!(t.selected_cell.t) {
             t.state = t.state.with_selected_cell(s.0);
         }
         if let Some(Some(s)) = t.selected_column.t {

@@ -199,12 +199,12 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
             n.node.typecheck(ctx)?;
             rtype = rtype.union(&ctx.env, n.node.typ())?;
         }
-        itype
+        dbg!(itype
             .check_contains(&ctx.env, &self.arg.node.typ())
-            .map_err(|e| anyhow!("missing match cases {e}"))?;
-        mtype
+            .map_err(|e| anyhow!("missing match cases {e}")))?;
+        dbg!(mtype
             .check_contains(&ctx.env, &self.arg.node.typ())
-            .map_err(|e| anyhow!("missing match cases {e}"))?;
+            .map_err(|e| anyhow!("missing match cases {e}")))?;
         let mut atype = self.arg.node.typ().clone().normalize();
         for (pat, _) in self.arms.iter() {
             if !&pat.type_predicate.could_match(&ctx.env, &atype)? {

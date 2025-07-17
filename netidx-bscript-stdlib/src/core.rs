@@ -721,14 +721,24 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Dbg {
         }
         from[1].update(ctx, event).map(|v| {
             match self.dest {
-                LogDest::Stderr => eprintln!("{}({}): {v}", self.spec.pos, self.spec),
-                LogDest::Stdout => println!("{}({}): {v}", self.spec.pos, self.spec),
+                LogDest::Stderr => eprintln!("{} dbg({}): {v}", self.spec.pos, self.spec),
+                LogDest::Stdout => println!("{} dbg({}): {v}", self.spec.pos, self.spec),
                 LogDest::Log(level) => match level {
-                    Level::Trace => log::trace!("{}({}): {v}", self.spec.pos, self.spec),
-                    Level::Debug => log::debug!("{}({}): {v}", self.spec.pos, self.spec),
-                    Level::Info => log::info!("{}({}): {v}", self.spec.pos, self.spec),
-                    Level::Warn => log::warn!("{}({}): {v}", self.spec.pos, self.spec),
-                    Level::Error => log::error!("{}({}): {v}", self.spec.pos, self.spec),
+                    Level::Trace => {
+                        log::trace!("{} dbg({}): {v}", self.spec.pos, self.spec)
+                    }
+                    Level::Debug => {
+                        log::debug!("{} dbg({}): {v}", self.spec.pos, self.spec)
+                    }
+                    Level::Info => {
+                        log::info!("{} dbg({}): {v}", self.spec.pos, self.spec)
+                    }
+                    Level::Warn => {
+                        log::warn!("{} dbg({}): {v}", self.spec.pos, self.spec)
+                    }
+                    Level::Error => {
+                        log::error!("{} dbg({}): {v}", self.spec.pos, self.spec)
+                    }
                 },
             };
             v
