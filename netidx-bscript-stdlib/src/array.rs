@@ -119,7 +119,8 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
                         Type::Fn(self.mftyp.clone()),
                         self.top_id,
                     );
-                    let pred = genn::apply(fnode, fargs, self.mftyp.clone(), self.top_id);
+                    let pred =
+                        genn::apply(ctx, fnode, fargs, self.mftyp.clone(), self.top_id);
                     self.slots.push(Slot { id, pred, cur: None });
                 }
                 Some(a)
@@ -179,7 +180,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
         let fargs = vec![node];
         let ft = self.mftyp.clone();
         let fnode = genn::reference(ctx, self.predid, Type::Fn(ft.clone()), self.top_id);
-        let mut node = genn::apply(fnode, fargs, ft, self.top_id);
+        let mut node = genn::apply(ctx, fnode, fargs, ft, self.top_id);
         let r = node.typecheck(ctx);
         node.delete(ctx);
         r
@@ -402,6 +403,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
                             self.top_id,
                         );
                         let node = genn::apply(
+                            ctx,
                             fnode,
                             vec![n, x],
                             self.mftype.clone(),
@@ -474,7 +476,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
         let x = genn::reference(ctx, BindId::new(), self.etyp.clone(), self.top_id);
         let fnode =
             genn::reference(ctx, self.fid, Type::Fn(self.mftype.clone()), self.top_id);
-        n = genn::apply(fnode, vec![n, x], self.mftype.clone(), self.top_id);
+        n = genn::apply(ctx, fnode, vec![n, x], self.mftype.clone(), self.top_id);
         let r = n.typecheck(ctx);
         n.delete(ctx);
         r
@@ -811,7 +813,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Group<C, E> {
                 let (xid, x) = genn::bind(ctx, &scope, "x", etyp.clone(), top_id);
                 let pid = BindId::new();
                 let fnode = genn::reference(ctx, pid, Type::Fn(mftyp.clone()), top_id);
-                let pred = genn::apply(fnode, vec![n, x], mftyp.clone(), top_id);
+                let pred = genn::apply(ctx, fnode, vec![n, x], mftyp.clone(), top_id);
                 Ok(Box::new(Self {
                     queue: VecDeque::new(),
                     buf: smallvec![],

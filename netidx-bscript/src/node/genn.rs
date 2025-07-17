@@ -47,15 +47,27 @@ pub fn constant<C: Ctx, E: UserEvent>(v: Value) -> Node<C, E> {
 
 /// generate and return an apply node for the given lambda
 pub fn apply<C: Ctx, E: UserEvent>(
+    ctx: &mut ExecCtx<C, E>,
     fnode: Node<C, E>,
     args: Vec<Node<C, E>>,
     typ: Arc<FnType>,
     top_id: ExprId,
 ) -> Node<C, E> {
+    let (ref_ids, ref_args) = args
+        .iter()
+        .map(|n| {
+            let id = BindId::new();
+            let r = reference(ctx, id, n.typ().clone(), top_id);
+            (id, r)
+        })
+        .unzip();
     Box::new(CallSite {
         spec: NOP.clone(),
         ftype: typ.clone(),
-        args,
+        actual_args: args,
+        queued: vec![],
+        ref_args,
+        ref_ids,
         arg_spec: HashMap::default(),
         fnode,
         function: None,

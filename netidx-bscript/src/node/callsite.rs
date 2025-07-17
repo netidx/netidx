@@ -1,4 +1,4 @@
-use super::{compiler::compile, Nop};
+use super::{compiler::compile, genn, Nop};
 use crate::{
     env::LambdaDef,
     expr::{Expr, ExprId, ModPath},
@@ -87,7 +87,10 @@ pub(crate) struct CallSite<C: Ctx, E: UserEvent> {
     pub(super) spec: TArc<Expr>,
     pub(super) ftype: TArc<FnType>,
     pub(super) fnode: Node<C, E>,
-    pub(super) args: Vec<Node<C, E>>,
+    pub(super) actual_args: Vec<Node<C, E>>,
+    pub(super) queued: Vec<(BindId, Value)>,
+    pub(super) ref_args: Vec<Node<C, E>>,
+    pub(super) ref_ids: Vec<BindId>,
     pub(super) arg_spec: FxHashMap<ArcStr, bool>, // true if arg is using the default value
     pub(super) function: Option<(LambdaId, Box<dyn Apply<C, E>>)>,
     pub(super) top_id: ExprId,
@@ -108,10 +111,30 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
             Type::Fn(ftype) => ftype.clone(),
             typ => bail!("at {pos} {f} has {typ}, expected a function"),
         };
-        let (args, arg_spec) = compile_apply_args(ctx, scope, top_id, &ftype, &args)
-            .with_context(|| format!("in apply at {pos}"))?;
+        let (actual_args, arg_spec) =
+            compile_apply_args(ctx, scope, top_id, &ftype, &args)
+                .with_context(|| format!("in apply at {pos}"))?;
         let spec = TArc::new(spec);
-        let site = Self { spec, ftype, args, arg_spec, fnode, function: None, top_id };
+        let (ref_ids, ref_args) = actual_args
+            .iter()
+            .map(|n| {
+                let id = BindId::new();
+                let r = genn::reference(ctx, id, n.typ().clone(), top_id);
+                (id, r)
+            })
+            .unzip();
+        let site = Self {
+            spec,
+            ftype,
+            actual_args,
+            queued: vec![],
+            ref_args,
+            ref_ids,
+            arg_spec,
+            fnode,
+            function: None,
+            top_id,
+        };
         Ok(Box::new(site))
     }
 
@@ -146,41 +169,53 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
             match map {
                 (Some(si), Some(oi)) if si == oi => {
                     if is_default {
-                        self.args[si] = compile_default!(si, f);
+                        self.actual_args[si] = compile_default!(si, f);
                     }
                 }
                 (Some(si), Some(oi)) if si < oi => {
                     let mut i = si;
                     while i < oi {
-                        self.args.swap(i, i + 1);
+                        self.actual_args.swap(i, i + 1);
+                        self.ref_args.swap(i, i + 1);
+                        self.ref_ids.swap(i, i + 1);
                         i += 1;
                     }
                     if is_default {
-                        self.args[i] = compile_default!(si, f);
+                        self.actual_args[i] = compile_default!(si, f);
                     }
                 }
                 (Some(si), Some(oi)) if oi < si => {
                     let mut i = si;
                     while i > oi {
-                        self.args.swap(i, i - 1);
+                        self.actual_args.swap(i, i - 1);
+                        self.ref_args.swap(i, i - 1);
+                        self.ref_ids.swap(i, i - 1);
                         i -= 1
                     }
                     if is_default {
-                        self.args[i] = compile_default!(i, f);
+                        self.actual_args[i] = compile_default!(i, f);
                     }
                 }
                 (Some(_), Some(_)) => unreachable!(),
                 (Some(i), None) => {
-                    self.args.remove(i);
+                    self.actual_args.remove(i);
+                    self.ref_args.remove(i);
+                    ctx.user.unref_var(self.ref_ids.remove(i), self.top_id);
                 }
-                (None, Some(i)) => self.args.insert(i, compile_default!(i, f)),
+                (None, Some(i)) => {
+                    self.actual_args.insert(i, compile_default!(i, f));
+                    let typ = self.actual_args[i].typ().clone();
+                    let id = BindId::new();
+                    self.ref_args.insert(i, genn::reference(ctx, id, typ, self.top_id));
+                    self.ref_ids.insert(i, id);
+                }
                 (None, None) => bail!("unexpected args"),
             }
         }
-        let mut rf = (f.init)(ctx, &self.args, self.top_id)?;
+        let mut rf = (f.init)(ctx, &self.ref_args, self.top_id)?;
         // some nodes, such as structwith, depend on the typecheck pass to
         // resolve things like field indexes. This should always succeed.
-        rf.typecheck(ctx, &mut self.args)?;
+        rf.typecheck(ctx, &mut self.ref_args)?;
         self.function = Some((f.id, rf));
         Ok(())
     }
@@ -193,6 +228,30 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
                 let m = format_compact!($m);
                 return Some(Value::Error(m.as_str().into()));
             }};
+        }
+        macro_rules! set_or_queue {
+            ($id:expr, $v:expr) => {
+                match event.variables.entry($id) {
+                    Entry::Vacant(e) => {
+                        e.insert($v);
+                    }
+                    Entry::Occupied(_) => ctx.user.set_var($id, $v),
+                }
+            };
+        }
+        macro_rules! update_args {
+            ($defined:expr) => {
+                for (i, n) in self.actual_args.iter_mut().enumerate() {
+                    if let Some(v) = n.update(ctx, event) {
+                        let id = self.ref_ids[i];
+                        if $defined {
+                            set_or_queue!(id, v)
+                        } else {
+                            self.queued.push((id, v));
+                        }
+                    }
+                }
+            };
         }
         let mut set = vec![];
         let bound = match (&self.function, self.fnode.update(ctx, event)) {
@@ -213,19 +272,29 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
             (_, Some(v)) => error!("invalid function {v}"),
         };
         match &mut self.function {
-            None => None,
-            Some((_, f)) if !bound => f.update(ctx, &mut self.args, event),
+            None => {
+                update_args!(false);
+                None
+            }
+            Some((_, f)) if !bound => {
+                update_args!(true);
+                f.update(ctx, &mut self.ref_args, event)
+            }
             Some((_, f)) => {
                 let init = mem::replace(&mut event.init, true);
-                f.refs(&mut |id| {
-                    if !event.variables.contains_key(&id) {
+                f.refs(&mut |id: BindId| {
+                    if let Entry::Vacant(e) = event.variables.entry(id) {
                         if let Some(v) = ctx.cached.get(&id) {
-                            event.variables.insert(id, v.clone());
+                            e.insert(v.clone());
                             set.push(id);
                         }
                     }
                 });
-                let res = f.update(ctx, &mut self.args, event);
+                update_args!(true);
+                for (id, v) in mem::take(&mut self.queued) {
+                    set_or_queue!(id, v)
+                }
+                let res = f.update(ctx, &mut self.ref_args, event);
                 event.init = init;
                 for id in set {
                     event.variables.remove(&id);
@@ -236,13 +305,26 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        let Self { spec: _, ftype: _, fnode, args, arg_spec: _, function, top_id: _ } =
-            self;
+        let Self {
+            spec: _,
+            ftype: _,
+            fnode,
+            actual_args,
+            ref_args,
+            ref_ids: _,
+            arg_spec: _,
+            queued: _,
+            function,
+            top_id: _,
+        } = self;
         if let Some((_, f)) = function {
             f.delete(ctx)
         }
         fnode.delete(ctx);
-        for n in args {
+        for n in actual_args {
+            n.delete(ctx)
+        }
+        for n in ref_args {
             n.delete(ctx)
         }
     }
@@ -256,11 +338,13 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
-        for n in self.args.iter_mut() {
+        for n in self.actual_args.iter_mut() {
             wrap!(n, n.typecheck(ctx))?
         }
         self.ftype.unbind_tvars();
-        for (arg, FnArgType { typ, .. }) in self.args.iter().zip(self.ftype.args.iter()) {
+        for (arg, FnArgType { typ, .. }) in
+            self.actual_args.iter().zip(self.ftype.args.iter())
+        {
             wrap!(arg, typ.check_contains(&ctx.env, &arg.typ()))?;
         }
         for (tv, tc) in self.ftype.constraints.read().iter() {
@@ -270,13 +354,26 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
     }
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        let Self { spec: _, ftype: _, fnode, args, arg_spec: _, function, top_id: _ } =
-            self;
+        let Self {
+            spec: _,
+            ftype: _,
+            fnode,
+            queued: _,
+            actual_args,
+            ref_args,
+            ref_ids: _,
+            arg_spec: _,
+            function,
+            top_id: _,
+        } = self;
         if let Some((_, fun)) = function {
             fun.refs(f)
         }
         fnode.refs(f);
-        for n in args {
+        for n in actual_args {
+            n.refs(f)
+        }
+        for n in ref_args {
             n.refs(f)
         }
     }

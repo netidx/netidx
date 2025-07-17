@@ -366,7 +366,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Publish<C, E> {
                 };
                 let (x, xn) = genn::bind(ctx, &scope, "x", Type::Any, top_id);
                 let fnode = genn::reference(ctx, pid, Type::Fn(mftyp.clone()), top_id);
-                let on_write = genn::apply(fnode, vec![xn], mftyp.clone(), top_id);
+                let on_write = genn::apply(ctx, fnode, vec![xn], mftyp.clone(), top_id);
                 Ok(Box::new(Publish {
                     args: CachedVals::new(from),
                     current: None,
@@ -498,7 +498,7 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for PublishRpc<C, E> {
                 let (x, xn) =
                     genn::bind(ctx, &scope, "x", mftyp.args[0].typ.clone(), top_id);
                 let fnode = genn::reference(ctx, pid, Type::Fn(mftyp.clone()), top_id);
-                let f = genn::apply(fnode, vec![xn], mftyp, top_id);
+                let f = genn::apply(ctx, fnode, vec![xn], mftyp, top_id);
                 Ok(Box::new(PublishRpc {
                     queue: VecDeque::new(),
                     args: CachedVals::new(from),
