@@ -182,21 +182,22 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
                 Some(guard) => guard.node.typecheck(ctx)?,
                 None => {
                     if !pat.structure_predicate.is_refutable() {
-                        mtype = mtype.union(&pat.type_predicate)
+                        mtype = mtype.union(&ctx.env, &pat.type_predicate)?
                     } else if let StructPatternNode::Literal(Value::Bool(b)) =
                         &pat.structure_predicate
                     {
                         saw_true |= b;
                         saw_false |= !b;
                         if saw_true && saw_false {
-                            mtype = mtype.union(&Type::Primitive(Typ::Bool.into()));
+                            mtype = mtype
+                                .union(&ctx.env, &Type::Primitive(Typ::Bool.into()))?;
                         }
                     }
                 }
             }
-            itype = itype.union(&pat.type_predicate);
+            itype = itype.union(&ctx.env, &pat.type_predicate)?;
             n.node.typecheck(ctx)?;
-            rtype = rtype.union(&n.node.typ());
+            rtype = rtype.union(&ctx.env, n.node.typ())?;
         }
         itype
             .check_contains(&ctx.env, &self.arg.node.typ())

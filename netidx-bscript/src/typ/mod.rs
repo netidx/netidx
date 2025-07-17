@@ -489,17 +489,46 @@ impl Type {
         })
     }
 
-    fn union_int(&self, t: &Self) -> Self {
+    fn union_int<C: Ctx, E: UserEvent>(
+        &self,
+        env: &Env<C, E>,
+        hist: &mut FxHashSet<(usize, usize)>,
+        t: &Self,
+    ) -> Result<Self> {
         match (self, t) {
-            (Type::Bottom, t) | (t, Type::Bottom) => t.clone(),
-            (Type::Any, _) | (_, Type::Any) => Type::Any,
+            (
+                Type::Ref { name: n0, scope: s0, .. },
+                Type::Ref { scope: s1, name: n1, .. },
+            ) if n0 == n1 && s0 == s1 => Ok(self.clone()),
+            (tr @ Type::Ref { .. }, t) => {
+                let t0 = tr.lookup_ref(env)?;
+                let t0_addr = (t0 as *const Type).addr();
+                let t_addr = (t as *const Type).addr();
+                if !hist.insert((t0_addr, t_addr)) {
+                    Ok(tr.clone())
+                } else {
+                    t0.union_int(env, hist, t)
+                }
+            }
+            (t, tr @ Type::Ref { .. }) => {
+                let t1 = tr.lookup_ref(env)?;
+                let t1_addr = (t1 as *const Type).addr();
+                let t_addr = (t as *const Type).addr();
+                if !hist.insert((t_addr, t1_addr)) {
+                    Ok(tr.clone())
+                } else {
+                    t.union_int(env, hist, t1)
+                }
+            }
+            (Type::Bottom, t) | (t, Type::Bottom) => Ok(t.clone()),
+            (Type::Any, _) | (_, Type::Any) => Ok(Type::Any),
             (Type::Primitive(p), t) | (t, Type::Primitive(p)) if p.is_empty() => {
-                t.clone()
+                Ok(t.clone())
             }
             (Type::Primitive(s0), Type::Primitive(s1)) => {
                 let mut s = *s0;
                 s.insert(*s1);
-                Type::Primitive(s)
+                Ok(Type::Primitive(s))
             }
             (
                 Type::Primitive(p),
@@ -508,96 +537,104 @@ impl Type {
             | (
                 Type::Array(_) | Type::Struct(_) | Type::Tuple(_) | Type::Variant(_, _),
                 Type::Primitive(p),
-            ) if p.contains(Typ::Array) => Type::Primitive(*p),
+            ) if p.contains(Typ::Array) => Ok(Type::Primitive(*p)),
             (Type::Primitive(p), Type::Array(t))
-            | (Type::Array(t), Type::Primitive(p)) => {
-                Type::Set(Arc::from_iter([Type::Primitive(*p), Type::Array(t.clone())]))
-            }
+            | (Type::Array(t), Type::Primitive(p)) => Ok(Type::Set(Arc::from_iter([
+                Type::Primitive(*p),
+                Type::Array(t.clone()),
+            ]))),
             (t @ Type::Array(t0), u @ Type::Array(t1)) => {
                 if t0 == t1 {
-                    Type::Array(t0.clone())
+                    Ok(Type::Array(t0.clone()))
                 } else {
-                    Type::Set(Arc::from_iter([u.clone(), t.clone()]))
+                    Ok(Type::Set(Arc::from_iter([u.clone(), t.clone()])))
                 }
             }
             (t @ Type::ByRef(t0), u @ Type::ByRef(t1)) => {
                 if t0 == t1 {
-                    Type::ByRef(t0.clone())
+                    Ok(Type::ByRef(t0.clone()))
                 } else {
-                    Type::Set(Arc::from_iter([u.clone(), t.clone()]))
+                    Ok(Type::Set(Arc::from_iter([u.clone(), t.clone()])))
                 }
             }
-            (Type::Set(s0), Type::Set(s1)) => {
-                Type::Set(Arc::from_iter(s0.iter().cloned().chain(s1.iter().cloned())))
-            }
-            (Type::Set(s), t) | (t, Type::Set(s)) => {
-                Type::Set(Arc::from_iter(s.iter().cloned().chain(iter::once(t.clone()))))
-            }
+            (Type::Set(s0), Type::Set(s1)) => Ok(Type::Set(Arc::from_iter(
+                s0.iter().cloned().chain(s1.iter().cloned()),
+            ))),
+            (Type::Set(s), t) | (t, Type::Set(s)) => Ok(Type::Set(Arc::from_iter(
+                s.iter().cloned().chain(iter::once(t.clone())),
+            ))),
             (u @ Type::Struct(t0), t @ Type::Struct(t1)) => {
                 if t0.len() == t1.len() && t0 == t1 {
-                    u.clone()
+                    Ok(u.clone())
                 } else {
-                    Type::Set(Arc::from_iter([u.clone(), t.clone()]))
+                    Ok(Type::Set(Arc::from_iter([u.clone(), t.clone()])))
                 }
             }
             (u @ Type::Struct(_), t) | (t, u @ Type::Struct(_)) => {
-                Type::Set(Arc::from_iter([u.clone(), t.clone()]))
+                Ok(Type::Set(Arc::from_iter([u.clone(), t.clone()])))
             }
             (u @ Type::Tuple(t0), t @ Type::Tuple(t1)) => {
                 if t0 == t1 {
-                    u.clone()
+                    Ok(u.clone())
                 } else {
-                    Type::Set(Arc::from_iter([u.clone(), t.clone()]))
+                    Ok(Type::Set(Arc::from_iter([u.clone(), t.clone()])))
                 }
             }
             (u @ Type::Tuple(_), t) | (t, u @ Type::Tuple(_)) => {
-                Type::Set(Arc::from_iter([u.clone(), t.clone()]))
+                Ok(Type::Set(Arc::from_iter([u.clone(), t.clone()])))
             }
             (u @ Type::Variant(tg0, t0), t @ Type::Variant(tg1, t1)) => {
                 if tg0 == tg1 && t0.len() == t1.len() {
-                    let typs = t0.iter().zip(t1.iter()).map(|(t0, t1)| t0.union_int(t1));
-                    Type::Variant(tg0.clone(), Arc::from_iter(typs))
+                    let typs = t0
+                        .iter()
+                        .zip(t1.iter())
+                        .map(|(t0, t1)| t0.union_int(env, hist, t1))
+                        .collect::<Result<SmallVec<[_; 8]>>>()?;
+                    Ok(Type::Variant(tg0.clone(), Arc::from_iter(typs.into_iter())))
                 } else {
-                    Type::Set(Arc::from_iter([u.clone(), t.clone()]))
+                    Ok(Type::Set(Arc::from_iter([u.clone(), t.clone()])))
                 }
             }
             (u @ Type::Variant(_, _), t) | (t, u @ Type::Variant(_, _)) => {
-                Type::Set(Arc::from_iter([u.clone(), t.clone()]))
+                Ok(Type::Set(Arc::from_iter([u.clone(), t.clone()])))
             }
             (Type::Fn(f0), Type::Fn(f1)) => {
                 if f0 == f1 {
-                    Type::Fn(f0.clone())
+                    Ok(Type::Fn(f0.clone()))
                 } else {
-                    Type::Set(Arc::from_iter([
+                    Ok(Type::Set(Arc::from_iter([
                         Type::Fn(f0.clone()),
                         Type::Fn(f1.clone()),
-                    ]))
+                    ])))
                 }
             }
             (f @ Type::Fn(_), t) | (t, f @ Type::Fn(_)) => {
-                Type::Set(Arc::from_iter([f.clone(), t.clone()]))
+                Ok(Type::Set(Arc::from_iter([f.clone(), t.clone()])))
             }
             (t0 @ Type::TVar(_), t1 @ Type::TVar(_)) => {
                 if t0 == t1 {
-                    t0.clone()
+                    Ok(t0.clone())
                 } else {
-                    Type::Set(Arc::from_iter([t0.clone(), t1.clone()]))
+                    Ok(Type::Set(Arc::from_iter([t0.clone(), t1.clone()])))
                 }
             }
             (t0 @ Type::TVar(_), t1) | (t1, t0 @ Type::TVar(_)) => {
-                Type::Set(Arc::from_iter([t0.clone(), t1.clone()]))
+                Ok(Type::Set(Arc::from_iter([t0.clone(), t1.clone()])))
             }
             (t @ Type::ByRef(_), u) | (u, t @ Type::ByRef(_)) => {
-                Type::Set(Arc::from_iter([t.clone(), u.clone()]))
-            }
-            (tr @ Type::Ref { .. }, t) | (t, tr @ Type::Ref { .. }) => {
-                Type::Set(Arc::from_iter([tr.clone(), t.clone()]))
+                Ok(Type::Set(Arc::from_iter([t.clone(), u.clone()])))
             }
         }
     }
 
-    pub fn union(&self, t: &Self) -> Self {
-        self.union_int(t).normalize()
+    pub fn union<C: Ctx, E: UserEvent>(&self, env: &Env<C, E>, t: &Self) -> Result<Self> {
+        thread_local! {
+            static HIST: RefCell<FxHashSet<(usize, usize)>> = RefCell::new(HashSet::default());
+        }
+        HIST.with_borrow_mut(|hist| {
+            hist.clear();
+            Ok(self.union_int(env, hist, t)?.normalize())
+        })
     }
 
     fn diff_int<C: Ctx, E: UserEvent>(
@@ -1583,9 +1620,13 @@ impl Type {
             (Type::TVar(tv0), Type::TVar(tv1)) if tv0.name == tv1.name && tv0 == tv1 => {
                 Some(Type::TVar(tv0.clone()))
             }
-            (Type::TVar(_), _)
-            | (_, Type::TVar(_))
-            | (Type::Tuple(_), _)
+            (Type::TVar(tv), t) => {
+                tv.read().typ.read().as_ref().and_then(|tv| tv.merge(t))
+            }
+            (t, Type::TVar(tv)) => {
+                tv.read().typ.read().as_ref().and_then(|tv| t.merge(tv))
+            }
+            (Type::Tuple(_), _)
             | (_, Type::Tuple(_))
             | (Type::Struct(_), _)
             | (_, Type::Struct(_))

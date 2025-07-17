@@ -298,7 +298,12 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Array<C, E> {
             wrap!(n.node, n.node.typecheck(ctx))?
         }
         let rtype = Type::Bottom;
-        let rtype = self.n.iter().fold(rtype, |rtype, n| n.node.typ().union(&rtype));
+        let rtype = wrap!(
+            self,
+            self.n
+                .iter()
+                .fold(Ok(rtype), |rtype, n| n.node.typ().union(&ctx.env, &rtype?))
+        )?;
         let rtype = Type::Array(Arc::new(rtype));
         Ok(self.typ.check_contains(&ctx.env, &rtype)?)
     }

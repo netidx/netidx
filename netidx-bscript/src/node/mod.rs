@@ -359,7 +359,7 @@ impl<C: Ctx, E: UserEvent> Bind<C, E> {
             Some(typ) => typ.scope_refs(scope),
             None => {
                 let typ = node.typ().clone();
-                let ptyp = pattern.infer_type_predicate();
+                let ptyp = pattern.infer_type_predicate(&ctx.env)?;
                 if !ptyp.contains(&ctx.env, &typ)? {
                     typ::format_with_flags(typ::PrintFlag::DerefTVars.into(), || {
                         bail!("at {pos} match error {typ} can't be matched by {ptyp}")
@@ -925,7 +925,7 @@ impl<C: Ctx, E: UserEvent> TypeCast<C, E> {
         if let Err(e) = target.check_cast(&ctx.env) {
             bail!("in cast at {pos} {e}");
         }
-        let typ = target.union(&Type::Primitive(Typ::Error.into()));
+        let typ = target.union(&ctx.env, &Type::Primitive(Typ::Error.into()))?;
         Ok(Box::new(Self { spec, typ, target, n }))
     }
 }
@@ -1010,7 +1010,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Any<C, E> {
             wrap!(n, n.typecheck(ctx))?
         }
         let rtyp = Type::Primitive(BitFlags::empty());
-        let rtyp = self.n.iter().fold(rtyp, |rtype, n| n.typ().union(&rtype));
+        let rtyp = wrap!(
+            self,
+            self.n.iter().fold(Ok(rtyp), |rtype, n| n.typ().union(&ctx.env, &rtype?))
+        )?;
         Ok(self.typ.check_contains(&ctx.env, &rtyp)?)
     }
 }

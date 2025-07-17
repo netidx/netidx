@@ -1,11 +1,12 @@
 use std::fmt;
 
+use anyhow::Result;
 use arcstr::ArcStr;
 use netidx_value::{Typ, Value};
 use smallvec::{smallvec, SmallVec};
 use triomphe::Arc;
 
-use crate::typ::Type;
+use crate::{env::Env, typ::Type, Ctx, UserEvent};
 
 use super::Expr;
 
@@ -129,33 +130,43 @@ impl StructurePattern {
         names.len() == len
     }
 
-    pub fn infer_type_predicate(&self) -> Type {
+    pub fn infer_type_predicate<C: Ctx, E: UserEvent>(
+        &self,
+        env: &Env<C, E>,
+    ) -> Result<Type> {
         match self {
-            Self::Bind(_) | Self::Ignore => Type::empty_tvar(),
-            Self::Literal(v) => Type::Primitive(Typ::get(v).into()),
+            Self::Bind(_) | Self::Ignore => Ok(Type::empty_tvar()),
+            Self::Literal(v) => Ok(Type::Primitive(Typ::get(v).into())),
             Self::Tuple { all: _, binds } => {
-                let a = binds.iter().map(|p| p.infer_type_predicate());
-                Type::Tuple(Arc::from_iter(a))
+                let a = binds
+                    .iter()
+                    .map(|p| p.infer_type_predicate(env))
+                    .collect::<Result<SmallVec<[_; 8]>>>()?;
+                Ok(Type::Tuple(Arc::from_iter(a)))
             }
             Self::Variant { all: _, tag, binds } => {
-                let a = binds.iter().map(|p| p.infer_type_predicate());
-                Type::Variant(tag.clone(), Arc::from_iter(a))
+                let a = binds
+                    .iter()
+                    .map(|p| p.infer_type_predicate(env))
+                    .collect::<Result<SmallVec<[_; 8]>>>()?;
+                Ok(Type::Variant(tag.clone(), Arc::from_iter(a)))
             }
             Self::Slice { all: _, binds }
             | Self::SlicePrefix { all: _, prefix: binds, tail: _ }
             | Self::SliceSuffix { all: _, head: _, suffix: binds } => {
-                let t = binds
-                    .iter()
-                    .fold(Type::Bottom, |t, p| t.union(&p.infer_type_predicate()));
-                Type::Array(Arc::new(t))
+                let t =
+                    binds.iter().fold(Ok::<_, anyhow::Error>(Type::Bottom), |t, p| {
+                        Ok(t?.union(env, &p.infer_type_predicate(env)?)?)
+                    })?;
+                Ok(Type::Array(Arc::new(t)))
             }
             Self::Struct { all: _, exhaustive: _, binds } => {
                 let mut typs = binds
                     .iter()
-                    .map(|(n, p)| (n.clone(), p.infer_type_predicate()))
-                    .collect::<SmallVec<[(ArcStr, Type); 8]>>();
+                    .map(|(n, p)| Ok((n.clone(), p.infer_type_predicate(env)?)))
+                    .collect::<Result<SmallVec<[(ArcStr, Type); 8]>>>()?;
                 typs.sort_by_key(|(n, _)| n.clone());
-                Type::Struct(Arc::from_iter(typs.into_iter()))
+                Ok(Type::Struct(Arc::from_iter(typs.into_iter())))
             }
         }
     }

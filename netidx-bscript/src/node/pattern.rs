@@ -524,7 +524,7 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         let type_predicate = match &spec.type_predicate {
             Some(t) => t.scope_refs(scope).lookup_ref(&ctx.env)?.clone(),
             None => {
-                let typ = spec.structure_predicate.infer_type_predicate();
+                let typ = spec.structure_predicate.infer_type_predicate(&ctx.env)?;
                 match &spec.structure_predicate {
                     StructurePattern::Bind(_) | StructurePattern::Ignore => {
                         arg_type.init_wildcard_match(&ctx.env, &typ)?

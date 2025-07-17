@@ -354,48 +354,6 @@ const OR_NEVER: &str = r#"
 "#;
 
 #[cfg(test)]
-run!(or_never, OR_NEVER, |v: Result<&Value>| {
-    match v {
-        Ok(Value::I64(0)) => true,
-        _ => false,
-    }
-});
-
-#[cfg(test)]
-const OR_ELSE0: &str = r#"
-{
-  let a = [0, null, 0];
-  let nums = or_else(#o:1, array::iter(a));
-  sum(array::group(nums, |n, _| n == 3))
-}
-"#;
-
-#[cfg(test)]
-run!(or_else0, OR_ELSE0, |v: Result<&Value>| {
-    match v {
-        Ok(Value::I64(1)) => true,
-        _ => false,
-    }
-});
-
-#[cfg(test)]
-const OR_ELSE1: &str = r#"
-{
-  let a = null;
-  let b = null;
-  or_else(#o:b, a)
-}
-"#;
-
-#[cfg(test)]
-run!(or_else1, OR_ELSE1, |v: Result<&Value>| {
-    match v {
-        Ok(Value::Null) => true,
-        _ => false,
-    }
-});
-
-#[cfg(test)]
 const ARRAY_MAP: &str = r#"
 {
   let a = [1, 2, 3, 4];

@@ -280,7 +280,8 @@ macro_rules! arith_op {
                 let rhs = self.rhs.node.typ();
                 wrap!(self.lhs.node, typ.check_contains(&ctx.env, lhs))?;
                 wrap!(self.rhs.node, typ.check_contains(&ctx.env, rhs))?;
-                wrap!(self,self.typ.check_contains(&ctx.env, &lhs.union(rhs)))
+                let ut = wrap!(self, lhs.union(&ctx.env, rhs))?;
+                wrap!(self,self.typ.check_contains(&ctx.env, &ut))
             }
         }
     }

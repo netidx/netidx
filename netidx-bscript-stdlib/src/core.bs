@@ -71,12 +71,6 @@ pub let never = |@args| 'never;
 /// when v updates, return it, but also print it along with the position of the expression
 pub let dbg = |v| 'dbg;
 
-/// if v is null then return never(), otherwise return v
-pub let or_never = |v| 'or_never;
-
-/// if v is null return o, otherwise return v
-pub let or_else = |#o, v| 'or_else;
-
 /// This is the toplevel error sink for the ? operator. If no other lexical binding of errors
 /// exists closer to the error site then errors handled by ? will come here.
 pub let errors: error = never()
