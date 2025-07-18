@@ -346,7 +346,7 @@ run!(mean, MEAN, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
-const ARRAY_MAP: &str = r#"
+const ARRAY_MAP0: &str = r#"
 {
   let a = [1, 2, 3, 4];
   array::map(a, |x| x > 3)
@@ -354,7 +354,7 @@ const ARRAY_MAP: &str = r#"
 "#;
 
 #[cfg(test)]
-run!(array_map, ARRAY_MAP, |v: Result<&Value>| {
+run!(array_map0, ARRAY_MAP0, |v: Result<&Value>| {
     match v {
         Ok(Value::Array(a)) => match &a[..] {
             [Value::Bool(false), Value::Bool(false), Value::Bool(false), Value::Bool(true)] => {
@@ -363,6 +363,26 @@ run!(array_map, ARRAY_MAP, |v: Result<&Value>| {
             _ => false,
         },
         _ => false,
+    }
+});
+
+#[cfg(test)]
+const ARRAY_MAP1: &str = r#"
+{
+  let a = [1, 2];
+  let b = [1, 2];
+  array::map(a, |x| array::map(b, |y| x + y))
+}
+"#;
+
+#[cfg(test)]
+run!(array_map1, ARRAY_MAP1, |v: Result<&Value>| {
+    match v {
+        Ok(v) => match v.clone().cast_to::<[[i64; 2]; 2]>() {
+            Ok([[2, 3], [3, 4]]) => true,
+            _ => false,
+        },
+        Err(_) => false,
     }
 });
 

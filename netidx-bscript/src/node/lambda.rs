@@ -33,6 +33,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BScriptLambda<C, E> {
         for (arg, pat) in from.iter_mut().zip(&self.args) {
             if let Some(v) = arg.update(ctx, event) {
                 pat.bind(&v, &mut |id, v| {
+                    ctx.cached.insert(id, v.clone());
                     event.variables.insert(id, v);
                 })
             }

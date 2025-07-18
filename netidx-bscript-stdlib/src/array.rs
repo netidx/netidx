@@ -13,7 +13,7 @@ use netidx_bscript::{
 use netidx_value::ValArray;
 use smallvec::{smallvec, SmallVec};
 use std::{
-    collections::VecDeque,
+    collections::{hash_map::Entry, VecDeque},
     fmt::Debug,
     iter,
     sync::{Arc, LazyLock},
@@ -128,6 +128,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
         };
         if let Some(a) = up {
             for (s, v) in self.slots.iter().zip(a.iter()) {
+                ctx.cached.insert(s.id, v.clone());
                 event.variables.insert(s.id, v.clone());
             }
             self.cur = a.clone();
@@ -141,10 +142,10 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
             if i == slen {
                 // new nodes were added starting here
                 event.init = true;
-                if !event.variables.contains_key(&self.predid) {
-                    if let Some(v) = ctx.cached.get(&self.predid) {
-                        event.variables.insert(self.predid, v.clone());
-                    }
+                if let Entry::Vacant(e) = event.variables.entry(self.predid)
+                    && let Some(v) = ctx.cached.get(&self.predid)
+                {
+                    e.insert(v.clone());
                 }
             }
             if let Some(v) = s.pred.update(ctx, event) {

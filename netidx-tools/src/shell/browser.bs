@@ -6,13 +6,12 @@ let path = "/";
 dbg(path);
 let structure = net::list_table(path);
 // CR if I put the uniq on the struct ref it doesn't work
-let mode = select structure.columns {
+let mode = uniq(select structure.columns {
     [] => `List,
     _ => `Table
-};
+});
 dbg(mode);
 let selected = { x: 0, y: 0 };
-dbg(selected);
 let visible_range = {
     row: {
         min: max(0, selected.y - size.rows),
@@ -29,7 +28,7 @@ let visible_range = {
 //    (col >= (visible_range.column).min) &&
 //    (col <= (visible_range.column).max)
 //);
-let is_visible = |row: i64, col: i64| row ~ true;
+let is_visible = |row: i64, col: i64| any(row, col) ~ true;
 let columns = {
     let cols = array::map(structure.columns, |(col, _)| col);
     select cols {
@@ -49,19 +48,14 @@ let widths: Array<Constraint> = select mode {
 let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
     let name = select str::basename(row) { null as _ => "", s => s };
     let name = cell(line(name));
-    let i = i; // CR this is a bug in mapq that I must look in to
-    let row = row;
     tui::table::row(&select mode {
         e@ `List => {
-            let path = select mode {
-                `List => "[row]",
-                `Table => ""
-            };
+            let path = select mode { `List => "[row]", `Table => "" };
             [ name, cell(line("[any(e ~ "#VAL", net::subscribe(path))]")) ]
         },
         e@ `Table => {
-            let cols = array::map(dbg(columns[1..])?, |col| {
-                let path = "[row]/[col]";
+            let cols = array::map(columns[1..]?, |col| {
+                let path = dbg("[row]/[col]");
                 cell(line("[any(e ~ "#VAL", net::subscribe(path))]"))
             });
             array::concat([name], cols)
