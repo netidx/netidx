@@ -266,7 +266,7 @@ impl TuiWidget for TableW {
             selected_cell,
             style,
             widths,
-            state,
+            state: _,
         } = self;
         cell_highlight_style
             .update(id, &v)
@@ -279,19 +279,9 @@ impl TuiWidget for TableW {
         highlight_spacing.update(id, &v).context("table update highlight_spacing")?;
         row_highlight_style.update(id, &v).context("table update highlight_style")?;
         highlight_symbol.update(id, &v).context("table update highlight_symbol")?;
-        if let Some(s) = selected.update(id, &v).context("table update selected")? {
-            *state = state.clone().with_selected(*s);
-        }
-        if let Some(s) =
-            selected_column.update(id, &v).context("table update selected_column")?
-        {
-            *state = state.clone().with_selected_column(*s)
-        }
-        if let Some(s) =
-            selected_cell.update(id, &v).context("table update selected_cell")?
-        {
-            *state = state.clone().with_selected_cell(s.map(|s| s.0))
-        }
+        selected.update(id, &v).context("table update selected")?;
+        selected_column.update(id, &v).context("table update selected_column")?;
+        selected_cell.update(id, &v).context("table update selected_cell")?;
         style.update(id, &v).context("table update style")?;
         widths.update(id, &v).context("table update widths")?;
         if footer_ref.id == id {

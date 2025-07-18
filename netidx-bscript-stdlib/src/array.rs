@@ -97,16 +97,17 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
             ctx.cached.insert(self.predid, v.clone());
             event.variables.insert(self.predid, v);
         }
-        let up = match from[0].update(ctx, event) {
-            Some(Value::Array(a)) if a.len() == self.slots.len() => Some(a),
-            Some(Value::Array(a)) if a.len() < self.slots.len() => {
+        let (up, resized) = match from[0].update(ctx, event) {
+            Some(Value::Array(a)) if a.len() == slen => (Some(a), false),
+            Some(Value::Array(a)) if a.len() < slen => {
                 while self.slots.len() > a.len() {
                     if let Some(mut s) = self.slots.pop() {
                         s.pred.delete(ctx);
+                        ctx.cached.remove(&s.id);
                         ctx.env.unbind_variable(s.id);
                     }
                 }
-                Some(a)
+                (Some(a), true)
             }
             Some(Value::Array(a)) => {
                 while self.slots.len() < a.len() {
@@ -122,9 +123,9 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
                     let pred = genn::apply(fnode, fargs, self.mftyp.clone(), self.top_id);
                     self.slots.push(Slot { id, pred, cur: None });
                 }
-                Some(a)
+                (Some(a), true)
             }
-            Some(_) | None => None,
+            Some(_) | None => (None, false),
         };
         if let Some(a) = up {
             for (s, v) in self.slots.iter().zip(a.iter()) {
@@ -137,7 +138,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
             }
         }
         let init = event.init;
-        let mut up = false;
+        let mut up = resized;
         for (i, s) in self.slots.iter_mut().enumerate() {
             if i == slen {
                 // new nodes were added starting here
