@@ -313,7 +313,8 @@ impl TuiWidget for TableW {
             r.update(id, &v)?;
         }
         if self.rows_ref.id == id {
-            self.set_rows(v.clone()).await?;
+            eprintln!("set_rows: {v}");
+            dbg!(self.set_rows(v.clone()).await)?;
         }
         for r in self.rows.iter_mut() {
             r.update(id, &v)?;

@@ -510,6 +510,7 @@ impl StructPatternNode {
 
 #[derive(Debug)]
 pub(crate) struct PatternNode<C: Ctx, E: UserEvent> {
+    pub(super) explicit_type_predicate: bool,
     pub(super) type_predicate: Type,
     pub(super) structure_predicate: StructPatternNode,
     pub(super) guard: Option<Cached<C, E>>,
@@ -523,8 +524,8 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         scope: &ModPath,
         top_id: ExprId,
     ) -> Result<Self> {
-        let type_predicate = match &spec.type_predicate {
-            Some(t) => t.scope_refs(scope).lookup_ref(&ctx.env)?.clone(),
+        let (explicit, type_predicate) = match &spec.type_predicate {
+            Some(t) => (true, t.scope_refs(scope).lookup_ref(&ctx.env)?.clone()),
             None => {
                 let typ = spec.structure_predicate.infer_type_predicate(&ctx.env)?;
                 match &spec.structure_predicate {
@@ -535,7 +536,7 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
                         typ.could_match(&ctx.env, &arg_type)?;
                     }
                 }
-                typ
+                (false, typ)
             }
         };
         match &type_predicate {
@@ -564,7 +565,12 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
             .map(|g| compiler::compile(ctx, g.clone(), &scope, top_id))
             .transpose()?
             .map(Cached::new);
-        Ok(PatternNode { type_predicate, structure_predicate, guard })
+        Ok(PatternNode {
+            explicit_type_predicate: explicit,
+            type_predicate,
+            structure_predicate,
+            guard,
+        })
     }
 
     pub(super) fn bind_event(&self, event: &mut Event<E>, v: &Value) {
@@ -591,7 +597,7 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
     }
 
     pub(super) fn is_match(&self, env: &Env<C, E>, v: &Value) -> bool {
-        self.type_predicate.is_a(env, v)
+        (!self.explicit_type_predicate || self.type_predicate.is_a(env, v))
             && self.structure_predicate.is_match(v)
             && match &self.guard {
                 None => true,

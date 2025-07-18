@@ -570,6 +570,26 @@ run!(array_match1, ARRAY_MATCH1, |v: Result<&Value>| match v {
     _ => false,
 });
 
+const ARRAY_MATCH2: &str = r#"
+{
+    let a = [];
+    let b = [0, 1, 2, 3, 4, 5, 6];
+    let r = select uniq(array::iter([a, a, a, b])) {
+        [] => `Empty,
+        _ => `Nonempty
+    };
+    array::group(r, |n, _| n == 2)
+}
+"#;
+
+run!(array_match2, ARRAY_MATCH2, |v: Result<&Value>| match v {
+    Ok(v) => match v.clone().cast_to::<[ArcStr; 2]>() {
+        Ok([s0, s1]) if &*s0 == "Empty" && &*s1 == "Nonempty" => true,
+        _ => false,
+    },
+    _ => false,
+});
+
 const TUPLES0: &str = r#"
 {
   let t: (string, Number, Number) = ("foo", 42, 23.5);

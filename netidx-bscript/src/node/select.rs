@@ -59,6 +59,7 @@ impl<C: Ctx, E: UserEvent> Select<C, E> {
 impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         let Self { selected, arg, arms, typ: _, spec: _ } = self;
+
         let mut val_up: SmallVec<[bool; 64]> = smallvec![];
         let arg_up = arg.update(ctx, event);
         macro_rules! bind {
@@ -103,8 +104,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
             let sel = match arg.cached.as_ref() {
                 None => None,
                 Some(v) => arms.iter().enumerate().find_map(|(i, (pat, _))| {
-                    let res = pat.is_match(&ctx.env, v);
-                    if res {
+                    if pat.is_match(&ctx.env, v) {
                         Some(i)
                     } else {
                         None
@@ -117,17 +117,17 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
                         bind!(i);
                     }
                     update!();
-                    if arg_up {
-                        val_up[i] = true;
+                    if arg_up || val_up[i] {
+                        arms[i].1.cached.clone()
+                    } else {
+                        None
                     }
-                    val!(i)
                 }
                 (Some(i), Some(_) | None) => {
                     bind!(i);
                     update!();
                     *selected = Some(i);
-                    val_up[i] = true;
-                    val!(i)
+                    arms[i].1.cached.clone()
                 }
                 (None, Some(_)) => {
                     update!();

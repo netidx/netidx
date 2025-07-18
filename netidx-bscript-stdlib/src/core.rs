@@ -611,17 +611,14 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Uniq {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        match from {
-            [e] => e.update(ctx, event).and_then(|v| {
-                if Some(&v) != self.0.as_ref() {
-                    self.0 = Some(v.clone());
-                    Some(v)
-                } else {
-                    None
-                }
-            }),
-            _ => unreachable!(),
-        }
+        from[0].update(ctx, event).and_then(|v| {
+            if Some(&v) != self.0.as_ref() {
+                self.0 = Some(v.clone());
+                Some(v)
+            } else {
+                None
+            }
+        })
     }
 }
 

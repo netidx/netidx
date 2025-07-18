@@ -1,5 +1,10 @@
 let path = "/";
-dbg(path);
-let structure = net::list(#update:null, path);
+path <- time::timer(duration:5.0s, false) ~ "/local";
+path <- time::timer(duration:10.0s, false) ~ "/local/bench";
+let structure = net::list_table(path);
 dbg(structure);
-structure
+let mode = select uniq(structure.columns) {
+    [] => `List,
+    _ => `Table
+};
+dbg(mode)

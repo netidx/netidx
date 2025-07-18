@@ -34,11 +34,14 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     fmt::Debug,
     mem,
-    sync::{self, LazyLock},
+    sync::{self, atomic::AtomicBool, LazyLock},
     time::Duration,
 };
 use tokio::time::Instant;
 use triomphe::Arc;
+
+#[allow(dead_code)]
+static TRACE: AtomicBool = AtomicBool::new(false);
 
 atomic_id!(LambdaId);
 

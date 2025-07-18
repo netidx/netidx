@@ -5,11 +5,12 @@ use tui::input_handler;
 let path = "/";
 dbg(path);
 let structure = net::list_table(path);
-dbg(structure);
-let mode = select uniq(structure.columns) {
+// CR if I put the uniq on the struct ref it doesn't work
+let mode = select structure.columns {
     [] => `List,
     _ => `Table
 };
+dbg(mode);
 let selected = { x: 0, y: 0 };
 dbg(selected);
 let visible_range = {
@@ -22,12 +23,13 @@ let visible_range = {
         max: selected.x + size.columns
     }
 };
-let is_visible = |row: i64, col: i64| uniq(
-    (row >= (visible_range.row).min) &&
-    (row <= (visible_range.row).max) &&
-    (col >= (visible_range.column).min) &&
-    (col <= (visible_range.column).max)
-);
+//let is_visible = |row: i64, col: i64| uniq(
+//    (row >= (visible_range.row).min) &&
+//    (row <= (visible_range.row).max) &&
+//    (col >= (visible_range.column).min) &&
+//    (col <= (visible_range.column).max)
+//);
+let is_visible = |row: i64, col: i64| row ~ true;
 let columns = {
     let cols = array::map(structure.columns, |(col, _)| col);
     select cols {
@@ -35,6 +37,7 @@ let columns = {
         cols => array::push_front(cols, "Name")
     }
 };
+dbg(columns);
 let header = select mode {
     `List => row(&[cell(line("Name")), cell(line("Value"))]),
     `Table => row(&array::map(columns, |col| cell(line(col))))
@@ -46,41 +49,43 @@ let widths: Array<Constraint> = select mode {
 let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
     let name = select str::basename(row) { null as _ => "", s => s };
     let name = cell(line(name));
+    let i = i; // CR this is a bug in mapq that I must look in to
+    let row = row;
     tui::table::row(&select mode {
-        `List => {
-            let path = select is_visible(i, 0) { true => "[row]", false => "" };
-            [ name, cell(line("[any("#VAL", net::subscribe(path))]")) ]
+        e@ `List => {
+            let path = select mode {
+                `List => "[row]",
+                `Table => ""
+            };
+            [ name, cell(line("[any(e ~ "#VAL", net::subscribe(path))]")) ]
         },
-        `Table => array::map(array::enumerate(columns), |(j, col)| select j {
-            0 => name,
-            j => {
-                let path = select is_visible(i, j) {
-                    true => "[row]/[col]",
-                    false => ""
-                };
-                cell(line("[any("#VAL", net::subscribe(path))]"))
-            }
-        })
+        e@ `Table => {
+            let cols = array::map(dbg(columns[1..])?, |col| {
+                let path = "[row]/[col]";
+                cell(line("[any(e ~ "#VAL", net::subscribe(path))]"))
+            });
+            array::concat([name], cols)
+        }
     })
 });
 let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(e) => select e.code {
         e@ `Left => {
-            selected <- dbg(e) ~ { selected with x: max(0, selected.x - 1) };
+            selected <- e ~ { selected with x: max(0, selected.x - 1) };
             `Stop
         },
         e@ `Right => {
             let x = min(array::len(columns) - 1, selected.x + 1);
-            selected <- dbg(e) ~ { selected with x };
+            selected <- e ~ { selected with x };
             `Stop
         },
         e@ `Down => {
-            //let y = min(array::len(structure.rows) - 1, e ~ (selected.y + 1));
-            selected <- dbg(e) ~ { selected with y: selected.y + 1 };
+            let y = min(array::len(structure.rows) - 1, selected.y + 1);
+            selected <- e ~ { selected with y };
             `Stop
         },
         e@ `Up => {
-            selected <- dbg(e) ~ { selected with y: max(0, selected.y - 1) };
+            selected <- e ~ { selected with y: max(0, selected.y - 1) };
             `Stop
         },
         e@ `Enter => select e ~ mode {
