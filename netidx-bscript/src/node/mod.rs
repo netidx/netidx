@@ -117,6 +117,11 @@ impl<C: Ctx, E: UserEvent> Cached<C, E> {
             }
         }
     }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.cached = None;
+        self.node.sleep(ctx)
+    }
 }
 
 #[derive(Debug)]
@@ -572,7 +577,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
         for n in &mut self.args {
-            n.node.sleep(ctx);
+            n.sleep(ctx);
         }
     }
 
@@ -715,7 +720,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ConnectDeref<C, E> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
-        self.rhs.node.sleep(ctx);
+        self.rhs.sleep(ctx);
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -1133,7 +1138,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Sample<C, E> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
-        self.arg.node.sleep(ctx);
+        self.arg.sleep(ctx);
         self.trigger.sleep(ctx);
     }
 

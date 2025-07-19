@@ -1,5 +1,3 @@
-use std::collections::hash_map::Entry;
-
 use super::{compiler::compile, pattern::StructPatternNode, Cached};
 use crate::{
     expr::{Expr, ExprId, ModPath, Pattern},
@@ -9,11 +7,12 @@ use crate::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use combine::stream::position::SourcePosition;
-use compact_str::format_compact;
+use compact_str::{format_compact, CompactString};
 use enumflags2::BitFlags;
 use netidx::subscriber::Value;
 use netidx_value::Typ;
 use smallvec::{smallvec, SmallVec};
+use std::collections::hash_map::Entry;
 
 atomic_id!(SelectId);
 
@@ -60,6 +59,7 @@ impl<C: Ctx, E: UserEvent> Select<C, E> {
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
+        let trace = self.arg.node.spec().pos.line == 61;
         let Self { selected, arg, arms, typ: _, spec: _ } = self;
         let mut pat_up = false;
         let arg_up = arg.update(ctx, event);
@@ -121,10 +121,22 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
                     REFS.with_borrow_mut(|refs| {
                         refs.clear();
                         arms[i].1.node.refs(refs);
+                        if trace {
+                            dbg!(&refs);
+                        }
                         refs.with_external_refs(|id| {
                             if let Entry::Vacant(e) = event.variables.entry(id)
                                 && let Some(v) = ctx.cached.get(&id)
                             {
+                                if trace {
+                                    let name = match ctx.env.by_id.get(&id) {
+                                        None => CompactString::new(""),
+                                        Some(b) => {
+                                            format_compact!("{}::{}", b.scope, b.name)
+                                        }
+                                    };
+                                    eprintln!("setting: {name} to val: {v}")
+                                }
                                 e.insert(v.clone());
                                 set.push(id);
                             }
@@ -160,11 +172,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
         let Self { selected: _, arg, arms, typ: _, spec: _ } = self;
-        arg.node.sleep(ctx);
+        arg.sleep(ctx);
         for (pat, arg) in arms {
-            arg.node.sleep(ctx);
+            arg.sleep(ctx);
             if let Some(n) = &mut pat.guard {
-                n.node.sleep(ctx)
+                n.sleep(ctx)
             }
         }
     }

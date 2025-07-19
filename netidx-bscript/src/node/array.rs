@@ -104,8 +104,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArrayRef<C, E> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
-        self.source.node.sleep(ctx);
-        self.i.node.sleep(ctx);
+        self.source.sleep(ctx);
+        self.i.sleep(ctx);
     }
 }
 
@@ -236,12 +236,12 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArraySlice<C, E> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
-        self.source.node.sleep(ctx);
+        self.source.sleep(ctx);
         if let Some(start) = &mut self.start {
-            start.node.sleep(ctx);
+            start.sleep(ctx);
         }
         if let Some(end) = &mut self.end {
-            end.node.sleep(ctx);
+            end.sleep(ctx);
         }
     }
 
@@ -305,7 +305,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Array<C, E> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
-        self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
+        self.n.iter_mut().for_each(|n| n.sleep(ctx))
     }
 
     fn refs(&self, refs: &mut Refs) {

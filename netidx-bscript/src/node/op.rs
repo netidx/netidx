@@ -154,8 +154,8 @@ macro_rules! bool_op {
             }
 
             fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
-                self.lhs.node.sleep(ctx);
-                self.rhs.node.sleep(ctx)
+                self.lhs.sleep(ctx);
+                self.rhs.sleep(ctx)
             }
 
             fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -287,8 +287,8 @@ macro_rules! arith_op {
             }
 
             fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
-                self.lhs.node.sleep(ctx);
-                self.rhs.node.sleep(ctx);
+                self.lhs.sleep(ctx);
+                self.rhs.sleep(ctx);
             }
 
             fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {

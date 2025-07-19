@@ -239,8 +239,8 @@ pub trait Apply<C: Ctx, E: UserEvent>: Debug + Send + Sync + Any {
     fn refs<'a>(&self, _refs: &mut Refs) {}
 
     /// put the node to sleep, used in conditions like select for branches that
-    /// are not selected
-    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
+    /// are not selected. Any cached values should be cleared on sleep.
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>);
 }
 
 /// Update represents a regular graph node, as opposed to a function

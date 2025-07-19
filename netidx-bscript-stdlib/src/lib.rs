@@ -66,6 +66,12 @@ impl CachedVals {
         CachedVals(from.into_iter().map(|_| None).collect())
     }
 
+    pub fn clear(&mut self) {
+        for v in &mut self.0 {
+            *v = None
+        }
+    }
+
     pub fn update<C: Ctx, E: UserEvent>(
         &mut self,
         ctx: &mut ExecCtx<C, E>,
@@ -148,6 +154,10 @@ impl<C: Ctx, E: UserEvent, T: EvalCached> Apply<C, E> for CachedArgs<T> {
         } else {
             None
         }
+    }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {
+        self.cached.clear()
     }
 }
 

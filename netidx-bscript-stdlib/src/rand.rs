@@ -55,6 +55,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Rand {
             None
         }
     }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {
+        self.args.clear()
+    }
 }
 
 #[derive(Debug)]
@@ -83,6 +87,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Pick {
             _ => None,
         })
     }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 }
 
 #[derive(Debug)]
@@ -112,6 +118,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Shuffle {
             }
             _ => None,
         })
+    }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {
+        self.0.clear()
     }
 }
 

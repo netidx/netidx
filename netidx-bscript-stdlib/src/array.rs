@@ -207,8 +207,10 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.cur = ValArray::from([]);
         for sl in &mut self.slots {
-            sl.pred.sleep(ctx)
+            sl.cur = None;
+            sl.pred.sleep(ctx);
         }
     }
 }
@@ -532,6 +534,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.init = None;
+        for v in &mut self.inits {
+            *v = None
+        }
         for n in &mut self.nodes {
             n.sleep(ctx)
         }
@@ -994,6 +1000,13 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Iter {
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         ctx.user.unref_var(self.0, self.1)
     }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        // there may be in flight updates which we now must ignore forever
+        ctx.user.unref_var(self.0, self.1);
+        self.0 = BindId::new();
+        ctx.user.ref_var(self.0, self.1);
+    }
 }
 
 #[derive(Debug)]
@@ -1048,6 +1061,13 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for IterQ {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         ctx.user.unref_var(self.id, self.top_id)
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id);
+        self.id = BindId::new();
+        self.queue.clear();
+        self.triggered = 0;
     }
 }
 

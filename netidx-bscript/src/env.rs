@@ -32,8 +32,8 @@ pub struct Bind {
     pub export: bool,
     pub typ: Type,
     pub doc: Option<ArcStr>,
-    scope: ModPath,
-    name: CompactString,
+    pub scope: ModPath,
+    pub name: CompactString,
 }
 
 impl fmt::Debug for Bind {

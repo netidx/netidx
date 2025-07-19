@@ -74,7 +74,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Struct<C, E> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
-        self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
+        self.n.iter_mut().for_each(|n| n.sleep(ctx))
     }
 
     fn refs(&self, refs: &mut Refs) {
@@ -188,7 +188,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.source.sleep(ctx);
-        self.replace.iter_mut().for_each(|(_, n)| n.node.sleep(ctx))
+        self.replace.iter_mut().for_each(|(_, n)| n.sleep(ctx))
     }
 
     fn refs(&self, refs: &mut Refs) {
@@ -384,7 +384,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Tuple<C, E> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
-        self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
+        self.n.iter_mut().for_each(|n| n.sleep(ctx))
     }
 
     fn refs(&self, refs: &mut Refs) {
@@ -471,7 +471,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Variant<C, E> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
-        self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
+        self.n.iter_mut().for_each(|n| n.sleep(ctx))
     }
 
     fn refs(&self, refs: &mut Refs) {

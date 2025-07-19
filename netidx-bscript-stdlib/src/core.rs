@@ -38,6 +38,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for IsErr {
             _ => Value::Bool(false),
         })
     }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 }
 
 #[derive(Debug)]
@@ -64,6 +66,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for FilterErr {
             _ => None,
         })
     }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 }
 
 #[derive(Debug)]
@@ -90,6 +94,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for ToError {
             Err(e) => Value::Error(format_compact!("{e}").as_str().into()),
         })
     }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 }
 
 #[derive(Debug)]
@@ -124,6 +130,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Once {
             }),
             _ => None,
         }
+    }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {
+        self.val = false
     }
 }
 
@@ -444,6 +454,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.out, self.top_id);
+        self.out = BindId::new();
+        ctx.user.ref_var(self.out, self.top_id);
+        self.queue.clear();
         self.pred.sleep(ctx);
     }
 }
@@ -495,6 +509,14 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Queue {
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         ctx.user.unref_var(self.id, self.top_id);
     }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id);
+        self.id = BindId::new();
+        ctx.user.ref_var(self.id, self.top_id);
+        self.triggered = 0;
+        self.queue.clear();
+    }
 }
 
 #[derive(Debug)]
@@ -537,6 +559,12 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Seq {
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         ctx.user.unref_var(self.id, self.top_id);
     }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id);
+        self.id = BindId::new();
+        ctx.user.ref_var(self.id, self.top_id);
+    }
 }
 
 #[derive(Debug)]
@@ -566,6 +594,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Count {
         } else {
             None
         }
+    }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {
+        self.count = 0
     }
 }
 
@@ -634,6 +666,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Uniq {
             }
         })
     }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {
+        self.0 = None
+    }
 }
 
 #[derive(Debug)]
@@ -660,6 +696,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Never {
         }
         None
     }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -755,6 +793,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Dbg {
             v
         })
     }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 }
 
 #[derive(Debug)]
@@ -797,6 +837,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Log {
         }
         None
     }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 }
 
 pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {

@@ -125,6 +125,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Write {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.args.clear();
         match &mut self.dv {
             Either::Left((path, dv)) => {
                 ctx.user.unsubscribe(path.clone(), dv.clone(), self.top_id);
@@ -214,6 +215,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.args.clear();
         if let Some((path, dv)) = self.cur.take() {
             ctx.user.unsubscribe(path, dv, self.top_id);
         }
@@ -286,6 +288,13 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for RpcCall {
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         ctx.user.unref_var(self.id, self.top_id)
     }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id);
+        self.id = BindId::new();
+        ctx.user.ref_var(self.id, self.top_id);
+        self.args.clear()
+    }
 }
 
 macro_rules! list {
@@ -352,6 +361,15 @@ macro_rules! list {
             fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
                 ctx.user.unref_var(self.id, self.top_id);
                 ctx.user.stop_list(self.id);
+            }
+
+            fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+                ctx.user.unref_var(self.id, self.top_id);
+                ctx.user.stop_list(self.id);
+                self.id = BindId::new();
+                ctx.user.ref_var(self.id, self.top_id);
+                self.current = None;
+                self.args.clear();
             }
         }
     };
@@ -494,6 +512,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         if let Some((_, val)) = self.current.take() {
             ctx.user.unpublish(val, self.top_id);
         }
+        self.args.clear();
         self.on_write.sleep(ctx);
     }
 }
@@ -678,6 +697,16 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.user.unref_var(self.id, self.top_id);
+        self.id = BindId::new();
+        ctx.user.ref_var(self.id, self.top_id);
+        if let Some(path) = self.current.take() {
+            ctx.user.unpublish_rpc(path);
+        }
+        self.args.clear();
+        self.queue.clear();
+        self.argbuf.clear();
+        self.ready = true;
         self.f.sleep(ctx);
     }
 }

@@ -74,6 +74,13 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for AfterIdle {
             ctx.user.unref_var(id, self.eid)
         }
     }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Some(id) = self.id.take() {
+            ctx.user.unref_var(id, self.eid);
+        }
+        self.args.clear()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -213,6 +220,21 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Timer {
                 now.clone()
             },
         )
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Some(id) = self.id.take() {
+            ctx.user.unref_var(id, self.eid);
+        }
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.args.clear();
+        self.timeout = None;
+        self.repeat = Repeat::No;
+        if let Some(id) = self.id.take() {
+            ctx.user.unref_var(id, self.eid);
+        }
     }
 }
 
