@@ -1,0 +1,85 @@
+use tui;
+use tui::table;
+use tui::input_handler;
+
+let path = "/";
+let structure = net::list_table(path);
+let mode = uniq(select structure.columns {
+    [] => `List,
+    _ => `Table
+});
+let selected = { x: 0, y: 0 };
+let columns = {
+    let cols = array::map(structure.columns, |(col, _)| col);
+    select cols {
+        [] => ["Name", "Value"],
+        cols => array::push_front(cols, "Name")
+    }
+};
+let header = select mode {
+    `List => row(&[cell(line("Name")), cell(line("Value"))]),
+    `Table => row(&array::map(columns, |col| cell(line(col))))
+};
+let widths: Array<Constraint> = select mode {
+    `List => [`Percentage(20), `Percentage(80)],
+    `Table => array::map(columns, |col| `Min(str::len(col)))
+};
+let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
+    let name = select str::basename(row) { null as _ => "", s => s };
+    let name = cell(line(name));
+    tui::table::row(&select mode {
+        `List => [ name, cell(line("[any("#SUB", net::subscribe("[row]"))]")) ],
+        `Table => array::map(array::enumerate(columns), |(i, col)| select i {
+            0 => name,
+            _ => cell(line("[any("#SUB", net::subscribe("[row]/[col]"))]"))
+        })
+    })
+});
+let handle_event = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(e) => select e.code {
+        e@ `Left => {
+            selected <- e ~ { selected with x: max(0, selected.x - 1) };
+            `Stop
+        },
+        e@ `Right => {
+            let x = min(array::len(columns) - 1, selected.x + 1);
+            selected <- e ~ { selected with x };
+            `Stop
+        },
+        e@ `Down => {
+            let y = min(array::len(structure.rows) - 1, selected.y + 1);
+            selected <- e ~ { selected with y };
+            `Stop
+        },
+        e@ `Up => {
+            selected <- e ~ { selected with y: max(0, selected.y - 1) };
+            `Stop
+        },
+        e@ `Enter => {
+            path <- e ~ (structure.rows)[selected.y]?;
+            selected <- e ~ { x: 0, y: 0 };
+            `Stop
+        },
+        e@ `Backspace => select e ~ str::dirname(path) {
+            null as _ => `Stop,
+            s => {
+                path <- s;
+                selected <- s ~ { x: 0, y: 0 };
+                `Stop
+            }
+        },
+        _ => `Continue
+    },
+    _ => `Continue
+};
+input_handler(
+    #handle: &handle_event,
+    &table(
+        #cell_highlight_style:&style(#bg:`Yellow),
+        #header:&header,
+        #flex:&`Center,
+        #widths: &widths,
+        #selected_cell: &selected,
+        &rows
+    )
+)
