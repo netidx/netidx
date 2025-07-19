@@ -3,7 +3,8 @@ use crate::{
     env::LambdaDef,
     expr::{Expr, ExprId, ModPath},
     typ::{FnArgType, FnType, Type},
-    wrap, Apply, BindId, Ctx, Event, ExecCtx, LambdaId, Node, Update, UserEvent,
+    wrap, Apply, BindId, Ctx, Event, ExecCtx, LambdaId, Node, Refs, Update, UserEvent,
+    REFS,
 };
 use anyhow::{bail, Context, Result};
 use arcstr::ArcStr;
@@ -128,13 +129,17 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
                     None | Some(None) => bail!("expected default value"),
                     Some(Some(expr)) => ctx.with_restored($f.env.clone(), |ctx| {
                         let n = compile(ctx, expr.clone(), &$f.scope, self.top_id)?;
-                        n.refs(&mut |id| {
-                            if let Some(v) = ctx.cached.get(&id) {
-                                if let Entry::Vacant(e) = event.variables.entry(id) {
-                                    e.insert(v.clone());
-                                    set.push(id);
+                        REFS.with_borrow_mut(|refs| {
+                            refs.clear();
+                            n.refs(refs);
+                            refs.with_external_refs(|id| {
+                                if let Some(v) = ctx.cached.get(&id) {
+                                    if let Entry::Vacant(e) = event.variables.entry(id) {
+                                        e.insert(v.clone());
+                                        set.push(id);
+                                    }
                                 }
-                            }
+                            })
                         });
                         Ok::<_, anyhow::Error>(n)
                     })?,
@@ -217,13 +222,17 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
             Some((_, f)) if !bound => f.update(ctx, &mut self.args, event),
             Some((_, f)) => {
                 let init = mem::replace(&mut event.init, true);
-                f.refs(&mut |id| {
-                    if let Entry::Vacant(e) = event.variables.entry(id) {
-                        if let Some(v) = ctx.cached.get(&id) {
-                            e.insert(v.clone());
-                            set.push(id);
+                REFS.with_borrow_mut(|refs| {
+                    refs.clear();
+                    f.refs(refs);
+                    refs.with_external_refs(|id| {
+                        if let Entry::Vacant(e) = event.variables.entry(id) {
+                            if let Some(v) = ctx.cached.get(&id) {
+                                e.insert(v.clone());
+                                set.push(id);
+                            }
                         }
-                    }
+                    })
                 });
                 let res = f.update(ctx, &mut self.args, event);
                 event.init = init;
@@ -281,15 +290,15 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
         Ok(())
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+    fn refs(&self, refs: &mut Refs) {
         let Self { spec: _, ftype: _, fnode, args, arg_spec: _, function, top_id: _ } =
             self;
         if let Some((_, fun)) = function {
-            fun.refs(f)
+            fun.refs(refs)
         }
-        fnode.refs(f);
+        fnode.refs(refs);
         for n in args {
-            n.refs(f)
+            n.refs(refs)
         }
     }
 }

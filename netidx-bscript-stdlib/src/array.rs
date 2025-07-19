@@ -7,7 +7,7 @@ use netidx_bscript::{
     expr::{ExprId, ModPath},
     node::genn,
     typ::{FnType, Type},
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, Node,
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, LambdaId, Node, Refs,
     UserEvent,
 };
 use netidx_value::ValArray;
@@ -193,9 +193,9 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
         r
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+    fn refs(&self, refs: &mut Refs) {
         for s in &self.slots {
-            s.pred.refs(f)
+            s.pred.refs(refs)
         }
     }
 
@@ -514,9 +514,9 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
         r
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+    fn refs(&self, refs: &mut Refs) {
         for n in &self.nodes {
-            n.refs(f)
+            n.refs(refs)
         }
     }
 
@@ -942,6 +942,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
         Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[1].typ())?;
         self.pred.typecheck(ctx)?;
         Ok(())
+    }
+
+    fn refs(&self, refs: &mut Refs) {
+        self.pred.refs(refs)
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {

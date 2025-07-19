@@ -2,7 +2,7 @@ use crate::{
     env, err,
     expr::{self, Expr, ExprId, ExprKind, ModPath},
     typ::{self, TVal, TVar, Type},
-    wrap, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
+    wrap, BindId, Ctx, Event, ExecCtx, Node, Refs, Update, UserEvent,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use arcstr::{literal, ArcStr};
@@ -91,7 +91,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Nop {
         &self.typ
     }
 
-    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
+    fn refs(&self, _refs: &mut Refs) {}
 }
 
 #[derive(Debug)]
@@ -158,7 +158,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Use {
         Ok(())
     }
 
-    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
+    fn refs(&self, _refs: &mut Refs) {}
 
     fn spec(&self) -> &Expr {
         &self.spec
@@ -220,7 +220,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TypeDef {
         Ok(())
     }
 
-    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
+    fn refs(&self, _refs: &mut Refs) {}
 
     fn spec(&self) -> &Expr {
         &self.spec
@@ -273,7 +273,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Constant {
 
     fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 
-    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
+    fn refs(&self, _refs: &mut Refs) {}
 
     fn typ(&self) -> &Type {
         &self.typ
@@ -328,9 +328,9 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Block<C, E> {
         }
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+    fn refs(&self, refs: &mut Refs) {
         for n in &self.children {
-            n.refs(f)
+            n.refs(refs)
         }
     }
 
@@ -406,9 +406,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Bind<C, E> {
         None
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.pattern.ids(f);
-        self.node.refs(f);
+    fn refs(&self, refs: &mut Refs) {
+        self.pattern.ids(&mut |id| {
+            refs.bound.insert(id);
+        });
+        self.node.refs(refs);
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -473,8 +475,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Ref {
         event.variables.get(&self.id).map(|v| v.clone())
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        f(self.id)
+    fn refs(&self, refs: &mut Refs) {
+        refs.refed.insert(self.id);
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -556,9 +558,9 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
         &self.typ
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+    fn refs(&self, refs: &mut Refs) {
         for a in &self.args {
-            a.node.refs(f)
+            a.node.refs(refs)
         }
     }
 
@@ -624,8 +626,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Connect<C, E> {
         &Type::Bottom
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.node.refs(f)
+    fn refs(&self, refs: &mut Refs) {
+        self.node.refs(refs)
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -702,9 +704,9 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ConnectDeref<C, E> {
         &Type::Bottom
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        f(self.src_id);
-        self.rhs.node.refs(f)
+    fn refs(&self, refs: &mut Refs) {
+        refs.refed.insert(self.src_id);
+        self.rhs.node.refs(refs)
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -782,8 +784,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ByRef<C, E> {
         &self.typ
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.child.refs(f)
+    fn refs(&self, refs: &mut Refs) {
+        self.child.refs(refs)
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -855,10 +857,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Deref<C, E> {
         &self.typ
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.child.refs(f);
+    fn refs(&self, refs: &mut Refs) {
+        self.child.refs(refs);
         if let Some(id) = self.id {
-            f(id);
+            refs.refed.insert(id);
         }
     }
 
@@ -921,8 +923,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Qop<C, E> {
         &self.spec
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.n.refs(f)
+    fn refs(&self, refs: &mut Refs) {
+        self.n.refs(refs)
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -998,8 +1000,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TypeCast<C, E> {
         self.n.sleep(ctx);
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.n.refs(f)
+    fn refs(&self, refs: &mut Refs) {
+        self.n.refs(refs)
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -1056,8 +1058,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Any<C, E> {
         self.n.iter_mut().for_each(|n| n.sleep(ctx))
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.n.iter().for_each(|n| n.refs(f))
+    fn refs(&self, refs: &mut Refs) {
+        self.n.iter().for_each(|n| n.refs(refs))
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -1143,10 +1145,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Sample<C, E> {
         &self.typ
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        f(self.id);
-        self.arg.node.refs(f);
-        self.trigger.refs(f);
+    fn refs(&self, refs: &mut Refs) {
+        refs.refed.insert(self.id);
+        self.arg.node.refs(refs);
+        self.trigger.refs(refs);
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {

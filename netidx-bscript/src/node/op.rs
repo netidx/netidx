@@ -2,7 +2,7 @@ use super::{compiler::compile, Cached};
 use crate::{
     expr::{Expr, ExprId, ModPath},
     typ::Type,
-    wrap, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
+    wrap, Ctx, Event, ExecCtx, Node, Refs, Update, UserEvent,
 };
 use anyhow::Result;
 use netidx_value::{Typ, Value};
@@ -57,9 +57,9 @@ macro_rules! compare_op {
                 &self.typ
             }
 
-            fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-                self.lhs.node.refs(f);
-                self.rhs.node.refs(f);
+            fn refs(&self, refs: &mut Refs) {
+                self.lhs.node.refs(refs);
+                self.rhs.node.refs(refs);
             }
 
             fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -143,9 +143,9 @@ macro_rules! bool_op {
                 &self.typ
             }
 
-            fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-                self.lhs.node.refs(f);
-                self.rhs.node.refs(f);
+            fn refs(&self, refs: &mut Refs) {
+                self.lhs.node.refs(refs);
+                self.rhs.node.refs(refs);
             }
 
             fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -210,8 +210,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Not<C, E> {
         &self.typ
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.n.refs(f);
+    fn refs(&self, refs: &mut Refs) {
+        self.n.refs(refs);
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -276,9 +276,9 @@ macro_rules! arith_op {
                 &self.typ
             }
 
-            fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-                self.lhs.node.refs(f);
-                self.rhs.node.refs(f);
+            fn refs(&self, refs: &mut Refs) {
+                self.lhs.node.refs(refs);
+                self.rhs.node.refs(refs);
             }
 
             fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {

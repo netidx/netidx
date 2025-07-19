@@ -4,7 +4,7 @@ use crate::{
     expr::{self, Arg, Expr, ExprId, ModPath},
     node::pattern::StructPatternNode,
     typ::{FnArgType, FnType, TVar, Type},
-    wrap, Apply, BindId, Ctx, Event, ExecCtx, InitFn, LambdaId, Node, Update, UserEvent,
+    wrap, Apply, Ctx, Event, ExecCtx, InitFn, LambdaId, Node, Refs, Update, UserEvent,
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
@@ -62,8 +62,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BScriptLambda<C, E> {
         Arc::clone(&self.typ)
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.body.refs(f)
+    fn refs(&self, refs: &mut Refs) {
+        self.body.refs(refs)
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -159,8 +159,8 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInLambda<C, E> {
         Arc::clone(&self.typ)
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.apply.refs(f)
+    fn refs(&self, refs: &mut Refs) {
+        self.apply.refs(refs)
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -326,7 +326,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Lambda<C, E> {
         &self.spec
     }
 
-    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
+    fn refs(&self, _refs: &mut Refs) {}
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         ctx.env.lambdas.remove_cow(&self.def.id);

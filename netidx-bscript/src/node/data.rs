@@ -2,7 +2,7 @@ use super::{compiler::compile, Cached};
 use crate::{
     expr::{Expr, ExprId, ExprKind, ModPath},
     typ::Type,
-    update_args, wrap, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
+    update_args, wrap, Ctx, Event, ExecCtx, Node, Refs, Update, UserEvent,
 };
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
@@ -77,8 +77,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Struct<C, E> {
         self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.n.iter().for_each(|n| n.node.refs(f))
+    fn refs(&self, refs: &mut Refs) {
+        self.n.iter().for_each(|n| n.node.refs(refs))
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -191,9 +191,9 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
         self.replace.iter_mut().for_each(|(_, n)| n.node.sleep(ctx))
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.source.refs(f);
-        self.replace.iter().for_each(|(_, n)| n.node.refs(f))
+    fn refs(&self, refs: &mut Refs) {
+        self.source.refs(refs);
+        self.replace.iter().for_each(|(_, n)| n.node.refs(refs))
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -284,8 +284,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructRef<C, E> {
         }
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.source.refs(f)
+    fn refs(&self, refs: &mut Refs) {
+        self.source.refs(refs)
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -387,8 +387,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Tuple<C, E> {
         self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.n.iter().for_each(|n| n.node.refs(f))
+    fn refs(&self, refs: &mut Refs) {
+        self.n.iter().for_each(|n| n.node.refs(refs))
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -474,8 +474,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Variant<C, E> {
         self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.n.iter().for_each(|n| n.node.refs(f))
+    fn refs(&self, refs: &mut Refs) {
+        self.n.iter().for_each(|n| n.node.refs(refs))
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -545,8 +545,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TupleRef<C, E> {
         &self.typ
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.source.refs(f)
+    fn refs(&self, refs: &mut Refs) {
+        self.source.refs(refs)
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {

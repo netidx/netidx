@@ -19,7 +19,7 @@ use crate::{
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use expr::Expr;
-use fxhash::FxHashMap;
+use fxhash::{FxHashMap, FxHashSet};
 use log::info;
 use netidx::{
     path::Path,
@@ -31,6 +31,7 @@ use node::compiler;
 use parking_lot::RwLock;
 use std::{
     any::Any,
+    cell::RefCell,
     collections::{hash_map::Entry, HashMap},
     fmt::Debug,
     mem,
@@ -42,6 +43,11 @@ use triomphe::Arc;
 
 #[allow(dead_code)]
 static TRACE: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// thread local shared refs structure
+    pub static REFS: RefCell<Refs> = RefCell::new(Refs::new());
+}
 
 atomic_id!(LambdaId);
 
@@ -134,6 +140,31 @@ impl<E: UserEvent> Event<E> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Refs {
+    refed: FxHashSet<BindId>,
+    bound: FxHashSet<BindId>,
+}
+
+impl Refs {
+    pub fn new() -> Self {
+        Self { refed: FxHashSet::default(), bound: FxHashSet::default() }
+    }
+
+    pub fn clear(&mut self) {
+        self.refed.clear();
+        self.bound.clear();
+    }
+
+    pub fn with_external_refs(&self, mut f: impl FnMut(BindId)) {
+        for id in &self.refed {
+            if !self.bound.contains(id) {
+                f(*id);
+            }
+        }
+    }
+}
+
 pub type Node<C, E> = Box<dyn Update<C, E>>;
 
 pub type BuiltInInitFn<C, E> = sync::Arc<
@@ -202,19 +233,14 @@ pub trait Apply<C: Ctx, E: UserEvent>: Debug + Send + Sync + Any {
         Arc::clone(&*EMPTY)
     }
 
-    /// push a list of variables the lambda references in addition to
-    /// it's arguments. Builtins only need to implement this if they
-    /// lookup and reference variables from the environment that were
-    /// not explicitly passed in.
-    fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        ()
-    }
+    /// Populate the Refs structure with all the ids bound and refed by this
+    /// node. It is only necessary for builtins to implement this if they create
+    /// nodes, such as call sites.
+    fn refs<'a>(&self, _refs: &mut Refs) {}
 
     /// put the node to sleep, used in conditions like select for branches that
     /// are not selected
-    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {
-        ()
-    }
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 }
 
 /// Update represents a regular graph node, as opposed to a function
@@ -234,8 +260,9 @@ pub trait Update<C: Ctx, E: UserEvent>: Debug + Send + Sync + Any + 'static {
     /// return the node type
     fn typ(&self) -> &Type;
 
-    /// record any variables the node references by calling f
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a));
+    /// Populate the Refs structure with all the bind ids either refed or bound
+    /// by the node and it's children
+    fn refs(&self, refs: &mut Refs);
 
     /// return the original expression used to compile this node
     fn spec(&self) -> &Expr;

@@ -476,6 +476,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         self.on_write.typecheck(ctx)
     }
 
+    fn refs(&self, refs: &mut netidx_bscript::Refs) {
+        self.on_write.refs(refs)
+    }
+
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         if let Some((_, val)) = self.current.take() {
             ctx.user.unpublish(val, self.top_id);
@@ -656,6 +660,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
         self.typ.args[2].typ.check_contains(&ctx.env, &from[2].typ())?;
         self.typ.args[3].typ.check_contains(&ctx.env, &from[3].typ())?;
         self.f.typecheck(ctx)
+    }
+
+    fn refs(&self, refs: &mut netidx_bscript::Refs) {
+        self.f.refs(refs)
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {

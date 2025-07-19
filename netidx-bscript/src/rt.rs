@@ -15,7 +15,7 @@ use crate::{
     expr::{self, ExprId, ExprKind, ModPath, ModuleKind, ModuleResolver, Origin},
     node::genn,
     typ::{FnType, Type},
-    BindId, Ctx, Event, ExecCtx, LambdaId, NoUserEvent, Node,
+    BindId, Ctx, Event, ExecCtx, LambdaId, NoUserEvent, Node, REFS,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use arcstr::{literal, ArcStr};
@@ -683,13 +683,17 @@ impl BS {
                 let mut clear: SmallVec<[BindId; 16]> = smallvec![];
                 self.event.init = *init;
                 if self.event.init {
-                    n.refs(&mut |id| {
-                        if let Some(v) = self.ctx.cached.get(&id) {
-                            if let Entry::Vacant(e) = self.event.variables.entry(id) {
-                                e.insert(v.clone());
-                                clear.push(id);
+                    REFS.with_borrow_mut(|refs| {
+                        refs.clear();
+                        n.refs(refs);
+                        refs.with_external_refs(|id| {
+                            if let Some(v) = self.ctx.cached.get(&id) {
+                                if let Entry::Vacant(e) = self.event.variables.entry(id) {
+                                    e.insert(v.clone());
+                                    clear.push(id);
+                                }
                             }
-                        }
+                        });
                     });
                 }
                 let res = catch_unwind(AssertUnwindSafe(|| {

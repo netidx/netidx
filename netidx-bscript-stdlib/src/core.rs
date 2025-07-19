@@ -8,7 +8,7 @@ use netidx_bscript::{
     expr::{Expr, ExprId, ModPath},
     node::genn,
     typ::FnType,
-    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, UserEvent,
+    Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, Refs, UserEvent,
 };
 use netidx_value::FromValue;
 use std::{collections::VecDeque, sync::Arc};
@@ -428,6 +428,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         self.typ.args[0].typ.check_contains(&ctx.env, &from[0].typ())?;
         self.typ.args[1].typ.check_contains(&ctx.env, &from[1].typ())?;
         self.pred.typecheck(ctx)
+    }
+
+    fn refs(&self, refs: &mut Refs) {
+        self.pred.refs(refs)
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {

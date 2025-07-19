@@ -3,7 +3,7 @@ use crate::{
     err,
     expr::{Expr, ExprId, ModPath},
     typ::Type,
-    update_args, wrap, BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
+    update_args, wrap, Ctx, Event, ExecCtx, Node, Refs, Update, UserEvent,
 };
 use anyhow::Result;
 use arcstr::literal;
@@ -85,9 +85,9 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArrayRef<C, E> {
         wrap!(self.i.node, int.check_contains(&ctx.env, self.i.node.typ()))
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.source.node.refs(f);
-        self.i.node.refs(f);
+    fn refs(&self, refs: &mut Refs) {
+        self.source.node.refs(refs);
+        self.i.node.refs(refs);
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
@@ -215,13 +215,13 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArraySlice<C, E> {
         Ok(())
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.source.node.refs(f);
+    fn refs(&self, refs: &mut Refs) {
+        self.source.node.refs(refs);
         if let Some(start) = &self.start {
-            start.node.refs(f)
+            start.node.refs(refs)
         }
         if let Some(end) = &self.end {
-            end.node.refs(f)
+            end.node.refs(refs)
         }
     }
 
@@ -308,8 +308,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Array<C, E> {
         self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
-        self.n.iter().for_each(|n| n.node.refs(f))
+    fn refs(&self, refs: &mut Refs) {
+        self.n.iter().for_each(|n| n.node.refs(refs))
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {

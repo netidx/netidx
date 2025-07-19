@@ -12,6 +12,7 @@ let mode = uniq(select structure.columns {
 });
 dbg(mode);
 let selected = { x: 0, y: 0 };
+dbg(selected);
 let visible_range = {
     row: {
         min: max(0, selected.y - size.rows),
@@ -49,17 +50,13 @@ let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
     let name = select str::basename(row) { null as _ => "", s => s };
     let name = cell(line(name));
     tui::table::row(&select mode {
-        e@ `List => [ name, cell(line("[any(e ~ "#VAL", net::subscribe("[row]"))]")) ],
-        e@ `Table => array::map(array::enumerate(columns), |(i, col)| select i {
+        `List => [ name, cell(line("[any("#SUB", net::subscribe("[row]"))]")) ],
+        `Table => array::map(array::enumerate(columns), |(i, col)| select i {
             0 => name,
-            _ => {
-                let path = "[row]/[col]";
-                cell(line("[any(e ~ "#VAL", net::subscribe(path))]"))
-            }
+            _ => cell(line("[any("#SUB", net::subscribe("[row]/[col]"))]"))
         })
     })
 });
-dbg(rows);
 let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(e) => select e.code {
         e@ `Left => {
@@ -67,7 +64,7 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
             `Stop
         },
         e@ `Right => {
-            let x = min(array::len(columns) - 1, selected.x + 1);
+            let x = dbg(min(array::len(columns) - 1, dbg(selected.x) + 1));
             selected <- e ~ { selected with x };
             `Stop
         },
@@ -80,17 +77,16 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
             selected <- e ~ { selected with y: max(0, selected.y - 1) };
             `Stop
         },
-        e@ `Enter => select e ~ mode {
-            `List => `Stop,
-            `Table => {
-                path <- e ~ (structure.rows)[selected.y]?;
-                `Stop
-            }
+        e@ `Enter => {
+            path <- e ~ (structure.rows)[selected.y]?;
+            selected <- e ~ { x: 0, y: 0 };
+            `Stop
         },
         e@ `Backspace => select e ~ str::dirname(path) {
             null as _ => `Stop,
             s => {
                 path <- s;
+                selected <- s ~ { x: 0, y: 0 };
                 `Stop
             }
         },

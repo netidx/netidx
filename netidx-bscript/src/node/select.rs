@@ -5,7 +5,7 @@ use crate::{
     expr::{Expr, ExprId, ModPath, Pattern},
     node::pattern::PatternNode,
     typ::Type,
-    BindId, Ctx, Event, ExecCtx, Node, Update, UserEvent,
+    BindId, Ctx, Event, ExecCtx, Node, Refs, Update, UserEvent, REFS,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use combine::stream::position::SourcePosition;
@@ -118,13 +118,17 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
                     }
                     *selected = Some(i);
                     bind!(i);
-                    arms[i].1.node.refs(&mut |id| {
-                        if let Entry::Vacant(e) = event.variables.entry(id)
-                            && let Some(v) = ctx.cached.get(&id)
-                        {
-                            e.insert(v.clone());
-                            set.push(id);
-                        }
+                    REFS.with_borrow_mut(|refs| {
+                        refs.clear();
+                        arms[i].1.node.refs(refs);
+                        refs.with_external_refs(|id| {
+                            if let Entry::Vacant(e) = event.variables.entry(id)
+                                && let Some(v) = ctx.cached.get(&id)
+                            {
+                                e.insert(v.clone());
+                                set.push(id);
+                            }
+                        });
                     });
                     let init = event.init;
                     event.init = true;
@@ -165,14 +169,16 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
         }
     }
 
-    fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
+    fn refs(&self, refs: &mut Refs) {
         let Self { selected: _, arg, arms, typ: _, spec: _ } = self;
-        arg.node.refs(f);
+        arg.node.refs(refs);
         for (pat, arg) in arms {
-            arg.node.refs(f);
-            pat.structure_predicate.ids(f);
+            arg.node.refs(refs);
+            pat.structure_predicate.ids(&mut |id| {
+                refs.bound.insert(id);
+            });
             if let Some(n) = &pat.guard {
-                n.node.refs(f);
+                n.node.refs(refs);
             }
         }
     }
