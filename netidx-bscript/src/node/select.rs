@@ -65,7 +65,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
         macro_rules! bind {
             ($i:expr) => {{
                 if let Some(arg) = arg.cached.as_ref() {
-                    arms[$i].0.bind_event(event, arg);
+                    arms[$i].0.bind_event(ctx, event, arg);
                 }
             }};
         }
@@ -89,7 +89,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
         for (pat, _) in arms.iter_mut() {
             if arg_up && pat.guard.is_some() {
                 if let Some(arg) = arg.cached.as_ref() {
-                    pat.bind_event(event, arg);
+                    pat.bind_event(ctx, event, arg);
                 }
             }
             pat_up |= pat.update(ctx, event);
@@ -143,18 +143,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        let mut ids: SmallVec<[BindId; 8]> = smallvec![];
         let Self { selected: _, arg, arms, typ: _, spec: _ } = self;
         arg.node.delete(ctx);
         for (pat, arg) in arms {
             arg.node.delete(ctx);
-            pat.structure_predicate.ids(&mut |id| ids.push(id));
-            if let Some(n) = &mut pat.guard {
-                n.node.delete(ctx);
-            }
-            for id in ids.drain(..) {
-                ctx.env.unbind_variable(id);
-            }
+            pat.delete(ctx);
         }
     }
 

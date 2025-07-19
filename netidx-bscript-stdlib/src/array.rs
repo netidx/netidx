@@ -39,6 +39,14 @@ pub struct Slot<C: Ctx, E: UserEvent> {
     pub cur: Option<Value>,
 }
 
+impl<C: Ctx, E: UserEvent> Slot<C, E> {
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.pred.delete(ctx);
+        ctx.cached.remove(&self.id);
+        ctx.env.unbind_variable(self.id);
+    }
+}
+
 #[derive(Debug)]
 pub struct MapQ<C: Ctx, E: UserEvent, T: MapFn<C, E>> {
     scope: ModPath,
@@ -102,9 +110,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
             Some(Value::Array(a)) if a.len() < slen => {
                 while self.slots.len() > a.len() {
                     if let Some(mut s) = self.slots.pop() {
-                        s.pred.delete(ctx);
-                        ctx.cached.remove(&s.id);
-                        ctx.env.unbind_variable(s.id);
+                        s.delete(ctx)
                     }
                 }
                 (Some(a), true)
@@ -196,8 +202,7 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         ctx.cached.remove(&self.predid);
         for sl in &mut self.slots {
-            ctx.cached.remove(&sl.id);
-            sl.pred.delete(ctx);
+            sl.delete(ctx)
         }
     }
 }

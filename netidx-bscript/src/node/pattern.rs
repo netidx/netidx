@@ -506,6 +506,61 @@ impl StructPatternNode {
             | Self::SliceSuffix { .. } => true,
         }
     }
+
+    pub fn delete<C: Ctx, E: UserEvent>(&self, ctx: &mut ExecCtx<C, E>) {
+        match self {
+            Self::Ignore | Self::Literal(_) => (),
+            Self::Bind(id) => {
+                ctx.cached.remove(&id);
+                ctx.env.unbind_variable(*id);
+            }
+            Self::Struct { all, binds } => {
+                if let Some(id) = all {
+                    ctx.cached.remove(id);
+                    ctx.env.unbind_variable(*id);
+                }
+                for (_, _, n) in binds {
+                    n.delete(ctx)
+                }
+            }
+            Self::Slice { tuple: _, all, binds }
+            | Self::Variant { tag: _, all, binds } => {
+                if let Some(id) = all {
+                    ctx.cached.remove(id);
+                    ctx.env.unbind_variable(*id);
+                }
+                for n in binds {
+                    n.delete(ctx)
+                }
+            }
+            Self::SlicePrefix { all, prefix, tail } => {
+                if let Some(id) = all {
+                    ctx.cached.remove(id);
+                    ctx.env.unbind_variable(*id);
+                }
+                if let Some(id) = tail {
+                    ctx.cached.remove(id);
+                    ctx.env.unbind_variable(*id);
+                }
+                for n in prefix {
+                    n.delete(ctx)
+                }
+            }
+            Self::SliceSuffix { all, head, suffix } => {
+                if let Some(id) = all {
+                    ctx.cached.remove(id);
+                    ctx.env.unbind_variable(*id);
+                }
+                if let Some(id) = head {
+                    ctx.cached.remove(id);
+                    ctx.env.unbind_variable(*id);
+                }
+                for n in suffix {
+                    n.delete(ctx);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -573,8 +628,14 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
         })
     }
 
-    pub(super) fn bind_event(&self, event: &mut Event<E>, v: &Value) {
+    pub(super) fn bind_event(
+        &self,
+        ctx: &mut ExecCtx<C, E>,
+        event: &mut Event<E>,
+        v: &Value,
+    ) {
         self.structure_predicate.bind(v, &mut |id, v| {
+            ctx.cached.insert(id, v.clone());
             event.variables.insert(id, v);
         })
     }
@@ -607,5 +668,12 @@ impl<C: Ctx, E: UserEvent> PatternNode<C, E> {
                     .and_then(|v| v.clone().get_as::<bool>())
                     .unwrap_or(false),
             }
+    }
+
+    pub(super) fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Some(n) = &mut self.guard {
+            n.node.delete(ctx)
+        }
+        self.structure_predicate.delete(ctx)
     }
 }

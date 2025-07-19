@@ -372,6 +372,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         macro_rules! set {
             ($v:expr) => {{
                 self.ready = false;
+                ctx.cached.insert(self.x, $v.clone());
                 event.variables.insert(self.x, $v);
             }};
         }
@@ -430,6 +431,11 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.cached.remove(&self.fid);
+        ctx.cached.remove(&self.out);
+        ctx.cached.remove(&self.x);
+        ctx.env.unbind_variable(self.x);
+        self.pred.delete(ctx);
         ctx.user.unref_var(self.out, self.top_id)
     }
 }

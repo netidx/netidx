@@ -67,7 +67,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BScriptLambda<C, E> {
     }
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
-        self.body.delete(ctx)
+        self.body.delete(ctx);
+        for n in &self.args {
+            n.delete(ctx)
+        }
     }
 }
 

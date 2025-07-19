@@ -399,6 +399,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Bind<C, E> {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.node.delete(ctx);
+        self.pattern.delete(ctx);
     }
 
     fn typ(&self) -> &Type {
