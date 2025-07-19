@@ -192,6 +192,14 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
             s.pred.refs(f)
         }
     }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.cached.remove(&self.predid);
+        for sl in &mut self.slots {
+            ctx.cached.remove(&sl.id);
+            sl.pred.delete(ctx);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -315,10 +323,11 @@ pub(super) type FindMap<C, E> = MapQ<C, E, FindMapImpl>;
 pub(super) struct Fold<C: Ctx, E: UserEvent> {
     top_id: ExprId,
     fid: BindId,
-    initid: BindId,
     binds: Vec<BindId>,
     nodes: Vec<Node<C, E>>,
     inits: Vec<Option<Value>>,
+    initids: Vec<BindId>,
+    initid: BindId,
     mftype: TArc<FnType>,
     etyp: Type,
     ityp: Type,
@@ -336,8 +345,9 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Fold<C, E> {
                 binds: vec![],
                 nodes: vec![],
                 inits: vec![],
-                fid: BindId::new(),
+                initids: vec![],
                 initid: BindId::new(),
+                fid: BindId::new(),
                 etyp: match &typ.args[0].typ {
                     Type::Array(et) => (**et).clone(),
                     t => bail!("expected array not {t}"),
@@ -365,6 +375,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
             None => self.nodes.len(),
             Some(Value::Array(a)) if a.len() == self.binds.len() => {
                 for (id, v) in self.binds.iter().zip(a.iter()) {
+                    ctx.cached.insert(*id, v.clone());
                     event.variables.insert(*id, v.clone());
                 }
                 self.nodes.len()
@@ -373,9 +384,15 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
                 while self.binds.len() < a.len() {
                     self.binds.push(BindId::new());
                     self.inits.push(None);
+                    self.initids.push(BindId::new());
                 }
                 while a.len() < self.binds.len() {
-                    self.binds.pop();
+                    if let Some(id) = self.binds.pop() {
+                        ctx.cached.remove(&id);
+                    }
+                    if let Some(id) = self.initids.pop() {
+                        ctx.cached.remove(&id);
+                    }
                     self.inits.pop();
                     if let Some(mut n) = self.nodes.pop() {
                         n.delete(ctx);
@@ -383,11 +400,12 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
                 }
                 let init = self.nodes.len();
                 for i in 0..self.binds.len() {
+                    ctx.cached.insert(self.binds[i], a[i].clone());
                     event.variables.insert(self.binds[i], a[i].clone());
                     if i >= self.nodes.len() {
                         let n = genn::reference(
                             ctx,
-                            self.initid,
+                            if i == 0 { self.initid } else { self.initids[i - 1] },
                             self.ityp.clone(),
                             self.top_id,
                         );
@@ -417,6 +435,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
             _ => self.nodes.len(),
         };
         if let Some(v) = from[1].update(ctx, event) {
+            ctx.cached.insert(self.initid, v.clone());
             event.variables.insert(self.initid, v.clone());
             self.init = Some(v);
         }
@@ -428,30 +447,32 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
         for i in 0..self.nodes.len() {
             if i == init {
                 event.init = true;
-                if let Some(v) = ctx.cached.get(&self.fid) {
-                    if !event.variables.contains_key(&self.fid) {
-                        event.variables.insert(self.fid, v.clone());
-                    }
+                if let Some(v) = ctx.cached.get(&self.fid)
+                    && let Entry::Vacant(e) = event.variables.entry(self.fid)
+                {
+                    e.insert(v.clone());
                 }
                 if i == 0 {
-                    if !event.variables.contains_key(&self.initid) {
-                        if let Some(v) = self.init.as_ref() {
-                            event.variables.insert(self.initid, v.clone());
-                        }
+                    if let Some(v) = self.init.as_ref()
+                        && let Entry::Vacant(e) = event.variables.entry(self.initid)
+                    {
+                        e.insert(v.clone());
                     }
                 } else {
                     if let Some(v) = self.inits[i - 1].clone() {
-                        event.variables.insert(self.initid, v);
+                        event.variables.insert(self.initids[i - 1], v);
                     }
                 }
             }
             match self.nodes[i].update(ctx, event) {
                 Some(v) => {
-                    event.variables.insert(self.initid, v.clone());
+                    ctx.cached.insert(self.initids[i], v.clone());
+                    event.variables.insert(self.initids[i], v.clone());
                     self.inits[i] = Some(v);
                 }
                 None => {
-                    event.variables.remove(&self.initid);
+                    ctx.cached.remove(&self.initids[i]);
+                    event.variables.remove(&self.initids[i]);
                     self.inits[i] = None;
                 }
             }
@@ -485,6 +506,17 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
         for n in &self.nodes {
             n.refs(f)
+        }
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        let i =
+            iter::once(&self.initid).chain(self.binds.iter()).chain(self.initids.iter());
+        for id in i {
+            ctx.cached.remove(id);
+        }
+        for n in &mut self.nodes {
+            n.delete(ctx);
         }
     }
 }
@@ -592,7 +624,7 @@ pub(super) struct WindowEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for WindowEv {
     const NAME: &str = "array_window";
-    deftype!("core::array", "fn(#window:i64, Array<'a>, @args: 'a) -> Array<'a>");
+    deftype!("core::array", "fn(#n:i64, Array<'a>, @args: 'a) -> Array<'a>");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         let mut present = true;
@@ -842,7 +874,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
             ($v:expr) => {{
                 self.ready = false;
                 self.buf.push($v.clone());
-                event.variables.insert(self.nid, Value::I64(self.buf.len() as i64));
+                let len = Value::I64(self.buf.len() as i64);
+                ctx.cached.insert(self.nid, len.clone());
+                event.variables.insert(self.nid, len);
+                ctx.cached.insert(self.xid, $v.clone());
                 event.variables.insert(self.xid, $v);
             }};
         }
@@ -850,6 +885,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
             self.queue.push_back(v);
         }
         if let Some(v) = from[1].update(ctx, event) {
+            ctx.cached.insert(self.pid, v.clone());
             event.variables.insert(self.pid, v);
         }
         if self.ready && self.queue.len() > 0 {
@@ -889,6 +925,13 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
         Type::Fn(self.mftyp.clone()).check_contains(&ctx.env, &from[1].typ())?;
         self.pred.typecheck(ctx)?;
         Ok(())
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        ctx.cached.remove(&self.nid);
+        ctx.cached.remove(&self.pid);
+        ctx.cached.remove(&self.xid);
+        self.pred.delete(ctx);
     }
 }
 

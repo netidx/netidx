@@ -583,7 +583,7 @@ run!(array_push_front, ARRAY_PUSH_FRONT, |v: Result<&Value>| {
 
 #[cfg(test)]
 const ARRAY_WINDOW0: &str = r#"
-  array::window(#window:1, [(1, 2), (3, 4)], (5, 6))
+  array::window(#n:1, [(1, 2), (3, 4)], (5, 6))
 "#;
 
 #[cfg(test)]
@@ -596,7 +596,7 @@ run!(array_window0, ARRAY_WINDOW0, |v: Result<&Value>| {
 
 #[cfg(test)]
 const ARRAY_WINDOW1: &str = r#"
-  array::window(#window:2, [(1, 2), (3, 4)], (5, 6))
+  array::window(#n:2, [(1, 2), (3, 4)], (5, 6))
 "#;
 
 #[cfg(test)]
@@ -609,7 +609,7 @@ run!(array_window1, ARRAY_WINDOW1, |v: Result<&Value>| {
 
 #[cfg(test)]
 const ARRAY_WINDOW2: &str = r#"
-  array::window(#window:3, [(1, 2), (3, 4)], (5, 6))
+  array::window(#n:3, [(1, 2), (3, 4)], (5, 6))
 "#;
 
 #[cfg(test)]

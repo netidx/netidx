@@ -50,11 +50,11 @@ pub let push = |a, @args| 'array_push_back;
 /// where N is the size of the final array
 pub let push_front = |a, @args| 'array_push_front;
 
-/// return an array no larger than #window with the args
+/// return an array no larger than #n with the args
 /// added to the back. If pushing the args would cause the
-/// array to become bigger than #window, remove values from the
+/// array to become bigger than #n, remove values from the
 /// front. O(N) where N is the window size.
-pub let window = |#window, a, @args| 'array_window;
+pub let window = |#n, a, @args| 'array_window;
 
 /// flatten takes an array with two levels of nesting and produces a flat array
 /// with all the nested elements concatenated together.
