@@ -12,7 +12,6 @@ let mode = uniq(select structure.columns {
 });
 dbg(mode);
 let selected = { x: 0, y: 0 };
-dbg(selected);
 let visible_range = {
     row: {
         min: max(0, selected.y - size.rows),
@@ -64,7 +63,7 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
             `Stop
         },
         e@ `Right => {
-            let x = dbg(min(array::len(columns) - 1, dbg(selected.x) + 1));
+            let x = min(array::len(columns) - 1, selected.x + 1);
             selected <- e ~ { selected with x };
             `Stop
         },
