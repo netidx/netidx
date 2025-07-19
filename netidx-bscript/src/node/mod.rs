@@ -77,6 +77,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Nop {
 
     fn delete(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
+
     fn typecheck(&mut self, _ctx: &mut ExecCtx<C, E>) -> Result<()> {
         Ok(())
     }
@@ -171,6 +173,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Use {
         }
     }
 
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
+
     fn typ(&self) -> &Type {
         &Type::Bottom
     }
@@ -226,6 +230,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TypeDef {
         ctx.env.undeftype(&self.scope, &self.name)
     }
 
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
+
     fn typ(&self) -> &Type {
         &Type::Bottom
     }
@@ -264,6 +270,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Constant {
     }
 
     fn delete(&mut self, _ctx: &mut ExecCtx<C, E>) {}
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 
     fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {}
 
@@ -311,6 +319,12 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Block<C, E> {
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         for n in &mut self.children {
             n.delete(ctx)
+        }
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        for n in &mut self.children {
+            n.sleep(ctx)
         }
     }
 
@@ -402,6 +416,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Bind<C, E> {
         self.pattern.delete(ctx);
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.node.sleep(ctx);
+    }
+
     fn typ(&self) -> &Type {
         &self.typ
     }
@@ -462,6 +480,8 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Ref {
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         ctx.user.unref_var(self.id, self.top_id)
     }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {}
 
     fn spec(&self) -> &Expr {
         &self.spec
@@ -548,6 +568,12 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
         }
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        for n in &mut self.args {
+            n.node.sleep(ctx);
+        }
+    }
+
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         for a in &mut self.args {
             wrap!(a.node, a.node.typecheck(ctx))?
@@ -604,6 +630,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Connect<C, E> {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.node.delete(ctx)
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.node.sleep(ctx);
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -682,6 +712,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ConnectDeref<C, E> {
         self.rhs.node.delete(ctx)
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.rhs.node.sleep(ctx);
+    }
+
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         wrap!(self.rhs.node, self.rhs.node.typecheck(ctx))?;
         let bind = match ctx.env.by_id.get(&self.src_id) {
@@ -734,6 +768,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ByRef<C, E> {
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         ctx.env.byref_chain.remove_cow(&self.id);
         self.child.delete(ctx)
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.child.sleep(ctx);
     }
 
     fn spec(&self) -> &Expr {
@@ -803,6 +841,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Deref<C, E> {
             ctx.user.unref_var(id, self.top_id);
         }
         self.child.delete(ctx);
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.child.sleep(ctx);
     }
 
     fn spec(&self) -> &Expr {
@@ -887,6 +929,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Qop<C, E> {
         self.n.delete(ctx)
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.sleep(ctx);
+    }
+
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         wrap!(self.n, self.n.typecheck(ctx))?;
         let bind =
@@ -948,6 +994,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TypeCast<C, E> {
         self.n.delete(ctx)
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.sleep(ctx);
+    }
+
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
         self.n.refs(f)
     }
@@ -1000,6 +1050,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Any<C, E> {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.n.iter_mut().for_each(|n| n.delete(ctx))
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.iter_mut().for_each(|n| n.sleep(ctx))
     }
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
@@ -1074,6 +1128,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Sample<C, E> {
         ctx.user.unref_var(self.id, self.top_id);
         self.arg.node.delete(ctx);
         self.trigger.delete(ctx);
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.arg.node.sleep(ctx);
+        self.trigger.sleep(ctx);
     }
 
     fn spec(&self) -> &Expr {

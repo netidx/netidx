@@ -67,6 +67,11 @@ macro_rules! compare_op {
                 self.rhs.node.delete(ctx)
             }
 
+            fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+                self.lhs.node.sleep(ctx);
+                self.rhs.node.sleep(ctx)
+            }
+
             fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
                 wrap!(self.lhs.node, self.lhs.node.typecheck(ctx))?;
                 wrap!(self.rhs.node, self.rhs.node.typecheck(ctx))?;
@@ -148,6 +153,11 @@ macro_rules! bool_op {
                 self.rhs.node.delete(ctx)
             }
 
+            fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+                self.lhs.node.sleep(ctx);
+                self.rhs.node.sleep(ctx)
+            }
+
             fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
                 wrap!(self.lhs.node, self.lhs.node.typecheck(ctx))?;
                 wrap!(self.rhs.node, self.rhs.node.typecheck(ctx))?;
@@ -206,6 +216,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Not<C, E> {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.n.delete(ctx);
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.sleep(ctx);
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -270,6 +284,11 @@ macro_rules! arith_op {
             fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
                 self.lhs.node.delete(ctx);
                 self.rhs.node.delete(ctx);
+            }
+
+            fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+                self.lhs.node.sleep(ctx);
+                self.rhs.node.sleep(ctx);
             }
 
             fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {

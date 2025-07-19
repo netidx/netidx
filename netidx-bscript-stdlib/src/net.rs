@@ -116,6 +116,23 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Write {
         }
         None
     }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Either::Left((path, dv)) = &self.dv {
+            ctx.user.unsubscribe(path.clone(), dv.clone(), self.top_id)
+        }
+        self.dv = Either::Right(vec![])
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        match &mut self.dv {
+            Either::Left((path, dv)) => {
+                ctx.user.unsubscribe(path.clone(), dv.clone(), self.top_id);
+                self.dv = Either::Right(vec![])
+            }
+            Either::Right(_) => (),
+        }
+    }
 }
 
 impl Write {
@@ -193,6 +210,12 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         if let Some((path, dv)) = self.cur.take() {
             ctx.user.unsubscribe(path, dv, self.top_id)
+        }
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Some((path, dv)) = self.cur.take() {
+            ctx.user.unsubscribe(path, dv, self.top_id);
         }
     }
 }
@@ -462,6 +485,13 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Publish<C, E> {
         ctx.env.unbind_variable(self.x);
         self.on_write.delete(ctx);
     }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Some((_, val)) = self.current.take() {
+            ctx.user.unpublish(val, self.top_id);
+        }
+        self.on_write.sleep(ctx);
+    }
 }
 
 #[derive(Debug)]
@@ -637,6 +667,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for PublishRpc<C, E> {
         ctx.env.unbind_variable(self.x);
         ctx.cached.remove(&self.pid);
         self.f.delete(ctx);
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.f.sleep(ctx);
     }
 }
 

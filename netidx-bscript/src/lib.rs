@@ -209,6 +209,12 @@ pub trait Apply<C: Ctx, E: UserEvent>: Debug + Send + Sync + Any {
     fn refs<'a>(&'a self, _f: &'a mut (dyn FnMut(BindId) + 'a)) {
         ()
     }
+
+    /// put the node to sleep, used in conditions like select for branches that
+    /// are not selected
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {
+        ()
+    }
 }
 
 /// Update represents a regular graph node, as opposed to a function
@@ -233,6 +239,9 @@ pub trait Update<C: Ctx, E: UserEvent>: Debug + Send + Sync + Any + 'static {
 
     /// return the original expression used to compile this node
     fn spec(&self) -> &Expr;
+
+    /// put the node to sleep, called on unselected branches
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>);
 }
 
 pub trait BuiltIn<C: Ctx, E: UserEvent> {

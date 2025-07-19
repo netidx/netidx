@@ -72,6 +72,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BScriptLambda<C, E> {
             n.delete(ctx)
         }
     }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.body.sleep(ctx);
+    }
 }
 
 impl<C: Ctx, E: UserEvent> BScriptLambda<C, E> {
@@ -161,6 +165,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for BuiltInLambda<C, E> {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.apply.delete(ctx)
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.apply.sleep(ctx);
     }
 }
 
@@ -324,26 +332,14 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Lambda<C, E> {
         ctx.env.lambdas.remove_cow(&self.def.id);
     }
 
+    fn sleep(&mut self, _ctx: &mut ExecCtx<C, E>) {
+        ()
+    }
+
     fn typ(&self) -> &Type {
         &self.typ
     }
 
-    /*
-    // for debugging
-    fn is_named_builtin(spec: &Expr, name: &str) -> bool {
-        match &spec.kind {
-            ExprKind::Lambda(a) => match &**a {
-                expr::Lambda { body: Either::Right(bname), .. }
-                    if &**bname == name =>
-                {
-                    true
-                }
-                _ => false,
-            },
-            _ => false,
-        }
-    }
-    */
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         self.typ.unbind_tvars();
         let mut faux_args: Vec<Node<C, E>> = self

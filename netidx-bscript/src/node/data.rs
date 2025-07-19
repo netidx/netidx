@@ -73,6 +73,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Struct<C, E> {
         self.n.iter_mut().for_each(|n| n.node.delete(ctx))
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
+    }
+
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
         self.n.iter().for_each(|n| n.node.refs(f))
     }
@@ -182,6 +186,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
         self.replace.iter_mut().for_each(|(_, n)| n.node.delete(ctx))
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.source.sleep(ctx);
+        self.replace.iter_mut().for_each(|(_, n)| n.node.sleep(ctx))
+    }
+
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
         self.source.refs(f);
         self.replace.iter().for_each(|(_, n)| n.node.refs(f))
@@ -283,6 +292,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructRef<C, E> {
         self.source.delete(ctx)
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.source.sleep(ctx)
+    }
+
     fn typ(&self) -> &Type {
         &self.typ
     }
@@ -370,6 +383,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Tuple<C, E> {
         self.n.iter_mut().for_each(|n| n.node.delete(ctx))
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
+    }
+
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
         self.n.iter().for_each(|n| n.node.refs(f))
     }
@@ -453,6 +470,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Variant<C, E> {
         self.n.iter_mut().for_each(|n| n.node.delete(ctx))
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
+    }
+
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {
         self.n.iter().for_each(|n| n.node.refs(f))
     }
@@ -530,6 +551,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for TupleRef<C, E> {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.source.delete(ctx)
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.source.sleep(ctx);
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {

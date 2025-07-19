@@ -102,6 +102,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArrayRef<C, E> {
     fn spec(&self) -> &Expr {
         &self.spec
     }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.source.node.sleep(ctx);
+        self.i.node.sleep(ctx);
+    }
 }
 
 #[derive(Debug)]
@@ -230,6 +235,16 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArraySlice<C, E> {
         }
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.source.node.sleep(ctx);
+        if let Some(start) = &mut self.start {
+            start.node.sleep(ctx);
+        }
+        if let Some(end) = &mut self.end {
+            end.node.sleep(ctx);
+        }
+    }
+
     fn typ(&self) -> &Type {
         &self.typ
     }
@@ -287,6 +302,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Array<C, E> {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.n.iter_mut().for_each(|n| n.node.delete(ctx))
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.n.iter_mut().for_each(|n| n.node.sleep(ctx))
     }
 
     fn refs<'a>(&'a self, f: &'a mut (dyn FnMut(BindId) + 'a)) {

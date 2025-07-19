@@ -1,3 +1,5 @@
+use std::collections::hash_map::Entry;
+
 use super::{compiler::compile, pattern::StructPatternNode, Cached};
 use crate::{
     expr::{Expr, ExprId, ModPath, Pattern},
@@ -59,8 +61,7 @@ impl<C: Ctx, E: UserEvent> Select<C, E> {
 impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         let Self { selected, arg, arms, typ: _, spec: _ } = self;
-
-        let mut val_up: SmallVec<[bool; 64]> = smallvec![];
+        let mut pat_up = false;
         let arg_up = arg.update(ctx, event);
         macro_rules! bind {
             ($i:expr) => {{
@@ -69,23 +70,6 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
                 }
             }};
         }
-        macro_rules! update {
-            () => {
-                for (_, val) in arms.iter_mut() {
-                    val_up.push(val.update(ctx, event));
-                }
-            };
-        }
-        macro_rules! val {
-            ($i:expr) => {{
-                if val_up[$i] {
-                    arms[$i].1.cached.clone()
-                } else {
-                    None
-                }
-            }};
-        }
-        let mut pat_up = false;
         for (pat, _) in arms.iter_mut() {
             if arg_up && pat.guard.is_some() {
                 if let Some(arg) = arg.cached.as_ref() {
@@ -98,8 +82,13 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
             }
         }
         if !arg_up && !pat_up {
-            update!();
-            selected.and_then(|i| val!(i))
+            self.selected.and_then(|i| {
+                if arms[i].1.update(ctx, event) {
+                    arms[i].1.cached.clone()
+                } else {
+                    None
+                }
+            })
         } else {
             let sel = match arg.cached.as_ref() {
                 None => None,
@@ -116,28 +105,42 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
                     if arg_up {
                         bind!(i);
                     }
-                    update!();
-                    if arg_up || val_up[i] {
+                    if arms[i].1.update(ctx, event) || arg_up {
                         arms[i].1.cached.clone()
                     } else {
                         None
                     }
                 }
                 (Some(i), Some(_) | None) => {
-                    bind!(i);
-                    update!();
+                    let mut set: SmallVec<[BindId; 32]> = smallvec![];
+                    if let Some(j) = *selected {
+                        arms[j].1.node.sleep(ctx);
+                    }
                     *selected = Some(i);
+                    bind!(i);
+                    arms[i].1.node.refs(&mut |id| {
+                        if let Entry::Vacant(e) = event.variables.entry(id)
+                            && let Some(v) = ctx.cached.get(&id)
+                        {
+                            e.insert(v.clone());
+                            set.push(id);
+                        }
+                    });
+                    let init = event.init;
+                    event.init = true;
+                    arms[i].1.update(ctx, event);
+                    event.init = init;
+                    for id in set {
+                        event.variables.remove(&id);
+                    }
                     arms[i].1.cached.clone()
                 }
-                (None, Some(_)) => {
-                    update!();
+                (None, Some(j)) => {
+                    arms[j].1.node.sleep(ctx);
                     *selected = None;
                     None
                 }
-                (None, None) => {
-                    update!();
-                    None
-                }
+                (None, None) => None,
             }
         }
     }
@@ -148,6 +151,17 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
         for (pat, arg) in arms {
             arg.node.delete(ctx);
             pat.delete(ctx);
+        }
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        let Self { selected: _, arg, arms, typ: _, spec: _ } = self;
+        arg.node.sleep(ctx);
+        for (pat, arg) in arms {
+            arg.node.sleep(ctx);
+            if let Some(n) = &mut pat.guard {
+                n.node.sleep(ctx)
+            }
         }
     }
 

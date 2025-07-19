@@ -438,6 +438,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Filter<C, E> {
         self.pred.delete(ctx);
         ctx.user.unref_var(self.out, self.top_id)
     }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.pred.sleep(ctx);
+    }
 }
 
 #[derive(Debug)]

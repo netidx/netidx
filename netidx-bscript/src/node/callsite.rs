@@ -247,6 +247,18 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for CallSite<C, E> {
         }
     }
 
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        let Self { spec: _, ftype: _, fnode, args, arg_spec: _, function, top_id: _ } =
+            self;
+        if let Some((_, f)) = function {
+            f.sleep(ctx)
+        }
+        fnode.sleep(ctx);
+        for n in args {
+            n.sleep(ctx)
+        }
+    }
+
     fn typ(&self) -> &Type {
         &self.ftype.rtype
     }

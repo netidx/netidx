@@ -205,6 +205,12 @@ impl<C: Ctx, E: UserEvent, T: MapFn<C, E>> Apply<C, E> for MapQ<C, E, T> {
             sl.delete(ctx)
         }
     }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        for sl in &mut self.slots {
+            sl.pred.sleep(ctx)
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -522,6 +528,12 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Fold<C, E> {
         }
         for n in &mut self.nodes {
             n.delete(ctx);
+        }
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        for n in &mut self.nodes {
+            n.sleep(ctx)
         }
     }
 }
@@ -937,6 +949,10 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Group<C, E> {
         ctx.cached.remove(&self.pid);
         ctx.cached.remove(&self.xid);
         self.pred.delete(ctx);
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.pred.sleep(ctx);
     }
 }
 
