@@ -4,38 +4,38 @@ use tui::input_handler;
 use tui::block;
 
 // Sample data for our table
-let header = row(&[
+let header = row([
     cell(line("Name")),
     cell(line("Age")),
     cell(line("City"))
 ]);
 
 // Create rows with data
-let row1 = row(&[
+let row1 = row([
     cell(line("Alice")),
     cell(line("28")),
     cell(line("New York"))
 ]);
 
-let row2 = row(&[
+let row2 = row([
     cell(line("Bob")),
     cell(line("32")),
     cell(line("San Francisco"))
 ]);
 
-let row3 = row(&[
+let row3 = row([
     cell(line("Charlie")),
     cell(line("25")),
     cell(line("Chicago"))
 ]);
 
-let row4 = row(&[
+let row4 = row([
     cell(line("Diana")),
     cell(line("30")),
     cell(line("Boston"))
 ]);
 
-let row5 = row(&[
+let row5 = row([
     cell(line("Eve")),
     cell(line("27")),
     cell(line("Seattle"))
@@ -48,11 +48,11 @@ let selected = 0;
 let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.code {
         k@`Up if selected > 0 => {
-            selected <- (k ~ selected) - 1;
+            selected <- k ~ (selected - 1);
             `Stop
         },
         k@`Down if selected < 4 => {
-            selected <- (k ~ selected) + 1;
+            selected <- k ~ (selected + 1);
             `Stop
         },
         _ => `Continue
@@ -67,7 +67,7 @@ let table = table(
     #selected: &selected,
     #column_spacing: &2,
     #widths: &[`Percentage(30), `Percentage(20), `Percentage(50)],
-    &[row1, row2, row3, row4, row5]
+    &[&row1, &row2, &row3, &row4, &row5]
 );
 
 // Wrap in input handler and block

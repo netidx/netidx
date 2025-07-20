@@ -9,19 +9,19 @@ let cell = |
 | -> Cell { content, style };
 
 type Row = {
-  bottom_margin: &[i64, null],
-  cells: &Array<Cell>,
-  height: &[i64, null],
-  style: &[Style, null],
-  top_margin: &[i64, null]
+  bottom_margin: [i64, null],
+  cells: Array<Cell>,
+  height: [i64, null],
+  style: [Style, null],
+  top_margin: [i64, null]
 };
 
 let row = |
-  #bottom_margin: &[i64, null] = &null,
-  #height: &[i64, null] = &null,
-  #style: &[Style, null] = &null,
-  #top_margin: &[i64, null] = &null,
-  cells: &Array<Cell>
+  #bottom_margin: [i64, null] = null,
+  #height: [i64, null] = null,
+  #style: [Style, null] = null,
+  #top_margin: [i64, null] = null,
+  cells: Array<Cell>
 | -> Row { cells, height, style, top_margin, bottom_margin };
 
 type Table = {
@@ -34,7 +34,7 @@ type Table = {
   highlight_spacing: &[HighlightSpacing, null],
   highlight_symbol: &[string, null],
   row_highlight_style: &[Style, null],
-  rows: &Array<Row>,
+  rows: &Array<&Row>,
   selected: &[i64, null],
   selected_cell: &[{x: i64, y: i64}, null],
   selected_column: &[i64, null],
@@ -57,7 +57,7 @@ let table = |
   #selected_column: &[i64, null] = &null,
   #style: &[Style, null] = &null,
   #widths: &[Array<Constraint>, null] = &null,
-  rows: &Array<Row>
+  rows: &Array<&Row>
 | -> Tui `Table({
   cell_highlight_style,
   column_highlight_style,

@@ -32,8 +32,8 @@ let process_data: Array<Process> = [
 
 // Create styled header with bold yellow text
 let header = row(
-    #style: &style(#fg: `Yellow, #add_modifier: [`Bold]),
-    &[
+    #style: style(#fg: `Yellow, #add_modifier: [`Bold]),
+    [
         cell(line("PID")),
         cell(line("Process")),
         cell(line("CPU %")),
@@ -62,7 +62,7 @@ let status_cell = |status: Status| -> Cell {
 
 // Create rows with conditional styling
 let clock = time::timer(duration:1.0s, true);
-let rows = array::map(process_data, |p: Process| -> Row {
+let rows = array::map(process_data, |p: Process| -> &Row {
     // Add some dynamism - CPU values change over time
     let cpu_val = p.cpu;
     cpu_val <- {
@@ -70,7 +70,7 @@ let rows = array::map(process_data, |p: Process| -> Row {
         let v = v + rand::rand(#clock, #start:-30, #end:30);
         max(0, min(100, v))
     };
-    row(&[
+    &row([
         cell(line("[p.pid]")),
         cell(line(p.name)),
         cpu_cell(cpu_val),

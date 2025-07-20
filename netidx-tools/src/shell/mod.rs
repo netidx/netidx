@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use arcstr::{literal, ArcStr};
 use enumflags2::BitFlags;
 use flexi_logger::{FileSpec, Logger};
-use futures::{channel::mpsc, StreamExt};
 use log::info;
 use netidx::{
     config::Config,
@@ -20,7 +19,7 @@ use netidx_bscript::{
 use reedline::Signal;
 use std::{collections::HashMap, path::PathBuf, sync::LazyLock, time::Duration};
 use structopt::StructOpt;
-use tokio::select;
+use tokio::{select, sync::mpsc};
 use triomphe::Arc;
 use tui::Tui;
 
@@ -231,13 +230,16 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
     }
     loop {
         select! {
-            mut batch = from_bs.select_next_some() => {
-                for e in batch.drain(..) {
-                    match e {
-                        RtEvent::Updated(id, v) => output.process_update(&env, id, v).await,
-                        RtEvent::Env(e) => {
-                            env = e;
-                            newenv = Some(env.clone());
+            batch = from_bs.recv() => match batch {
+                None => bail!("bscript runtime is dead"),
+                Some(mut batch) => {
+                    for e in batch.drain(..) {
+                        match e {
+                            RtEvent::Updated(id, v) => output.process_update(&env, id, v).await,
+                            RtEvent::Env(e) => {
+                                env = e;
+                                newenv = Some(env.clone());
+                            }
                         }
                     }
                 }

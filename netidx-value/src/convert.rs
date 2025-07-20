@@ -789,92 +789,263 @@ impl<const S: usize, T: Into<Value>> From<SmallVec<[T; S]>> for Value {
     }
 }
 
-impl<T: FromValue, U: FromValue> FromValue for (T, U) {
-    fn from_value(v: Value) -> Result<Self> {
-        macro_rules! convert {
-            ($elts:expr) => {{
-                let v0 = $elts[0].clone().cast_to::<T>()?;
-                let v1 = $elts[1].clone().cast_to::<U>()?;
-                Ok((v0, v1))
-            }};
-        }
-        match v {
-            Value::Array(a) if a.len() == 2 => convert!(a),
-            Value::Array(_) => bail!("not a tuple"),
-            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+macro_rules! tuple {
+    ($len:literal, $(($i:literal, $t:ident, $v:ident)),+) =>{
+        impl<$($t: FromValue),+> FromValue for ($($t),+) {
+            fn from_value(v: Value) -> Result<Self> {
                 match v {
-                    Value::Array(a) if a.len() == 2 => convert!(a),
-                    Value::Array(_) => bail!("not a tuple"),
-                    _ => bail!("can't cast"),
+                    Value::Array(a) if a.len() == $len => {
+                        Ok(($(a[$i].clone().cast_to::<$t>()?),+))
+                    },
+                    Value::Array(_) => bail!("not a tuple of length {}", $len),
+                    v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                        match v {
+                            Value::Array(a) if a.len() == $len => {
+                                Ok(($(a[$i].clone().cast_to::<$t>()?),+))
+                            },
+                            Value::Array(_) => bail!("not a tuple of length {}", $len),
+                            _ => bail!("can't cast"),
+                        }
+                    }),
                 }
-            }),
-        }
-    }
-
-    fn get(v: Value) -> Option<Self> {
-        match v {
-            Value::Array(elts) if elts.len() == 2 => {
-                let v0 = elts[0].clone().get_as::<T>()?;
-                let v1 = elts[1].clone().get_as::<U>()?;
-                Some((v0, v1))
             }
-            _ => None,
         }
-    }
-}
 
-impl<T: Into<Value>, U: Into<Value>> From<(T, U)> for Value {
-    fn from((t, u): (T, U)) -> Value {
-        let v0 = t.into();
-        let v1 = u.into();
-        Value::Array([v0, v1].into())
-    }
-}
-
-impl<T: FromValue, U: FromValue, V: FromValue> FromValue for (T, U, V) {
-    fn from_value(v: Value) -> Result<Self> {
-        macro_rules! convert {
-            ($elts:expr) => {{
-                let v0 = $elts[0].clone().cast_to::<T>()?;
-                let v1 = $elts[1].clone().cast_to::<U>()?;
-                let v2 = $elts[2].clone().cast_to::<V>()?;
-                Ok((v0, v1, v2))
-            }};
-        }
-        match v {
-            Value::Array(a) if a.len() == 3 => convert!(a),
-            Value::Array(_) => bail!("not a triple"),
-            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
-                match v {
-                    Value::Array(a) if a.len() == 3 => convert!(a),
-                    Value::Array(_) => bail!("not a triple"),
-                    _ => bail!("can't cast"),
-                }
-            }),
-        }
-    }
-
-    fn get(v: Value) -> Option<Self> {
-        match v {
-            Value::Array(elts) if elts.len() == 3 => {
-                let v0 = elts[0].clone().get_as::<T>()?;
-                let v1 = elts[1].clone().get_as::<U>()?;
-                let v2 = elts[2].clone().get_as::<V>()?;
-                Some((v0, v1, v2))
+        impl<$($t: Into<Value>),+> From<($($t),+)> for Value {
+            fn from(($($v),+): ($($t),+)) -> Value {
+                Value::Array([$($v.into()),+].into())
             }
-            _ => None,
         }
     }
 }
 
-impl<T: Into<Value>, U: Into<Value>, V: Into<Value>> From<(T, U, V)> for Value {
-    fn from((t, u, v): (T, U, V)) -> Value {
-        let v0 = t.into();
-        let v1 = u.into();
-        let v2 = v.into();
-        Value::Array([v0, v1, v2].into())
-    }
-}
+tuple!(2, (0, T, t), (1, U, u));
+tuple!(3, (0, T, t), (1, U, u), (2, V, v));
+tuple!(4, (0, T, t), (1, U, u), (2, V, v), (3, W, w));
+tuple!(5, (0, T, t), (1, U, u), (2, V, v), (3, W, w), (4, X, x));
+tuple!(6, (0, T, t), (1, U, u), (2, V, v), (3, W, w), (4, X, x), (5, Y, y));
+tuple!(7, (0, T, t), (1, U, u), (2, V, v), (3, W, w), (4, X, x), (5, Y, y), (6, Z, z));
+tuple!(
+    8,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a)
+);
+tuple!(
+    9,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b)
+);
+tuple!(
+    10,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b),
+    (9, C, c)
+);
+tuple!(
+    11,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b),
+    (9, C, c),
+    (10, D, d)
+);
+tuple!(
+    12,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b),
+    (9, C, c),
+    (10, D, d),
+    (11, E, e)
+);
+tuple!(
+    13,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b),
+    (9, C, c),
+    (10, D, d),
+    (11, E, e),
+    (12, F, f)
+);
+tuple!(
+    14,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b),
+    (9, C, c),
+    (10, D, d),
+    (11, E, e),
+    (12, F, f),
+    (13, G, g)
+);
+tuple!(
+    15,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b),
+    (9, C, c),
+    (10, D, d),
+    (11, E, e),
+    (12, F, f),
+    (13, G, g),
+    (14, H, h)
+);
+tuple!(
+    16,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b),
+    (9, C, c),
+    (10, D, d),
+    (11, E, e),
+    (12, F, f),
+    (13, G, g),
+    (14, H, h),
+    (15, I, i)
+);
+tuple!(
+    17,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b),
+    (9, C, c),
+    (10, D, d),
+    (11, E, e),
+    (12, F, f),
+    (13, G, g),
+    (14, H, h),
+    (15, I, i),
+    (16, J, j)
+);
+tuple!(
+    18,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b),
+    (9, C, c),
+    (10, D, d),
+    (11, E, e),
+    (12, F, f),
+    (13, G, g),
+    (14, H, h),
+    (15, I, i),
+    (16, J, j),
+    (17, K, k)
+);
+tuple!(
+    19,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b),
+    (9, C, c),
+    (10, D, d),
+    (11, E, e),
+    (12, F, f),
+    (13, G, g),
+    (14, H, h),
+    (15, I, i),
+    (16, J, j),
+    (17, K, k),
+    (18, L, l)
+);
+tuple!(
+    20,
+    (0, T, t),
+    (1, U, u),
+    (2, V, v),
+    (3, W, w),
+    (4, X, x),
+    (5, Y, y),
+    (6, Z, z),
+    (7, A, a),
+    (8, B, b),
+    (9, C, c),
+    (10, D, d),
+    (11, E, e),
+    (12, F, f),
+    (13, G, g),
+    (14, H, h),
+    (15, I, i),
+    (16, J, j),
+    (17, K, k),
+    (18, L, l),
+    (19, M, m)
+);
 
 impl<K: FromValue + Eq + Hash, V: FromValue, S: BuildHasher + Default> FromValue
     for HashMap<K, V, S>

@@ -24,7 +24,7 @@ use combine::stream::position::SourcePosition;
 use compact_str::format_compact;
 use core::fmt;
 use derive_builder::Builder;
-use futures::{channel::mpsc, future::join_all, FutureExt, SinkExt, StreamExt};
+use futures::{channel::mpsc, future::join_all, FutureExt, StreamExt};
 use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
 use log::{debug, error, info};
@@ -53,7 +53,10 @@ use std::{
 };
 use tokio::{
     fs, select,
-    sync::{oneshot, Mutex},
+    sync::{
+        mpsc::{self as tmpsc, error::SendTimeoutError, UnboundedReceiver},
+        oneshot, Mutex,
+    },
     task::{self, JoinError, JoinSet},
     time::{self, Instant},
 };
@@ -461,7 +464,7 @@ pub struct CompExp {
 
 impl Drop for CompExp {
     fn drop(&mut self) {
-        let _ = self.rt.0.unbounded_send(ToRt::Delete { id: self.id });
+        let _ = self.rt.0.send(ToRt::Delete { id: self.id });
     }
 }
 
@@ -488,7 +491,7 @@ pub struct Ref {
 
 impl Drop for Ref {
     fn drop(&mut self) {
-        let _ = self.rt.0.unbounded_send(ToRt::Delete { id: self.id });
+        let _ = self.rt.0.send(ToRt::Delete { id: self.id });
     }
 }
 
@@ -517,7 +520,7 @@ pub struct Callable {
 
 impl Drop for Callable {
     fn drop(&mut self) {
-        let _ = self.rt.0.unbounded_send(ToRt::DeleteCallable { id: self.id });
+        let _ = self.rt.0.send(ToRt::DeleteCallable { id: self.id });
     }
 }
 
@@ -542,7 +545,7 @@ impl Callable {
     pub async fn call_unchecked(&self, args: ValArray) -> Result<()> {
         self.rt
             .0
-            .unbounded_send(ToRt::Call { id: self.id, args })
+            .send(ToRt::Call { id: self.id, args })
             .map_err(|_| anyhow!("runtime is dead"))
     }
 }
@@ -572,7 +575,7 @@ struct BS {
     updated: FxHashMap<ExprId, bool>,
     nodes: IndexMap<ExprId, Node<BSCtx, NoUserEvent>, FxBuildHasher>,
     callables: FxHashMap<CallableId, CallableInt>,
-    sub: mpsc::Sender<Pooled<Vec<RtEvent>>>,
+    sub: tmpsc::Sender<Pooled<Vec<RtEvent>>>,
     resolvers: Arc<[ModuleResolver]>,
     publish_timeout: Option<Duration>,
     last_rpc_gc: Instant,
@@ -626,6 +629,8 @@ impl BS {
         writes: Option<WriteBatch>,
         tasks: &mut Vec<(BindId, Value)>,
         rpcs: &mut Vec<(BindId, RpcCall)>,
+        to_rt: &mut UnboundedReceiver<ToRt>,
+        input: &mut Vec<ToRt>,
     ) {
         macro_rules! push_event {
             ($id:expr, $v:expr, $event:ident, $refed:ident, $overflow:ident) => {
@@ -711,8 +716,22 @@ impl BS {
                 }
             }
         }
-        if let Err(_) = self.sub.send(batch).await {
-            error!("could not send batch")
+        loop {
+            match self.sub.send_timeout(batch, Duration::from_millis(100)).await {
+                Ok(()) => break,
+                Err(SendTimeoutError::Closed(_)) => {
+                    error!("could not send batch");
+                    break;
+                }
+                Err(SendTimeoutError::Timeout(b)) => {
+                    batch = b;
+                    // prevent deadlock on input
+                    while let Ok(m) = to_rt.try_recv() {
+                        input.push(m);
+                    }
+                    self.process_input_batch(tasks, input).await;
+                }
+            }
         }
         self.event.clear();
         self.updated.clear();
@@ -723,6 +742,50 @@ impl BS {
             );
             let timeout = self.publish_timeout;
             task::spawn(async move { batch.commit(timeout).await });
+        }
+    }
+
+    async fn process_input_batch(
+        &mut self,
+        tasks: &mut Vec<(BindId, Value)>,
+        input: &mut Vec<ToRt>,
+    ) {
+        for m in input.drain(..) {
+            match m {
+                ToRt::GetEnv { res } => {
+                    let _ = res.send(self.ctx.env.clone());
+                }
+                ToRt::Compile { text, rt, res } => {
+                    let _ = res.send(self.compile(rt, text).await);
+                }
+                ToRt::Load { path, rt, res } => {
+                    let _ = res.send(self.load(rt, &path).await);
+                }
+                ToRt::Delete { id } => {
+                    if let Some(mut n) = self.nodes.shift_remove(&id) {
+                        n.delete(&mut self.ctx);
+                    }
+                    debug!("delete {id:?}");
+                    let mut batch = BATCH.take();
+                    batch.push(RtEvent::Env(self.ctx.env.clone()));
+                    if let Err(_) = self.sub.send(batch).await {
+                        error!("could not send event");
+                    }
+                }
+                ToRt::CompileCallable { id, rt, res } => {
+                    let _ = res.send(self.compile_callable(id, rt));
+                }
+                ToRt::CompileRef { id, rt, res } => {
+                    let _ = res.send(self.compile_ref(rt, id));
+                }
+                ToRt::Set { id, v } => tasks.push((id, v)),
+                ToRt::DeleteCallable { id } => self.delete_callable(id),
+                ToRt::Call { id, args } => {
+                    if let Err(e) = self.call_callable(id, args, tasks) {
+                        error!("calling callable {id:?} failed with {e:?}")
+                    }
+                }
+            }
         }
     }
 
@@ -950,8 +1013,9 @@ impl BS {
         }
     }
 
-    async fn run(mut self, mut to_rt: mpsc::UnboundedReceiver<ToRt>) -> Result<()> {
+    async fn run(mut self, mut to_rt: tmpsc::UnboundedReceiver<ToRt>) -> Result<()> {
         let mut tasks = vec![];
+        let mut input = vec![];
         let mut rpcs = vec![];
         let onemin = Duration::from_secs(60);
         'main: loop {
@@ -959,7 +1023,6 @@ impl BS {
             let ready = self.cycle_ready();
             let mut updates = None;
             let mut writes = None;
-            let mut input = None;
             macro_rules! peek {
                 (updates) => {
                     if self.ctx.user.net_updates.is_empty() {
@@ -990,6 +1053,11 @@ impl BS {
                         }
                     }
                 };
+                (input) => {
+                    while let Ok(m) = to_rt.try_recv() {
+                        input.push(m);
+                    }
+                };
                 ($($item:tt),+) => {{
                     $(peek!($item));+
                 }};
@@ -1000,37 +1068,36 @@ impl BS {
                     &mut self.ctx.user.rpcs
                 ) => {
                     rpcs.push(rp);
-                    peek!(updates, tasks, writes, rpcs)
+                    peek!(updates, tasks, writes, rpcs, input)
                 }
                 wr = maybe_next(
                     self.ctx.user.net_writes.is_empty(),
                     &mut self.ctx.user.writes
                 ) => {
                     writes = Some(wr);
-                    peek!(updates, tasks, rpcs);
+                    peek!(updates, tasks, rpcs, input);
                 },
                 up = maybe_next(
                     self.ctx.user.net_updates.is_empty(),
                     &mut self.ctx.user.updates
                 ) => {
                     updates = Some(up);
-                    peek!(updates, writes, tasks, rpcs);
+                    peek!(updates, writes, tasks, rpcs, input);
                 },
                 up = join_or_wait(&mut self.ctx.user.tasks) => {
                     if let Ok(up) = up {
                         tasks.push(up);
                     }
-                    peek!(updates, writes, tasks, rpcs)
+                    peek!(updates, writes, tasks, rpcs, input)
                 },
                 _ = or_never(ready) => {
-                    peek!(updates, writes, tasks, rpcs)
+                    peek!(updates, writes, tasks, rpcs, input)
                 },
-                n = to_rt.next() => match n {
-                    None => break 'main Ok(()),
-                    Some(i) => {
-                        peek!(updates, writes, tasks, rpcs);
-                        input = Some(i);
+                n = to_rt.recv_many(&mut input, 100000) => {
+                    if n == 0 {
+                        break 'main Ok(())
                     }
+                    peek!(updates, writes, tasks, rpcs);
                 },
                 () = unsubscribe_ready(&self.ctx.user.pending_unsubscribe, now) => {
                     while let Some((ts, _)) = self.ctx.user.pending_unsubscribe.front() {
@@ -1043,43 +1110,9 @@ impl BS {
                     continue 'main
                 },
             }
-            match input {
-                None => (),
-                Some(ToRt::GetEnv { res }) => {
-                    let _ = res.send(self.ctx.env.clone());
-                }
-                Some(ToRt::Compile { text, rt, res }) => {
-                    let _ = res.send(self.compile(rt, text).await);
-                }
-                Some(ToRt::Load { path, rt, res }) => {
-                    let _ = res.send(self.load(rt, &path).await);
-                }
-                Some(ToRt::Delete { id }) => {
-                    if let Some(mut n) = self.nodes.shift_remove(&id) {
-                        n.delete(&mut self.ctx);
-                    }
-                    debug!("delete {id:?}");
-                    let mut batch = BATCH.take();
-                    batch.push(RtEvent::Env(self.ctx.env.clone()));
-                    if let Err(_) = self.sub.send(batch).await {
-                        error!("could not send event");
-                    }
-                }
-                Some(ToRt::CompileCallable { id, rt, res }) => {
-                    let _ = res.send(self.compile_callable(id, rt));
-                }
-                Some(ToRt::CompileRef { id, rt, res }) => {
-                    let _ = res.send(self.compile_ref(rt, id));
-                }
-                Some(ToRt::Set { id, v }) => tasks.push((id, v)),
-                Some(ToRt::DeleteCallable { id }) => self.delete_callable(id),
-                Some(ToRt::Call { id, args }) => {
-                    if let Err(e) = self.call_callable(id, args, &mut tasks) {
-                        error!("calling callable {id:?} failed with {e:?}")
-                    }
-                }
-            }
-            self.do_cycle(updates, writes, &mut tasks, &mut rpcs).await;
+            self.process_input_batch(&mut tasks, &mut input).await;
+            self.do_cycle(updates, writes, &mut tasks, &mut rpcs, &mut to_rt, &mut input)
+                .await;
             if !self.ctx.user.rpc_clients.is_empty() {
                 if now - self.last_rpc_gc >= onemin {
                     self.last_rpc_gc = now;
@@ -1093,12 +1126,12 @@ impl BS {
 /// A handle to a running BS instance. Drop the handle to shutdown the
 /// associated background tasks.
 #[derive(Clone)]
-pub struct BSHandle(mpsc::UnboundedSender<ToRt>);
+pub struct BSHandle(tmpsc::UnboundedSender<ToRt>);
 
 impl BSHandle {
     async fn exec<R, F: FnOnce(oneshot::Sender<R>) -> ToRt>(&self, f: F) -> Result<R> {
         let (tx, rx) = oneshot::channel();
-        self.0.unbounded_send(f(tx)).map_err(|_| anyhow!("runtime is dead"))?;
+        self.0.send(f(tx)).map_err(|_| anyhow!("runtime is dead"))?;
         Ok(rx.await.map_err(|_| anyhow!("runtime did not respond"))?)
     }
 
@@ -1148,7 +1181,7 @@ impl BSHandle {
     /// Set the variable idenfified by `id` to `v`, triggering updates of all
     /// dependent node trees.
     pub fn set(&self, id: BindId, v: Value) -> Result<()> {
-        self.0.unbounded_send(ToRt::Set { id, v }).map_err(|_| anyhow!("runtime is dead"))
+        self.0.send(ToRt::Set { id, v }).map_err(|_| anyhow!("runtime is dead"))
     }
 }
 
@@ -1170,14 +1203,14 @@ pub struct BSConfig {
     #[builder(default)]
     resolvers: Vec<ModuleResolver>,
     /// The channel that will receive events from the runtime
-    sub: mpsc::Sender<Pooled<Vec<RtEvent>>>,
+    sub: tmpsc::Sender<Pooled<Vec<RtEvent>>>,
 }
 
 impl BSConfig {
     /// Create a new config
     pub fn builder(
         ctx: ExecCtx<BSCtx, NoUserEvent>,
-        sub: mpsc::Sender<Pooled<Vec<RtEvent>>>,
+        sub: tmpsc::Sender<Pooled<Vec<RtEvent>>>,
     ) -> BSConfigBuilder {
         BSConfigBuilder::default().ctx(ctx).sub(sub)
     }
@@ -1194,7 +1227,7 @@ impl BSConfig {
     /// `netidx_bscript_stdlib::register` to start.
     pub async fn start(self) -> Result<BSHandle> {
         let (init_tx, init_rx) = oneshot::channel();
-        let (tx, rx) = mpsc::unbounded();
+        let (tx, rx) = tmpsc::unbounded_channel();
         task::spawn(async move {
             match BS::new(self).await {
                 Ok(bs) => {
