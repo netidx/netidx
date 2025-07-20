@@ -187,7 +187,7 @@ pub enum Module {
 /// use anyhow::Result;
 /// use netidx_core::pool::Pooled;
 /// use netidx_bscript::{ExecCtx, rt::{BSCtx, BSConfigBuilder, BSHandle, RtEvent}};
-/// use futures::channel::mpsc;
+/// use tokio::sync::mpsc;
 /// use enumflags2::BitFlags;
 ///
 /// async fn start_runtime(

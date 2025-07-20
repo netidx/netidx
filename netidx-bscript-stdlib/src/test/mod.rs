@@ -1,6 +1,5 @@
 use anyhow::Result;
 use enumflags2::BitFlags;
-use futures::channel::mpsc;
 use netidx::{
     pool::Pooled, publisher::PublisherBuilder, resolver_server,
     subscriber::SubscriberBuilder,
@@ -9,6 +8,7 @@ use netidx_bscript::{
     rt::{BSConfig, BSCtx, BSHandle, RtEvent},
     ExecCtx,
 };
+use tokio::sync::mpsc;
 
 mod langtest;
 mod libtest;
@@ -62,7 +62,7 @@ macro_rules! run {
     ($name:ident, $code:expr, $pred:expr) => {
         #[tokio::test(flavor = "current_thread")]
         async fn $name() -> ::anyhow::Result<()> {
-            let (tx, mut rx) = futures::channel::mpsc::channel(10);
+            let (tx, mut rx) = tokio::sync::mpsc::channel(10);
             let ctx = $crate::test::init(tx).await?;
             let bs = ctx.rt;
             match bs.compile(arcstr::ArcStr::from($code)).await {
@@ -71,7 +71,7 @@ macro_rules! run {
                     dbg!("compilation succeeded");
                     let eid = e.exprs[0].id;
                     loop {
-                        match futures::StreamExt::next(&mut rx).await {
+                        match rx.recv().await {
                             None => bail!("runtime died"),
                             Some(mut batch) => {
                                 for e in batch.drain(..) {

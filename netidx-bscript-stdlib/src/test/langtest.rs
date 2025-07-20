@@ -2,9 +2,9 @@ use super::init;
 use crate::run;
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
-use futures::{channel::mpsc, StreamExt};
 use netidx::publisher::Value;
 use netidx_bscript::rt::RtEvent;
+use tokio::sync::mpsc;
 
 #[tokio::test(flavor = "current_thread")]
 async fn bind_ref_arith() -> Result<()> {
@@ -19,7 +19,7 @@ async fn bind_ref_arith() -> Result<()> {
 "#;
     let e = bs.compile(ArcStr::from(e)).await?;
     let eid = e.exprs[0].id;
-    match rx.next().await {
+    match rx.recv().await {
         None => bail!("runtime died"),
         Some(mut ev) => {
             for e in ev.drain(..) {
