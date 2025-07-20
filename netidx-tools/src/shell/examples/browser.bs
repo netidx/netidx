@@ -9,12 +9,9 @@ let mode = uniq(select structure.columns {
     _ => `Table
 });
 let selected = { x: 0, y: 0 };
-let columns = {
-    let cols = array::map(structure.columns, |(col, _)| col);
-    select cols {
-        [] => ["Name", "Value"],
-        cols => array::push_front(cols, "Name")
-    }
+let columns = select array::map(structure.columns, |(col, _)| col) {
+    [] => ["Name", "Value"],
+    cols => array::push_front(cols, "Name")
 };
 let header = select mode {
     `List => row(&[cell(line("Name")), cell(line("Value"))]),
