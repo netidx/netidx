@@ -40,10 +40,6 @@ let header = select mode {
     `List => row([cell(line("Name")), cell(line("Value"))]),
     `Table => row(array::map(columns, |col| cell(line(col))))
 };
-let widths: Array<Constraint> = select mode {
-    `List => [`Percentage(20), `Percentage(80)],
-    `Table => array::map(columns, |col| `Min(str::len(col)))
-};
 dbg(structure.rows);
 let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
     let name = select str::basename(row) { null as _ => "", s => s };
@@ -98,8 +94,7 @@ input_handler(
     &table(
         #cell_highlight_style:&style(#bg:`Yellow),
         #header:&header,
-        #flex:&`Center,
-        #widths: &widths,
+        #widths:&[],
         #selected_cell: &selected,
         &rows
     )
