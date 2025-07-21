@@ -1,4 +1,6 @@
-use super::{compile, into_borrowed_line, LineV, SpanV, StyleV, TRef, TuiW, TuiWidget};
+use super::{
+    compile, into_borrowed_line, LineV, SizeV, SpanV, StyleV, TRef, TuiW, TuiWidget,
+};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use async_trait::async_trait;
@@ -17,6 +19,8 @@ pub(super) struct TabsW {
     bs: BSHandle,
     tabs: Vec<(LineV, TuiW)>,
     tabs_ref: Ref,
+    size_ref: Ref,
+    last_size: SizeV,
     divider: TRef<Option<SpanV>>,
     highlight_style: TRef<Option<StyleV>>,
     padding_left: TRef<Option<LineV>>,
@@ -27,14 +31,15 @@ pub(super) struct TabsW {
 
 impl TabsW {
     pub(super) async fn compile(bs: BSHandle, v: Value) -> Result<TuiW> {
-        let [(_, divider), (_, highlight_style), (_, padding_left), (_, padding_right), (_, selected), (_, style), (_, tabs)] =
-            v.cast_to::<[(ArcStr, u64); 7]>().context("tabs fields")?;
+        let [(_, divider), (_, highlight_style), (_, padding_left), (_, padding_right), (_, selected), (_, size), (_, style), (_, tabs)] =
+            v.cast_to::<[(ArcStr, u64); 8]>().context("tabs fields")?;
         let (
             divider,
             highlight_style,
             padding_left,
             padding_right,
             selected,
+            size_ref,
             style,
             tabs_ref,
         ) = try_join! {
@@ -43,6 +48,7 @@ impl TabsW {
             bs.compile_ref(padding_left),
             bs.compile_ref(padding_right),
             bs.compile_ref(selected),
+            bs.compile_ref(size),
             bs.compile_ref(style),
             bs.compile_ref(tabs)
         }?;
@@ -65,6 +71,8 @@ impl TabsW {
             padding_left,
             padding_right,
             selected,
+            size_ref,
+            last_size: SizeV::default(),
             style,
         };
         if let Some(v) = t.tabs_ref.last.take() {
@@ -98,13 +106,26 @@ impl TuiWidget for TabsW {
     }
 
     async fn handle_update(&mut self, id: ExprId, v: Value) -> Result<()> {
-        self.divider.update(id, &v).context("tabs divider update")?;
-        self.highlight_style.update(id, &v).context("tabs highlight_style update")?;
-        self.padding_left.update(id, &v).context("tabs padding_left update")?;
-        self.padding_right.update(id, &v).context("tabs padding_right update")?;
-        self.selected.update(id, &v).context("tabs selected update")?;
-        self.style.update(id, &v).context("tabs style update")?;
-        if self.tabs_ref.id == id {
+        let Self {
+            bs: _,
+            tabs: _,
+            tabs_ref,
+            size_ref: _,
+            last_size: _,
+            divider,
+            highlight_style,
+            padding_left,
+            padding_right,
+            selected,
+            style,
+        } = self;
+        divider.update(id, &v).context("tabs divider update")?;
+        highlight_style.update(id, &v).context("tabs highlight_style update")?;
+        padding_left.update(id, &v).context("tabs padding_left update")?;
+        padding_right.update(id, &v).context("tabs padding_right update")?;
+        selected.update(id, &v).context("tabs selected update")?;
+        style.update(id, &v).context("tabs style update")?;
+        if tabs_ref.id == id {
             self.set_tabs(v.clone()).await?;
         }
         for (_, c) in &mut self.tabs {
@@ -118,6 +139,8 @@ impl TuiWidget for TabsW {
             bs: _,
             tabs,
             tabs_ref: _,
+            size_ref,
+            last_size,
             divider,
             highlight_style,
             padding_left,
@@ -156,6 +179,11 @@ impl TuiWidget for TabsW {
             child_rect.height = child_rect.height.saturating_sub(1);
         }
         let idx = selected.t.and_then(|o| o.map(|s| s as usize)).unwrap_or(0);
+        let size = SizeV::from(child_rect);
+        if *last_size != size {
+            *last_size = size;
+            size_ref.set_deref(size)?
+        }
         if let Some((_, child)) = tabs.get_mut(idx) {
             child.draw(frame, child_rect)?;
         }

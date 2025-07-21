@@ -27,6 +27,7 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
 input_handler(
     #handle: &handle_event,
     &scrollbar(
+        #size:&size,
         #position: &position,
         &paragraph(#scroll: &{x: 0, y: position}, &long_text)
     )
