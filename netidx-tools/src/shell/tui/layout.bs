@@ -3,8 +3,24 @@ type Spacing = [
   `Overlap(i64)
 ];
 
+type Child = {
+  child: Tui,
+  constraint: Constraint,
+  size: &[Size, null]
+};
+
+let child = |
+  #size: &[Size, null] = &null,
+  #constraint: Constraint,
+  child: Tui
+| -> Child {
+  child,
+  constraint,
+  size
+};
+
 type Layout = {
-  children: &Array<(Constraint, Tui)>,
+  children: &Array<Child>,
   direction: &[Direction, null],
   flex: &[Flex, null],
   focused: &[i64, null],
@@ -22,7 +38,7 @@ let layout = |
   #margin: &[i64, null] = &null,
   #spacing: &[Spacing, null] = &null,
   #vertical_margin: &[i64, null] = &null,
-  children: &Array<(Constraint, Tui)>
+  children: &Array<Child>
 | -> Tui `Layout({
   direction,
   flex,

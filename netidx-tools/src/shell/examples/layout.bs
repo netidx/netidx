@@ -66,9 +66,9 @@ let block2_layout = layout(
   #direction: &`Horizontal,
   #focused: &2,
   &[
-    (`Percentage(25), block2l),
-    (`Percentage(25), block2r),
-    (`Percentage(50), block2rem)
+    child(#constraint:`Percentage(25), block2l),
+    child(#constraint:`Percentage(25), block2r),
+    child(#constraint:`Percentage(50), block2rem)
   ]
 );
 let block2 = block(
@@ -91,5 +91,8 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
 
 input_handler(
   #handle: &handle_event,
-  &layout(#focused: &focused, &[(`Percentage(50), block1), (`Percentage(50), block2)])
+  &layout(#focused: &focused, &[
+    child(#constraint:`Percentage(50), block1),
+    child(#constraint:`Percentage(50), block2)
+  ])
 )

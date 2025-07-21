@@ -500,7 +500,7 @@ impl Ref {
         self.rt.set(self.bid, v)
     }
 
-    pub fn set_deref(&self, v: Value) -> Result<()> {
+    pub fn set_deref<T: Into<Value>>(&self, v: T) -> Result<()> {
         if let Some(id) = self.target_bid {
             self.rt.set(id, v)?
         }
@@ -1180,7 +1180,8 @@ impl BSHandle {
 
     /// Set the variable idenfified by `id` to `v`, triggering updates of all
     /// dependent node trees.
-    pub fn set(&self, id: BindId, v: Value) -> Result<()> {
+    pub fn set<T: Into<Value>>(&self, id: BindId, v: T) -> Result<()> {
+        let v = v.into();
         self.0.send(ToRt::Set { id, v }).map_err(|_| anyhow!("runtime is dead"))
     }
 }

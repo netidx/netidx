@@ -1,6 +1,6 @@
 use super::{
-    compile, into_borrowed_line, AlignmentV, EmptyW, LineV, PositionV, StyleV, TRef,
-    TuiW, TuiWidget,
+    compile, into_borrowed_line, AlignmentV, EmptyW, LineV, PositionV, SizeV, StyleV,
+    TRef, TuiW, TuiWidget,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
@@ -90,18 +90,21 @@ pub(super) struct BlockW {
     title_position: TRef<Option<PositionV>>,
     title_style: TRef<Option<StyleV>>,
     title_top: TRef<Option<LineV>>,
+    size_ref: Ref,
+    last_size: SizeV,
 }
 
 impl BlockW {
     pub(super) async fn compile(bs: BSHandle, v: Value) -> Result<TuiW> {
-        let [(_, border), (_, border_style), (_, border_type), (_, child), (_, padding), (_, style), (_, title), (_, title_alignment), (_, title_bottom), (_, title_position), (_, title_style), (_, title_top)] =
-            v.cast_to::<[(ArcStr, u64); 12]>().context("block flds")?;
+        let [(_, border), (_, border_style), (_, border_type), (_, child), (_, padding), (_, size), (_, style), (_, title), (_, title_alignment), (_, title_bottom), (_, title_position), (_, title_style), (_, title_top)] =
+            v.cast_to::<[(ArcStr, u64); 13]>().context("block flds")?;
         let (
             border,
             border_style,
             border_type,
             mut child_ref,
             padding,
+            size_ref,
             style,
             title,
             title_alignment,
@@ -115,6 +118,7 @@ impl BlockW {
             bs.compile_ref(border_type),
             bs.compile_ref(child),
             bs.compile_ref(padding),
+            bs.compile_ref(size),
             bs.compile_ref(style),
             bs.compile_ref(title),
             bs.compile_ref(title_alignment),
@@ -153,6 +157,7 @@ impl BlockW {
             border_style,
             border_type,
             padding,
+            size_ref,
             style,
             title,
             title_alignment,
@@ -162,6 +167,7 @@ impl BlockW {
             title_top,
             child_ref,
             child,
+            last_size: SizeV::default(),
         };
         Ok(Box::new(t))
     }
@@ -182,6 +188,8 @@ impl TuiWidget for BlockW {
             child_ref,
             child,
             padding,
+            size_ref: _,
+            last_size: _,
             style,
             title,
             title_alignment,
@@ -218,6 +226,8 @@ impl TuiWidget for BlockW {
             child_ref: _,
             child,
             padding,
+            size_ref,
+            last_size,
             style,
             title,
             title_alignment,
@@ -261,6 +271,11 @@ impl TuiWidget for BlockW {
             block = block.title_top(into_borrowed_line(l));
         }
         let child_rect = block.inner(rect);
+        let size: SizeV = SizeV::from(child_rect);
+        if *last_size != size {
+            *last_size = size;
+            size_ref.set_deref(size)?;
+        }
         frame.render_widget(block, rect);
         child.draw(frame, child_rect)?;
         Ok(())

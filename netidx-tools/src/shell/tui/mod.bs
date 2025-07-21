@@ -132,6 +132,8 @@ type Marker = [
   `HalfBlock
 ];
 
+type Size = { width: i64, height: i64 };
+
 pub mod input_handler;
 pub mod text;
 pub mod paragraph;
@@ -150,7 +152,7 @@ pub mod calendar;
 pub mod canvas;
 
 /// this will be set to the current terminal size
-let size: { columns: i64, rows: i64 } = never();
+let size: Size = never();
 
 /// this will receive all input events even if no input_handler is created
 let event: input_handler::Event = never();

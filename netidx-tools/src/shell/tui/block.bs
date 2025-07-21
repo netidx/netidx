@@ -32,6 +32,7 @@ type Block = {
   border_type: &[BorderType, null],
   child: &Tui,
   padding: &[Padding, null],
+  size: &[Size, null],
   style: &[Style, null],
   title: &[Line, null],
   title_alignment: &[Alignment, null],
@@ -53,12 +54,14 @@ let block = |
   #title_style: &[Style, null] = &null,
   #title_position: &[Position, null] = &null,
   #title_alignment: &[Alignment, null] = &null,
+  #size: &[Size, null] = &null,
   child: &Tui
 | -> Tui `Block({
   border,
   border_type,
   border_style,
   padding,
+  size,
   style,
   title,
   title_top,

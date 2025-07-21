@@ -265,6 +265,36 @@ impl FromValue for HighlightSpacingV {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+struct SizeV {
+    width: u16,
+    height: u16,
+}
+
+impl Into<Value> for SizeV {
+    fn into(self) -> Value {
+        [
+            (literal!("width"), (self.width as i64)),
+            (literal!("height"), (self.height as i64)),
+        ]
+        .into()
+    }
+}
+
+impl From<Rect> for SizeV {
+    fn from(r: Rect) -> Self {
+        let s = r.as_size();
+        Self { width: s.width, height: s.height }
+    }
+}
+
+impl SizeV {
+    fn from_terminal() -> Result<Self> {
+        let (width, height) = terminal::size()?;
+        Ok(Self { width, height })
+    }
+}
+
 fn into_borrowed_line<'a>(line: &'a Line<'static>) -> Line<'a> {
     let spans = line
         .spans
@@ -440,10 +470,8 @@ fn get_id(env: &Env<BSCtx, NoUserEvent>, name: &ModPath) -> Result<BindId> {
         .id)
 }
 
-fn set_size(bs: &BSHandle, id: BindId, (col, row): (u16, u16)) -> Result<()> {
-    let v: Value =
-        [(literal!("columns"), (col as i64)), (literal!("rows"), (row as i64))].into();
-    bs.set(id, v)
+fn set_size(bs: &BSHandle, id: BindId, size: SizeV) -> Result<()> {
+    bs.set(id, size)
 }
 
 fn set_mouse(enable: bool) {
@@ -481,7 +509,7 @@ async fn run(
     if let Some(b) = mouse.t {
         set_mouse(b)
     }
-    set_size(&bs, size, terminal::size()?)?;
+    set_size(&bs, size, SizeV::from_terminal()?)?;
     let mut events = EventStream::new().fuse();
     let mut root: TuiW = Box::new(EmptyW);
     let notify = loop {
@@ -519,8 +547,8 @@ async fn run(
                 }
                 Ok(e) => {
                     let v = event_to_value(&e);
-                    if let Event::Resize(col, row) = e
-                        && let Err(e) = set_size(&bs, size, (col, row)) {
+                    if let Event::Resize(width, height) = e
+                        && let Err(e) = set_size(&bs, size, SizeV { width, height }) {
                         error!("could not set the size ref {e:?}")
                     }
                     if let Err(e) = bs.set(event, v.clone()) {

@@ -1,4 +1,4 @@
-use super::{compile, DirectionV, FlexV, TRef, TuiW, TuiWidget};
+use super::{compile, DirectionV, FlexV, SizeV, TRef, TuiW, TuiWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use async_trait::async_trait;
@@ -52,9 +52,27 @@ impl FromValue for SpacingV {
     }
 }
 
+struct ChildW {
+    size_ref: Ref,
+    last_size: SizeV,
+    constraint: Constraint,
+    child: TuiW,
+}
+
+impl ChildW {
+    async fn compile(bs: BSHandle, v: Value) -> Result<Self> {
+        let ((_, child), (_, constraint), (_, size)) =
+            v.cast_to::<((ArcStr, Value), (ArcStr, ConstraintV), (ArcStr, u64))>()?;
+        let child = compile(bs.clone(), child).await.context("compiling child")?;
+        let constraint = constraint.0;
+        let size_ref = bs.compile_ref(size).await.context("compiling size ref")?;
+        Ok(Self { size_ref, last_size: SizeV::default(), constraint, child })
+    }
+}
+
 pub(super) struct LayoutW {
     bs: BSHandle,
-    children: Vec<(Constraint, TuiW)>,
+    children: Vec<ChildW>,
     children_ref: Ref,
     direction: TRef<Option<DirectionV>>,
     flex: TRef<Option<FlexV>>,
@@ -118,20 +136,17 @@ impl LayoutW {
     }
 
     async fn set_children(&mut self, v: Value) -> Result<()> {
-        self.children = future::join_all(
-            v.cast_to::<SmallVec<[(ConstraintV, Value); 8]>>()?.into_iter().map(
-                |(c, v)| {
-                    let bs = self.bs.clone();
-                    async move {
-                        let child = compile(bs, v).await?;
-                        Ok((c.0, child))
-                    }
-                },
-            ),
-        )
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+        self.children =
+            future::join_all(v.cast_to::<SmallVec<[Value; 8]>>()?.into_iter().map(|v| {
+                let bs = self.bs.clone();
+                async move {
+                    let child = ChildW::compile(bs, v).await?;
+                    Ok(child)
+                }
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
         Ok(())
     }
 }
@@ -140,8 +155,8 @@ impl LayoutW {
 impl TuiWidget for LayoutW {
     async fn handle_event(&mut self, e: Event, v: Value) -> Result<()> {
         let idx = self.focused.t.and_then(|o| o.map(|i| i as usize)).unwrap_or(0);
-        if let Some((_, c)) = self.children.get_mut(idx) {
-            c.handle_event(e, v).await?;
+        if let Some(c) = self.children.get_mut(idx) {
+            c.child.handle_event(e, v).await?;
         }
         Ok(())
     }
@@ -169,8 +184,8 @@ impl TuiWidget for LayoutW {
         if children_ref.id == id {
             self.set_children(v.clone()).await?;
         }
-        for (_, c) in &mut self.children {
-            c.handle_update(id, v.clone()).await?
+        for c in &mut self.children {
+            c.child.handle_update(id, v.clone()).await?
         }
         Ok(())
     }
@@ -207,10 +222,15 @@ impl TuiWidget for LayoutW {
         if let Some(Some(m)) = vertical_margin.t {
             layout = layout.vertical_margin(m);
         }
-        layout = layout.constraints(children.iter().map(|(c, _)| *c));
+        layout = layout.constraints(children.iter().map(|c| c.constraint));
         let areas = layout.split(rect);
-        for (rect, (_, child)) in areas.iter().zip(children.iter_mut()) {
-            child.draw(frame, *rect)?
+        for (rect, child) in areas.iter().zip(children.iter_mut()) {
+            let size = SizeV::from(*rect);
+            if child.last_size != size {
+                child.last_size = size;
+                child.size_ref.set_deref(size)?;
+            }
+            child.child.draw(frame, *rect)?
         }
         Ok(())
     }

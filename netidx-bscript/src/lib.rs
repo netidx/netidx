@@ -373,6 +373,7 @@ pub trait Ctx: Debug + 'static {
 
 pub struct ExecCtx<C: Ctx, E: UserEvent> {
     builtins: FxHashMap<&'static str, (FnType, BuiltInInitFn<C, E>)>,
+    tags: FxHashSet<ArcStr>,
     pub env: Env<C, E>,
     pub cached: FxHashMap<BindId, Value>,
     pub user: C,
@@ -396,6 +397,7 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
         Self {
             env: Env::new(),
             builtins: FxHashMap::default(),
+            tags: FxHashSet::default(),
             cached: HashMap::default(),
             user,
         }
@@ -418,6 +420,16 @@ impl<C: Ctx, E: UserEvent> ExecCtx<C, E> {
     pub fn set_var(&mut self, id: BindId, v: Value) {
         self.cached.insert(id, v.clone());
         self.user.set_var(id, v)
+    }
+
+    fn tag(&mut self, s: &ArcStr) -> ArcStr {
+        match self.tags.get(s) {
+            Some(s) => s.clone(),
+            None => {
+                self.tags.insert(s.clone());
+                s.clone()
+            }
+        }
     }
 
     /// Restore the lexical environment to the snapshot `env` for the

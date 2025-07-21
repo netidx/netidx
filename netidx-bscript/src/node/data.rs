@@ -7,7 +7,7 @@ use crate::{
 use anyhow::{bail, Result};
 use arcstr::ArcStr;
 use netidx_value::{ValArray, Value};
-use smallvec::{smallvec, SmallVec};
+use smallvec::SmallVec;
 use std::iter;
 use triomphe::Arc;
 
@@ -27,15 +27,11 @@ impl<C: Ctx, E: UserEvent> Struct<C, E> {
         top_id: ExprId,
         args: &[(ArcStr, Expr)],
     ) -> Result<Node<C, E>> {
-        let mut names: SmallVec<[ArcStr; 8]> = smallvec![];
-        let n = args.iter().map(|(n, s)| {
-            names.push(n.clone());
-            s
-        });
-        let n = n
-            .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
+        let names: Box<[ArcStr]> = args.iter().map(|(n, _)| ctx.tag(n)).collect();
+        let n = args
+            .iter()
+            .map(|(_, e)| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
             .collect::<Result<Box<[_]>>>()?;
-        let names = Box::from_iter(names);
         let typs =
             names.iter().zip(n.iter()).map(|(n, a)| (n.clone(), a.node.typ().clone()));
         let typ = Type::Struct(Arc::from_iter(typs));
@@ -433,7 +429,7 @@ impl<C: Ctx, E: UserEvent> Variant<C, E> {
             .collect::<Result<Box<[_]>>>()?;
         let typs = Arc::from_iter(n.iter().map(|n| n.node.typ().clone()));
         let typ = Type::Variant(tag.clone(), typs);
-        let tag = tag.clone();
+        let tag = ctx.tag(tag);
         Ok(Box::new(Self { spec, typ, tag, n }))
     }
 }
