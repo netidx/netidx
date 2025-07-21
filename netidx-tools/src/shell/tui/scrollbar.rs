@@ -1,4 +1,4 @@
-use super::{compile, EmptyW, StyleV, TRef, TuiW, TuiWidget};
+use super::{compile, EmptyW, SizeV, StyleV, TRef, TuiW, TuiWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use async_trait::async_trait;
@@ -48,13 +48,15 @@ pub(super) struct ScrollbarW {
     thumb_symbol: TRef<Option<ArcStr>>,
     track_style: TRef<Option<StyleV>>,
     track_symbol: TRef<Option<ArcStr>>,
+    size_ref: Ref,
+    last_size: SizeV,
     state: ScrollbarState,
 }
 
 impl ScrollbarW {
     pub(super) async fn compile(bs: BSHandle, v: Value) -> Result<TuiW> {
-        let [(_, begin_style), (_, begin_symbol), (_, child), (_, content_length), (_, end_style), (_, end_symbol), (_, orientation), (_, position), (_, style), (_, thumb_style), (_, thumb_symbol), (_, track_style), (_, track_symbol), (_, viewport_length)] =
-            v.cast_to::<[(ArcStr, u64); 14]>().context("scrollbar flds")?;
+        let [(_, begin_style), (_, begin_symbol), (_, child), (_, content_length), (_, end_style), (_, end_symbol), (_, orientation), (_, position), (_, size), (_, style), (_, thumb_style), (_, thumb_symbol), (_, track_style), (_, track_symbol), (_, viewport_length)] =
+            v.cast_to::<[(ArcStr, u64); 15]>().context("scrollbar flds")?;
         let (
             begin_style,
             begin_symbol,
@@ -64,6 +66,7 @@ impl ScrollbarW {
             end_symbol,
             orientation,
             position,
+            size_ref,
             style,
             thumb_style,
             thumb_symbol,
@@ -79,6 +82,7 @@ impl ScrollbarW {
             bs.compile_ref(end_symbol),
             bs.compile_ref(orientation),
             bs.compile_ref(position),
+            bs.compile_ref(size),
             bs.compile_ref(style),
             bs.compile_ref(thumb_style),
             bs.compile_ref(thumb_symbol),
@@ -121,6 +125,8 @@ impl ScrollbarW {
             begin_symbol,
             child_ref,
             child,
+            size_ref,
+            last_size: SizeV::default(),
             content_length,
             end_style,
             end_symbol,
@@ -151,6 +157,8 @@ impl TuiWidget for ScrollbarW {
             begin_symbol,
             child,
             child_ref,
+            size_ref: _,
+            last_size: _,
             content_length,
             end_style,
             end_symbol,
@@ -190,6 +198,8 @@ impl TuiWidget for ScrollbarW {
             begin_symbol,
             child,
             child_ref: _,
+            size_ref,
+            last_size,
             content_length,
             end_style,
             end_symbol,
@@ -270,6 +280,11 @@ impl TuiWidget for ScrollbarW {
                 }
             }
         };
+        let size = SizeV::from(rect);
+        if *last_size != size {
+            *last_size = size;
+            size_ref.set_deref(size)?
+        }
         child.draw(frame, rect)
     }
 }
