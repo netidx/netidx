@@ -5,76 +5,99 @@ use tui::input_handler;
 let path = "/";
 dbg(path);
 let structure = net::list_table(path);
-// CR if I put the uniq on the struct ref it doesn't work
 let mode = uniq(select structure.columns {
     [] => `List,
     _ => `Table
 });
 dbg(mode);
 let selected = { x: 1, y: 0 };
-let visible_range = {
-    row: {
-        min: max(0, selected.y - size.rows),
-        max: selected.y + size.rows
-    },
-    column: {
-        min: max(0, selected.x - size.columns),
-        max: selected.x + size.columns
-    }
-};
-//let is_visible = |row: i64, col: i64| uniq(
-//    (row >= (visible_range.row).min) &&
-//    (row <= (visible_range.row).max) &&
-//    (col >= (visible_range.column).min) &&
-//    (col <= (visible_range.column).max)
-//);
-let is_visible = |row: i64, col: i64| any(row, col) ~ true;
+let viewport = { x: 0, y: 0 };
 let columns = {
     let cols = array::map(structure.columns, |(col, _)| col);
     select cols {
-        [] => ["Name", "Value"],
-        cols => array::push_front(cols, "Name")
+        [] => ["Value"],
+        cols => cols
     }
+};
+dbg(structure.rows);
+let visible_rows = (structure.rows)[viewport.y .. viewport.y + size.rows]?;
+let { total: _, cols: visible_columns, widths } = {
+    let init = { total: 4, cols: [], widths: [`Min(4)] };
+    let cols = columns[viewport.x ..]?;
+    array::fold(cols, init, |{total, cols, widths}, col|
+        select str::len(col) + len {
+            l if l <= size.columns => {
+                total: l,
+                cols: array::push(cols, col),
+                widths: array::push(widths, `Min(str::len(col)))
+            },
+            _ => {total, cols, widths}
+        })
 };
 let header = select mode {
     `List => row([cell(line("Name")), cell(line("Value"))]),
-    `Table => row(array::map(columns, |col| cell(line(col))))
+    `Table => {
+        let cols = array::map(visible_columns, |col| cell(line(col)));
+        row(array::push_front(cols, cell(line("Name"))))
+    }
 };
-dbg(structure.rows);
-let rows = array::map(array::enumerate(structure.rows), |(i, row)| {
+dbg(visible_rows);
+dbg(visible_columns);
+dbg(header);
+let rows = array::map(visible_rows, |row| {
     let name = select str::basename(row) { null as _ => "", s => s };
     let name = cell(line(name));
     &tui::table::row(select mode {
         `List => [ name, cell(line("[any("#SUB", net::subscribe("[row]"))]")) ],
-        `Table => array::map(array::enumerate(columns), |(i, col)| select i {
-            0 => name,
-            _ => cell(line("[any("#SUB", net::subscribe("[row]/[col]"))]"))
-        })
+        `Table => {
+            let a = array::map(visible_columns, |col| {
+                let v = any("#SUB", net::subscribe("[row]/[col]"));
+                cell(line("[v]"))
+            });
+            array::push_front(a, name)
+        }
     })
 });
 let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(e) => select e.code {
         e@ `Left => {
-            selected <- e ~ { selected with x: max(1, selected.x - 1) };
+            select e ~ selected.x {
+                e if e <= 1 => viewport <- e ~ { viewport with x: max(0, viewport.x - 1) },
+                e => selected <- e ~ { selected with x: selected.x - 1 }
+            };
             `Stop
         },
         e@ `Right => {
-            let x = min(array::len(columns) - 1, selected.x + 1);
-            selected <- e ~ { selected with x };
+            let clim = array::len(columns) - 1;
+            let limit = array::len(visible_columns) - 1;
+            select e ~ selected.x {
+                x if x >= limit =>
+                    viewport <- x ~ { viewport with x: min(clim, viewport.x + 1) },
+                e => selected <- e ~ {selected with x: selected.x + 1}
+            };
             `Stop
         },
         e@ `Down => {
-            let y = min(array::len(structure.rows) - 1, selected.y + 1);
-            selected <- e ~ { selected with y };
+            let rlim = array::len(rows) - 1;
+            let limit = array::len(visible_rows) - 1;
+            select e ~ selected.y {
+                x if x >= limit =>
+                    viewport <- x ~ { viewport with y: min(rlim, viewport.y + 1) },
+                e => selected <- e ~ { selected with y: selected.y + 1 }
+            };
             `Stop
         },
         e@ `Up => {
-            selected <- e ~ { selected with y: max(0, selected.y - 1) };
+            select e ~ selected.y {
+                e if e <= 0 => viewport <- e ~ { viewport with y: max(0, viewport.y - 1) },
+                e => selected <- e ~ { selected with y: selected.y - 1 }
+            };
             `Stop
         },
         e@ `Enter => {
             path <- e ~ (structure.rows)[selected.y]?;
             selected <- e ~ { x: 1, y: 0 };
+            viewport <- e ~ { x: 0, y: 0 };
             `Stop
         },
         e@ `Backspace => select e ~ str::dirname(path) {
@@ -82,6 +105,7 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
             s => {
                 path <- s;
                 selected <- s ~ { x: 1, y: 0 };
+                viewport <- s ~ { x: 0, y: 0 };
                 `Stop
             }
         },

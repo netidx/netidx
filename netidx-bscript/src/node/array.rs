@@ -199,7 +199,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for ArraySlice<C, E> {
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         wrap!(self.source.node, self.source.node.typecheck(ctx))?;
-        let it = Type::Primitive(Typ::unsigned_integer());
+        let it = Type::Primitive(Typ::integer());
         wrap!(
             self.source.node,
             self.typ.check_contains(&ctx.env, &self.source.node.typ())
