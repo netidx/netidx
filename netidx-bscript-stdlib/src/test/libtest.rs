@@ -300,7 +300,7 @@ run!(uniq, UNIQ, |v: Result<&Value>| {
 
 #[cfg(test)]
 const SEQ: &str = r#"
-  array::group(seq(4), |n, _| n == 4)
+  array::group(seq(0, 4), |n, _| n == 4)
 "#;
 
 #[cfg(test)]
@@ -308,6 +308,26 @@ run!(seq, SEQ, |v: Result<&Value>| {
     match v {
         Ok(Value::Array(a)) => match &a[..] {
             [Value::I64(0), Value::I64(1), Value::I64(2), Value::I64(3)] => true,
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const THROTTLE: &str = r#"
+{
+    let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let data = throttle(array::iter(data));
+    array::group(data, |n, _| n == 2)
+}
+"#;
+
+#[cfg(test)]
+run!(throttle, THROTTLE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::Array(a)) => match &a[..] {
+            [Value::I64(1), Value::I64(10)] => true,
             _ => false,
         },
         _ => false,

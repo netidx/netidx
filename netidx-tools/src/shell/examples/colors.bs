@@ -1,0 +1,6 @@
+use tui;
+use tui::paragraph;
+
+let block = |i| span(#style:style(#bg:`Indexed(i)), " ");
+let spans: Array<Span> = array::map(seq(0, 255), |i| block(i));
+paragraph(&line(spans))

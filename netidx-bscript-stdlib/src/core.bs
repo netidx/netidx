@@ -44,8 +44,8 @@ pub let min = |a, @args| 'min;
 /// and once will return nothing
 pub let once = |v| 'once;
 
-/// seq will update i times from 0 to i - 1 in that order.
-pub let seq = |i| 'seq;
+/// seq will update j - i times, starting at i and ending at j - 1
+pub let seq = |i, j| 'seq;
 
 /// return true if any argument is true
 pub let or = |@args| 'or;
@@ -79,6 +79,11 @@ pub let dbg = |#dest:[`Stdout, `Stderr, Log] = `Stderr, v| 'dbg;
 ///
 /// Unlike dbg, log does not also return the value
 pub let log = |#level: Log = `Info, msg| 'log;
+
+/// Throttle v so it updates at most every #rate, where rate is a
+/// duration (default 0.5 seconds). Intermediate updates that push v
+/// over the #rate will be discarded.
+pub let throttle = |#rate = duration:0.5s, v| 'throttle;
 
 /// This is the toplevel error sink for the ? operator. If no other lexical binding of errors
 /// exists closer to the error site then errors handled by ? will come here.

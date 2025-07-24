@@ -11,7 +11,8 @@ use netidx_bscript::{
     Apply, BindId, BuiltIn, BuiltInInitFn, Ctx, Event, ExecCtx, Node, Refs, UserEvent,
 };
 use netidx_value::FromValue;
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
+use tokio::time::Instant;
 use triomphe::Arc as TArc;
 
 #[derive(Debug)]
@@ -523,6 +524,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Queue {
 struct Seq {
     id: BindId,
     top_id: ExprId,
+    args: CachedVals,
 }
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Seq {
@@ -530,13 +532,11 @@ impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Seq {
     deftype!("core", "fn(i64) -> i64");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
-        Arc::new(|ctx, _, _, from, top_id| match from {
-            [_] => {
-                let id = BindId::new();
-                ctx.user.ref_var(id, top_id);
-                Ok(Box::new(Self { id, top_id }))
-            }
-            _ => bail!("expected one argument"),
+        Arc::new(|ctx, _, _, from, top_id| {
+            let id = BindId::new();
+            ctx.user.ref_var(id, top_id);
+            let args = CachedVals::new(from);
+            Ok(Box::new(Self { id, top_id, args }))
         })
     }
 }
@@ -548,9 +548,14 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Seq {
         from: &mut [Node<C, E>],
         event: &mut Event<E>,
     ) -> Option<Value> {
-        if let Some(Value::I64(i)) = from[0].update(ctx, event) {
-            for i in 0..i {
-                ctx.user.set_var(self.id, Value::I64(i));
+        if self.args.update(ctx, from, event) {
+            match &self.args.0[..] {
+                [Some(Value::I64(i)), Some(Value::I64(j))] if i <= j => {
+                    for v in *i..*j {
+                        ctx.user.set_var(self.id, Value::I64(v));
+                    }
+                }
+                _ => return err!("invalid args i must be <= j"),
             }
         }
         event.variables.get(&self.id).cloned()
@@ -564,6 +569,102 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Seq {
         ctx.user.unref_var(self.id, self.top_id);
         self.id = BindId::new();
         ctx.user.ref_var(self.id, self.top_id);
+    }
+}
+
+#[derive(Debug)]
+struct Throttle {
+    wait: Duration,
+    last: Option<Instant>,
+    tid: Option<BindId>,
+    top_id: ExprId,
+    args: CachedVals,
+}
+
+impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Throttle {
+    const NAME: &str = "throttle";
+    deftype!("core", "fn(?#rate:duration, 'a) -> 'a");
+
+    fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
+        Arc::new(|_, _, _, from, top_id| {
+            let args = CachedVals::new(from);
+            Ok(Box::new(Self {
+                wait: Duration::ZERO,
+                last: None,
+                tid: None,
+                top_id,
+                args,
+            }))
+        })
+    }
+}
+
+impl<C: Ctx, E: UserEvent> Apply<C, E> for Throttle {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<C, E>,
+        from: &mut [Node<C, E>],
+        event: &mut Event<E>,
+    ) -> Option<Value> {
+        macro_rules! maybe_schedule {
+            ($last:expr) => {{
+                let now = Instant::now();
+                if now - *$last >= self.wait {
+                    *$last = now;
+                    return self.args.0[1].clone();
+                } else {
+                    let id = BindId::new();
+                    ctx.user.ref_var(id, self.top_id);
+                    ctx.user.set_timer(id, self.wait - (now - *$last));
+                    self.tid = Some(id);
+                    return None;
+                }
+            }};
+        }
+        let mut up = [false; 2];
+        self.args.update_diff(&mut up, ctx, from, event);
+        if up[0]
+            && let Some(Value::Duration(d)) = &self.args.0[0]
+        {
+            self.wait = *d;
+            if let Some(id) = self.tid.take()
+                && let Some(last) = &mut self.last
+            {
+                ctx.user.unref_var(id, self.top_id);
+                maybe_schedule!(last)
+            }
+        }
+        if up[1] && self.tid.is_none() {
+            match &mut self.last {
+                Some(last) => maybe_schedule!(last),
+                None => {
+                    self.last = Some(Instant::now());
+                    return self.args.0[1].clone();
+                }
+            }
+        }
+        if let Some(id) = self.tid
+            && let Some(_) = event.variables.get(&id)
+        {
+            ctx.user.unref_var(id, self.top_id);
+            self.tid = None;
+            self.last = Some(Instant::now());
+            return self.args.0[1].clone();
+        }
+        None
+    }
+
+    fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
+        if let Some(id) = self.tid.take() {
+            ctx.user.unref_var(id, self.top_id);
+        }
+    }
+
+    fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
+        self.delete(ctx);
+        self.last = None;
+        self.wait = Duration::ZERO;
+        self.args.clear();
     }
 }
 
@@ -863,5 +964,6 @@ pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<
     ctx.register_builtin::<ToError>()?;
     ctx.register_builtin::<Dbg>()?;
     ctx.register_builtin::<Log>()?;
+    ctx.register_builtin::<Throttle>()?;
     Ok(literal!(include_str!("core.bs")))
 }
