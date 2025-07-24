@@ -274,8 +274,8 @@ struct SizeV {
 impl Into<Value> for SizeV {
     fn into(self) -> Value {
         [
-            (literal!("width"), (self.width as i64)),
             (literal!("height"), (self.height as i64)),
+            (literal!("width"), (self.width as i64)),
         ]
         .into()
     }

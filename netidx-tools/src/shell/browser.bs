@@ -7,12 +7,10 @@ dbg(size);
 let path = "/";
 dbg(path);
 let structure = net::list_table(path);
-dbg(structure);
 let mode = uniq(select structure.columns {
     [] => `List,
     _ => `Table
 });
-dbg(mode);
 let selected = { x: 1, y: 0 };
 let viewport = { x: 0, y: 0 };
 let columns: Array<string> = {
@@ -22,14 +20,14 @@ let columns: Array<string> = {
         cols => array::sort(cols)
     }
 };
-dbg(columns);
 let visible_rows = {
     let len = array::len(structure.rows);
     let start = min(len - 1, viewport.y);
-    let end = min(len, viewport.y + size.height);
+    dbg(size);
+    let end = min(len, viewport.y + dbg(size.height));
+    dbg((start, end));
     (structure.rows)[start .. end]?
 };
-dbg(visible_rows);
 let { total: _, cols: visible_columns, widths } = {
     let init = { total: 4, cols: [], widths: [`Min(4)] };
     array::fold(columns[viewport.x ..]?, init, |{total, cols, widths}, col|
@@ -49,9 +47,6 @@ let header = select mode {
         row(array::push_front(cols, cell(line("Name"))))
     }
 };
-dbg(visible_rows);
-dbg(visible_columns);
-dbg(header);
 let rows = array::map(visible_rows, |row| {
     let name = select str::basename(row) { null as _ => "", s => s };
     let name = cell(line(name));
@@ -70,34 +65,34 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(e) => select e.code {
         e@ `Left => {
             select e ~ selected.x {
-                e if e <= 1 => viewport <- e ~ { viewport with x: max(0, viewport.x - 1) },
+                e if e <= 1 => viewport <- uniq(e ~ { viewport with x: max(0, viewport.x - 1) }),
                 e => selected <- e ~ { selected with x: selected.x - 1 }
             };
             `Stop
         },
         e@ `Right => {
-            let limit = array::len(visible_columns) - 1;
-            let clim = array::len(columns) - 1;
+            let limit = array::len(visible_columns);
+            let clim = array::len(columns) - array::len(visible_columns);
             select e ~ selected.x {
                 x if x >= limit =>
-                    viewport <- x ~ { viewport with x: min(clim, viewport.x + 1) },
+                    viewport <- uniq(x ~ { viewport with x: min(clim, viewport.x + 1) }),
                 e => selected <- e ~ {selected with x: selected.x + 1}
             };
             `Stop
         },
         e@ `Down => {
-            let rlim = array::len(rows) - 1;
+            let rlim = array::len(rows) - array::len(visible_rows);
             let limit = array::len(visible_rows) - 1;
             select e ~ selected.y {
                 x if x >= limit =>
-                    viewport <- x ~ { viewport with y: min(rlim, viewport.y + 1) },
+                    viewport <- uniq(x ~ { viewport with y: min(rlim, viewport.y + 1) }),
                 e => selected <- e ~ { selected with y: selected.y + 1 }
             };
             `Stop
         },
         e@ `Up => {
             select e ~ selected.y {
-                e if e <= 0 => viewport <- e ~ { viewport with y: max(0, viewport.y - 1) },
+                e if e <= 0 => viewport <- uniq(e ~ { viewport with y: max(0, viewport.y - 1) }),
                 e => selected <- e ~ { selected with y: selected.y - 1 }
             };
             `Stop
