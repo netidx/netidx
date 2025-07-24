@@ -1,6 +1,12 @@
 use tui;
 use tui::paragraph;
 
-let block = |i| span(#style:style(#bg:`Indexed(i)), " ");
-let spans: Array<Span> = array::map(seq(0, 255), |i| block(i));
-paragraph(&line(spans))
+let span: Array<Span> = select seq(0, 256) {
+    i => [
+        span(#style:style(#fg:`Indexed(i)), "██"),
+        span("[i]"),
+        span(#style:style(#fg:`Indexed(i)), "██")
+    ]
+};
+let l = line(array::flatten(array::group(span, |n, _| n == 255)));
+paragraph(&[l])

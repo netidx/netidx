@@ -529,7 +529,7 @@ struct Seq {
 
 impl<C: Ctx, E: UserEvent> BuiltIn<C, E> for Seq {
     const NAME: &str = "seq";
-    deftype!("core", "fn(i64) -> i64");
+    deftype!("core", "fn(i64, i64) -> i64");
 
     fn init(_: &mut ExecCtx<C, E>) -> BuiltInInitFn<C, E> {
         Arc::new(|ctx, _, _, from, top_id| {

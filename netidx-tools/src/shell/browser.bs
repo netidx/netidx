@@ -4,7 +4,7 @@ use tui::block;
 use tui::input_handler;
 
 let path = "/";
-let gutter = style(#bg:`Rgb({r: 50, g: 50, b: 50}));
+let gutter = style(#bg:`Indexed(235), #fg:`Cyan);
 let (mode, structure) = select net::list_table(path) {
     { columns, rows } => {
         let mode = uniq(select columns {
@@ -43,8 +43,8 @@ let { total: _, cols: visible_columns, widths }:
     { total: i64, cols: Array<string>, widths: Array<Constraint> } = {
     let init = { total: 4, cols: [], widths: [`Min(4)] };
     array::fold((structure.columns)[viewport.x ..]?, init, |{total, cols, widths}, col| {
-        let len = max(10, str::len(col));
-        select len + total {
+        let len = str::len(col);
+        select max(10, len) + total {
             l if l <= size.width => {
                 total: l,
                 cols: array::push(cols, col),
@@ -149,14 +149,13 @@ let grid = table(
     #widths:&[],
     #flex:&`Center,
     #selected_cell: &selected,
-    #style:&style(#bg:`Rgb({r: 25, b: 25, g: 25})),
+    #style:&style(#bg:`Indexed(234)),
     &rows
 );
 let surround = block(
-    #border:&`All,
+    #border:&`None,
     #border_style:&style(#fg:`Yellow),
-    #title:&line(#style:style(#fg:`Cyan), path),
-    #title_bottom:&line(#style:style(#fg:`Cyan), selected_path),
+    #title_bottom:&line(#style:style(#fg:`Cyan), "[path] ([selected_path])"),
     #size:&size,
     &grid
 );
