@@ -744,15 +744,25 @@ pub(super) struct SortEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for SortEv {
     const NAME: &str = "array_sort";
-    deftype!("core::array", "fn(Array<'a>) -> Array<'a>");
+    deftype!("core::array", "fn(?#dir:Direction, Array<'a>) -> Array<'a>");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
-        if let Some(Value::Array(a)) = &from.0[0] {
-            self.0.extend(a.iter().cloned());
-            self.0.sort();
-            return Some(Value::Array(ValArray::from_iter_exact(self.0.drain(..))));
+        match &from.0[..] {
+            [Some(Value::String(dir)), Some(Value::Array(a))] => match &**dir {
+                "Ascending" => {
+                    self.0.extend(a.iter().cloned());
+                    self.0.sort();
+                    Some(Value::Array(ValArray::from_iter_exact(self.0.drain(..))))
+                }
+                "Descending" => {
+                    self.0.extend(a.iter().cloned());
+                    self.0.sort_by(|a0, a1| a1.cmp(a0));
+                    Some(Value::Array(ValArray::from_iter_exact(self.0.drain(..))))
+                }
+                _ => None,
+            },
+            _ => None,
         }
-        None
     }
 }
 

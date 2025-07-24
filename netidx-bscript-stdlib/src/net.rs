@@ -198,7 +198,7 @@ impl<C: Ctx, E: UserEvent> Apply<C, E> for Subscribe {
                 );
                 self.cur = Some((path, dval));
             }
-            (Some(Value::String(_)), true) => return None, // path unchanged
+            (Some(Value::String(_)), true) => (), // path unchanged
             (Some(v), true) => return errf!("invalid path {v}, expected string"),
         }
         self.cur.as_ref().and_then(|(_, dv)| {

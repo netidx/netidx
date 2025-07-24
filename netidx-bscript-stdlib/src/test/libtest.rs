@@ -676,7 +676,7 @@ run!(array_group, ARRAY_GROUP, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
-const ARRAY_SORT: &str = r#"
+const ARRAY_SORT0: &str = r#"
 {
    let a = [5, 4, 3, 2, 1];
    array::sort(a)
@@ -684,12 +684,29 @@ const ARRAY_SORT: &str = r#"
 "#;
 
 #[cfg(test)]
-run!(array_sort, ARRAY_SORT, |v: Result<&Value>| {
+run!(array_sort0, ARRAY_SORT0, |v: Result<&Value>| {
     match v {
-        Ok(Value::Array(a)) => match &a[..] {
-            [Value::I64(1), Value::I64(2), Value::I64(3), Value::I64(4), Value::I64(5)] => {
-                true
-            }
+        Ok(v) => match v.clone().cast_to::<[i64; 5]>() {
+            Ok([1, 2, 3, 4, 5]) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const ARRAY_SORT1: &str = r#"
+{
+   let a = [5, 4, 3, 2, 1];
+   array::sort(#dir:`Descending, a)
+}
+"#;
+
+#[cfg(test)]
+run!(array_sort1, ARRAY_SORT1, |v: Result<&Value>| {
+    match v {
+        Ok(v) => match v.clone().cast_to::<[i64; 5]>() {
+            Ok([5, 4, 3, 2, 1]) => true,
             _ => false,
         },
         _ => false,
