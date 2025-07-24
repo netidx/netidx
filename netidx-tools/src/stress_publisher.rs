@@ -40,14 +40,16 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
         .await
         .context("failed to create publisher")?;
     let mut sent: usize = 0;
-    let mut v = 0u64;
-    let published = {
+    let mut published = {
         let mut published = Vec::with_capacity(p.rows * p.cols);
         for row in 0..p.rows {
             for col in 0..p.cols {
                 let path = Path::from(format!("{}/{}/{}", p.base, row, col));
-                published
-                    .push(publisher.publish(path, Value::V64(v)).context("encode value")?)
+                let v = (row + col) as u64;
+                published.push((
+                    v,
+                    publisher.publish(path, Value::V64(v)).context("encode value")?,
+                ))
             }
         }
         published
@@ -56,10 +58,10 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
     let one_second = Duration::from_secs(1);
     loop {
         let mut updates = publisher.start_batch();
-        v += 1;
         task::block_in_place(|| {
-            for p in published.iter() {
-                p.update(&mut updates, Value::V64(v as u64));
+            for (v, p) in published.iter_mut() {
+                p.update(&mut updates, Value::V64(*v));
+                *v += 1;
                 sent += 1;
             }
         });
