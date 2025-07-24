@@ -1,6 +1,7 @@
 use crate::run;
 use anyhow::bail;
 use anyhow::Result;
+use arcstr::ArcStr;
 use netidx::subscriber::Value;
 
 #[cfg(test)]
@@ -707,6 +708,64 @@ run!(array_sort1, ARRAY_SORT1, |v: Result<&Value>| {
     match v {
         Ok(v) => match v.clone().cast_to::<[i64; 5]>() {
             Ok([5, 4, 3, 2, 1]) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const ARRAY_SORT2: &str = r#"
+{
+   let a = ["5", "6", "50", "60", "40", "4", "3", "2", "1"];
+   array::sort(#numeric:true, a)
+}
+"#;
+
+#[cfg(test)]
+run!(array_sort2, ARRAY_SORT2, |v: Result<&Value>| {
+    match v {
+        Ok(v) => match v.clone().cast_to::<[ArcStr; 9]>() {
+            Ok([a0, a1, a2, a3, a4, a5, a6, a7, a8]) => {
+                &*a0 == "1"
+                    && &*a1 == "2"
+                    && &*a2 == "3"
+                    && &*a3 == "4"
+                    && &*a4 == "5"
+                    && &*a5 == "6"
+                    && &*a6 == "40"
+                    && &*a7 == "50"
+                    && &*a8 == "60"
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+});
+
+#[cfg(test)]
+const ARRAY_SORT3: &str = r#"
+{
+   let a = ["5", "6", "50", "60", "40", "4", "3", "2", "1"];
+   array::sort(#dir:`Descending, #numeric:true, a)
+}
+"#;
+
+#[cfg(test)]
+run!(array_sort3, ARRAY_SORT3, |v: Result<&Value>| {
+    match v {
+        Ok(v) => match v.clone().cast_to::<[ArcStr; 9]>() {
+            Ok([a0, a1, a2, a3, a4, a5, a6, a7, a8]) => {
+                &*a0 == "60"
+                    && &*a1 == "50"
+                    && &*a2 == "40"
+                    && &*a3 == "6"
+                    && &*a4 == "5"
+                    && &*a5 == "4"
+                    && &*a6 == "3"
+                    && &*a7 == "2"
+                    && &*a8 == "1"
+            }
             _ => false,
         },
         _ => false,

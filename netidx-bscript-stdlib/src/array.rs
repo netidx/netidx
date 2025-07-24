@@ -744,23 +744,39 @@ pub(super) struct SortEv(SmallVec<[Value; 32]>);
 
 impl EvalCached for SortEv {
     const NAME: &str = "array_sort";
-    deftype!("core::array", "fn(?#dir:Direction, Array<'a>) -> Array<'a>");
+    deftype!(
+        "core::array",
+        "fn(?#dir:Direction, ?#numeric:bool, Array<'a>) -> Array<'a>"
+    );
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        fn cn(v: &Value) -> Value {
+            v.clone().cast(Typ::F64).unwrap_or_else(|| v.clone())
+        }
         match &from.0[..] {
-            [Some(Value::String(dir)), Some(Value::Array(a))] => match &**dir {
-                "Ascending" => {
-                    self.0.extend(a.iter().cloned());
-                    self.0.sort();
-                    Some(Value::Array(ValArray::from_iter_exact(self.0.drain(..))))
+            [Some(Value::String(dir)), Some(Value::Bool(numeric)), Some(Value::Array(a))] => {
+                match &**dir {
+                    "Ascending" => {
+                        self.0.extend(a.iter().cloned());
+                        if *numeric {
+                            self.0.sort_by(|v0, v1| cn(v0).cmp(&cn(v1)))
+                        } else {
+                            self.0.sort();
+                        }
+                        Some(Value::Array(ValArray::from_iter_exact(self.0.drain(..))))
+                    }
+                    "Descending" => {
+                        self.0.extend(a.iter().cloned());
+                        if *numeric {
+                            self.0.sort_by(|a0, a1| cn(a1).cmp(&cn(a0)))
+                        } else {
+                            self.0.sort_by(|a0, a1| a1.cmp(a0));
+                        }
+                        Some(Value::Array(ValArray::from_iter_exact(self.0.drain(..))))
+                    }
+                    _ => None,
                 }
-                "Descending" => {
-                    self.0.extend(a.iter().cloned());
-                    self.0.sort_by(|a0, a1| a1.cmp(a0));
-                    Some(Value::Array(ValArray::from_iter_exact(self.0.drain(..))))
-                }
-                _ => None,
-            },
+            }
             _ => None,
         }
     }

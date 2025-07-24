@@ -72,8 +72,10 @@ type Direction = [
     `Descending
 ];
 
-/// return a new copy of a sorted ascending (by default)
-pub let sort = |#dir = `Ascending, a| 'array_sort;
+/// return a new copy of a sorted ascending (by default). If numeric is true then
+/// values will be cast to numbers before comparison, resulting in a numeric sort
+/// even if the values are strings.
+pub let sort = |#dir = `Ascending, #numeric = false, a| 'array_sort;
 
 /// return an array of pairs where the first element is the index in
 /// the array and the second element is the value.
