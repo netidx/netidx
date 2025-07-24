@@ -4,6 +4,7 @@ use tui::block;
 use tui::input_handler;
 
 let path = "/";
+let gutter = style(#bg:`Rgb({r: 50, g: 50, b: 50}));
 let (mode, structure) = select net::list_table(path) {
     { columns, rows } => {
         let mode = uniq(select columns {
@@ -54,10 +55,10 @@ let { total: _, cols: visible_columns, widths }:
     })
 };
 let header = select mode {
-    `List => row(#style:style(#bg:`DarkGray), [cell(line("Name")), cell(line("Value"))]),
+    `List => row(#style:gutter, [cell(line("Name")), cell(line("Value"))]),
     `Table => {
         let cols = array::map(visible_columns, |col| cell(line(col)));
-        row(#style:style(#bg:`DarkGray), array::push_front(cols, cell(line("Name"))))
+        row(#style:gutter, array::push_front(cols, cell(line("Name"))))
     }
 };
 let selected_path = {
@@ -72,14 +73,15 @@ let rows = array::map(visible_rows, |row| {
     &tui::table::row(select mode {
         `List => [
             cell(line(name)),
-            cell(line("[any("#SUB", net::subscribe("[row]"))]"))
+            cell(line("[any(uniq(row) ~ "#SUB", net::subscribe("[row]"))]"))
         ],
         `Table => {
             let a = array::map(visible_columns, |col| {
-                let v = any("#SUB", net::subscribe("[row]/[col]"));
+                let path = "[row]/[col]";
+                let v = any(uniq(path) ~ "#SUB", net::subscribe(path));
                 cell(line("[v]"))
             });
-            let name = cell(#style:style(#bg:`DarkGray), line(name));
+            let name = cell(#style:gutter, line(name));
             array::push_front(a, name)
         }
     })
@@ -145,14 +147,16 @@ let grid = table(
     #cell_highlight_style:&style(#bg:`Yellow),
     #header:&header,
     #widths:&[],
+    #flex:&`Center,
     #selected_cell: &selected,
+    #style:&style(#bg:`Rgb({r: 25, b: 25, g: 25})),
     &rows
 );
 let surround = block(
     #border:&`All,
-    #border_style:&style(#fg:`Green),
-    #title:&line(path),
-    #title_bottom:&line(selected_path),
+    #border_style:&style(#fg:`Yellow),
+    #title:&line(#style:style(#fg:`Cyan), path),
+    #title_bottom:&line(#style:style(#fg:`Cyan), selected_path),
     #size:&size,
     &grid
 );
