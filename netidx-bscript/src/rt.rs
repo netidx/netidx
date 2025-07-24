@@ -631,6 +631,7 @@ impl BS {
         rpcs: &mut Vec<(BindId, RpcCall)>,
         to_rt: &mut UnboundedReceiver<ToRt>,
         input: &mut Vec<ToRt>,
+        mut batch: Pooled<Vec<RtEvent>>,
     ) {
         macro_rules! push_event {
             ($id:expr, $v:expr, $event:ident, $refed:ident, $overflow:ident) => {
@@ -682,7 +683,6 @@ impl BS {
                 push_event!(id, wr, writes, published, net_writes)
             }
         }
-        let mut batch = BATCH.take();
         for (id, n) in self.nodes.iter_mut() {
             if let Some(init) = self.updated.get(id) {
                 let mut clear: SmallVec<[BindId; 16]> = smallvec![];
@@ -729,7 +729,7 @@ impl BS {
                     while let Ok(m) = to_rt.try_recv() {
                         input.push(m);
                     }
-                    self.process_input_batch(tasks, input).await;
+                    self.process_input_batch(tasks, input, &mut batch).await;
                 }
             }
         }
@@ -749,6 +749,7 @@ impl BS {
         &mut self,
         tasks: &mut Vec<(BindId, Value)>,
         input: &mut Vec<ToRt>,
+        batch: &mut Pooled<Vec<RtEvent>>,
     ) {
         for m in input.drain(..) {
             match m {
@@ -766,11 +767,7 @@ impl BS {
                         n.delete(&mut self.ctx);
                     }
                     debug!("delete {id:?}");
-                    let mut batch = BATCH.take();
                     batch.push(RtEvent::Env(self.ctx.env.clone()));
-                    if let Err(_) = self.sub.send(batch).await {
-                        error!("could not send event");
-                    }
                 }
                 ToRt::CompileCallable { id, rt, res } => {
                     let _ = res.send(self.compile_callable(id, rt));
@@ -778,7 +775,10 @@ impl BS {
                 ToRt::CompileRef { id, rt, res } => {
                     let _ = res.send(self.compile_ref(rt, id));
                 }
-                ToRt::Set { id, v } => tasks.push((id, v)),
+                ToRt::Set { id, v } => {
+                    self.ctx.cached.insert(id, v.clone());
+                    tasks.push((id, v))
+                }
                 ToRt::DeleteCallable { id } => self.delete_callable(id),
                 ToRt::Call { id, args } => {
                     if let Err(e) = self.call_callable(id, args, tasks) {
@@ -1110,9 +1110,12 @@ impl BS {
                     continue 'main
                 },
             }
-            self.process_input_batch(&mut tasks, &mut input).await;
-            self.do_cycle(updates, writes, &mut tasks, &mut rpcs, &mut to_rt, &mut input)
-                .await;
+            let mut batch = BATCH.take();
+            self.process_input_batch(&mut tasks, &mut input, &mut batch).await;
+            self.do_cycle(
+                updates, writes, &mut tasks, &mut rpcs, &mut to_rt, &mut input, batch,
+            )
+            .await;
             if !self.ctx.user.rpc_clients.is_empty() {
                 if now - self.last_rpc_gc >= onemin {
                     self.last_rpc_gc = now;

@@ -2,9 +2,12 @@ use tui;
 use tui::table;
 use tui::input_handler;
 
+dbg(errors);
+dbg(size);
 let path = "/";
 dbg(path);
 let structure = net::list_table(path);
+dbg(structure);
 let mode = uniq(select structure.columns {
     [] => `List,
     _ => `Table
@@ -12,21 +15,26 @@ let mode = uniq(select structure.columns {
 dbg(mode);
 let selected = { x: 1, y: 0 };
 let viewport = { x: 0, y: 0 };
-let columns = {
+let columns: Array<string> = {
     let cols = array::map(structure.columns, |(col, _)| col);
     select cols {
         [] => ["Value"],
-        cols => cols
+        cols => array::sort(cols)
     }
 };
-dbg(structure.rows);
-let visible_rows = (structure.rows)[viewport.y .. viewport.y + size.rows]?;
+dbg(columns);
+let visible_rows = {
+    let len = array::len(structure.rows);
+    let start = min(len - 1, viewport.y);
+    let end = min(len, viewport.y + size.height);
+    (structure.rows)[start .. end]?
+};
+dbg(visible_rows);
 let { total: _, cols: visible_columns, widths } = {
     let init = { total: 4, cols: [], widths: [`Min(4)] };
-    let cols = columns[viewport.x ..]?;
-    array::fold(cols, init, |{total, cols, widths}, col|
-        select str::len(col) + len {
-            l if l <= size.columns => {
+    array::fold(columns[viewport.x ..]?, init, |{total, cols, widths}, col|
+        select str::len(col) + total {
+            l if l <= size.width => {
                 total: l,
                 cols: array::push(cols, col),
                 widths: array::push(widths, `Min(str::len(col)))
@@ -68,8 +76,8 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
             `Stop
         },
         e@ `Right => {
-            let clim = array::len(columns) - 1;
             let limit = array::len(visible_columns) - 1;
+            let clim = array::len(columns) - 1;
             select e ~ selected.x {
                 x if x >= limit =>
                     viewport <- x ~ { viewport with x: min(clim, viewport.x + 1) },
