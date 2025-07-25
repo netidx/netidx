@@ -182,10 +182,7 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
                 (None, None) => bail!("unexpected args"),
             }
         }
-        let mut rf = (f.init)(ctx, &self.args, self.top_id)?;
-        // some nodes, such as structwith, depend on the typecheck pass to
-        // resolve things like field indexes. This should always succeed.
-        let _ = rf.typecheck(ctx, &mut self.args);
+        let rf = (f.init)(ctx, &self.args, self.top_id)?;
         self.function = Some((f.id, rf));
         Ok(())
     }

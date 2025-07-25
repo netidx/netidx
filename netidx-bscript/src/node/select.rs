@@ -60,6 +60,7 @@ impl<C: Ctx, E: UserEvent> Select<C, E> {
 impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         let Self { selected, arg, arms, typ: _, spec: _ } = self;
+        let mut pat_up = false;
         let arg_up = arg.update(ctx, event);
         macro_rules! bind {
             ($i:expr) => {{
@@ -74,12 +75,12 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Select<C, E> {
                     pat.bind_event(ctx, event, arg);
                 }
             }
-            pat.update(ctx, event);
+            pat_up |= pat.update(ctx, event);
             if arg_up && pat.guard.is_some() {
                 pat.unbind_event(event);
             }
         }
-        if !arg_up {
+        if !arg_up && !pat_up {
             self.selected.and_then(|i| {
                 if arms[i].1.update(ctx, event) {
                     arms[i].1.cached.clone()

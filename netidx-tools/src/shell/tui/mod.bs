@@ -150,6 +150,7 @@ pub mod list;
 pub mod table;
 pub mod calendar;
 pub mod canvas;
+pub mod browser;
 
 /// this will be set to the current terminal size
 let size: Size = never();

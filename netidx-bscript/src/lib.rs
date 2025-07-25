@@ -35,7 +35,11 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     fmt::Debug,
     mem,
-    sync::{self, atomic::AtomicBool, LazyLock},
+    sync::{
+        self,
+        atomic::{AtomicBool, Ordering},
+        LazyLock,
+    },
     time::Duration,
 };
 use tokio::time::Instant;
@@ -43,6 +47,16 @@ use triomphe::Arc;
 
 #[allow(dead_code)]
 static TRACE: AtomicBool = AtomicBool::new(false);
+
+#[allow(dead_code)]
+fn set_trace(b: bool) {
+    TRACE.store(b, Ordering::Relaxed)
+}
+
+#[allow(dead_code)]
+fn trace() -> bool {
+    TRACE.load(Ordering::Relaxed)
+}
 
 thread_local! {
     /// thread local shared refs structure

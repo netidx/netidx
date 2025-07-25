@@ -101,12 +101,19 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Struct<C, E> {
 }
 
 #[derive(Debug)]
+struct Replace<C: Ctx, E: UserEvent> {
+    index: Option<usize>,
+    name: Value,
+    n: Cached<C, E>,
+}
+
+#[derive(Debug)]
 pub(crate) struct StructWith<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     source: Node<C, E>,
     current: Option<ValArray>,
-    replace: Box<[(usize, Cached<C, E>)]>,
+    replace: Box<[Replace<C, E>]>,
 }
 
 impl<C: Ctx, E: UserEvent> StructWith<C, E> {
@@ -121,7 +128,13 @@ impl<C: Ctx, E: UserEvent> StructWith<C, E> {
         let source = compile(ctx, source.clone(), scope, top_id)?;
         let replace = replace
             .iter()
-            .map(|(_, e)| Ok((0, Cached::new(compile(ctx, e.clone(), scope, top_id)?))))
+            .map(|(name, e)| {
+                Ok(Replace {
+                    index: None,
+                    name: Value::String(name.clone()),
+                    n: Cached::new(compile(ctx, e.clone(), scope, top_id)?),
+                })
+            })
             .collect::<Result<Box<[_]>>>()?;
         let typ = source.typ().clone();
         Ok(Box::new(Self { spec, typ, source, current: None, replace }))
@@ -142,21 +155,34 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
             })
             .unwrap_or(false);
         let mut determined = self.current.is_some();
-        for (_, n) in self.replace.iter_mut() {
-            updated |= n.update(ctx, event);
-            determined &= n.cached.is_some();
+        for r in self.replace.iter_mut() {
+            updated |= r.n.update(ctx, event);
+            determined &= r.n.cached.is_some();
         }
         if updated && determined {
             let mut si = 0;
             let iter =
                 self.current.as_ref().unwrap().iter().enumerate().map(|(i, v)| match v {
                     Value::Array(v) if v.len() == 2 => {
-                        if si < self.replace.len() && i == self.replace[si].0 {
-                            let r = self.replace[si].1.cached.clone().unwrap();
-                            si += 1;
-                            Value::Array(ValArray::from_iter_exact(
-                                [v[0].clone(), r].into_iter(),
-                            ))
+                        if let Some(r) = self.replace.get_mut(si) {
+                            match r.index {
+                                Some(index) if i == index => {
+                                    si += 1;
+                                    let rep = r.n.cached.clone().unwrap();
+                                    Value::Array(ValArray::from_iter_exact(
+                                        [v[0].clone(), rep].into_iter(),
+                                    ))
+                                }
+                                None if &r.name == &v[0] => {
+                                    si += 1;
+                                    r.index = Some(i);
+                                    let rep = r.n.cached.clone().unwrap();
+                                    Value::Array(ValArray::from_iter_exact(
+                                        [v[0].clone(), rep].into_iter(),
+                                    ))
+                                }
+                                _ => Value::Array(v.clone()),
+                            }
                         } else {
                             Value::Array(v.clone())
                         }
@@ -179,17 +205,17 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
 
     fn delete(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.source.delete(ctx);
-        self.replace.iter_mut().for_each(|(_, n)| n.node.delete(ctx))
+        self.replace.iter_mut().for_each(|r| r.n.node.delete(ctx))
     }
 
     fn sleep(&mut self, ctx: &mut ExecCtx<C, E>) {
         self.source.sleep(ctx);
-        self.replace.iter_mut().for_each(|(_, n)| n.sleep(ctx))
+        self.replace.iter_mut().for_each(|r| r.n.sleep(ctx))
     }
 
     fn refs(&self, refs: &mut Refs) {
         self.source.refs(refs);
-        self.replace.iter().for_each(|(_, n)| n.node.refs(refs))
+        self.replace.iter().for_each(|r| r.n.node.refs(refs))
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
@@ -204,7 +230,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
             self,
             self.source.typ().with_deref(|typ| match typ {
                 Some(Type::Struct(flds)) => {
-                    for ((i, c), n) in self.replace.iter_mut().zip(fields.iter()) {
+                    for (rep, n) in self.replace.iter_mut().zip(fields.iter()) {
                         let r = flds.iter().enumerate().find_map(|(i, (field, typ))| {
                             if field == n {
                                 Some((i, typ))
@@ -214,9 +240,9 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
                         });
                         match r {
                             None => bail!("struct has no field named {n}"),
-                            Some((j, typ)) => {
-                                typ.check_contains(&ctx.env, &c.node.typ())?;
-                                *i = j;
+                            Some((i, typ)) => {
+                                typ.check_contains(&ctx.env, &rep.n.node.typ())?;
+                                rep.index = Some(i);
                             }
                         }
                     }
@@ -235,7 +261,8 @@ pub(crate) struct StructRef<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
     source: Node<C, E>,
-    field: usize,
+    field: Option<usize>,
+    field_name: ArcStr,
 }
 
 impl<C: Ctx, E: UserEvent> StructRef<C, E> {
@@ -245,37 +272,56 @@ impl<C: Ctx, E: UserEvent> StructRef<C, E> {
         scope: &ModPath,
         top_id: ExprId,
         source: &Expr,
-        field: &ArcStr,
+        field_name: &ArcStr,
     ) -> Result<Node<C, E>> {
         let source = compile(ctx, source.clone(), scope, top_id)?;
         let (typ, field) = match &source.typ() {
-            Type::Struct(flds) => flds
-                .iter()
-                .enumerate()
-                .find_map(
-                    |(i, (n, t))| {
-                        if field == n {
-                            Some((t.clone(), i))
+            Type::Struct(flds) => {
+                flds.iter()
+                    .enumerate()
+                    .find_map(|(i, (n, t))| {
+                        if field_name == n {
+                            Some((t.clone(), Some(i)))
                         } else {
                             None
                         }
-                    },
-                )
-                .unwrap_or_else(|| (Type::empty_tvar(), 0)),
-            _ => (Type::empty_tvar(), 0),
+                    })
+                    .unwrap_or_else(|| (Type::empty_tvar(), None))
+            }
+            _ => (Type::empty_tvar(), None),
         };
-        // typcheck will resolve the field index if we didn't find it already
-        Ok(Box::new(Self { spec, typ, source, field }))
+        let field_name = field_name.clone();
+        Ok(Box::new(Self { spec, typ, source, field, field_name }))
     }
 }
 
 impl<C: Ctx, E: UserEvent> Update<C, E> for StructRef<C, E> {
     fn update(&mut self, ctx: &mut ExecCtx<C, E>, event: &mut Event<E>) -> Option<Value> {
         match self.source.update(ctx, event) {
-            Some(Value::Array(a)) => a.get(self.field).and_then(|v| match v {
-                Value::Array(a) if a.len() == 2 => Some(a[1].clone()),
-                _ => None,
-            }),
+            Some(Value::Array(a)) => match self.field {
+                Some(i) => a.get(i).and_then(|v| match v {
+                    Value::Array(a) if a.len() == 2 => Some(a[1].clone()),
+                    _ => None,
+                }),
+                None => {
+                    let res = a.iter().enumerate().find_map(|(i, kv)| match kv {
+                        Value::Array(kv) => match &kv[..] {
+                            [Value::String(f), v] if f == &self.field_name => {
+                                Some((i, v.clone()))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                    match res {
+                        Some((i, v)) => {
+                            self.field = Some(i);
+                            Some(v)
+                        }
+                        None => None,
+                    }
+                }
+            },
             Some(_) | None => None,
         }
     }
@@ -302,14 +348,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructRef<C, E> {
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
         wrap!(self.source, self.source.typecheck(ctx))?;
-        let field = match &self.spec.kind {
-            ExprKind::StructRef { source: _, field } => field.clone(),
-            _ => bail!("BUG: miscompiled struct ref"),
-        };
         let etyp = self.source.typ().with_deref(|typ| match typ {
             Some(Type::Struct(flds)) => {
                 let typ = flds.iter().enumerate().find_map(|(i, (n, t))| {
-                    if &field == n {
+                    if &self.field_name == n {
                         Some((i, t.clone()))
                     } else {
                         None
@@ -317,14 +359,14 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructRef<C, E> {
                 });
                 match typ {
                     Some((i, t)) => Ok((i, t)),
-                    None => bail!("in struct, unknown field {field}"),
+                    None => bail!("in struct, unknown field {}", self.field_name),
                 }
             }
             None => bail!("type must be known, annotations needed"),
             _ => bail!("expected struct"),
         });
         let (idx, typ) = wrap!(self, etyp)?;
-        self.field = idx;
+        self.field = Some(idx);
         wrap!(self, self.typ.check_contains(&ctx.env, &typ))
     }
 }

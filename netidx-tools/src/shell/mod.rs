@@ -120,6 +120,7 @@ async fn bs_init(
             (Path::from("/tui/table"), literal!(include_str!("tui/table.bs"))),
             (Path::from("/tui/calendar"), literal!(include_str!("tui/calendar.bs"))),
             (Path::from("/tui/canvas"), literal!(include_str!("tui/canvas.bs"))),
+            (Path::from("/tui/browser"), literal!(include_str!("tui/browser.bs"))),
         ])),
     ];
     let mut bs = BSConfig::builder(ctx, sub);
